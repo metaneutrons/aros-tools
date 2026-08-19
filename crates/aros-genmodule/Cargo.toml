@@ -1,0 +1,20 @@
+[package]
+name = "aros-genmodule"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "aros-genmodule"
+path = "src/main.rs"
+
+[dependencies]
+aros-common.workspace = true
+clap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+regex.workspace = true

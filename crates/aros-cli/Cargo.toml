@@ -1,0 +1,26 @@
+[package]
+name = "aros-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "aros"
+path = "src/main.rs"
+
+[dependencies]
+aros-common.workspace = true
+aros-transpiler.workspace = true
+clap.workspace = true
+console.workspace = true
+indicatif.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+miette.workspace = true
+anyhow.workspace = true
+which.workspace = true
+tokio.workspace = true
