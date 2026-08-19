@@ -120,8 +120,10 @@ dependencies = [
  "anyhow",
  "aros-common",
  "clap",
+ "rayon",
  "regex",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]
