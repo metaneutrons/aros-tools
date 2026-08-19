@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     println!(
-        "⚡ AROS-NG 2.0 Transpiler — Scanning mmakefile.src files in {}...",
+        "⚡ AROS-NG Transpiler v0.1.0 — Scanning mmakefile.src files in {}...",
         args.source_dir.display()
     );
 
