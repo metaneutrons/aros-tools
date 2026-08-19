@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
         Commands::Info => {
             println!(
                 "{SPARKLES} {}",
-                style("AROS-NG 2.0 Workspace Info").cyan().bold()
+                style("AROS Tools v0.1: Workspace Info").cyan().bold()
             );
             println!("  • Toolchain Architecture: Multi-Target Modern CMake + Ninja");
             println!(
@@ -213,7 +213,13 @@ async fn main() -> Result<()> {
                     .or_else(|_| which::which("ccache"))
                     .map_or_else(|_| "none".into(), |p| p.display().to_string())
             );
-            println!("  • Supported Presets: pc-x86_64, rpi-aarch64, arm-raspi, esp32p4-riscv32");
+
+            let targets = aros_common::TargetProfile::load_from_file(std::path::Path::new(
+                "aros-targets.toml",
+            ))
+            .unwrap_or_else(|_| aros_common::TargetProfile::default_profiles());
+            let target_names: Vec<String> = targets.into_iter().map(|t| t.name).collect();
+            println!("  • Configured Targets: {}", target_names.join(", "));
         }
     }
 
