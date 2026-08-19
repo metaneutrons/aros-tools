@@ -13,8 +13,8 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 #[command(
     name = "aros",
     author = "AROS Development Team & Fabian Schmieder (@metaneutrons)",
-    version = "2.0.0",
-    about = "AROS-NG 2.0: Next-Generation Build System & Tooling Engine",
+    version = "0.1.0",
+    about = "AROS Tools v0.1: Next-Generation Build System & Tooling Engine",
     long_about = "Modern, ultra-fast, multi-platform build orchestrator and upstream sync pipeline for AROS."
 )]
 struct Cli {
