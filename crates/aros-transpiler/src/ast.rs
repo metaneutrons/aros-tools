@@ -94,4 +94,6 @@ pub struct ParsedMmakefile {
     pub skipped_fetches: Vec<String>,
     /// `-include .../make.opts` files that could not be used, for reporting.
     pub skipped_make_opts: Vec<String>,
+    /// Make conditionals whose flags were dropped, for reporting.
+    pub skipped_conditions: Vec<String>,
 }

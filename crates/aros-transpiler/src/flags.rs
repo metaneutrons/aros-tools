@@ -46,6 +46,39 @@ pub struct FlagSet {
     /// True when the file reassigns the flags and also builds more than one
     /// module, so the file-global reading may not match Make.
     pub ambiguous: bool,
+    /// Definitions that apply only to one architecture, as `(tag, define)`.
+    pub arch_defines: Vec<(String, String)>,
+    /// Codegen options that apply only to one architecture.
+    pub arch_compile_options: Vec<(String, String)>,
+    /// Conditions whose flags were dropped because the condition is not a
+    /// simple architecture test.
+    pub skipped_conditions: Vec<String>,
+}
+
+/// Maps a Make conditional onto an architecture tag, if it is a plain test on a
+/// target parameter.
+///
+/// `ifeq ($(AROS_TARGET_CPU),x86_64)` guards
+/// `USER_CFLAGS += $(CFLAGS_GENERAL_REGS_ONLY)` in both rom/exec and
+/// rom/kernel. Applying that unconditionally puts -mgeneral-regs-only on
+/// aarch64 too, where the kernel's inline assembly needs the FP registers and
+/// the build fails with "instruction requires: fp-armv8".
+fn condition_tag(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("ifeq")?.trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    let (lhs, rhs) = inner.split_once(',')?;
+    let var = lhs.trim().strip_prefix("$(")?.strip_suffix(')')?;
+    let value = rhs.trim();
+    if value.is_empty() || value.contains('$') {
+        return None;
+    }
+    match var {
+        // The CPU and the platform are both tag forms in their own right.
+        "AROS_TARGET_CPU" | "CPU" | "AROS_TARGET_PLATFORM" | "ARCH" => {
+            Some(value.trim_matches('"').to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Make variables usable inside a define name or value.
@@ -147,9 +180,34 @@ fn collect_raw(content: &str) -> (HashMap<String, String>, HashMap<String, usize
     let mut vars: HashMap<String, String> = HashMap::new();
     let mut assign_count: HashMap<String, usize> = HashMap::new();
     let mut pending: Option<String> = None;
+    // Conditional nesting. Flag assignments inside a condition are handled by
+    // collect_conditional() and must not also land here, or they would be
+    // applied to every architecture. Other variables are still collected,
+    // because the flag text may expand through them.
+    let mut depth = 0usize;
 
     for line in content.lines() {
         let trimmed = line.trim();
+
+        if trimmed.starts_with("ifeq")
+            || trimmed.starts_with("ifneq")
+            || trimmed.starts_with("ifdef")
+            || trimmed.starts_with("ifndef")
+        {
+            depth += 1;
+            pending = None;
+            continue;
+        }
+        if trimmed == "endif" {
+            depth = depth.saturating_sub(1);
+            pending = None;
+            continue;
+        }
+        if trimmed == "else" || trimmed.starts_with("else ") {
+            pending = None;
+            continue;
+        }
+
         let continues = trimmed.ends_with('\\');
         let payload = trimmed.trim_end_matches('\\').trim();
 
@@ -174,6 +232,13 @@ fn collect_raw(content: &str) -> (HashMap<String, String>, HashMap<String, usize
         };
         let name = lhs.trim().to_owned();
         if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        if depth > 0 && (name == "USER_CPPFLAGS" || name == "USER_CFLAGS") {
+            // collect_conditional() owns this one.
+            if continues {
+                pending = None;
+            }
             continue;
         }
         *assign_count.entry(name.clone()).or_default() += 1;
@@ -241,6 +306,116 @@ fn expand(raw: &str, vars: &HashMap<String, String>, self_name: &str, depth: usi
     out
 }
 
+/// Collects `USER_*` flag text that sits inside a Make conditional.
+///
+/// Returns `(tag, text)` pairs for conditions that map to an architecture, plus
+/// the conditions whose contents had to be dropped. Only the outermost level is
+/// considered: a nested condition, an `else` branch or a test we cannot map
+/// makes the contents unusable.
+fn collect_conditional(
+    content: &str,
+    vars: &HashMap<String, String>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    // (tag of the enclosing condition, still in its true branch)
+    let mut stack: Vec<(Option<String>, bool)> = Vec::new();
+    let mut pending_key: Option<(String, String)> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("ifeq")
+            || trimmed.starts_with("ifneq")
+            || trimmed.starts_with("ifdef")
+            || trimmed.starts_with("ifndef")
+        {
+            // Only a top-level ifeq on a target parameter is usable.
+            let tag = if stack.is_empty() {
+                condition_tag(trimmed)
+            } else {
+                None
+            };
+            if tag.is_none() && stack.is_empty() {
+                skipped.push(trimmed.to_owned());
+            }
+            stack.push((tag, true));
+            pending_key = None;
+            continue;
+        }
+        if trimmed == "else" || trimmed.starts_with("else ") {
+            if let Some(top) = stack.last_mut() {
+                // The negation of an architecture test is not a tag.
+                top.1 = false;
+            }
+            pending_key = None;
+            continue;
+        }
+        if trimmed == "endif" {
+            stack.pop();
+            pending_key = None;
+            continue;
+        }
+        if stack.is_empty() {
+            pending_key = None;
+            continue;
+        }
+
+        let continues = trimmed.ends_with('\\');
+        let payload = trimmed.trim_end_matches('\\').trim();
+
+        // Continuation of a flag assignment we are already collecting.
+        if let Some((key, mut text)) = pending_key.take() {
+            text.push(' ');
+            text.push_str(payload);
+            if continues {
+                pending_key = Some((key, text));
+            } else {
+                push_conditional(&stack, &key, &text, vars, &mut out);
+            }
+            continue;
+        }
+
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((lhs, rhs, _)) = split_assignment(payload) else {
+            continue;
+        };
+        let key = lhs.trim().to_owned();
+        if key != "USER_CPPFLAGS" && key != "USER_CFLAGS" {
+            continue;
+        }
+        let text = rhs.trim().to_owned();
+        if continues {
+            pending_key = Some((key, text));
+        } else {
+            push_conditional(&stack, &key, &text, vars, &mut out);
+        }
+    }
+
+    (out, skipped)
+}
+
+fn push_conditional(
+    stack: &[(Option<String>, bool)],
+    key: &str,
+    text: &str,
+    vars: &HashMap<String, String>,
+    out: &mut Vec<(String, String)>,
+) {
+    // Usable only at the outermost level, in the true branch, with a mapped tag.
+    if stack.len() != 1 {
+        return;
+    }
+    let (Some(tag), true) = (&stack[0].0, stack[0].1) else {
+        return;
+    };
+    let expanded = expand(text, vars, key, 8);
+    out.push((tag.clone(), expanded));
+}
+
 /// Collects the flags one `mmakefile.src` contributes.
 #[must_use]
 pub fn collect_flags(content: &str) -> FlagSet {
@@ -259,6 +434,32 @@ pub fn collect_flags(content: &str) -> FlagSet {
         for tok in expanded.split_whitespace() {
             classify(tok, &mut set);
         }
+    }
+
+    // Assignments inside a Make conditional must not be applied unconditionally.
+    // A plain test on the CPU or the platform becomes an architecture tag that
+    // CMake filters; anything else is dropped and reported.
+    let (conditional, skipped_conditions) = collect_conditional(content, &vars);
+    set.skipped_conditions = skipped_conditions;
+    for (tag, raw) in conditional {
+        let mut bucket = FlagSet::default();
+        for tok in raw.split_whitespace() {
+            classify(tok, &mut bucket);
+        }
+        for d in bucket.defines {
+            let entry = (tag.clone(), d);
+            if !set.arch_defines.contains(&entry) {
+                set.arch_defines.push(entry);
+            }
+        }
+        for o in bucket.compile_options {
+            let entry = (tag.clone(), o);
+            if !set.arch_compile_options.contains(&entry) {
+                set.arch_compile_options.push(entry);
+            }
+        }
+        // Anything the classifier could not use is already accounted for by the
+        // unconditional pass's report.
     }
 
     set.defines.dedup();
@@ -451,5 +652,80 @@ USER_CPPFLAGS := -DB
     fn undefine_is_carried_through() {
         let f = collect_flags("USER_CPPFLAGS := -UNDEBUG\n");
         assert_eq!(f.undefines, vec!["NDEBUG"]);
+    }
+
+    #[test]
+    fn a_cpu_guarded_flag_does_not_leak_to_other_architectures() {
+        // rom/exec and rom/kernel both wrap this in ifeq on the CPU. Applying
+        // it unconditionally puts -mgeneral-regs-only on aarch64, where the
+        // kernel's inline assembly needs FP registers.
+        let src = "\
+USER_CPPFLAGS := -DAROS_ARCH_pc
+ifeq ($(AROS_TARGET_CPU),x86_64)
+USER_CFLAGS += $(CFLAGS_GENERAL_REGS_ONLY)
+endif
+";
+        let f = collect_flags(src);
+        assert!(
+            !f.compile_options.contains(&"-mgeneral-regs-only".to_owned()),
+            "must not be unconditional: {:?}",
+            f.compile_options
+        );
+        assert_eq!(
+            f.arch_compile_options,
+            vec![("x86_64".to_owned(), "-mgeneral-regs-only".to_owned())]
+        );
+        // The unconditional define is still picked up.
+        assert_eq!(f.defines, vec!["AROS_ARCH_pc"]);
+    }
+
+    #[test]
+    fn a_cpu_guarded_define_becomes_architecture_conditional() {
+        let src = "\
+ifeq ($(AROS_TARGET_CPU),m68k)
+USER_CPPFLAGS += -DM68K_ONLY
+endif
+";
+        let f = collect_flags(src);
+        assert!(f.defines.is_empty(), "defines: {:?}", f.defines);
+        assert_eq!(
+            f.arch_defines,
+            vec![("m68k".to_owned(), "M68K_ONLY".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_unmappable_condition_drops_its_flags_and_reports() {
+        let src = "\
+ifeq ($(AROS_TOOLCHAIN),llvm)
+USER_CPPFLAGS += -DTOOLCHAIN_SPECIFIC
+endif
+";
+        let f = collect_flags(src);
+        assert!(f.defines.is_empty());
+        assert!(f.arch_defines.is_empty());
+        assert_eq!(f.skipped_conditions.len(), 1);
+        assert!(f.skipped_conditions[0].contains("AROS_TOOLCHAIN"));
+    }
+
+    #[test]
+    fn an_else_branch_is_not_treated_as_a_tag() {
+        let src = "\
+ifeq ($(AROS_TARGET_CPU),x86_64)
+USER_CPPFLAGS += -DIS_X86
+else
+USER_CPPFLAGS += -DNOT_X86
+endif
+";
+        let f = collect_flags(src);
+        assert_eq!(
+            f.arch_defines,
+            vec![("x86_64".to_owned(), "IS_X86".to_owned())]
+        );
+        assert!(
+            !f.arch_defines.iter().any(|(_, d)| d == "NOT_X86"),
+            "the negation of an architecture test is not a tag"
+        );
+        assert!(f.defines.is_empty());
     }
 }

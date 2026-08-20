@@ -87,8 +87,11 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
     let (opts_files, skipped_make_opts) = collect_make_opts(&content, &rel_dir, root);
-    let mut arch_defines: Vec<(String, String)> = Vec::new();
-    let mut arch_compile_options: Vec<(String, String)> = Vec::new();
+    let skipped_conditions = flag_set.skipped_conditions.clone();
+    // Flags guarded by an `ifeq` on the CPU or platform are already tagged by
+    // the flag collector; the make.opts contents are appended below.
+    let mut arch_defines: Vec<(String, String)> = flag_set.arch_defines.clone();
+    let mut arch_compile_options: Vec<(String, String)> = flag_set.arch_compile_options.clone();
     let mut opts_include_dirs: Vec<String> = Vec::new();
     let mut opts_arch_includes: Vec<(String, String)> = Vec::new();
     for f in &opts_files {
@@ -338,5 +341,6 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         fetches,
         skipped_fetches,
         skipped_make_opts,
+        skipped_conditions,
     })
 }

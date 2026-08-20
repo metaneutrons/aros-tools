@@ -80,6 +80,7 @@ fn main() -> Result<()> {
     let mut skipped_arch_sources: Vec<String> = Vec::new();
     let mut skipped_fetches: Vec<String> = Vec::new();
     let mut skipped_make_opts: Vec<String> = Vec::new();
+    let mut skipped_conditions: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
             graph.add_target(target);
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
         graph.add_fetches(parsed.fetches);
         skipped_fetches.extend(parsed.skipped_fetches);
         skipped_make_opts.extend(parsed.skipped_make_opts);
+        skipped_conditions.extend(parsed.skipped_conditions);
         skipped_arch_sources.extend(parsed.skipped_arch_sources);
         unresolved.extend(parsed.unresolved_includes);
         skipped_headers.extend(parsed.skipped_copy_includes);
@@ -192,6 +194,19 @@ fn main() -> Result<()> {
             println!(
                 "⚠️  {} compiler flag(s) not propagated (not a simple -D, or an unmapped variable) -> {}",
                 skipped_flags.len(),
+                report.display()
+            );
+        }
+    }
+    skipped_conditions.sort_unstable();
+    skipped_conditions.dedup();
+    if !skipped_conditions.is_empty() {
+        let report = args.output.with_extension("skipped-conditions.txt");
+        let body = skipped_conditions.join("\n");
+        if fs::write(&report, format!("{body}\n")).is_ok() {
+            println!(
+                "⚠️  {} Make conditional(s) guard flags in a way that is not an architecture test -> {}",
+                skipped_conditions.len(),
                 report.display()
             );
         }
