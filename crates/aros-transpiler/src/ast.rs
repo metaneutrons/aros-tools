@@ -82,6 +82,9 @@ pub struct ParsedMmakefile {
     /// Hand-written Make rules that stage headers; these need a static CMake
     /// counterpart and are reported so new ones do not go unnoticed.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
+    /// Hand-written `$(GENDIR)` rules producing something other than a header,
+    /// for reporting.
+    pub generated_file_rules: Vec<String>,
     /// Flags collected from this file, including what had to be skipped.
     pub flags: FlagSet,
     /// `%build_archspecific` declarations contributed by this file.

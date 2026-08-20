@@ -97,9 +97,7 @@ fn plain_tokens(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|t| *t != "\\")
         .map(|t| t.trim_matches('"').to_owned())
-        .filter(|t| {
-            !t.is_empty() && !t.contains('$') && !t.contains('(') && !t.contains('/')
-        })
+        .filter(|t| !t.is_empty() && !t.contains('$') && !t.contains('(') && !t.contains('/'))
         .collect()
 }
 
@@ -146,10 +144,7 @@ fn expand_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<String> {
 /// Returns the resolved declarations and, for reporting, the ones whose file
 /// list could not be resolved.
 #[must_use]
-pub fn collect_arch_sources(
-    content: &str,
-    rel_dir: &Path,
-) -> (Vec<ArchSourceDecl>, Vec<String>) {
+pub fn collect_arch_sources(content: &str, rel_dir: &Path) -> (Vec<ArchSourceDecl>, Vec<String>) {
     let vars = collect_file_vars(content);
     let dir = rel_dir.to_string_lossy().replace('\\', "/");
     let mut out = Vec::new();
@@ -250,8 +245,7 @@ AFILES := \
 
     #[test]
     fn stackswap_is_present_so_the_generic_stub_can_be_dropped() {
-        let (decls, _) =
-            collect_arch_sources(EXEC_X86_64, &PathBuf::from("arch/x86_64-all/exec"));
+        let (decls, _) = collect_arch_sources(EXEC_X86_64, &PathBuf::from("arch/x86_64-all/exec"));
         assert!(decls[0].files.contains(&"stackswap".to_owned()));
     }
 
@@ -267,7 +261,8 @@ AFILES := \
     fn linklibfiles_are_not_overrides() {
         // linklibfiles land in linklib/arch, which the module's ARCHOBJS
         // wildcard does not cover.
-        let src = "%build_archspecific mainmmake=m arch=pc linklibfiles=\"x\" files=\"y\" maindir=d\n";
+        let src =
+            "%build_archspecific mainmmake=m arch=pc linklibfiles=\"x\" files=\"y\" maindir=d\n";
         let (decls, _) = collect_arch_sources(src, &PathBuf::from("arch/all-pc/d"));
         assert_eq!(decls[0].files, vec!["y"]);
     }

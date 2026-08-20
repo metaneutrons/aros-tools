@@ -1,5 +1,5 @@
-use crate::ast::{MetaTargetRule, TargetDefinition};
 use crate::arch_sources::ArchSourceDecl;
+use crate::ast::{MetaTargetRule, TargetDefinition};
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
 use crate::fetch::FetchDecl;
 use crate::includes::ArchIncludeDecl;

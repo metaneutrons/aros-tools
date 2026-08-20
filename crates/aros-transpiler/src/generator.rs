@@ -93,8 +93,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         for rule in &graph.adhoc_header_rules {
             writeln!(
                 out,
-                "aros_adhoc_header_rule(FILE \"{}\" LINE {} DEST \"{}\" PREREQS \"{}\")",
-                rule.file, rule.line, rule.dest, rule.prereqs
+                "aros_adhoc_header_rule(FILE {} LINE {} ROOT {} DEST {} PREREQS {})",
+                cmake_arg(&rule.file),
+                rule.line,
+                cmake_arg(&rule.root),
+                cmake_arg(&rule.dest),
+                cmake_arg(&rule.prereqs)
             )
             .unwrap();
         }

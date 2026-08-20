@@ -285,7 +285,10 @@ fn collapse_dot_dot(path: &str) -> String {
     for seg in path.split('/') {
         if seg == ".." {
             // Never climb past a variable reference or the root.
-            if parts.last().is_some_and(|p| *p != ".." && !p.starts_with("${") && !p.is_empty()) {
+            if parts
+                .last()
+                .is_some_and(|p| *p != ".." && !p.starts_with("${") && !p.is_empty())
+            {
                 parts.pop();
                 continue;
             }
@@ -512,12 +515,22 @@ PRIV_EXEC_INCLUDES = \
 USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
 ";
         let set = collect_includes(src, &dir("rom/exec"));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/exec".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/kernel".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/debug".to_owned()));
+        assert!(set
+            .dirs
+            .contains(&"${CMAKE_SOURCE_DIR}/rom/exec".to_owned()));
+        assert!(set
+            .dirs
+            .contains(&"${CMAKE_SOURCE_DIR}/rom/kernel".to_owned()));
+        assert!(set
+            .dirs
+            .contains(&"${CMAKE_SOURCE_DIR}/rom/debug".to_owned()));
         assert!(set.arch_modules.contains(&"exec".to_owned()));
         assert!(set.arch_modules.contains(&"kernel".to_owned()));
-        assert!(set.unresolved.is_empty(), "unresolved: {:?}", set.unresolved);
+        assert!(
+            set.unresolved.is_empty(),
+            "unresolved: {:?}",
+            set.unresolved
+        );
     }
 
     #[test]
@@ -540,9 +553,13 @@ USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
     fn handles_curdir_and_relative_forms() {
         let src = "USER_INCLUDES := -I$(SRCDIR)/$(CURDIR)/include -I. -I$(GENINCDIR)\n";
         let set = collect_includes(src, &dir("rom/dos"));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/dos/include".to_owned()));
+        assert!(set
+            .dirs
+            .contains(&"${CMAKE_SOURCE_DIR}/rom/dos/include".to_owned()));
         assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/dos".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_BINARY_DIR}/GENINCDIR".to_owned()));
+        assert!(set
+            .dirs
+            .contains(&"${CMAKE_BINARY_DIR}/GENINCDIR".to_owned()));
     }
 
     #[test]

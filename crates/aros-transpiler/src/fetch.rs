@@ -172,7 +172,9 @@ pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<St
         };
 
         let Some(name) = get("mmake") else { continue };
-        let Some(archive) = get("archive") else { continue };
+        let Some(archive) = get("archive") else {
+            continue;
+        };
 
         let decl = FetchDecl {
             name,
@@ -241,8 +243,7 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
 
     #[test]
     fn resolves_the_acpica_declaration() {
-        let (decls, skipped) =
-            collect_fetches(ACPICA, &PathBuf::from("arch/all-native/acpica"));
+        let (decls, skipped) = collect_fetches(ACPICA, &PathBuf::from("arch/all-native/acpica"));
         assert!(skipped.is_empty(), "skipped: {skipped:?}");
         assert_eq!(decls.len(), 1);
         let d = &decls[0];
@@ -259,7 +260,9 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
         let d = &decls[0];
         // $(ACPICAREPOSITORIES) -> the three origins, with $(INTELID) resolved.
         assert!(d.origins.contains("cache://"));
-        assert!(d.origins.contains("https://downloadmirror.intel.com/917611"));
+        assert!(d
+            .origins
+            .contains("https://downloadmirror.intel.com/917611"));
         assert!(d.origins.contains("https://axrt.org/download/thirdparty"));
         // $(ACPICAPSPECS) -> patch:subdir:options, all substituted.
         assert_eq!(

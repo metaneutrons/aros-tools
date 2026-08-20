@@ -1,10 +1,10 @@
 use crate::arch_sources::collect_arch_sources;
+use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
 use crate::copy_includes::collect_copy_includes;
 use crate::fetch::collect_fetches;
 use crate::flags::collect_flags;
 use crate::includes::{collect_arch_decls, collect_includes};
 use crate::make_opts::collect_make_opts;
-use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
 use aros_common::Result;
 use regex::Regex;
 use std::collections::HashMap;
@@ -75,8 +75,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     // parsed out of this file.
     let include_set = collect_includes(&content, &rel_dir);
     let arch_decls = collect_arch_decls(&content, &rel_dir);
-    let (copy_includes, skipped_copy_includes, adhoc_header_rules) =
-        collect_copy_includes(&content, &rel_dir);
+    let copy_scan = collect_copy_includes(&content, &rel_dir);
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
@@ -124,14 +123,11 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             None => {
                 // A local make.opts always applies.
                 flag_set.defines.extend(opts_flags.defines);
-                flag_set
-                    .compile_options
-                    .extend(opts_flags.compile_options);
+                flag_set.compile_options.extend(opts_flags.compile_options);
                 opts_include_dirs.extend(opts_incs.dirs);
             }
         }
     }
-
 
     // Collect Makefile variable assignments
     let mut vars: HashMap<String, Vec<String>> = HashMap::new();
@@ -339,9 +335,10 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         meta_rules,
         arch_decls,
         unresolved_includes: include_set.unresolved,
-        copy_includes,
-        skipped_copy_includes,
-        adhoc_header_rules,
+        copy_includes: copy_scan.decls,
+        skipped_copy_includes: copy_scan.skipped,
+        adhoc_header_rules: copy_scan.adhoc,
+        generated_file_rules: copy_scan.generated_files,
         flags: flag_set,
         arch_sources,
         skipped_arch_sources,

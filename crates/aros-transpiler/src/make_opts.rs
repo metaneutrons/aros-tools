@@ -67,7 +67,11 @@ fn to_glob(raw: &str, root: &Path, rel_dir: &str) -> Option<String> {
             "SRCDIR" | "TOP" => out.push_str(&root.to_string_lossy()),
             "CURDIR" => out.push_str(rel_dir),
             // Target parameters: matched against the tree instead of guessed.
-            "ARCH" | "CPU" | "FAMILY" | "AROS_TARGET_VARIANT" | "AROS_TARGET_ARCH"
+            "ARCH"
+            | "CPU"
+            | "FAMILY"
+            | "AROS_TARGET_VARIANT"
+            | "AROS_TARGET_ARCH"
             | "AROS_TARGET_CPU" => out.push('*'),
             _ => return None,
         }
@@ -147,10 +151,7 @@ pub fn collect_make_opts(
             };
 
             if !out.iter().any(|f| f.path == rel_str) {
-                out.push(MakeOptsFile {
-                    tag,
-                    path: rel_str,
-                });
+                out.push(MakeOptsFile { tag, path: rel_str });
             }
         }
     }
@@ -169,7 +170,10 @@ mod tests {
         assert_eq!(tag_from_arch_dir("all-native").as_deref(), Some("native"));
         // Directories read <cpu>-<platform>, tags read <platform>-<cpu>.
         assert_eq!(tag_from_arch_dir("x86_64-pc").as_deref(), Some("pc-x86_64"));
-        assert_eq!(tag_from_arch_dir("m68k-amiga").as_deref(), Some("amiga-m68k"));
+        assert_eq!(
+            tag_from_arch_dir("m68k-amiga").as_deref(),
+            Some("amiga-m68k")
+        );
         assert_eq!(tag_from_arch_dir("noseparator"), None);
     }
 
@@ -193,7 +197,11 @@ mod tests {
 
     #[test]
     fn curdir_resolves_to_the_declaring_directory() {
-        let g = to_glob("$(SRCDIR)/$(CURDIR)/make.opts", Path::new("/src"), "rom/usb/pciusb");
+        let g = to_glob(
+            "$(SRCDIR)/$(CURDIR)/make.opts",
+            Path::new("/src"),
+            "rom/usb/pciusb",
+        );
         assert_eq!(g.as_deref(), Some("/src/rom/usb/pciusb/make.opts"));
     }
 

@@ -170,8 +170,7 @@ fn simple_define(body: &str) -> Option<String> {
                 return None;
             }
             let inner = resolve_vars(&inner)?;
-            if inner.contains('"') || inner.contains('\\') || inner.contains(char::is_whitespace)
-            {
+            if inner.contains('"') || inner.contains('\\') || inner.contains(char::is_whitespace) {
                 return None;
             }
             return Some(format!("{name}=\"{inner}\""));
@@ -534,11 +533,7 @@ fn classify(tok: &str, set: &mut FlagSet) {
 
     // Include flags are the include collector's business; reporting them here
     // too would be noise, and a report full of noise gets ignored.
-    if tok.starts_with("-I")
-        || tok == "-isystem"
-        || tok == "-idirafter"
-        || tok == "-iquote"
-    {
+    if tok.starts_with("-I") || tok == "-isystem" || tok == "-idirafter" || tok == "-iquote" {
         return;
     }
 
@@ -702,7 +697,8 @@ endif
 ";
         let f = collect_flags(src);
         assert!(
-            !f.compile_options.contains(&"-mgeneral-regs-only".to_owned()),
+            !f.compile_options
+                .contains(&"-mgeneral-regs-only".to_owned()),
             "must not be unconditional: {:?}",
             f.compile_options
         );

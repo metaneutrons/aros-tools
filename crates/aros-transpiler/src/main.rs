@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     let mut skipped_fetches: Vec<String> = Vec::new();
     let mut skipped_make_opts: Vec<String> = Vec::new();
     let mut skipped_conditions: Vec<String> = Vec::new();
+    let mut generated_file_rules: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
             graph.add_target(target);
@@ -91,6 +92,7 @@ fn main() -> Result<()> {
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
+        generated_file_rules.extend(parsed.generated_file_rules);
         graph.add_arch_sources(parsed.arch_sources);
         graph.add_fetches(parsed.fetches);
         skipped_fetches.extend(parsed.skipped_fetches);
@@ -181,6 +183,22 @@ fn main() -> Result<()> {
             println!(
                 "⚠️  {} %copy_includes declaration(s) skipped (out-of-tree or unresolved)",
                 skipped_headers.len()
+            );
+        }
+    }
+
+    generated_file_rules.sort_unstable();
+    generated_file_rules.dedup();
+    if !generated_file_rules.is_empty() {
+        // Not headers, so these do not break a compile; they break a link or a
+        // package step, which is harder to trace back. Listed for that reason.
+        let report = args.output.with_extension("generated-file-rules.txt");
+        let body = generated_file_rules.join("\n");
+        if fs::write(&report, format!("{body}\n")).is_ok() {
+            println!(
+                "⚠️  {} hand-written $(GENDIR) rule(s) build something other than a header -> {}",
+                generated_file_rules.len(),
+                report.display()
             );
         }
     }

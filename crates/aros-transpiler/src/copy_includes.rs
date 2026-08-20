@@ -27,22 +27,45 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// A hand-written Make rule that writes into one of the include roots.
+/// A hand-written Make rule that produces a header.
 ///
 /// These cannot be transpiled generically, because the recipe is arbitrary
 /// Make (the ones in the tree rename files, run generator tools, or use pattern
 /// rules). They are reported so that a rule appearing upstream is noticed here
 /// rather than as a missing header somewhere else entirely.
+///
+/// Two kinds of destination count. A header under `$(AROS_INCLUDES)` or
+/// `$(GENINCDIR)` is staged into the SDK and visible tree-wide; one under
+/// `$(GENDIR)` is private to its own module. Both fail the same way when
+/// missing, so both are collected, and `root` says which kind it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdhocHeaderRule {
     /// mmakefile that declares the rule, relative to the source root.
     pub file: String,
     /// 1-based line number of the rule.
     pub line: usize,
+    /// The include root the target sits in, verbatim, e.g. `$(GENINCDIR)/`.
+    pub root: String,
     /// The rule's target, with the include root stripped.
     pub dest: String,
     /// The rule's prerequisites, verbatim.
     pub prereqs: String,
+}
+
+/// What one mmakefile yielded for header staging.
+#[derive(Debug, Default)]
+pub struct CopyIncludesScan {
+    /// Resolved `%copy_includes` declarations.
+    pub decls: Vec<CopyIncludesDecl>,
+    /// `%copy_includes` directives that could not be resolved.
+    pub skipped: Vec<String>,
+    /// Hand-written rules producing a header.
+    pub adhoc: Vec<AdhocHeaderRule>,
+    /// Hand-written rules under `$(GENDIR)` producing something other than a
+    /// header (objects, ELF images, linker scripts). Reported only, since a
+    /// missing one of these surfaces as a link or packaging failure rather
+    /// than a missing include.
+    pub generated_files: Vec<String>,
 }
 
 /// One resolved `%copy_includes` declaration.
@@ -230,10 +253,7 @@ fn push_plain_tokens(text: &str, out: &mut Vec<String>) -> Option<()> {
 /// `%copy_includes` calls (for example `arch/all-native/acpica`), and Make
 /// resolves each directive against the value in force at that point.
 #[must_use]
-pub fn collect_copy_includes(
-    content: &str,
-    rel_dir: &Path,
-) -> (Vec<CopyIncludesDecl>, Vec<String>, Vec<AdhocHeaderRule>) {
+pub fn collect_copy_includes(content: &str, rel_dir: &Path) -> CopyIncludesScan {
     let base = rel_dir.to_string_lossy().replace('\\', "/");
     let mmakefile = if base.is_empty() {
         "mmakefile.src".to_owned()
@@ -245,6 +265,7 @@ pub fn collect_copy_includes(
     let mut decls = Vec::new();
     let mut skipped = Vec::new();
     let mut adhoc = Vec::new();
+    let mut generated_files = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0usize;
@@ -301,10 +322,18 @@ pub fn collect_copy_includes(
 
         // A hand-written rule writing into an include root, e.g.
         //   $(AROS_INCLUDES)/hidd/pci.h: include/pci_hidd.h
-        if let Some(rule) = parse_adhoc_rule(payload, &mmakefile, line_no) {
-            adhoc.push(rule);
-            i += 1;
-            continue;
+        match parse_adhoc_rule(payload, &mmakefile, line_no) {
+            Some(ParsedRule::Header(rule)) => {
+                adhoc.push(rule);
+                i += 1;
+                continue;
+            }
+            Some(ParsedRule::Other(note)) => {
+                generated_files.push(note);
+                i += 1;
+                continue;
+            }
+            None => {}
         }
 
         if let Some((lhs, rhs, append)) = split_assignment(payload) {
@@ -328,24 +357,70 @@ pub fn collect_copy_includes(
         i += 1;
     }
 
-    (decls, skipped, adhoc)
+    CopyIncludesScan {
+        decls,
+        skipped,
+        adhoc,
+        generated_files,
+    }
 }
 
-/// Recognises a Make rule whose target lives in one of the include roots.
-fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<AdhocHeaderRule> {
-    const ROOTS: [&str; 2] = ["$(AROS_INCLUDES)/", "$(GENINCDIR)/"];
+/// A hand-written rule, classified by what it produces.
+enum ParsedRule {
+    /// Produces a header, so a missing one breaks a compile.
+    Header(AdhocHeaderRule),
+    /// Produces something else under `$(GENDIR)`; carries a ready-to-report
+    /// description.
+    Other(String),
+}
+
+/// Recognises a Make rule whose target lives in one of the generated roots.
+///
+/// `$(GENDIR)/` is included because module-private generated headers live
+/// there, for example `$(GENDIR)/$(CURDIR)/dos/errorlist.h`. Leaving it out
+/// meant such a rule was silently absent and only surfaced as an undeclared
+/// identifier in the module that includes it.
+fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<ParsedRule> {
+    const ROOTS: [&str; 3] = ["$(AROS_INCLUDES)/", "$(GENINCDIR)/", "$(GENDIR)/"];
     let root = ROOTS.iter().find(|r| line.starts_with(**r))?;
     // A rule, not a variable assignment.
     let (target, prereqs) = line.split_once(':')?;
     if target.contains('=') || prereqs.starts_with('=') {
         return None;
     }
-    Some(AdhocHeaderRule {
-        file: mmakefile.to_owned(),
-        line: line_no,
-        dest: target[root.len()..].trim().to_owned(),
-        prereqs: prereqs.trim().trim_start_matches(':').trim().to_owned(),
-    })
+    let dest = target[root.len()..].trim().to_owned();
+    let prereqs = prereqs.trim().trim_start_matches(':').trim().to_owned();
+
+    // $(AROS_INCLUDES) and $(GENINCDIR) are include roots, so everything
+    // landing there is a header whatever its name, including pattern rules and
+    // variable-named targets. $(GENDIR) holds every kind of generated file, so
+    // there the suffix decides.
+    let is_header = *root != "$(GENDIR)/" || dest.ends_with(".h") || dest.ends_with(".hpp");
+    if is_header {
+        return Some(ParsedRule::Header(AdhocHeaderRule {
+            file: mmakefile.to_owned(),
+            line: line_no,
+            root: (*root).to_owned(),
+            dest,
+            prereqs,
+        }));
+    }
+
+    // Rules that create a directory, or a Make dependency file, carry no build
+    // output of their own. CMake creates output directories itself and tracks
+    // header dependencies through the compiler, so these cannot go missing and
+    // would only dilute the report.
+    let is_bookkeeping = dest.ends_with(".d")
+        || !dest.contains('.')
+        || dest.ends_with(".includes-generated")
+        || dest.ends_with(".stubs-generated");
+    if is_bookkeeping {
+        return None;
+    }
+
+    Some(ParsedRule::Other(format!(
+        "{root}{dest} <- {prereqs}  ({mmakefile}:{line_no})"
+    )))
 }
 
 /// Resolves one `%copy_includes` directive against the current variable state.
@@ -430,7 +505,8 @@ mod tests {
     fn wildcard_with_dir_flattens_to_basenames() {
         // rom/hidds/kbd/mmakefile.src
         let src = "INCLUDE_FILES := $(call WILDCARD, include/*.h)\n%copy_includes path=hidd dir=include\n";
-        let (decls, skipped, _) = collect_copy_includes(src, &PathBuf::from("rom/hidds/kbd"));
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("rom/hidds/kbd"));
         assert!(skipped.is_empty());
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].dest, "hidd");
@@ -443,7 +519,8 @@ mod tests {
     fn explicit_name_without_dir_keeps_relative_path() {
         // workbench/classes/zune/iconimage/mmakefile.src
         let src = "INCLUDE_FILES := iconimage.h\n%copy_includes path=zune\n";
-        let (decls, _, _) = collect_copy_includes(src, &PathBuf::from("workbench/classes/zune/iconimage"));
+        let CopyIncludesScan { decls, .. } =
+            collect_copy_includes(src, &PathBuf::from("workbench/classes/zune/iconimage"));
         assert_eq!(decls[0].dest, "zune");
         assert_eq!(decls[0].source_dir, "workbench/classes/zune/iconimage");
         assert_eq!(decls[0].patterns, vec!["iconimage.h"]);
@@ -453,8 +530,9 @@ mod tests {
     #[test]
     fn oop_case_maps_to_sdk_prefix() {
         // rom/oop/mmakefile.src, the header that blocked 49 compilations.
-        let src = "INCLUDE_FILES := $(call WILDCARD, include/*.h)\n%copy_includes path=oop dir=include\n";
-        let (decls, _, _) = collect_copy_includes(src, &PathBuf::from("rom/oop"));
+        let src =
+            "INCLUDE_FILES := $(call WILDCARD, include/*.h)\n%copy_includes path=oop dir=include\n";
+        let CopyIncludesScan { decls, .. } = collect_copy_includes(src, &PathBuf::from("rom/oop"));
         assert_eq!(decls[0].dest, "oop");
         assert_eq!(decls[0].source_dir, "rom/oop/include");
     }
@@ -462,7 +540,7 @@ mod tests {
     #[test]
     fn expands_character_classes_for_cmake_glob() {
         let src = "INCLUDE_FILES := $(call WILDCARD, *.[hi] aros/*.[hi])\n%copy_includes path=x\n";
-        let (decls, _, _) = collect_copy_includes(src, &PathBuf::from("d"));
+        let CopyIncludesScan { decls, .. } = collect_copy_includes(src, &PathBuf::from("d"));
         let p = &decls[0].patterns;
         assert!(p.contains(&"*.h".to_owned()));
         assert!(p.contains(&"*.i".to_owned()));
@@ -473,14 +551,15 @@ mod tests {
     #[test]
     fn inline_include_list_is_honoured() {
         let src = "%copy_includes path=libraries includes=\"speechcore.h aros_resource.h\"\n";
-        let (decls, _, _) = collect_copy_includes(src, &PathBuf::from("d"));
+        let CopyIncludesScan { decls, .. } = collect_copy_includes(src, &PathBuf::from("d"));
         assert_eq!(decls[0].patterns, vec!["speechcore.h", "aros_resource.h"]);
     }
 
     #[test]
     fn unresolvable_third_party_dir_is_skipped_not_guessed() {
         let src = "INCLUDE_FILES := $(call WILDCARD, *.h)\n%copy_includes path=freetype dir=$(FT2SRCDIR)/include\n";
-        let (decls, skipped, _) = collect_copy_includes(src, &PathBuf::from("d"));
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("d"));
         assert!(decls.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("FT2SRCDIR"));
@@ -489,15 +568,20 @@ mod tests {
     #[test]
     fn unresolvable_include_list_is_skipped() {
         let src = "%copy_includes path=x dir=include\n";
-        let (decls, skipped, _) = collect_copy_includes(src, &PathBuf::from("d"));
-        assert!(decls.is_empty(), "no INCLUDE_FILES defined, nothing to copy");
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("d"));
+        assert!(
+            decls.is_empty(),
+            "no INCLUDE_FILES defined, nothing to copy"
+        );
         assert_eq!(skipped.len(), 1);
     }
 
     #[test]
     fn parent_relative_dir_resolves() {
         let src = "INCLUDE_FILES := ../include/mui/BetterString_mcc.h\n%copy_includes path=mui dir=../include/mui\n";
-        let (decls, _, _) = collect_copy_includes(src, &PathBuf::from("workbench/classes/zune/betterstring"));
+        let CopyIncludesScan { decls, .. } =
+            collect_copy_includes(src, &PathBuf::from("workbench/classes/zune/betterstring"));
         assert_eq!(decls[0].source_dir, "workbench/classes/zune/include/mui");
         assert_eq!(decls[0].patterns, vec!["BetterString_mcc.h"]);
     }
@@ -512,7 +596,8 @@ INCLUDE_FILES := $(call WILDCARD, include/*.h)
 INCLUDE_FILES = $(call WILDCARD, $(ACPICA_INCLUDES)/*.h)
 %copy_includes mmake=acpica-includes-copy path=acpica dir=$(ACPICA_INCLUDES)
 ";
-        let (decls, skipped, _) = collect_copy_includes(src, &PathBuf::from("arch/all-native/acpica"));
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("arch/all-native/acpica"));
         // The first directive must resolve; the second is out-of-tree.
         assert_eq!(decls.len(), 1, "decls: {decls:?}");
         assert_eq!(decls[0].dest, "libraries");
@@ -525,10 +610,18 @@ INCLUDE_FILES = $(call WILDCARD, $(ACPICA_INCLUDES)/*.h)
     fn nested_parens_in_wildcard_do_not_truncate_the_glob() {
         // `$(call WILDCARD, $(X)/*.h)` must not be cut at the inner ")".
         let src = "INCLUDE_FILES := $(call WILDCARD, $(SOMEDIR)/*.h)\n%copy_includes path=x\n";
-        let (decls, skipped, _) = collect_copy_includes(src, &PathBuf::from("d"));
-        assert!(decls.is_empty(), "unresolved variable must not yield a pattern");
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("d"));
+        assert!(
+            decls.is_empty(),
+            "unresolved variable must not yield a pattern"
+        );
         assert_eq!(skipped.len(), 1);
-        assert!(!skipped[0].contains("*.h)"), "glob was truncated: {}", skipped[0]);
+        assert!(
+            !skipped[0].contains("*.h)"),
+            "glob was truncated: {}",
+            skipped[0]
+        );
     }
 
     #[test]
@@ -541,7 +634,8 @@ $(AROS_INCLUDES)/hidd/pci.h: include/pci_hidd.h
 $(GENINCDIR)/hidd/pci.h: include/pci_hidd.h
 \t$(CP) $< $(GENINCDIR)/hidd/pci.h
 ";
-        let (_, _, adhoc) = collect_copy_includes(src, &PathBuf::from("rom/hidds/pci"));
+        let CopyIncludesScan { adhoc, .. } =
+            collect_copy_includes(src, &PathBuf::from("rom/hidds/pci"));
         assert_eq!(adhoc.len(), 2, "adhoc: {adhoc:?}");
         assert_eq!(adhoc[0].file, "rom/hidds/pci/mmakefile.src");
         assert_eq!(adhoc[0].line, 1);
@@ -553,7 +647,7 @@ $(GENINCDIR)/hidd/pci.h: include/pci_hidd.h
     #[test]
     fn variable_assignment_is_not_mistaken_for_a_rule() {
         let src = "INCLUDE_FILES := a.h\n%copy_includes path=x\n";
-        let (decls, _, adhoc) = collect_copy_includes(src, &PathBuf::from("d"));
+        let CopyIncludesScan { decls, adhoc, .. } = collect_copy_includes(src, &PathBuf::from("d"));
         assert!(adhoc.is_empty());
         assert_eq!(decls.len(), 1);
     }
@@ -571,7 +665,7 @@ ACPICA_INCLUDES    := $(ACPICASRCDIR)/source/include
 INCLUDE_FILES = $(call WILDCARD, $(ACPICA_INCLUDES)/*.h)
 %copy_includes mmake=acpica-includes-copy path=acpica dir=$(ACPICA_INCLUDES)
 ";
-        let (decls, skipped, _) =
+        let CopyIncludesScan { decls, skipped, .. } =
             collect_copy_includes(src, &PathBuf::from("arch/all-native/acpica"));
         assert!(skipped.is_empty(), "skipped: {skipped:?}");
         assert_eq!(decls.len(), 1);
@@ -582,5 +676,65 @@ INCLUDE_FILES = $(call WILDCARD, $(ACPICA_INCLUDES)/*.h)
         );
         assert_eq!(decls[0].patterns, vec!["*.h"]);
         assert!(decls[0].flatten);
+    }
+
+    #[test]
+    fn module_private_generated_header_is_recorded() {
+        // rom/dos/mmakefile.src:90. Before $(GENDIR) was a recognised root this
+        // rule went unreported, and the missing errorlist.h surfaced as an
+        // undeclared MSG_STRING_* in displayerror.c instead.
+        let src = "$(GENDIR)/$(CURDIR)/dos/errorlist.h : $(SRCDIR)/$(CURDIR)/catalogs/dos.cd\n";
+        let CopyIncludesScan { adhoc, .. } = collect_copy_includes(src, &PathBuf::from("rom/dos"));
+        assert_eq!(adhoc.len(), 1);
+        assert_eq!(adhoc[0].root, "$(GENDIR)/");
+        assert_eq!(adhoc[0].dest, "$(CURDIR)/dos/errorlist.h");
+    }
+
+    #[test]
+    fn non_header_under_gendir_is_reported_separately() {
+        let src = "$(GENDIR)/boot/aros-amiga-m68k.elf : $(KOBJS_rom)\n";
+        let CopyIncludesScan {
+            adhoc,
+            generated_files,
+            ..
+        } = collect_copy_includes(src, &PathBuf::from("arch/m68k-amiga/boot"));
+        assert!(adhoc.is_empty());
+        assert_eq!(generated_files.len(), 1);
+        assert!(generated_files[0].contains("aros-amiga-m68k.elf"));
+    }
+
+    #[test]
+    fn directory_and_dependency_rules_are_not_reported() {
+        // CMake makes output directories itself and tracks header dependencies
+        // through the compiler, so neither can go missing.
+        let src = "\
+$(GENDIR)/$(CURDIR) :
+$(GENDIR)/$(CURDIR)/errorlist.d : $(GENDIR)/$(CURDIR)/errorlist.h
+$(GENDIR)/$(CURDIR)/.includes-generated : $(GENMODULE)
+";
+        let CopyIncludesScan {
+            adhoc,
+            generated_files,
+            ..
+        } = collect_copy_includes(src, &PathBuf::from("rom/dos"));
+        assert!(adhoc.is_empty(), "adhoc: {adhoc:?}");
+        assert!(generated_files.is_empty(), "reported: {generated_files:?}");
+    }
+
+    #[test]
+    fn target_in_an_include_root_counts_as_a_header_whatever_its_name() {
+        // $(AROS_INCLUDES) is an include root, so a variable-named or pattern
+        // target there is still a header. Only $(GENDIR) mixes file kinds.
+        let src = "\
+$(AROS_INCLUDES)/freetype/config/$(FT2OPTIONFILE) : $(FT2SRCDIR)/x
+$(AROS_INCLUDES)/% : %
+";
+        let CopyIncludesScan {
+            adhoc,
+            generated_files,
+            ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/libs/freetype2"));
+        assert_eq!(adhoc.len(), 2);
+        assert!(generated_files.is_empty());
     }
 }
