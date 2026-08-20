@@ -173,7 +173,11 @@ fn parse_entry_list(lines: &[&str], is_attribute: bool) -> Vec<Entry> {
         // Strip a trailing comment.
         let (code, comment) = trimmed.find('#').map_or((trimmed, None), |p| {
             let c = trimmed[p + 1..].trim();
-            let comment = if c.is_empty() { None } else { Some(c.to_owned()) };
+            let comment = if c.is_empty() {
+                None
+            } else {
+                Some(c.to_owned())
+            };
             (trimmed[..p].trim_end(), comment)
         });
         if code.is_empty() {
@@ -283,7 +287,11 @@ pub fn parse_interfaces(content: &str) -> Vec<Interface> {
                 || is_section(t, "begin", "methodlist")
             {
                 let is_attr = is_section(t, "begin", "attributelist");
-                let terminator = if is_attr { "attributelist" } else { "methodlist" };
+                let terminator = if is_attr {
+                    "attributelist"
+                } else {
+                    "methodlist"
+                };
                 i += 1;
                 let start = i;
                 while i < lines.len() {
@@ -558,7 +566,10 @@ VOID EnumDrivers(struct Hook *callback, APTR hookMsg)
         let m = &i.methods[0];
         assert_eq!(m.ty, "OOP_Object *");
         assert_eq!(m.name, "AddDriver");
-        assert_eq!(m.args, vec!["OOP_Class *driverClass", "struct TagItem *tags"]);
+        assert_eq!(
+            m.args,
+            vec!["OOP_Class *driverClass", "struct TagItem *tags"]
+        );
         assert_eq!(m.lvo, 0);
         assert_eq!(i.methods[2].name, "EnumDrivers");
         assert_eq!(i.methods[2].lvo, 2);
@@ -677,7 +688,10 @@ New
 
     #[test]
     fn function_pointer_argument_name_is_found() {
-        assert_eq!(arg_name("struct Hook *callback").as_deref(), Some("callback"));
+        assert_eq!(
+            arg_name("struct Hook *callback").as_deref(),
+            Some("callback")
+        );
         assert_eq!(arg_name("void (*fn)(APTR)").as_deref(), Some("fn"));
         assert_eq!(arg_name("APTR hookMsg").as_deref(), Some("hookMsg"));
     }

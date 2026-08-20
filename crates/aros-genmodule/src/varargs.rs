@@ -297,8 +297,7 @@ pub fn parse_function_line(line: &str) -> Option<Function> {
     if !arg_text.is_empty() && arg_text != "void" {
         for decl in split_args(arg_text) {
             // A parameter may be unnamed; keep it, it just cannot be referenced.
-            let (ty, nm) = split_decl(&decl)
-                .unwrap_or_else(|| (decl.clone(), String::new()));
+            let (ty, nm) = split_decl(&decl).unwrap_or_else(|| (decl.clone(), String::new()));
             args.push(Arg { decl, ty, name: nm });
         }
     }
@@ -356,11 +355,7 @@ pub struct DefinesOutput {
 
 /// Renders `defines/<module>.h` including the tag-list varargs stubs.
 #[must_use]
-pub fn render_defines(
-    include_name: &str,
-    lib_base: &str,
-    functions: &[Function],
-) -> DefinesOutput {
+pub fn render_defines(include_name: &str, lib_base: &str, functions: &[Function]) -> DefinesOutput {
     let upper = include_name.to_uppercase();
     let mut out = DefinesOutput::default();
     let t = &mut out.text;
@@ -398,10 +393,7 @@ pub fn render_defines(
         }
     }
 
-    let _ = write!(
-        t,
-        "\n__END_DECLS\n\n#endif /* DEFINES_{upper}_H */\n"
-    );
+    let _ = write!(t, "\n__END_DECLS\n\n#endif /* DEFINES_{upper}_H */\n");
     out
 }
 
@@ -626,7 +618,10 @@ mod tests {
         assert_eq!(f.args[0].decl, "struct TagItem *tags");
         assert_eq!(f.args[0].ty, "struct TagItem *");
         assert_eq!(f.args[0].name, "tags");
-        assert_eq!(f.signature(), "struct Task *NewCreateTaskA(struct TagItem *tags)");
+        assert_eq!(
+            f.signature(),
+            "struct Task *NewCreateTaskA(struct TagItem *tags)"
+        );
     }
 
     #[test]
@@ -651,10 +646,8 @@ mod tests {
 
     #[test]
     fn handles_a_function_pointer_parameter() {
-        let f = parse_function_line(
-            "void EnumDrivers(void (*cb)(APTR, LONG), APTR msg) (A0, A1)",
-        )
-        .unwrap();
+        let f = parse_function_line("void EnumDrivers(void (*cb)(APTR, LONG), APTR msg) (A0, A1)")
+            .unwrap();
         assert_eq!(f.name, "EnumDrivers");
         assert_eq!(f.args.len(), 2, "args: {:?}", f.args);
         assert_eq!(f.args[1].name, "msg");
