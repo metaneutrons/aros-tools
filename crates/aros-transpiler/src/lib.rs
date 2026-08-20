@@ -1,9 +1,21 @@
 pub mod ast;
+pub mod arch_sources;
+pub mod copy_includes;
+pub mod fetch;
+pub mod flags;
 pub mod generator;
+pub mod includes;
+pub mod make_opts;
 pub mod graph;
 pub mod parser;
 
 pub use ast::{ModuleType, TargetDefinition};
 pub use generator::generate_cmake;
 pub use graph::DependencyGraph;
+pub use arch_sources::ArchSourceDecl;
+pub use copy_includes::CopyIncludesDecl;
+pub use fetch::FetchDecl;
+pub use flags::FlagSet;
+pub use includes::{ArchIncludeDecl, IncludeSet};
+pub use make_opts::MakeOptsFile;
 pub use parser::parse_mmakefile;
