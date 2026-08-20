@@ -230,14 +230,34 @@ fn resident_flags(module: &ConfModule) -> String {
     }
 }
 
+/// The reference's default basename: the module name with its first letter
+/// capitalised (`tools/genmodule/config.c:1334`).
+///
+/// This is what makes `LIBBASE` usable inside the module. A library function's
+/// last parameter is the typed base, named after the basename -- for layers
+/// that is `struct LayersBase *LayersBase`. `LIBBASE` expands to that name, so
+/// inside a function it binds to the typed parameter and shadows the
+/// `struct Library *` the proto header declares. Lowercasing the first letter
+/// breaks the match, and every `LIBBASE->field` access then resolves against
+/// `struct Library` instead.
+fn default_basename(module_name: &str) -> String {
+    let mut chars = module_name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
     let content = fs::read_to_string(path).ok()?;
     let stem = path.file_stem()?.to_string_lossy().to_string();
 
     let mut module = ConfModule {
         name: stem.clone(),
-        lib_base: format!("{stem}Base"),
-        lib_base_type: format!("struct {stem}Base"),
+        lib_base: format!("{}Base", default_basename(&stem)),
+        // Left empty on purpose: the default depends on libbasetypeextern,
+        // which may be read later in the config section. Resolved below.
+        lib_base_type: String::new(),
         mod_type: read_mod_type(path, &stem).unwrap_or_default(),
         rel_dir: path
             .parent()
@@ -309,8 +329,10 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                     let mut it = val.split('.');
                     if let Some(maj) = it.next().and_then(|x| x.trim().parse::<u32>().ok()) {
                         module.major_version = maj;
-                        module.minor_version =
-                            it.next().and_then(|x| x.trim().parse::<u32>().ok()).unwrap_or(0);
+                        module.minor_version = it
+                            .next()
+                            .and_then(|x| x.trim().parse::<u32>().ok())
+                            .unwrap_or(0);
                     }
                 }
                 "residentpri" => {
@@ -391,6 +413,17 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 }
             }
         }
+    }
+
+    // `libbasetype` is the module's private view of its base. The reference
+    // takes an explicit declaration first, falls back to libbasetypeextern
+    // (config.c:1344), and writes `struct Library` when neither is given
+    // (writeinclibdefs.c:13). It is never derived from the module name.
+    if module.lib_base_type.is_empty() {
+        module.lib_base_type = module
+            .explicit_base_type_extern
+            .clone()
+            .unwrap_or_else(|| "struct Library".to_owned());
     }
 
     Some(module)
@@ -483,7 +516,7 @@ fn generate_sdk_headers(
         "\n#ifdef __cplusplus\n\
          }\n\
          #endif\n\n\
-         #endif /* CLIB_"
+         #endif /* CLIB_",
     );
     protos.push_str(&mod_upper);
     protos.push_str("_PROTOS_H */\n");
@@ -642,10 +675,7 @@ fn main() {
         std::collections::HashMap::new();
     for m in &modules {
         if exports_public_headers(m) {
-            by_name
-                .entry(m.name.to_lowercase())
-                .or_default()
-                .push(m);
+            by_name.entry(m.name.to_lowercase()).or_default().push(m);
         }
     }
     let mut clashes: Vec<String> = by_name
@@ -731,7 +761,11 @@ mod tests {
     fn a_device_exports_only_with_an_api_or_a_custom_base() {
         assert!(!exports_public_headers(&module("device", 0, "")));
         assert!(exports_public_headers(&module("device", 2, "")));
-        assert!(exports_public_headers(&module("device", 0, "#include <x.h>")));
+        assert!(exports_public_headers(&module(
+            "device",
+            0,
+            "#include <x.h>"
+        )));
         let mut custom = module("device", 0, "");
         custom.explicit_base_type_extern = Some("struct MyBase".to_owned());
         assert!(exports_public_headers(&custom));
@@ -740,7 +774,11 @@ mod tests {
     #[test]
     fn handlers_export_with_functions_or_a_cdef_block() {
         assert!(!exports_public_headers(&module("handler", 0, "")));
-        assert!(exports_public_headers(&module("handler", 0, "#include <y.h>")));
+        assert!(exports_public_headers(&module(
+            "handler",
+            0,
+            "#include <y.h>"
+        )));
     }
 
     #[test]
@@ -770,13 +808,19 @@ mod tests {
         assert!(arch_dir_applies(Path::new("arch/all-native/acpica"), &dirs));
         // Foreign architectures are skipped; this is what stops
         // arch/m68k-amiga/devs/audio from clobbering workbench/devs/audio.
-        assert!(!arch_dir_applies(Path::new("arch/m68k-amiga/devs/audio"), &dirs));
+        assert!(!arch_dir_applies(
+            Path::new("arch/m68k-amiga/devs/audio"),
+            &dirs
+        ));
         assert!(!arch_dir_applies(Path::new("arch/arm-native/soc"), &dirs));
     }
 
     #[test]
     fn empty_arch_list_filters_nothing() {
-        assert!(arch_dir_applies(Path::new("arch/m68k-amiga/devs/audio"), &[]));
+        assert!(arch_dir_applies(
+            Path::new("arch/m68k-amiga/devs/audio"),
+            &[]
+        ));
     }
 
     #[test]
@@ -787,7 +831,10 @@ mod tests {
         m.lib_base_type = "struct ACPICABase".to_owned();
         assert_eq!(extern_base_type(&m), "struct Library *");
 
-        assert_eq!(extern_base_type(&module("device", 0, "")), "struct Device *");
+        assert_eq!(
+            extern_base_type(&module("device", 0, "")),
+            "struct Device *"
+        );
         assert_eq!(extern_base_type(&module("resource", 0, "")), "APTR ");
         assert_eq!(extern_base_type(&module("handler", 0, "")), "APTR ");
         assert_eq!(extern_base_type(&module("hidd", 0, "")), "struct Library *");
@@ -800,5 +847,25 @@ mod tests {
         let mut m = module("library", 0, "");
         m.explicit_base_type_extern = Some("struct MyOwnBase".to_owned());
         assert_eq!(extern_base_type(&m), "struct MyOwnBase *");
+    }
+
+    #[test]
+    fn default_basename_capitalises_the_first_letter() {
+        // The library base has to be named exactly as the module's own
+        // functions name their last parameter, or LIBBASE binds to the
+        // untyped global from the proto header instead.
+        assert_eq!(default_basename("layers"), "Layers");
+        assert_eq!(default_basename("intuition"), "Intuition");
+        assert_eq!(default_basename("acpica"), "Acpica");
+    }
+
+    #[test]
+    fn default_basename_leaves_an_already_capitalised_name_alone() {
+        assert_eq!(default_basename("Layers"), "Layers");
+    }
+
+    #[test]
+    fn default_basename_handles_an_empty_name() {
+        assert_eq!(default_basename(""), "");
     }
 }
