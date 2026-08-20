@@ -116,6 +116,8 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             ModuleType::Gadget => "aros_add_gadget",
             ModuleType::Mcc => "aros_add_mcc",
             ModuleType::Program => "aros_add_program",
+            ModuleType::ProgramGroup => "aros_add_programs",
+            ModuleType::SimpleModule => "aros_add_module_simple",
             ModuleType::LinkLib => "aros_add_linklib",
             _ => "aros_add_custom_target",
         };
@@ -146,6 +148,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
         writeln!(out, "    MMAKE_ID {}", target.mmake_name).unwrap();
+        if let Some(suffix) = &target.mod_suffix {
+            writeln!(out, "    MODTYPE {suffix}").unwrap();
+        }
         writeln!(
             out,
             "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",

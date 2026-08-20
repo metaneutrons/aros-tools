@@ -65,6 +65,82 @@ fn expand_file_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<Strin
 /// # Errors
 /// Returns an error if the file cannot be read.
 #[allow(clippy::missing_panics_doc)]
+/// Resolves a name argument that may reference a Make variable.
+///
+/// Ten declarations name their output through a variable, for instance
+/// `progname=$(EXE)` in external/openurl and `progname=$(EXENAME)` in
+/// arch/all-pc/bootstrap. Sanitising those verbatim produced target names like
+/// `__EXE_`, and two of them then collided on the same output file. A variable
+/// that resolves to exactly one value is substituted; anything else returns
+/// None so the caller can report it.
+fn resolve_name(raw: &str, vars: &HashMap<String, Vec<String>>) -> Option<String> {
+    if !raw.contains("$(") {
+        return Some(sanitize_ident(raw));
+    }
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("$(") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find(')')?;
+        let name = &after[..end];
+        let values = vars.get(name)?;
+        if values.len() != 1 {
+            return None;
+        }
+        out.push_str(&values[0]);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    if out.is_empty() {
+        return None;
+    }
+    Some(sanitize_ident(&out))
+}
+
+/// Collects the source lists a build macro declares.
+///
+/// The reference treats files, cxxfiles, objcfiles and asmfiles as one set and
+/// falls back to a default when all four are empty (make.tmpl:1643 for
+/// programs, 2857ff for modules). Returns `(sources, any_declared)`; the flag
+/// separates "nothing was declared" from "a list was declared but its Make
+/// variables are unresolved", which must not silently fall back.
+fn macro_sources(args: &str, vars: &HashMap<String, Vec<String>>) -> (Vec<String>, bool) {
+    let mut sources = Vec::new();
+    let mut declared = false;
+    for key in ["files", "cxxfiles", "objcfiles", "asmfiles"] {
+        let Some(raw) = macro_arg(args, key) else {
+            continue;
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        declared = true;
+        sources.extend(expand_file_list(&raw, vars));
+    }
+    (sources, declared)
+}
+
+/// Lists the C sources in a directory, for the macros whose `files` default is
+/// `$(basename $(call WILDCARD, *.c))`.
+fn wildcard_c_sources(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("c") {
+                return None;
+            }
+            p.file_stem().map(|s| s.to_string_lossy().to_string())
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 /// One macro invocation from an mmakefile: its name and its argument text.
 struct Invocation {
     name: String,
@@ -312,6 +388,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
+            mod_suffix: None,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = include_set.dirs.clone();
@@ -354,23 +431,15 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             ));
             continue;
         };
-        let prog_name = sanitize_ident(&prog_raw);
+        let Some(prog_name) = resolve_name(&prog_raw, &vars) else {
+            skipped_programs.push(format!(
+                "{}: %build_prog mmake={mmake_raw} progname={prog_raw} is unresolved",
+                rel_dir.display()
+            ));
+            continue;
+        };
 
-        // The reference takes files, cxxfiles, objcfiles and asmfiles
-        // together, and falls back to the program name when all four are empty
-        // (make.tmpl:1643). 15 of the 264 declarations rely on one of those.
-        let mut declared_any = false;
-        let mut source_files = Vec::new();
-        for key in ["files", "cxxfiles", "objcfiles", "asmfiles"] {
-            let Some(raw) = macro_arg(&inv.args, key) else {
-                continue;
-            };
-            if raw.trim().is_empty() {
-                continue;
-            }
-            declared_any = true;
-            source_files.extend(expand_file_list(&raw, &vars));
-        }
+        let (mut source_files, declared_any) = macro_sources(&inv.args, &vars);
         if source_files.is_empty() {
             if declared_any {
                 // A list was given but its Make variables are unresolved.
@@ -397,6 +466,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
+            mod_suffix: None,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = include_set.dirs.clone();
@@ -414,20 +484,127 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         });
     }
 
-    // Declarations of the kinds not modelled yet, so they surface as a count
-    // rather than as targets that quietly never exist.
+    // 2b. The remaining build macros.
+    //
+    // All four share the compile model and differ only in what they link:
+    // %build_prog one executable, %build_progs one per file, %build_linklib a
+    // static library, %build_module_simple a module without the genmodule
+    // chain. Only the link kind and the name argument change here.
     for inv in &invocations {
-        let kind = match inv.name.as_str() {
-            "build_progs" => "one executable per file",
-            "build_linklib" => "link library",
-            "build_module_simple" => "module without genmodule",
+        let (module_type, name_arg) = match inv.name.as_str() {
+            "build_progs" => (ModuleType::ProgramGroup, None),
+            "build_linklib" => (ModuleType::LinkLib, Some("libname")),
+            "build_module_simple" => (ModuleType::SimpleModule, Some("modname")),
             _ => continue,
         };
+
+        let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
+            continue;
+        };
+        let mmake_name = sanitize_ident(&mmake_raw);
+
+        // %build_progs has no name of its own: each source file names its own
+        // executable, so the mmake id carries the group.
+        let target_name = match name_arg {
+            None => mmake_name.clone(),
+            Some(key) => match macro_arg(&inv.args, key).and_then(|v| {
+                resolve_name(&v, &vars).or_else(|| {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} {key}={v} is unresolved",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    None
+                })
+            }) {
+                Some(v) => v,
+                None => {
+                    if macro_arg(&inv.args, key).is_none() {
+                        skipped_programs.push(format!(
+                            "{}: %{} mmake={mmake_raw} has no {key}",
+                            rel_dir.display(),
+                            inv.name
+                        ));
+                    }
+                    continue;
+                }
+            },
+        };
+
+        let (mut source_files, declared_any) = macro_sources(&inv.args, &vars);
+        if source_files.is_empty() {
+            if declared_any {
+                skipped_programs.push(format!(
+                    "{}: %{} mmake={mmake_raw} has an unresolved file list",
+                    rel_dir.display(),
+                    inv.name
+                ));
+                continue;
+            }
+            // %build_module_simple defaults files to every *.c in the
+            // directory. The others have no default, and %build_progs even
+            // declares files=/A, so a declaration without sources is
+            // malformed.
+            if matches!(module_type, ModuleType::SimpleModule) {
+                source_files = wildcard_c_sources(parent_dir);
+            }
+            if source_files.is_empty() {
+                skipped_programs.push(format!(
+                    "{}: %{} mmake={mmake_raw} declares no sources",
+                    rel_dir.display(),
+                    inv.name
+                ));
+                continue;
+            }
+        }
+
+        let use_libs =
+            macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
+        let mod_suffix = if matches!(module_type, ModuleType::SimpleModule) {
+            macro_arg(&inv.args, "modtype")
+        } else {
+            None
+        };
+
+        targets.push(TargetDefinition {
+            mmake_name,
+            target_name,
+            module_type,
+            source_files,
+            use_libs,
+            dependencies: Vec::new(),
+            dir_path: rel_dir.clone(),
+            target_dir: None,
+            mod_suffix,
+            compiler_flags: Vec::new(),
+            include_dirs: {
+                let mut d = include_set.dirs.clone();
+                d.extend(opts_include_dirs.iter().cloned());
+                d
+            },
+            arch_modules: include_set.arch_modules.clone(),
+            arch_includes: opts_arch_includes.clone(),
+            defines: flag_set.defines.clone(),
+            undefines: flag_set.undefines.clone(),
+            compile_options: flag_set.compile_options.clone(),
+            arch_sources: Vec::new(),
+            arch_defines: arch_defines.clone(),
+            arch_compile_options: arch_compile_options.clone(),
+        });
+    }
+
+    // %build_module_macro is invoked five times but defined nowhere in the
+    // tree. Four of the five sit under arch/.unmaintained or an architecture
+    // we do not build, and one carries a "converted without testing" note, so
+    // the historic build cannot expand it either.
+    for inv in invocations
+        .iter()
+        .filter(|i| i.name == "build_module_macro")
+    {
         if let Some(m) = macro_arg(&inv.args, "mmake") {
             skipped_programs.push(format!(
-                "{}: %{} mmake={m} ({kind})",
-                rel_dir.display(),
-                inv.name
+                "{}: %build_module_macro mmake={m} (macro is not defined anywhere in the tree)",
+                rel_dir.display()
             ));
         }
     }
@@ -551,5 +728,53 @@ mod tests {
         let invs = macro_invocations(src);
         let names: Vec<&str> = invs.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["common"]);
+    }
+
+    #[test]
+    fn a_name_argument_resolves_through_a_variable() {
+        // external/openurl declares progname=$(EXE) with EXE := OpenURL.
+        // Sanitising it verbatim produced the target name __EXE_, and two such
+        // targets then collided on the same output file.
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("EXE".to_owned(), vec!["OpenURL".to_owned()]);
+        assert_eq!(super::resolve_name("$(EXE)", &vars).unwrap(), "OpenURL");
+        assert_eq!(
+            super::resolve_name("mesa3dgl$(EXE)", &vars).unwrap(),
+            "mesa3dglOpenURL"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_name_is_refused() {
+        let vars = std::collections::HashMap::new();
+        assert!(super::resolve_name("$(EXENAME)", &vars).is_none());
+        // A variable holding a list cannot name one target.
+        let mut many = std::collections::HashMap::new();
+        many.insert("L".to_owned(), vec!["a".to_owned(), "b".to_owned()]);
+        assert!(super::resolve_name("$(L)", &many).is_none());
+    }
+
+    #[test]
+    fn all_four_source_lists_are_read() {
+        // developer/debug/test/cplusplus declares files="" cxxfiles="exception".
+        let vars = std::collections::HashMap::new();
+        let (srcs, declared) = super::macro_sources(
+            r#"mmake=x progname=exception files="" cxxfiles="exception""#,
+            &vars,
+        );
+        assert!(declared);
+        assert_eq!(srcs, vec!["exception"]);
+    }
+
+    #[test]
+    fn nothing_declared_is_distinct_from_nothing_resolved() {
+        let vars = std::collections::HashMap::new();
+        let (srcs, declared) = super::macro_sources("mmake=x progname=p", &vars);
+        assert!(srcs.is_empty());
+        assert!(!declared, "no list was given at all");
+
+        let (srcs, declared) = super::macro_sources("mmake=x files=$(UNKNOWN)", &vars);
+        assert!(srcs.is_empty());
+        assert!(declared, "a list was given but did not resolve");
     }
 }

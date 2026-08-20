@@ -17,7 +17,12 @@ pub enum ModuleType {
     Gadget,
     Mcc,
     Program,
+    /// `%build_progs`: one executable per source file, under one mmake name.
+    ProgramGroup,
     LinkLib,
+    /// `%build_module_simple`: a module linked without the genmodule chain,
+    /// so it has no .conf and no generated libdefs header.
+    SimpleModule,
     Package,
     Custom,
 }
@@ -33,6 +38,9 @@ pub struct TargetDefinition {
     pub dependencies: Vec<String>,
     pub dir_path: PathBuf,
     pub target_dir: Option<String>,
+    /// The `modtype` a `%build_module_simple` declared, which decides the
+    /// module's file extension. Empty for every other kind.
+    pub mod_suffix: Option<String>,
     pub compiler_flags: Vec<String>,
     /// Include directories from the mmakefile's `USER_INCLUDES`, already
     /// rendered as CMake paths.
