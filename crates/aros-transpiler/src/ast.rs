@@ -38,6 +38,13 @@ pub struct TargetDefinition {
     pub dependencies: Vec<String>,
     pub dir_path: PathBuf,
     pub target_dir: Option<String>,
+    /// True when a `%build_linklib` declares the extra 32-bit flavour of a
+    /// library, which a 64-bit target has beside its own: compiler/crt/stdc
+    /// builds stdc.static twice, the second into $(GENDIR)/lib32 for the
+    /// bootstrap. Both carry the same libname, so uselibs cannot tell them
+    /// apart without this.
+    #[serde(default)]
+    pub variant_32bit: bool,
     /// mmake ids of the link libraries this target links against, resolved
     /// from `uselibs` once every mmakefile has been parsed.
     #[serde(default)]

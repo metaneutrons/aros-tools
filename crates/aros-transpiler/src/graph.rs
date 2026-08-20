@@ -190,11 +190,31 @@ impl DependencyGraph {
                             ids.push(id);
                         }
                     }
-                    Some(c) => unresolved.push(format!(
-                        "{}: {mmake} uselibs={name} is ambiguous ({})",
-                        target.dir_path.display(),
-                        c.join(", ")
-                    )),
+                    Some(c) => {
+                        // Two link libraries share a libname when one is the
+                        // extra 32-bit flavour a 64-bit target keeps for its
+                        // bootstrap. The main target wants the other one.
+                        let main: Vec<&&str> = c
+                            .iter()
+                            .filter(|id| {
+                                self.targets
+                                    .get(**id)
+                                    .is_some_and(|t| !t.variant_32bit)
+                            })
+                            .collect();
+                        if main.len() == 1 {
+                            let id = (**main[0]).to_owned();
+                            if !ids.contains(&id) {
+                                ids.push(id);
+                            }
+                        } else {
+                            unresolved.push(format!(
+                                "{}: {mmake} uselibs={name} is ambiguous ({})",
+                                target.dir_path.display(),
+                                c.join(", ")
+                            ));
+                        }
+                    }
                     // Not every uselib is built here: some name a host library
                     // or a port that is not fetched. Reported, not guessed at.
                     None => unresolved.push(format!(

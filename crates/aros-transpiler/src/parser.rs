@@ -394,8 +394,21 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             continue;
         }
 
-        if let Some((k, v)) = line.split_once(":=") {
-            let var_name = k.trim().to_string();
+        // Make has four assignment forms and the tree uses three of them.
+        // Reading only `:=` lost every list written with `=` or `?=`:
+        // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
+        // that way, and eight %build_linklib declarations get their file list
+        // from one.
+        let assignment = line
+            .split_once(":=")
+            .or_else(|| line.split_once("?="))
+            .filter(|(k, _)| !k.contains('=') && !k.contains(':'))
+            .or_else(|| {
+                line.split_once('=')
+                    .filter(|(k, _)| !k.contains(':') && !k.ends_with('+') && !k.contains('$'))
+            });
+        if let Some((k, v)) = assignment {
+            let var_name = k.trim().trim_end_matches('?').trim().to_string();
             // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
             // held. Inserting the new list would discard it, and the surviving
             // `$(FILES)` reference then resolves to itself: muimaster came out
@@ -531,6 +544,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dir_path: rel_dir.clone(),
             target_dir: None,
             link_libs: Vec::new(),
+            variant_32bit: false,
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -610,6 +624,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dir_path: rel_dir.clone(),
             target_dir: None,
             link_libs: Vec::new(),
+            variant_32bit: false,
             mod_suffix: None,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -709,6 +724,11 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         } else {
             None
         };
+        // The 32-bit flavour is told apart by where it writes, not by its
+        // name: libdir=$(GENDIR)/lib32 and objdir=.../32bit.
+        let variant_32bit = ["libdir", "objdir"].iter().any(|k| {
+            macro_arg(&inv.args, k).is_some_and(|v| v.contains("lib32") || v.contains("32bit"))
+        });
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -720,6 +740,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dir_path: rel_dir.clone(),
             target_dir: None,
             link_libs: Vec::new(),
+            variant_32bit,
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
