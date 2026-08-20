@@ -124,14 +124,33 @@ fn resolve_vars(text: &str) -> Option<String> {
     Some(out)
 }
 
+/// Recognises the Make spelling of a string-literal define value.
+///
+/// `"\"pc\""` yields `pc`. Both the outer shell quotes and the inner escaped
+/// quotes have to be present; anything else is not a string literal.
+fn string_literal_value(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    let inner = t.strip_prefix('"')?.strip_suffix('"')?;
+    let inner = inner.strip_prefix("\\\"")?.strip_suffix("\\\"")?;
+    Some(inner.to_owned())
+}
+
+/// Whether a name is usable as a C identifier once CMake substitutes any
+/// variable reference in it.
+fn is_identifier_shaped(name: &str) -> bool {
+    let bare = name
+        .replace("${AROS_TARGET_PLATFORM}", "x")
+        .replace("${AROS_TARGET_CPU}", "x")
+        .replace("${AROS_TARGET_FAMILY}", "x");
+    !bare.is_empty()
+        && bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !bare.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Accepts only the simple define forms: an identifier, optionally followed by
 /// `=` and an unquoted value.
 fn simple_define(body: &str) -> Option<String> {
     if body.is_empty() {
-        return None;
-    }
-    // Quotes and backslashes mean shell/Make quoting we will not reproduce.
-    if body.contains('"') || body.contains('\'') || body.contains('\\') {
         return None;
     }
     let (name, value) = match body.split_once('=') {
@@ -139,18 +158,34 @@ fn simple_define(body: &str) -> Option<String> {
         None => (body, None),
     };
 
+    // A string-literal define is written `NAME="\"value\""` in Make, e.g.
+    // rom/kernel's -DAROS_ARCHITECTURE. Reduce it to NAME="value" and let CMake
+    // do the escaping. Anything else containing quotes is refused: the same
+    // shape appears in arguments meant for a nested CMake build, such as
+    // -DCMAKE_CXX_FLAGS="...".
+    if let Some(v) = value {
+        if let Some(inner) = string_literal_value(v) {
+            let name = resolve_vars(name)?;
+            if !is_identifier_shaped(&name) {
+                return None;
+            }
+            let inner = resolve_vars(&inner)?;
+            if inner.contains('"') || inner.contains('\\') || inner.contains(char::is_whitespace)
+            {
+                return None;
+            }
+            return Some(format!("{name}=\"{inner}\""));
+        }
+    }
+
+    // Quotes and backslashes otherwise mean shell/Make quoting we will not
+    // reproduce.
+    if body.contains('"') || body.contains('\'') || body.contains('\\') {
+        return None;
+    }
+
     let name = resolve_vars(name)?;
-    // The name must be a C identifier once variables are substituted; a CMake
-    // reference is allowed because it expands to one.
-    let bare = name.replace("${AROS_TARGET_PLATFORM}", "x")
-        .replace("${AROS_TARGET_CPU}", "x")
-        .replace("${AROS_TARGET_FAMILY}", "x");
-    if bare.is_empty()
-        || !bare
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        || bare.starts_with(|c: char| c.is_ascii_digit())
-    {
+    if !is_identifier_shaped(&name) {
         return None;
     }
 
@@ -727,5 +762,28 @@ endif
             "the negation of an architecture test is not a tag"
         );
         assert!(f.defines.is_empty());
+    }
+
+    #[test]
+    fn string_literal_defines_are_propagated() {
+        // rom/kernel: -DAROS_ARCHITECTURE="\"$(AROS_TARGET_PLATFORM)\""
+        let f = collect_flags(
+            "USER_CPPFLAGS := -DAROS_ARCHITECTURE=\"\\\"$(AROS_TARGET_PLATFORM)\\\"\"\n",
+        );
+        assert_eq!(
+            f.defines,
+            vec!["AROS_ARCHITECTURE=\"${AROS_TARGET_PLATFORM}\""]
+        );
+        assert!(f.skipped.is_empty(), "skipped: {:?}", f.skipped);
+    }
+
+    #[test]
+    fn a_quoted_flag_list_is_still_refused() {
+        // Not a compiler define but an argument for a nested CMake build.
+        let f = collect_flags("USER_CPPFLAGS := -DCMAKE_CXX_FLAGS=\"-O2 -g\"\n");
+        assert!(f.defines.is_empty(), "defines: {:?}", f.defines);
+        // The value splits on whitespace, so more than one token is reported;
+        // what matters is that none of them became a define.
+        assert!(!f.skipped.is_empty());
     }
 }
