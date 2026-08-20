@@ -6,6 +6,7 @@ members = [
     "crates/aros-genmodule",
     "crates/aros-romtool",
     "crates/aros-cli",
+    "crates/aros-verify",
 ]
 
 [workspace.package]

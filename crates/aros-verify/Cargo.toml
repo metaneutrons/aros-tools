@@ -1,0 +1,19 @@
+[package]
+name = "aros-verify"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "aros-verify"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+rayon.workspace = true
