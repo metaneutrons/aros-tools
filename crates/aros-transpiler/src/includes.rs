@@ -63,7 +63,12 @@ fn map_known_var(name: &str) -> Option<&'static str> {
         // ACPICASRCDIR := $(PORTSDIR)/acpica/$(ACPICAARCHBASE).
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),
-        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}"),
+        // Generated per-module output. BootstrapSDK.cmake puts this under
+        // <build>/gen, so the mapping needs that segment: a module reaching
+        // its own generated header writes -I$(GENDIR)/$(CURDIR)/<sub>, and
+        // without it the path pointed one level too high and the include was
+        // simply absent.
+        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
         "AROS_INCLUDES" => Some("${CMAKE_BINARY_DIR}/SDK/include"),
         // Target parameters are passed through as CMake variables so the
         // transpiler stays target-agnostic.
