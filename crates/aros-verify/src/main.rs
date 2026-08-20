@@ -47,6 +47,11 @@ struct Args {
     #[arg(long)]
     work: PathBuf,
 
+    /// The configured build directory, to check that emitted declarations
+    /// actually became CMake targets.
+    #[arg(long)]
+    build_dir: Option<PathBuf>,
+
     /// Re-run genmf even when a cached expansion exists.
     #[arg(long)]
     refresh: bool,
@@ -126,6 +131,62 @@ fn main() -> Result<()> {
     // named by progname.
     let undeclared: Vec<&String> = ours.keys().filter(|k| !declared.contains(k.as_str())).collect();
 
+    // ---- Realisation ----------------------------------------------------
+    //
+    // Coverage above measures what the transpiler emitted, which is not the
+    // same as what CMake built. A declaration emitted with an empty source
+    // list makes every builder return early, so the target never exists, and
+    // nothing said so: aros_add_custom_target was an empty stub for 97
+    // declarations with 313 source files and this check would have caught it
+    // on the first run.
+    //
+    // CMakeFiles/<id>.dir is the evidence. CMake creates it for any target it
+    // configured, and for none it did not.
+    let unrealised = match &args.build_dir {
+        None => Vec::new(),
+        Some(dir) => {
+            let cmakefiles = dir.join("CMakeFiles");
+            let mut present: BTreeSet<String> = BTreeSet::new();
+            if let Ok(entries) = fs::read_dir(&cmakefiles) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if let Some(stem) = name.strip_suffix(".dir") {
+                        present.insert(stem.to_owned());
+                    }
+                }
+            }
+            // A package or kickstart declaration becomes an add_custom_target,
+            // which gets no CMakeFiles/<id>.dir. Ninja records it as a phony
+            // edge instead, so both places have to be read or the four
+            // pc-x86_64 packages read as unrealised.
+            if let Ok(ninja) = fs::read_to_string(dir.join("build.ninja")) {
+                let phony = Regex::new(r"(?m)^build ([^:$ ]+): phony").unwrap();
+                for c in phony.captures_iter(&ninja) {
+                    if let Some(name) = c[1].rsplit('/').next() {
+                        present.insert(name.to_owned());
+                    }
+                }
+            }
+            if present.is_empty() {
+                vec![format!(
+                    "cannot read {} -- configure the build first",
+                    cmakefiles.display()
+                )]
+            } else {
+                ours.keys()
+                    .filter(|id| !present.contains(*id))
+                    .map(|id| {
+                        let where_ = declarations
+                            .iter()
+                            .find(|d| &d.mmake == id)
+                            .map_or_else(|| "?".to_owned(), |d| d.file.clone());
+                        format!("{id:44} {where_}")
+                    })
+                    .collect()
+            }
+        }
+    };
+
     // ---- Shape ----------------------------------------------------------
 
     let mut wrong_name = Vec::new();
@@ -155,6 +216,13 @@ fn main() -> Result<()> {
     );
     println!("   reference     {} targets in the genmf expansion", shapes.len());
     println!("   emitted       {} MMAKE_IDs", ours.len());
+    if args.build_dir.is_some() {
+        let built = ours.len().saturating_sub(unrealised.len());
+        println!(
+            "   realised      {built}/{} emitted became CMake targets",
+            ours.len()
+        );
+    }
 
     write_report(
         &args.work.join("missing-targets.txt"),
@@ -180,6 +248,15 @@ fn main() -> Result<()> {
         &format!("{} target(s) built under the wrong name", wrong_name.len()),
     )?;
 
+    write_report(
+        &args.work.join("unrealised-targets.txt"),
+        unrealised.clone(),
+        &format!(
+            "{} emitted declaration(s) never became a CMake target",
+            unrealised.len()
+        ),
+    )?;
+
     if !by_macro.is_empty() {
         println!("\n   {:24} {:>8} {:>8}", "macro", "declared", "missing");
         for (m, (total, miss)) in &by_macro {
@@ -189,7 +266,10 @@ fn main() -> Result<()> {
         }
     }
 
-    let failed = !missing.is_empty() || !undeclared.is_empty() || !wrong_name.is_empty();
+    let failed = !missing.is_empty()
+        || !undeclared.is_empty()
+        || !wrong_name.is_empty()
+        || !unrealised.is_empty();
     if failed && !args.no_gate {
         anyhow::bail!("verification found gaps; see the reports in {}", args.work.display());
     }
