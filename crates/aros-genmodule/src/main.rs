@@ -71,6 +71,9 @@ struct ConfModule {
     date: String,
     /// Whether the config declared `options autoinit`.
     auto_init: bool,
+    /// Whether the config declared `options noresident`, which starts the
+    /// library vectors at 1 instead of the module type's default.
+    no_resident: bool,
     /// Module type (`library`, `device`, `resource`, `hidd`, `handler`, ...).
     /// Not part of the .conf; taken from the sibling mmakefile.src.
     mod_type: String,
@@ -244,6 +247,12 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
         ..ConfModule::default()
     };
 
+    // Vector numbering starts below the module's own functions; the standard
+    // Open/Close/Expunge vectors occupy the slots before it. Initialised on
+    // entering the function list, because the config section that may override
+    // the starting point with `options noresident` is read first.
+    let mut lvo = 0u32;
+    let mut lvo_ready = false;
     let mut section = "";
     // `##begin interface` and `##begin class` nest their own config and
     // methodlist sections; reading those as the module's would let an
@@ -277,6 +286,10 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
             section = "";
         } else if trimmed == "##begin functionlist" {
             section = "functions";
+            if !lvo_ready {
+                lvo = varargs::first_lvo(&module.mod_type, module.no_resident);
+                lvo_ready = true;
+            }
         } else if trimmed == "##end functionlist" {
             section = "";
         } else if section == "config" {
@@ -306,8 +319,12 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                     }
                 }
                 "options" => {
-                    if val.split([',', ' ']).any(|o| o.trim() == "autoinit") {
-                        module.auto_init = true;
+                    for opt in val.split([',', ' ']) {
+                        match opt.trim() {
+                            "autoinit" => module.auto_init = true,
+                            "noresident" => module.no_resident = true,
+                            _ => {}
+                        }
                     }
                 }
                 "sysbase_field" => module.sysbase_field = Some(val.to_string()),
@@ -326,6 +343,19 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 .find('#')
                 .map_or(trimmed, |hash_pos| trimmed[..hash_pos].trim());
 
+            // A blank line or `.skip n` advances the vector counter without
+            // producing an entry, exactly as the reference parser does. A
+            // comment line does not: 867 of them sit inside function lists, and
+            // counting them would shift every vector that follows.
+            let is_comment = trimmed.starts_with('#');
+            if code_line.is_empty() && !is_comment {
+                lvo = lvo.saturating_add(1);
+            } else if let Some(rest) = code_line.strip_prefix(".skip") {
+                if let Ok(n) = rest.split_whitespace().next().unwrap_or("").parse::<u32>() {
+                    lvo = lvo.saturating_add(n);
+                }
+            }
+
             // `.private` and `.novararg` modify the preceding declaration.
             if code_line == ".private" {
                 if let Some(f) = module.functions.last_mut() {
@@ -339,7 +369,9 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 && !code_line.starts_with('.')
                 && !code_line.starts_with('#')
             {
-                if let Some(f) = varargs::parse_function_line(code_line) {
+                if let Some(mut f) = varargs::parse_function_line(code_line) {
+                    f.lvo = lvo;
+                    lvo = lvo.saturating_add(1);
                     // The four standard library vectors are supplied by the
                     // module skeleton, not declared in the public header.
                     let is_standard_vector = matches!(
@@ -469,6 +501,11 @@ fn generate_sdk_headers(
     let defines = varargs::render_defines(&include_name, &module.lib_base, &module.functions);
     if public {
         fs::write(defines_dir.join(format!("{include_name}.h")), &defines.text)?;
+        // Function LVOs, a separate header in the reference too.
+        fs::write(
+            defines_dir.join(format!("{include_name}_LVO.h")),
+            varargs::render_lvo(&include_name, &module.functions),
+        )?;
     }
 
     // 4. <mod>_libdefs.h, following tools/genmodule/writeinclibdefs.c.
@@ -669,6 +706,7 @@ mod tests {
                     args: Vec::new(),
                     private: false,
                     novararg: false,
+                    lvo: 0,
                 })
                 .collect(),
             ..ConfModule::default()

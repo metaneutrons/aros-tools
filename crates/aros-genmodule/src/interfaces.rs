@@ -13,6 +13,7 @@
 //! start at 0, a blank line advances the counter by one (leaving a gap), and
 //! `.skip n` advances it by n. Comment lines do not advance it.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -334,7 +335,8 @@ pub fn render(iface: &Interface) -> String {
     let ab = &iface.attribute_base;
     let mut out = String::with_capacity(8192);
 
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "#ifndef INTERFACE_{name}_H\n\
          #define INTERFACE_{name}_H\n\
          \n\
@@ -347,7 +349,7 @@ pub fn render(iface: &Interface) -> String {
          #include <exec/types.h>\n\
          #include <proto/oop.h>\n\
          \n"
-    ));
+    );
     out.push_str(&format!(
         "#define IID_{:<32} \"{}\"\n\n",
         name, iface.interface_id
