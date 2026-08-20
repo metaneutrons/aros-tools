@@ -154,6 +154,10 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
         writeln!(out, "    MMAKE_ID {}", target.mmake_name).unwrap();
+        if !target.link_libs.is_empty() {
+            let libs: Vec<String> = target.link_libs.iter().map(|l| cmake_arg(l)).collect();
+            writeln!(out, "    LIBS {}", libs.join(" ")).unwrap();
+        }
         if let Some(suffix) = &target.mod_suffix {
             writeln!(out, "    MODTYPE {suffix}").unwrap();
         }

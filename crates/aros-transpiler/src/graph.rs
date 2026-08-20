@@ -152,6 +152,70 @@ impl DependencyGraph {
     /// Returns the members that resolved to nothing. Those matter: a package
     /// missing a module still builds, and the failure only appears when the
     /// system does not boot.
+    /// Turns each target's `uselibs` names into the link-library targets that
+    /// build them.
+    ///
+    /// `uselibs="debug"` means link against libdebug.a, which
+    /// `%build_linklib libname=debug` builds under the mmake id
+    /// `linklibs-debug`. Nothing resolved those names, so every builder linked
+    /// an always-empty ARG_LIBS and no module linked against anything at all.
+    ///
+    /// Resolving here rather than in CMake also sidesteps a name clash:
+    /// aros_link_libraries discards `debug`, `optimized` and `general` because
+    /// target_link_libraries reads them as build-type keywords, and `debug` is
+    /// a real AROS link library used by 20 declarations.
+    ///
+    /// Returns the names that matched no link library.
+    pub fn resolve_use_libs(&mut self) -> Vec<String> {
+        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (mmake, target) in &self.targets {
+            if matches!(target.module_type, ModuleType::LinkLib) {
+                by_name
+                    .entry(target.target_name.as_str())
+                    .or_default()
+                    .push(mmake.as_str());
+            }
+        }
+
+        let mut unresolved = Vec::new();
+        let mut resolved: Vec<(String, Vec<String>)> = Vec::new();
+        for (mmake, target) in &self.targets {
+            let mut ids = Vec::new();
+            for name in &target.use_libs {
+                match by_name.get(name.as_str()) {
+                    Some(c) if c.len() == 1 => {
+                        let id = (*c[0]).to_owned();
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                    Some(c) => unresolved.push(format!(
+                        "{}: {mmake} uselibs={name} is ambiguous ({})",
+                        target.dir_path.display(),
+                        c.join(", ")
+                    )),
+                    // Not every uselib is built here: some name a host library
+                    // or a port that is not fetched. Reported, not guessed at.
+                    None => unresolved.push(format!(
+                        "{}: {mmake} uselibs={name} has no link library",
+                        target.dir_path.display()
+                    )),
+                }
+            }
+            if !ids.is_empty() {
+                resolved.push((mmake.clone(), ids));
+            }
+        }
+
+        for (mmake, ids) in resolved {
+            if let Some(t) = self.targets.get_mut(&mmake) {
+                t.link_libs = ids;
+            }
+        }
+        unresolved
+    }
+
     pub fn resolve_packages(&mut self) -> Vec<String> {
         // Indexed by name and by (name, kind). A module name alone is
         // ambiguous often enough to matter: `ahci` is both kernel-ahci and a

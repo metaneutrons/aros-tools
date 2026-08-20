@@ -38,6 +38,10 @@ pub struct TargetDefinition {
     pub dependencies: Vec<String>,
     pub dir_path: PathBuf,
     pub target_dir: Option<String>,
+    /// mmake ids of the link libraries this target links against, resolved
+    /// from `uselibs` once every mmakefile has been parsed.
+    #[serde(default)]
+    pub link_libs: Vec<String>,
     /// The `modtype` a `%build_module_simple` declared, which decides the
     /// module's file extension. Empty for every other kind.
     pub mod_suffix: Option<String>,

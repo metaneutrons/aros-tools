@@ -119,6 +119,10 @@ fn main() -> Result<()> {
     // Package membership names modules, not targets, so it can only be
     // resolved once every mmakefile has contributed its targets.
     skipped_packages.extend(graph.resolve_packages());
+
+    // uselibs names a link library by its libname, which only resolves once
+    // every %build_linklib in the tree has been seen.
+    let unresolved_libs = graph.resolve_use_libs();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
@@ -192,6 +196,21 @@ fn main() -> Result<()> {
             println!(
                 "⚠️  {} %copy_includes declaration(s) skipped (out-of-tree or unresolved)",
                 skipped_headers.len()
+            );
+        }
+    }
+
+    let mut unresolved_libs = unresolved_libs;
+    unresolved_libs.sort_unstable();
+    unresolved_libs.dedup();
+    if !unresolved_libs.is_empty() {
+        let report = args.output.with_extension("unresolved-uselibs.txt");
+        let body = unresolved_libs.join("\n");
+        if fs::write(&report, format!("{body}\n")).is_ok() {
+            println!(
+                "⚠️  {} uselibs name(s) matched no link library -> {}",
+                unresolved_libs.len(),
+                report.display()
             );
         }
     }

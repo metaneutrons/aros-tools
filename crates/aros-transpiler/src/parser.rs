@@ -530,6 +530,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
+            link_libs: Vec::new(),
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -608,6 +609,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
+            link_libs: Vec::new(),
             mod_suffix: None,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -717,6 +719,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
+            link_libs: Vec::new(),
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
