@@ -80,7 +80,14 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
-    let (arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir);
+    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir);
+    // A %build_archspecific file contributes to a target defined elsewhere, so
+    // its own USER_INCLUDES and flags have to travel with the declaration.
+    for d in &mut arch_sources {
+        d.include_dirs = include_set.dirs.clone();
+        d.defines = flag_set.defines.clone();
+        d.compile_options = flag_set.compile_options.clone();
+    }
     let (fetches, skipped_fetches) = collect_fetches(&content, &rel_dir);
 
     // Architecture option files. Their contents are tagged with the

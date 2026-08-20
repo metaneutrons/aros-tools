@@ -38,6 +38,15 @@ pub struct ArchSourceDecl {
     /// Source base names. Extensions are resolved by the build, so a `.S` file
     /// overriding a `.c` file needs no special handling here.
     pub files: Vec<String>,
+    /// Include directories the declaring mmakefile sets. These belong to the
+    /// target being extended, not to this file: arch/arm-native/kernel adds
+    /// -I$(SRCDIR)/rom/openfirmware, and without it the kernel cannot find
+    /// of_intern.h.
+    pub include_dirs: Vec<String>,
+    /// Definitions the declaring mmakefile sets.
+    pub defines: Vec<String>,
+    /// Codegen options the declaring mmakefile sets.
+    pub compile_options: Vec<String>,
 }
 
 /// Collects `VAR := / = / += value` file lists, keeping plain names only.
@@ -180,6 +189,10 @@ pub fn collect_arch_sources(
             tag,
             dir: dir.clone(),
             files,
+            // Filled in by the caller, which has already collected them.
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            compile_options: Vec::new(),
         });
     }
 

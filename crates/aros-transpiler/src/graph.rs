@@ -60,6 +60,26 @@ impl DependencyGraph {
                     target
                         .arch_sources
                         .push((d.tag.clone(), d.dir.clone(), d.files.clone()));
+                    // The declaring file's own include paths and flags belong to
+                    // this target too, but only for its architecture.
+                    for inc in &d.include_dirs {
+                        let e = (d.tag.clone(), inc.clone());
+                        if !target.arch_includes.contains(&e) {
+                            target.arch_includes.push(e);
+                        }
+                    }
+                    for def in &d.defines {
+                        let e = (d.tag.clone(), def.clone());
+                        if !target.arch_defines.contains(&e) {
+                            target.arch_defines.push(e);
+                        }
+                    }
+                    for opt in &d.compile_options {
+                        let e = (d.tag.clone(), opt.clone());
+                        if !target.arch_compile_options.contains(&e) {
+                            target.arch_compile_options.push(e);
+                        }
+                    }
                 }
             }
         }
