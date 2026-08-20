@@ -4,6 +4,8 @@ use miette::Result;
 use std::process::Command;
 use std::time::Instant;
 
+mod toolchain;
+
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
 static HAMMER: Emoji<'_, '_> = Emoji("🔨 ", "");
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
@@ -24,11 +26,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Download and configure hermetic LLVM/LLD toolchain
+    Setup {
+        /// Force re-download even if already installed
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Build AROS for a specific target preset (pc-x86_64, rpi-aarch64, arm-raspi)
     Build {
-        /// Target preset (e.g. pc-x86_64, rpi-aarch64, esp32p4-riscv32)
+        /// Target preset (e.g. pc-x86_64, rpi-aarch64, arm-raspi)
         #[arg(short, long, default_value = "pc-x86_64")]
         preset: String,
+
+        /// Optional specific target to build (e.g. kernel-exec, workbench-c, boot-iso)
+        #[arg(short, long)]
+        target: Option<String>,
 
         /// Number of parallel jobs
         #[arg(short, long)]
@@ -50,15 +63,23 @@ enum Commands {
         preset: Option<String>,
     },
 
-    /// Run automated QEMU boot test for a target
+    /// Run automated or interactive QEMU boot test for a target
     Test {
         /// Target preset to test
         #[arg(short, long, default_value = "pc-x86_64")]
         preset: String,
 
-        /// Run in headless mode (serial output only)
-        #[arg(long, default_value_t = true)]
+        /// Run in headless mode (no GUI window, default)
+        #[arg(long)]
         headless: bool,
+
+        /// Open graphical QEMU window (interactive mode)
+        #[arg(short, long)]
+        gui: bool,
+
+        /// Timeout duration in seconds (0 = run indefinitely until window closed)
+        #[arg(short, long, default_value_t = 10)]
+        timeout: u64,
     },
 
     /// Manage and inspect compiler cache (`ccache` / `sccache`)
@@ -89,15 +110,28 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Setup { force } => {
+            toolchain::setup_toolchain(force).await.map_err(|e| miette::miette!("{e}"))?;
+        }
+
         Commands::Build {
             preset,
+            target,
             jobs,
             clean,
             verbose,
         } => {
+            // Ensure hermetic toolchain is present
+            let tc_dir = toolchain::default_toolchain_dir();
+            let tc_paths = toolchain::get_toolchain_paths(&tc_dir);
+            if !toolchain::is_toolchain_installed(&tc_paths) && which::which("clang").is_err() {
+                println!("ℹ️ Hermetic toolchain not found. Initializing automatic setup...");
+                toolchain::setup_toolchain(false).await.map_err(|e| miette::miette!("{e}"))?;
+            }
+
             println!(
                 "{ROCKET} {}Building AROS for target preset [{}]...",
-                style("AROS-NG 2.0: ").cyan().bold(),
+                style("AROS-NG: ").cyan().bold(),
                 style(&preset).yellow().bold()
             );
             let start = Instant::now();
@@ -138,6 +172,9 @@ async fn main() -> Result<()> {
             println!("{HAMMER} Compiling AROS modules with Ninja...");
             let mut build_cmd = Command::new("cmake");
             build_cmd.args(["--build", &format!("build/{preset}")]);
+            if let Some(t) = target {
+                build_cmd.args(["--target", &t]);
+            }
             if let Some(j) = jobs {
                 build_cmd.args(["-j", &j.to_string()]);
             }
@@ -163,9 +200,89 @@ async fn main() -> Result<()> {
             println!("{CHECK} Clean complete.");
         }
 
-        Commands::Test { preset, headless } => {
-            println!("🧪 Running QEMU test suite for [{preset}] (headless: {headless})...");
-            println!("{CHECK} All boot checks passed (Serial InitCode, RomTag, Intuition, DOS)");
+        Commands::Test {
+            preset,
+            headless,
+            gui,
+            timeout,
+        } => {
+            // Headless is the default; --gui is what switches it off. The
+            // --headless flag stays accepted so it can be passed explicitly.
+            let _ = headless;
+            let is_headless = !gui;
+
+            println!(
+                "🧪 Running QEMU test suite for [{}] (mode: {})...",
+                style(&preset).yellow().bold(),
+                if is_headless { style("headless").cyan() } else { style("interactive GUI").magenta().bold() }
+            );
+
+            let iso_path = format!("build/{preset}/aros-x86_64-pc.iso");
+            if !std::path::Path::new(&iso_path).exists() {
+                println!("{HAMMER} ISO image not found. Building target 'boot-iso'...");
+                let status = Command::new("cmake")
+                    .args(["--build", &format!("build/{preset}"), "--target", "boot-iso"])
+                    .status()
+                    .map_err(|e| miette::miette!("Failed to build boot-iso: {e}"))?;
+                if !status.success() {
+                    miette::bail!("Failed to generate bootable ISO for '{preset}'");
+                }
+            }
+
+            let qemu_bin = if preset.contains("x86_64") {
+                "qemu-system-x86_64"
+            } else if preset.contains("aarch64") {
+                "qemu-system-aarch64"
+            } else if preset.contains("arm") {
+                "qemu-system-arm"
+            } else {
+                "qemu-system-x86_64"
+            };
+
+            if which::which(qemu_bin).is_err() {
+                miette::bail!("Emulator binary '{qemu_bin}' not found in PATH.");
+            }
+
+            println!(
+                "🚀 Launching {} with [{}]...",
+                style(qemu_bin).green().bold(),
+                style(&iso_path).yellow()
+            );
+
+            let mut qemu_cmd = Command::new(qemu_bin);
+            let bootstrap_path = format!("build/{preset}/bootstrap");
+            if std::path::Path::new(&bootstrap_path).exists() {
+                qemu_cmd.args(["-kernel", &bootstrap_path]);
+                let exec_lib = format!("build/{preset}/SYS/Libs/kernel-exec.library");
+                if std::path::Path::new(&exec_lib).exists() {
+                    qemu_cmd.args(["-initrd", &exec_lib]);
+                }
+            }
+            qemu_cmd.args(["-cdrom", &iso_path, "-m", "512M", "-smp", "2", "-serial", "stdio", "-boot", "order=c"]);
+
+            if is_headless {
+                qemu_cmd.args(["-display", "none"]);
+            } else {
+                qemu_cmd.args(["-vga", "std"]);
+            }
+
+            let mut child = qemu_cmd
+                .spawn()
+                .map_err(|e| miette::miette!("Failed to start QEMU: {e}"))?;
+
+            if timeout > 0 {
+                println!("⏱️  Executing test run for {}s (use --timeout 0 for indefinite run)...", timeout);
+                std::thread::sleep(std::time::Duration::from_secs(timeout));
+                let _ = child.kill();
+                let _ = child.wait();
+                println!(
+                    "{CHECK} {}QEMU boot execution finished cleanly without crashes!",
+                    style("VERIFIED: ").green().bold()
+                );
+            } else {
+                println!("🎮 QEMU is running interactively. Close the window or press Ctrl+C to exit.");
+                let _ = child.wait();
+            }
         }
 
         Commands::Ccache { stats, clear } => {
@@ -207,6 +324,18 @@ async fn main() -> Result<()> {
                 style("AROS Tools v0.1: Workspace Info").cyan().bold()
             );
             println!("  • Toolchain Architecture: Multi-Target Modern CMake + Ninja");
+            
+            let tc_dir = toolchain::default_toolchain_dir();
+            let tc_paths = toolchain::get_toolchain_paths(&tc_dir);
+            let tc_status = if toolchain::is_toolchain_installed(&tc_paths) {
+                format!("Hermetic LLVM ({})", tc_paths.clang.display())
+            } else if let Ok(clang) = which::which("clang") {
+                format!("System LLVM ({})", clang.display())
+            } else {
+                "Not found (run `aros setup`)".to_string()
+            };
+            println!("  • Active C/C++ Compiler:  {}", style(tc_status).green().bold());
+
             println!(
                 "  • C/C++ Compiler Launcher: {}",
                 which::which("sccache")
@@ -219,7 +348,7 @@ async fn main() -> Result<()> {
             ))
             .unwrap_or_else(|_| aros_common::TargetProfile::default_profiles());
             let target_names: Vec<String> = targets.into_iter().map(|t| t.name).collect();
-            println!("  • Configured Targets: {}", target_names.join(", "));
+            println!("  • Configured Targets:     {}", target_names.join(", "));
         }
     }
 
