@@ -29,15 +29,37 @@ fn sanitize_ident(s: &str) -> String {
 }
 
 fn expand_file_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<String> {
+    expand_file_list_depth(raw, vars, 8)
+}
+
+/// Expands a file list, following variable references.
+///
+/// A list routinely names other lists, and those name further ones:
+/// muimaster builds its sources from `$(FUNCS) $(FILES)` where `FILES` is
+/// itself `$(FILES) $(CLASSFILES)`. Expanding only one level left it with 26
+/// sources where the reference has about 94. Bounded, so a variable defined in
+/// terms of itself cannot loop.
+fn expand_file_list_depth(
+    raw: &str,
+    vars: &HashMap<String, Vec<String>>,
+    depth: usize,
+) -> Vec<String> {
     let mut result = Vec::new();
     for token in raw.split_whitespace() {
         let cleaned = token.replace(['"', '\\'], "").trim().to_string();
 
-        // A plain `$(VAR)` expands to its list.
+        // A plain `$(VAR)` expands to its list, whose items may be references
+        // in turn.
         if let Some(name) = cleaned.strip_prefix("$(").and_then(|t| t.strip_suffix(')')) {
-            if !name.contains(' ') && !name.contains(',') {
+            if depth > 0 && !name.contains(' ') && !name.contains(',') {
                 if let Some(list) = vars.get(name) {
-                    result.extend(list.iter().filter(|i| keep_source_name(i)).cloned());
+                    for item in list {
+                        if item.contains("$(") {
+                            result.extend(expand_file_list_depth(item, vars, depth - 1));
+                        } else if keep_source_name(item) {
+                            result.push(item.clone());
+                        }
+                    }
                 }
             }
             continue;
@@ -51,6 +73,7 @@ fn expand_file_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<Strin
             result.push(cleaned);
         }
     }
+    result.dedup();
     result
 }
 
@@ -213,7 +236,17 @@ struct Invocation {
 /// file list for that reason alone. An unresolved `$(...)` is still dropped,
 /// since substituting nothing would silently compile the wrong set.
 fn keep_list_item(s: &str) -> bool {
-    !s.is_empty() && !s.contains('$') && !s.contains(')') && !s.contains(',')
+    if s.is_empty() || s.contains(',') {
+        return false;
+    }
+    // A whole `$(VAR)` reference is kept, so expand_file_list can follow it:
+    // `FILES := $(FILES) $(CLASSFILES)` has to survive collection or the list
+    // it names is lost. A fragment carrying a stray paren is Make syntax the
+    // tokeniser split apart and cannot be resolved.
+    if s.starts_with("$(") && s.ends_with(')') && !s[2..s.len() - 1].contains(')') {
+        return true;
+    }
+    !s.contains('$') && !s.contains(')')
 }
 
 /// Splits an mmakefile into its macro invocations.
@@ -363,6 +396,18 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
 
         if let Some((k, v)) = line.split_once(":=") {
             let var_name = k.trim().to_string();
+            // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
+            // held. Inserting the new list would discard it, and the surviving
+            // `$(FILES)` reference then resolves to itself: muimaster came out
+            // with 26 sources against the reference's ~94.
+            let prior = vars.get(&var_name).cloned().unwrap_or_default();
+            let self_ref = format!("$({var_name})");
+            let v = if v.contains(&self_ref) && !prior.is_empty() {
+                v.replace(&self_ref, &prior.join(" "))
+            } else {
+                v.to_owned()
+            };
+            let v = v.as_str();
             let values: Vec<String> = v
                 .split_whitespace()
                 .filter(|s| *s != "\\")
@@ -433,13 +478,31 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             _ => ModuleType::Custom,
         };
 
-        let source_files: Vec<String> = re_files.captures(rest).map_or_else(Vec::new, |fcap| {
-            let files_str = fcap
-                .get(1)
-                .or_else(|| fcap.get(2))
-                .map_or("", |m| m.as_str());
-            expand_file_list(files_str, &vars)
-        });
+        // The same source-list rules as every other build macro: the union of
+        // the four lists, and the reference's default of every *.c in the
+        // directory when none is given (make.tmpl:2802). This loop used to read
+        // `files=` alone and silently yield nothing otherwise, which left 21
+        // declarations with no sources at all and never reported it.
+        let (mut source_files, declared_any) = macro_sources(rest, &vars);
+        if source_files.is_empty() {
+            if declared_any {
+                skipped_programs.push(format!(
+                    "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
+                    rel_dir.display(),
+                    inv.name
+                ));
+                continue;
+            }
+            source_files = wildcard_c_sources(parent_dir);
+            if source_files.is_empty() {
+                skipped_programs.push(format!(
+                    "{}: %{} mmake={mmake_raw} modname={mod_raw} declares no sources",
+                    rel_dir.display(),
+                    inv.name
+                ));
+                continue;
+            }
+        }
 
         let use_libs: Vec<String> = re_libs.captures(rest).map_or_else(Vec::new, |lcap| {
             let libs_str = lcap
@@ -448,6 +511,15 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
                 .map_or("", |m| m.as_str());
             expand_file_list(libs_str, &vars)
         });
+
+        // A modtype the target model has no variant for still decides the
+        // file suffix and install directory (make.tmpl:2048-2095); the
+        // compilation is identical to modtype=library.
+        let mod_suffix = if matches!(module_type, ModuleType::Custom) && !mod_type_owned.is_empty() {
+            Some(mod_type_owned.clone())
+        } else {
+            None
+        };
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -458,7 +530,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir: None,
-            mod_suffix: None,
+            mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = include_set.dirs.clone();
