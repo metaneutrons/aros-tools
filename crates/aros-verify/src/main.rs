@@ -346,9 +346,17 @@ fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> 
     all
 }
 
-/// `MMAKE_ID <id>` together with the `TARGET <name>` of the same block.
+/// Every mmake target the generated file declares, with the name it builds
+/// under.
+///
+/// Build targets carry `TARGET <name>` and `MMAKE_ID <id>`. Package and
+/// kickstart declarations carry `NAME <id>` instead and have no separate
+/// build name; counting only MMAKE_ID reported all 21 of them as missing.
 fn collect_ours(generated: &str) -> BTreeMap<String, String> {
-    let re = Regex::new(r"(?m)^\s*TARGET\s+(\S+)\s*$|^\s*MMAKE_ID\s+(\S+)\s*$").unwrap();
+    let re = Regex::new(
+        r#"(?m)^\s*TARGET\s+(\S+)\s*$|^\s*MMAKE_ID\s+(\S+)\s*$|^\s*NAME\s+(\S+)\s*$"#,
+    )
+    .unwrap();
     let mut out = BTreeMap::new();
     let mut pending_target: Option<String> = None;
     for c in re.captures_iter(generated) {
@@ -357,6 +365,9 @@ fn collect_ours(generated: &str) -> BTreeMap<String, String> {
         } else if let Some(id) = c.get(2) {
             let name = pending_target.take().unwrap_or_default();
             out.insert(id.as_str().to_string(), name);
+        } else if let Some(id) = c.get(3) {
+            // A package has no build name of its own.
+            out.entry(id.as_str().to_string()).or_default();
         }
     }
     out
@@ -403,6 +414,24 @@ mod tests {
         let names: Vec<&str> = decls.iter().map(|d| d.mmake.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn counts_a_package_declaration_too() {
+        // %make_package and %link_kickstart emit NAME, not MMAKE_ID.
+        let generated = "\
+aros_make_package(
+    NAME kernel-package-base
+    OUTPUT \"x\"
+)
+aros_link_kickstart(
+    NAME kernel-pc-x86_64-kernel
+    OUTPUT \"y\"
+)
+";
+        let ours = collect_ours(generated);
+        assert!(ours.contains_key("kernel-package-base"));
+        assert!(ours.contains_key("kernel-pc-x86_64-kernel"));
     }
 
     #[test]
