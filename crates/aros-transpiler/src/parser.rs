@@ -32,32 +32,43 @@ fn expand_file_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<Strin
     let mut result = Vec::new();
     for token in raw.split_whitespace() {
         let cleaned = token.replace(['"', '\\'], "").trim().to_string();
-        if cleaned.is_empty()
-            || cleaned.contains('(')
-            || cleaned.contains(')')
-            || cleaned.contains('$')
-            || cleaned.contains(',')
-            || cleaned.contains('/')
-        {
-            if cleaned.starts_with("$(") && cleaned.ends_with(')') {
-                let var_name = &cleaned[2..cleaned.len() - 1];
-                if let Some(list) = vars.get(var_name) {
-                    for item in list {
-                        if !item.contains('(')
-                            && !item.contains('$')
-                            && !item.contains('/')
-                            && !item.is_empty()
-                        {
-                            result.push(sanitize_ident(item));
-                        }
-                    }
+
+        // A plain `$(VAR)` expands to its list.
+        if let Some(name) = cleaned.strip_prefix("$(").and_then(|t| t.strip_suffix(')')) {
+            if !name.contains(' ') && !name.contains(',') {
+                if let Some(list) = vars.get(name) {
+                    result.extend(list.iter().filter(|i| keep_source_name(i)).cloned());
                 }
             }
             continue;
         }
-        result.push(sanitize_ident(&cleaned));
+
+        // Anything still carrying Make syntax is not a file name.
+        if cleaned.contains('$') || cleaned.contains('(') || cleaned.contains(',') {
+            continue;
+        }
+        if keep_source_name(&cleaned) {
+            result.push(cleaned);
+        }
     }
     result
+}
+
+/// Whether a token names a source file.
+///
+/// Names are kept verbatim rather than passed through sanitize_ident: a source
+/// is routinely a path relative to the mmakefile, and turning `libudis86/decode`
+/// into `libudis86_decode` produced a name matching no file on disk. Only the
+/// CMake target name needs sanitising, not the sources it is built from.
+fn keep_source_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains('$')
+        && !s.contains('(')
+        // A stray closing paren is the tail of a `$(call ...)` the tokeniser
+        // split apart. Emitted verbatim it ended a CMake argument list early:
+        // `SOURCES autoinit-aros)` made the whole generated file unparsable.
+        && !s.contains(')')
+        && !s.contains(',')
 }
 
 /// Parses a single `mmakefile.src` file into structured target definitions and meta-target rules.
@@ -192,6 +203,17 @@ fn join_mm_continuations(content: &str) -> String {
 struct Invocation {
     name: String,
     args: String,
+}
+
+/// Whether a word from a Make list is usable as a list item.
+///
+/// A slash used to disqualify one, which threw away most of what these lists
+/// hold: a source name is routinely a path relative to the mmakefile, as in
+/// `libudis86/decode` or `../locale`. 58 declarations came out with an empty
+/// file list for that reason alone. An unresolved `$(...)` is still dropped,
+/// since substituting nothing would silently compile the wrong set.
+fn keep_list_item(s: &str) -> bool {
+    !s.is_empty() && !s.contains('$') && !s.contains(')') && !s.contains(',')
 }
 
 /// Splits an mmakefile into its macro invocations.
@@ -345,7 +367,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
                 .split_whitespace()
                 .filter(|s| *s != "\\")
                 .map(|s| s.replace(['"', '\\'], "").trim().to_string())
-                .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('$'))
+                .filter(|s| keep_list_item(s))
                 .collect();
             vars.insert(var_name.clone(), values);
             current_var = if line.ends_with('\\') {
@@ -358,7 +380,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
                 .split_whitespace()
                 .filter(|s| *s != "\\")
                 .map(|s| s.replace(['"', '\\'], "").trim().to_string())
-                .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('$'))
+                .filter(|s| keep_list_item(s))
                 .collect();
             if let Some(existing) = vars.get_mut(var_name) {
                 existing.extend(values);
