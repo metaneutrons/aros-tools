@@ -107,7 +107,9 @@ fn map_var(name: &str) -> Option<&'static str> {
         "SRCDIR" | "TOP" => Some("${CMAKE_SOURCE_DIR}"),
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),
-        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}"),
+        // Same mapping as includes.rs: the generated per-module tree lives
+        // under <build>/gen, not at the build root.
+        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
         "GENINCDIR" => Some("${CMAKE_BINARY_DIR}/GENINCDIR"),
         _ => None,
     }
@@ -389,25 +391,53 @@ enum ParsedRule {
 /// identifier in the module that includes it.
 fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<ParsedRule> {
     const ROOTS: [&str; 3] = ["$(AROS_INCLUDES)/", "$(GENINCDIR)/", "$(GENDIR)/"];
-    let root = ROOTS.iter().find(|r| line.starts_with(**r))?;
+
     // A rule, not a variable assignment.
     let (target, prereqs) = line.split_once(':')?;
     if target.contains('=') || prereqs.starts_with('=') {
         return None;
     }
-    let dest = target[root.len()..].trim().to_owned();
-    let prereqs = prereqs.trim().trim_start_matches(':').trim().to_owned();
+
+    // Two shapes reach an include root. The plain one names it in the target:
+    //
+    //     $(AROS_INCLUDES)/hidd/pci.h : include/pci_hidd.h
+    //
+    // A static pattern rule names it in the middle field instead, and the
+    // target is a variable holding the file list:
+    //
+    //     $(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
+    //
+    // workbench/network/common/include stages 81 headers that way, the whole
+    // BSD socket interface, and matching only the first shape left it
+    // unreported: netdb.h, netinet/in.h and proto/socket.h went missing with
+    // nothing to say why.
+    let (root, dest, prereqs) = if let Some(r) = ROOTS.iter().find(|r| line.starts_with(**r)) {
+        (
+            *r,
+            target[r.len()..].trim().to_owned(),
+            prereqs.trim().trim_start_matches(':').trim().to_owned(),
+        )
+    } else {
+        let (pattern, source) = prereqs.split_once(':')?;
+        let pattern = pattern.trim();
+        let r = ROOTS.iter().find(|r| pattern.starts_with(**r))?;
+        (
+            *r,
+            pattern[r.len()..].trim().to_owned(),
+            format!("{} (files: {})", source.trim(), target.trim()),
+        )
+    };
 
     // $(AROS_INCLUDES) and $(GENINCDIR) are include roots, so everything
     // landing there is a header whatever its name, including pattern rules and
     // variable-named targets. $(GENDIR) holds every kind of generated file, so
     // there the suffix decides.
-    let is_header = *root != "$(GENDIR)/" || dest.ends_with(".h") || dest.ends_with(".hpp");
+    let is_header = root != "$(GENDIR)/" || dest.ends_with(".h") || dest.ends_with(".hpp");
     if is_header {
         return Some(ParsedRule::Header(AdhocHeaderRule {
             file: mmakefile.to_owned(),
             line: line_no,
-            root: (*root).to_owned(),
+            root: root.to_owned(),
             dest,
             prereqs,
         }));
@@ -743,5 +773,25 @@ $(AROS_INCLUDES)/% : %
         } = collect_copy_includes(src, &PathBuf::from("workbench/libs/freetype2"));
         assert_eq!(adhoc.len(), 2);
         assert!(generated_files.is_empty());
+    }
+
+    #[test]
+    fn a_static_pattern_rule_into_the_sdk_is_recorded() {
+        // workbench/network/common/include stages 81 headers this way, the
+        // whole BSD socket interface. The include root sits in the middle
+        // field, not in the target, so matching only the target missed it and
+        // netdb.h, netinet/in.h and proto/socket.h went absent unreported.
+        let src = "\
+INCLUDES      := $(call WILDCARD, *.h arpa/*.h)
+DEST_INCLUDES := $(foreach f,$(INCLUDES),$(AROS_INCLUDES)/$(f))
+
+$(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
+";
+        let CopyIncludesScan { adhoc, .. } =
+            collect_copy_includes(src, &PathBuf::from("workbench/network/common/include"));
+        assert_eq!(adhoc.len(), 1, "adhoc: {adhoc:?}");
+        assert_eq!(adhoc[0].root, "$(AROS_INCLUDES)/");
+        assert_eq!(adhoc[0].dest, "%");
+        assert!(adhoc[0].prereqs.contains("DEST_INCLUDES"));
     }
 }
