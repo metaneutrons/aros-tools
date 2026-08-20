@@ -128,6 +128,72 @@ fn resolve_vars(text: &str) -> Option<String> {
 ///
 /// `"\"pc\""` yields `pc`. Both the outer shell quotes and the inner escaped
 /// quotes have to be present; anything else is not a string literal.
+/// Splits a flag list on whitespace, but keeps a `$(...)` call together.
+///
+/// `-DISODATE="\"$(shell date '+%Y-%m-%d')\""` is one flag containing two
+/// spaces. Splitting on whitespace alone cut it into three fragments, and the
+/// define was reported as unsupported instead of being carried over.
+fn split_flags(raw: &str) -> Vec<&str> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'{' => depth += 1,
+            b')' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if b.is_ascii_whitespace() && depth == 0 {
+            if let Some(st) = start.take() {
+                out.push(&raw[st..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        out.push(&raw[st..]);
+    }
+    out
+}
+
+/// Maps `$(shell date '+<fmt>')` onto a CMake variable holding that date.
+///
+/// 52 mmakefiles stamp a build date into a define this way, all but one as
+/// ADATE with `%d.%m.%Y`; rom/dos uses ISODATE with `%Y-%m-%d`, and without it
+/// banner.c does not compile. The formats are strftime, which is also what
+/// CMake's string(TIMESTAMP) takes, so AROS.cmake fills these in at configure
+/// time. An unlisted format returns None and is reported as a skipped flag
+/// rather than guessed at.
+fn map_shell_date(value: &str) -> Option<String> {
+    let start = value.find("$(shell ")?;
+    let rest = &value[start..];
+    let end = rest.find(')')?;
+    let call = &rest[8..end].trim();
+
+    let fmt = call
+        .strip_prefix("date")?
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .strip_prefix('+')?;
+
+    let var = match fmt {
+        "%d.%m.%Y" => "${AROS_BUILD_DATE_DMY}",
+        "%Y-%m-%d" => "${AROS_BUILD_DATE_ISO}",
+        _ => return None,
+    };
+
+    let mut out = String::with_capacity(value.len());
+    out.push_str(&value[..start]);
+    out.push_str(var);
+    out.push_str(&rest[end + 1..]);
+    Some(out)
+}
+
 fn string_literal_value(raw: &str) -> Option<String> {
     let t = raw.trim();
     let inner = t.strip_prefix('"')?.strip_suffix('"')?;
@@ -169,7 +235,13 @@ fn simple_define(body: &str) -> Option<String> {
             if !is_identifier_shaped(&name) {
                 return None;
             }
-            let inner = resolve_vars(&inner)?;
+            // A build-date stamp is the one $(shell ...) form worth carrying
+            // over; everything else stays unresolved and gets reported.
+            let inner = if inner.contains("$(shell ") {
+                map_shell_date(&inner)?
+            } else {
+                resolve_vars(&inner)?
+            };
             if inner.contains('"') || inner.contains('\\') || inner.contains(char::is_whitespace) {
                 return None;
             }
@@ -465,7 +537,7 @@ pub fn collect_flags(content: &str) -> FlagSet {
     for key in ["USER_CPPFLAGS", "USER_CFLAGS"] {
         let Some(raw) = vars.get(key) else { continue };
         let expanded = expand(raw, &vars, key, 8);
-        for tok in expanded.split_whitespace() {
+        for tok in split_flags(&expanded) {
             classify(tok, &mut set);
         }
     }
@@ -477,7 +549,7 @@ pub fn collect_flags(content: &str) -> FlagSet {
     set.skipped_conditions = skipped_conditions;
     for (tag, raw) in conditional {
         let mut bucket = FlagSet::default();
-        for tok in raw.split_whitespace() {
+        for tok in split_flags(&raw) {
             classify(tok, &mut bucket);
         }
         for d in bucket.defines {
@@ -603,12 +675,45 @@ USER_CPPFLAGS += -DINTUITION_INLINE_NEWOBJECT
     }
 
     #[test]
-    fn refuses_shell_built_defines() {
+    fn carries_over_a_build_date_stamp() {
+        // 52 mmakefiles stamp the date in this way. The value becomes a CMake
+        // variable rather than being resolved here, so it is evaluated per
+        // configure and not baked into the transpiler's output.
         let f = collect_flags(
             "USER_CPPFLAGS := -DADATE=\"\\\"$(shell date '+%d.%m.%Y')\\\"\" -DKEEP=1\n",
         );
+        assert_eq!(
+            f.defines,
+            vec!["ADATE=\"${AROS_BUILD_DATE_DMY}\"", "KEEP=1"]
+        );
+    }
+
+    #[test]
+    fn refuses_an_unknown_date_format() {
+        // Guessing a format would silently stamp the wrong string; it is
+        // reported instead so the format can be added deliberately.
+        let f =
+            collect_flags("USER_CPPFLAGS := -DADATE=\"\\\"$(shell date '+%s')\\\"\" -DKEEP=1\n");
+        assert_eq!(f.defines, vec!["KEEP=1"]);
+        assert!(!f.skipped.is_empty(), "the unknown format must be reported");
+    }
+
+    #[test]
+    fn refuses_other_shell_built_defines() {
+        let f = collect_flags(
+            "USER_CPPFLAGS := -DREV=\"\\\"$(shell git rev-parse HEAD)\\\"\" -DKEEP=1\n",
+        );
         assert_eq!(f.defines, vec!["KEEP=1"]);
         assert!(!f.skipped.is_empty(), "the shell define must be reported");
+    }
+
+    #[test]
+    fn a_flag_containing_spaces_stays_one_token() {
+        // Splitting on whitespace alone cut $(shell date '+%d.%m.%Y') into
+        // three fragments, and the define was dropped as unsupported.
+        let toks = split_flags("-DA=\"$(shell date '+%d.%m.%Y')\" -DB=1");
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[1], "-DB=1");
     }
 
     #[test]
