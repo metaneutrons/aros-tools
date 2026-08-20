@@ -1,0 +1,617 @@
+//! Varargs convenience stubs for `defines/<module>.h`.
+//!
+//! AROS APIs come in pairs: a tag-list entry point that takes a
+//! `struct TagItem *`, and a variadic convenience form. Only the former is
+//! written by hand. `exec.conf` declares
+//! `struct Task *NewCreateTaskA(struct TagItem *tags)`, while callers such as
+//! `rom/devs/ahci/ahci_aros.h` use `NewCreateTask(TAG, value, ..., TAG_DONE)`.
+//!
+//! The variadic form is not source in the tree; it is generated. The reference
+//! implementation is `tools/genmodule/writeincdefines.c`, which derives the
+//! name from the tag-list function and emits a macro that collects the varargs
+//! into an `IPTR` array before calling through.
+//!
+//! Naming rules, taken from that file:
+//!
+//! | tag-list function      | condition                          | variadic name |
+//! |------------------------|------------------------------------|---------------|
+//! | `FooA`                 | trailing `A`                       | `Foo`         |
+//! | `FooTagList`           | trailing `TagList`                 | `FooTags`     |
+//! | `FooArgs`              | last parameter named args/arglist  | `Foo`         |
+//! | `Foo`                  | last parameter `struct TagItem *`  | `FooTags`     |
+//!
+//! Only this tag-list family (the reference's `varargtype == 1`) is generated
+//! here. The `va_list` and `RAWARG` variants exist but are rare; they are
+//! counted and reported rather than guessed at.
+
+use std::fmt::Write as _;
+
+/// One parameter of a function declaration.
+#[derive(Debug, Clone)]
+pub struct Arg {
+    /// Declaration as written, e.g. `struct TagItem *tags`.
+    pub decl: String,
+    /// Type portion, e.g. `struct TagItem *`.
+    pub ty: String,
+    /// Parameter name, e.g. `tags`.
+    pub name: String,
+}
+
+/// A function from a `##begin functionlist` section.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub ret_type: String,
+    pub args: Vec<Arg>,
+    /// Marked `.private`; no public stub is generated.
+    pub private: bool,
+    /// Marked `.novararg`; the module opts out explicitly.
+    pub novararg: bool,
+}
+
+impl Function {
+    /// The declaration as it appears in `clib/<mod>_protos.h`.
+    #[must_use]
+    pub fn signature(&self) -> String {
+        let args = if self.args.is_empty() {
+            "void".to_owned()
+        } else {
+            self.args
+                .iter()
+                .map(|a| a.decl.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!("{}{}({args})", self.ret_type, self.name)
+    }
+}
+
+/// Which variadic family a function belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarargKind {
+    /// Tag list collected into an IPTR array. The only kind generated here.
+    TagList,
+    /// `V`-prefixed function taking a `va_list`.
+    VaList,
+    /// `RAWARG` based.
+    RawArg,
+}
+
+/// Derives the variadic name and kind for a function, if it has one.
+#[must_use]
+pub fn vararg_form(f: &Function) -> Option<(String, VarargKind)> {
+    if f.private || f.novararg || f.args.is_empty() {
+        return None;
+    }
+    let last = f.args.last()?;
+    let name = f.name.as_str();
+
+    // RAWARG cases first: they share the name shapes below but are a different
+    // calling convention, and must not be mistaken for a tag list.
+    let last_is_rawarg = last.decl.trim_start().starts_with("RAWARG");
+
+    if let Some(stem) = name.strip_suffix('A') {
+        if stem.is_empty() {
+            return None;
+        }
+        let kind = if last_is_rawarg {
+            VarargKind::RawArg
+        } else {
+            VarargKind::TagList
+        };
+        return Some((stem.to_owned(), kind));
+    }
+
+    if let Some(stem) = name.strip_suffix("TagList") {
+        return Some((format!("{stem}Tags"), VarargKind::TagList));
+    }
+
+    if let Some(stem) = name.strip_suffix("Args") {
+        let ln = last.name.to_ascii_lowercase();
+        if ln == "args" || ln == "arglist" {
+            return Some((stem.to_owned(), VarargKind::TagList));
+        }
+    }
+
+    if let Some(stem) = name.strip_prefix('V') {
+        if last.decl.trim_start().starts_with("va_list") {
+            return Some((stem.to_owned(), VarargKind::VaList));
+        }
+        if last_is_rawarg {
+            return Some((stem.to_owned(), VarargKind::RawArg));
+        }
+    }
+
+    // Fall-through: a trailing `struct TagItem *`, optionally const-qualified.
+    let t = last.ty.trim_start();
+    let t = t.strip_prefix("const").map_or(t, str::trim_start);
+    if let Some(rest) = t.strip_prefix("struct") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix("TagItem") {
+            if rest.trim_start().starts_with('*') {
+                return Some((format!("{name}Tags"), VarargKind::TagList));
+            }
+        }
+    }
+
+    None
+}
+
+/// Splits a declaration into type and name.
+///
+/// The backward scan stops at whitespace or `*`, so `struct TagItem *tags`
+/// yields the type `struct TagItem *` and the name `tags`.
+fn split_decl(decl: &str) -> Option<(String, String)> {
+    let d = decl.trim_end();
+    let bytes = d.as_bytes();
+    let mut i = d.len();
+    while i > 0 {
+        let c = bytes[i - 1];
+        if c.is_ascii_whitespace() || c == b'*' {
+            break;
+        }
+        i -= 1;
+    }
+    if i == 0 || i == d.len() {
+        // No name, e.g. `void` or a bare type.
+        return None;
+    }
+    Some((d[..i].to_owned(), d[i..].to_owned()))
+}
+
+/// Splits an argument list on commas at nesting depth zero.
+fn split_args(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in list.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_owned());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_owned());
+    }
+    out
+}
+
+/// Parses one `##begin functionlist` entry.
+///
+/// Accepted shapes, per `config.c`:
+///
+/// ```text
+/// type name(argproto, ...)
+/// type name(argproto, ...) (reg, ...)
+/// ```
+///
+/// The register specification is parsed only far enough to be ignored: on the
+/// targets built here arguments are passed on the stack. Matching the closing
+/// parenthesis of the *argument* list matters, though; taking the last `(` on
+/// the line silently truncates the prototype of any function declared without
+/// a register specification.
+#[must_use]
+pub fn parse_function_line(line: &str) -> Option<Function> {
+    let code = line.split('#').next()?.trim();
+    if code.is_empty() || code.starts_with('.') {
+        return None;
+    }
+
+    let open = code.find('(')?;
+    let after = &code[open + 1..];
+    let mut depth = 1i32;
+    let mut close = None;
+    for (i, ch) in after.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+
+    let (ret_type, name) = split_decl(&code[..open])?;
+    if name.is_empty() {
+        return None;
+    }
+
+    let arg_text = after[..close].trim();
+    let mut args = Vec::new();
+    if !arg_text.is_empty() && arg_text != "void" {
+        for decl in split_args(arg_text) {
+            // A parameter may be unnamed; keep it, it just cannot be referenced.
+            let (ty, nm) = split_decl(&decl)
+                .unwrap_or_else(|| (decl.clone(), String::new()));
+            args.push(Arg { decl, ty, name: nm });
+        }
+    }
+
+    Some(Function {
+        name,
+        ret_type,
+        args,
+        private: false,
+        novararg: false,
+    })
+}
+
+/// Renders the tag-list stub for one function.
+///
+/// Shape follows `writedefinevararg` for `varargtype == 1`: the fixed
+/// parameters are passed through, and the variadic tail is collected into an
+/// `IPTR` array that is cast to the tag-list parameter's type.
+fn render_taglist_stub(f: &Function, vararg_name: &str, mod_upper: &str) -> String {
+    let mut out = String::with_capacity(512);
+    let _ = writeln!(
+        out,
+        "\n#if !defined(NO_INLINE_STDARG) && !defined({mod_upper}_NO_INLINE_STDARG)"
+    );
+
+    let fixed = &f.args[..f.args.len() - 1];
+    let last = f.args.last().expect("checked by caller");
+
+    let params: Vec<String> = (1..=fixed.len()).map(|i| format!("arg{i}, ")).collect();
+    let _ = writeln!(out, "#define {vararg_name}({}...) \\", params.concat());
+    let _ = writeln!(out, "({{ \\");
+    let _ = writeln!(
+        out,
+        "    const IPTR {}_args[] = {{ AROS_PP_VARIADIC_CAST2IPTR(__VA_ARGS__) }};\\",
+        f.name
+    );
+
+    let mut call: Vec<String> = (1..=fixed.len()).map(|i| format!("(arg{i})")).collect();
+    call.push(format!("({})({}_args)", last.ty.trim_end(), f.name));
+    let _ = writeln!(out, "    {}({}); \\", f.name, call.join(", "));
+    let _ = writeln!(out, "}})");
+    let _ = writeln!(out, "#endif /* !NO_INLINE_STDARG */");
+    out
+}
+
+/// Result of rendering a module's `defines/<mod>.h`.
+#[derive(Debug, Default)]
+pub struct DefinesOutput {
+    pub text: String,
+    /// Functions whose variadic form is a kind we do not generate.
+    pub unsupported: Vec<String>,
+}
+
+/// Renders `defines/<module>.h` including the tag-list varargs stubs.
+#[must_use]
+pub fn render_defines(
+    include_name: &str,
+    lib_base: &str,
+    functions: &[Function],
+) -> DefinesOutput {
+    let upper = include_name.to_uppercase();
+    let mut out = DefinesOutput::default();
+    let t = &mut out.text;
+
+    let _ = write!(
+        t,
+        "/* Auto-generated by AROS-NG genmodule v0.1.0 */\n\
+         #ifndef DEFINES_{upper}_H\n\
+         #define DEFINES_{upper}_H\n\
+         \n\
+         #include <aros/libcall.h>\n\
+         #include <exec/types.h>\n\
+         #include <aros/symbolsets.h>\n\
+         #include <aros/preprocessor/variadic/cast2iptr.hpp>\n\
+         \n\
+         #if !defined(__{upper}_LIBBASE)\n\
+         #    define __{upper}_LIBBASE {lib_base}\n\
+         #endif\n\
+         \n\
+         __BEGIN_DECLS\n"
+    );
+
+    for f in functions {
+        let Some((vararg_name, kind)) = vararg_form(f) else {
+            continue;
+        };
+        match kind {
+            VarargKind::TagList => {
+                t.push_str(&render_taglist_stub(f, &vararg_name, &upper));
+            }
+            VarargKind::VaList | VarargKind::RawArg => {
+                out.unsupported
+                    .push(format!("{include_name}: {} ({kind:?})", f.name));
+            }
+        }
+    }
+
+    let _ = write!(
+        t,
+        "\n__END_DECLS\n\n#endif /* DEFINES_{upper}_H */\n"
+    );
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arg(decl: &str, ty: &str, name: &str) -> Arg {
+        Arg {
+            decl: decl.to_owned(),
+            ty: ty.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
+    fn func(ret: &str, name: &str, args: Vec<Arg>) -> Function {
+        Function {
+            name: name.to_owned(),
+            ret_type: ret.to_owned(),
+            args,
+            private: false,
+            novararg: false,
+        }
+    }
+
+    #[test]
+    fn trailing_a_drops_the_a() {
+        // exec.conf: struct Task *NewCreateTaskA(struct TagItem *tags)
+        let f = func(
+            "struct Task *",
+            "NewCreateTaskA",
+            vec![arg("struct TagItem *tags", "struct TagItem *", "tags")],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("NewCreateTask".to_owned(), VarargKind::TagList))
+        );
+    }
+
+    #[test]
+    fn taglist_suffix_becomes_tags() {
+        let f = func(
+            "APTR",
+            "OpenWindowTagList",
+            vec![
+                arg("APTR win", "APTR", "win"),
+                arg("struct TagItem *tags", "struct TagItem *", "tags"),
+            ],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("OpenWindowTags".to_owned(), VarargKind::TagList))
+        );
+    }
+
+    #[test]
+    fn args_suffix_needs_a_matching_parameter_name() {
+        let matching = func(
+            "void",
+            "DoStuffArgs",
+            vec![arg("IPTR *args", "IPTR *", "args")],
+        );
+        assert_eq!(
+            vararg_form(&matching),
+            Some(("DoStuff".to_owned(), VarargKind::TagList))
+        );
+
+        // Same suffix but an unrelated parameter name: no stub.
+        let other = func(
+            "void",
+            "DoStuffArgs",
+            vec![arg("LONG count", "LONG", "count")],
+        );
+        assert_eq!(vararg_form(&other), None);
+    }
+
+    #[test]
+    fn trailing_tagitem_pointer_gains_a_tags_form() {
+        let f = func(
+            "APTR",
+            "MakeThing",
+            vec![arg("struct TagItem *tags", "struct TagItem *", "tags")],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("MakeThingTags".to_owned(), VarargKind::TagList))
+        );
+    }
+
+    #[test]
+    fn const_qualified_tagitem_is_recognised() {
+        let f = func(
+            "APTR",
+            "MakeThing",
+            vec![arg(
+                "const struct TagItem *tags",
+                "const struct TagItem *",
+                "tags",
+            )],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("MakeThingTags".to_owned(), VarargKind::TagList))
+        );
+    }
+
+    #[test]
+    fn rawarg_is_classified_separately() {
+        let f = func(
+            "void",
+            "VPrintfA",
+            vec![arg("RAWARG args", "RAWARG", "args")],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("VPrintf".to_owned(), VarargKind::RawArg))
+        );
+    }
+
+    #[test]
+    fn v_prefix_with_valist() {
+        let f = func(
+            "void",
+            "VFPrintf",
+            vec![
+                arg("BPTR fh", "BPTR", "fh"),
+                arg("va_list ap", "va_list", "ap"),
+            ],
+        );
+        assert_eq!(
+            vararg_form(&f),
+            Some(("FPrintf".to_owned(), VarargKind::VaList))
+        );
+    }
+
+    #[test]
+    fn private_and_novararg_are_skipped() {
+        let mut f = func(
+            "void",
+            "SecretA",
+            vec![arg("struct TagItem *t", "struct TagItem *", "t")],
+        );
+        f.private = true;
+        assert_eq!(vararg_form(&f), None);
+
+        f.private = false;
+        f.novararg = true;
+        assert_eq!(vararg_form(&f), None);
+    }
+
+    #[test]
+    fn plain_function_gets_no_stub() {
+        let f = func("void", "Forbid", vec![]);
+        assert_eq!(vararg_form(&f), None);
+        let f = func("void", "Signal", vec![arg("LONG n", "LONG", "n")]);
+        assert_eq!(vararg_form(&f), None);
+    }
+
+    #[test]
+    fn rendered_stub_matches_the_reference_shape() {
+        let f = func(
+            "struct Task *",
+            "NewCreateTaskA",
+            vec![arg("struct TagItem *tags", "struct TagItem *", "tags")],
+        );
+        let out = render_defines("exec", "SysBase", std::slice::from_ref(&f));
+        let t = &out.text;
+
+        assert!(t.contains("#include <aros/preprocessor/variadic/cast2iptr.hpp>"));
+        assert!(t.contains("#if !defined(NO_INLINE_STDARG) && !defined(EXEC_NO_INLINE_STDARG)"));
+        assert!(t.contains("#define NewCreateTask(...) \\"));
+        assert!(t.contains(
+            "    const IPTR NewCreateTaskA_args[] = { AROS_PP_VARIADIC_CAST2IPTR(__VA_ARGS__) };\\"
+        ));
+        assert!(t.contains("    NewCreateTaskA((struct TagItem *)(NewCreateTaskA_args)); \\"));
+        assert!(t.contains("#endif /* !NO_INLINE_STDARG */"));
+        assert!(out.unsupported.is_empty());
+    }
+
+    #[test]
+    fn fixed_parameters_are_passed_through() {
+        let f = func(
+            "APTR",
+            "OpenWindowTagList",
+            vec![
+                arg("APTR parent", "APTR", "parent"),
+                arg("struct TagItem *tags", "struct TagItem *", "tags"),
+            ],
+        );
+        let out = render_defines("intuition", "IntuitionBase", std::slice::from_ref(&f));
+        assert!(out.text.contains("#define OpenWindowTags(arg1, ...) \\"));
+        assert!(out.text.contains(
+            "    OpenWindowTagList((arg1), (struct TagItem *)(OpenWindowTagList_args)); \\"
+        ));
+    }
+
+    #[test]
+    fn unsupported_kinds_are_reported_not_emitted() {
+        let f = func(
+            "void",
+            "VFPrintf",
+            vec![
+                arg("BPTR fh", "BPTR", "fh"),
+                arg("va_list ap", "va_list", "ap"),
+            ],
+        );
+        let out = render_defines("dos", "DOSBase", std::slice::from_ref(&f));
+        assert!(!out.text.contains("#define FPrintf"));
+        assert_eq!(out.unsupported.len(), 1);
+        assert!(out.unsupported[0].contains("VFPrintf"));
+    }
+
+    #[test]
+    fn parses_a_line_with_a_register_specification() {
+        // exec.conf
+        let f =
+            parse_function_line("struct Task *NewCreateTaskA(struct TagItem *tags) (A0)").unwrap();
+        assert_eq!(f.name, "NewCreateTaskA");
+        assert_eq!(f.ret_type, "struct Task *");
+        assert_eq!(f.args.len(), 1);
+        assert_eq!(f.args[0].decl, "struct TagItem *tags");
+        assert_eq!(f.args[0].ty, "struct TagItem *");
+        assert_eq!(f.args[0].name, "tags");
+        assert_eq!(f.signature(), "struct Task *NewCreateTaskA(struct TagItem *tags)");
+    }
+
+    #[test]
+    fn parses_a_line_without_a_register_specification() {
+        // Taking the last '(' on the line would truncate this prototype.
+        let f = parse_function_line("APTR AllocMem(IPTR byteSize, ULONG requirements)").unwrap();
+        assert_eq!(f.name, "AllocMem");
+        assert_eq!(f.args.len(), 2);
+        assert_eq!(
+            f.signature(),
+            "APTR AllocMem(IPTR byteSize, ULONG requirements)"
+        );
+    }
+
+    #[test]
+    fn parses_an_empty_argument_list() {
+        let f = parse_function_line("void Forbid()").unwrap();
+        assert_eq!(f.name, "Forbid");
+        assert!(f.args.is_empty());
+        assert_eq!(f.signature(), "void Forbid(void)");
+    }
+
+    #[test]
+    fn handles_a_function_pointer_parameter() {
+        let f = parse_function_line(
+            "void EnumDrivers(void (*cb)(APTR, LONG), APTR msg) (A0, A1)",
+        )
+        .unwrap();
+        assert_eq!(f.name, "EnumDrivers");
+        assert_eq!(f.args.len(), 2, "args: {:?}", f.args);
+        assert_eq!(f.args[1].name, "msg");
+    }
+
+    #[test]
+    fn strips_a_trailing_comment() {
+        let f = parse_function_line("void Signal(LONG n) (D0) # sends a signal").unwrap();
+        assert_eq!(f.name, "Signal");
+        assert_eq!(f.args.len(), 1);
+    }
+
+    #[test]
+    fn rejects_directives_and_blank_lines() {
+        assert!(parse_function_line(".private").is_none());
+        assert!(parse_function_line("   ").is_none());
+        assert!(parse_function_line("# comment").is_none());
+    }
+}
