@@ -85,6 +85,8 @@ pub struct ParsedMmakefile {
     /// Hand-written `$(GENDIR)` rules producing something other than a header,
     /// for reporting.
     pub generated_file_rules: Vec<String>,
+    /// Build declarations whose kind the target model does not express yet.
+    pub skipped_programs: Vec<String>,
     /// Flags collected from this file, including what had to be skipped.
     pub flags: FlagSet,
     /// `%build_archspecific` declarations contributed by this file.
