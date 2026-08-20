@@ -7,6 +7,7 @@ pub mod generator;
 pub mod graph;
 pub mod includes;
 pub mod make_opts;
+pub mod packages;
 pub mod parser;
 
 pub use arch_sources::ArchSourceDecl;

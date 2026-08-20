@@ -141,6 +141,53 @@ fn wildcard_c_sources(dir: &Path) -> Vec<String> {
     out
 }
 
+/// Joins `#MM` lines that continue over several source lines.
+///
+/// A continued dependency list repeats the `#MM` prefix on every line:
+///
+/// ```text
+/// #MM kernel-bsp-pc-x86_64 :   \
+/// #MM         kernel-log       \
+/// #MM         kernel-ata
+/// ```
+///
+/// so a per-line regex sees the first line with nothing after the colon but a
+/// backslash, and the rest as separate rules with no colon at all. 2223 of the
+/// tree's 5089 `#MM` lines are continuations, which is 44% of all metatarget
+/// dependencies.
+fn join_mm_continuations(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut pending = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim_end();
+        let is_mm = trimmed.trim_start().starts_with("#MM");
+        let continues = trimmed.ends_with('\\');
+        let body = trimmed.trim_end_matches('\\').trim_end();
+
+        if pending {
+            // Strip the repeated marker so the text reads as one rule.
+            let stripped = body
+                .trim_start()
+                .strip_prefix("#MM-")
+                .or_else(|| body.trim_start().strip_prefix("#MM"))
+                .unwrap_or(body.trim_start());
+            out.push(' ');
+            out.push_str(stripped.trim());
+        } else {
+            out.push_str(body);
+        }
+
+        if is_mm && continues {
+            pending = true;
+        } else {
+            pending = false;
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// One macro invocation from an mmakefile: its name and its argument text.
 struct Invocation {
     name: String,
@@ -231,6 +278,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
+    let (packages, skipped_packages) = crate::packages::collect_packages(&content, &rel_dir);
     let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir);
     // A %build_archspecific file contributes to a target defined elsewhere, so
     // its own USER_INCLUDES and flags have to travel with the declaration.
@@ -610,7 +658,8 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     }
 
     // 3. Extract #MM and #MM- meta-target rules
-    for cap in re_mm.captures_iter(&content) {
+    let mm_content = join_mm_continuations(&content);
+    for cap in re_mm.captures_iter(&mm_content) {
         let meta_name = sanitize_ident(&cap[1]);
         let deps_str = &cap[2];
         let deps: Vec<String> = deps_str
@@ -645,6 +694,8 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         skipped_make_opts,
         skipped_conditions,
         skipped_programs,
+        packages,
+        skipped_packages,
     })
 }
 

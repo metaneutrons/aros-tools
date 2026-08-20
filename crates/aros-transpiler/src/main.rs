@@ -83,6 +83,7 @@ fn main() -> Result<()> {
     let mut skipped_conditions: Vec<String> = Vec::new();
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
+    let mut skipped_packages: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
             graph.add_target(target);
@@ -95,6 +96,8 @@ fn main() -> Result<()> {
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
+        graph.add_packages(parsed.packages);
+        skipped_packages.extend(parsed.skipped_packages);
         graph.add_arch_sources(parsed.arch_sources);
         graph.add_fetches(parsed.fetches);
         skipped_fetches.extend(parsed.skipped_fetches);
@@ -112,6 +115,10 @@ fn main() -> Result<()> {
     // Architecture includes are declared in the arch/ tree but consumed in
     // rom/, so they can only be joined once every file has been parsed.
     graph.resolve_arch_includes();
+
+    // Package membership names modules, not targets, so it can only be
+    // resolved once every mmakefile has contributed its targets.
+    skipped_packages.extend(graph.resolve_packages());
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
@@ -187,6 +194,29 @@ fn main() -> Result<()> {
                 skipped_headers.len()
             );
         }
+    }
+
+    skipped_packages.sort_unstable();
+    skipped_packages.dedup();
+    if !skipped_packages.is_empty() {
+        // A package missing a member still builds. The gap only shows up as a
+        // system that does not boot, so it has to be visible here.
+        let report = args.output.with_extension("unresolved-package-members.txt");
+        let body = skipped_packages.join("\n");
+        if fs::write(&report, format!("{body}\n")).is_ok() {
+            println!(
+                "⚠️  {} package member(s) could not be resolved to a target -> {}",
+                skipped_packages.len(),
+                report.display()
+            );
+        }
+    }
+    if !graph.packages.is_empty() {
+        let members: usize = graph.packages.iter().map(|p| p.resolved.len()).sum();
+        println!(
+            "📦 {} package/kickstart declaration(s) with {members} member(s)",
+            graph.packages.len()
+        );
     }
 
     skipped_programs.sort_unstable();

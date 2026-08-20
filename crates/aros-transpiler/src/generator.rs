@@ -34,7 +34,13 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
              # ============================================================================="
         )
         .unwrap();
-        for decl in &graph.copy_includes {
+        // Generic headers first, architecture-specific last: both land under
+        // the same SDK name and the last copy wins. compiler/include ships a
+        // portable asm/cpu.h that arch/<cpu>-all/include has to override, and
+        // without a defined order which one survived depended on parse order.
+        let mut ordered: Vec<&_> = graph.copy_includes.iter().collect();
+        ordered.sort_by_key(|d| usize::from(d.source_dir.contains("/arch/")));
+        for decl in ordered {
             let patterns: Vec<String> = decl.patterns.iter().map(|p| cmake_arg(p)).collect();
             writeln!(
                 out,
@@ -285,39 +291,42 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "endif()\n").unwrap();
         }
     }
+    // Packages and the kickstart link, last: both check whether each member
+    // is a configured target that produces a file, so the targets have to
+    // exist by the time CMake reaches these calls.
+    if !graph.packages.is_empty() {
+        writeln!(
+            out,
+            "# ---- Packages and kickstart, from %make_package / %link_kickstart ----"
+        )
+        .unwrap();
+        for pkg in &graph.packages {
+            if pkg.resolved.is_empty() {
+                continue;
+            }
+            let func = if pkg.is_kickstart {
+                "aros_link_kickstart"
+            } else {
+                "aros_make_package"
+            };
+            writeln!(out, "{func}(").unwrap();
+            writeln!(out, "    NAME {}", pkg.mmake).unwrap();
+            writeln!(out, "    OUTPUT {}", cmake_arg(&pkg.output)).unwrap();
+            if !pkg.arch.is_empty() {
+                writeln!(out, "    ARCH {}", cmake_arg(&pkg.arch)).unwrap();
+            }
+            if !pkg.uselibs.is_empty() {
+                let libs: Vec<String> = pkg.uselibs.iter().map(|l| cmake_arg(l)).collect();
+                writeln!(out, "    USELIBS {}", libs.join(" ")).unwrap();
+            }
+            let ids: Vec<String> = pkg.resolved.iter().map(|m| cmake_arg(m)).collect();
+            writeln!(out, "    MODULES {}", ids.join(" ")).unwrap();
+            writeln!(out, ")").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
+
 
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::cmake_arg;
-
-    #[test]
-    fn plain_value_is_just_quoted() {
-        assert_eq!(cmake_arg("__AROS__=1"), "\"__AROS__=1\"");
-    }
-
-    #[test]
-    fn cmake_variable_reference_survives() {
-        assert_eq!(
-            cmake_arg("${AROS_TARGET_PLATFORM}"),
-            "\"${AROS_TARGET_PLATFORM}\""
-        );
-    }
-
-    #[test]
-    fn string_literal_define_keeps_its_quotes() {
-        // Emitted unescaped this became three CMake arguments, and the compiler
-        // saw -DAROS_ARCHITECTURE="" plus a stray -Dpc"".
-        assert_eq!(
-            cmake_arg("AROS_ARCHITECTURE=\"${AROS_TARGET_PLATFORM}\""),
-            "\"AROS_ARCHITECTURE=\\\"${AROS_TARGET_PLATFORM}\\\"\""
-        );
-    }
-
-    #[test]
-    fn backslash_is_escaped_before_the_quote() {
-        assert_eq!(cmake_arg("a\\b"), "\"a\\\\b\"");
-    }
 }

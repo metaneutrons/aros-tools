@@ -95,6 +95,10 @@ pub struct ParsedMmakefile {
     pub generated_file_rules: Vec<String>,
     /// Build declarations whose kind the target model does not express yet.
     pub skipped_programs: Vec<String>,
+    /// `%make_package` and `%link_kickstart` declarations.
+    pub packages: Vec<crate::packages::PackageDecl>,
+    /// Package declarations that could not be resolved, for reporting.
+    pub skipped_packages: Vec<String>,
     /// Flags collected from this file, including what had to be skipped.
     pub flags: FlagSet,
     /// `%build_archspecific` declarations contributed by this file.

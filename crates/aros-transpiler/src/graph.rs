@@ -1,5 +1,5 @@
 use crate::arch_sources::ArchSourceDecl;
-use crate::ast::{MetaTargetRule, TargetDefinition};
+use crate::ast::{MetaTargetRule, ModuleType, TargetDefinition};
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
 use crate::fetch::FetchDecl;
 use crate::includes::ArchIncludeDecl;
@@ -21,6 +21,58 @@ pub struct DependencyGraph {
     pub arch_sources: HashMap<String, Vec<ArchSourceDecl>>,
     /// `%fetch` declarations for third-party sources.
     pub fetches: Vec<FetchDecl>,
+    /// `%make_package` and `%link_kickstart` declarations.
+    pub packages: Vec<crate::packages::PackageDecl>,
+}
+
+/// Splits an `arch/<cpu>-<platform>/...` path into its two components.
+fn arch_of(dir: &std::path::Path) -> Option<(String, String)> {
+    let s = dir.to_string_lossy().replace('\\', "/");
+    let rest = s.strip_prefix("arch/")?;
+    let first = rest.split('/').next()?;
+    let (cpu, platform) = first.split_once('-')?;
+    Some((cpu.to_owned(), platform.to_owned()))
+}
+
+/// Whether a candidate's directory can serve a declaration made under `ctx`.
+///
+/// The rule matches AROS_ARCH_SOURCE_DIRS in cmake/AROS.cmake: "all" is a
+/// wildcard in either position and "native" is a platform shared by every
+/// non-hosted target. A candidate outside arch/ is architecture-neutral and
+/// always eligible.
+///
+/// This is what separates the six targets named `serial` across four
+/// architectures, so a package declared in arch/i386-pc/boot picks
+/// kernel-pc-i386-serial and not the Amiga or Unix one.
+fn arch_compatible(candidate: Option<&(String, String)>, ctx: Option<&(String, String)>) -> bool {
+    let Some((cand_cpu, cand_plat)) = candidate else {
+        return true;
+    };
+    let Some((ctx_cpu, ctx_plat)) = ctx else {
+        // A declaration outside arch/ describes the portable base, so an
+        // architecture-specific candidate cannot be meant.
+        return false;
+    };
+    (cand_cpu == "all" || cand_cpu == ctx_cpu)
+        && (cand_plat == "all" || cand_plat == "native" || cand_plat == ctx_plat)
+}
+
+/// The package category a module type installs under, where the two agree.
+///
+/// Handlers and classes come out of the parser as `Custom`, since the tree
+/// declares them with modtypes the target model does not separate; for those
+/// the name alone has to do.
+fn module_kind_name(t: &ModuleType) -> Option<&'static str> {
+    match t {
+        ModuleType::Library => Some("library"),
+        ModuleType::Device => Some("device"),
+        ModuleType::Resource => Some("resource"),
+        ModuleType::Hidd => Some("hidd"),
+        ModuleType::Datatype => Some("datatype"),
+        ModuleType::Gadget => Some("gadget"),
+        ModuleType::Mcc => Some("mcc"),
+        _ => None,
+    }
 }
 
 impl DependencyGraph {
@@ -83,6 +135,170 @@ impl DependencyGraph {
                 }
             }
         }
+    }
+
+    pub fn add_packages(&mut self, decls: Vec<crate::packages::PackageDecl>) {
+        self.packages.extend(decls);
+    }
+
+    /// Turns each package's `(kind, module name)` members into the mmake ids
+    /// that build them.
+    ///
+    /// A declaration names `devs=ata`, meaning the file `ata.device`, and the
+    /// target that builds it is `kernel-ata`. Only the module name is stated,
+    /// so the lookup needs every mmakefile parsed, which is why this runs on
+    /// the finished graph.
+    ///
+    /// Returns the members that resolved to nothing. Those matter: a package
+    /// missing a module still builds, and the failure only appears when the
+    /// system does not boot.
+    pub fn resolve_packages(&mut self) -> Vec<String> {
+        // Indexed by name and by (name, kind). A module name alone is
+        // ambiguous often enough to matter: `ahci` is both kernel-ahci and a
+        // SysExplorer plugin, and `serial` matches six targets across four
+        // architectures. The category the declaration states resolves most of
+        // those, so it is tried first.
+        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        let mut by_name_kind: std::collections::HashMap<(&str, &'static str), Vec<&str>> =
+            std::collections::HashMap::new();
+        for (mmake, target) in &self.targets {
+            by_name
+                .entry(target.target_name.as_str())
+                .or_default()
+                .push(mmake.as_str());
+            if let Some(kind) = module_kind_name(&target.module_type) {
+                by_name_kind
+                    .entry((target.target_name.as_str(), kind))
+                    .or_default()
+                    .push(mmake.as_str());
+            }
+        }
+
+        let mut unresolved = Vec::new();
+        let mut resolved_all = Vec::new();
+        for decl in &self.packages {
+            let mut ids: Vec<String> = Vec::new();
+            let decl_arch = arch_of(std::path::Path::new(
+                decl.file.strip_suffix("/mmakefile.src").unwrap_or(&decl.file),
+            ));
+
+            // The startup module has to be linked first: the bootstrap takes
+            // its entry point from the first executable section of the first
+            // module (elfloader.c:662).
+            let ordered = decl
+                .startup
+                .iter()
+                .map(|s| ("resource".to_owned(), s.clone()))
+                .chain(decl.members.iter().cloned());
+
+            for (kind, name) in ordered {
+                // Prefer the category-qualified match; fall back to the name
+                // alone for kinds the target model does not distinguish, such
+                // as handlers.
+                let pool = by_name_kind
+                    .get(&(name.as_str(), kind.as_str()))
+                    .or_else(|| by_name.get(name.as_str()));
+                let Some(pool) = pool else {
+                    unresolved.push(format!(
+                        "{}: {} {kind}={name} has no target",
+                        decl.file, decl.mmake
+                    ));
+                    continue;
+                };
+
+                // A package holds modules, never programs. rom/filesys/CDVDFS
+                // builds both a cdrom handler and a test program called cdrom;
+                // only the first belongs in aros-fs.pkg.
+                let pool: Vec<&str> = {
+                    let modules: Vec<&str> = pool
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            !matches!(
+                                self.targets.get(*id).map(|t| &t.module_type),
+                                Some(ModuleType::Program | ModuleType::ProgramGroup)
+                            )
+                        })
+                        .collect();
+                    if modules.is_empty() {
+                        pool.clone()
+                    } else {
+                        modules
+                    }
+                };
+                let pool = &pool;
+
+                // Narrow an ambiguous name in two steps.
+                //
+                // The declaration's own #MM dependencies are checked first,
+                // because they state the intent directly. arch/x86_64-pc/boot
+                // lists kernel-pc-i386-serial and kernel-pc-i386-parallel, so
+                // the x86_64 BSP deliberately reuses the i386 drivers, which
+                // no directory-based rule could infer. The same list separates
+                // kernel-fs-cdvdfs-cdrom from kernel-fs-cdvdfs, which sit in
+                // one directory under the same module name.
+                let mut eligible: Vec<&str> = if pool.len() == 1 {
+                    pool.clone()
+                } else if let Some(deps) = self.meta_targets.get(&decl.mmake) {
+                    let named: Vec<&str> =
+                        pool.iter().copied().filter(|id| deps.contains(*id)).collect();
+                    if named.is_empty() {
+                        pool.clone()
+                    } else {
+                        named
+                    }
+                } else {
+                    pool.clone()
+                };
+
+                // Then by architecture, which handles the drivers that exist
+                // once per platform under one name.
+                if eligible.len() > 1 {
+                    let narrowed: Vec<&str> = eligible
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            let cand = self
+                                .targets
+                                .get(*id)
+                                .and_then(|t| arch_of(&t.dir_path));
+                            arch_compatible(cand.as_ref(), decl_arch.as_ref())
+                        })
+                        .collect();
+                    if !narrowed.is_empty() {
+                        eligible = narrowed;
+                    }
+                }
+
+                match eligible.len() {
+                    1 => {
+                        let id = eligible[0].to_owned();
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                    0 => unresolved.push(format!(
+                        "{}: {} {kind}={name} has no target for this architecture (candidates: {})",
+                        decl.file,
+                        decl.mmake,
+                        pool.join(", ")
+                    )),
+                    _ => unresolved.push(format!(
+                        "{}: {} {kind}={name} is ambiguous ({})",
+                        decl.file,
+                        decl.mmake,
+                        eligible.join(", ")
+                    )),
+                }
+            }
+            resolved_all.push(ids);
+        }
+
+        for (decl, ids) in self.packages.iter_mut().zip(resolved_all) {
+            decl.resolved = ids;
+        }
+        unresolved
     }
 
     pub fn add_adhoc_header_rules(&mut self, rules: Vec<AdhocHeaderRule>) {
