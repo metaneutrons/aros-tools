@@ -262,6 +262,13 @@ pub fn collect_copy_includes(content: &str, rel_dir: &Path) -> CopyIncludesScan 
     };
 
     let mut vars: HashMap<String, String> = HashMap::new();
+    // $(CURDIR) is the declaring mmakefile's directory. Two staging rules read
+    // their sources through it, reqtools' amigaincludesforgcc tree and udis86's
+    // generated itab.h, and without it the path kept the literal "$(CURDIR)"
+    // and matched nothing.
+    if !base.is_empty() {
+        vars.insert("CURDIR".to_owned(), base.clone());
+    }
     let mut decls = Vec::new();
     let mut skipped = Vec::new();
     let mut adhoc = Vec::new();
