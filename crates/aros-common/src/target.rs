@@ -1,8 +1,75 @@
 use crate::arch::Architecture;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+/// Toolchain asset declaration per host platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAssetConfig {
+    pub asset: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// Declarative Toolchain configuration loaded from aros-targets.toml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolchainConfig {
+    pub llvm_version: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub hosts: HashMap<String, HostAssetConfig>,
+}
+
+impl Default for ToolchainConfig {
+    fn default() -> Self {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "macos-aarch64".to_string(),
+            HostAssetConfig {
+                asset: "clang+llvm-{version}-arm64-apple-macos11.tar.xz".to_string(),
+                sha256: None,
+            },
+        );
+        hosts.insert(
+            "macos-x86_64".to_string(),
+            HostAssetConfig {
+                asset: "clang+llvm-{version}-x86_64-apple-darwin.tar.xz".to_string(),
+                sha256: None,
+            },
+        );
+        hosts.insert(
+            "linux-x86_64".to_string(),
+            HostAssetConfig {
+                asset: "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz".to_string(),
+                sha256: None,
+            },
+        );
+        hosts.insert(
+            "linux-aarch64".to_string(),
+            HostAssetConfig {
+                asset: "clang+llvm-{version}-aarch64-linux-gnu.tar.xz".to_string(),
+                sha256: None,
+            },
+        );
+
+        Self {
+            llvm_version: "18.1.8".to_string(),
+            base_url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}".to_string(),
+            hosts,
+        }
+    }
+}
+
+/// Root structure of `aros-targets.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArosConfig {
+    #[serde(default)]
+    pub toolchain: Option<ToolchainConfig>,
+    #[serde(default)]
+    pub targets: Vec<TargetProfile>,
+}
 
 /// Target Profile representing a specific hardware board or configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,22 +83,42 @@ pub struct TargetProfile {
 }
 
 impl TargetProfile {
-    /// Load target profiles dynamically from a declarative configuration file (e.g. `aros-targets.toml`).
-    ///
-    /// # Errors
-    /// Returns an error if the file cannot be read or parsed.
+    /// Load targets from configuration file.
     pub fn load_from_file(path: &Path) -> Result<Vec<Self>> {
         if path.exists() {
             let content = fs::read_to_string(path)?;
-            let targets: Vec<Self> = toml::from_str(&content).map_err(|e| {
+            let config: ArosConfig = toml::from_str(&content).map_err(|e| {
                 crate::error::ArosError::TranspilerSyntax {
                     file: path.display().to_string(),
                     message: e.to_string(),
                 }
             })?;
-            Ok(targets)
+            if config.targets.is_empty() {
+                Ok(Self::default_profiles())
+            } else {
+                Ok(config.targets)
+            }
         } else {
             Ok(Self::default_profiles())
+        }
+    }
+
+    /// Load full ArosConfig from file.
+    pub fn load_config(path: &Path) -> Result<ArosConfig> {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            let config: ArosConfig = toml::from_str(&content).map_err(|e| {
+                crate::error::ArosError::TranspilerSyntax {
+                    file: path.display().to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            Ok(config)
+        } else {
+            Ok(ArosConfig {
+                toolchain: Some(ToolchainConfig::default()),
+                targets: Self::default_profiles(),
+            })
         }
     }
 
