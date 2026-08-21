@@ -2,15 +2,22 @@ use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{MetaTargetRule, ModuleType, TargetDefinition};
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
 use crate::fetch::FetchDecl;
+use crate::icons::{IconSet, IconTarget};
 use crate::includes::ArchIncludeDecl;
 use aros_common::{ArosError, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Dependency Graph for parallel target building and cycle detection.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
     pub targets: HashMap<String, TargetDefinition>,
     pub meta_targets: HashMap<String, HashSet<String>>,
+    /// Every unique `%build_icons` mmake id. This is separate from `targets`:
+    /// icons are generated runtime resources, not compiled modules.
+    pub icon_targets: HashMap<String, IconTarget>,
+    /// Resolved icon declarations in source order. Duplicate mmake ids are
+    /// intentional and their output rules must be aggregated by CMake.
+    pub icons: Vec<IconSet>,
     /// Every `%set_archincludes` declaration in the tree, keyed by `modname`.
     pub arch_decls: HashMap<String, Vec<ArchIncludeDecl>>,
     /// Every resolved `%copy_includes` declaration, deduplicated.
@@ -62,7 +69,7 @@ fn arch_compatible(candidate: Option<&(String, String)>, ctx: Option<&(String, S
 /// Handlers and classes come out of the parser as `Custom`, since the tree
 /// declares them with modtypes the target model does not separate; for those
 /// the name alone has to do.
-fn module_kind_name(t: &ModuleType) -> Option<&'static str> {
+const fn module_kind_name(t: &ModuleType) -> Option<&'static str> {
     match t {
         ModuleType::Library => Some("library"),
         ModuleType::Device => Some("device"),
@@ -83,6 +90,15 @@ impl DependencyGraph {
 
     pub fn add_target(&mut self, target: TargetDefinition) {
         self.targets.insert(target.mmake_name.clone(), target);
+    }
+
+    pub fn add_icons(&mut self, targets: Vec<IconTarget>, sets: Vec<IconSet>) {
+        for target in targets {
+            self.icon_targets
+                .entry(target.mmake.clone())
+                .or_insert(target);
+        }
+        self.icons.extend(sets);
     }
 
     pub fn add_fetches(&mut self, decls: Vec<FetchDecl>) {
@@ -196,11 +212,7 @@ impl DependencyGraph {
                         // bootstrap. The main target wants the other one.
                         let main: Vec<&&str> = c
                             .iter()
-                            .filter(|id| {
-                                self.targets
-                                    .get(**id)
-                                    .is_some_and(|t| !t.variant_32bit)
-                            })
+                            .filter(|id| self.targets.get(**id).is_some_and(|t| !t.variant_32bit))
                             .collect();
                         if main.len() == 1 {
                             let id = (**main[0]).to_owned();
@@ -264,7 +276,9 @@ impl DependencyGraph {
         for decl in &self.packages {
             let mut ids: Vec<String> = Vec::new();
             let decl_arch = arch_of(std::path::Path::new(
-                decl.file.strip_suffix("/mmakefile.src").unwrap_or(&decl.file),
+                decl.file
+                    .strip_suffix("/mmakefile.src")
+                    .unwrap_or(&decl.file),
             ));
 
             // The startup module has to be linked first: the bootstrap takes
@@ -325,8 +339,11 @@ impl DependencyGraph {
                 let mut eligible: Vec<&str> = if pool.len() == 1 {
                     pool.clone()
                 } else if let Some(deps) = self.meta_targets.get(&decl.mmake) {
-                    let named: Vec<&str> =
-                        pool.iter().copied().filter(|id| deps.contains(*id)).collect();
+                    let named: Vec<&str> = pool
+                        .iter()
+                        .copied()
+                        .filter(|id| deps.contains(*id))
+                        .collect();
                     if named.is_empty() {
                         pool.clone()
                     } else {
@@ -343,10 +360,7 @@ impl DependencyGraph {
                         .iter()
                         .copied()
                         .filter(|id| {
-                            let cand = self
-                                .targets
-                                .get(*id)
-                                .and_then(|t| arch_of(&t.dir_path));
+                            let cand = self.targets.get(*id).and_then(|t| arch_of(&t.dir_path));
                             arch_compatible(cand.as_ref(), decl_arch.as_ref())
                         })
                         .collect();
@@ -455,6 +469,134 @@ impl DependencyGraph {
             .extend(rule.dependencies);
     }
 
+    /// Flattens strongly connected groups of pure #MM targets.
+    ///
+    /// GNU Make tolerates a circular prerequisite by dropping an edge during
+    /// traversal. CMake rejects the same utility-target cycle at generate
+    /// time. A cycle of phony aggregators denotes a shared prerequisite
+    /// closure, so every member receives the union of the group's external
+    /// dependencies and all internal edges are removed. The result is
+    /// deterministic and preserves what building either entry point prepares.
+    ///
+    /// Returns one report line per flattened component.
+    pub fn flatten_meta_cycles(&mut self) -> Vec<String> {
+        fn visit(
+            node: &str,
+            graph: &HashMap<String, HashSet<String>>,
+            nodes: &HashSet<String>,
+            seen: &mut HashSet<String>,
+            order: &mut Vec<String>,
+        ) {
+            if !seen.insert(node.to_owned()) {
+                return;
+            }
+            let mut next: Vec<&str> = graph
+                .get(node)
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .filter(|dep| nodes.contains(*dep))
+                .collect();
+            next.sort_unstable();
+            for dep in next {
+                visit(dep, graph, nodes, seen, order);
+            }
+            order.push(node.to_owned());
+        }
+
+        fn visit_reverse(
+            node: &str,
+            reverse: &HashMap<String, Vec<String>>,
+            seen: &mut HashSet<String>,
+            component: &mut Vec<String>,
+        ) {
+            if !seen.insert(node.to_owned()) {
+                return;
+            }
+            component.push(node.to_owned());
+            if let Some(next) = reverse.get(node) {
+                for dep in next {
+                    visit_reverse(dep, reverse, seen, component);
+                }
+            }
+        }
+
+        let nodes: HashSet<String> = self.meta_targets.keys().cloned().collect();
+        let mut names: Vec<String> = nodes.iter().cloned().collect();
+        names.sort_unstable();
+        let mut seen = HashSet::new();
+        let mut order = Vec::with_capacity(names.len());
+        for name in &names {
+            visit(name, &self.meta_targets, &nodes, &mut seen, &mut order);
+        }
+
+        let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+        for (from, deps) in &self.meta_targets {
+            for to in deps.iter().filter(|dep| nodes.contains(*dep)) {
+                reverse.entry(to.clone()).or_default().push(from.clone());
+            }
+        }
+        for incoming in reverse.values_mut() {
+            incoming.sort_unstable();
+            incoming.dedup();
+        }
+
+        seen.clear();
+        let mut components = Vec::new();
+        while let Some(name) = order.pop() {
+            if seen.contains(&name) {
+                continue;
+            }
+            let mut component = Vec::new();
+            visit_reverse(&name, &reverse, &mut seen, &mut component);
+            component.sort_unstable();
+            let cyclic = component.len() > 1
+                || self
+                    .meta_targets
+                    .get(&component[0])
+                    .is_some_and(|deps| deps.contains(&component[0]));
+            if cyclic {
+                components.push(component);
+            }
+        }
+
+        components.sort();
+        let mut reports = Vec::new();
+        for component in components {
+            let members: HashSet<&str> = component.iter().map(String::as_str).collect();
+            let mut external = BTreeSet::new();
+            for name in &component {
+                if let Some(deps) = self.meta_targets.get(name) {
+                    external.extend(
+                        deps.iter()
+                            .filter(|dep| !members.contains(dep.as_str()))
+                            .cloned(),
+                    );
+                }
+            }
+            for name in &component {
+                if let Some(deps) = self.meta_targets.get_mut(name) {
+                    deps.retain(|dep| !members.contains(dep.as_str()));
+                    deps.extend(external.iter().cloned());
+                }
+            }
+            let kind = if component
+                .iter()
+                .any(|name| self.targets.contains_key(name) || self.icon_targets.contains_key(name))
+            {
+                "build/meta"
+            } else {
+                "meta"
+            };
+            reports.push(format!(
+                "flattened {kind} cycle [{}]; shared external dependencies [{}]",
+                component.join(" -> "),
+                external.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        reports
+    }
+
     /// Verifies that no cyclic dependencies exist in the graph.
     ///
     /// # Errors
@@ -497,5 +639,63 @@ impl DependencyGraph {
 
         rec_stack.remove(node);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DependencyGraph;
+    use crate::ast::MetaTargetRule;
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_meta_cycle_becomes_one_shared_external_dependency_closure() {
+        let mut graph = DependencyGraph::new();
+        graph.add_meta_rule(MetaTargetRule {
+            name: "a".to_owned(),
+            dependencies: vec!["b".to_owned(), "x".to_owned()],
+        });
+        graph.add_meta_rule(MetaTargetRule {
+            name: "b".to_owned(),
+            dependencies: vec!["a".to_owned(), "y".to_owned()],
+        });
+
+        let reports = graph.flatten_meta_cycles();
+        assert_eq!(reports.len(), 1);
+        let expected: HashSet<String> = ["x", "y"].into_iter().map(str::to_owned).collect();
+        assert_eq!(graph.meta_targets["a"], expected);
+        assert_eq!(graph.meta_targets["b"], expected);
+    }
+
+    #[test]
+    fn an_acyclic_meta_graph_is_unchanged() {
+        let mut graph = DependencyGraph::new();
+        graph.add_meta_rule(MetaTargetRule {
+            name: "a".to_owned(),
+            dependencies: vec!["b".to_owned()],
+        });
+        graph.add_meta_rule(MetaTargetRule {
+            name: "b".to_owned(),
+            dependencies: vec!["leaf".to_owned()],
+        });
+        let before = graph.meta_targets.clone();
+        assert!(graph.flatten_meta_cycles().is_empty());
+        assert_eq!(graph.meta_targets, before);
+    }
+
+    #[test]
+    fn a_meta_self_loop_is_removed_without_losing_other_dependencies() {
+        let mut graph = DependencyGraph::new();
+        graph.add_meta_rule(MetaTargetRule {
+            name: "test".to_owned(),
+            dependencies: vec!["test".to_owned(), "test-leaf".to_owned()],
+        });
+
+        let reports = graph.flatten_meta_cycles();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            graph.meta_targets["test"],
+            std::iter::once("test-leaf".to_owned()).collect()
+        );
     }
 }

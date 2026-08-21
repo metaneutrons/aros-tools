@@ -10,6 +10,15 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// One non-empty #MM rule. Horizontal whitespace is intentional: `\s*` also
+/// consumes a newline, so an empty `#MM setup-ppc :` used to steal the next
+/// ordinary Make rule and manufacture `setup-ppc -> setup-ppc` self-cycles.
+static META_RULE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^#MM-?[ \t]+([^ \t\r\n:]+)[ \t]*:[ \t]*([^\r\n]+)").unwrap());
+static CONTINUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap());
 
 /// Makes a name safe to use as a CMake target.
 ///
@@ -26,6 +35,39 @@ fn sanitize_ident(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Renders the target-configuration variables used in #MM rules as CMake
+/// variable references.
+///
+/// Dropping every dependency containing `$(` removed the root edge from
+/// `workbench` to the selected icon set, so 181 correctly generated icon rules
+/// would still be unreachable. Only variables with an unambiguous counterpart
+/// are translated; callers report every other dynamic token.
+fn render_meta_token(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = raw.trim();
+    while let Some(start) = rest.find("$(") {
+        out.push_str(&sanitize_ident(&rest[..start]));
+        let after = &rest[start + 2..];
+        let end = after.find(')')?;
+        let name = &after[..end];
+        let cmake_name = match name {
+            "AROS_TARGET_ARCH" | "AROS_TARGET_PLATFORM" | "ARCH" => "AROS_TARGET_PLATFORM",
+            "AROS_TARGET_CPU" | "CPU" => "AROS_TARGET_CPU",
+            "AROS_TARGET_FAMILY" | "FAMILY" => "AROS_TARGET_FAMILY",
+            "AROS_TARGET_VARIANT" => "AROS_TARGET_VARIANT",
+            "AROS_TARGET_ICONSET" => "AROS_TARGET_ICONSET",
+            "AROS_TARGET_CPU32" => "AROS_TARGET_CPU32",
+            _ => return None,
+        };
+        out.push_str("${");
+        out.push_str(cmake_name);
+        out.push('}');
+        rest = &after[end + 1..];
+    }
+    out.push_str(&sanitize_ident(rest));
+    (!out.is_empty()).then_some(out)
 }
 
 fn expand_file_list(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<String> {
@@ -94,11 +136,6 @@ fn keep_source_name(s: &str) -> bool {
         && !s.contains(',')
 }
 
-/// Parses a single `mmakefile.src` file into structured target definitions and meta-target rules.
-///
-/// # Errors
-/// Returns an error if the file cannot be read.
-#[allow(clippy::missing_panics_doc)]
 /// Resolves a name argument that may reference a Make variable.
 ///
 /// Ten declarations name their output through a variable, for instance
@@ -205,7 +242,7 @@ fn join_mm_continuations(content: &str) -> String {
                 .trim_start()
                 .strip_prefix("#MM-")
                 .or_else(|| body.trim_start().strip_prefix("#MM"))
-                .unwrap_or(body.trim_start());
+                .unwrap_or_else(|| body.trim_start());
             out.push(' ');
             out.push_str(stripped.trim());
         } else {
@@ -239,9 +276,9 @@ struct Invocation {
 /// `mmake=` is often not on the first, and a file list is nearly always written
 /// one name per continued line. Joining first means one pass can both read the
 /// assignments and see where each declaration stands.
-fn join_continuations(content: &str) -> String {
-    let cont = Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap();
-    cont.replace_all(content, " ").into_owned()
+#[must_use]
+pub fn join_continuations(content: &str) -> String {
+    CONTINUATION_RE.replace_all(content, " ").into_owned()
 }
 
 /// Variable assignments in the order the file makes them.
@@ -257,9 +294,16 @@ fn join_continuations(content: &str) -> String {
 /// gdbstop, two targets claimed the output SYS/C/.../gdbstop, and Ninja refused
 /// to generate the build at all. 16 declarations across 9 mmakefiles read a
 /// variable that is reassigned later in the same file.
-struct VarScope {
+pub struct VarScope {
     /// Per name, the assignments in file order as (line, values).
     assignments: HashMap<String, Vec<(usize, Vec<String>)>>,
+    /// Per name, the right-hand side as written, in file order.
+    ///
+    /// A list is not enough for a path. `EXEDIR := $(AROS_TOOLS)/QuickPart` is
+    /// one word either way, but `dir=$(AROS_PRESETS)/Icons/Gorilla/Small/$(AROS_DIR_AROS)`
+    /// has to keep its slashes and its references, so path resolution reads
+    /// this instead of the word list.
+    raw: HashMap<String, Vec<(usize, String)>>,
 }
 
 impl VarScope {
@@ -280,6 +324,17 @@ impl VarScope {
             .collect()
     }
 
+    /// The right-hand side of `name` as written, as of `line`.
+    #[must_use]
+    pub fn raw_at(&self, name: &str, line: usize) -> Option<String> {
+        self.raw
+            .get(name)?
+            .iter()
+            .rev()
+            .find(|(at, _)| *at < line)
+            .map(|(_, v)| v.clone())
+    }
+
     /// The most recent value of `name`, used to resolve a self-referential
     /// assignment while the scan is still running.
     fn latest(&self, name: &str) -> &[String] {
@@ -288,12 +343,59 @@ impl VarScope {
             .and_then(|h| h.last())
             .map_or(&[][..], |(_, v)| v.as_slice())
     }
+
+    /// The most recent raw value of `name` while the assignment scan is in
+    /// progress. Appending is defined in terms of the value accumulated so
+    /// far, not merely the last right-hand side.
+    fn latest_raw(&self, name: &str) -> Option<&str> {
+        self.raw
+            .get(name)
+            .and_then(|h| h.last())
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssignmentKind {
+    Set,
+    SetIfUnset,
+    Append,
+}
+
+/// Splits a plain Make variable assignment without mistaking a rule for one.
+///
+/// The tree uses `:=`, `=`, `?=` and `+=`. Keeping the operator is important:
+/// two icon lists are built incrementally, and treating their `+=` lines as
+/// either invalid or ordinary assignments silently drops 118 generated files.
+fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
+    let trimmed = line.trim();
+    let (at, width, kind) = [
+        (":=", AssignmentKind::Set),
+        ("+=", AssignmentKind::Append),
+        ("?=", AssignmentKind::SetIfUnset),
+        ("=", AssignmentKind::Set),
+    ]
+    .into_iter()
+    .filter_map(|(op, kind)| trimmed.find(op).map(|at| (at, op.len(), kind)))
+    .min_by_key(|(at, _, _)| *at)?;
+
+    let name = trimmed[..at].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some((name, trimmed[at + width..].trim(), kind))
 }
 
 /// Reads every variable assignment from continuation-joined mmakefile text.
-fn collect_vars(joined: &str) -> VarScope {
+#[must_use]
+pub fn collect_vars(joined: &str) -> VarScope {
     let mut scope = VarScope {
         assignments: HashMap::new(),
+        raw: HashMap::new(),
     };
 
     for (line_no, line) in joined.lines().enumerate() {
@@ -302,34 +404,39 @@ fn collect_vars(joined: &str) -> VarScope {
             continue;
         }
 
-        // Make has four assignment forms and the tree uses three of them.
+        // Make has four assignment forms and the tree uses all of them.
         // Reading only `:=` lost every list written with `=` or `?=`:
         // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
-        // that way, and eight %build_linklib declarations get their file list
-        // from one.
-        let assignment = line
-            .split_once(":=")
-            .or_else(|| line.split_once("?="))
-            .filter(|(k, _)| !k.contains('=') && !k.contains(':'))
-            .or_else(|| {
-                line.split_once('=')
-                    .filter(|(k, _)| !k.contains(':') && !k.ends_with('+') && !k.contains('$'))
-            });
-        let Some((k, v)) = assignment else {
+        // that way, while the icon sets append to two lists with `+=`.
+        let Some((var_name, value, kind)) = variable_assignment(line) else {
             continue;
         };
 
-        let var_name = k.trim().trim_end_matches('?').trim().to_owned();
+        if kind == AssignmentKind::SetIfUnset && scope.assignments.contains_key(var_name) {
+            continue;
+        }
+
         // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
         // held. Inserting the new list would discard it, and the surviving
         // `$(FILES)` reference then resolves to itself: muimaster came out with
         // 26 sources against the reference's ~94.
         let self_ref = format!("$({var_name})");
-        let prior = scope.latest(&var_name);
-        let expanded = if v.contains(&self_ref) && !prior.is_empty() {
-            v.replace(&self_ref, &prior.join(" "))
+        let prior = scope.latest(var_name);
+        let expanded_rhs = if value.contains(&self_ref) && !prior.is_empty() {
+            value.replace(&self_ref, &prior.join(" "))
         } else {
-            v.to_owned()
+            value.to_owned()
+        };
+        let expanded = if kind == AssignmentKind::Append {
+            match scope.latest_raw(var_name) {
+                Some(old) if !old.is_empty() && !expanded_rhs.is_empty() => {
+                    format!("{old} {expanded_rhs}")
+                }
+                Some(old) if !old.is_empty() => old.to_owned(),
+                _ => expanded_rhs,
+            }
+        } else {
+            expanded_rhs
         };
 
         let values: Vec<String> = expanded
@@ -339,15 +446,19 @@ fn collect_vars(joined: &str) -> VarScope {
             .filter(|s| keep_list_item(s))
             .collect();
         scope
+            .raw
+            .entry(var_name.to_owned())
+            .or_default()
+            .push((line_no, expanded.trim().to_owned()));
+        scope
             .assignments
-            .entry(var_name)
+            .entry(var_name.to_owned())
             .or_default()
             .push((line_no, values));
     }
 
     scope
 }
-
 
 /// Whether a word from a Make list is usable as a list item.
 ///
@@ -435,7 +546,32 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
     }
 }
 
+/// Parses a single `mmakefile.src` into target definitions and meta rules.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
 pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
+    let dirs = crate::dirs::DirVars::load(root);
+    parse_mmakefile_with_dirs(path, root, &dirs)
+}
+
+/// Parses one mmakefile with the shared directory-variable table.
+///
+/// The command-line scanner calls this form so `config/make.cfg.in` is read
+/// once for the whole tree rather than once per mmakefile. The two-argument
+/// wrapper remains convenient for focused tests and library callers.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn parse_mmakefile_with_dirs(
+    path: &Path,
+    root: &Path,
+    dirs: &crate::dirs::DirVars,
+) -> Result<ParsedMmakefile> {
     let content = read_source(path)?;
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let rel_dir = parent_dir
@@ -444,6 +580,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         .to_path_buf();
     let mut targets = Vec::new();
     let mut meta_rules = Vec::new();
+    let mut skipped_meta_rules = Vec::new();
 
     // Include paths are a file-level property in Make: USER_INCLUDES applies to
     // every rule in the mmakefile, so the same set is attached to each target
@@ -511,10 +648,10 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     // comparable.
     let joined = join_continuations(&content);
     let scope = collect_vars(&joined);
+    let icon_scan = crate::icons::collect_icons_all(&joined, dirs, &rel_dir);
     let invocations = macro_invocations(&joined);
     let mut skipped_programs: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
-    let re_mm = Regex::new(r"(?m)^#MM-?\s+([^\s:]+)\s*:\s*(.+)").unwrap();
 
     // 1. Extract module definitions
     for inv in invocations.iter().filter(|i| {
@@ -587,7 +724,8 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         // A modtype the target model has no variant for still decides the
         // file suffix and install directory (make.tmpl:2048-2095); the
         // compilation is identical to modtype=library.
-        let mod_suffix = if matches!(module_type, ModuleType::Custom) && !mod_type_owned.is_empty() {
+        let mod_suffix = if matches!(module_type, ModuleType::Custom) && !mod_type_owned.is_empty()
+        {
             Some(mod_type_owned.clone())
         } else {
             None
@@ -838,15 +976,26 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
 
     // 3. Extract #MM and #MM- meta-target rules
     let mm_content = join_mm_continuations(&content);
-    for cap in re_mm.captures_iter(&mm_content) {
-        let meta_name = sanitize_ident(&cap[1]);
+    for cap in META_RULE_RE.captures_iter(&mm_content) {
+        let raw_meta = &cap[1];
+        let Some(meta_name) = render_meta_token(raw_meta) else {
+            skipped_meta_rules.push(format!(
+                "{}: #MM target {raw_meta} contains an unmapped Make variable",
+                rel_dir.display()
+            ));
+            continue;
+        };
         let deps_str = &cap[2];
-        let deps: Vec<String> = deps_str
-            .split_whitespace()
-            .filter(|s| !s.contains('$') && !s.contains('(') && !s.contains(')'))
-            .map(sanitize_ident)
-            .filter(|s| !s.is_empty())
-            .collect();
+        let mut deps = Vec::new();
+        for raw_dep in deps_str.split_whitespace() {
+            match render_meta_token(raw_dep) {
+                Some(dep) => deps.push(dep),
+                None => skipped_meta_rules.push(format!(
+                    "{}: #MM {raw_meta} dependency {raw_dep} contains an unmapped Make variable",
+                    rel_dir.display()
+                )),
+            }
+        }
 
         if !deps.is_empty() {
             meta_rules.push(MetaTargetRule {
@@ -859,6 +1008,10 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     Ok(ParsedMmakefile {
         targets,
         meta_rules,
+        icon_targets: icon_scan.targets,
+        icons: icon_scan.sets,
+        skipped_icons: icon_scan.skipped,
+        skipped_meta_rules,
         arch_decls,
         unresolved_includes: include_set.unresolved,
         copy_includes: copy_scan.decls,
@@ -880,7 +1033,10 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_vars, join_continuations, macro_arg, macro_invocations, sanitize_ident};
+    use super::{
+        collect_vars, join_continuations, join_mm_continuations, macro_arg, macro_invocations,
+        render_meta_token, sanitize_ident, META_RULE_RE,
+    };
 
     #[test]
     fn every_declaration_in_a_file_is_seen() {
@@ -968,7 +1124,8 @@ FILES := gdbstop
 
     #[test]
     fn a_self_referential_assignment_keeps_the_earlier_value() {
-        let src = "FILES := a b\nFILES := $(FILES) c\n%build_prog mmake=m progname=M files=$(FILES)\n";
+        let src =
+            "FILES := a b\nFILES := $(FILES) c\n%build_prog mmake=m progname=M files=$(FILES)\n";
         let joined = join_continuations(src);
         let scope = collect_vars(&joined);
         let invs = macro_invocations(&joined);
@@ -976,6 +1133,30 @@ FILES := gdbstop
             scope.snapshot(invs[0].line).get("FILES").unwrap(),
             &vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
         );
+    }
+
+    #[test]
+    fn appended_values_accumulate_in_the_positional_snapshot_and_raw_value() {
+        let src = "ICONS := A B\nICONS += C D\n%build_icons mmake=x icons=$(ICONS) dir=x\nICONS += late\n";
+        let joined = join_continuations(src);
+        let scope = collect_vars(&joined);
+        let inv = &macro_invocations(&joined)[0];
+        assert_eq!(
+            scope.snapshot(inv.line).get("ICONS").unwrap(),
+            &vec![
+                "A".to_owned(),
+                "B".to_owned(),
+                "C".to_owned(),
+                "D".to_owned()
+            ]
+        );
+        assert_eq!(scope.raw_at("ICONS", inv.line).as_deref(), Some("A B C D"));
+    }
+
+    #[test]
+    fn a_conditional_assignment_does_not_overwrite_an_existing_value() {
+        let scope = collect_vars("A := first\nA ?= second\n%build_prog mmake=x progname=X\n");
+        assert_eq!(scope.raw_at("A", usize::MAX).as_deref(), Some("first"));
     }
 
     #[test]
@@ -1012,6 +1193,30 @@ FILES := gdbstop
         assert_eq!(sanitize_ident("atheros5000.device"), "atheros5000.device");
         assert_eq!(sanitize_ident("wasapiaudio.dll"), "wasapiaudio.dll");
         assert_eq!(sanitize_ident("odd/name"), "odd_name");
+    }
+
+    #[test]
+    fn known_dynamic_meta_target_variables_become_cmake_references() {
+        assert_eq!(
+            render_meta_token("iconset-$(AROS_TARGET_ICONSET)-wbench-icons").unwrap(),
+            "iconset-${AROS_TARGET_ICONSET}-wbench-icons"
+        );
+        assert_eq!(
+            render_meta_token("includes-$(ARCH)-$(CPU)").unwrap(),
+            "includes-${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}"
+        );
+        assert_eq!(
+            render_meta_token("grub2-efi32-$(AROS_TARGET_CPU32)-quick").unwrap(),
+            "grub2-efi32-${AROS_TARGET_CPU32}-quick"
+        );
+        assert!(render_meta_token("target-$(SOMETHING_UNKNOWN)").is_none());
+    }
+
+    #[test]
+    fn an_empty_meta_rule_does_not_consume_the_next_make_rule() {
+        let source = "#MM setup-ppc :\nsetup-ppc : preplink\n";
+        let joined = join_mm_continuations(source);
+        assert!(META_RULE_RE.captures_iter(&joined).next().is_none());
     }
 
     #[test]

@@ -533,6 +533,19 @@ aros_build_module(
     }
 
     #[test]
+    fn counts_an_icon_declaration_without_a_compiled_target_name() {
+        let generated = "\
+aros_declare_icon_target(
+    MMAKE_ID iconset-Gorilla-wbench-icons
+    DIRECTORY \"images/IconSets/Gorilla\"
+)
+";
+        let ours = collect_ours(generated);
+        assert!(ours.contains_key("iconset-Gorilla-wbench-icons"));
+        assert_eq!(ours["iconset-Gorilla-wbench-icons"], "");
+    }
+
+    #[test]
     fn a_declaration_without_a_name_is_skipped() {
         // %build_icons and friends are sometimes invoked without mmake=; they
         // have no identity to compare against.

@@ -90,6 +90,18 @@ pub struct MetaTargetRule {
 pub struct ParsedMmakefile {
     pub targets: Vec<TargetDefinition>,
     pub meta_rules: Vec<MetaTargetRule>,
+    /// `%build_icons` target identities, including declarations whose inputs
+    /// could not be resolved. Keeping the identity makes the gap visible and
+    /// preserves meta-target edges even when no command can be emitted.
+    pub icon_targets: Vec<crate::icons::IconTarget>,
+    /// Resolved `%build_icons` declarations. Repeated mmake ids deliberately
+    /// remain separate: Make merges their prerequisites.
+    pub icons: Vec<crate::icons::IconSet>,
+    /// `%build_icons` declarations or variants that could not be resolved.
+    pub skipped_icons: Vec<String>,
+    /// Dynamic #MM names/dependencies that reference Make variables for which
+    /// this CMake build has no counterpart.
+    pub skipped_meta_rules: Vec<String>,
     /// `%set_archincludes` declarations contributed by this file.
     pub arch_decls: Vec<ArchIncludeDecl>,
     /// Include tokens whose Make variables were not resolved, for reporting.

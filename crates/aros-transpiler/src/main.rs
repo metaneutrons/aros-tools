@@ -1,5 +1,6 @@
 use aros_common::Result;
-use aros_transpiler::{generate_cmake, parse_mmakefile, DependencyGraph};
+use aros_transpiler::dirs::DirVars;
+use aros_transpiler::{generate_cmake, parse_mmakefile_with_dirs, DependencyGraph};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
     // directories, mmakefile.src included, so scanning build/ would parse those
     // copies a second time and attribute their rules to the wrong location.
     let skip_dirs = ["build", "target", ".git"];
-    let files: Vec<PathBuf> = WalkDir::new(&args.source_dir)
+    let mut files: Vec<PathBuf> = WalkDir::new(&args.source_dir)
         .into_iter()
         .filter_entry(|e| {
             !e.file_type().is_dir()
@@ -46,6 +47,10 @@ fn main() -> Result<()> {
         .filter(|e| e.file_name() == "mmakefile.src")
         .map(walkdir::DirEntry::into_path)
         .collect();
+    // Stable source order matters for duplicate-output semantics: GNU Make's
+    // first satisfiable icon rule wins, and the CMake output registry mirrors
+    // that choice while reporting conflicting later claims.
+    files.sort();
 
     println!(
         "📦 Found {} mmakefile.src files. Parsing in parallel...",
@@ -61,10 +66,11 @@ fn main() -> Result<()> {
             .unwrap(),
     );
 
+    let dirs = DirVars::load(&args.source_dir);
     let parsed_results: Vec<_> = files
         .par_iter()
         .filter_map(|path| {
-            let res = parse_mmakefile(path, &args.source_dir).ok();
+            let res = parse_mmakefile_with_dirs(path, &args.source_dir, &dirs).ok();
             pb.inc(1);
             res
         })
@@ -84,6 +90,8 @@ fn main() -> Result<()> {
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
+    let mut skipped_icons: Vec<String> = Vec::new();
+    let mut skipped_meta_rules: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
             graph.add_target(target);
@@ -91,6 +99,9 @@ fn main() -> Result<()> {
         for rule in parsed.meta_rules {
             graph.add_meta_rule(rule);
         }
+        graph.add_icons(parsed.icon_targets, parsed.icons);
+        skipped_icons.extend(parsed.skipped_icons);
+        skipped_meta_rules.extend(parsed.skipped_meta_rules);
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
@@ -126,6 +137,10 @@ fn main() -> Result<()> {
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
+    // GNU Make drops a circular phony prerequisite during traversal; CMake
+    // rejects utility-target cycles outright. Collapse each meta-only SCC to
+    // its shared external prerequisite closure and make that visible.
+    let flattened_meta_cycles = graph.flatten_meta_cycles();
     let n_overrides: usize = graph.arch_sources.values().map(Vec::len).sum();
     println!("🔧 {n_overrides} architecture source override(s) from %build_archspecific");
     println!(
@@ -151,6 +166,24 @@ fn main() -> Result<()> {
         "skipped-arch-sources.txt",
         skipped_arch_sources,
         "%build_archspecific declaration(s) had no resolvable file list",
+    );
+    write_report(
+        &args.output,
+        "skipped-icons.txt",
+        skipped_icons,
+        "%build_icons declaration(s) or target variant(s) could not be resolved",
+    );
+    write_report(
+        &args.output,
+        "skipped-meta-rules.txt",
+        skipped_meta_rules,
+        "#MM target/dependency token(s) reference unmapped Make variables",
+    );
+    write_report(
+        &args.output,
+        "meta-cycles.txt",
+        flattened_meta_cycles,
+        "cyclic #MM component(s) flattened to shared dependencies",
     );
 
     println!(
@@ -232,8 +265,14 @@ fn main() -> Result<()> {
     );
 
     println!(
-        "🔨 Assembling Dependency Graph with {} concrete targets and {} meta-targets...",
+        "🖼️  {} resolved icon declaration variant(s), {} unique icon target(s)",
+        graph.icons.len(),
+        graph.icon_targets.len()
+    );
+    println!(
+        "🔨 Assembling Dependency Graph with {} concrete targets, {} icon targets and {} meta-targets...",
         graph.targets.len(),
+        graph.icon_targets.len(),
         graph.meta_targets.len()
     );
 
@@ -252,8 +291,9 @@ fn main() -> Result<()> {
     fs::write(&args.output, cmake_content)?;
 
     println!(
-        "✅ Successfully generated {} concrete targets and {} meta-targets in {}!",
+        "✅ Successfully generated {} concrete targets, {} icon targets and {} meta-targets in {}!",
         graph.targets.len(),
+        graph.icon_targets.len(),
         graph.meta_targets.len(),
         args.output.display()
     );
@@ -282,6 +322,9 @@ fn write_report(output: &Path, extension: &str, mut lines: Vec<String>, what: &s
     if fs::write(&report, format!("{body}\n")).is_ok() {
         println!("⚠️  {n} {what} -> {}", report.display());
     } else {
-        println!("⚠️  {n} {what} (report could not be written to {})", report.display());
+        println!(
+            "⚠️  {n} {what} (report could not be written to {})",
+            report.display()
+        );
     }
 }
