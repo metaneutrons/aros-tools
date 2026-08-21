@@ -3,6 +3,7 @@ use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::collect_fetches_with_scope;
 use crate::flags::collect_flags;
+use crate::genmodule_linklibs::resolve_generated_linklib_sources;
 use crate::includes::{collect_arch_decls, collect_includes};
 use crate::local_make_includes::{
     inline_local_make_includes, LocalMakeFragmentPolicy, LocalMakeIncludeLimits,
@@ -377,6 +378,19 @@ fn evaluate_macro_sources(
     legacy_vars: &HashMap<String, Vec<String>>,
     context: &MakeExprContext<'_>,
 ) -> std::result::Result<EvaluatedSources, String> {
+    evaluate_macro_sources_with_files(args, legacy_vars, context, None)
+}
+
+/// Evaluates source lanes while allowing a caller to supply an exact C source
+/// manifest for `files=`. Generated genmodule wildcards are the one supported
+/// use: they are empty until build time, while the other language lanes retain
+/// the ordinary bounded Make evaluation and diagnostics.
+fn evaluate_macro_sources_with_files(
+    args: &str,
+    legacy_vars: &HashMap<String, Vec<String>>,
+    context: &MakeExprContext<'_>,
+    resolved_files: Option<&[String]>,
+) -> std::result::Result<EvaluatedSources, String> {
     let mut sources = EvaluatedSources::default();
     let mut arguments = Vec::new();
     for key in ["files", "cxxfiles", "objcfiles", "asmfiles"] {
@@ -387,6 +401,19 @@ fn evaluate_macro_sources(
             continue;
         }
         sources.declared = true;
+        if key == "files" {
+            if let Some(values) = resolved_files {
+                for value in values {
+                    if value.is_empty() || value.contains(';') {
+                        return Err(format!("files={raw} produced an invalid source `{value}`"));
+                    }
+                    if !sources.c.contains(value) {
+                        sources.c.push(value.clone());
+                    }
+                }
+                continue;
+            }
+        }
         arguments.push((key, raw));
     }
 
@@ -2554,7 +2581,36 @@ fn parse_mmakefile_impl(
             }
         };
 
-        let mut sources = match evaluate_macro_sources(&inv.args, &vars, &expression_context) {
+        let resolved_generated_files = if module_type == ModuleType::LinkLib {
+            match macro_arg(&inv.args, "files") {
+                Some(files) => {
+                    match resolve_generated_linklib_sources(&files, &joined, &rel_dir, |name| {
+                        expression_context.safe_local_raw(name)
+                    }) {
+                        Ok(Some(generated)) => Some(generated.sources),
+                        Ok(None) => None,
+                        Err(reason) => {
+                            skipped_programs.push(format!(
+                                "{}:{}: %{} mmake={mmake_raw} {reason}",
+                                rel_dir.display(),
+                                inv.line + 1,
+                                inv.name
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut sources = match evaluate_macro_sources_with_files(
+            &inv.args,
+            &vars,
+            &expression_context,
+            resolved_generated_files.as_deref(),
+        ) {
             Ok(sources) => sources,
             Err(reason) => {
                 skipped_programs.push(format!(
@@ -3995,6 +4051,94 @@ FILES := gdbstop
                 .skipped_programs
                 .iter()
                 .all(|message| !message.contains("linklibs-btcore")));
+        }
+    }
+
+    #[test]
+    fn generated_linklib_wildcards_are_exact_manifests_in_all_current_profiles() {
+        let root = root();
+        let dirs = dirs();
+        let expected = BTreeMap::from([
+            (
+                "compiler-posixc-lfa-linklib",
+                vec!["@AROS_GENMODULE|normal|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
+            ),
+            (
+                "compiler-posixc-lfa-linklib-rel",
+                vec!["@AROS_GENMODULE|rel|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
+            ),
+            (
+                "workbench-libs-gl-linklib",
+                vec![
+                    "gl_funcs",
+                    "@AROS_GENMODULE|normal|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
+                ],
+            ),
+            (
+                "workbench-libs-gl-linklib-rel",
+                vec![
+                    "gl_funcs",
+                    "@AROS_GENMODULE|rel|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
+                ],
+            ),
+        ]);
+
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let target_context = target_context(cpu, platform, float_abi);
+            let mut targets = BTreeMap::new();
+            let mut diagnostics = Vec::new();
+            for file in [
+                "compiler/crt/posixc/mmakefile.src",
+                "workbench/libs/gl/mmakefile.src",
+            ] {
+                let parsed = super::parse_mmakefile_with_dirs_and_context(
+                    &root.join(file),
+                    &root,
+                    &dirs,
+                    &target_context,
+                )
+                .unwrap();
+                diagnostics.extend(parsed.skipped_programs);
+                diagnostics.extend(parsed.partial_source_lists);
+                targets.extend(
+                    parsed
+                        .targets
+                        .into_iter()
+                        .filter(|target| expected.contains_key(target.mmake_name.as_str()))
+                        .map(|target| (target.mmake_name.clone(), target)),
+                );
+            }
+
+            assert_eq!(
+                targets.len(),
+                expected.len(),
+                "{cpu}-{platform}: {diagnostics:#?}"
+            );
+            for (mmake, sources) in &expected {
+                let target = targets.get(*mmake).unwrap_or_else(|| {
+                    panic!("{cpu}-{platform}: missing {mmake}: {diagnostics:#?}")
+                });
+                assert_eq!(target.module_type, ModuleType::LinkLib);
+                assert_eq!(
+                    target
+                        .source_files
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    *sources,
+                    "{cpu}-{platform}: {mmake}"
+                );
+            }
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|message| { expected.keys().all(|mmake| !message.contains(mmake)) }),
+                "{cpu}-{platform}: {diagnostics:#?}"
+            );
         }
     }
 
