@@ -451,10 +451,6 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
 
     let invocations = macro_invocations(&content);
     let mut skipped_programs: Vec<String> = Vec::new();
-    // Anchored on leading whitespace so that `linklibfiles=`, `asmfiles=`,
-    // `cxxfiles=`, `objcfiles=` and `excludefiles=` are not mistaken for the
-    // module's `files=` argument. The regex crate has no lookbehind.
-    let re_files = Regex::new(r#"(?:^|\s)files=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
     let re_mm = Regex::new(r"(?m)^#MM-?\s+([^\s:]+)\s*:\s*(.+)").unwrap();
 
