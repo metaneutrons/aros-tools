@@ -33,7 +33,19 @@ pub struct TargetDefinition {
     pub mmake_name: String,
     pub target_name: String,
     pub module_type: ModuleType,
+    /// C source stems or paths from the macro's `files=` lane.
     pub source_files: Vec<String>,
+    /// C++ source stems or paths from `cxxfiles=`. Keeping this lane separate
+    /// is required for fetched sources which do not exist when CMake first
+    /// configures and therefore cannot be classified by probing extensions.
+    #[serde(default)]
+    pub cxx_source_files: Vec<String>,
+    /// Objective-C source stems or paths from `objcfiles=`.
+    #[serde(default)]
+    pub objc_source_files: Vec<String>,
+    /// Assembler source stems or paths from `asmfiles=`.
+    #[serde(default)]
+    pub asm_source_files: Vec<String>,
     pub use_libs: Vec<String>,
     pub dependencies: Vec<String>,
     pub dir_path: PathBuf,
@@ -127,6 +139,11 @@ pub struct ParsedMmakefile {
     pub generated_file_rules: Vec<String>,
     /// Build declarations whose kind the target model does not express yet.
     pub skipped_programs: Vec<String>,
+    /// Source lanes omitted from an otherwise retained legacy target because
+    /// their Make expression cannot yet be evaluated faithfully.
+    pub partial_source_lists: Vec<String>,
+    /// Explicit program output directories which could not be resolved.
+    pub unresolved_output_paths: Vec<String>,
     /// `%make_package` and `%link_kickstart` declarations.
     pub packages: Vec<crate::packages::PackageDecl>,
     /// Package declarations that could not be resolved, for reporting.

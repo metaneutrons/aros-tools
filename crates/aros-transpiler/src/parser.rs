@@ -1,13 +1,14 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
 use crate::copy_includes::collect_copy_includes;
-use crate::fetch::collect_fetches;
+use crate::fetch::collect_fetches_with_scope;
 use crate::flags::collect_flags;
 use crate::includes::{collect_arch_decls, collect_includes};
+use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
 use crate::make_opts::collect_make_opts;
 use aros_common::{read_source, Result};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -19,6 +20,7 @@ static META_RULE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^#MM-?[ \t]+([^ \t\r\n:]+)[ \t]*:[ \t]*([^\r\n]+)").unwrap());
 static CONTINUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap());
+const MAX_DEPTH_FOR_IMMEDIATE_EXPANSION: usize = 16;
 
 /// Makes a name safe to use as a CMake target.
 ///
@@ -149,6 +151,7 @@ fn keep_source_name(s: &str) -> bool {
 /// `__EXE_`, and two of them then collided on the same output file. A variable
 /// that resolves to exactly one value is substituted; anything else returns
 /// None so the caller can report it.
+#[cfg(test)]
 fn resolve_name(raw: &str, vars: &HashMap<String, Vec<String>>) -> Option<String> {
     if !raw.contains("$(") {
         return Some(sanitize_ident(raw));
@@ -181,6 +184,7 @@ fn resolve_name(raw: &str, vars: &HashMap<String, Vec<String>>) -> Option<String
 /// programs, 2857ff for modules). Returns `(sources, any_declared)`; the flag
 /// separates "nothing was declared" from "a list was declared but its Make
 /// variables are unresolved", which must not silently fall back.
+#[cfg(test)]
 fn macro_sources(args: &str, vars: &HashMap<String, Vec<String>>) -> (Vec<String>, bool) {
     let mut sources = Vec::new();
     let mut declared = false;
@@ -195,6 +199,299 @@ fn macro_sources(args: &str, vars: &HashMap<String, Vec<String>>) -> (Vec<String
         sources.extend(expand_file_list(&raw, vars));
     }
     (sources, declared)
+}
+
+/// Source lists resolved with their compiler-language provenance intact.
+///
+/// A fetched C++ stem cannot be rediscovered by probing the filesystem during
+/// CMake configure because the fetch target runs later. Flattening all four
+/// macro arguments into one vector therefore makes a correct future-source
+/// rule impossible. The legacy macros already distinguish these lanes, so the
+/// transpiled model does the same.
+#[derive(Debug, Default)]
+struct EvaluatedSources {
+    c: Vec<String>,
+    cxx: Vec<String>,
+    objc: Vec<String>,
+    asm: Vec<String>,
+    declared: bool,
+    diagnostics: Vec<String>,
+}
+
+impl EvaluatedSources {
+    fn is_empty(&self) -> bool {
+        self.c.is_empty() && self.cxx.is_empty() && self.objc.is_empty() && self.asm.is_empty()
+    }
+
+    fn lane_mut(&mut self, key: &str) -> &mut Vec<String> {
+        match key {
+            "files" => &mut self.c,
+            "cxxfiles" => &mut self.cxx,
+            "objcfiles" => &mut self.objc,
+            "asmfiles" => &mut self.asm,
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn simple_make_variable_reference(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    let body = raw
+        .strip_prefix("$(")
+        .and_then(|value| value.strip_suffix(')'))
+        .or_else(|| {
+            raw.strip_prefix("${")
+                .and_then(|value| value.strip_suffix('}'))
+        })?;
+    (!body.is_empty()
+        && body
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')))
+    .then_some(body)
+}
+
+/// Splits whitespace-separated Make expressions without breaking a nested
+/// `$(function ...)` argument list. GNU Make concatenates these top-level
+/// fragments with spaces, so each can be evaluated independently.
+fn split_make_fragments(raw: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
+    let mut start = None;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut quote = None;
+    for (at, character) in raw.char_indices() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            if start.is_none() {
+                start = Some(at);
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                start.get_or_insert(at);
+            }
+            '(' => {
+                paren_depth += 1;
+                start.get_or_insert(at);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                start.get_or_insert(at);
+            }
+            '{' => {
+                brace_depth += 1;
+                start.get_or_insert(at);
+            }
+            '}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                start.get_or_insert(at);
+            }
+            _ if character.is_whitespace() && paren_depth == 0 && brace_depth == 0 => {
+                if let Some(begin) = start.take() {
+                    fragments.push(raw[begin..at].to_owned());
+                }
+            }
+            _ => {
+                start.get_or_insert(at);
+            }
+        }
+    }
+    if let Some(begin) = start {
+        fragments.push(raw[begin..].to_owned());
+    }
+    fragments
+}
+
+fn expand_source_fragments(raw: &str, context: &MakeExprContext<'_>, depth: usize) -> Vec<String> {
+    if depth == 0 {
+        return vec![raw.to_owned()];
+    }
+    let mut output = Vec::new();
+    for fragment in split_make_fragments(raw) {
+        if let Some(name) = simple_make_variable_reference(&fragment) {
+            if let Some(value) = context.safe_local_raw(name) {
+                output.extend(expand_source_fragments(&value, context, depth - 1));
+                continue;
+            }
+        }
+        output.push(fragment);
+    }
+    output
+}
+
+fn contains_make_function(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut cursor = 0usize;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] != b'$' || !matches!(bytes[cursor + 1], b'(' | b'{') {
+            cursor += 1;
+            continue;
+        }
+        let open = bytes[cursor + 1];
+        let close = if open == b'(' { b')' } else { b'}' };
+        let mut nesting = 1usize;
+        let mut end = cursor + 2;
+        while end < bytes.len() {
+            if bytes[end] == b'$' && bytes.get(end + 1) == Some(&open) {
+                nesting += 1;
+                end += 2;
+                continue;
+            }
+            if bytes[end] == close {
+                nesting -= 1;
+                if nesting == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        if end == bytes.len() {
+            return false;
+        }
+        let body = raw[cursor + 2..end].trim();
+        if body.find(char::is_whitespace).is_some() || contains_make_function(body) {
+            return true;
+        }
+        cursor = end + 1;
+    }
+    false
+}
+
+/// Evaluates all source-list arguments at the declaration line.
+///
+/// A conditional source value is always all-or-error: no unconditional subset
+/// can stand in for an unknown branch. An unrelated language lane using an
+/// unsupported expression may be reported and omitted when another lane is
+/// fully resolved, which preserves existing mixed-language targets without
+/// ever merging alternatives. [`MakeExprContext`] supplies the strict
+/// conditional-variable guard.
+fn evaluate_macro_sources(
+    args: &str,
+    legacy_vars: &HashMap<String, Vec<String>>,
+    context: &MakeExprContext<'_>,
+) -> std::result::Result<EvaluatedSources, String> {
+    let mut sources = EvaluatedSources::default();
+    let mut arguments = Vec::new();
+    for key in ["files", "cxxfiles", "objcfiles", "asmfiles"] {
+        let Some(raw) = macro_arg(args, key) else {
+            continue;
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        sources.declared = true;
+        arguments.push((key, raw));
+    }
+
+    let mut unresolved_lanes = Vec::new();
+    for (key, raw) in arguments {
+        let mut values = Vec::new();
+        let mut first_error = None;
+        for fragment in expand_source_fragments(&raw, context, 32) {
+            match evaluate_make_list(&fragment, context) {
+                Ok(fragment_values) => values.extend(fragment_values),
+                Err(error @ MakeExprError::UnsafeVariable { .. }) => {
+                    return Err(format!("{key}={raw} cannot be evaluated: {error}"));
+                }
+                Err(error) => {
+                    let old_values = if contains_make_function(&fragment) {
+                        Vec::new()
+                    } else {
+                        expand_file_list(&fragment, legacy_vars)
+                    };
+                    if old_values.is_empty() {
+                        sources.diagnostics.push(format!(
+                            "{key}={raw} omitted unresolved source fragment `{fragment}`: {error}"
+                        ));
+                    } else {
+                        sources.diagnostics.push(format!(
+                            "{key}={raw} kept the legacy subset of source fragment `{fragment}`: {error}"
+                        ));
+                        values.extend(old_values);
+                    }
+                    first_error.get_or_insert_with(|| {
+                        format!("{key}={raw} cannot evaluate source fragment `{fragment}`: {error}")
+                    });
+                }
+            }
+        }
+        if values.is_empty() {
+            if let Some(error) = first_error {
+                unresolved_lanes.push(error);
+            }
+        }
+        let lane = sources.lane_mut(key);
+        for value in values {
+            if value.is_empty() || value.contains(';') {
+                return Err(format!("{key}={raw} produced an invalid source `{value}`"));
+            }
+            if !lane.contains(&value) {
+                lane.push(value);
+            }
+        }
+    }
+    if sources.is_empty() {
+        if let Some(error) = unresolved_lanes.into_iter().next() {
+            return Err(error);
+        }
+    }
+    Ok(sources)
+}
+
+/// Resolves a single output name through the bounded Make evaluator.
+fn evaluate_name(raw: &str, context: &MakeExprContext<'_>) -> std::result::Result<String, String> {
+    let expanded = evaluate_make_expr(raw, context).map_err(|error| error.to_string())?;
+    let mut words = expanded.split_whitespace();
+    let Some(name) = words.next() else {
+        return Err("expression expanded to an empty name".to_owned());
+    };
+    if words.next().is_some() {
+        return Err(format!(
+            "expression expanded to more than one name: `{expanded}`"
+        ));
+    }
+    let name = sanitize_ident(name);
+    if name.is_empty() {
+        return Err("expression expanded to an empty name".to_owned());
+    }
+    Ok(name)
+}
+
+fn evaluate_output_directory(
+    args: &str,
+    context: &MakeExprContext<'_>,
+) -> std::result::Result<Option<String>, String> {
+    let Some(raw) = macro_arg(args, "targetdir") else {
+        return Ok(None);
+    };
+    let expanded = evaluate_make_expr(&raw, context)
+        .map_err(|error| format!("targetdir={raw} cannot be evaluated: {error}"))?;
+    let expanded = expanded.trim();
+    if expanded.is_empty() {
+        return Err(format!("targetdir={raw} expanded to an empty path"));
+    }
+    Ok(Some(expanded.to_owned()))
+}
+
+fn record_partial_source_lists(
+    output: &mut Vec<String>,
+    sources: &EvaluatedSources,
+    relative_dir: &Path,
+    invocation: &Invocation,
+    mmake: &str,
+) {
+    output.extend(sources.diagnostics.iter().map(|diagnostic| {
+        format!(
+            "{}:{}: %{} mmake={mmake} {diagnostic}",
+            relative_dir.display(),
+            invocation.line + 1,
+            invocation.name
+        )
+    }));
 }
 
 /// Lists the C sources in a directory, for the macros whose `files` default is
@@ -286,6 +583,48 @@ pub fn join_continuations(content: &str) -> String {
     CONTINUATION_RE.replace_all(content, " ").into_owned()
 }
 
+/// Concrete target values available while scanning Make conditionals.
+///
+/// Every field is optional on purpose.  An omitted value is not the same as an
+/// empty Make variable: the former means that the CMake configuration did not
+/// provide enough information to select a branch, while the latter can make an
+/// `ifeq ($(VAR),)` condition decidable.  Library callers that do not supply a
+/// context retain the conservative, target-agnostic parser behaviour.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TargetContext {
+    pub cpu: Option<String>,
+    pub platform: Option<String>,
+    pub family: Option<String>,
+    pub variant: Option<String>,
+    pub toolchain: Option<String>,
+    pub cpu32: Option<String>,
+    pub use_mmu: Option<String>,
+    pub float_abi: Option<String>,
+}
+
+impl TargetContext {
+    fn value(&self, name: &str) -> Option<String> {
+        match name {
+            "AROS_TARGET_CPU" | "CPU" => self.cpu.clone(),
+            // Historic MetaMake calls the machine ARCH.  Its
+            // AROS_TARGET_PLATFORM is instead the compound machine/CPU name.
+            "AROS_TARGET_ARCH" | "ARCH" => self.platform.clone(),
+            "AROS_TARGET_PLATFORM" => Some(format!(
+                "{}-{}",
+                self.platform.as_deref()?,
+                self.cpu.as_deref()?
+            )),
+            "AROS_TARGET_FAMILY" | "FAMILY" => self.family.clone(),
+            "AROS_TARGET_VARIANT" => self.variant.clone(),
+            "AROS_TOOLCHAIN" => self.toolchain.clone(),
+            "AROS_TARGET_CPU32" => self.cpu32.clone(),
+            "USE_MMU" => self.use_mmu.clone(),
+            "GCC_CONFIG_FLOAT_ABI" => self.float_abi.clone(),
+            _ => None,
+        }
+    }
+}
+
 /// Variable assignments in the order the file makes them.
 ///
 /// Make expands a declaration's arguments where the declaration stands.
@@ -309,6 +648,20 @@ pub struct VarScope {
     /// has to keep its slashes and its references, so path resolution reads
     /// this instead of the word list.
     raw: HashMap<String, Vec<(usize, String)>>,
+    /// Assignments made inside a Make conditional, by source line.
+    ///
+    /// The legacy list collector intentionally retains its historical
+    /// last-assignment behaviour because the icon collector evaluates
+    /// condition branches separately. Generic expression evaluation must be
+    /// stricter: using the last textual branch would silently merge or select
+    /// architecture-specific source lists without knowing the condition.
+    conditional_assignments: HashMap<String, Vec<usize>>,
+    /// Names introduced as file-local switches, including an assignment in a
+    /// branch proven false and explicitly commented-out `#NAME=value` feature
+    /// toggles. Once seen, absence of an active assignment has GNU Make's
+    /// ordinary empty value. Names never introduced by the file remain unknown
+    /// because they may come from an included configuration fragment.
+    local_names: HashSet<String>,
 }
 
 impl VarScope {
@@ -340,13 +693,16 @@ impl VarScope {
             .map(|(_, v)| v.clone())
     }
 
-    /// The most recent value of `name`, used to resolve a self-referential
-    /// assignment while the scan is still running.
-    fn latest(&self, name: &str) -> &[String] {
-        self.assignments
+    /// Whether `name` was assigned in a Make conditional before `line`.
+    ///
+    /// A caller without an evaluated condition context must reject such a
+    /// value rather than taking whichever branch happened to occur last in the
+    /// source file.
+    #[must_use]
+    pub fn conditionally_assigned_before(&self, name: &str, line: usize) -> bool {
+        self.conditional_assignments
             .get(name)
-            .and_then(|h| h.last())
-            .map_or(&[][..], |(_, v)| v.as_slice())
+            .is_some_and(|assignments| assignments.iter().any(|at| *at < line))
     }
 
     /// The most recent raw value of `name` while the assignment scan is in
@@ -362,9 +718,16 @@ impl VarScope {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AssignmentKind {
-    Set,
+    SimpleSet,
+    RecursiveSet,
     SetIfUnset,
     Append,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VariableFlavor {
+    Simple,
+    Recursive,
 }
 
 /// Splits a plain Make variable assignment without mistaking a rule for one.
@@ -375,10 +738,10 @@ enum AssignmentKind {
 fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
     let trimmed = line.trim();
     let (at, width, kind) = [
-        (":=", AssignmentKind::Set),
+        (":=", AssignmentKind::SimpleSet),
         ("+=", AssignmentKind::Append),
         ("?=", AssignmentKind::SetIfUnset),
-        ("=", AssignmentKind::Set),
+        ("=", AssignmentKind::RecursiveSet),
     ]
     .into_iter()
     .filter_map(|(op, kind)| trimmed.find(op).map(|at| (at, op.len(), kind)))
@@ -395,17 +758,532 @@ fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
     Some((name, trimmed[at + width..].trim(), kind))
 }
 
+/// Removes an unescaped GNU Make comment from one logical line.
+///
+/// A `#` starts a comment even when it is attached to the preceding word.
+/// Keeping it in an assignment made `FILES := a b #disabled` compile a bogus
+/// source named `#disabled`. An odd run of backslashes escapes the marker.
+fn strip_make_comment(line: &str) -> &str {
+    for (at, character) in line.char_indices() {
+        if character != '#' {
+            continue;
+        }
+        let escaped = line[..at]
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'\\')
+            .count()
+            % 2
+            == 1;
+        if !escaped {
+            return &line[..at];
+        }
+    }
+    line
+}
+
+/// Freezes local variable references in a simply-expanded (`:=`) assignment.
+///
+/// Global/configured variables remain as Make references for [`DirVars`] to
+/// render later. Function calls are retained too, but their nested local
+/// arguments are frozen now, which preserves the source-order semantics the
+/// bounded evaluator needs at the declaration line.
+fn expand_immediate_locals(raw: &str, scope: &VarScope, depth: usize) -> String {
+    if depth == 0 || !raw.contains('$') {
+        return raw.to_owned();
+    }
+
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    while cursor < raw.len() {
+        let Some(relative) = raw[cursor..].find('$') else {
+            output.push_str(&raw[cursor..]);
+            break;
+        };
+        let dollar = cursor + relative;
+        output.push_str(&raw[cursor..dollar]);
+        let Some(next) = raw.as_bytes().get(dollar + 1) else {
+            output.push('$');
+            break;
+        };
+        if *next == b'$' {
+            output.push('$');
+            cursor = dollar + 2;
+            continue;
+        }
+        let (open, close) = match *next {
+            b'(' => (b'(', b')'),
+            b'{' => (b'{', b'}'),
+            _ => {
+                output.push('$');
+                cursor = dollar + 1;
+                continue;
+            }
+        };
+
+        let mut nesting = 1usize;
+        let mut end = dollar + 2;
+        while end < raw.len() {
+            let byte = raw.as_bytes()[end];
+            if byte == b'$' && raw.as_bytes().get(end + 1) == Some(&open) {
+                nesting += 1;
+                end += 2;
+                continue;
+            }
+            if byte == close {
+                nesting -= 1;
+                if nesting == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        if end == raw.len() {
+            output.push_str(&raw[dollar..]);
+            break;
+        }
+
+        let body = &raw[dollar + 2..end];
+        let simple_name = (!body.is_empty()
+            && body.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '-'
+            }))
+        .then_some(body);
+        if let Some(value) = simple_name.and_then(|name| scope.latest_raw(name)) {
+            output.push_str(&expand_immediate_locals(value, scope, depth - 1));
+        } else {
+            output.push('$');
+            output.push(open as char);
+            output.push_str(&expand_immediate_locals(body, scope, depth - 1));
+            output.push(close as char);
+        }
+        cursor = end + 1;
+    }
+    output
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConditionalTruth {
+    False,
+    True,
+    Unknown,
+}
+
+impl ConditionalTruth {
+    fn not(self) -> Self {
+        match self {
+            Self::False => Self::True,
+            Self::True => Self::False,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConditionalFrame {
+    parent: ConditionalTruth,
+    matched: ConditionalTruth,
+    current: ConditionalTruth,
+}
+
+impl ConditionalFrame {
+    fn new(parent: ConditionalTruth, condition: ConditionalTruth) -> Self {
+        Self {
+            parent,
+            matched: condition,
+            current: parent.and(condition),
+        }
+    }
+
+    fn else_if(&mut self, condition: ConditionalTruth) {
+        self.current = self.parent.and(self.matched.not()).and(condition);
+        self.matched = self.matched.or(condition);
+    }
+
+    fn otherwise(&mut self) {
+        self.current = self.parent.and(self.matched.not());
+        self.matched = ConditionalTruth::True;
+    }
+}
+
+fn directive_tail<'a>(line: &'a str, word: &str) -> Option<&'a str> {
+    let tail = line.strip_prefix(word)?;
+    (tail.is_empty()
+        || tail
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace() || character == '('))
+    .then(|| tail.trim())
+}
+
+fn split_top_level_comma(raw: &str) -> Option<(&str, &str)> {
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut quote = None;
+    for (at, character) in raw.char_indices() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && brace_depth == 0 => {
+                return Some((&raw[..at], &raw[at + 1..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn take_condition_word(raw: &str) -> Option<(&str, &str)> {
+    let raw = raw.trim_start();
+    let first = raw.chars().next()?;
+    if matches!(first, '\'' | '"') {
+        let after_quote = &raw[first.len_utf8()..];
+        let end = after_quote.find(first)?;
+        let word = &raw[..end + 2];
+        return Some((word, &after_quote[end + 1..]));
+    }
+    let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+    Some((&raw[..end], &raw[end..]))
+}
+
+fn equality_operands(raw: &str) -> Option<(&str, &str)> {
+    let raw = raw.trim();
+    if raw.starts_with('(') && raw.ends_with(')') {
+        return split_top_level_comma(&raw[1..raw.len() - 1]);
+    }
+    let (left, rest) = take_condition_word(raw)?;
+    let (right, trailing) = take_condition_word(rest)?;
+    trailing.trim().is_empty().then_some((left, right))
+}
+
+fn unquote_condition_value(raw: &str) -> &str {
+    let raw = raw.trim();
+    if raw.len() >= 2 {
+        let bytes = raw.as_bytes();
+        if matches!(bytes[0], b'\'' | b'"') && bytes[0] == bytes[raw.len() - 1] {
+            return &raw[1..raw.len() - 1];
+        }
+    }
+    raw
+}
+
+fn condition_pattern_matches(pattern: &str, word: &str) -> bool {
+    let Some(percent) = pattern.find('%') else {
+        return pattern == word;
+    };
+    let prefix = &pattern[..percent];
+    let suffix = &pattern[percent + 1..];
+    word.len() >= prefix.len() + suffix.len() && word.starts_with(prefix) && word.ends_with(suffix)
+}
+
+fn expand_condition_function(
+    body: &str,
+    scope: &VarScope,
+    context: &TargetContext,
+    depth: usize,
+) -> Option<String> {
+    let split = body.find(char::is_whitespace)?;
+    let name = body[..split].trim();
+    let args = body[split..].trim();
+    match name {
+        "strip" => Some(
+            expand_condition_operand(args, scope, context, depth - 1)?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        "findstring" => {
+            let (needle, haystack) = split_top_level_comma(args)?;
+            let needle = expand_condition_operand(needle, scope, context, depth - 1)?;
+            let haystack = expand_condition_operand(haystack, scope, context, depth - 1)?;
+            Some(if haystack.contains(&needle) {
+                needle
+            } else {
+                String::new()
+            })
+        }
+        "filter" | "filter-out" => {
+            let (patterns, words) = split_top_level_comma(args)?;
+            let patterns = expand_condition_operand(patterns, scope, context, depth - 1)?;
+            let words = expand_condition_operand(words, scope, context, depth - 1)?;
+            let keep_matches = name == "filter";
+            Some(
+                words
+                    .split_whitespace()
+                    .filter(|word| {
+                        let matches = patterns
+                            .split_whitespace()
+                            .any(|pattern| condition_pattern_matches(pattern, word));
+                        matches == keep_matches
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn expand_condition_reference(
+    body: &str,
+    scope: &VarScope,
+    context: &TargetContext,
+    depth: usize,
+) -> Option<String> {
+    let body = body.trim();
+    if !body.is_empty()
+        && body.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+    {
+        if scope
+            .conditional_assignments
+            .get(body)
+            .is_some_and(|assignments| !assignments.is_empty())
+        {
+            return None;
+        }
+        if let Some(value) = scope.latest_raw(body) {
+            return expand_condition_operand(value, scope, context, depth - 1);
+        }
+        if let Some(value) = context.value(body) {
+            return Some(value);
+        }
+        return scope.local_names.contains(body).then(String::new);
+    }
+    expand_condition_function(body, scope, context, depth)
+}
+
+fn expand_condition_operand(
+    raw: &str,
+    scope: &VarScope,
+    context: &TargetContext,
+    depth: usize,
+) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    while cursor < raw.len() {
+        let Some(relative) = raw[cursor..].find('$') else {
+            output.push_str(&raw[cursor..]);
+            break;
+        };
+        let dollar = cursor + relative;
+        output.push_str(&raw[cursor..dollar]);
+        let next = *raw.as_bytes().get(dollar + 1)?;
+        if next == b'$' {
+            output.push('$');
+            cursor = dollar + 2;
+            continue;
+        }
+        let (open, close) = match next {
+            b'(' => (b'(', b')'),
+            b'{' => (b'{', b'}'),
+            _ => return None,
+        };
+        let mut nesting = 1usize;
+        let mut end = dollar + 2;
+        while end < raw.len() {
+            let byte = raw.as_bytes()[end];
+            if byte == b'$' && raw.as_bytes().get(end + 1) == Some(&open) {
+                nesting += 1;
+                end += 2;
+                continue;
+            }
+            if byte == close {
+                nesting -= 1;
+                if nesting == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        if end == raw.len() {
+            return None;
+        }
+        output.push_str(&expand_condition_reference(
+            &raw[dollar + 2..end],
+            scope,
+            context,
+            depth - 1,
+        )?);
+        cursor = end + 1;
+    }
+    Some(unquote_condition_value(output.trim()).to_owned())
+}
+
+fn evaluate_conditional(
+    directive: &str,
+    args: &str,
+    scope: &VarScope,
+    context: &TargetContext,
+) -> ConditionalTruth {
+    let value = match directive {
+        "ifeq" | "ifneq" => equality_operands(args).and_then(|(left, right)| {
+            Some(
+                expand_condition_operand(left, scope, context, MAX_DEPTH_FOR_IMMEDIATE_EXPANSION)?
+                    == expand_condition_operand(
+                        right,
+                        scope,
+                        context,
+                        MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
+                    )?,
+            )
+        }),
+        "ifdef" | "ifndef" => {
+            let name = args.trim();
+            let value = scope
+                .latest_raw(name)
+                .map(str::to_owned)
+                .or_else(|| context.value(name));
+            value.map(|value| !value.is_empty())
+        }
+        _ => None,
+    };
+    let Some(value) = value else {
+        return ConditionalTruth::Unknown;
+    };
+    let value = if matches!(directive, "ifneq" | "ifndef") {
+        !value
+    } else {
+        value
+    };
+    if value {
+        ConditionalTruth::True
+    } else {
+        ConditionalTruth::False
+    }
+}
+
 /// Reads every variable assignment from continuation-joined mmakefile text.
 #[must_use]
 pub fn collect_vars(joined: &str) -> VarScope {
+    collect_vars_impl(joined, None).0
+}
+
+/// Reads variable assignments while selecting every Make conditional that the
+/// concrete target context makes decidable.
+///
+/// Assignments in a false branch are discarded. Assignments in an unknown
+/// branch are also kept out of the value history, but are recorded as unsafe so
+/// expression evaluation reports the unresolved lane instead of silently
+/// treating it as empty or merging it with its alternative.
+#[must_use]
+pub fn collect_vars_with_context(joined: &str, context: &TargetContext) -> VarScope {
+    collect_vars_impl(joined, Some(context)).0
+}
+
+fn collect_vars_impl(
+    joined: &str,
+    context: Option<&TargetContext>,
+) -> (VarScope, Vec<ConditionalTruth>) {
     let mut scope = VarScope {
         assignments: HashMap::new(),
         raw: HashMap::new(),
+        conditional_assignments: HashMap::new(),
+        local_names: HashSet::new(),
     };
+    let mut conditional_depth = 0usize;
+    let mut conditional_stack: Vec<ConditionalFrame> = Vec::new();
+    let mut flavors: HashMap<String, VariableFlavor> = HashMap::new();
+    let mut line_states = Vec::with_capacity(joined.lines().count());
 
-    for (line_no, line) in joined.lines().enumerate() {
+    for (line_no, raw_line) in joined.lines().enumerate() {
+        let branch_state = context.map_or_else(
+            || {
+                if conditional_depth > 0 {
+                    ConditionalTruth::Unknown
+                } else {
+                    ConditionalTruth::True
+                }
+            },
+            |_| {
+                conditional_stack
+                    .last()
+                    .map_or(ConditionalTruth::True, |frame| frame.current)
+            },
+        );
+        line_states.push(branch_state);
+
+        if context.is_some() {
+            let commented = raw_line.trim_start().strip_prefix('#').map(str::trim_start);
+            if let Some((name, _, _)) = commented.and_then(variable_assignment) {
+                scope.local_names.insert(name.to_owned());
+            }
+        }
+        let line = strip_make_comment(raw_line);
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+
+        if let Some((directive, args)) = ["ifeq", "ifneq", "ifdef", "ifndef"]
+            .into_iter()
+            .find_map(|word| directive_tail(trimmed, word).map(|tail| (word, tail)))
+        {
+            if let Some(context) = context {
+                let parent = conditional_stack
+                    .last()
+                    .map_or(ConditionalTruth::True, |frame| frame.current);
+                let condition = evaluate_conditional(directive, args, &scope, context);
+                conditional_stack.push(ConditionalFrame::new(parent, condition));
+            } else {
+                conditional_depth += 1;
+            }
+            continue;
+        }
+        if trimmed == "endif" {
+            if context.is_some() {
+                conditional_stack.pop();
+            } else {
+                conditional_depth = conditional_depth.saturating_sub(1);
+            }
+            continue;
+        }
+        if trimmed == "else" || trimmed.starts_with("else ") {
+            if let Some(context) = context {
+                if let Some(frame) = conditional_stack.last_mut() {
+                    let tail = trimmed.strip_prefix("else").unwrap().trim();
+                    if tail.is_empty() {
+                        frame.otherwise();
+                    } else if let Some((directive, args)) = ["ifeq", "ifneq", "ifdef", "ifndef"]
+                        .into_iter()
+                        .find_map(|word| directive_tail(tail, word).map(|args| (word, args)))
+                    {
+                        let condition = evaluate_conditional(directive, args, &scope, context);
+                        frame.else_if(condition);
+                    } else {
+                        frame.else_if(ConditionalTruth::Unknown);
+                    }
+                }
+            }
             continue;
         }
 
@@ -416,19 +1294,33 @@ pub fn collect_vars(joined: &str) -> VarScope {
         let Some((var_name, value, kind)) = variable_assignment(line) else {
             continue;
         };
+        scope.local_names.insert(var_name.to_owned());
+
+        if branch_state == ConditionalTruth::Unknown {
+            scope
+                .conditional_assignments
+                .entry(var_name.to_owned())
+                .or_default()
+                .push(line_no);
+        }
+        if context.is_some() && branch_state != ConditionalTruth::True {
+            continue;
+        }
 
         if kind == AssignmentKind::SetIfUnset && scope.assignments.contains_key(var_name) {
             continue;
         }
 
-        // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
-        // held. Inserting the new list would discard it, and the surviving
-        // `$(FILES)` reference then resolves to itself: muimaster came out with
-        // 26 sources against the reference's ~94.
-        let self_ref = format!("$({var_name})");
-        let prior = scope.latest(var_name);
-        let expanded_rhs = if value.contains(&self_ref) && !prior.is_empty() {
-            value.replace(&self_ref, &prior.join(" "))
+        let flavor = match kind {
+            AssignmentKind::SimpleSet => VariableFlavor::Simple,
+            AssignmentKind::RecursiveSet | AssignmentKind::SetIfUnset => VariableFlavor::Recursive,
+            AssignmentKind::Append => flavors
+                .get(var_name)
+                .copied()
+                .unwrap_or(VariableFlavor::Recursive),
+        };
+        let expanded_rhs = if flavor == VariableFlavor::Simple {
+            expand_immediate_locals(value, &scope, MAX_DEPTH_FOR_IMMEDIATE_EXPANSION)
         } else {
             value.to_owned()
         };
@@ -460,9 +1352,10 @@ pub fn collect_vars(joined: &str) -> VarScope {
             .entry(var_name.to_owned())
             .or_default()
             .push((line_no, values));
+        flavors.insert(var_name.to_owned(), flavor);
     }
 
-    scope
+    (scope, line_states)
 }
 
 /// Whether a word from a Make list is usable as a list item.
@@ -518,6 +1411,58 @@ fn macro_invocations(joined: &str) -> Vec<Invocation> {
         });
     }
     out
+}
+
+fn is_concrete_build_invocation(name: &str) -> bool {
+    matches!(
+        name,
+        "build_module"
+            | "build_module_abi"
+            | "build_module_library"
+            | "build_prog"
+            | "build_progs"
+            | "build_linklib"
+            | "build_module_simple"
+    )
+}
+
+fn select_target_invocations(
+    joined: &str,
+    line_states: Option<&[ConditionalTruth]>,
+    relative_dir: &Path,
+    skipped: &mut Vec<String>,
+) -> Vec<Invocation> {
+    macro_invocations(joined)
+        .into_iter()
+        .filter_map(|invocation| {
+            if !is_concrete_build_invocation(&invocation.name) {
+                return Some(invocation);
+            }
+            let Some(states) = line_states else {
+                return Some(invocation);
+            };
+            match states
+                .get(invocation.line)
+                .copied()
+                .unwrap_or(ConditionalTruth::Unknown)
+            {
+                ConditionalTruth::True => Some(invocation),
+                ConditionalTruth::False => None,
+                ConditionalTruth::Unknown => {
+                    let mmake = macro_arg(&invocation.args, "mmake")
+                        .map_or_else(String::new, |name| format!(" mmake={name}"));
+                    skipped.push(format!(
+                        "{}:{}: %{}{} is guarded by an unresolved Make conditional",
+                        relative_dir.display(),
+                        invocation.line + 1,
+                        invocation.name,
+                        mmake
+                    ));
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Reads `key=value` or `key="value with spaces"` from an argument text.
@@ -757,6 +1702,25 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     parse_mmakefile_with_dirs(path, root, &dirs)
 }
 
+/// Parses one mmakefile for a concrete target configuration.
+///
+/// Unlike [`parse_mmakefile`], this form may select `ifeq`/`ifneq` branches
+/// whose operands are completely known from `target`. Unknown target settings
+/// remain unsafe and are reported rather than inferred.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn parse_mmakefile_with_context(
+    path: &Path,
+    root: &Path,
+    target: &TargetContext,
+) -> Result<ParsedMmakefile> {
+    let dirs = crate::dirs::DirVars::load(root);
+    parse_mmakefile_with_dirs_and_context(path, root, &dirs, target)
+}
+
 /// Parses one mmakefile with the shared directory-variable table.
 ///
 /// The command-line scanner calls this form so `config/make.cfg.in` is read
@@ -772,12 +1736,49 @@ pub fn parse_mmakefile_with_dirs(
     root: &Path,
     dirs: &crate::dirs::DirVars,
 ) -> Result<ParsedMmakefile> {
+    parse_mmakefile_impl(path, root, dirs, None)
+}
+
+/// Parses one mmakefile for a concrete target using a shared directory table.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn parse_mmakefile_with_dirs_and_context(
+    path: &Path,
+    root: &Path,
+    dirs: &crate::dirs::DirVars,
+    target: &TargetContext,
+) -> Result<ParsedMmakefile> {
+    parse_mmakefile_impl(path, root, dirs, Some(target))
+}
+
+fn parse_mmakefile_impl(
+    path: &Path,
+    root: &Path,
+    dirs: &crate::dirs::DirVars,
+    target: Option<&TargetContext>,
+) -> Result<ParsedMmakefile> {
     let content = read_source(path)?;
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let rel_dir = parent_dir
         .strip_prefix(root)
         .unwrap_or(parent_dir)
         .to_path_buf();
+
+    // Make evaluates ordinary build-macro arguments at their declaration
+    // line, while `%fetch` recipes retain references until recipe execution
+    // after the complete file has been read. Both use the same selected
+    // conditional scope but deliberately query it at different positions.
+    let joined = join_continuations(&content);
+    let (scope, conditional_line_states) = match target {
+        Some(target) => {
+            let (scope, states) = collect_vars_impl(&joined, Some(target));
+            (scope, Some(states))
+        }
+        None => (collect_vars(&joined), None),
+    };
     let mut targets = Vec::new();
     let mut meta_rules = Vec::new();
     let mut skipped_meta_rules = Vec::new();
@@ -800,7 +1801,7 @@ pub fn parse_mmakefile_with_dirs(
         d.defines = flag_set.defines.clone();
         d.compile_options = flag_set.compile_options.clone();
     }
-    let (fetches, skipped_fetches) = collect_fetches(&content, &rel_dir);
+    let (fetches, skipped_fetches) = collect_fetches_with_scope(&content, &rel_dir, &scope);
 
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
@@ -846,11 +1847,16 @@ pub fn parse_mmakefile_with_dirs(
     // the variable state is positional. Both scans read the same
     // continuation-joined text, which is what makes their line numbers
     // comparable.
-    let joined = join_continuations(&content);
-    let scope = collect_vars(&joined);
     let icon_scan = crate::icons::collect_icons_all(&joined, dirs, &rel_dir);
-    let invocations = macro_invocations(&joined);
     let mut skipped_programs: Vec<String> = Vec::new();
+    let invocations = select_target_invocations(
+        &joined,
+        conditional_line_states.as_deref(),
+        &rel_dir,
+        &mut skipped_programs,
+    );
+    let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
 
     // 1. Extract module definitions
@@ -870,6 +1876,7 @@ pub fn parse_mmakefile_with_dirs(
             continue;
         };
         let vars = scope.snapshot(inv.line);
+        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
         let mmake_name = sanitize_ident(&mmake_raw);
         let mod_name = sanitize_ident(&mod_raw);
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
@@ -938,9 +1945,27 @@ pub fn parse_mmakefile_with_dirs(
         // directory when none is given (make.tmpl:2802). This loop used to read
         // `files=` alone and silently yield nothing otherwise, which left 21
         // declarations with no sources at all and never reported it.
-        let (mut source_files, declared_any) = macro_sources(rest, &vars);
-        if source_files.is_empty() {
-            if declared_any {
+        let mut sources = match evaluate_macro_sources(rest, &vars, &expression_context) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        };
+        record_partial_source_lists(
+            &mut partial_source_lists,
+            &sources,
+            &rel_dir,
+            inv,
+            &mmake_raw,
+        );
+        if sources.is_empty() {
+            if sources.declared {
                 skipped_programs.push(format!(
                     "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
                     rel_dir.display(),
@@ -948,8 +1973,8 @@ pub fn parse_mmakefile_with_dirs(
                 ));
                 continue;
             }
-            source_files = wildcard_c_sources(parent_dir);
-            if source_files.is_empty() {
+            sources.c = wildcard_c_sources(parent_dir);
+            if sources.is_empty() {
                 skipped_programs.push(format!(
                     "{}: %{} mmake={mmake_raw} modname={mod_raw} declares no sources",
                     rel_dir.display(),
@@ -973,7 +1998,10 @@ pub fn parse_mmakefile_with_dirs(
             mmake_name,
             target_name: mod_name,
             module_type,
-            source_files,
+            source_files: sources.c,
+            cxx_source_files: sources.cxx,
+            objc_source_files: sources.objc,
+            asm_source_files: sources.asm,
             use_libs,
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
@@ -1014,6 +2042,7 @@ pub fn parse_mmakefile_with_dirs(
             continue;
         };
         let vars = scope.snapshot(inv.line);
+        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // progname is declared /A, so a declaration without one is malformed
@@ -1025,17 +2054,38 @@ pub fn parse_mmakefile_with_dirs(
             ));
             continue;
         };
-        let Some(prog_name) = resolve_name(&prog_raw, &vars) else {
-            skipped_programs.push(format!(
-                "{}: %build_prog mmake={mmake_raw} progname={prog_raw} is unresolved",
-                rel_dir.display()
-            ));
-            continue;
+        let prog_name = match evaluate_name(&prog_raw, &expression_context) {
+            Ok(name) => name,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} progname={prog_raw} is unresolved: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
         };
 
-        let (mut source_files, declared_any) = macro_sources(&inv.args, &vars);
-        if source_files.is_empty() {
-            if declared_any {
+        let mut sources = match evaluate_macro_sources(&inv.args, &vars, &expression_context) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} progname={prog_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
+        };
+        record_partial_source_lists(
+            &mut partial_source_lists,
+            &sources,
+            &rel_dir,
+            inv,
+            &mmake_raw,
+        );
+        if sources.is_empty() {
+            if sources.declared {
                 // A list was given but its Make variables are unresolved.
                 // Falling back to the program name here would compile the
                 // wrong file, so report instead.
@@ -1045,21 +2095,35 @@ pub fn parse_mmakefile_with_dirs(
                 ));
                 continue;
             }
-            source_files.push(prog_name.clone());
+            sources.c.push(prog_name.clone());
         }
 
         let use_libs =
             macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
+        let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
+            Ok(directory) => directory,
+            Err(reason) => {
+                unresolved_output_paths.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                None
+            }
+        };
 
         targets.push(TargetDefinition {
             mmake_name,
             target_name: prog_name,
             module_type: ModuleType::Program,
-            source_files,
+            source_files: sources.c,
+            cxx_source_files: sources.cxx,
+            objc_source_files: sources.objc,
+            asm_source_files: sources.asm,
             use_libs,
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
-            target_dir: None,
+            target_dir,
             link_libs: Vec::new(),
             variant_32bit: false,
             declared_mod_type: None,
@@ -1099,39 +2163,58 @@ pub fn parse_mmakefile_with_dirs(
             continue;
         };
         let vars = scope.snapshot(inv.line);
+        let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // %build_progs has no name of its own: each source file names its own
         // executable, so the mmake id carries the group.
         let target_name = match name_arg {
             None => mmake_name.clone(),
-            Some(key) => match macro_arg(&inv.args, key).and_then(|v| {
-                resolve_name(&v, &vars).or_else(|| {
+            Some(key) => {
+                let Some(raw) = macro_arg(&inv.args, key) else {
                     skipped_programs.push(format!(
-                        "{}: %{} mmake={mmake_raw} {key}={v} is unresolved",
+                        "{}: %{} mmake={mmake_raw} has no {key}",
                         rel_dir.display(),
                         inv.name
                     ));
-                    None
-                })
-            }) {
-                Some(v) => v,
-                None => {
-                    if macro_arg(&inv.args, key).is_none() {
+                    continue;
+                };
+                match evaluate_name(&raw, &expression_context) {
+                    Ok(name) => name,
+                    Err(reason) => {
                         skipped_programs.push(format!(
-                            "{}: %{} mmake={mmake_raw} has no {key}",
+                            "{}:{}: %{} mmake={mmake_raw} {key}={raw} is unresolved: {reason}",
                             rel_dir.display(),
+                            inv.line + 1,
                             inv.name
                         ));
+                        continue;
                     }
-                    continue;
                 }
-            },
+            }
         };
 
-        let (mut source_files, declared_any) = macro_sources(&inv.args, &vars);
-        if source_files.is_empty() {
-            if declared_any {
+        let mut sources = match evaluate_macro_sources(&inv.args, &vars, &expression_context) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        };
+        record_partial_source_lists(
+            &mut partial_source_lists,
+            &sources,
+            &rel_dir,
+            inv,
+            &mmake_raw,
+        );
+        if sources.is_empty() {
+            if sources.declared {
                 skipped_programs.push(format!(
                     "{}: %{} mmake={mmake_raw} has an unresolved file list",
                     rel_dir.display(),
@@ -1144,9 +2227,9 @@ pub fn parse_mmakefile_with_dirs(
             // declares files=/A, so a declaration without sources is
             // malformed.
             if matches!(module_type, ModuleType::SimpleModule) {
-                source_files = wildcard_c_sources(parent_dir);
+                sources.c = wildcard_c_sources(parent_dir);
             }
-            if source_files.is_empty() {
+            if sources.is_empty() {
                 skipped_programs.push(format!(
                     "{}: %{} mmake={mmake_raw} declares no sources",
                     rel_dir.display(),
@@ -1164,6 +2247,7 @@ pub fn parse_mmakefile_with_dirs(
         } else {
             None
         };
+        let is_program_group = matches!(module_type, ModuleType::ProgramGroup);
         let target_dir = if is_simple_module {
             match resolve_module_target_dir(
                 &inv.args,
@@ -1183,6 +2267,19 @@ pub fn parse_mmakefile_with_dirs(
                         inv.name
                     ));
                     continue;
+                }
+            }
+        } else if is_program_group {
+            match evaluate_output_directory(&inv.args, &expression_context) {
+                Ok(directory) => directory,
+                Err(reason) => {
+                    unresolved_output_paths.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    None
                 }
             }
         } else {
@@ -1220,7 +2317,10 @@ pub fn parse_mmakefile_with_dirs(
             mmake_name,
             target_name,
             module_type,
-            source_files,
+            source_files: sources.c,
+            cxx_source_files: sources.cxx,
+            objc_source_files: sources.objc,
+            asm_source_files: sources.asm,
             use_libs,
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
@@ -1314,6 +2414,8 @@ pub fn parse_mmakefile_with_dirs(
         skipped_make_opts,
         skipped_conditions,
         skipped_programs,
+        partial_source_lists,
+        unresolved_output_paths,
         packages,
         skipped_packages,
     })
@@ -1322,17 +2424,33 @@ pub fn parse_mmakefile_with_dirs(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_vars, join_continuations, join_mm_continuations, macro_arg, macro_invocations,
-        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
-        META_RULE_RE,
+        collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
+        join_continuations, join_mm_continuations, macro_arg, macro_invocations, render_meta_token,
+        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
     };
+    use crate::ast::ModuleType;
     use crate::dirs::DirVars;
     use aros_common::read_source;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use walkdir::WalkDir;
 
     fn root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    }
+
+    fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
+        TargetContext {
+            cpu: Some(cpu.to_owned()),
+            platform: Some(platform.to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some(if cpu == "x86_64" { "i386" } else { "" }.to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(float_abi.to_owned()),
+        }
     }
 
     fn dirs() -> DirVars {
@@ -1384,6 +2502,41 @@ mod tests {
         assert_eq!(macro_arg(&progs[0].args, "progname").unwrap(), "SysLog");
         assert_eq!(macro_arg(&progs[0].args, "files").unwrap(), "$(FILES)");
         assert_eq!(macro_arg(&progs[1].args, "progname").unwrap(), "Other");
+    }
+
+    #[test]
+    fn target_context_selects_build_invocations_and_reports_unknown_guards() {
+        let joined = join_continuations(
+            "ifneq ($(AROS_TARGET_CPU32),)\n\
+             %build_linklib mmake=linklibs-only32 libname=only32 files=only32\n\
+             else\n\
+             %build_linklib mmake=linklibs-native libname=native files=native\n\
+             endif\n\
+             ifeq ($(EXTERNAL_SWITCH),yes)\n\
+             %build_prog mmake=unknown progname=unknown files=unknown\n\
+             endif\n",
+        );
+
+        for (context, expected) in [
+            (target_context("x86_64", "pc", ""), "linklibs-only32"),
+            (target_context("arm", "raspi", "hard"), "linklibs-native"),
+        ] {
+            let (_, states) = collect_vars_impl(&joined, Some(&context));
+            let mut skipped = Vec::new();
+            let invocations = select_target_invocations(
+                &joined,
+                Some(&states),
+                Path::new("fixture"),
+                &mut skipped,
+            );
+            let names: Vec<String> = invocations
+                .iter()
+                .filter_map(|invocation| macro_arg(&invocation.args, "mmake"))
+                .collect();
+            assert_eq!(names, [expected]);
+            assert_eq!(skipped.len(), 1, "{skipped:#?}");
+            assert!(skipped[0].contains("mmake=unknown"), "{skipped:#?}");
+        }
     }
 
     #[test]
@@ -1455,9 +2608,155 @@ FILES := gdbstop
     }
 
     #[test]
+    fn conditional_assignments_are_visible_to_strict_expression_callers() {
+        let joined = join_continuations(
+            "FILES := common\n\
+             ifeq ($(ARCH),pc)\n\
+             FILES += pc-only\n\
+             else\n\
+             FILES += other-only\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&joined).remove(0);
+        let scope = collect_vars(&joined);
+
+        assert!(scope.conditionally_assigned_before("FILES", invocation.line));
+        // Preserve the existing raw view for collectors that partition and
+        // evaluate Make branches themselves.
+        assert_eq!(
+            scope.raw_at("FILES", invocation.line).as_deref(),
+            Some("common pc-only other-only")
+        );
+        assert!(!scope.conditionally_assigned_before("UNRELATED", invocation.line));
+    }
+
+    #[test]
+    fn target_context_selects_one_conditional_branch_without_merging() {
+        let joined = join_continuations(
+            "FILES := common\n\
+             ifeq ($(AROS_TARGET_CPU),x86_64)\n\
+             FILES += x86-only\n\
+             else ifeq ($(AROS_TARGET_CPU),aarch64)\n\
+             FILES += arm64-only\n\
+             else\n\
+             FILES += other-only\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&joined).remove(0);
+
+        let x86 = collect_vars_with_context(&joined, &target_context("x86_64", "pc", ""));
+        assert_eq!(
+            x86.raw_at("FILES", invocation.line).as_deref(),
+            Some("common x86-only")
+        );
+        assert!(!x86.conditionally_assigned_before("FILES", invocation.line));
+
+        let aarch64 = collect_vars_with_context(&joined, &target_context("aarch64", "raspi", ""));
+        assert_eq!(
+            aarch64.raw_at("FILES", invocation.line).as_deref(),
+            Some("common arm64-only")
+        );
+        assert!(!aarch64.conditionally_assigned_before("FILES", invocation.line));
+    }
+
+    #[test]
+    fn unknown_target_condition_is_unsafe_and_never_merged() {
+        let joined = join_continuations(
+            "FILES := common\n\
+             ifeq ($(UNCONFIGURED_SWITCH),yes)\n\
+             FILES += enabled\n\
+             else\n\
+             FILES += disabled\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&joined).remove(0);
+        let scope = collect_vars_with_context(&joined, &target_context("x86_64", "pc", ""));
+        assert_eq!(
+            scope.raw_at("FILES", invocation.line).as_deref(),
+            Some("common")
+        );
+        assert!(scope.conditionally_assigned_before("FILES", invocation.line));
+    }
+
+    #[test]
+    fn a_seen_local_switch_has_make_empty_value_but_an_external_name_stays_unknown() {
+        let joined = join_continuations(
+            "FILES := common\n\
+             #LOCAL_DISABLED=yes\n\
+             ifeq ($(AROS_TARGET_CPU),x86_64)\n\
+             LOCAL_CPU_FEATURE=yes\n\
+             endif\n\
+             ifeq ($(LOCAL_DISABLED),yes)\n\
+             FILES += disabled-comment-option\n\
+             endif\n\
+             ifeq ($(LOCAL_CPU_FEATURE),yes)\n\
+             FILES += cpu-feature\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&joined).remove(0);
+        let arm = collect_vars_with_context(&joined, &target_context("arm", "raspi", "hard"));
+        assert_eq!(
+            arm.raw_at("FILES", invocation.line).as_deref(),
+            Some("common")
+        );
+        assert!(!arm.conditionally_assigned_before("FILES", invocation.line));
+
+        let external = join_continuations(
+            "FILES := common\n\
+             ifeq ($(EXTERNAL_CONFIG),yes)\n\
+             FILES += configured\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&external).remove(0);
+        let arm = collect_vars_with_context(&external, &target_context("arm", "raspi", "hard"));
+        assert!(arm.conditionally_assigned_before("FILES", invocation.line));
+    }
+
+    #[test]
+    fn target_context_evaluates_local_constants_and_make_filters() {
+        let joined = join_continuations(
+            "DEBUG_ACPI := no\n\
+             FILES := common\n\
+             ifeq ($(DEBUG_ACPI),yes)\n\
+             FILES += debug\n\
+             else\n\
+             FILES += release\n\
+             endif\n\
+             ifneq (,$(filter arm aarch64,$(AROS_TARGET_CPU)))\n\
+             FILES += arm-family\n\
+             endif\n\
+             %build_prog mmake=x progname=x files=$(FILES)\n",
+        );
+        let invocation = macro_invocations(&joined).remove(0);
+        let scope = collect_vars_with_context(&joined, &target_context("aarch64", "raspi", ""));
+        assert_eq!(
+            scope.raw_at("FILES", invocation.line).as_deref(),
+            Some("common release arm-family")
+        );
+        assert!(!scope.conditionally_assigned_before("FILES", invocation.line));
+    }
+
+    #[test]
     fn a_conditional_assignment_does_not_overwrite_an_existing_value() {
         let scope = collect_vars("A := first\nA ?= second\n%build_prog mmake=x progname=X\n");
         assert_eq!(scope.raw_at("A", usize::MAX).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn an_assignment_comment_is_not_a_list_item() {
+        let scope = collect_vars(
+            "FILES := SerialClass SerialUnitClass #unix_funcs\n\
+             %build_module mmake=x modname=x files=$(FILES)\n",
+        );
+        assert_eq!(
+            scope.raw_at("FILES", usize::MAX).as_deref(),
+            Some("SerialClass SerialUnitClass")
+        );
     }
 
     #[test]
@@ -1581,6 +2880,462 @@ FILES := gdbstop
     }
 
     #[test]
+    fn strict_expression_fallback_keeps_language_lanes_and_rejects_conditions() {
+        let root = root();
+        let dirs = dirs();
+        let joined = join_continuations(
+            "PORTROOT := $(PORTSDIR)/fixture\n\
+             CFILES := one two\n\
+             CXXFILES := three four\n\
+             %build_linklib mmake=ok libname=ok \\\n+                 files=\"$(addprefix $(PORTROOT)/,$(CFILES))\" \\\n+                 cxxfiles=\"$(addprefix $(PORTROOT)/,$(CXXFILES))\"\n",
+        );
+        let scope = collect_vars(&joined);
+        let invocation = macro_invocations(&joined).remove(0);
+        let legacy = scope.snapshot(invocation.line);
+        let context =
+            MakeExprContext::new(&scope, &dirs, invocation.line, &root, Path::new("fixture"));
+        let sources = evaluate_macro_sources(&invocation.args, &legacy, &context).unwrap();
+        assert_eq!(
+            sources.c,
+            [
+                "${AROS_PORTS_DIR}/fixture/one",
+                "${AROS_PORTS_DIR}/fixture/two"
+            ]
+        );
+        assert_eq!(
+            sources.cxx,
+            [
+                "${AROS_PORTS_DIR}/fixture/three",
+                "${AROS_PORTS_DIR}/fixture/four"
+            ]
+        );
+
+        let conditional = join_continuations(
+            "FILES := common\n\
+             ifeq ($(ARCH),pc)\n\
+             FILES += pc-only\n\
+             endif\n\
+             %build_linklib mmake=unsafe libname=unsafe \\\n+                 files=\"$(addprefix source/,$(FILES))\"\n",
+        );
+        let scope = collect_vars(&conditional);
+        let invocation = macro_invocations(&conditional).remove(0);
+        let legacy = scope.snapshot(invocation.line);
+        let context =
+            MakeExprContext::new(&scope, &dirs, invocation.line, &root, Path::new("fixture"));
+        let error = evaluate_macro_sources(&invocation.args, &legacy, &context).unwrap_err();
+        assert!(error.contains("unevaluated Make conditional"), "{error}");
+
+        let partial = join_continuations(
+            "FILES := common\n\
+             ifeq ($(ARCH),pc)\n\
+             FILES += pc-only\n\
+             else\n\
+             FILES += arm-only\n\
+             endif\n\
+             %build_linklib mmake=legacy libname=legacy \\\n+                 files=$(FILES) cxxfiles=$(UNKNOWN_CXX)\n",
+        );
+        let scope = collect_vars(&partial);
+        let invocation = macro_invocations(&partial).remove(0);
+        let legacy = scope.snapshot(invocation.line);
+        let context =
+            MakeExprContext::new(&scope, &dirs, invocation.line, &root, Path::new("fixture"));
+        let error = evaluate_macro_sources(&invocation.args, &legacy, &context).unwrap_err();
+        assert!(error.contains("unevaluated Make conditional"), "{error}");
+
+        let mixed = join_continuations(
+            "FILES := common\n\
+             %build_linklib mmake=legacy libname=legacy \\\n+                 files=$(FILES) cxxfiles=$(UNKNOWN_CXX)\n",
+        );
+        let scope = collect_vars(&mixed);
+        let invocation = macro_invocations(&mixed).remove(0);
+        let legacy = scope.snapshot(invocation.line);
+        let context =
+            MakeExprContext::new(&scope, &dirs, invocation.line, &root, Path::new("fixture"));
+        let sources = evaluate_macro_sources(&invocation.args, &legacy, &context).unwrap();
+        assert_eq!(sources.c, ["common"]);
+        assert!(sources.cxx.is_empty());
+        assert_eq!(sources.diagnostics.len(), 1, "{:#?}", sources.diagnostics);
+        assert!(sources.diagnostics[0].contains("UNKNOWN_CXX"));
+    }
+
+    #[test]
+    fn freetype_keeps_independent_prefixed_source_fragments() {
+        let root = root();
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/freetype2/mmakefile.src"),
+            &root,
+            &dirs(),
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+        let target = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "workbench-libs-freetype-linklib")
+            .expect("the independently resolvable FT2 source block must retain the target");
+        assert!(!target.source_files.is_empty());
+        assert!(target
+            .source_files
+            .iter()
+            .all(|source| source.starts_with("${AROS_PORTS_DIR}/freetype2/freetype-2.14.3/src/")));
+        assert!(target
+            .source_files
+            .iter()
+            .any(|source| source.ends_with("/gzip/ftgzip")));
+        assert!(!target
+            .source_files
+            .iter()
+            .any(|source| source == "gzip/ftgzip"));
+        assert!(parsed.partial_source_lists.iter().any(|diagnostic| {
+            diagnostic.contains("workbench-libs-freetype-linklib")
+                && diagnostic.contains("omitted unresolved source fragment")
+        }));
+    }
+
+    #[test]
+    fn real_cpu32_build_invocations_are_absent_on_arm_and_present_on_x86() {
+        let root = root();
+        let dirs = dirs();
+        for (path, mmake) in [
+            ("compiler/alib/mmakefile.src", "linklibs-amiga32"),
+            (
+                "compiler/arossupport/mmakefile.src",
+                "linklibs-arossupport32",
+            ),
+            ("compiler/autoinit/mmakefile.src", "linklibs-autoinit32"),
+        ] {
+            let arm = super::parse_mmakefile_with_dirs_and_context(
+                &root.join(path),
+                &root,
+                &dirs,
+                &target_context("arm", "raspi", "hard"),
+            )
+            .unwrap();
+            assert!(
+                arm.targets.iter().all(|target| target.mmake_name != mmake),
+                "{mmake} leaked into ARM"
+            );
+
+            let x86 = super::parse_mmakefile_with_dirs_and_context(
+                &root.join(path),
+                &root,
+                &dirs,
+                &target_context("x86_64", "pc", ""),
+            )
+            .unwrap();
+            assert!(
+                x86.targets.iter().any(|target| target.mmake_name == mmake),
+                "{mmake} was lost on x86_64"
+            );
+        }
+    }
+
+    #[test]
+    fn real_tree_e1_resolves_exactly_48_targets_without_merging_cxx_sources() {
+        let root = root();
+        let dirs = dirs();
+        let files = [
+            "developer/debug/test/freetype/mmakefile.src",
+            "external/bz2/mmakefile.src",
+            "tools/mkamikeymap/mmakefile.src",
+            "workbench/classes/datatypes/heic/mmakefile.src",
+            "workbench/classes/datatypes/jpegxl/mmakefile.src",
+            "workbench/classes/datatypes/webp/mmakefile.src",
+            "workbench/libs/codesets/mmakefile.src",
+            "workbench/libs/expat/mmakefile.src",
+            "workbench/libs/jpeg/mmakefile.src",
+            "workbench/libs/lzma/mmakefile.src",
+            "workbench/libs/utf8proc/mmakefile.src",
+        ];
+        let expected: BTreeSet<&str> = "
+            test-freetype-lib-graph test-freetype-lib-common test-freetype-lib-ftcommon
+            test-freetype-ftstring test-freetype-ftstring-static test-freetype-ftview
+            test-freetype-ftview-static external-bz2-lib linklibs-bz2-nostdio
+            external-bz2-bzip2-bin external-bz2-bzip2recover-bin tools-mkkeymap
+            tools-mkamikeymap datatypes-heic-linklibs-de265 datatypes-heic-linklibs-heif
+            datatypes-jpegxl-linklibs-brotli datatypes-jpegxl-linklibs-hwy
+            datatypes-jpegxl-linklibs-jxl datatypes-webp-linklibs-webpdecode
+            datatypes-webp-linklibs-webpencode datatypes-webp-linklibs-webputils
+            workbench-libs-codesets-library linklibs-codesets libcodesets-test-b64d
+            libcodesets-test-b64e libcodesets-test-detectcodeset
+            libcodesets-test-utf8tostrhook libcodesets-test-demo1 libcodesets-test-convert
+            libcodesets-test-autoopen workbench-libs-expat-lib workbench-libs-expat-examples
+            workbench-libs-jpeg workbench-libs-lzma-library linklibs-lzma
+            workbench-libs-utf8proc-library linklibs-utf8proc
+            workbench-libs-utf8proc-tests-case workbench-libs-utf8proc-tests-charwidth
+            workbench-libs-utf8proc-tests-custom workbench-libs-utf8proc-tests-grapheme
+            workbench-libs-utf8proc-tests-iscase workbench-libs-utf8proc-tests-iterate
+            workbench-libs-utf8proc-tests-maxdecomposition workbench-libs-utf8proc-tests-misc
+            workbench-libs-utf8proc-tests-norm workbench-libs-utf8proc-tests-printproperty
+            workbench-libs-utf8proc-tests-valid
+        "
+        .split_whitespace()
+        .collect();
+        assert_eq!(expected.len(), 48);
+
+        let mut targets = BTreeMap::new();
+        for file in files {
+            let parsed = super::parse_mmakefile_with_dirs(&root.join(file), &root, &dirs).unwrap();
+            for target in parsed.targets {
+                if expected.contains(target.mmake_name.as_str()) {
+                    targets.insert(target.mmake_name.clone(), target);
+                }
+            }
+        }
+        assert_eq!(
+            targets.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            expected
+        );
+
+        let cxx_targets: BTreeSet<&str> = targets
+            .iter()
+            .filter(|(_, target)| !target.cxx_source_files.is_empty())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            cxx_targets,
+            BTreeSet::from([
+                "datatypes-heic-linklibs-de265",
+                "datatypes-heic-linklibs-heif",
+                "datatypes-jpegxl-linklibs-hwy",
+                "datatypes-jpegxl-linklibs-jxl",
+            ])
+        );
+        assert_eq!(
+            targets["datatypes-heic-linklibs-de265"]
+                .cxx_source_files
+                .len(),
+            34
+        );
+        assert_eq!(
+            targets["datatypes-heic-linklibs-heif"]
+                .cxx_source_files
+                .len(),
+            119
+        );
+        assert_eq!(
+            targets["datatypes-jpegxl-linklibs-hwy"]
+                .cxx_source_files
+                .len(),
+            7
+        );
+        assert_eq!(
+            targets["datatypes-jpegxl-linklibs-jxl"]
+                .cxx_source_files
+                .len(),
+            76
+        );
+
+        let port_targets = targets
+            .values()
+            .filter(|target| {
+                target
+                    .source_files
+                    .iter()
+                    .chain(&target.cxx_source_files)
+                    .any(|source| source.starts_with("${AROS_PORTS_DIR}/"))
+            })
+            .count();
+        assert_eq!(port_targets, 46);
+        assert!(targets.values().all(|target| target
+            .source_files
+            .iter()
+            .chain(&target.cxx_source_files)
+            .all(|source| !source.contains("/Volumes/Dev/"))));
+    }
+
+    #[test]
+    fn concrete_profiles_keep_core_conditional_targets_and_select_png_sources() {
+        let root = root();
+        let dirs = dirs();
+        let files = [
+            "arch/all-hosted/filesys/emul_handler/mmakefile.src",
+            "arch/all-native/acpica/mmakefile.src",
+            "arch/all-unix/hidd/unixio/mmakefile.src",
+            "arch/arm-all/arm-aeabi/mmakefile.src",
+            "rom/kernel/mmakefile.src",
+            "workbench/libs/png/mmakefile.src",
+        ];
+        let expected: BTreeSet<&str> = BTreeSet::from([
+            "kernel-fs-emul",
+            "kernel-acpica-sharedlib",
+            "kernel-unixio",
+            "linklibs-aeabi",
+            "kernel-kernel",
+            "workbench-libs-png",
+            "linklibs-png-nostdio",
+        ]);
+
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let target = target_context(cpu, platform, float_abi);
+            let mut parsed_targets = BTreeMap::new();
+            let mut skipped = Vec::new();
+            for file in files {
+                let parsed = super::parse_mmakefile_with_dirs_and_context(
+                    &root.join(file),
+                    &root,
+                    &dirs,
+                    &target,
+                )
+                .unwrap();
+                skipped.extend(parsed.skipped_programs);
+                for parsed_target in parsed.targets {
+                    if expected.contains(parsed_target.mmake_name.as_str()) {
+                        parsed_targets.insert(parsed_target.mmake_name.clone(), parsed_target);
+                    }
+                }
+            }
+            assert_eq!(
+                parsed_targets
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                expected,
+                "{cpu}-{platform}: {skipped:#?}"
+            );
+
+            let png = &parsed_targets["workbench-libs-png"].source_files;
+            assert_eq!(
+                png.iter().any(|source| source.contains("intel/")),
+                cpu == "x86_64",
+                "{cpu}-{platform} selected the wrong Intel PNG branch"
+            );
+            assert_eq!(
+                png.iter().any(|source| source.contains("arm/")),
+                cpu == "aarch64",
+                "{cpu}-{platform} selected the wrong Arm PNG branch"
+            );
+            assert!(parsed_targets["kernel-kernel"]
+                .source_files
+                .iter()
+                .any(|source| source == "kernel_mm"));
+        }
+
+        let arm = target_context("arm", "raspi", "hard");
+        let aeabi = super::parse_mmakefile_with_dirs_and_context(
+            &root.join("arch/arm-all/arm-aeabi/mmakefile.src"),
+            &root,
+            &dirs,
+            &arm,
+        )
+        .unwrap();
+        let aeabi = aeabi
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "linklibs-aeabi")
+            .unwrap();
+        assert!(aeabi.source_files.iter().any(|source| source == "i2d"));
+        assert!(!aeabi
+            .source_files
+            .iter()
+            .any(|source| source == "softfloat"));
+
+        let kernel_file = root.join("rom/kernel/mmakefile.src");
+        let mut no_mmu = target_context("x86_64", "pc", "");
+        no_mmu.use_mmu = Some("0".to_owned());
+        let kernel =
+            super::parse_mmakefile_with_dirs_and_context(&kernel_file, &root, &dirs, &no_mmu)
+                .unwrap();
+        let kernel = kernel
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "kernel-kernel")
+            .unwrap();
+        assert!(kernel
+            .source_files
+            .iter()
+            .all(|source| source != "kernel_mm"));
+
+        let mut unknown_mmu = target_context("x86_64", "pc", "");
+        unknown_mmu.use_mmu = None;
+        let kernel =
+            super::parse_mmakefile_with_dirs_and_context(&kernel_file, &root, &dirs, &unknown_mmu)
+                .unwrap();
+        assert!(kernel
+            .targets
+            .iter()
+            .all(|target| target.mmake_name != "kernel-kernel"));
+        assert!(kernel
+            .skipped_programs
+            .iter()
+            .any(|diagnostic| diagnostic.contains("unevaluated Make conditional")));
+    }
+
+    #[test]
+    fn concrete_profiles_keep_webp_dsp_targets_and_select_only_x86_sse2() {
+        let root = root();
+        let dirs = dirs();
+        let file = root.join("workbench/classes/datatypes/webp/mmakefile.src");
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &file,
+                &root,
+                &dirs,
+                &target_context(cpu, platform, float_abi),
+            )
+            .unwrap();
+            let targets: BTreeMap<_, _> = parsed
+                .targets
+                .iter()
+                .map(|target| (target.mmake_name.as_str(), target))
+                .collect();
+            let sharpyuv = targets
+                .get("datatypes-webp-linklibs-sharpyuv")
+                .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
+            let webpdsp = targets
+                .get("datatypes-webp-linklibs-webpdsp")
+                .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
+            let sources: Vec<_> = sharpyuv
+                .source_files
+                .iter()
+                .chain(&webpdsp.source_files)
+                .collect();
+            assert_eq!(
+                sources.iter().any(|source| source.contains("_sse2")),
+                cpu == "x86_64",
+                "{cpu}-{platform} selected the wrong WebP SSE2 branch"
+            );
+            assert!(
+                sources.iter().all(|source| !source.contains("_sse41")),
+                "{cpu}-{platform} unexpectedly selected disabled WebP SSE4.1"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_mkamikeymap_programs_keep_distinct_output_directories() {
+        let root = root();
+        let parsed = super::parse_mmakefile_with_dirs(
+            &root.join("tools/mkamikeymap/mmakefile.src"),
+            &root,
+            &dirs(),
+        )
+        .unwrap();
+        let outputs: BTreeMap<_, _> = parsed
+            .targets
+            .iter()
+            .map(|target| (target.mmake_name.as_str(), target.target_dir.as_deref()))
+            .collect();
+
+        assert_eq!(
+            outputs["tools-mkkeymap"],
+            Some("${AROS_BUILD_DIR}/hosttools/")
+        );
+        assert_eq!(
+            outputs["tools-mkamikeymap"],
+            Some("${AROS_BUILD_DIR}/SYS/Extras/Developer/Build")
+        );
+    }
+
+    #[test]
     fn module_directory_expansion_is_positional_and_reports_unknowns() {
         let joined = join_continuations(
             "MODDIR := Devs/First\n\
@@ -1696,6 +3451,7 @@ FILES := gdbstop
     fn real_tree_module_output_metadata_has_expected_coverage() {
         let root = root();
         let dirs = dirs();
+        let target = target_context("x86_64", "pc", "");
         let mut install_dirs = Vec::new();
         let mut suffixes = Vec::new();
         let mut output_errors = Vec::new();
@@ -1723,8 +3479,16 @@ FILES := gdbstop
             {
                 continue;
             }
-            let parsed = super::parse_mmakefile_with_dirs(entry.path(), &root, &dirs).unwrap();
+            let parsed =
+                super::parse_mmakefile_with_dirs_and_context(entry.path(), &root, &dirs, &target)
+                    .unwrap();
             install_dirs.extend(parsed.targets.iter().filter_map(|target| {
+                if matches!(
+                    target.module_type,
+                    ModuleType::Program | ModuleType::ProgramGroup
+                ) {
+                    return None;
+                }
                 target
                     .target_dir
                     .as_ref()

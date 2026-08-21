@@ -128,6 +128,67 @@ impl DependencyGraph {
         }
     }
 
+    /// Adds direct fetch prerequisites for concrete targets compiling port
+    /// sources and returns port sources for which no `%fetch` owner exists.
+    ///
+    /// A sibling target's dependency is insufficient: Ninja may build the
+    /// consumer directly, before the archive has been unpacked. Ownership is
+    /// structural and deliberately limited to real declarations. When fetch
+    /// destinations overlap, the longest path-component prefix wins.
+    pub fn resolve_port_source_fetches(&mut self) -> Vec<String> {
+        const PORTS_ROOT: &str = "${AROS_PORTS_DIR}";
+
+        let mut owners: Vec<&FetchDecl> = self
+            .fetches
+            .iter()
+            .filter(|fetch| {
+                let destination = fetch.destination.trim_end_matches('/');
+                destination == PORTS_ROOT || destination.starts_with("${AROS_PORTS_DIR}/")
+            })
+            .collect();
+        owners.sort_by(|left, right| {
+            right
+                .destination
+                .trim_end_matches('/')
+                .len()
+                .cmp(&left.destination.trim_end_matches('/').len())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let mut edges = BTreeSet::new();
+        let mut unowned = BTreeSet::new();
+        for target in self.targets.values() {
+            for source in target
+                .source_files
+                .iter()
+                .chain(&target.cxx_source_files)
+                .chain(&target.objc_source_files)
+                .chain(&target.asm_source_files)
+            {
+                if source != PORTS_ROOT && !source.starts_with("${AROS_PORTS_DIR}/") {
+                    continue;
+                }
+                let owner = owners.iter().copied().find(|fetch| {
+                    let destination = fetch.destination.trim_end_matches('/');
+                    source == destination
+                        || source
+                            .strip_prefix(destination)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                });
+                if let Some(owner) = owner {
+                    edges.insert((target.mmake_name.clone(), owner.name.clone()));
+                } else {
+                    unowned.insert(format!("{}|{source}", target.mmake_name));
+                }
+            }
+        }
+
+        for (target, fetch) in edges {
+            self.meta_targets.entry(target).or_default().insert(fetch);
+        }
+        unowned.into_iter().collect()
+    }
+
     pub fn add_arch_sources(&mut self, decls: Vec<ArchSourceDecl>) {
         for d in decls {
             self.arch_sources
@@ -635,7 +696,7 @@ mod tests {
     use crate::ast::MetaTargetRule;
     use crate::dirs::DirVars;
     use crate::packages::{PackageDecl, ResolvedPackageMember};
-    use crate::parse_mmakefile_with_dirs;
+    use crate::{parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context, TargetContext};
     use std::collections::HashSet;
     use std::path::Path;
     use walkdir::WalkDir;
@@ -719,6 +780,72 @@ mod tests {
         assert_eq!(
             graph.meta_targets["test"],
             std::iter::once("test-leaf".to_owned()).collect()
+        );
+    }
+
+    #[test]
+    fn port_sources_depend_directly_on_the_longest_fetch_destination_owner() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let target = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let parsed = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/png/mmakefile.src"),
+            &root,
+            &dirs,
+            &target,
+        )
+        .unwrap();
+
+        let mut graph = DependencyGraph::new();
+        for target in parsed.targets.clone() {
+            graph.add_target(target);
+        }
+        graph.add_fetches(parsed.fetches.clone());
+        assert!(graph.resolve_port_source_fetches().is_empty());
+        assert!(graph.meta_targets["workbench-libs-png"].contains("libpng-fetch"));
+        assert!(graph.meta_targets["linklibs-png-nostdio"].contains("libpng-fetch"));
+
+        let mut consumer = parsed
+            .targets
+            .into_iter()
+            .find(|target| target.mmake_name == "workbench-libs-png")
+            .unwrap();
+        consumer.mmake_name = "synthetic-consumer".to_owned();
+        consumer.source_files = vec![
+            "${AROS_PORTS_DIR}/libpng/version/source".to_owned(),
+            "${AROS_PORTS_DIR}/ownerless/source".to_owned(),
+        ];
+        consumer.cxx_source_files.clear();
+        consumer.objc_source_files.clear();
+        consumer.asm_source_files.clear();
+
+        let template = parsed.fetches.into_iter().next().unwrap();
+        let mut broad = template.clone();
+        broad.name = "libpng-broad-fetch".to_owned();
+        broad.destination = "${AROS_PORTS_DIR}/libpng".to_owned();
+        let mut narrow = template;
+        narrow.name = "libpng-narrow-fetch".to_owned();
+        narrow.destination = "${AROS_PORTS_DIR}/libpng/version".to_owned();
+
+        let mut graph = DependencyGraph::new();
+        graph.add_target(consumer);
+        graph.add_fetches(vec![broad, narrow]);
+        assert_eq!(
+            graph.resolve_port_source_fetches(),
+            ["synthetic-consumer|${AROS_PORTS_DIR}/ownerless/source"]
+        );
+        assert_eq!(
+            graph.meta_targets["synthetic-consumer"],
+            std::iter::once("libpng-narrow-fetch".to_owned()).collect()
         );
     }
 
@@ -885,6 +1012,16 @@ mod tests {
     fn real_tree_packages_resolve_to_exact_runtime_files() {
         let root = root();
         let dirs = DirVars::load(&root);
+        let target = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
         let skip_dirs = ["build", "target", ".git"];
         let mut files: Vec<_> = WalkDir::new(&root)
             .into_iter()
@@ -903,7 +1040,8 @@ mod tests {
 
         let mut graph = DependencyGraph::new();
         for file in files {
-            let parsed = parse_mmakefile_with_dirs(&file, &root, &dirs).unwrap();
+            let parsed =
+                parse_mmakefile_with_dirs_and_context(&file, &root, &dirs, &target).unwrap();
             for target in parsed.targets {
                 graph.add_target(target);
             }

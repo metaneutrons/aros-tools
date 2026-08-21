@@ -8,6 +8,7 @@ pub mod generator;
 pub mod graph;
 pub mod icons;
 pub mod includes;
+pub mod make_expr;
 pub mod make_opts;
 pub mod packages;
 pub mod parser;
@@ -21,5 +22,12 @@ pub use generator::generate_cmake;
 pub use graph::DependencyGraph;
 pub use icons::{IconSet, IconTarget};
 pub use includes::{ArchIncludeDecl, IncludeSet};
+pub use make_expr::{
+    evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError, MakeVariableGuard,
+    MakeVariableLookup,
+};
 pub use make_opts::MakeOptsFile;
-pub use parser::{parse_mmakefile, parse_mmakefile_with_dirs};
+pub use parser::{
+    parse_mmakefile, parse_mmakefile_with_context, parse_mmakefile_with_dirs,
+    parse_mmakefile_with_dirs_and_context, TargetContext,
+};

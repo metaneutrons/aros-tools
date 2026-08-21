@@ -1,6 +1,9 @@
 use aros_common::Result;
 use aros_transpiler::dirs::DirVars;
-use aros_transpiler::{generate_cmake, parse_mmakefile_with_dirs, DependencyGraph};
+use aros_transpiler::{
+    generate_cmake, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context,
+    DependencyGraph, TargetContext,
+};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -19,6 +22,38 @@ struct Args {
     /// Output path for generated CMake targets file
     #[arg(short, long, default_value = "build/generated_targets.cmake")]
     output: PathBuf,
+
+    /// Target instruction set (for example x86_64, arm, or aarch64)
+    #[arg(long)]
+    cpu: Option<String>,
+
+    /// Target machine/platform (for example pc or raspi)
+    #[arg(long)]
+    platform: Option<String>,
+
+    /// MetaMake target family
+    #[arg(long)]
+    family: Option<String>,
+
+    /// MetaMake target variant; pass an empty value for the ordinary variant
+    #[arg(long)]
+    variant: Option<String>,
+
+    /// Toolchain family (gnu or llvm)
+    #[arg(long)]
+    toolchain: Option<String>,
+
+    /// Optional 32-bit companion CPU
+    #[arg(long)]
+    cpu32: Option<String>,
+
+    /// Historic USE_MMU value (0 or 1)
+    #[arg(long)]
+    use_mmu: Option<String>,
+
+    /// Historic GCC_CONFIG_FLOAT_ABI value
+    #[arg(long)]
+    float_abi: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -71,10 +106,38 @@ fn main() -> Result<()> {
     );
 
     let dirs = DirVars::load(&args.source_dir);
+    let target = [
+        &args.cpu,
+        &args.platform,
+        &args.family,
+        &args.variant,
+        &args.toolchain,
+        &args.cpu32,
+        &args.use_mmu,
+        &args.float_abi,
+    ]
+    .iter()
+    .any(|value| value.is_some())
+    .then(|| TargetContext {
+        cpu: args.cpu.clone(),
+        platform: args.platform.clone(),
+        family: args.family.clone(),
+        variant: args.variant.clone(),
+        toolchain: args.toolchain.clone(),
+        cpu32: args.cpu32.clone(),
+        use_mmu: args.use_mmu.clone(),
+        float_abi: args.float_abi.clone(),
+    });
     let parsed_results: Vec<_> = files
         .par_iter()
         .filter_map(|path| {
-            let res = parse_mmakefile_with_dirs(path, &args.source_dir, &dirs).ok();
+            let res = match &target {
+                Some(target) => {
+                    parse_mmakefile_with_dirs_and_context(path, &args.source_dir, &dirs, target)
+                }
+                None => parse_mmakefile_with_dirs(path, &args.source_dir, &dirs),
+            }
+            .ok();
             pb.inc(1);
             res
         })
@@ -93,6 +156,8 @@ fn main() -> Result<()> {
     let mut skipped_conditions: Vec<String> = Vec::new();
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
+    let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
@@ -111,6 +176,8 @@ fn main() -> Result<()> {
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
+        partial_source_lists.extend(parsed.partial_source_lists);
+        unresolved_output_paths.extend(parsed.unresolved_output_paths);
         graph.add_packages(parsed.packages);
         skipped_packages.extend(parsed.skipped_packages);
         graph.add_arch_sources(parsed.arch_sources);
@@ -141,6 +208,10 @@ fn main() -> Result<()> {
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
+    // A concrete target must order its own fetched sources. Depending on a
+    // sibling which happens to use the same archive does not constrain a
+    // direct Ninja invocation of this target.
+    let unowned_port_sources = graph.resolve_port_source_fetches();
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
@@ -164,6 +235,12 @@ fn main() -> Result<()> {
         "skipped-fetches.txt",
         skipped_fetches,
         "%fetch declaration(s) reference unmapped Make variables",
+    );
+    write_report(
+        &args.output,
+        "unowned-port-sources.txt",
+        unowned_port_sources,
+        "port source(s) have no matching %fetch destination owner",
     );
     write_report(
         &args.output,
@@ -232,6 +309,18 @@ fn main() -> Result<()> {
         "unmodelled-declarations.txt",
         skipped_programs,
         "build declaration(s) of a kind the target model does not express",
+    );
+    write_report(
+        &args.output,
+        "partial-source-lists.txt",
+        partial_source_lists,
+        "source lane(s) omitted from otherwise retained targets",
+    );
+    write_report(
+        &args.output,
+        "unresolved-output-paths.txt",
+        unresolved_output_paths,
+        "explicit program output path(s) could not be evaluated",
     );
     // Not headers, so these do not break a compile; they break a link or a
     // package step, which is harder to trace back. Listed for that reason.

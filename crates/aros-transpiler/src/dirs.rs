@@ -34,12 +34,17 @@ const MAX_DEPTH: usize = 12;
 const SEEDS: &[(&str, &str)] = &[
     // config/make.cfg.in:17 builds TARGETDIR from $(TOP)/bin/<arch>-<cpu>; the
     // CMake binary directory is its counterpart.
-    ("TOP", "${CMAKE_SOURCE_DIR}"),
+    ("TOP", "${AROS_BUILD_DIR}"),
     ("SRCDIR", "${CMAKE_SOURCE_DIR}"),
     ("TARGETDIR", "${AROS_BUILD_DIR}"),
     ("GENDIR", "${AROS_BUILD_DIR}/gen"),
     ("HOSTDIR", "${AROS_BUILD_DIR}/hosttools"),
     ("TOOLDIR", "${AROS_BUILD_DIR}/hosttools"),
+    // Keep source expressions and %fetch on the same configurable roots.
+    // Expanding PORTSDIR through TARGETDIR here would hard-code the default
+    // `${AROS_BUILD_DIR}/Ports` and diverge from `-DAROS_PORTS_DIR=...`.
+    ("PORTSDIR", "${AROS_PORTS_DIR}"),
+    ("PORTSSOURCEDIR", "${AROS_PORTS_SOURCE_DIR}"),
     // The system directory. The historic tree calls it AROS/
     // (config/make.cfg.in:51); this build calls it SYS/, after the volume it
     // becomes at runtime, and cmake/AROS.cmake:52-55 and the boot-iso target

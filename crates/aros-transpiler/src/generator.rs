@@ -26,6 +26,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         .keys()
         .chain(graph.icon_targets.keys())
         .map(String::as_str)
+        .chain(graph.fetches.iter().map(|fetch| fetch.name.as_str()))
         .collect();
 
     // SDK header staging comes first: the copies happen at configure time, and
@@ -172,8 +173,16 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "    INSTALL_DIR {}", cmake_arg(target_dir)).unwrap();
         }
 
-        if !target.source_files.is_empty() {
-            writeln!(out, "    SOURCES {}", target.source_files.join(" ")).unwrap();
+        for (keyword, sources) in [
+            ("SOURCES", &target.source_files),
+            ("CXX_SOURCES", &target.cxx_source_files),
+            ("OBJC_SOURCES", &target.objc_source_files),
+            ("ASM_SOURCES", &target.asm_source_files),
+        ] {
+            if !sources.is_empty() {
+                let quoted: Vec<String> = sources.iter().map(|source| cmake_arg(source)).collect();
+                writeln!(out, "    {keyword} {}", quoted.join(" ")).unwrap();
+            }
         }
 
         if !target.use_libs.is_empty() {
@@ -377,7 +386,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "        if(TARGET \"${{dep}}\")").unwrap();
         writeln!(
             out,
-            "            add_dependencies({} \"${{dep}}\")",
+            "            aros_add_target_dependency({} \"${{dep}}\")",
             cmake_arg(meta_name)
         )
         .unwrap();
@@ -440,6 +449,7 @@ mod tests {
     use super::generate_cmake;
     use crate::ast::MetaTargetRule;
     use crate::dirs::DirVars;
+    use crate::fetch::FetchDecl;
     use crate::graph::DependencyGraph;
     use crate::icons::IconTarget;
     use crate::packages::{PackageDecl, ResolvedPackageMember};
@@ -467,8 +477,33 @@ mod tests {
         });
 
         let cmake = generate_cmake(&graph);
-        assert!(cmake.contains("add_dependencies(\"icons\" \"${dep}\")"));
+        assert!(cmake.contains("aros_add_target_dependency(\"icons\" \"${dep}\")"));
         assert!(!cmake.contains("add_custom_target(\"icons\")"));
+    }
+
+    #[test]
+    fn fetch_targets_survive_meta_dependency_filtering() {
+        let mut graph = DependencyGraph::new();
+        graph.add_fetches(vec![FetchDecl {
+            name: "example-fetch".to_owned(),
+            archive: "example-1.0".to_owned(),
+            suffixes: "tar.gz".to_owned(),
+            origins: "https://example.invalid".to_owned(),
+            location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
+            destination: "${AROS_PORTS_DIR}".to_owned(),
+            patch_origins: String::new(),
+            patches: String::new(),
+            dir: "external/example".to_owned(),
+        }]);
+        graph.add_meta_rule(MetaTargetRule {
+            name: "consumer".to_owned(),
+            dependencies: vec!["example-fetch".to_owned()],
+        });
+
+        let cmake = generate_cmake(&graph);
+        assert!(cmake.contains("aros_fetch_archive(NAME \"example-fetch\""));
+        assert!(cmake.contains("aros_add_target_dependency(\"consumer\" \"${dep}\")"));
+        assert!(!cmake.contains("add_custom_target(\"example-fetch\")"));
     }
 
     #[test]

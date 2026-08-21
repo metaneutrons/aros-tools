@@ -14,6 +14,7 @@
 //! The generated CMake target is never part of `all`. Fetching reaches out to
 //! the network, so it stays an explicit step (`ninja fetch-ports`).
 
+use crate::parser::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -105,7 +106,8 @@ fn split_assignment(line: &str) -> Option<(&str, &str, bool)> {
 /// Make variables that map onto a CMake location.
 fn map_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" | "TOP" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "TOP" => Some("${AROS_BUILD_DIR}"),
         // The reference puts unpacked ports under $(TARGETDIR)/Ports and keeps
         // downloaded archives in a separate, configure-chosen directory.
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
@@ -118,11 +120,59 @@ fn map_var(name: &str) -> Option<&'static str> {
     }
 }
 
+fn reference_end(raw: &str, start: usize) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let mut depth = 1usize;
+    let mut cursor = start + 2;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$' && bytes.get(cursor + 1) == Some(&b'(') {
+            depth += 1;
+            cursor += 2;
+            continue;
+        }
+        if bytes[cursor] == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(cursor);
+            }
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn split_function_args(raw: &str) -> Option<[&str; 3]> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0usize;
+    let mut commas = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$' && bytes.get(cursor + 1) == Some(&b'(') {
+            depth += 1;
+            cursor += 2;
+            continue;
+        }
+        if bytes[cursor] == b')' && depth > 0 {
+            depth -= 1;
+        } else if bytes[cursor] == b',' && depth == 0 {
+            commas.push(cursor);
+        }
+        cursor += 1;
+    }
+    (commas.len() == 2).then(|| {
+        [
+            &raw[..commas[0]],
+            &raw[commas[0] + 1..commas[1]],
+            &raw[commas[1] + 1..],
+        ]
+    })
+}
+
 /// Expands `$(VAR)` against local assignments, then against the CMake mapping.
 ///
 /// `$(CURDIR)` resolves to the declaring directory. An unresolved variable is
 /// left verbatim so the caller can see and report it.
-fn expand(raw: &str, vars: &HashMap<String, String>, dir: &str, depth: usize) -> String {
+fn expand(raw: &str, lookup: &dyn Fn(&str) -> Option<String>, dir: &str, depth: usize) -> String {
     if depth == 0 || !raw.contains("$(") {
         return raw.to_owned();
     }
@@ -130,22 +180,30 @@ fn expand(raw: &str, vars: &HashMap<String, String>, dir: &str, depth: usize) ->
     let mut rest = raw;
     while let Some(start) = rest.find("$(") {
         out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let Some(end) = after.find(')') else {
+        let Some(end) = reference_end(rest, start) else {
             out.push_str(&rest[start..]);
             return out;
         };
-        let name = &after[..end];
-        if name == "CURDIR" {
+        let body = &rest[start + 2..end];
+        if body == "CURDIR" {
             out.push_str(dir);
-        } else if let Some(m) = map_var(name) {
+        } else if let Some(args) = body.strip_prefix("subst ").and_then(split_function_args) {
+            let from = expand(args[0], lookup, dir, depth - 1);
+            let to = expand(args[1], lookup, dir, depth - 1);
+            let text = expand(args[2], lookup, dir, depth - 1);
+            if from.is_empty() {
+                out.push_str(&rest[start..=end]);
+            } else {
+                out.push_str(&text.replace(&from, &to));
+            }
+        } else if let Some(m) = map_var(body) {
             out.push_str(m);
-        } else if let Some(v) = vars.get(name) {
-            out.push_str(&expand(v, vars, dir, depth - 1));
+        } else if let Some(v) = lookup(body) {
+            out.push_str(&expand(&v, lookup, dir, depth - 1));
         } else {
-            out.push_str(&rest[start..=start + 2 + end]);
+            out.push_str(&rest[start..=end]);
         }
-        rest = &after[end + 1..];
+        rest = &rest[end + 1..];
     }
     out.push_str(rest);
     out
@@ -158,6 +216,38 @@ fn expand(raw: &str, vars: &HashMap<String, String>, dir: &str, depth: usize) ->
 #[must_use]
 pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<String>) {
     let vars = collect_raw_vars(content);
+    collect_fetches_with_lookup(content, rel_dir, &|name| vars.get(name).cloned())
+}
+
+/// Collects `%fetch` declarations against the target-selected final Make scope.
+///
+/// Fetch recipes expand their variables when the recipe runs, after Make has
+/// read the complete file. This differs from `%build_*`, whose simple
+/// assignments freeze arguments at the declaration line. Using the final
+/// target-aware scope preserves later conditional assignments such as the
+/// GNU-only libheif compatibility patches without applying them to LLVM.
+pub(crate) fn collect_fetches_with_scope(
+    content: &str,
+    rel_dir: &Path,
+    scope: &VarScope,
+) -> (Vec<FetchDecl>, Vec<String>) {
+    collect_fetches_with_lookup(content, rel_dir, &|name| {
+        if scope.conditionally_assigned_before(name, usize::MAX) {
+            // Preserve the reference so the normal unresolved-field gate
+            // reports it. Treating an undecidable conditional value as an
+            // absent optional patch would silently emit an unpatched fetch.
+            Some(format!("$({name})"))
+        } else {
+            scope.raw_at(name, usize::MAX)
+        }
+    })
+}
+
+fn collect_fetches_with_lookup(
+    content: &str,
+    rel_dir: &Path,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<FetchDecl>, Vec<String>) {
     let dir = rel_dir.to_string_lossy().replace('\\', "/");
     let mut out = Vec::new();
     let mut skipped = Vec::new();
@@ -166,7 +256,7 @@ pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<St
         let get = |key: &str| -> Option<String> {
             crate::includes::arg_value_quoted(&body, key)
                 .or_else(|| crate::includes::arg_value(&body, key))
-                .map(|v| expand(&v, &vars, &dir, 8))
+                .map(|v| expand(&v, lookup, &dir, 8))
                 // Values reach here with whatever quoting the mmakefile used;
                 // the generator adds its own, so strip any leftovers.
                 .map(|v| v.trim_matches('"').trim().to_owned())
@@ -186,7 +276,21 @@ pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<St
             destination: get("destination").unwrap_or_else(|| ".".to_owned()),
             patch_origins: get("patches_origins")
                 .unwrap_or_else(|| format!("${{CMAKE_SOURCE_DIR}}/{dir}")),
-            patches: get("patches_specs").unwrap_or_else(|| "::".to_owned()),
+            patches: get("patches_specs")
+                .filter(|value| {
+                    let trimmed = value.trim();
+                    let Some(name) = trimmed
+                        .strip_prefix("$(")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                    else {
+                        return true;
+                    };
+                    // An optional, wholly undefined patch variable is Make's
+                    // ordinary way to disable patching. It expands to empty,
+                    // unlike an unresolved archive/destination field.
+                    lookup(name).is_some() || map_var(name).is_some()
+                })
+                .unwrap_or_else(|| "::".to_owned()),
             dir: dir.clone(),
         };
 
@@ -219,6 +323,9 @@ pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{
+        collect_vars, collect_vars_with_context, join_continuations, TargetContext,
+    };
     use std::path::PathBuf;
 
     const ACPICA: &str = r#"
@@ -298,20 +405,75 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
     }
 
     #[test]
-    fn a_make_function_anywhere_rejects_the_declaration() {
-        // workbench/libs/expat uses $(subst .,_,$(EXPATVERSION)) in its origin
-        // list. Emitting that verbatim breaks the generated build file's
-        // escaping, so the whole declaration is skipped.
+    fn subst_and_an_undefined_optional_patch_match_make() {
+        // workbench/libs/expat uses subst in its release URL and deliberately
+        // leaves the optional patch variable undefined.
         let src = "\
 EXPATVERSION := 2.8.2
 %fetch mmake=expat-fetch archive=expat-$(EXPATVERSION) \\
     destination=$(PORTSDIR)/expat location=$(PORTSSOURCEDIR) \\
     archive_origins=\"cache:// https://example.org/R_$(subst .,_,$(EXPATVERSION))\" \\
-    suffixes=\"tar.bz2\"
+    suffixes=\"tar.bz2\" patches_specs=$(EXPATPATCHSPEC)
 ";
         let (decls, skipped) = collect_fetches(src, &PathBuf::from("workbench/libs/expat"));
-        assert!(decls.is_empty(), "decls: {decls:?}");
-        assert_eq!(skipped.len(), 1);
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(decls.len(), 1);
+        assert!(decls[0].origins.contains("R_2_8_2"));
+        assert_eq!(decls[0].patches, "::");
+    }
+
+    #[test]
+    fn target_conditionals_select_late_fetch_patch_values() {
+        // The HEIC port declares its fetch recipes before a GNU-only
+        // compatibility branch. Make expands these recipe variables after it
+        // has parsed that branch; LLVM must not inherit the GNU patches.
+        let src = r"
+HEIFPATCHSPEC := base.diff:libheif:-p1
+%fetch mmake=heif-fetch archive=heif destination=$(PORTSDIR)/heif \
+    patches_specs=$(HEIFPATCHSPEC)
+%fetch mmake=de265-fetch archive=de265 destination=$(PORTSDIR)/de265 \
+    patches_specs=$(DE265PATCHSPEC)
+ifeq ($(AROS_TOOLCHAIN),gnu)
+DE265PATCHSPEC := compat.diff:libde265:-p1
+HEIFPATCHSPEC += compat-cxx.diff:libheif:-p1
+endif
+";
+        let collect = |toolchain: &str| {
+            let target = TargetContext {
+                cpu: None,
+                platform: None,
+                family: None,
+                variant: None,
+                toolchain: Some(toolchain.to_owned()),
+                cpu32: None,
+                use_mmu: None,
+                float_abi: None,
+            };
+            let scope = collect_vars_with_context(&join_continuations(src), &target);
+            collect_fetches_with_scope(src, Path::new("workbench/classes/datatypes/heic"), &scope)
+        };
+
+        let (llvm, skipped) = collect("llvm");
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(llvm[0].patches, "base.diff:libheif:-p1");
+        assert_eq!(llvm[1].patches, "::");
+
+        let (gnu, skipped) = collect("gnu");
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(
+            gnu[0].patches,
+            "base.diff:libheif:-p1 compat-cxx.diff:libheif:-p1"
+        );
+        assert_eq!(gnu[1].patches, "compat.diff:libde265:-p1");
+
+        let unknown = collect_vars(&join_continuations(src));
+        let (decls, skipped) = collect_fetches_with_scope(
+            src,
+            Path::new("workbench/classes/datatypes/heic"),
+            &unknown,
+        );
+        assert!(decls.is_empty());
+        assert_eq!(skipped.len(), 2);
     }
 
     #[test]
