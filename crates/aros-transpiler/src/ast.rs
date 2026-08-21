@@ -37,6 +37,9 @@ pub struct TargetDefinition {
     pub use_libs: Vec<String>,
     pub dependencies: Vec<String>,
     pub dir_path: PathBuf,
+    /// Explicit module output directory after Make-variable expansion.
+    /// Relative values are rooted below SYS by CMake; rendered build-tree
+    /// paths such as `${AROS_BUILD_DIR}/Libs` remain absolute overrides.
     pub target_dir: Option<String>,
     /// True when a `%build_linklib` declares the extra 32-bit flavour of a
     /// library, which a 64-bit target has beside its own: compiler/crt/stdc
@@ -49,8 +52,14 @@ pub struct TargetDefinition {
     /// from `uselibs` once every mmakefile has been parsed.
     #[serde(default)]
     pub link_libs: Vec<String>,
-    /// The `modtype` a `%build_module_simple` declared, which decides the
-    /// module's file extension. Empty for every other kind.
+    /// The original `modtype` when CMake cannot infer it from [`ModuleType`],
+    /// notably custom and `%build_module_simple` declarations.
+    #[serde(default)]
+    pub declared_mod_type: Option<String>,
+    /// Effective output suffix override, without the leading dot. Full module
+    /// declarations may set `modsuffix=` independently of `modtype`; USB and
+    /// Bluetooth classes use the type-default suffix `class`.
+    #[serde(default)]
     pub mod_suffix: Option<String>,
     pub compiler_flags: Vec<String>,
     /// Include directories from the mmakefile's `USER_INCLUDES`, already

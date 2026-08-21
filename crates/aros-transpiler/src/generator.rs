@@ -156,8 +156,11 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             let libs: Vec<String> = target.link_libs.iter().map(|l| cmake_arg(l)).collect();
             writeln!(out, "    LIBS {}", libs.join(" ")).unwrap();
         }
+        if let Some(mod_type) = &target.declared_mod_type {
+            writeln!(out, "    MODTYPE {}", cmake_arg(mod_type)).unwrap();
+        }
         if let Some(suffix) = &target.mod_suffix {
-            writeln!(out, "    MODTYPE {suffix}").unwrap();
+            writeln!(out, "    MODSUFFIX {}", cmake_arg(suffix)).unwrap();
         }
         writeln!(
             out,
@@ -165,6 +168,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             target.dir_path.display()
         )
         .unwrap();
+        if let Some(target_dir) = &target.target_dir {
+            writeln!(out, "    INSTALL_DIR {}", cmake_arg(target_dir)).unwrap();
+        }
 
         if !target.source_files.is_empty() {
             writeln!(out, "    SOURCES {}", target.source_files.join(" ")).unwrap();
@@ -419,8 +425,15 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
 mod tests {
     use super::generate_cmake;
     use crate::ast::MetaTargetRule;
+    use crate::dirs::DirVars;
     use crate::graph::DependencyGraph;
     use crate::icons::IconTarget;
+    use crate::parse_mmakefile_with_dirs;
+    use std::path::Path;
+
+    fn root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    }
 
     fn icon(name: &str) -> IconTarget {
         IconTarget {
@@ -503,5 +516,42 @@ mod tests {
 
         let cmake = generate_cmake(&graph);
         assert!(!cmake.contains("add_custom_target(\"clean\")"));
+    }
+
+    #[test]
+    fn module_output_metadata_is_emitted_for_the_cmake_builders() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "developer/debug/test/library/mmakefile.src",
+            "workbench/tools/SysExplorer/mmakefile.src",
+            "rom/usb/classes/serialpl2303/mmakefile.src",
+        ] {
+            let parsed = parse_mmakefile_with_dirs(&root.join(relative), &root, &dirs).unwrap();
+            assert!(
+                parsed.skipped_programs.is_empty(),
+                "{relative}: {:#?}",
+                parsed.skipped_programs
+            );
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+        }
+
+        let cmake = generate_cmake(&graph);
+        assert!(
+            cmake.contains(
+                "    INSTALL_DIR \"${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/Library/Libs\""
+            ),
+            "{cmake}"
+        );
+        assert!(
+            cmake.contains("    INSTALL_DIR \"Tools/SysExpModules\""),
+            "{cmake}"
+        );
+        assert!(cmake.contains("    MODTYPE \"usbclass\""), "{cmake}");
+        assert!(cmake.contains("    MODSUFFIX \"class\""), "{cmake}");
+        assert!(cmake.contains("    MODSUFFIX \"sysexp\""), "{cmake}");
     }
 }

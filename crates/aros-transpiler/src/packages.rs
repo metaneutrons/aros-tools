@@ -88,11 +88,13 @@ fn declaring_arch(rel_dir: &Path) -> String {
 /// is a package that never gets built.
 fn map_output_var(name: &str) -> Option<&'static str> {
     match name {
-        // The boot directory, and its architecture-specific subdirectory.
+        // config/make.cfg.in:17,97-99. This build names the system directory
+        // SYS rather than the reference tree's AROS, but preserves the same
+        // nesting: TARGETDIR/SYS/boot/<platform>.
+        "TARGETDIR" => Some("${AROS_BUILD_DIR}"),
+        "AROSDIR" => Some("${AROS_SYS_DIR}"),
         "AROS_BOOT" => Some("${AROS_BOOT_DIR}"),
-        "AROSARCHDIR" | "AROS_BOOT_ARCH" => Some("${AROS_BOOT_ARCH_DIR}"),
-        // The AROS tree root inside the build, which holds SYS/ and boot/.
-        "AROSDIR" | "TARGETDIR" => Some("${AROS_BUILD_DIR}"),
+        "AROSARCHDIR" => Some("${AROS_BOOT_ARCH_DIR}"),
         // Target parameters, so a rom image can be named after its CPU.
         "AROS_TARGET_CPU" | "CPU" => Some("${AROS_TARGET_CPU}"),
         "AROS_TARGET_ARCH" | "ARCH" => Some("${AROS_TARGET_PLATFORM}"),
@@ -407,6 +409,56 @@ BASE_RSRCS    := bootloader dosboot
         assert!(decls.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("unmapped"));
+    }
+
+    #[test]
+    fn output_roots_follow_make_cfg_layout() {
+        let vars = HashMap::new();
+        assert_eq!(
+            render_output("$(TARGETDIR)/root.bin", &vars).as_deref(),
+            Some("${AROS_BUILD_DIR}/root.bin")
+        );
+        assert_eq!(
+            render_output("$(AROSDIR)/system.bin", &vars).as_deref(),
+            Some("${AROS_SYS_DIR}/system.bin")
+        );
+        assert_eq!(
+            render_output("$(AROS_BOOT)/base.pkg", &vars).as_deref(),
+            Some("${AROS_BOOT_DIR}/base.pkg")
+        );
+        assert_eq!(
+            render_output("$(AROSARCHDIR)/kernel", &vars).as_deref(),
+            Some("${AROS_BOOT_ARCH_DIR}/kernel")
+        );
+        // There is no AROS_BOOT_ARCH variable in make.cfg.in. Keeping an
+        // invented alias would conceal a misspelling in a declaration.
+        assert_eq!(map_output_var("AROS_BOOT_ARCH"), None);
+    }
+
+    #[test]
+    fn target_parameter_aliases_follow_target_cfg() {
+        for (reference, alias, expected) in [
+            ("AROS_TARGET_CPU", "CPU", "${AROS_TARGET_CPU}"),
+            ("AROS_TARGET_ARCH", "ARCH", "${AROS_TARGET_PLATFORM}"),
+            ("AROS_TARGET_FAMILY", "FAMILY", "${AROS_TARGET_FAMILY}"),
+        ] {
+            assert_eq!(map_output_var(reference), Some(expected));
+            assert_eq!(map_output_var(alias), Some(expected));
+        }
+    }
+
+    #[test]
+    fn local_output_name_expands_below_the_system_root() {
+        let src = "\
+ARM_BSP := aros-$(AROS_TARGET_CPU)-bsp.rom
+%make_package mmake=kernel-package-raspi-arm file=$(AROSDIR)/$(ARM_BSP) libs=exec
+";
+        let (decls, skipped) = collect_packages(src, Path::new("arch/arm-raspi/boot"));
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(
+            decls[0].output,
+            "${AROS_SYS_DIR}/aros-${AROS_TARGET_CPU}-bsp.rom"
+        );
     }
 
     #[test]

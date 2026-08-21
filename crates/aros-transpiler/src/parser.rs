@@ -546,6 +546,201 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
     }
 }
 
+/// The relative module directory genmodule chooses for a full module when no
+/// `moduledir=` override is present (tools/genmodule/config.c:250-333).
+///
+/// This is normally left to the CMake module builder. It is needed here only
+/// when a declaration explicitly changes `prefix=`, because that prefix and
+/// the relative default together determine the complete output directory.
+fn default_relative_module_dir(mod_type: &str) -> Option<&'static str> {
+    match mod_type {
+        "library" => Some("Libs"),
+        "class" => Some("Classes"),
+        "mcc" | "mui" | "mcp" => Some("Classes/Zune"),
+        "device" | "resource" | "hook" => Some("Devs"),
+        "gadget" => Some("Classes/Gadgets"),
+        "image" => Some("Classes/Images"),
+        "datatype" => Some("Classes/DataTypes"),
+        "usbclass" => Some("Classes/USB"),
+        "btclass" => Some("Classes/Bluetooth"),
+        "hidd" => Some("Devs/Drivers"),
+        "handler" => Some("L"),
+        _ => None,
+    }
+}
+
+fn rendered_absolute(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path == "${AROS_BUILD_DIR}"
+        || path.starts_with("${AROS_BUILD_DIR}/")
+}
+
+fn join_module_prefix(prefix: &str, directory: &str) -> String {
+    if rendered_absolute(directory) {
+        return directory.to_owned();
+    }
+    let prefix = prefix.trim_end_matches('/');
+    let directory = directory.trim_start_matches('/');
+    if prefix.is_empty() {
+        directory.to_owned()
+    } else if directory.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}/{directory}")
+    }
+}
+
+fn expand_module_arg(
+    raw: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    line: usize,
+) -> std::result::Result<String, Vec<String>> {
+    let local = |name: &str| scope.raw_at(name, line);
+
+    // A whole local variable names the value of its assignment, not a fresh
+    // recursive lookup of that name. This matters when a file shadows a
+    // configured variable with a simple assignment such as
+    // TARGETDIR := $(AROS_TESTS)/Library: AROS_TESTS was derived from the
+    // configured TARGETDIR before the local assignment took effect.
+    if let Some(name) = raw
+        .strip_prefix("$(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        if !name.contains(['$', ' ', ')']) {
+            if let Some(value) = local(name) {
+                return dirs.expand_with(&value, &|nested| {
+                    if nested == name {
+                        None
+                    } else {
+                        local(nested)
+                    }
+                });
+            }
+        }
+    }
+
+    dirs.expand_with(raw, &local)
+}
+
+/// Resolves a module's explicit output arguments at the declaration line.
+///
+/// Local variables shadow the shared `make.cfg.in` directory table. An
+/// explicit but unresolved value is an error: treating it like an absent
+/// override would silently install the module into its type's default path.
+fn resolve_module_target_dir(
+    args: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    line: usize,
+    mod_type: &str,
+    uses_prefix: bool,
+    arch_specific: bool,
+) -> std::result::Result<Option<String>, String> {
+    let module_dir = match macro_arg(args, "moduledir") {
+        Some(raw) => Some(
+            expand_module_arg(&raw, scope, dirs, line)
+                .map_err(|missing| format!("moduledir={raw} references {}", missing.join(", ")))?,
+        ),
+        None => None,
+    };
+
+    if !uses_prefix && !arch_specific {
+        return Ok(module_dir);
+    }
+
+    let prefix = if uses_prefix {
+        match macro_arg(args, "prefix") {
+            Some(raw) => Some(
+                expand_module_arg(&raw, scope, dirs, line)
+                    .map_err(|missing| format!("prefix={raw} references {}", missing.join(", ")))?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // An explicit moduledir replaces DEFMODDIR after the archspecific prefix
+    // is computed (make.tmpl:2398-2407), so it must never inherit boot/<arch>.
+    // CMake supplies the ordinary AROSDIR prefix for an otherwise relative
+    // override; only an explicitly changed prefix has to be joined here.
+    if let Some(directory) = module_dir {
+        if rendered_absolute(&directory) {
+            return Ok(Some(directory));
+        }
+        return Ok(Some(prefix.map_or_else(
+            || directory.clone(),
+            |prefix| join_module_prefix(&prefix, &directory),
+        )));
+    }
+
+    if prefix.is_none() && !arch_specific {
+        return Ok(None);
+    }
+
+    let directory = default_relative_module_dir(mod_type)
+        .ok_or_else(|| format!("no known default moduledir for modtype={mod_type}"))?
+        .to_owned();
+    if rendered_absolute(&directory) {
+        return Ok(Some(directory));
+    }
+
+    if arch_specific {
+        // build_module_core inserts AROS_DIR_BOOTARCH between prefix and the
+        // module's relative default (make.tmpl:2400-2407). With the ordinary
+        // prefix, use the canonical CMake directory directly. An explicitly
+        // changed prefix instead receives the same relative boot path.
+        return Ok(Some(prefix.map_or_else(
+            || join_module_prefix("${AROS_BOOT_ARCH_DIR}", &directory),
+            |prefix| {
+                join_module_prefix(
+                    &prefix,
+                    &format!("boot/${{AROS_TARGET_PLATFORM}}/{directory}"),
+                )
+            },
+        )));
+    }
+
+    Ok(prefix.map(|prefix| join_module_prefix(&prefix, &directory)))
+}
+
+fn resolve_yes_argument(
+    args: &str,
+    key: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    line: usize,
+) -> std::result::Result<bool, String> {
+    let Some(raw) = macro_arg(args, key) else {
+        return Ok(false);
+    };
+    let local = |name: &str| scope.raw_at(name, line);
+    dirs.expand_with(&raw, &local)
+        .map(|value| value == "yes")
+        .map_err(|missing| format!("{key}={raw} references {}", missing.join(", ")))
+}
+
+fn resolve_module_suffix(
+    args: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    line: usize,
+    mod_type: &str,
+) -> std::result::Result<Option<String>, String> {
+    if let Some(raw) = macro_arg(args, "modsuffix") {
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let local = |name: &str| scope.raw_at(name, line);
+        return dirs
+            .expand_with(&raw, &local)
+            .map(|value| (!value.is_empty()).then_some(value))
+            .map_err(|missing| format!("modsuffix={raw} references {}", missing.join(", ")));
+    }
+    Ok(matches!(mod_type, "usbclass" | "btclass").then(|| "class".to_owned()))
+}
+
 /// Parses a single `mmakefile.src` into target definitions and meta rules.
 ///
 /// # Errors
@@ -687,6 +882,52 @@ pub fn parse_mmakefile_with_dirs(
             _ => ModuleType::Custom,
         };
 
+        let arch_specific = match resolve_yes_argument(rest, "archspecific", &scope, dirs, inv.line)
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        };
+        let target_dir = match resolve_module_target_dir(
+            rest,
+            &scope,
+            dirs,
+            inv.line,
+            mod_type_str,
+            true,
+            arch_specific,
+        ) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        };
+        let mod_suffix = match resolve_module_suffix(rest, &scope, dirs, inv.line, mod_type_str) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        };
+
         // The same source-list rules as every other build macro: the union of
         // the four lists, and the reference's default of every *.c in the
         // directory when none is given (make.tmpl:2802). This loop used to read
@@ -720,16 +961,8 @@ pub fn parse_mmakefile_with_dirs(
                 .map_or("", |m| m.as_str());
             expand_file_list(libs_str, &vars)
         });
-
-        // A modtype the target model has no variant for still decides the
-        // file suffix and install directory (make.tmpl:2048-2095); the
-        // compilation is identical to modtype=library.
-        let mod_suffix = if matches!(module_type, ModuleType::Custom) && !mod_type_owned.is_empty()
-        {
-            Some(mod_type_owned.clone())
-        } else {
-            None
-        };
+        let declared_mod_type =
+            matches!(module_type, ModuleType::Custom).then(|| mod_type_owned.clone());
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -739,9 +972,10 @@ pub fn parse_mmakefile_with_dirs(
             use_libs,
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
-            target_dir: None,
+            target_dir,
             link_libs: Vec::new(),
             variant_32bit: false,
+            declared_mod_type,
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -823,6 +1057,7 @@ pub fn parse_mmakefile_with_dirs(
             target_dir: None,
             link_libs: Vec::new(),
             variant_32bit: false,
+            declared_mod_type: None,
             mod_suffix: None,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -918,8 +1153,55 @@ pub fn parse_mmakefile_with_dirs(
 
         let use_libs =
             macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
-        let mod_suffix = if matches!(module_type, ModuleType::SimpleModule) {
+        let is_simple_module = matches!(module_type, ModuleType::SimpleModule);
+        let declared_mod_type = if is_simple_module {
             macro_arg(&inv.args, "modtype")
+        } else {
+            None
+        };
+        let target_dir = if is_simple_module {
+            match resolve_module_target_dir(
+                &inv.args,
+                &scope,
+                dirs,
+                inv.line,
+                declared_mod_type.as_deref().unwrap_or_default(),
+                false,
+                false,
+            ) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let mod_suffix = if is_simple_module {
+            match resolve_module_suffix(
+                &inv.args,
+                &scope,
+                dirs,
+                inv.line,
+                declared_mod_type.as_deref().unwrap_or_default(),
+            ) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
         } else {
             None
         };
@@ -937,9 +1219,10 @@ pub fn parse_mmakefile_with_dirs(
             use_libs,
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
-            target_dir: None,
+            target_dir,
             link_libs: Vec::new(),
             variant_32bit,
+            declared_mod_type,
             mod_suffix,
             compiler_flags: Vec::new(),
             include_dirs: {
@@ -1035,8 +1318,21 @@ pub fn parse_mmakefile_with_dirs(
 mod tests {
     use super::{
         collect_vars, join_continuations, join_mm_continuations, macro_arg, macro_invocations,
-        render_meta_token, sanitize_ident, META_RULE_RE,
+        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        META_RULE_RE,
     };
+    use crate::dirs::DirVars;
+    use aros_common::read_source;
+    use std::path::Path;
+    use walkdir::WalkDir;
+
+    fn root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    }
+
+    fn dirs() -> DirVars {
+        DirVars::load(&root())
+    }
 
     #[test]
     fn every_declaration_in_a_file_is_seen() {
@@ -1273,5 +1569,190 @@ FILES := gdbstop
         let (srcs, declared) = super::macro_sources("mmake=x files=$(UNKNOWN)", &vars);
         assert!(srcs.is_empty());
         assert!(declared, "a list was given but did not resolve");
+    }
+
+    #[test]
+    fn module_directory_expansion_is_positional_and_reports_unknowns() {
+        let joined = join_continuations(
+            "MODDIR := Devs/First\n\
+             %build_module mmake=one modname=one modtype=device files=one moduledir=$(MODDIR)\n\
+             MODDIR := Storage/Second\n\
+             %build_module mmake=two modname=two modtype=device files=two moduledir=$(MODDIR)\n",
+        );
+        let scope = collect_vars(&joined);
+        let invocations = macro_invocations(&joined);
+        assert_eq!(
+            resolve_module_target_dir(
+                &invocations[0].args,
+                &scope,
+                &dirs(),
+                invocations[0].line,
+                "device",
+                true,
+                false,
+            )
+            .unwrap()
+            .as_deref(),
+            Some("Devs/First")
+        );
+        assert_eq!(
+            resolve_module_target_dir(
+                &invocations[1].args,
+                &scope,
+                &dirs(),
+                invocations[1].line,
+                "device",
+                true,
+                false,
+            )
+            .unwrap()
+            .as_deref(),
+            Some("Storage/Second")
+        );
+
+        let error = resolve_module_target_dir(
+            "moduledir=$(NOT_DEFINED)",
+            &scope,
+            &dirs(),
+            usize::MAX,
+            "device",
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("NOT_DEFINED"), "{error}");
+    }
+
+    #[test]
+    fn explicit_prefix_and_arch_specific_defaults_are_complete_paths() {
+        let scope = collect_vars("");
+        assert_eq!(
+            resolve_module_target_dir(
+                "prefix=$(TARGETDIR)",
+                &scope,
+                &dirs(),
+                0,
+                "library",
+                true,
+                false,
+            )
+            .unwrap()
+            .as_deref(),
+            Some("${AROS_BUILD_DIR}/Libs")
+        );
+        assert_eq!(
+            resolve_module_target_dir("", &scope, &dirs(), 0, "library", true, true)
+                .unwrap()
+                .as_deref(),
+            Some("${AROS_BOOT_ARCH_DIR}/Libs")
+        );
+        assert_eq!(
+            resolve_module_target_dir(
+                "moduledir=Storage/Foo archspecific=yes",
+                &scope,
+                &dirs(),
+                0,
+                "library",
+                true,
+                true,
+            )
+            .unwrap()
+            .as_deref(),
+            Some("Storage/Foo")
+        );
+    }
+
+    #[test]
+    fn module_suffix_override_is_separate_from_declared_type() {
+        let scope = collect_vars("");
+        assert_eq!(
+            resolve_module_suffix("modsuffix=logger", &scope, &dirs(), 0, "library")
+                .unwrap()
+                .as_deref(),
+            Some("logger")
+        );
+        assert_eq!(
+            resolve_module_suffix("", &scope, &dirs(), 0, "usbclass")
+                .unwrap()
+                .as_deref(),
+            Some("class")
+        );
+        assert_eq!(
+            resolve_module_suffix("", &scope, &dirs(), 0, "printer").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn real_tree_module_output_metadata_has_expected_coverage() {
+        let root = root();
+        let dirs = dirs();
+        let mut install_dirs = Vec::new();
+        let mut suffixes = Vec::new();
+        let mut output_errors = Vec::new();
+
+        let skip_dirs = ["build", "target", ".git"];
+        for entry in WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir()
+                    || entry.depth() == 0
+                    || !skip_dirs
+                        .iter()
+                        .any(|dir| entry.file_name().to_string_lossy() == *dir)
+            })
+            .filter_map(std::result::Result::ok)
+        {
+            if !entry.file_type().is_file() || entry.file_name() != "mmakefile.src" {
+                continue;
+            }
+            let source = read_source(entry.path()).unwrap();
+            if !source.contains("moduledir=")
+                && !source.contains("prefix=$(TARGETDIR)")
+                && !source.contains("archspecific=yes")
+                && !source.contains("modsuffix=")
+            {
+                continue;
+            }
+            let parsed = super::parse_mmakefile_with_dirs(entry.path(), &root, &dirs).unwrap();
+            install_dirs.extend(parsed.targets.iter().filter_map(|target| {
+                target
+                    .target_dir
+                    .as_ref()
+                    .map(|directory| (target.mmake_name.clone(), directory.clone()))
+            }));
+            suffixes.extend(parsed.targets.iter().filter_map(|target| {
+                target
+                    .mod_suffix
+                    .as_ref()
+                    .map(|suffix| (target.mmake_name.clone(), suffix.clone()))
+            }));
+            output_errors.extend(parsed.skipped_programs.into_iter().filter(|message| {
+                ["moduledir=", "prefix=", "archspecific=", "modsuffix="]
+                    .iter()
+                    .any(|needle| message.contains(needle))
+            }));
+        }
+
+        assert!(output_errors.is_empty(), "{output_errors:#?}");
+        assert_eq!(install_dirs.len(), 61);
+        assert_eq!(suffixes.len(), 44);
+        assert_eq!(
+            install_dirs
+                .iter()
+                .filter(|(mmake, directory)| {
+                    mmake.starts_with("test-library-")
+                        && directory == "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/Library/Libs"
+                })
+                .count(),
+            4
+        );
+        assert_eq!(
+            install_dirs
+                .iter()
+                .filter(|(_, directory)| directory.starts_with("${AROS_BOOT_ARCH_DIR}/"))
+                .count(),
+            12
+        );
     }
 }
