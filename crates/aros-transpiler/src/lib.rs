@@ -9,6 +9,7 @@ pub mod generator;
 pub mod graph;
 pub mod icons;
 pub mod includes;
+pub mod local_make_includes;
 pub mod make_expr;
 pub mod make_opts;
 pub mod packages;
@@ -24,6 +25,10 @@ pub use generator::generate_cmake;
 pub use graph::DependencyGraph;
 pub use icons::{IconSet, IconTarget};
 pub use includes::{ArchIncludeDecl, IncludeSet};
+pub use local_make_includes::{
+    inline_local_make_includes, IncludedLocalMakeFragment, LocalMakeFragmentPolicy,
+    LocalMakeIncludeIssue, LocalMakeIncludeIssueKind, LocalMakeIncludeLimits, LocalMakeIncludeScan,
+};
 pub use make_expr::{
     evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError, MakeVariableGuard,
     MakeVariableLookup,

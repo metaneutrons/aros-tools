@@ -175,6 +175,9 @@ pub struct ParsedMmakefile {
     pub skipped_fetches: Vec<String>,
     /// `-include .../make.opts` files that could not be used, for reporting.
     pub skipped_make_opts: Vec<String>,
+    /// Local source-tree Make fragments which were unresolved, unsafe, or
+    /// broader than the declaration-aware source-list subset.
+    pub skipped_local_make_includes: Vec<String>,
     /// Make conditionals whose flags were dropped, for reporting.
     pub skipped_conditions: Vec<String>,
 }

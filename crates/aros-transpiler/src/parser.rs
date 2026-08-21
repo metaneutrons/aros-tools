@@ -4,6 +4,9 @@ use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::collect_fetches_with_scope;
 use crate::flags::collect_flags;
 use crate::includes::{collect_arch_decls, collect_includes};
+use crate::local_make_includes::{
+    inline_local_make_includes, LocalMakeFragmentPolicy, LocalMakeIncludeLimits,
+};
 use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
 use crate::make_opts::collect_make_opts;
 use aros_common::{read_source, Result};
@@ -2043,11 +2046,30 @@ fn parse_mmakefile_impl(
         .unwrap_or(parent_dir)
         .to_path_buf();
 
+    // A small number of declarations keep a plain source inventory in a
+    // sibling Make fragment. Insert only the proven-safe single-list shape at
+    // the original include site, so the ordinary positional scope evaluates
+    // it without a target-specific variable name. Broader configuration files
+    // and recipe-bearing fragments remain untouched and reportable.
+    let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
+    let local_make_scan = inline_local_make_includes(
+        &content,
+        root,
+        &relative_path,
+        LocalMakeIncludeLimits::default(),
+        LocalMakeFragmentPolicy::PlainSourceLists,
+    );
+    let skipped_local_make_includes = local_make_scan
+        .issues
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
     // Make evaluates ordinary build-macro arguments at their declaration
     // line, while `%fetch` recipes retain references until recipe execution
     // after the complete file has been read. Both use the same selected
     // conditional scope but deliberately query it at different positions.
-    let joined = join_continuations(&content);
+    let joined = join_continuations(&local_make_scan.expanded);
     let (scope, conditional_line_states) = match target {
         Some(target) => {
             let (scope, states) = collect_vars_impl(&joined, Some(target));
@@ -2753,6 +2775,7 @@ fn parse_mmakefile_impl(
         fetches,
         skipped_fetches,
         skipped_make_opts,
+        skipped_local_make_includes,
         skipped_conditions,
         skipped_programs,
         partial_source_lists,
@@ -3928,6 +3951,51 @@ FILES := gdbstop
             .skipped_programs
             .iter()
             .any(|diagnostic| diagnostic.contains("unevaluated Make conditional")));
+    }
+
+    #[test]
+    fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
+        let root = root();
+        let dirs = dirs();
+        let file = root.join("rom/bluetooth/stack/mmakefile.src");
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &file,
+                &root,
+                &dirs,
+                &target_context(cpu, platform, float_abi),
+            )
+            .unwrap();
+            let btcore = parsed
+                .targets
+                .iter()
+                .find(|target| target.mmake_name == "linklibs-btcore")
+                .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
+            assert_eq!(btcore.module_type, ModuleType::LinkLib);
+            assert_eq!(btcore.target_name, "btcore");
+            assert_eq!(btcore.source_files.len(), 28, "{cpu}-{platform}");
+            assert!(btcore
+                .source_files
+                .iter()
+                .all(|source| source.starts_with("${CMAKE_SOURCE_DIR}/rom/bluetooth/stack/")));
+            assert!(btcore
+                .source_files
+                .iter()
+                .any(|source| source.ends_with("/core/security/smp_manager")));
+            assert!(btcore
+                .source_files
+                .iter()
+                .any(|source| source.ends_with("/aros/input_bridge")));
+            assert!(parsed.skipped_local_make_includes.is_empty());
+            assert!(parsed
+                .skipped_programs
+                .iter()
+                .all(|message| !message.contains("linklibs-btcore")));
+        }
     }
 
     #[test]

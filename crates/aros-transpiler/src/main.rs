@@ -153,6 +153,7 @@ fn main() -> Result<()> {
     let mut skipped_arch_sources: Vec<String> = Vec::new();
     let mut skipped_fetches: Vec<String> = Vec::new();
     let mut skipped_make_opts: Vec<String> = Vec::new();
+    let mut skipped_local_make_includes: Vec<String> = Vec::new();
     let mut skipped_conditions: Vec<String> = Vec::new();
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
@@ -187,6 +188,7 @@ fn main() -> Result<()> {
         graph.add_fetches(parsed.fetches);
         skipped_fetches.extend(parsed.skipped_fetches);
         skipped_make_opts.extend(parsed.skipped_make_opts);
+        skipped_local_make_includes.extend(parsed.skipped_local_make_includes);
         skipped_conditions.extend(parsed.skipped_conditions);
         skipped_arch_sources.extend(parsed.skipped_arch_sources);
         unresolved.extend(parsed.unresolved_includes);
@@ -231,6 +233,12 @@ fn main() -> Result<()> {
         "skipped-make-opts.txt",
         skipped_make_opts,
         "make.opts file(s) not applied (Make conditionals or an unmapped path)",
+    );
+    write_report(
+        &args.output,
+        "skipped-local-make-includes.txt",
+        skipped_local_make_includes,
+        "local Make include fragment(s) remain unsafe, unresolved, or outside the plain source-list scope",
     );
     // A skipped fetch means a third-party dependency the build cannot obtain.
     write_report(
