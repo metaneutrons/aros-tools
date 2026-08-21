@@ -1,6 +1,6 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
-use crate::copy_includes::collect_copy_includes;
+use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::collect_fetches_with_scope;
 use crate::flags::collect_flags;
 use crate::includes::{collect_arch_decls, collect_includes};
@@ -1932,6 +1932,104 @@ pub fn parse_mmakefile_with_dirs_and_context(
     parse_mmakefile_impl(path, root, dirs, Some(target))
 }
 
+/// Inlines source-tree Make includes for collector variable evaluation.
+///
+/// Build declarations remain owned by their original mmakefile.  Only the
+/// variable scope used by `%fetch` and `%copy_includes` sees these files; this
+/// avoids manufacturing duplicate targets from common included fragments.
+/// The supported path form is deliberately bounded to paths made concrete by
+/// `SRCDIR` and `CURDIR`.  Includes rooted in the build or fetched sources stay
+/// deferred and continue to be reported by the collector that needs them.
+/// `CURDIR` remains the original mmakefile directory through recursion, and a
+/// relative include stays relative to Make's source/build root rather than to
+/// the directory of the including file.
+fn inline_collector_make_includes(
+    content: &str,
+    root: &Path,
+    mmake_curdir: &Path,
+    visited: &mut HashSet<std::path::PathBuf>,
+    depth: usize,
+) -> String {
+    if depth == 0 {
+        return content.to_owned();
+    }
+
+    let root_abs = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let rel_text = mmake_curdir.to_string_lossy().replace('\\', "/");
+    let mut output = String::with_capacity(content.len());
+    for line in content.lines() {
+        output.push_str(line);
+        output.push('\n');
+
+        let trimmed = line.trim();
+        let path_text = trimmed
+            .strip_prefix("-include ")
+            .or_else(|| trimmed.strip_prefix("include "))
+            .map(str::trim);
+        let Some(path_text) = path_text else { continue };
+        if path_text.is_empty() || path_text.split_whitespace().count() != 1 {
+            continue;
+        }
+
+        let expanded = path_text
+            .replace("$(SRCDIR)", &root_abs.to_string_lossy())
+            .replace("$(CURDIR)", &rel_text);
+        if expanded.contains('$') {
+            continue;
+        }
+        let candidate = Path::new(&expanded);
+        let candidate = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            // GNU Make resolves an include without a directory against its
+            // invocation working directory. It does not switch to the
+            // directory of the file which contained the include.
+            root_abs.join(candidate)
+        };
+        let Ok(candidate) = fs::canonicalize(candidate) else {
+            continue;
+        };
+        if !candidate.starts_with(&root_abs) || !visited.insert(candidate.clone()) {
+            continue;
+        }
+        let Ok(included) = read_source(&candidate) else {
+            continue;
+        };
+        output.push_str(&inline_collector_make_includes(
+            &included,
+            &root_abs,
+            mmake_curdir,
+            visited,
+            depth - 1,
+        ));
+    }
+    output
+}
+
+/// Marks forward local variables without defining them.  GNU Make expands an
+/// as-yet undefined local to the empty string, which is how option defaults
+/// such as Mesa's `ifeq ($(OPT_MESAGL),)` become decidable.  The parser already
+/// treats commented assignments as local-name declarations, so `?=` retains
+/// its correct undefined-variable behaviour.
+fn collector_forward_local_prelude(content: &str) -> String {
+    let mut names = HashSet::new();
+    for line in content.lines() {
+        let line = strip_make_comment(line);
+        if let Some((name, _, _)) = variable_assignment(line) {
+            names.insert(name.to_owned());
+        }
+    }
+    let mut names: Vec<_> = names.into_iter().collect();
+    names.sort();
+    let mut prelude = String::new();
+    for name in names {
+        prelude.push_str("# ");
+        prelude.push_str(&name);
+        prelude.push_str(" =\n");
+    }
+    prelude
+}
+
 fn parse_mmakefile_impl(
     path: &Path,
     root: &Path,
@@ -1957,6 +2055,19 @@ fn parse_mmakefile_impl(
         }
         None => (collect_vars(&joined), None),
     };
+    let mut collector_visited = HashSet::new();
+    let collector_content =
+        inline_collector_make_includes(&content, root, &rel_dir, &mut collector_visited, 8);
+    let collector_joined = join_continuations(&collector_content);
+    let collector_input = format!(
+        "{}{}",
+        collector_forward_local_prelude(&collector_joined),
+        collector_joined
+    );
+    let collector_scope = target.map_or_else(
+        || collect_vars(&collector_input),
+        |target| collect_vars_impl(&collector_input, Some(target)).0,
+    );
     let mut targets = Vec::new();
     let mut meta_rules = Vec::new();
     let mut skipped_meta_rules = Vec::new();
@@ -1966,7 +2077,7 @@ fn parse_mmakefile_impl(
     // parsed out of this file.
     let include_set = collect_includes(&content, &rel_dir);
     let arch_decls = collect_arch_decls(&content, &rel_dir);
-    let copy_scan = collect_copy_includes(&content, &rel_dir);
+    let copy_scan = collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope);
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
@@ -1979,7 +2090,8 @@ fn parse_mmakefile_impl(
         d.defines = flag_set.defines.clone();
         d.compile_options = flag_set.compile_options.clone();
     }
-    let (fetches, skipped_fetches) = collect_fetches_with_scope(&content, &rel_dir, &scope);
+    let (fetches, skipped_fetches) =
+        collect_fetches_with_scope(&content, &rel_dir, &collector_scope);
 
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
@@ -2653,8 +2765,32 @@ mod tests {
     use crate::dirs::DirVars;
     use aros_common::read_source;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use walkdir::WalkDir;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new() -> Self {
+            let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "aros-parser-include-{}-{serial}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
@@ -2675,6 +2811,56 @@ mod tests {
 
     fn dirs() -> DirVars {
         DirVars::load(&root())
+    }
+
+    #[test]
+    fn recursive_collector_includes_keep_original_curdir_and_make_root() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.0.join("shared")).unwrap();
+        fs::create_dir_all(tree.0.join("module/path")).unwrap();
+        fs::write(
+            tree.0.join("shared/vars.mk"),
+            "include nested.mk\ninclude $(SRCDIR)/$(CURDIR)/local.mk\n",
+        )
+        .unwrap();
+        fs::write(tree.0.join("nested.mk"), "ROOT_RELATIVE_INCLUDE := yes\n").unwrap();
+        fs::write(
+            tree.0.join("shared/nested.mk"),
+            "WRONG_INCLUDE_FILE_DIRECTORY := yes\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.0.join("module/path/local.mk"),
+            "ORIGINAL_MMAKE_CURDIR := yes\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.0.join("shared/local.mk"),
+            "WRONG_RECURSIVE_CURDIR := yes\n",
+        )
+        .unwrap();
+
+        let mut visited = std::collections::HashSet::new();
+        let inlined = super::inline_collector_make_includes(
+            "include $(SRCDIR)/shared/vars.mk\n",
+            &tree.0,
+            Path::new("module/path"),
+            &mut visited,
+            8,
+        );
+        assert!(
+            inlined.contains("ROOT_RELATIVE_INCLUDE := yes"),
+            "{inlined}"
+        );
+        assert!(
+            inlined.contains("ORIGINAL_MMAKE_CURDIR := yes"),
+            "{inlined}"
+        );
+        assert!(
+            !inlined.contains("WRONG_INCLUDE_FILE_DIRECTORY"),
+            "{inlined}"
+        );
+        assert!(!inlined.contains("WRONG_RECURSIVE_CURDIR"), "{inlined}");
     }
 
     #[test]
@@ -3332,6 +3518,85 @@ FILES := gdbstop
             diagnostic.contains("workbench-libs-freetype-linklib")
                 && diagnostic.contains("omitted unresolved source fragment")
         }));
+    }
+
+    #[test]
+    fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
+        let root = root();
+        let dirs = dirs();
+        let file = root.join("workbench/libs/mesa/mmakefile.src");
+
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &file,
+                &root,
+                &dirs,
+                &target_context(cpu, platform, float_abi),
+            )
+            .unwrap();
+
+            assert!(
+                parsed.skipped_fetches.is_empty(),
+                "{cpu}: {:#?}",
+                parsed.skipped_fetches
+            );
+            assert!(
+                parsed.skipped_copy_includes.is_empty(),
+                "{cpu}: {:#?}",
+                parsed.skipped_copy_includes
+            );
+            assert_eq!(parsed.fetches.len(), 1, "{cpu}");
+            let fetch = &parsed.fetches[0];
+            assert_eq!(fetch.name, "mesa3d-fetch");
+            assert_eq!(fetch.archive, "mesa-20.0.8");
+            assert_eq!(fetch.suffixes, "tar.xz tar.gz");
+            assert_eq!(fetch.destination, "${AROS_PORTS_DIR}/mesa");
+            assert_eq!(fetch.location, "${AROS_PORTS_SOURCE_DIR}");
+            assert!(fetch.origins.ends_with("older-versions/20.x"));
+            assert_eq!(fetch.patches, "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1");
+
+            assert_eq!(parsed.copy_includes.len(), 4, "{cpu}");
+            assert!(parsed
+                .copy_includes
+                .iter()
+                .all(|copy| copy.name == "mesa3d-includes-copy" && copy.flatten));
+            let headers: BTreeMap<_, _> = parsed
+                .copy_includes
+                .iter()
+                .map(|copy| (copy.dest.as_str(), copy.patterns.as_slice()))
+                .collect();
+            assert_eq!(headers["GL"], ["gl.h", "glext.h"]);
+            assert_eq!(headers["KHR"], ["khrplatform.h"]);
+            assert_eq!(
+                headers["EGL"],
+                [
+                    "egl.h",
+                    "eglext.h",
+                    "eglplatform.h",
+                    "eglmesaext.h",
+                    "eglextchromium.h"
+                ]
+            );
+            assert_eq!(
+                headers["vulkan"],
+                ["vulkan.h", "vulkan_core.h", "vk_icd.h", "vk_platform.h"]
+            );
+            assert_eq!(
+                parsed
+                    .copy_includes
+                    .iter()
+                    .map(|copy| copy.patterns.len())
+                    .sum::<usize>(),
+                12
+            );
+            assert!(parsed.copy_includes.iter().all(|copy| copy
+                .source_dir
+                .starts_with("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/")));
+        }
     }
 
     #[test]

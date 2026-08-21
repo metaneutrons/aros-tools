@@ -168,6 +168,30 @@ fn split_function_args(raw: &str) -> Option<[&str; 3]> {
     })
 }
 
+fn split_function_args2(raw: &str) -> Option<[&str; 2]> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0usize;
+    let mut comma = None;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$' && bytes.get(cursor + 1) == Some(&b'(') {
+            depth += 1;
+            cursor += 2;
+            continue;
+        }
+        if bytes[cursor] == b')' && depth > 0 {
+            depth -= 1;
+        } else if bytes[cursor] == b',' && depth == 0 {
+            if comma.is_some() {
+                return None;
+            }
+            comma = Some(cursor);
+        }
+        cursor += 1;
+    }
+    comma.map(|comma| [&raw[..comma], &raw[comma + 1..]])
+}
+
 /// Expands `$(VAR)` against local assignments, then against the CMake mapping.
 ///
 /// `$(CURDIR)` resolves to the declaring directory. An unresolved variable is
@@ -195,6 +219,19 @@ fn expand(raw: &str, lookup: &dyn Fn(&str) -> Option<String>, dir: &str, depth: 
                 out.push_str(&rest[start..=end]);
             } else {
                 out.push_str(&text.replace(&from, &to));
+            }
+        } else if let Some(args) = body.strip_prefix("word ").and_then(split_function_args2) {
+            let index = expand(args[0], lookup, dir, depth - 1)
+                .trim()
+                .parse::<usize>()
+                .ok();
+            let words = expand(args[1], lookup, dir, depth - 1);
+            if let Some(index) = index.filter(|index| *index > 0) {
+                if let Some(word) = words.split_whitespace().nth(index - 1) {
+                    out.push_str(word);
+                }
+            } else {
+                out.push_str(&rest[start..=end]);
             }
         } else if let Some(m) = map_var(body) {
             out.push_str(m);

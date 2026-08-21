@@ -29,40 +29,10 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         .chain(graph.fetches.iter().map(|fetch| fetch.name.as_str()))
         .collect();
 
-    // SDK header staging comes first: the copies happen at configure time, and
-    // keeping them at the top of the file makes the generated output readable
-    // in the same order the build needs them.
-    if !graph.copy_includes.is_empty() {
-        writeln!(
-            out,
-            "# =============================================================================\n\
-             # SDK header staging (from %copy_includes)\n\
-             # ============================================================================="
-        )
-        .unwrap();
-        // Generic headers first, architecture-specific last: both land under
-        // the same SDK name and the last copy wins. compiler/include ships a
-        // portable asm/cpu.h that arch/<cpu>-all/include has to override, and
-        // without a defined order which one survived depended on parse order.
-        let mut ordered: Vec<&_> = graph.copy_includes.iter().collect();
-        ordered.sort_by_key(|d| usize::from(d.source_dir.contains("/arch/")));
-        for decl in ordered {
-            let patterns: Vec<String> = decl.patterns.iter().map(|p| cmake_arg(p)).collect();
-            writeln!(
-                out,
-                "aros_copy_includes(DEST \"{}\" SOURCE \"{}\" PATTERNS {}{})",
-                decl.dest,
-                decl.source_dir,
-                patterns.join(" "),
-                if decl.flatten { " FLATTEN" } else { "" }
-            )
-            .unwrap();
-        }
-        writeln!(out).unwrap();
-    }
-
-    // Third-party source fetching. Emitted before the targets so the rules
-    // exist when a module wants to depend on them.
+    // Third-party source fetching is emitted before header staging.  Most
+    // copies still happen at configure time, but a cache-empty fetched port
+    // needs its owning fetch target to exist before CMake can declare the
+    // build-time copy rules.
     if !graph.fetches.is_empty() {
         writeln!(
             out,
@@ -84,6 +54,38 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 f.destination,
                 f.patch_origins,
                 f.patches
+            )
+            .unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
+    // SDK header staging.  In-tree sources are copied at configure time;
+    // explicit files from a not-yet-fetched port become Ninja outputs.
+    if !graph.copy_includes.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # SDK header staging (from %copy_includes)\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        // Generic headers first, architecture-specific last: both land under
+        // the same SDK name and the last copy wins. compiler/include ships a
+        // portable asm/cpu.h that arch/<cpu>-all/include has to override, and
+        // without a defined order which one survived depended on parse order.
+        let mut ordered: Vec<&_> = graph.copy_includes.iter().collect();
+        ordered.sort_by_key(|d| usize::from(d.source_dir.contains("/arch/")));
+        for decl in ordered {
+            let patterns: Vec<String> = decl.patterns.iter().map(|p| cmake_arg(p)).collect();
+            writeln!(
+                out,
+                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{})",
+                decl.name,
+                decl.dest,
+                decl.source_dir,
+                patterns.join(" "),
+                if decl.flatten { " FLATTEN" } else { "" }
             )
             .unwrap();
         }
@@ -342,6 +344,25 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     let mut meta_rules: Vec<_> = graph.meta_targets.iter().collect();
     meta_rules.sort_by_key(|(name, _)| (*name).clone());
 
+    // The dedicated ABI builder already orders its archive after the exact
+    // genmodule includes/FD outputs and after any public headers discovered in
+    // its config.  The legacy `<mmake>-linklib -> <mmake>-includes` meta edge
+    // additionally reaches the global `includes-generate-deps` closure, which
+    // makes a focused ABI archive download every unrelated port.  Suppress
+    // only that redundant edge; the public `<mmake>-includes` meta target
+    // retains its complete historic behaviour when requested explicitly.
+    let redundant_abi_include_edges: Vec<(String, String)> = graph
+        .targets
+        .values()
+        .filter(|target| target.module_type == ModuleType::Abi)
+        .map(|target| {
+            (
+                format!("{}-linklib", target.mmake_name),
+                format!("{}-includes", target.mmake_name),
+            )
+        })
+        .collect();
+
     // Phase one declares every meta target. The old single-pass form checked
     // `if(TARGET dep)` while iterating a HashMap, so a meta dependency that was
     // declared later in the random iteration order was permanently omitted.
@@ -370,6 +391,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     && (all_targets.contains(dep.as_str())
                         || all_metas.contains(dep.as_str())
                         || dep.contains("${"))
+                    && !redundant_abi_include_edges
+                        .iter()
+                        .any(|(linklib, includes)| linklib == *meta_name && includes == *dep)
             })
             .collect();
         valid_deps.sort();
@@ -633,6 +657,7 @@ mod tests {
         let mut graph = DependencyGraph::new();
         for relative in [
             "rom/bluetooth/classes/mmakefile.src",
+            "workbench/libs/dxtn/mmakefile.src",
             "workbench/libs/version/mmakefile.src",
         ] {
             let parsed = parse_mmakefile_with_dirs(&root.join(relative), &root, &dirs).unwrap();
@@ -665,6 +690,19 @@ mod tests {
         assert!(version.contains("    MMAKE_ID workbench-libs-version"));
         assert!(version.contains("    GENMODULE_ONLY"));
         assert!(!version.contains("SOURCES"), "{version}");
+
+        let dxtn_meta_start = cmake
+            .find("if(TARGET \"workbench-libs-dxtn-linklib\")")
+            .expect("the ABI linklib keeps its architecture-selected meta edge");
+        let dxtn_meta_end =
+            cmake[dxtn_meta_start..].find("\nendif()\n\n").unwrap() + dxtn_meta_start;
+        let dxtn_meta = &cmake[dxtn_meta_start..dxtn_meta_end];
+        assert!(dxtn_meta.contains("workbench-libs-dxtn-${AROS_TARGET_CPU}-linklib"));
+        assert!(
+            !dxtn_meta.contains("workbench-libs-dxtn-includes"),
+            "{dxtn_meta}"
+        );
+        assert!(cmake.contains("if(TARGET \"workbench-libs-dxtn-includes\")"));
     }
 
     #[test]
