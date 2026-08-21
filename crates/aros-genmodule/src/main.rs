@@ -697,9 +697,13 @@ fn main() {
         })
         .collect();
 
-    if !clashes.is_empty() {
+    let report = args.output_inc.join("conf-name-collisions.txt");
+    if clashes.is_empty() {
+        // Removed rather than left behind: a report that outlives its cause
+        // keeps naming collisions that no longer exist.
+        let _ = fs::remove_file(&report);
+    } else {
         clashes.sort_unstable();
-        let report = args.output_inc.join("conf-name-collisions.txt");
         let _ = fs::create_dir_all(&args.output_inc);
         let _ = fs::write(&report, format!("{}\n", clashes.join("\n")));
         println!(

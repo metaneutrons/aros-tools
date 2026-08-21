@@ -4,7 +4,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 use walkdir::WalkDir;
 
@@ -126,110 +126,60 @@ fn main() -> Result<()> {
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
-
     let n_overrides: usize = graph.arch_sources.values().map(Vec::len).sum();
     println!("🔧 {n_overrides} architecture source override(s) from %build_archspecific");
     println!(
         "🌐 {} third-party source fetch rule(s) from %fetch",
         graph.fetches.len()
     );
-    skipped_make_opts.sort_unstable();
-    skipped_make_opts.dedup();
-    if !skipped_make_opts.is_empty() {
-        let report = args.output.with_extension("skipped-make-opts.txt");
-        let body = skipped_make_opts.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} make.opts file(s) not applied (Make conditionals or an unmapped path) -> {}",
-                skipped_make_opts.len(),
-                report.display()
-            );
-        }
-    }
-    skipped_fetches.sort_unstable();
-    skipped_fetches.dedup();
-    if !skipped_fetches.is_empty() {
-        // Written out, not just counted: a skipped fetch means a third-party
-        // dependency the build cannot obtain.
-        let report = args.output.with_extension("skipped-fetches.txt");
-        let body = skipped_fetches.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} %fetch declaration(s) reference unmapped Make variables -> {}",
-                skipped_fetches.len(),
-                report.display()
-            );
-        } else {
-            println!(
-                "⚠️  {} %fetch declaration(s) reference unmapped Make variables",
-                skipped_fetches.len()
-            );
-        }
-    }
-    skipped_arch_sources.sort_unstable();
-    skipped_arch_sources.dedup();
-    if !skipped_arch_sources.is_empty() {
-        println!(
-            "⚠️  {} %build_archspecific declaration(s) had no resolvable file list",
-            skipped_arch_sources.len()
-        );
-    }
+
+    write_report(
+        &args.output,
+        "skipped-make-opts.txt",
+        skipped_make_opts,
+        "make.opts file(s) not applied (Make conditionals or an unmapped path)",
+    );
+    // A skipped fetch means a third-party dependency the build cannot obtain.
+    write_report(
+        &args.output,
+        "skipped-fetches.txt",
+        skipped_fetches,
+        "%fetch declaration(s) reference unmapped Make variables",
+    );
+    write_report(
+        &args.output,
+        "skipped-arch-sources.txt",
+        skipped_arch_sources,
+        "%build_archspecific declaration(s) had no resolvable file list",
+    );
 
     println!(
         "📥 {} SDK header staging rule(s) from %copy_includes",
         graph.copy_includes.len()
     );
-    skipped_headers.sort_unstable();
-    skipped_headers.dedup();
-    if !skipped_headers.is_empty() {
-        // Written out, not just counted: a skipped declaration means a header
-        // never reaches the SDK, and that has to be inspectable.
-        let report = args.output.with_extension("skipped-header-staging.txt");
-        let body = skipped_headers.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} %copy_includes declaration(s) skipped (out-of-tree or unresolved) -> {}",
-                skipped_headers.len(),
-                report.display()
-            );
-        } else {
-            println!(
-                "⚠️  {} %copy_includes declaration(s) skipped (out-of-tree or unresolved)",
-                skipped_headers.len()
-            );
-        }
-    }
+    // A skipped declaration means a header never reaches the SDK, and that has
+    // to be inspectable.
+    write_report(
+        &args.output,
+        "skipped-header-staging.txt",
+        skipped_headers,
+        "%copy_includes declaration(s) skipped (out-of-tree or unresolved)",
+    );
 
-    let mut unresolved_libs = unresolved_libs;
-    unresolved_libs.sort_unstable();
-    unresolved_libs.dedup();
-    if !unresolved_libs.is_empty() {
-        let report = args.output.with_extension("unresolved-uselibs.txt");
-        let body = unresolved_libs.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} uselibs name(s) matched no link library -> {}",
-                unresolved_libs.len(),
-                report.display()
-            );
-        }
-    }
-
-    skipped_packages.sort_unstable();
-    skipped_packages.dedup();
-    if !skipped_packages.is_empty() {
-        // A package missing a member still builds. The gap only shows up as a
-        // system that does not boot, so it has to be visible here.
-        let report = args.output.with_extension("unresolved-package-members.txt");
-        let body = skipped_packages.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} package member(s) could not be resolved to a target -> {}",
-                skipped_packages.len(),
-                report.display()
-            );
-        }
-    }
+    write_report(
+        &args.output,
+        "unresolved-uselibs.txt",
+        unresolved_libs,
+        "uselibs name(s) matched no link library",
+    );
+    // A package missing a member still builds. The gap only shows up as a
+    // system that does not boot, so it has to be visible here.
+    write_report(
+        &args.output,
+        "unresolved-package-members.txt",
+        skipped_packages,
+        "package member(s) could not be resolved to a target",
+    );
     if !graph.packages.is_empty() {
         let members: usize = graph.packages.iter().map(|p| p.resolved.len()).sum();
         println!(
@@ -238,91 +188,48 @@ fn main() -> Result<()> {
         );
     }
 
-    skipped_programs.sort_unstable();
-    skipped_programs.dedup();
-    if !skipped_programs.is_empty() {
-        // These are build declarations, not flags or headers: each one is a
-        // target the historic build produces and this one does not.
-        let report = args.output.with_extension("unmodelled-declarations.txt");
-        let body = skipped_programs.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} build declaration(s) of a kind the target model does not express -> {}",
-                skipped_programs.len(),
-                report.display()
-            );
-        }
-    }
-
-    generated_file_rules.sort_unstable();
-    generated_file_rules.dedup();
-    if !generated_file_rules.is_empty() {
-        // Not headers, so these do not break a compile; they break a link or a
-        // package step, which is harder to trace back. Listed for that reason.
-        let report = args.output.with_extension("generated-file-rules.txt");
-        let body = generated_file_rules.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} hand-written $(GENDIR) rule(s) build something other than a header -> {}",
-                generated_file_rules.len(),
-                report.display()
-            );
-        }
-    }
-
-    skipped_flags.sort_unstable();
-    skipped_flags.dedup();
-    if !skipped_flags.is_empty() {
-        let report = args.output.with_extension("skipped-flags.txt");
-        let body = skipped_flags.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} compiler flag(s) not propagated (not a simple -D, or an unmapped variable) -> {}",
-                skipped_flags.len(),
-                report.display()
-            );
-        }
-    }
-    skipped_conditions.sort_unstable();
-    skipped_conditions.dedup();
-    if !skipped_conditions.is_empty() {
-        let report = args.output.with_extension("skipped-conditions.txt");
-        let body = skipped_conditions.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} Make conditional(s) guard flags in a way that is not an architecture test -> {}",
-                skipped_conditions.len(),
-                report.display()
-            );
-        }
-    }
+    // These are build declarations, not flags or headers: each one is a target
+    // the historic build produces and this one does not.
+    write_report(
+        &args.output,
+        "unmodelled-declarations.txt",
+        skipped_programs,
+        "build declaration(s) of a kind the target model does not express",
+    );
+    // Not headers, so these do not break a compile; they break a link or a
+    // package step, which is harder to trace back. Listed for that reason.
+    write_report(
+        &args.output,
+        "generated-file-rules.txt",
+        generated_file_rules,
+        "hand-written $(GENDIR) rule(s) build something other than a header",
+    );
+    write_report(
+        &args.output,
+        "skipped-flags.txt",
+        skipped_flags,
+        "compiler flag(s) not propagated (not a simple -D, or an unmapped variable)",
+    );
+    write_report(
+        &args.output,
+        "skipped-conditions.txt",
+        skipped_conditions,
+        "Make conditional(s) guard flags in a way that is not an architecture test",
+    );
     if ambiguous_flags > 0 {
         println!(
             "⚠️  {ambiguous_flags} mmakefile(s) reassign USER_CPPFLAGS/USER_CFLAGS and build several modules; \
              flags are read file-globally there and may differ from Make"
         );
     }
-
-    unresolved.sort_unstable();
-    unresolved.dedup();
-    if !unresolved.is_empty() {
-        // The full list is long and dominated by third-party ports, so it goes
-        // next to the generated CMake file rather than into the build log.
-        let report = args.output.with_extension("unresolved-includes.txt");
-        let body = unresolved.join("\n");
-        if fs::write(&report, format!("{body}\n")).is_ok() {
-            println!(
-                "⚠️  {} include path(s) reference unmapped Make variables and were skipped -> {}",
-                unresolved.len(),
-                report.display()
-            );
-        } else {
-            println!(
-                "⚠️  {} include path(s) reference unmapped Make variables and were skipped",
-                unresolved.len()
-            );
-        }
-    }
+    // The full list is long and dominated by third-party ports, so it goes next
+    // to the generated CMake file rather than into the build log.
+    write_report(
+        &args.output,
+        "unresolved-includes.txt",
+        unresolved,
+        "include path(s) reference unmapped Make variables and were skipped",
+    );
 
     println!(
         "🔨 Assembling Dependency Graph with {} concrete targets and {} meta-targets...",
@@ -351,4 +258,30 @@ fn main() -> Result<()> {
         args.output.display()
     );
     Ok(())
+}
+
+/// Writes one skip report next to the generated CMake file.
+///
+/// Removes the file when there is nothing left to report. Every report used to
+/// be written only in the non-empty case, so a file outlived the change that
+/// emptied it and went on naming declarations that were no longer skipped. That
+/// is worse than no report: the numbers are what the next step is chosen from.
+///
+/// A write failure is announced rather than swallowed. The count is printed
+/// either way, so a read-only build directory costs the detail, not the signal.
+fn write_report(output: &Path, extension: &str, mut lines: Vec<String>, what: &str) {
+    let report = output.with_extension(extension);
+    if lines.is_empty() {
+        let _ = fs::remove_file(&report);
+        return;
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    let n = lines.len();
+    let body = lines.join("\n");
+    if fs::write(&report, format!("{body}\n")).is_ok() {
+        println!("⚠️  {n} {what} -> {}", report.display());
+    } else {
+        println!("⚠️  {n} {what} (report could not be written to {})", report.display());
+    }
 }
