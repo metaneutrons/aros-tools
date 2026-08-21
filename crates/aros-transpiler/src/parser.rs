@@ -5,7 +5,7 @@ use crate::fetch::collect_fetches;
 use crate::flags::collect_flags;
 use crate::includes::{collect_arch_decls, collect_includes};
 use crate::make_opts::collect_make_opts;
-use aros_common::Result;
+use aros_common::{read_source, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -315,7 +315,7 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
 }
 
 pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
-    let content = fs::read_to_string(path)?;
+    let content = read_source(path)?;
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let rel_dir = parent_dir
         .strip_prefix(root)
@@ -356,7 +356,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
     let mut opts_include_dirs: Vec<String> = Vec::new();
     let mut opts_arch_includes: Vec<(String, String)> = Vec::new();
     for f in &opts_files {
-        let Ok(body) = fs::read_to_string(root.join(&f.path)) else {
+        let Ok(body) = read_source(&root.join(&f.path)) else {
             continue;
         };
         let opts_flags = collect_flags(&body);

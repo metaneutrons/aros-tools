@@ -114,6 +114,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "toml",
  "tracing",
@@ -166,6 +167,7 @@ name = "aros-verify"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aros-common",
  "clap",
  "rayon",
  "regex",

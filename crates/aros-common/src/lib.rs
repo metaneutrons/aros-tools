@@ -3,9 +3,11 @@
 pub mod arch;
 pub mod error;
 pub mod target;
+pub mod text;
 pub mod toolchain;
 
 pub use arch::Architecture;
 pub use error::{ArosError, Result};
 pub use target::TargetProfile;
+pub use text::read_source;
 pub use toolchain::Toolchain;

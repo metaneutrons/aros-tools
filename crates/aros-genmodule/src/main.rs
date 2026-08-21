@@ -1,6 +1,7 @@
 mod interfaces;
 mod varargs;
 
+use aros_common::read_source;
 use clap::Parser;
 use rayon::prelude::*;
 use std::fmt::Write as _;
@@ -175,7 +176,7 @@ fn conf_key_value(line: &str) -> Option<(&str, &str)> {
 /// MOD_NAME_STRING would call every module a `.library`.
 fn read_mod_type(conf_path: &Path, module_name: &str) -> Option<String> {
     let mmakefile = conf_path.parent()?.join("mmakefile.src");
-    let content = fs::read_to_string(mmakefile).ok()?;
+    let content = read_source(&mmakefile).ok()?;
     // Directives span continuation lines, so flatten before matching.
     let flat = content.replace("\\\n", " ");
     let mut best: Option<String> = None;
@@ -249,7 +250,7 @@ fn default_basename(module_name: &str) -> String {
 }
 
 fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
-    let content = fs::read_to_string(path).ok()?;
+    let content = read_source(path).ok()?;
     let stem = path.file_stem()?.to_string_lossy().to_string();
 
     let mut module = ConfModule {

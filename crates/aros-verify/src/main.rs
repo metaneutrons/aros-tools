@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use aros_common::read_source;
 use clap::Parser;
 use rayon::prelude::*;
 use regex::Regex;
@@ -325,7 +326,7 @@ fn collect_declarations(root: &Path, files: &[PathBuf]) -> Vec<Declaration> {
 
     let mut out = Vec::new();
     for f in files {
-        let Ok(text) = fs::read_to_string(f) else {
+        let Ok(text) = read_source(f) else {
             continue;
         };
         let joined = cont.replace_all(&text, " ");
@@ -394,7 +395,7 @@ fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> 
         .par_iter()
         .map(|(_, path)| {
             let mut map: BTreeMap<String, RefShape> = BTreeMap::new();
-            let Ok(text) = fs::read_to_string(path) else {
+            let Ok(text) = read_source(path) else {
                 return map;
             };
             for c in re_prog.captures_iter(&text) {

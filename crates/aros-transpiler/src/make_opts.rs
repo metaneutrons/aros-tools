@@ -23,6 +23,7 @@
 //! that was never taken. Three files in the tree are affected, all for hosted
 //! ports.
 
+use aros_common::read_source;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -127,7 +128,7 @@ pub fn collect_make_opts(
 
             // The flag collectors do not evaluate conditionals, so a file that
             // has any would be applied unconditionally. Skip and report.
-            if let Ok(body) = std::fs::read_to_string(&entry) {
+            if let Ok(body) = read_source(&entry) {
                 if body.lines().any(|l| {
                     let t = l.trim_start();
                     t.starts_with("ifeq")
