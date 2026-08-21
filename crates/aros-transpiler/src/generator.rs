@@ -128,29 +128,18 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             _ => "aros_add_custom_target",
         };
 
-        let dir_str = target.dir_path.to_string_lossy();
-        let arch_condition = if dir_str.contains("arch/all-pc")
-            || dir_str.contains("arch/x86_64-pc")
-            || dir_str.contains("arch/i386-all")
-        {
-            Some(r#"AROS_TARGET_PLATFORM STREQUAL "pc""#)
-        } else if dir_str.contains("arch/arm-native")
-            || dir_str.contains("arch/aarch64-raspi")
-            || dir_str.contains("arch/all-raspi")
-        {
-            Some(r#"AROS_TARGET_PLATFORM STREQUAL "raspi""#)
-        } else if dir_str.contains("arch/m68k-amiga") || dir_str.contains("arch/m68k-all") {
-            Some(r#"AROS_TARGET_ARCH STREQUAL "m68k""#)
-        } else if dir_str.contains("arch/all-darwin") {
-            Some(r#"AROS_TARGET_PLATFORM STREQUAL "darwin""#)
-        } else {
-            None
-        };
-
-        if let Some(cond) = arch_condition {
-            writeln!(out, "if({cond})").unwrap();
-        }
-
+        // Every declaration is emitted, whatever architecture its sources belong
+        // to. Restricting the emission was tempting, but a hard-coded
+        // `if(AROS_TARGET_PLATFORM STREQUAL "pc")` around the declaration made
+        // 46 targets disappear from the build graph entirely, so nothing could
+        // report on them: they were neither built nor listed as skipped, and a
+        // newly added arch/ directory would have joined them silently.
+        //
+        // aros_gate_arch() in cmake/AROS.cmake does the filtering instead. It
+        // reads AROS_ARCH_SOURCE_DIRS, so it covers every architecture rather
+        // than the four spelled out here, and it excludes the target from `all`
+        // while keeping it nameable, which is what makes it possible to ask
+        // whether a foreign-architecture target would build.
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
         writeln!(out, "    MMAKE_ID {}", target.mmake_name).unwrap();
@@ -245,10 +234,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
 
         writeln!(out, ")").unwrap();
-
-        if arch_condition.is_some() {
-            writeln!(out, "endif()").unwrap();
-        }
         writeln!(out).unwrap();
     }
 
