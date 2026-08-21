@@ -85,7 +85,8 @@ fn condition_tag(line: &str) -> Option<String> {
 fn map_var(name: &str) -> Option<&'static str> {
     match name {
         // AROS calls the platform ARCH and the processor CPU.
-        "ARCH" | "AROS_TARGET_PLATFORM" => Some("${AROS_TARGET_PLATFORM}"),
+        "ARCH" => Some("${AROS_TARGET_PLATFORM}"),
+        "AROS_TARGET_PLATFORM" => Some("${AROS_TARGET_LEGACY_PLATFORM}"),
         "CPU" | "AROS_TARGET_CPU" => Some("${AROS_TARGET_CPU}"),
         "FAMILY" => Some("${AROS_TARGET_FAMILY}"),
         _ => None,
@@ -206,6 +207,7 @@ fn string_literal_value(raw: &str) -> Option<String> {
 fn is_identifier_shaped(name: &str) -> bool {
     let bare = name
         .replace("${AROS_TARGET_PLATFORM}", "x")
+        .replace("${AROS_TARGET_LEGACY_PLATFORM}", "x")
         .replace("${AROS_TARGET_CPU}", "x")
         .replace("${AROS_TARGET_FAMILY}", "x");
     !bare.is_empty()
@@ -267,6 +269,7 @@ fn simple_define(body: &str) -> Option<String> {
             // Keep values simple: identifiers, numbers, dots.
             let probe = v
                 .replace("${AROS_TARGET_PLATFORM}", "x")
+                .replace("${AROS_TARGET_LEGACY_PLATFORM}", "x")
                 .replace("${AROS_TARGET_CPU}", "x")
                 .replace("${AROS_TARGET_FAMILY}", "x");
             if probe.is_empty()
@@ -873,7 +876,7 @@ endif
         );
         assert_eq!(
             f.defines,
-            vec!["AROS_ARCHITECTURE=\"${AROS_TARGET_PLATFORM}\""]
+            vec!["AROS_ARCHITECTURE=\"${AROS_TARGET_LEGACY_PLATFORM}\""]
         );
         assert!(f.skipped.is_empty(), "skipped: {:?}", f.skipped);
     }

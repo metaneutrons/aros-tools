@@ -73,6 +73,7 @@ fn to_glob(raw: &str, root: &Path, rel_dir: &str) -> Option<String> {
             | "FAMILY"
             | "AROS_TARGET_VARIANT"
             | "AROS_TARGET_ARCH"
+            | "AROS_TARGET_PLATFORM"
             | "AROS_TARGET_CPU" => out.push('*'),
             _ => return None,
         }

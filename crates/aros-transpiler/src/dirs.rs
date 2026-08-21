@@ -50,6 +50,7 @@ const SEEDS: &[(&str, &str)] = &[
     // is AROS_TARGET_PLATFORM here; see the note in CMakeLists.txt.
     ("AROS_TARGET_CPU", "${AROS_TARGET_CPU}"),
     ("AROS_TARGET_ARCH", "${AROS_TARGET_PLATFORM}"),
+    ("AROS_TARGET_PLATFORM", "${AROS_TARGET_LEGACY_PLATFORM}"),
     ("AROS_TARGET_FAMILY", "${AROS_TARGET_FAMILY}"),
     // Empty in every configuration this build supports. Named rather than left
     // undefined, so the ifeq at config/make.cfg.in:52 can be decided.
@@ -405,6 +406,19 @@ mod tests {
         assert_eq!(
             d.expand("$(AROS_TARGET_CPU32)").unwrap(),
             "${AROS_TARGET_CPU32}"
+        );
+    }
+
+    #[test]
+    fn the_legacy_platform_is_the_compound_metamake_selector() {
+        let d = from_text("");
+        assert_eq!(
+            d.expand("$(AROS_TARGET_PLATFORM)").unwrap(),
+            "${AROS_TARGET_LEGACY_PLATFORM}"
+        );
+        assert_eq!(
+            d.expand("$(AROS_TARGET_ARCH)").unwrap(),
+            "${AROS_TARGET_PLATFORM}"
         );
     }
 

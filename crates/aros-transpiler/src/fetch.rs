@@ -112,7 +112,8 @@ fn map_var(name: &str) -> Option<&'static str> {
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),
         "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}"),
         "CPU" | "AROS_TARGET_CPU" => Some("${AROS_TARGET_CPU}"),
-        "ARCH" | "AROS_TARGET_PLATFORM" => Some("${AROS_TARGET_PLATFORM}"),
+        "ARCH" => Some("${AROS_TARGET_PLATFORM}"),
+        "AROS_TARGET_PLATFORM" => Some("${AROS_TARGET_LEGACY_PLATFORM}"),
         _ => None,
     }
 }
@@ -318,5 +319,16 @@ EXPATVERSION := 2.8.2
         let src = "%fetch mmake=z archive=pkg-1 destination=$(PORTSDIR)/z suffixes=\"tar.gz\"\n";
         let (decls, _) = collect_fetches(src, &PathBuf::from("d"));
         assert_eq!(decls[0].suffixes, "tar.gz", "no stray quotes");
+    }
+
+    #[test]
+    fn distinguishes_machine_arch_from_the_compound_legacy_platform() {
+        let src = "%fetch mmake=z archive=pkg-$(ARCH)-$(AROS_TARGET_PLATFORM) destination=$(PORTSDIR)/z\n";
+        let (decls, skipped) = collect_fetches(src, &PathBuf::from("d"));
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(
+            decls[0].archive,
+            "pkg-${AROS_TARGET_PLATFORM}-${AROS_TARGET_LEGACY_PLATFORM}"
+        );
     }
 }

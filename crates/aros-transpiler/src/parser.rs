@@ -53,7 +53,12 @@ fn render_meta_token(raw: &str) -> Option<String> {
         let end = after.find(')')?;
         let name = &after[..end];
         let cmake_name = match name {
-            "AROS_TARGET_ARCH" | "AROS_TARGET_PLATFORM" | "ARCH" => "AROS_TARGET_PLATFORM",
+            // The historic ARCH/AROS_TARGET_ARCH is the machine (pc, raspi),
+            // which this build calls AROS_TARGET_PLATFORM.  Historic
+            // AROS_TARGET_PLATFORM is instead the compound MetaMake selector
+            // (pc-x86_64, raspi-arm, raspi-aarch64).
+            "AROS_TARGET_ARCH" | "ARCH" => "AROS_TARGET_PLATFORM",
+            "AROS_TARGET_PLATFORM" => "AROS_TARGET_LEGACY_PLATFORM",
             "AROS_TARGET_CPU" | "CPU" => "AROS_TARGET_CPU",
             "AROS_TARGET_FAMILY" | "FAMILY" => "AROS_TARGET_FAMILY",
             "AROS_TARGET_VARIANT" => "AROS_TARGET_VARIANT",
@@ -1500,6 +1505,10 @@ FILES := gdbstop
         assert_eq!(
             render_meta_token("includes-$(ARCH)-$(CPU)").unwrap(),
             "includes-${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}"
+        );
+        assert_eq!(
+            render_meta_token("distfiles-$(AROS_TARGET_PLATFORM)").unwrap(),
+            "distfiles-${AROS_TARGET_LEGACY_PLATFORM}"
         );
         assert_eq!(
             render_meta_token("grub2-efi32-$(AROS_TARGET_CPU32)-quick").unwrap(),

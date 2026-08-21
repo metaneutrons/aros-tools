@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     println!(
-        "⚡ AROS-NG Transpiler v0.1.0 — Scanning mmakefile.src files in {}...",
+        "⚡ AROS-NG Transpiler v0.1.0 — Scanning MetaMake inputs in {}...",
         args.source_dir.display()
     );
 
@@ -44,7 +44,11 @@ fn main() -> Result<()> {
                     .any(|d| e.file_name().to_string_lossy() == *d)
         })
         .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name() == "mmakefile.src")
+        // MetaMake reads both generated-template inputs (`mmakefile.src`) and
+        // direct make fragments (`mmakefile`).  The latter include the
+        // top-level AROS/AROS-complete roots and 32 further dependency files;
+        // omitting them leaves an apparently valid but disconnected graph.
+        .filter(|e| matches!(e.file_name().to_str(), Some("mmakefile.src" | "mmakefile")))
         .map(walkdir::DirEntry::into_path)
         .collect();
     // Stable source order matters for duplicate-output semantics: GNU Make's
@@ -53,7 +57,7 @@ fn main() -> Result<()> {
     files.sort();
 
     println!(
-        "📦 Found {} mmakefile.src files. Parsing in parallel...",
+        "📦 Found {} MetaMake input files. Parsing in parallel...",
         files.len()
     );
 

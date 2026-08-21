@@ -333,10 +333,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     // `if(TARGET dep)` while iterating a HashMap, so a meta dependency that was
     // declared later in the random iteration order was permanently omitted.
     for (meta_name, _) in &meta_rules {
-        // `clean` is a generator-provided target name which CMake refuses in
-        // add_custom_target(). It remains a valid dependency token, but cannot
-        // have a separately declared utility target here.
-        if meta_name.as_str() != "clean" && !all_targets.contains(meta_name.as_str()) {
+        // `clean` and `install` are generator-provided target names which
+        // CMake refuses in add_custom_target(). They remain valid dependency
+        // tokens, but cannot have separately declared utility targets here.
+        if !matches!(meta_name.as_str(), "clean" | "install")
+            && !all_targets.contains(meta_name.as_str())
+        {
             writeln!(out, "if(NOT TARGET {})", cmake_arg(meta_name)).unwrap();
             writeln!(out, "    add_custom_target({})", cmake_arg(meta_name)).unwrap();
             writeln!(out, "endif()").unwrap();
@@ -529,6 +531,23 @@ mod tests {
 
         let cmake = generate_cmake(&graph);
         assert!(!cmake.contains("add_custom_target(\"clean\")"));
+    }
+
+    #[test]
+    fn the_reserved_install_target_is_not_redeclared() {
+        let mut graph = DependencyGraph::new();
+        graph.add_meta_rule(MetaTargetRule {
+            name: "install".to_owned(),
+            dependencies: vec!["leaf".to_owned()],
+        });
+        graph.add_meta_rule(MetaTargetRule {
+            name: "leaf".to_owned(),
+            dependencies: Vec::new(),
+        });
+
+        let cmake = generate_cmake(&graph);
+        assert!(!cmake.contains("add_custom_target(\"install\")"));
+        assert!(cmake.contains("add_custom_target(\"leaf\")"));
     }
 
     #[test]
