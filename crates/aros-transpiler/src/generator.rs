@@ -125,6 +125,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     for target in concrete_targets {
         let macro_name = match target.module_type {
             ModuleType::Library => "aros_add_library",
+            ModuleType::Abi => "aros_add_module_abi",
             ModuleType::Device => "aros_add_device",
             ModuleType::Resource => "aros_add_resource",
             ModuleType::Hidd => "aros_add_hidd",
@@ -153,6 +154,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
         writeln!(out, "    MMAKE_ID {}", target.mmake_name).unwrap();
+        if target.genmodule_only {
+            writeln!(out, "    GENMODULE_ONLY").unwrap();
+        }
         if !target.link_libs.is_empty() {
             let libs: Vec<String> = target.link_libs.iter().map(|l| cmake_arg(l)).collect();
             writeln!(out, "    LIBS {}", libs.join(" ")).unwrap();
@@ -620,6 +624,47 @@ mod tests {
         assert!(cmake.contains("    MODTYPE \"usbclass\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"class\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"sysexp\""), "{cmake}");
+    }
+
+    #[test]
+    fn abi_and_genmodule_only_targets_use_their_dedicated_cmake_contracts() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "rom/bluetooth/classes/mmakefile.src",
+            "workbench/libs/version/mmakefile.src",
+        ] {
+            let parsed = parse_mmakefile_with_dirs(&root.join(relative), &root, &dirs).unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+            for rule in parsed.meta_rules {
+                graph.add_meta_rule(rule);
+            }
+        }
+
+        let cmake = generate_cmake(&graph);
+        let abi_start = cmake
+            .find("aros_add_module_abi(\n    TARGET btclass")
+            .expect("ABI CMake call");
+        let abi_end = cmake[abi_start..].find("\n)\n").unwrap() + abi_start;
+        let abi = &cmake[abi_start..abi_end];
+        assert!(abi.contains("    MMAKE_ID kernel-bluetooth-btclass"));
+        assert!(abi.contains("    MODTYPE \"library\""));
+        assert!(abi.contains("    DIRECTORY \"${CMAKE_SOURCE_DIR}/rom/bluetooth/classes\""));
+        assert!(!abi.contains("SOURCES"), "{abi}");
+        assert!(!abi.contains("GENMODULE_ONLY"), "{abi}");
+        assert!(!abi.contains("CONFFILE"), "{abi}");
+
+        let version_start = cmake
+            .find("aros_add_library(\n    TARGET version")
+            .expect("version CMake call");
+        let version_end = cmake[version_start..].find("\n)\n").unwrap() + version_start;
+        let version = &cmake[version_start..version_end];
+        assert!(version.contains("    MMAKE_ID workbench-libs-version"));
+        assert!(version.contains("    GENMODULE_ONLY"));
+        assert!(!version.contains("SOURCES"), "{version}");
     }
 
     #[test]

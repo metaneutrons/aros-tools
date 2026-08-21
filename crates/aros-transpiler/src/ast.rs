@@ -10,6 +10,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleType {
     Library,
+    /// `%build_module_abi`: generated headers and a link stub library, but no
+    /// runtime module. Keeping this distinct from [`Library`](Self::Library)
+    /// prevents package resolution from treating an ABI skeleton as a file.
+    Abi,
     Device,
     Resource,
     Hidd,
@@ -33,6 +37,11 @@ pub struct TargetDefinition {
     pub mmake_name: String,
     pub target_name: String,
     pub module_type: ModuleType,
+    /// The module has no hand-written sources because genmodule supplies its
+    /// complete runtime implementation. This is deliberately set only for an
+    /// explicit `files=""`, never for a source expression that resolved empty.
+    #[serde(default)]
+    pub genmodule_only: bool,
     /// C source stems or paths from the macro's `files=` lane.
     pub source_files: Vec<String>,
     /// C++ source stems or paths from `cxxfiles=`. Keeping this lane separate

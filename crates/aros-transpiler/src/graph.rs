@@ -78,6 +78,12 @@ fn arch_compatible(candidate: Option<&(String, String)>, ctx: Option<&(String, S
 /// resolution match an authoritative filename rather than a potentially
 /// same-named module of another kind.
 fn target_runtime_name(target: &TargetDefinition) -> Option<String> {
+    // An ABI skeleton publishes headers and a static link stub, not a runtime
+    // module. Its declared modtype must therefore never make it eligible for a
+    // package member such as `library=foo`.
+    if matches!(target.module_type, ModuleType::Abi) {
+        return None;
+    }
     if let Some(suffix) = target.mod_suffix.as_deref() {
         return Some(runtime_name(suffix, &target.target_name));
     }
@@ -263,14 +269,23 @@ impl DependencyGraph {
     ///
     /// Returns the names that matched no link library.
     pub fn resolve_use_libs(&mut self) -> Vec<String> {
-        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
+        // Keep the declaration identity for architecture/flavour selection
+        // separate from the target a consumer may actually link. ABI-only
+        // declarations expose a workflow aggregate under their mmake id; the
+        // archive is the `<mmake>-linklib` product target.
+        let mut by_name: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
         for (mmake, target) in &self.targets {
-            if matches!(target.module_type, ModuleType::LinkLib) {
+            if matches!(target.module_type, ModuleType::Abi | ModuleType::LinkLib) {
+                let link_target = if matches!(target.module_type, ModuleType::Abi) {
+                    format!("{mmake}-linklib")
+                } else {
+                    mmake.clone()
+                };
                 by_name
-                    .entry(target.target_name.as_str())
+                    .entry(target.target_name.clone())
                     .or_default()
-                    .push(mmake.as_str());
+                    .push((mmake.clone(), link_target));
             }
         }
 
@@ -281,7 +296,7 @@ impl DependencyGraph {
             for name in &target.use_libs {
                 match by_name.get(name.as_str()) {
                     Some(c) if c.len() == 1 => {
-                        let id = (*c[0]).to_owned();
+                        let id = c[0].1.clone();
                         if !ids.contains(&id) {
                             ids.push(id);
                         }
@@ -290,20 +305,28 @@ impl DependencyGraph {
                         // Two link libraries share a libname when one is the
                         // extra 32-bit flavour a 64-bit target keeps for its
                         // bootstrap. The main target wants the other one.
-                        let main: Vec<&&str> = c
+                        let main: Vec<&(String, String)> = c
                             .iter()
-                            .filter(|id| self.targets.get(**id).is_some_and(|t| !t.variant_32bit))
+                            .filter(|(declaration, _)| {
+                                self.targets
+                                    .get(declaration)
+                                    .is_some_and(|t| !t.variant_32bit)
+                            })
                             .collect();
                         if main.len() == 1 {
-                            let id = (**main[0]).to_owned();
+                            let id = main[0].1.clone();
                             if !ids.contains(&id) {
                                 ids.push(id);
                             }
                         } else {
+                            let declarations: Vec<&str> = c
+                                .iter()
+                                .map(|(declaration, _)| declaration.as_str())
+                                .collect();
                             unresolved.push(format!(
                                 "{}: {mmake} uselibs={name} is ambiguous ({})",
                                 target.dir_path.display(),
-                                c.join(", ")
+                                declarations.join(", ")
                             ));
                         }
                     }
@@ -730,6 +753,62 @@ mod tests {
             arch: String::new(),
         }]);
         graph
+    }
+
+    #[test]
+    fn an_abi_skeleton_is_a_linklib_provider_but_never_a_runtime_member() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs(
+            &root.join("rom/bluetooth/classes/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap();
+        let abi = parsed
+            .targets
+            .into_iter()
+            .find(|target| target.mmake_name == "kernel-bluetooth-btclass")
+            .expect("btclass ABI target");
+        assert_eq!(target_runtime_name(&abi), None);
+
+        let mut consumer = parse_mmakefile_with_dirs(
+            &root.join("workbench/libs/version/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap()
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-libs-version")
+        .expect("version target");
+        consumer.mmake_name = "test-abi-consumer".to_owned();
+        consumer.use_libs = vec!["btclass".to_owned()];
+
+        let mut graph = DependencyGraph::new();
+        graph.add_target(abi);
+        graph.add_target(consumer);
+        assert!(graph.resolve_use_libs().is_empty());
+        assert_eq!(
+            graph.targets["test-abi-consumer"].link_libs,
+            ["kernel-bluetooth-btclass-linklib"]
+        );
+
+        graph.add_packages(vec![PackageDecl {
+            file: "test/mmakefile.src".to_owned(),
+            mmake: "test-package".to_owned(),
+            output: "${AROS_BOOT_ARCH_DIR}/test.pkg".to_owned(),
+            members: vec![("library".to_owned(), "btclass".to_owned())],
+            startup: None,
+            uselibs: Vec::new(),
+            is_kickstart: false,
+            resolved: Vec::new(),
+            arch: String::new(),
+        }]);
+        let unresolved = graph.resolve_packages();
+        assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+        assert!(unresolved[0].contains("(btclass.library) has no target"));
+        assert!(graph.packages[0].resolved.is_empty());
     }
 
     #[test]

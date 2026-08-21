@@ -1496,6 +1496,184 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
     }
 }
 
+/// Whether a full library intentionally delegates all of its sources to
+/// genmodule.
+///
+/// An evaluated expression that happens to be empty is not equivalent: it may
+/// be an unresolved source list. Only the literal quoted-empty spelling used
+/// by version.library opts into this mode, and no second language lane may be
+/// present.
+fn is_explicit_genmodule_only(invocation: &str, args: &str, mod_type: &str) -> bool {
+    let literal = "files=\"\"";
+    let has_literal_empty_files = args.match_indices(literal).any(|(start, _)| {
+        let end = start + literal.len();
+        (start == 0
+            || args[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace))
+            && (end == args.len() || args[end..].chars().next().is_some_and(char::is_whitespace))
+    });
+    invocation == "build_module"
+        && mod_type == "library"
+        && has_literal_empty_files
+        && ["cxxfiles", "objcfiles", "asmfiles"]
+            .iter()
+            .all(|key| macro_arg(args, key).is_none())
+}
+
+fn implicit_module_meta_rules(
+    mmake: &str,
+    modname: &str,
+    include_set: &str,
+    use_libs: &[String],
+    has_abi: bool,
+    has_library: bool,
+) -> Vec<MetaTargetRule> {
+    const fn rule(name: String, dependencies: Vec<String>) -> MetaTargetRule {
+        MetaTargetRule { name, dependencies }
+    }
+
+    let mut rules = Vec::new();
+    for suffix in [
+        "",
+        "-quick",
+        "-makefile",
+        "-clean",
+        "-genmakefile",
+        "-genmodfiles",
+    ] {
+        rules.push(rule(format!("{mmake}{suffix}"), Vec::new()));
+    }
+    rules.push(rule(
+        format!("{mmake}-genmodfiles"),
+        vec![format!("{mmake}-genmakefile")],
+    ));
+    // The quick spelling is an alias for the complete module/linklib target,
+    // not merely for its reduced include and architecture prerequisites
+    // (make.tmpl:2671).
+    rules.push(rule(format!("{mmake}-quick"), vec![mmake.to_owned()]));
+
+    let linklibs: Vec<String> = use_libs
+        .iter()
+        .map(|name| format!("linklibs-{name}"))
+        .collect();
+    let includes: Vec<String> = use_libs
+        .iter()
+        .map(|name| format!("includes-{name}"))
+        .collect();
+
+    if has_abi {
+        for suffix in [
+            "-includes",
+            "-includes-quick",
+            "-includes-dirs",
+            "-fd",
+            "-linklib",
+            "-set-archincludes",
+        ] {
+            rules.push(rule(format!("{mmake}{suffix}"), Vec::new()));
+        }
+        for alias in [
+            format!("includes-{modname}"),
+            format!("includes-{modname}_rel"),
+        ] {
+            rules.push(rule(alias, vec![format!("{mmake}-includes")]));
+        }
+        for alias in [
+            format!("linklibs-{modname}"),
+            format!("linklibs-{modname}_rel"),
+        ] {
+            rules.push(rule(alias, vec![format!("{mmake}-linklib")]));
+        }
+        rules.push(rule(
+            include_set.to_owned(),
+            vec![format!("{mmake}-includes")],
+        ));
+
+        let mut base_dependencies = vec![format!("{mmake}-includes"), "core-linklibs".to_owned()];
+        base_dependencies.extend(linklibs.iter().cloned());
+        rules.push(rule(mmake.to_owned(), base_dependencies));
+
+        let mut linklib_dependencies = vec![format!("{mmake}-includes")];
+        linklib_dependencies.extend(includes.iter().cloned());
+        rules.push(rule(format!("{mmake}-linklib"), linklib_dependencies));
+        rules.push(rule(
+            format!("{mmake}-quick"),
+            vec![format!("{mmake}-includes-quick")],
+        ));
+        rules.push(rule(
+            format!("{mmake}-includes"),
+            vec![
+                format!("{mmake}-makefile"),
+                format!("{mmake}-includes-dirs"),
+                format!("{mmake}-set-archincludes"),
+                "includes-generate-deps".to_owned(),
+                format!("{mmake}-fd"),
+            ],
+        ));
+    }
+
+    if has_library {
+        let mut kobj_dependencies = vec!["core-linklibs".to_owned()];
+        kobj_dependencies.extend(linklibs);
+        if has_abi {
+            kobj_dependencies.insert(0, format!("{mmake}-includes"));
+        }
+        rules.push(rule(format!("{mmake}-kobj"), kobj_dependencies));
+        rules.push(rule(
+            format!("{mmake}-kobj-quick"),
+            if has_abi {
+                vec![format!("{mmake}-includes-quick")]
+            } else {
+                Vec::new()
+            },
+        ));
+    }
+
+    // `%gen_archspecificrules` is expanded unconditionally for these six
+    // suffixes, including the kobj identities of an ABI-only declaration.
+    // Register every endpoint as a meta key: generator phase two deliberately
+    // filters dependencies whose identities are unknown.
+    for suffix in [
+        "",
+        "-set-archincludes",
+        "-linklib",
+        "-kobj",
+        "-kobj-quick",
+        "-quick",
+    ] {
+        let base = format!("{mmake}{suffix}");
+        let cpu = format!("{mmake}-${{AROS_TARGET_CPU}}{suffix}");
+        let family = format!("{mmake}-${{AROS_TARGET_FAMILY}}{suffix}");
+        let arch = format!("{mmake}-${{AROS_TARGET_PLATFORM}}{suffix}");
+        let arch_variant =
+            format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_VARIANT}}{suffix}");
+        let arch_cpu = format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}{suffix}");
+        let arch_cpu_variant = format!(
+            "{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
+        );
+
+        rules.push(rule(base, vec![cpu.clone()]));
+        rules.push(rule(cpu, vec![family.clone()]));
+        rules.push(rule(family, vec![arch.clone()]));
+        rules.push(rule(arch, vec![arch_variant.clone()]));
+        rules.push(rule(arch_variant, vec![arch_cpu.clone()]));
+        rules.push(rule(arch_cpu, vec![arch_cpu_variant.clone()]));
+        rules.push(rule(arch_cpu_variant, Vec::new()));
+    }
+    rules.push(rule(
+        format!("{mmake}-kobj"),
+        vec![format!("{mmake}-${{AROS_TARGET_CPU}}")],
+    ));
+    rules.push(rule(
+        format!("{mmake}-kobj-quick"),
+        vec![format!("{mmake}-${{AROS_TARGET_CPU}}-quick")],
+    ));
+
+    rules
+}
+
 /// The relative module directory genmodule chooses for a full module when no
 /// `moduledir=` override is present (tools/genmodule/config.c:250-333).
 ///
@@ -1866,9 +2044,8 @@ fn parse_mmakefile_impl(
             "build_module" | "build_module_abi" | "build_module_library"
         )
     }) {
-        // The three spellings are 16-to-21-line wrappers around the same
-        // %build_module_core; they differ only in flags that steer meta-target
-        // wiring, not compilation (make.tmpl:2212).
+        // The three spellings wrap the same %build_module_core, but the ABI
+        // form deliberately has no runtime compilation (make.tmpl:2828).
         let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
             continue;
         };
@@ -1882,17 +2059,23 @@ fn parse_mmakefile_impl(
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
         let mod_type_str = mod_type_owned.as_str();
         let rest = inv.args.as_str();
+        let is_abi = inv.name == "build_module_abi";
 
-        let module_type = match mod_type_str {
-            "library" => ModuleType::Library,
-            "device" => ModuleType::Device,
-            "resource" => ModuleType::Resource,
-            "hidd" => ModuleType::Hidd,
-            "datatype" => ModuleType::Datatype,
-            "gadget" => ModuleType::Gadget,
-            "mcc" => ModuleType::Mcc,
-            _ => ModuleType::Custom,
+        let module_type = if is_abi {
+            ModuleType::Abi
+        } else {
+            match mod_type_str {
+                "library" => ModuleType::Library,
+                "device" => ModuleType::Device,
+                "resource" => ModuleType::Resource,
+                "hidd" => ModuleType::Hidd,
+                "datatype" => ModuleType::Datatype,
+                "gadget" => ModuleType::Gadget,
+                "mcc" => ModuleType::Mcc,
+                _ => ModuleType::Custom,
+            }
         };
+        let genmodule_only = is_explicit_genmodule_only(&inv.name, rest, mod_type_str);
 
         let arch_specific = match resolve_yes_argument(rest, "archspecific", &scope, dirs, inv.line)
         {
@@ -1940,49 +2123,56 @@ fn parse_mmakefile_impl(
             }
         };
 
-        // The same source-list rules as every other build macro: the union of
-        // the four lists, and the reference's default of every *.c in the
-        // directory when none is given (make.tmpl:2802). This loop used to read
-        // `files=` alone and silently yield nothing otherwise, which left 21
-        // declarations with no sources at all and never reported it.
-        let mut sources = match evaluate_macro_sources(rest, &vars, &expression_context) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
-        };
-        record_partial_source_lists(
-            &mut partial_source_lists,
-            &sources,
-            &rel_dir,
-            inv,
-            &mmake_raw,
-        );
-        if sources.is_empty() {
-            if sources.declared {
-                skipped_programs.push(format!(
-                    "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
-                    rel_dir.display(),
-                    inv.name
-                ));
-                continue;
-            }
-            sources.c = wildcard_c_sources(parent_dir);
+        // An ABI skeleton has no implementation sources, and the one explicit
+        // genmodule-only library is implemented entirely by generated start/end
+        // files. Every other empty result keeps the existing strict source-list
+        // handling: unresolved lists may never turn into generated-only modules.
+        let sources = if is_abi || genmodule_only {
+            EvaluatedSources::default()
+        } else {
+            // The same source-list rules as every other build macro: the union
+            // of all four lanes, with the reference's *.c default only when no
+            // lane was declared (make.tmpl:2802).
+            let mut sources = match evaluate_macro_sources(rest, &vars, &expression_context) {
+                Ok(sources) => sources,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            };
+            record_partial_source_lists(
+                &mut partial_source_lists,
+                &sources,
+                &rel_dir,
+                inv,
+                &mmake_raw,
+            );
             if sources.is_empty() {
-                skipped_programs.push(format!(
-                    "{}: %{} mmake={mmake_raw} modname={mod_raw} declares no sources",
-                    rel_dir.display(),
-                    inv.name
-                ));
-                continue;
+                if sources.declared {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    continue;
+                }
+                sources.c = wildcard_c_sources(parent_dir);
+                if sources.is_empty() {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} modname={mod_raw} declares no sources",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    continue;
+                }
             }
-        }
+            sources
+        };
 
         let use_libs: Vec<String> = re_libs.captures(rest).map_or_else(Vec::new, |lcap| {
             let libs_str = lcap
@@ -1991,13 +2181,40 @@ fn parse_mmakefile_impl(
                 .map_or("", |m| m.as_str());
             expand_file_list(libs_str, &vars)
         });
-        let declared_mod_type =
-            matches!(module_type, ModuleType::Custom).then(|| mod_type_owned.clone());
+        let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
+            .then(|| mod_type_owned.clone());
+
+        if is_abi || genmodule_only {
+            let include_set = match macro_arg(rest, "include_set") {
+                Some(raw) => {
+                    let Some(rendered) = render_meta_token(&raw) else {
+                        skipped_programs.push(format!(
+                            "{}:{}: %{} mmake={mmake_raw} include_set={raw} contains an unmapped Make variable",
+                            rel_dir.display(),
+                            inv.line + 1,
+                            inv.name
+                        ));
+                        continue;
+                    };
+                    rendered
+                }
+                None => "includes-all".to_owned(),
+            };
+            meta_rules.extend(implicit_module_meta_rules(
+                &mmake_name,
+                &mod_name,
+                &include_set,
+                &use_libs,
+                inv.name != "build_module_library",
+                inv.name != "build_module_abi",
+            ));
+        }
 
         targets.push(TargetDefinition {
             mmake_name,
             target_name: mod_name,
             module_type,
+            genmodule_only,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             objc_source_files: sources.objc,
@@ -2116,6 +2333,7 @@ fn parse_mmakefile_impl(
             mmake_name,
             target_name: prog_name,
             module_type: ModuleType::Program,
+            genmodule_only: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             objc_source_files: sources.objc,
@@ -2317,6 +2535,7 @@ fn parse_mmakefile_impl(
             mmake_name,
             target_name,
             module_type,
+            genmodule_only: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             objc_source_files: sources.objc,
@@ -2425,7 +2644,8 @@ fn parse_mmakefile_impl(
 mod tests {
     use super::{
         collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
-        join_continuations, join_mm_continuations, macro_arg, macro_invocations, render_meta_token,
+        implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
+        join_mm_continuations, macro_arg, macro_invocations, render_meta_token,
         resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
         select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
     };
@@ -2502,6 +2722,128 @@ mod tests {
         assert_eq!(macro_arg(&progs[0].args, "progname").unwrap(), "SysLog");
         assert_eq!(macro_arg(&progs[0].args, "files").unwrap(), "$(FILES)");
         assert_eq!(macro_arg(&progs[1].args, "progname").unwrap(), "Other");
+    }
+
+    #[test]
+    fn only_a_literal_empty_library_file_list_is_genmodule_only() {
+        assert!(is_explicit_genmodule_only(
+            "build_module",
+            r#"mmake=x modname=x modtype=library files="""#,
+            "library"
+        ));
+        for (invocation, args, mod_type) in [
+            (
+                "build_module",
+                "mmake=x modname=x modtype=library files=$(EMPTY)",
+                "library",
+            ),
+            (
+                "build_module",
+                r#"mmake=x modname=x modtype=library files="" cxxfiles=x"#,
+                "library",
+            ),
+            (
+                "build_module",
+                r#"mmake=x modname=x modtype=device files="""#,
+                "device",
+            ),
+            (
+                "build_module_abi",
+                r#"mmake=x modname=x modtype=library files="""#,
+                "library",
+            ),
+            (
+                "build_module",
+                r#"mmake=x modname=x modtype=library files=""junk"#,
+                "library",
+            ),
+            (
+                "build_module",
+                r#"mmake=x modname=x modtype=library notfiles="""#,
+                "library",
+            ),
+        ] {
+            assert!(
+                !is_explicit_genmodule_only(invocation, args, mod_type),
+                "unexpected generated-only acceptance: %{invocation} {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_module_meta_rules_keep_aliases_and_every_arch_endpoint() {
+        let rules = implicit_module_meta_rules(
+            "module-id",
+            "module",
+            "includes-set",
+            &["dependency_rel".to_owned()],
+            true,
+            true,
+        );
+        let mut metas: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for rule in rules {
+            metas
+                .entry(rule.name)
+                .or_default()
+                .extend(rule.dependencies);
+        }
+
+        for (name, dependency) in [
+            ("includes-set", "module-id-includes"),
+            ("includes-module", "module-id-includes"),
+            ("includes-module_rel", "module-id-includes"),
+            ("linklibs-module", "module-id-linklib"),
+            ("linklibs-module_rel", "module-id-linklib"),
+            ("module-id-genmodfiles", "module-id-genmakefile"),
+        ] {
+            assert!(metas[name].contains(dependency), "{name} -> {dependency}");
+        }
+        for dependency in [
+            "module-id-includes",
+            "core-linklibs",
+            "linklibs-dependency_rel",
+            "module-id-${AROS_TARGET_CPU}",
+        ] {
+            assert!(metas["module-id"].contains(dependency), "{dependency}");
+        }
+        assert!(metas["module-id-quick"].contains("module-id"));
+        for dependency in [
+            "module-id-includes",
+            "includes-dependency_rel",
+            "module-id-${AROS_TARGET_CPU}-linklib",
+        ] {
+            assert!(
+                metas["module-id-linklib"].contains(dependency),
+                "{dependency}"
+            );
+        }
+        for dependency in [
+            "module-id-includes",
+            "core-linklibs",
+            "linklibs-dependency_rel",
+            "module-id-${AROS_TARGET_CPU}-kobj",
+            "module-id-${AROS_TARGET_CPU}",
+        ] {
+            assert!(metas["module-id-kobj"].contains(dependency), "{dependency}");
+        }
+
+        for suffix in [
+            "",
+            "-set-archincludes",
+            "-linklib",
+            "-kobj",
+            "-kobj-quick",
+            "-quick",
+        ] {
+            let leaf = format!(
+                "module-id-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
+            );
+            assert!(metas.contains_key(&leaf), "missing {leaf}");
+        }
+        assert!(metas
+            .values()
+            .flatten()
+            .all(|dependency| { dependency != "linklibs-" && dependency != "includes-" }));
     }
 
     #[test]
@@ -3445,6 +3787,110 @@ FILES := gdbstop
             resolve_module_suffix("", &scope, &dirs(), 0, "printer").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
+        let root = root();
+        let dirs = dirs();
+        let skip_dirs = ["build", "target", ".git"];
+        let abi_invocations = WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir()
+                    || entry.depth() == 0
+                    || !skip_dirs
+                        .iter()
+                        .any(|dir| entry.file_name().to_string_lossy() == *dir)
+            })
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file() && entry.file_name() == "mmakefile.src")
+            .map(|entry| {
+                read_source(entry.path())
+                    .unwrap()
+                    .matches("%build_module_abi")
+                    .count()
+            })
+            .sum::<usize>();
+        assert_eq!(abi_invocations, 4);
+
+        let abi_files = [
+            (
+                "rom/bluetooth/classes/mmakefile.src",
+                "kernel-bluetooth-btclass",
+                "btclass",
+            ),
+            (
+                "rom/usb/classes/mmakefile.src",
+                "kernel-usb-usbclass",
+                "usbclass",
+            ),
+            (
+                "rom/usb/classes/arosx/include/mmakefile.src",
+                "kernel-usb-classes-arosx-library",
+                "arosx",
+            ),
+            (
+                "workbench/libs/dxtn/mmakefile.src",
+                "workbench-libs-dxtn",
+                "dxtn",
+            ),
+        ];
+
+        for (file, mmake, modname) in abi_files {
+            let parsed = super::parse_mmakefile_with_dirs(&root.join(file), &root, &dirs).unwrap();
+            let target = parsed
+                .targets
+                .iter()
+                .find(|target| target.mmake_name == mmake)
+                .unwrap_or_else(|| panic!("{file} did not retain {mmake}"));
+            assert_eq!(target.module_type, ModuleType::Abi);
+            assert_eq!(target.target_name, modname);
+            assert_eq!(target.declared_mod_type.as_deref(), Some("library"));
+            assert!(!target.genmodule_only);
+            assert!(target.source_files.is_empty());
+            assert!(target.cxx_source_files.is_empty());
+            assert!(target.objc_source_files.is_empty());
+            assert!(target.asm_source_files.is_empty());
+
+            let mut metas: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for rule in &parsed.meta_rules {
+                metas
+                    .entry(&rule.name)
+                    .or_default()
+                    .extend(rule.dependencies.iter().map(String::as_str));
+            }
+            assert!(metas[mmake].contains(&format!("{mmake}-includes").as_str()));
+            assert!(metas[&format!("linklibs-{modname}").as_str()]
+                .contains(&format!("{mmake}-linklib").as_str()));
+            assert!(metas.contains_key(format!("{mmake}-kobj").as_str()));
+            assert!(metas.contains_key(
+                format!(
+                    "{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}-quick"
+                )
+                .as_str()
+            ));
+        }
+
+        let parsed = super::parse_mmakefile_with_dirs(
+            &root.join("workbench/libs/version/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap();
+        let version = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "workbench-libs-version")
+            .expect("version.library must be retained");
+        assert_eq!(version.module_type, ModuleType::Library);
+        assert!(version.genmodule_only);
+        assert!(version.source_files.is_empty());
+        assert!(parsed
+            .meta_rules
+            .iter()
+            .any(|rule| rule.name == "linklibs-version"
+                && rule.dependencies == ["workbench-libs-version-linklib"]));
     }
 
     #[test]
