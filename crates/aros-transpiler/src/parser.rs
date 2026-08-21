@@ -222,11 +222,132 @@ fn join_mm_continuations(content: &str) -> String {
     out
 }
 
-/// One macro invocation from an mmakefile: its name and its argument text.
+/// One macro invocation from an mmakefile: its name, argument text, and the
+/// line of the continuation-joined file it stands on.
+///
+/// The line is what makes positional variable lookup possible; see `VarScope`.
 struct Invocation {
     name: String,
     args: String,
+    line: usize,
 }
+
+/// Joins Make continuation lines, so an assignment or a declaration occupies
+/// exactly one line.
+///
+/// Nearly every declaration spreads its arguments over several lines and
+/// `mmake=` is often not on the first, and a file list is nearly always written
+/// one name per continued line. Joining first means one pass can both read the
+/// assignments and see where each declaration stands.
+fn join_continuations(content: &str) -> String {
+    let cont = Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap();
+    cont.replace_all(content, " ").into_owned()
+}
+
+/// Variable assignments in the order the file makes them.
+///
+/// Make expands a declaration's arguments where the declaration stands.
+/// `%build_progs files=$(FILES)` therefore takes the value FILES held at that
+/// line, because the macro emits `<mmake>_FILES := %(files)` -- a simple
+/// assignment, evaluated in place (config/make.tmpl:1868).
+///
+/// Reading one file-global value instead gave every declaration the file's last
+/// assignment. arch/m68k-amiga/c declares `FILES := gdbstub`, a %build_progs,
+/// `FILES := gdbstop`, and a second %build_progs; both came out building
+/// gdbstop, two targets claimed the output SYS/C/.../gdbstop, and Ninja refused
+/// to generate the build at all. 16 declarations across 9 mmakefiles read a
+/// variable that is reassigned later in the same file.
+struct VarScope {
+    /// Per name, the assignments in file order as (line, values).
+    assignments: HashMap<String, Vec<(usize, Vec<String>)>>,
+}
+
+impl VarScope {
+    /// The variable state as Make would see it at `line`.
+    ///
+    /// A declaration on line N sees every assignment made before it and none of
+    /// those made after.
+    fn snapshot(&self, line: usize) -> HashMap<String, Vec<String>> {
+        self.assignments
+            .iter()
+            .filter_map(|(name, history)| {
+                history
+                    .iter()
+                    .rev()
+                    .find(|(at, _)| *at < line)
+                    .map(|(_, values)| (name.clone(), values.clone()))
+            })
+            .collect()
+    }
+
+    /// The most recent value of `name`, used to resolve a self-referential
+    /// assignment while the scan is still running.
+    fn latest(&self, name: &str) -> &[String] {
+        self.assignments
+            .get(name)
+            .and_then(|h| h.last())
+            .map_or(&[][..], |(_, v)| v.as_slice())
+    }
+}
+
+/// Reads every variable assignment from continuation-joined mmakefile text.
+fn collect_vars(joined: &str) -> VarScope {
+    let mut scope = VarScope {
+        assignments: HashMap::new(),
+    };
+
+    for (line_no, line) in joined.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+
+        // Make has four assignment forms and the tree uses three of them.
+        // Reading only `:=` lost every list written with `=` or `?=`:
+        // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
+        // that way, and eight %build_linklib declarations get their file list
+        // from one.
+        let assignment = line
+            .split_once(":=")
+            .or_else(|| line.split_once("?="))
+            .filter(|(k, _)| !k.contains('=') && !k.contains(':'))
+            .or_else(|| {
+                line.split_once('=')
+                    .filter(|(k, _)| !k.contains(':') && !k.ends_with('+') && !k.contains('$'))
+            });
+        let Some((k, v)) = assignment else {
+            continue;
+        };
+
+        let var_name = k.trim().trim_end_matches('?').trim().to_owned();
+        // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
+        // held. Inserting the new list would discard it, and the surviving
+        // `$(FILES)` reference then resolves to itself: muimaster came out with
+        // 26 sources against the reference's ~94.
+        let self_ref = format!("$({var_name})");
+        let prior = scope.latest(&var_name);
+        let expanded = if v.contains(&self_ref) && !prior.is_empty() {
+            v.replace(&self_ref, &prior.join(" "))
+        } else {
+            v.to_owned()
+        };
+
+        let values: Vec<String> = expanded
+            .split_whitespace()
+            .filter(|s| *s != "\\")
+            .map(|s| s.replace(['"', '\\'], "").trim().to_owned())
+            .filter(|s| keep_list_item(s))
+            .collect();
+        scope
+            .assignments
+            .entry(var_name)
+            .or_default()
+            .push((line_no, values));
+    }
+
+    scope
+}
+
 
 /// Whether a word from a Make list is usable as a list item.
 ///
@@ -249,21 +370,20 @@ fn keep_list_item(s: &str) -> bool {
     !s.contains('$') && !s.contains(')')
 }
 
-/// Splits an mmakefile into its macro invocations.
+/// Splits continuation-joined mmakefile text into its macro invocations.
+///
+/// Takes text already run through `join_continuations`, and records each
+/// invocation's line in that text, so a declaration's arguments can be resolved
+/// against the variable state as of that point rather than the file's last word.
 ///
 /// This replaces matching the whole file with one regex. With `(?s)` and a
 /// non-greedy tail such as `(.*?)(?:%common|$)`, the first `%build_module` in a
 /// file swallowed every later one, because most files carry a single `%common`
 /// at the end. 14 files contributed one target each instead of all of theirs,
 /// costing 60 targets, among them every Wanderer and Zune class.
-fn macro_invocations(content: &str) -> Vec<Invocation> {
-    // Continuations are joined first: nearly every declaration spreads its
-    // arguments over several lines, and `mmake=` is often not on the first.
-    let cont = Regex::new(r"\\\s*\n\s*").unwrap();
-    let joined = cont.replace_all(content, " ");
-
+fn macro_invocations(joined: &str) -> Vec<Invocation> {
     let mut out = Vec::new();
-    for line in joined.lines() {
+    for (line_no, line) in joined.lines().enumerate() {
         let t = line.trim_start();
         let Some(after) = t.strip_prefix('%') else {
             continue;
@@ -278,6 +398,7 @@ fn macro_invocations(content: &str) -> Vec<Invocation> {
         out.push(Invocation {
             name: name.to_owned(),
             args: args.to_owned(),
+            line: line_no,
         });
     }
     out
@@ -384,72 +505,13 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         }
     }
 
-    // Collect Makefile variable assignments
-    let mut vars: HashMap<String, Vec<String>> = HashMap::new();
-    let mut current_var: Option<String> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.starts_with('%') {
-            current_var = None;
-            continue;
-        }
-
-        // Make has four assignment forms and the tree uses three of them.
-        // Reading only `:=` lost every list written with `=` or `?=`:
-        // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
-        // that way, and eight %build_linklib declarations get their file list
-        // from one.
-        let assignment = line
-            .split_once(":=")
-            .or_else(|| line.split_once("?="))
-            .filter(|(k, _)| !k.contains('=') && !k.contains(':'))
-            .or_else(|| {
-                line.split_once('=')
-                    .filter(|(k, _)| !k.contains(':') && !k.ends_with('+') && !k.contains('$'))
-            });
-        if let Some((k, v)) = assignment {
-            let var_name = k.trim().trim_end_matches('?').trim().to_string();
-            // `FILES := $(FILES) $(CLASSFILES)` has to keep what FILES already
-            // held. Inserting the new list would discard it, and the surviving
-            // `$(FILES)` reference then resolves to itself: muimaster came out
-            // with 26 sources against the reference's ~94.
-            let prior = vars.get(&var_name).cloned().unwrap_or_default();
-            let self_ref = format!("$({var_name})");
-            let v = if v.contains(&self_ref) && !prior.is_empty() {
-                v.replace(&self_ref, &prior.join(" "))
-            } else {
-                v.to_owned()
-            };
-            let v = v.as_str();
-            let values: Vec<String> = v
-                .split_whitespace()
-                .filter(|s| *s != "\\")
-                .map(|s| s.replace(['"', '\\'], "").trim().to_string())
-                .filter(|s| keep_list_item(s))
-                .collect();
-            vars.insert(var_name.clone(), values);
-            current_var = if line.ends_with('\\') {
-                Some(var_name)
-            } else {
-                None
-            };
-        } else if let Some(ref var_name) = current_var {
-            let values: Vec<String> = trimmed
-                .split_whitespace()
-                .filter(|s| *s != "\\")
-                .map(|s| s.replace(['"', '\\'], "").trim().to_string())
-                .filter(|s| keep_list_item(s))
-                .collect();
-            if let Some(existing) = vars.get_mut(var_name) {
-                existing.extend(values);
-            }
-            if !line.ends_with('\\') {
-                current_var = None;
-            }
-        }
-    }
-
-    let invocations = macro_invocations(&content);
+    // Make evaluates a declaration's arguments where the declaration stands, so
+    // the variable state is positional. Both scans read the same
+    // continuation-joined text, which is what makes their line numbers
+    // comparable.
+    let joined = join_continuations(&content);
+    let scope = collect_vars(&joined);
+    let invocations = macro_invocations(&joined);
     let mut skipped_programs: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
     let re_mm = Regex::new(r"(?m)^#MM-?\s+([^\s:]+)\s*:\s*(.+)").unwrap();
@@ -470,6 +532,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         let Some(mod_raw) = macro_arg(&inv.args, "modname") else {
             continue;
         };
+        let vars = scope.snapshot(inv.line);
         let mmake_name = sanitize_ident(&mmake_raw);
         let mod_name = sanitize_ident(&mod_raw);
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
@@ -573,6 +636,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
             continue;
         };
+        let vars = scope.snapshot(inv.line);
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // progname is declared /A, so a declaration without one is malformed
@@ -656,6 +720,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
         let Some(mmake_raw) = macro_arg(&inv.args, "mmake") else {
             continue;
         };
+        let vars = scope.snapshot(inv.line);
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // %build_progs has no name of its own: each source file names its own
@@ -815,7 +880,7 @@ pub fn parse_mmakefile(path: &Path, root: &Path) -> Result<ParsedMmakefile> {
 
 #[cfg(test)]
 mod tests {
-    use super::{macro_arg, macro_invocations, sanitize_ident};
+    use super::{collect_vars, join_continuations, macro_arg, macro_invocations, sanitize_ident};
 
     #[test]
     fn every_declaration_in_a_file_is_seen() {
@@ -854,13 +919,75 @@ mod tests {
 
 %build_prog mmake=other progname=Other files=other
 ";
-        let invs = macro_invocations(src);
+        let joined = join_continuations(src);
+        let invs = macro_invocations(&joined);
         let progs: Vec<&super::Invocation> =
             invs.iter().filter(|i| i.name == "build_prog").collect();
         assert_eq!(progs.len(), 2);
         assert_eq!(macro_arg(&progs[0].args, "progname").unwrap(), "SysLog");
         assert_eq!(macro_arg(&progs[0].args, "files").unwrap(), "$(FILES)");
         assert_eq!(macro_arg(&progs[1].args, "progname").unwrap(), "Other");
+    }
+
+    #[test]
+    fn a_reassigned_list_is_read_as_of_each_declaration() {
+        // arch/m68k-amiga/c/mmakefile.src, reduced. Reading the file-global
+        // value gave both declarations `gdbstop`, so two targets claimed the
+        // same output path and Ninja refused to generate the build.
+        let src = "\
+FILES := gdbstub
+
+%build_progs mmake=workbench-c-m68k-gdbstub files=$(FILES) targetdir=$(AROS_C)
+
+FILES := gdbstop
+
+%build_progs mmake=workbench-c-m68k-misc files=$(FILES) targetdir=$(AROS_C)
+";
+        let joined = join_continuations(src);
+        let scope = collect_vars(&joined);
+        let invs = macro_invocations(&joined);
+        assert_eq!(invs.len(), 2);
+
+        let first = scope.snapshot(invs[0].line);
+        assert_eq!(first.get("FILES").unwrap(), &vec!["gdbstub".to_owned()]);
+        let second = scope.snapshot(invs[1].line);
+        assert_eq!(second.get("FILES").unwrap(), &vec!["gdbstop".to_owned()]);
+    }
+
+    #[test]
+    fn a_declaration_does_not_see_a_later_assignment() {
+        let src = "%build_prog mmake=a progname=A files=$(F)\nF := late\n";
+        let joined = join_continuations(src);
+        let scope = collect_vars(&joined);
+        let invs = macro_invocations(&joined);
+        assert!(
+            !scope.snapshot(invs[0].line).contains_key("F"),
+            "a declaration must not read an assignment made after it"
+        );
+    }
+
+    #[test]
+    fn a_self_referential_assignment_keeps_the_earlier_value() {
+        let src = "FILES := a b\nFILES := $(FILES) c\n%build_prog mmake=m progname=M files=$(FILES)\n";
+        let joined = join_continuations(src);
+        let scope = collect_vars(&joined);
+        let invs = macro_invocations(&joined);
+        assert_eq!(
+            scope.snapshot(invs[0].line).get("FILES").unwrap(),
+            &vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_continued_list_is_one_assignment() {
+        let src = "QPARTFILES  := \\\n    QP_Main \\\n    QP_Gui\n%build_prog mmake=m progname=M files=$(QPARTFILES)\n";
+        let joined = join_continuations(src);
+        let scope = collect_vars(&joined);
+        let invs = macro_invocations(&joined);
+        assert_eq!(
+            scope.snapshot(invs[0].line).get("QPARTFILES").unwrap(),
+            &vec!["QP_Main".to_owned(), "QP_Gui".to_owned()]
+        );
     }
 
     #[test]
