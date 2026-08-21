@@ -148,6 +148,30 @@ impl ArchitectureScope {
         format!("architecture-{}-{}", self.cpu, self.platform)
     }
 
+    /// Concrete values supplied to MetaMake by the equivalent CMake profile.
+    ///
+    /// Historic MetaMake calls the machine `ARCH`/`AROS_TARGET_ARCH`, while
+    /// `AROS_TARGET_PLATFORM` is the compound machine/CPU selector.  CMake's
+    /// names are less surprising, so keeping this translation here prevents
+    /// the reference denominator from evaluating a condition in a different
+    /// context from the transpiler.
+    fn make_value(&self, name: &str) -> Option<String> {
+        match name {
+            "AROS_TARGET_CPU" | "CPU" => Some(self.cpu.clone()),
+            "AROS_TARGET_ARCH" | "ARCH" => Some(self.platform.clone()),
+            "AROS_TARGET_PLATFORM" => Some(format!("{}-{}", self.platform, self.cpu)),
+            // CMake currently configures an i386 companion only for x86_64.
+            // For every other CPU this is a known empty Make variable, not an
+            // unknown value inherited from some unavailable configuration.
+            "AROS_TARGET_CPU32" => Some(if self.cpu == "x86_64" {
+                "i386".to_owned()
+            } else {
+                String::new()
+            }),
+            _ => None,
+        }
+    }
+
     fn declaration_is_eligible(&self, declaration: &Declaration) -> bool {
         if matches!(
             declaration.macro_name.as_str(),
@@ -253,7 +277,18 @@ fn main() -> Result<()> {
     //    continuations joined, so this measure does not depend on the
     //    transpiler's own parser being right.
     let declarations = collect_declarations(&root, &mmakefiles);
-    let scoped_declarations: Vec<&Declaration> = declarations
+    // The global report deliberately remains a raw tree inventory.  A
+    // concrete architecture report additionally evaluates Make conditionals
+    // with the target values CMake supplied.  Directory filtering alone is
+    // insufficient: several shared mmakefiles declare 32-bit companions only
+    // when AROS_TARGET_CPU32 is non-empty.
+    let conditional_declarations = architecture
+        .as_ref()
+        .map(|scope| collect_declarations_for_profile(&root, &mmakefiles, scope));
+    let declaration_candidates = conditional_declarations
+        .as_deref()
+        .unwrap_or(declarations.as_slice());
+    let scoped_declarations: Vec<&Declaration> = declaration_candidates
         .iter()
         .filter(|declaration| {
             architecture
@@ -560,35 +595,531 @@ fn find_mmakefiles(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MakeTruth {
+    False,
+    True,
+    Unknown,
+}
+
+impl MakeTruth {
+    const fn not(self) -> Self {
+        match self {
+            Self::False => Self::True,
+            Self::True => Self::False,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MakeConditionalFrame {
+    parent: MakeTruth,
+    matched: MakeTruth,
+    current: MakeTruth,
+}
+
+impl MakeConditionalFrame {
+    const fn new(parent: MakeTruth, condition: MakeTruth) -> Self {
+        Self {
+            parent,
+            matched: condition,
+            current: parent.and(condition),
+        }
+    }
+
+    const fn else_if(&mut self, condition: MakeTruth) {
+        self.current = self.parent.and(self.matched.not()).and(condition);
+        self.matched = self.matched.or(condition);
+    }
+
+    const fn otherwise(&mut self) {
+        self.current = self.parent.and(self.matched.not());
+        self.matched = MakeTruth::True;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MakeAssignmentKind {
+    Simple,
+    Recursive,
+    SetIfUnset,
+    Append,
+}
+
+/// File-local values needed by Make conditionals.
+///
+/// `None` means an assignment occurred under an unresolved guard or its value
+/// could not be expanded.  It must remain unknown; converting it to an empty
+/// string would incorrectly choose an `ifeq` branch.
+#[derive(Default)]
+struct MakeConditionScope {
+    values: BTreeMap<String, Option<String>>,
+    local_names: BTreeSet<String>,
+}
+
+fn make_assignment(line: &str) -> Option<(&str, &str, MakeAssignmentKind)> {
+    let trimmed = line.trim();
+    let (at, width, kind) = [
+        (":=", MakeAssignmentKind::Simple),
+        ("+=", MakeAssignmentKind::Append),
+        ("?=", MakeAssignmentKind::SetIfUnset),
+        ("=", MakeAssignmentKind::Recursive),
+    ]
+    .into_iter()
+    .filter_map(|(operator, kind)| trimmed.find(operator).map(|at| (at, operator.len(), kind)))
+    .min_by_key(|(at, _, _)| *at)?;
+    let name = trimmed[..at].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return None;
+    }
+    Some((name, trimmed[at + width..].trim(), kind))
+}
+
+fn strip_make_comment(line: &str) -> &str {
+    for (at, character) in line.char_indices() {
+        if character != '#' {
+            continue;
+        }
+        let escaped = line[..at]
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'\\')
+            .count()
+            % 2
+            == 1;
+        if !escaped {
+            return &line[..at];
+        }
+    }
+    line
+}
+
+fn make_directive_tail<'a>(line: &'a str, word: &str) -> Option<&'a str> {
+    let tail = line.strip_prefix(word)?;
+    (tail.is_empty()
+        || tail
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace() || character == '('))
+    .then(|| tail.trim())
+}
+
+fn split_top_level_comma(raw: &str) -> Option<(&str, &str)> {
+    let mut parentheses = 0usize;
+    let mut braces = 0usize;
+    let mut quote = None;
+    for (at, character) in raw.char_indices() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => parentheses += 1,
+            ')' => parentheses = parentheses.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ',' if parentheses == 0 && braces == 0 => {
+                return Some((&raw[..at], &raw[at + 1..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn take_condition_word(raw: &str) -> Option<(&str, &str)> {
+    let raw = raw.trim_start();
+    let first = raw.chars().next()?;
+    if matches!(first, '\'' | '"') {
+        let after_quote = &raw[first.len_utf8()..];
+        let end = after_quote.find(first)?;
+        return Some((&raw[..end + 2], &after_quote[end + 1..]));
+    }
+    let end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+    Some((&raw[..end], &raw[end..]))
+}
+
+fn equality_operands(raw: &str) -> Option<(&str, &str)> {
+    let raw = raw.trim();
+    if raw.starts_with('(') && raw.ends_with(')') {
+        return split_top_level_comma(&raw[1..raw.len() - 1]);
+    }
+    let (left, rest) = take_condition_word(raw)?;
+    let (right, trailing) = take_condition_word(rest)?;
+    trailing.trim().is_empty().then_some((left, right))
+}
+
+fn unquote_condition_value(raw: &str) -> &str {
+    let raw = raw.trim();
+    if raw.len() >= 2 {
+        let bytes = raw.as_bytes();
+        if matches!(bytes[0], b'\'' | b'"') && bytes[0] == bytes[raw.len() - 1] {
+            return &raw[1..raw.len() - 1];
+        }
+    }
+    raw
+}
+
+fn condition_pattern_matches(pattern: &str, word: &str) -> bool {
+    let Some(percent) = pattern.find('%') else {
+        return pattern == word;
+    };
+    let prefix = &pattern[..percent];
+    let suffix = &pattern[percent + 1..];
+    word.len() >= prefix.len() + suffix.len() && word.starts_with(prefix) && word.ends_with(suffix)
+}
+
+fn expand_condition_function(
+    body: &str,
+    variables: &MakeConditionScope,
+    target: &ArchitectureScope,
+    depth: usize,
+) -> Option<String> {
+    let split = body.find(char::is_whitespace)?;
+    let name = body[..split].trim();
+    let arguments = body[split..].trim();
+    match name {
+        "strip" => Some(
+            expand_condition_operand(arguments, variables, target, depth - 1)?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        "findstring" => {
+            let (needle, haystack) = split_top_level_comma(arguments)?;
+            let needle = expand_condition_operand(needle, variables, target, depth - 1)?;
+            let haystack = expand_condition_operand(haystack, variables, target, depth - 1)?;
+            Some(if haystack.contains(&needle) {
+                needle
+            } else {
+                String::new()
+            })
+        }
+        "filter" | "filter-out" => {
+            let (patterns, words) = split_top_level_comma(arguments)?;
+            let patterns = expand_condition_operand(patterns, variables, target, depth - 1)?;
+            let words = expand_condition_operand(words, variables, target, depth - 1)?;
+            let keep_matches = name == "filter";
+            Some(
+                words
+                    .split_whitespace()
+                    .filter(|word| {
+                        let matches = patterns
+                            .split_whitespace()
+                            .any(|pattern| condition_pattern_matches(pattern, word));
+                        matches == keep_matches
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn expand_condition_reference(
+    body: &str,
+    variables: &MakeConditionScope,
+    target: &ArchitectureScope,
+    depth: usize,
+) -> Option<String> {
+    let body = body.trim();
+    if !body.is_empty()
+        && body
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        if let Some(value) = variables.values.get(body) {
+            return value
+                .as_deref()
+                .and_then(|value| expand_condition_operand(value, variables, target, depth - 1));
+        }
+        if let Some(value) = target.make_value(body) {
+            return Some(value);
+        }
+        return variables.local_names.contains(body).then(String::new);
+    }
+    expand_condition_function(body, variables, target, depth)
+}
+
+fn expand_condition_operand(
+    raw: &str,
+    variables: &MakeConditionScope,
+    target: &ArchitectureScope,
+    depth: usize,
+) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    while cursor < raw.len() {
+        let Some(relative) = raw[cursor..].find('$') else {
+            output.push_str(&raw[cursor..]);
+            break;
+        };
+        let dollar = cursor + relative;
+        output.push_str(&raw[cursor..dollar]);
+        let next = *raw.as_bytes().get(dollar + 1)?;
+        if next == b'$' {
+            output.push('$');
+            cursor = dollar + 2;
+            continue;
+        }
+        let (open, close) = match next {
+            b'(' => (b'(', b')'),
+            b'{' => (b'{', b'}'),
+            _ => return None,
+        };
+        let mut nesting = 1usize;
+        let mut end = dollar + 2;
+        while end < raw.len() {
+            let byte = raw.as_bytes()[end];
+            if byte == b'$' && raw.as_bytes().get(end + 1) == Some(&open) {
+                nesting += 1;
+                end += 2;
+                continue;
+            }
+            if byte == close {
+                nesting -= 1;
+                if nesting == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        if end == raw.len() {
+            return None;
+        }
+        output.push_str(&expand_condition_reference(
+            &raw[dollar + 2..end],
+            variables,
+            target,
+            depth - 1,
+        )?);
+        cursor = end + 1;
+    }
+    Some(unquote_condition_value(output.trim()).to_owned())
+}
+
+fn evaluate_make_conditional(
+    directive: &str,
+    arguments: &str,
+    variables: &MakeConditionScope,
+    target: &ArchitectureScope,
+) -> MakeTruth {
+    const MAX_EXPANSION_DEPTH: usize = 16;
+    let value = match directive {
+        "ifeq" | "ifneq" => equality_operands(arguments).and_then(|(left, right)| {
+            Some(
+                expand_condition_operand(left, variables, target, MAX_EXPANSION_DEPTH)?
+                    == expand_condition_operand(right, variables, target, MAX_EXPANSION_DEPTH)?,
+            )
+        }),
+        "ifdef" | "ifndef" => {
+            let name = arguments.trim();
+            let value = variables
+                .values
+                .get(name)
+                .map_or_else(|| target.make_value(name), Clone::clone);
+            value.map(|value| !value.is_empty())
+        }
+        _ => None,
+    };
+    let Some(mut value) = value else {
+        return MakeTruth::Unknown;
+    };
+    if matches!(directive, "ifneq" | "ifndef") {
+        value = !value;
+    }
+    if value {
+        MakeTruth::True
+    } else {
+        MakeTruth::False
+    }
+}
+
+/// Selects the branch state for each logical line using only target values we
+/// know.  An unresolved condition stays `Unknown`; callers retain declarations
+/// from both possible branches so profile mode never hides an unsupported or
+/// externally configured declaration merely by guessing its value.
+fn make_conditional_line_states(joined: &str, target: &ArchitectureScope) -> Vec<MakeTruth> {
+    const MAX_EXPANSION_DEPTH: usize = 16;
+    let mut variables = MakeConditionScope::default();
+    let mut stack: Vec<MakeConditionalFrame> = Vec::new();
+    let mut states = Vec::with_capacity(joined.lines().count());
+
+    for raw_line in joined.lines() {
+        let branch_state = stack.last().map_or(MakeTruth::True, |frame| frame.current);
+        states.push(branch_state);
+
+        let line = strip_make_comment(raw_line);
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+        if let Some((directive, arguments)) = ["ifeq", "ifneq", "ifdef", "ifndef"]
+            .into_iter()
+            .find_map(|word| make_directive_tail(trimmed, word).map(|tail| (word, tail)))
+        {
+            let parent = stack.last().map_or(MakeTruth::True, |frame| frame.current);
+            let condition = evaluate_make_conditional(directive, arguments, &variables, target);
+            stack.push(MakeConditionalFrame::new(parent, condition));
+            continue;
+        }
+        if trimmed == "endif" {
+            stack.pop();
+            continue;
+        }
+        if trimmed == "else" || trimmed.starts_with("else ") {
+            // Evaluate an `else ifeq` against the scope before borrowing the
+            // top frame mutably.
+            let condition = trimmed
+                .strip_prefix("else")
+                .map(str::trim)
+                .filter(|tail| !tail.is_empty())
+                .map(|tail| {
+                    ["ifeq", "ifneq", "ifdef", "ifndef"]
+                        .into_iter()
+                        .find_map(|word| {
+                            make_directive_tail(tail, word).map(|arguments| (word, arguments))
+                        })
+                        .map_or(MakeTruth::Unknown, |(directive, arguments)| {
+                            evaluate_make_conditional(directive, arguments, &variables, target)
+                        })
+                });
+            if let Some(frame) = stack.last_mut() {
+                if let Some(condition) = condition {
+                    frame.else_if(condition);
+                } else {
+                    frame.otherwise();
+                }
+            }
+            continue;
+        }
+
+        let Some((name, value, kind)) = make_assignment(line) else {
+            continue;
+        };
+        variables.local_names.insert(name.to_owned());
+        if branch_state == MakeTruth::False {
+            continue;
+        }
+        if branch_state == MakeTruth::Unknown {
+            variables.values.insert(name.to_owned(), None);
+            continue;
+        }
+        if kind == MakeAssignmentKind::SetIfUnset
+            && (variables.values.contains_key(name) || target.make_value(name).is_some())
+        {
+            continue;
+        }
+
+        let value = match kind {
+            MakeAssignmentKind::Simple => {
+                expand_condition_operand(value, &variables, target, MAX_EXPANSION_DEPTH)
+            }
+            MakeAssignmentKind::Append => match variables.values.get(name) {
+                Some(Some(old)) => Some(if old.is_empty() || value.is_empty() {
+                    format!("{old}{value}")
+                } else {
+                    format!("{old} {value}")
+                }),
+                Some(None) => None,
+                None => Some(value.to_owned()),
+            },
+            MakeAssignmentKind::Recursive | MakeAssignmentKind::SetIfUnset => {
+                Some(value.to_owned())
+            }
+        };
+        variables.values.insert(name.to_owned(), value);
+    }
+    states
+}
+
 /// Reads every `%build_* ... mmake=<name>` from the tree.
 ///
 /// Line continuations are joined first: most declarations spread their
 /// arguments over several lines, and `mmake=` is often not on the first one.
 fn collect_declarations(root: &Path, files: &[PathBuf]) -> Vec<Declaration> {
+    collect_declarations_impl(root, files, None)
+}
+
+fn collect_declarations_for_profile(
+    root: &Path,
+    files: &[PathBuf],
+    target: &ArchitectureScope,
+) -> Vec<Declaration> {
+    collect_declarations_impl(root, files, Some(target))
+}
+
+fn collect_declarations_impl(
+    root: &Path,
+    files: &[PathBuf],
+    target: Option<&ArchitectureScope>,
+) -> Vec<Declaration> {
+    // Keep the established global inventory's continuation semantics byte for
+    // byte. Profile mode must only remove false conditional branches; it must
+    // not gain declarations because its logical-line splitter changed.
     let cont = Regex::new(r"\\\s*\n\s*").unwrap();
-    let decl = Regex::new(r"(?m)^\s*%(build_\w+|make_package|link_kickstart)\b([^\n]*)").unwrap();
+    let decl = Regex::new(r"^\s*%(build_\w+|make_package|link_kickstart)\b([^\n]*)").unwrap();
     let mmake = Regex::new(r"\bmmake=([\w.-]+)").unwrap();
 
     let mut out = Vec::new();
-    for f in files {
-        let Ok(text) = read_source(f) else {
+    for file in files {
+        let Ok(text) = read_source(file) else {
             continue;
         };
         let joined = cont.replace_all(&text, " ");
-        let rel = f
+        let states = target.map(|target| make_conditional_line_states(&joined, target));
+        let relative = file
             .strip_prefix(root)
-            .unwrap_or(f)
+            .unwrap_or(file)
             .to_string_lossy()
             .to_string();
-        for c in decl.captures_iter(&joined) {
-            let macro_name = c[1].to_string();
-            if let Some(m) = mmake.captures(&c[2]) {
-                out.push(Declaration {
-                    mmake: m[1].to_string(),
-                    macro_name,
-                    file: rel.clone(),
-                });
+        for (line_number, line) in joined.lines().enumerate() {
+            // A definitely false branch cannot exist in the concrete genmf
+            // reference. Unknown guards remain in the denominator so a
+            // profile report is conservative instead of silently incomplete.
+            if states.as_ref().and_then(|states| states.get(line_number)) == Some(&MakeTruth::False)
+            {
+                continue;
             }
+            let Some(captures) = decl.captures(line) else {
+                continue;
+            };
+            let Some(id) = mmake.captures(&captures[2]) else {
+                continue;
+            };
+            out.push(Declaration {
+                mmake: id[1].to_owned(),
+                macro_name: captures[1].to_owned(),
+                file: relative.clone(),
+            });
         }
     }
     out
@@ -929,6 +1460,116 @@ mod tests {
         assert_eq!(scope.key(), "architecture-x86_64-pc");
         assert!(parse_arch_component("../pc").is_err());
         assert!(parse_arch_component("aarch64").is_ok());
+    }
+
+    #[test]
+    fn profile_declarations_follow_make_conditionals_without_guessing_unknowns() {
+        let dir = std::env::temp_dir().join(format!(
+            "aros-verify-test-conditional-profile-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mmakefile.src");
+        fs::write(
+            &file,
+            "ifneq ($(AROS_TARGET_CPU32),)\n\
+             %build_linklib mmake=cpu32 libname=cpu32 files=cpu32\n\
+             endif\n\
+             ifeq ($(AROS_TARGET_CPU),x86_64)\n\
+             %build_prog mmake=x86 progname=x86 files=x86\n\
+             else ifneq (,$(filter arm aarch64,$(AROS_TARGET_CPU)))\n\
+             %build_prog mmake=arm-family progname=arm-family files=arm-family\n\
+             endif\n\
+             SELECTED := $(AROS_TARGET_CPU)\n\
+             ifeq ($(findstring arm,$(SELECTED)),arm)\n\
+             %build_prog mmake=arm-spelling progname=arm-spelling files=arm-spelling\n\
+             endif\n\
+             ifeq ($(EXTERNAL_SWITCH),yes)\n\
+             %build_prog mmake=unresolved progname=unresolved files=unresolved\n\
+             endif\n",
+        )
+        .unwrap();
+
+        let ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
+            collect_declarations_for_profile(&dir, std::slice::from_ref(&file), scope)
+                .into_iter()
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+        assert_eq!(
+            ids(&ArchitectureScope::new("x86_64", "pc")),
+            BTreeSet::from([
+                "cpu32".to_owned(),
+                "unresolved".to_owned(),
+                "x86".to_owned()
+            ])
+        );
+        assert_eq!(
+            ids(&ArchitectureScope::new("arm", "raspi")),
+            BTreeSet::from([
+                "arm-family".to_owned(),
+                "arm-spelling".to_owned(),
+                "unresolved".to_owned(),
+            ])
+        );
+        assert_eq!(
+            ids(&ArchitectureScope::new("aarch64", "raspi")),
+            BTreeSet::from(["arm-family".to_owned(), "unresolved".to_owned()])
+        );
+
+        // No profile means the historic global inventory: every textual
+        // declaration remains visible, including mutually exclusive branches.
+        assert_eq!(collect_declarations(&dir, &[file]).len(), 5);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_architecture_denominators_are_pinned() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let files = find_mmakefiles(&root);
+        let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
+            let declarations = if conditional {
+                collect_declarations_for_profile(&root, &files, scope)
+            } else {
+                collect_declarations(&root, &files)
+            };
+            declarations
+                .into_iter()
+                .filter(|declaration| scope.declaration_is_eligible(declaration))
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+
+        let x86 = ArchitectureScope::new("x86_64", "pc");
+        let arm = ArchitectureScope::new("arm", "raspi");
+        let aarch64 = ArchitectureScope::new("aarch64", "raspi");
+        let global: BTreeSet<String> = collect_declarations(&root, &files)
+            .into_iter()
+            .map(|declaration| declaration.mmake)
+            .collect();
+        assert_eq!(global.len(), 1120);
+        assert_eq!(ids(&x86, true).len(), 1001);
+        assert_eq!(ids(&arm, true).len(), 993);
+        assert_eq!(ids(&aarch64, true).len(), 993);
+
+        let arm_removed: BTreeSet<String> = ids(&arm, false)
+            .difference(&ids(&arm, true))
+            .cloned()
+            .collect();
+        assert_eq!(
+            arm_removed,
+            BTreeSet::from([
+                "crosstools-compiler-rt32".to_owned(),
+                "linklibs-amiga32".to_owned(),
+                "linklibs-arossupport32".to_owned(),
+                "linklibs-autoinit32".to_owned(),
+            ])
+        );
+        let aarch64_removed: BTreeSet<String> = ids(&aarch64, false)
+            .difference(&ids(&aarch64, true))
+            .cloned()
+            .collect();
+        assert_eq!(aarch64_removed, arm_removed);
     }
 
     #[test]
