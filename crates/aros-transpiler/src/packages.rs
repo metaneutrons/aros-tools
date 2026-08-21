@@ -20,6 +20,19 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// A package member after its build target has been identified.
+///
+/// Keeping the target and archive basename in one value prevents parallel
+/// lists from drifting when a declaration contains a duplicate or one member
+/// cannot be resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPackageMember {
+    /// mmake id of the target that produces the module.
+    pub target: String,
+    /// Basename stored in the PKG container, matching `%make_package`.
+    pub runtime_name: String,
+}
+
 /// One `%make_package` or `%link_kickstart` declaration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageDecl {
@@ -38,10 +51,11 @@ pub struct PackageDecl {
     pub uselibs: Vec<String>,
     /// True for `%link_kickstart`, false for `%make_package`.
     pub is_kickstart: bool,
-    /// mmake ids of the members, filled in by the graph once every mmakefile
-    /// has been parsed. Startup comes first where one is declared.
+    /// Target/runtime-name pairs filled in by the graph once every mmakefile
+    /// has been parsed. Startup comes first where one is declared. Duplicate
+    /// producer targets are removed as GNU Make removes duplicates from `$^`.
     #[serde(default)]
-    pub resolved: Vec<String>,
+    pub resolved: Vec<ResolvedPackageMember>,
     /// The architecture this declaration belongs to, as `<cpu>-<platform>`,
     /// taken from its directory. Empty for a portable declaration.
     ///
@@ -70,6 +84,23 @@ const CATEGORIES: [(&str, &str); 12] = [
     ("arch_libs", "library"),
     ("arch_res", "resource"),
 ];
+
+/// The basename that the reference `%make_package` places in a PKG.
+///
+/// Handlers are the one historical exception to the ordinary `name.kind`
+/// spelling (`ram-handler`, not `ram.handler`). Custom suffixes carried by the
+/// sole `misc=` declaration use the ordinary branch (`serial.logger`).
+pub(crate) fn runtime_name(kind: &str, name: &str) -> String {
+    // Typed lists may retain their install subdirectory (`USB/hub.class` is
+    // sourced below Classes/USB), while PKG's historical tool is invoked with
+    // `--basename`. Only the last path component belongs in the container.
+    let name = name.rsplit('/').next().unwrap_or(name);
+    if kind == "handler" {
+        format!("{name}-handler")
+    } else {
+        format!("{name}.{kind}")
+    }
+}
 
 /// The `<cpu>-<platform>` an mmakefile belongs to, from its path.
 fn declaring_arch(rel_dir: &Path) -> String {
@@ -129,11 +160,37 @@ fn collect_raw_values(content: &str) -> HashMap<String, String> {
     vars
 }
 
+/// Collects complete right-hand sides after joining Make continuations.
+///
+/// Unlike [`collect_raw_values`], this intentionally retains Make functions:
+/// the x86_64 BSP's sole `misc=` list is built with `$(addprefix ...)` and its
+/// already-suffixed basename has to survive into the package model.
+fn collect_raw_assignments(content: &str) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    let joined = content.replace("\\\n", " ");
+    for line in joined.lines() {
+        let payload = line.trim();
+        let Some(idx) = payload.find(":=").or_else(|| payload.find('=')) else {
+            continue;
+        };
+        let (lhs, rhs) = payload.split_at(idx);
+        let name = lhs.trim().trim_end_matches(':').trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let value = rhs.trim_start_matches(':').trim_start_matches('=').trim();
+        if !value.is_empty() {
+            vars.insert(name.to_owned(), value.to_owned());
+        }
+    }
+    vars
+}
+
 /// Collects the simple `NAME := a b c` assignments a declaration draws on.
 ///
-/// Only plain word lists are kept. A value containing a path, a shell call or
-/// another substitution is not a module list and would not resolve to targets
-/// anyway.
+/// Only static word lists are kept. A slash is valid: Poseidon's package uses
+/// `USB/bootkeyboard` and `USBHardware/pciusb` to name modules installed in a
+/// subdirectory; target lookup and PKG naming later use their basenames.
 fn collect_lists(content: &str) -> HashMap<String, Vec<String>> {
     let mut vars: HashMap<String, Vec<String>> = HashMap::new();
     let mut pending: Option<String> = None;
@@ -160,7 +217,7 @@ fn collect_lists(content: &str) -> HashMap<String, Vec<String>> {
 
         let words: Vec<String> = value
             .split_whitespace()
-            .filter(|w| !w.contains('$') && !w.contains('/') && !w.contains('('))
+            .filter(|w| !w.contains('$') && !w.contains('('))
             .map(str::to_owned)
             .collect();
         if !words.is_empty() {
@@ -191,6 +248,102 @@ fn expand_names(raw: &str, vars: &HashMap<String, Vec<String>>) -> Vec<String> {
     out
 }
 
+fn plain_variable(raw: &str) -> Option<&str> {
+    let inner = raw.strip_prefix("$(")?.strip_suffix(')')?;
+    (!inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(inner)
+}
+
+/// Splits the two arguments of the supported Make function without mistaking
+/// a comma inside a nested `$(...)` for the separator.
+fn split_make_args(raw: &str) -> Option<(&str, &str)> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(') {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b')' && depth > 0 {
+            depth -= 1;
+        } else if bytes[i] == b',' && depth == 0 {
+            return Some((&raw[..i], &raw[i + 1..]));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Expands the audited `misc=` word-list forms.
+///
+/// The real declaration is `$(BSP_MISC)`, whose assignment applies
+/// `$(addprefix $(AROS_DEVS)/,$(LOG_RESOURCES))`. Prefix expansion is not
+/// needed here: PKG stores basenames and target resolution uses the basename's
+/// stem. Retaining it nevertheless makes this helper faithful for direct
+/// already-suffixed paths too.
+fn expand_misc(
+    raw: &str,
+    assignments: &HashMap<String, String>,
+    lists: &HashMap<String, Vec<String>>,
+    depth: usize,
+) -> std::result::Result<Vec<String>, String> {
+    if depth == 0 {
+        return Err("expansion is recursive".to_owned());
+    }
+    let raw = raw.trim();
+    if let Some(name) = plain_variable(raw) {
+        if let Some(values) = lists.get(name) {
+            return Ok(values.clone());
+        }
+        return assignments.get(name).map_or_else(
+            || Err(format!("{raw} is unresolved")),
+            |value| expand_misc(value, assignments, lists, depth - 1),
+        );
+    }
+
+    if let Some(body) = raw
+        .strip_prefix("$(addprefix ")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        let Some((prefix, values)) = split_make_args(body) else {
+            return Err(format!("{raw} has malformed addprefix arguments"));
+        };
+        return expand_misc(values, assignments, lists, depth - 1).map(|values| {
+            values
+                .into_iter()
+                .map(|value| format!("{}{value}", prefix.trim()))
+                .collect()
+        });
+    }
+
+    let mut values = Vec::new();
+    for token in raw.split_whitespace() {
+        let basename = token.rsplit('/').next().unwrap_or(token);
+        if basename.contains('$') {
+            return Err(format!("{token} is unresolved"));
+        }
+        values.push(token.to_owned());
+    }
+    if values.is_empty() {
+        Err(format!("{raw} resolved to no files"))
+    } else {
+        Ok(values)
+    }
+}
+
+/// Converts an already-suffixed `misc=` path into the same `(kind, name)`
+/// representation used by the typed package arguments.
+fn misc_member(path: &str) -> Option<(String, String)> {
+    let basename = path.rsplit('/').next()?.trim_matches('"');
+    if let Some(name) = basename.strip_suffix("-handler") {
+        return (!name.is_empty()).then(|| ("handler".to_owned(), name.to_owned()));
+    }
+    let (name, kind) = basename.rsplit_once('.')?;
+    (!name.is_empty() && !kind.is_empty()).then(|| (kind.to_owned(), name.to_owned()))
+}
+
 /// Renders an output path as a CMake expression.
 ///
 /// Substitutes every `$(VAR)`, resolving a variable declared in the same
@@ -213,11 +366,7 @@ fn render_output(raw: &str, raw_vars: &HashMap<String, String>) -> Option<String
             .cloned()
             .or_else(|| map_output_var(name).map(str::to_owned))?;
 
-        current = format!(
-            "{}{replacement}{}",
-            &current[..start],
-            &after[end + 1..]
-        );
+        current = format!("{}{replacement}{}", &current[..start], &after[end + 1..]);
     }
     None
 }
@@ -238,6 +387,7 @@ pub fn collect_packages(content: &str, rel_dir: &Path) -> (Vec<PackageDecl>, Vec
 
     let vars = collect_lists(content);
     let raw_vars = collect_raw_values(content);
+    let raw_assignments = collect_raw_assignments(content);
     let mut decls = Vec::new();
     let mut skipped = Vec::new();
 
@@ -270,6 +420,21 @@ pub fn collect_packages(content: &str, rel_dir: &Path) -> (Vec<PackageDecl>, Vec
             };
             for name in expand_names(&raw, &vars) {
                 members.push((kind.to_owned(), name));
+            }
+        }
+        if let Some(raw) = arg(trimmed, "misc") {
+            match expand_misc(&raw, &raw_assignments, &vars, 8) {
+                Ok(paths) => {
+                    for path in paths {
+                        match misc_member(&path) {
+                            Some(member) => members.push(member),
+                            None => skipped.push(format!(
+                                "{file}: {mmake} misc={path} has no canonical basename"
+                            )),
+                        }
+                    }
+                }
+                Err(reason) => skipped.push(format!("{file}: {mmake} misc={raw}: {reason}")),
             }
         }
 
@@ -470,5 +635,75 @@ ARM_BSP := aros-$(AROS_TARGET_CPU)-bsp.rom
         assert!(decls.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("no members"));
+    }
+
+    #[test]
+    fn runtime_basenames_match_make_package() {
+        assert_eq!(runtime_name("handler", "ram"), "ram-handler");
+        assert_eq!(runtime_name("library", "dos"), "dos.library");
+        assert_eq!(
+            runtime_name("class", "USB/bootkeyboard"),
+            "bootkeyboard.class"
+        );
+        assert_eq!(
+            runtime_name("device", "USBHardware/pciusb"),
+            "pciusb.device"
+        );
+    }
+
+    #[test]
+    fn reads_the_x86_64_bsp_misc_logger() {
+        let src = "\
+LOG_RESOURCES := serial.logger
+BSP_MISC := \\
+        $(addprefix $(AROS_DEVS)/,$(LOG_RESOURCES))
+
+%make_package mmake=kernel-bsp-pc-x86_64 file=$(AROSARCHDIR)/aros-bsp.pkg \\
+    libs=exec misc=$(BSP_MISC)
+";
+        let (decls, skipped) = collect_packages(src, Path::new("arch/x86_64-pc/boot"));
+        assert!(skipped.is_empty(), "{skipped:#?}");
+        assert_eq!(decls.len(), 1);
+        assert_eq!(
+            decls[0].members,
+            vec![
+                ("library".to_owned(), "exec".to_owned()),
+                ("logger".to_owned(), "serial".to_owned())
+            ]
+        );
+        assert_eq!(runtime_name("logger", "serial"), "serial.logger");
+    }
+
+    #[test]
+    fn typed_members_may_retain_an_install_subdirectory() {
+        let src = "\
+USB_CLASSES := USB/bootkeyboard USB/hub
+USB_DEVS := USBHardware/pciusb
+%make_package mmake=usb file=$(AROS_BOOT)/usb.pkg \\
+    classes=$(USB_CLASSES) devs=$(USB_DEVS)
+";
+        let (decls, skipped) = collect_packages(src, Path::new("rom/usb"));
+        assert!(skipped.is_empty(), "{skipped:#?}");
+        assert_eq!(
+            decls[0].members,
+            vec![
+                ("class".to_owned(), "USB/bootkeyboard".to_owned()),
+                ("class".to_owned(), "USB/hub".to_owned()),
+                ("device".to_owned(), "USBHardware/pciusb".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_misc_list_is_reported_without_hiding_other_members() {
+        let src = "%make_package mmake=x file=$(AROS_BOOT)/x.pkg libs=exec misc=$(UNKNOWN)\n";
+        let (decls, skipped) = collect_packages(src, Path::new("rom"));
+        assert_eq!(decls.len(), 1);
+        assert_eq!(
+            decls[0].members,
+            vec![("library".to_owned(), "exec".to_owned())]
+        );
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains("misc=$(UNKNOWN)"), "{skipped:#?}");
     }
 }

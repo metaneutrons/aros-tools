@@ -411,8 +411,20 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 let libs: Vec<String> = pkg.uselibs.iter().map(|l| cmake_arg(l)).collect();
                 writeln!(out, "    USELIBS {}", libs.join(" ")).unwrap();
             }
-            let ids: Vec<String> = pkg.resolved.iter().map(|m| cmake_arg(m)).collect();
+            let ids: Vec<String> = pkg
+                .resolved
+                .iter()
+                .map(|member| cmake_arg(&member.target))
+                .collect();
             writeln!(out, "    MODULES {}", ids.join(" ")).unwrap();
+            if !pkg.is_kickstart {
+                let names: Vec<String> = pkg
+                    .resolved
+                    .iter()
+                    .map(|member| cmake_arg(&member.runtime_name))
+                    .collect();
+                writeln!(out, "    MEMBER_NAMES {}", names.join(" ")).unwrap();
+            }
             writeln!(out, ")").unwrap();
         }
         writeln!(out).unwrap();
@@ -428,6 +440,7 @@ mod tests {
     use crate::dirs::DirVars;
     use crate::graph::DependencyGraph;
     use crate::icons::IconTarget;
+    use crate::packages::{PackageDecl, ResolvedPackageMember};
     use crate::parse_mmakefile_with_dirs;
     use std::path::Path;
 
@@ -553,5 +566,60 @@ mod tests {
         assert!(cmake.contains("    MODTYPE \"usbclass\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"class\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"sysexp\""), "{cmake}");
+    }
+
+    #[test]
+    fn package_member_names_align_with_modules_but_do_not_reach_kickstart() {
+        let mut graph = DependencyGraph::new();
+        let members = vec![
+            ResolvedPackageMember {
+                target: "kernel-fs-ram".to_owned(),
+                runtime_name: "ram-handler".to_owned(),
+            },
+            ResolvedPackageMember {
+                target: "kernel-log-serial".to_owned(),
+                runtime_name: "serial.logger".to_owned(),
+            },
+        ];
+        graph.add_packages(vec![
+            PackageDecl {
+                file: "rom/mmakefile.src".to_owned(),
+                mmake: "package".to_owned(),
+                output: "${AROS_BOOT_DIR}/package.pkg".to_owned(),
+                members: Vec::new(),
+                startup: None,
+                uselibs: Vec::new(),
+                is_kickstart: false,
+                resolved: members.clone(),
+                arch: String::new(),
+            },
+            PackageDecl {
+                file: "arch/test/boot/mmakefile.src".to_owned(),
+                mmake: "kickstart".to_owned(),
+                output: "${AROS_BOOT_ARCH_DIR}/kernel".to_owned(),
+                members: Vec::new(),
+                startup: Some("kernel".to_owned()),
+                uselibs: Vec::new(),
+                is_kickstart: true,
+                resolved: members,
+                arch: "test".to_owned(),
+            },
+        ]);
+
+        let cmake = generate_cmake(&graph);
+        let package_start = cmake.find("aros_make_package(").unwrap();
+        let kickstart_start = cmake.find("aros_link_kickstart(").unwrap();
+        let package = &cmake[package_start..kickstart_start];
+        let kickstart = &cmake[kickstart_start..];
+        assert!(
+            package.contains("    MODULES \"kernel-fs-ram\" \"kernel-log-serial\""),
+            "{package}"
+        );
+        assert!(
+            package.contains("    MEMBER_NAMES \"ram-handler\" \"serial.logger\""),
+            "{package}"
+        );
+        assert!(kickstart.contains("    MODULES \"kernel-fs-ram\" \"kernel-log-serial\""));
+        assert!(!kickstart.contains("MEMBER_NAMES"), "{kickstart}");
     }
 }

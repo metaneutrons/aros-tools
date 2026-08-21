@@ -4,6 +4,7 @@ use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
 use crate::fetch::FetchDecl;
 use crate::icons::{IconSet, IconTarget};
 use crate::includes::ArchIncludeDecl;
+use crate::packages::{runtime_name, ResolvedPackageMember};
 use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -60,26 +61,44 @@ fn arch_compatible(candidate: Option<&(String, String)>, ctx: Option<&(String, S
         // architecture-specific candidate cannot be meant.
         return false;
     };
-    (cand_cpu == "all" || cand_cpu == ctx_cpu)
-        && (cand_plat == "all" || cand_plat == "native" || cand_plat == ctx_plat)
+    let cpu_compatible = cand_cpu == "all"
+        || cand_cpu == ctx_cpu
+        || matches!(
+            (ctx_cpu.as_str(), cand_cpu.as_str()),
+            ("x86_64", "i386") | ("aarch64", "arm") | ("riscv64", "riscv")
+        );
+    cpu_compatible && (cand_plat == "all" || cand_plat == "native" || cand_plat == ctx_plat)
 }
 
-/// The package category a module type installs under, where the two agree.
+/// The runtime basename a target definition produces.
 ///
-/// Handlers and classes come out of the parser as `Custom`, since the tree
-/// declares them with modtypes the target model does not separate; for those
-/// the name alone has to do.
-const fn module_kind_name(t: &ModuleType) -> Option<&'static str> {
-    match t {
-        ModuleType::Library => Some("library"),
-        ModuleType::Device => Some("device"),
-        ModuleType::Resource => Some("resource"),
-        ModuleType::Hidd => Some("hidd"),
-        ModuleType::Datatype => Some("datatype"),
-        ModuleType::Gadget => Some("gadget"),
-        ModuleType::Mcc => Some("mcc"),
-        _ => None,
+/// An explicit/effective `modsuffix` replaces the module type. Otherwise a
+/// custom or simple module's declared type wins over the coarse AST kind.
+/// This mirrors the output naming used by the CMake builders and lets package
+/// resolution match an authoritative filename rather than a potentially
+/// same-named module of another kind.
+fn target_runtime_name(target: &TargetDefinition) -> Option<String> {
+    if let Some(suffix) = target.mod_suffix.as_deref() {
+        return Some(runtime_name(suffix, &target.target_name));
     }
+    if let Some(declared) = target.declared_mod_type.as_deref() {
+        return match declared {
+            "printer" => Some(target.target_name.clone()),
+            "usbclass" | "btclass" => Some(runtime_name("class", &target.target_name)),
+            kind => Some(runtime_name(kind, &target.target_name)),
+        };
+    }
+    let kind = match target.module_type {
+        ModuleType::Library => "library",
+        ModuleType::Device => "device",
+        ModuleType::Resource => "resource",
+        ModuleType::Hidd => "hidd",
+        ModuleType::Datatype => "datatype",
+        ModuleType::Gadget => "gadget",
+        ModuleType::Mcc => "mcc",
+        _ => return None,
+    };
+    Some(runtime_name(kind, &target.target_name))
 }
 
 impl DependencyGraph {
@@ -249,32 +268,24 @@ impl DependencyGraph {
     }
 
     pub fn resolve_packages(&mut self) -> Vec<String> {
-        // Indexed by name and by (name, kind). A module name alone is
-        // ambiguous often enough to matter: `ahci` is both kernel-ahci and a
-        // SysExplorer plugin, and `serial` matches six targets across four
-        // architectures. The category the declaration states resolves most of
-        // those, so it is tried first.
-        let mut by_name: std::collections::HashMap<&str, Vec<&str>> =
-            std::collections::HashMap::new();
-        let mut by_name_kind: std::collections::HashMap<(&str, &'static str), Vec<&str>> =
+        // Indexed by the exact basename each target installs. A name-only
+        // lookup is unsafe: `hid` is both `hid.class` and `hid.hidd`, while a
+        // package declaration authoritatively asks for one of those files.
+        let mut by_runtime: std::collections::HashMap<String, Vec<&str>> =
             std::collections::HashMap::new();
         for (mmake, target) in &self.targets {
-            by_name
-                .entry(target.target_name.as_str())
-                .or_default()
-                .push(mmake.as_str());
-            if let Some(kind) = module_kind_name(&target.module_type) {
-                by_name_kind
-                    .entry((target.target_name.as_str(), kind))
-                    .or_default()
-                    .push(mmake.as_str());
+            if let Some(runtime) = target_runtime_name(target) {
+                by_runtime.entry(runtime).or_default().push(mmake.as_str());
             }
+        }
+        for ids in by_runtime.values_mut() {
+            ids.sort_unstable();
         }
 
         let mut unresolved = Vec::new();
         let mut resolved_all = Vec::new();
         for decl in &self.packages {
-            let mut ids: Vec<String> = Vec::new();
+            let mut members: Vec<ResolvedPackageMember> = Vec::new();
             let decl_arch = arch_of(std::path::Path::new(
                 decl.file
                     .strip_suffix("/mmakefile.src")
@@ -291,110 +302,86 @@ impl DependencyGraph {
                 .chain(decl.members.iter().cloned());
 
             for (kind, name) in ordered {
-                // Prefer the category-qualified match; fall back to the name
-                // alone for kinds the target model does not distinguish, such
-                // as handlers.
-                let pool = by_name_kind
-                    .get(&(name.as_str(), kind.as_str()))
-                    .or_else(|| by_name.get(name.as_str()));
-                let Some(pool) = pool else {
+                let member_runtime = runtime_name(&kind, &name);
+                let Some(pool) = by_runtime.get(&member_runtime) else {
                     unresolved.push(format!(
-                        "{}: {} {kind}={name} has no target",
+                        "{}: {} {kind}={name} ({member_runtime}) has no target",
                         decl.file, decl.mmake
                     ));
                     continue;
                 };
 
-                // A package holds modules, never programs. rom/filesys/CDVDFS
-                // builds both a cdrom handler and a test program called cdrom;
-                // only the first belongs in aros-fs.pkg.
-                let pool: Vec<&str> = {
-                    let modules: Vec<&str> = pool
-                        .iter()
-                        .copied()
-                        .filter(|id| {
-                            !matches!(
-                                self.targets.get(*id).map(|t| &t.module_type),
-                                Some(ModuleType::Program | ModuleType::ProgramGroup)
-                            )
-                        })
-                        .collect();
-                    if modules.is_empty() {
-                        pool.clone()
-                    } else {
-                        modules
-                    }
-                };
-                let pool = &pool;
-
-                // Narrow an ambiguous name in two steps.
-                //
-                // The declaration's own #MM dependencies are checked first,
-                // because they state the intent directly. arch/x86_64-pc/boot
-                // lists kernel-pc-i386-serial and kernel-pc-i386-parallel, so
-                // the x86_64 BSP deliberately reuses the i386 drivers, which
-                // no directory-based rule could infer. The same list separates
-                // kernel-fs-cdvdfs-cdrom from kernel-fs-cdvdfs, which sit in
-                // one directory under the same module name.
-                let mut eligible: Vec<&str> = if pool.len() == 1 {
-                    pool.clone()
-                } else if let Some(deps) = self.meta_targets.get(&decl.mmake) {
-                    let named: Vec<&str> = pool
-                        .iter()
-                        .copied()
-                        .filter(|id| deps.contains(*id))
-                        .collect();
-                    if named.is_empty() {
-                        pool.clone()
-                    } else {
-                        named
-                    }
+                // A #MM dependency names a cross-architecture producer
+                // authoritatively. A single explicit candidate therefore
+                // survives even when its directory is foreign (mingw32 uses
+                // an all-hosted module this way). With no explicit choice,
+                // architecture filtering is mandatory even for a unique pool:
+                // uniqueness does not make a foreign module applicable.
+                let explicit: Vec<&str> = self
+                    .meta_targets
+                    .get(&decl.mmake)
+                    .map(|deps| {
+                        pool.iter()
+                            .copied()
+                            .filter(|id| {
+                                deps.contains(*id)
+                                    // `%link_kickstart` depends on each
+                                    // module's generated kobj target rather
+                                    // than its base mmake id.
+                                    || deps.contains(&format!("{id}-kobj"))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (candidates, allow_single_foreign) = if explicit.is_empty() {
+                    (pool.clone(), false)
                 } else {
-                    pool.clone()
+                    (explicit, true)
                 };
-
-                // Then by architecture, which handles the drivers that exist
-                // once per platform under one name.
-                if eligible.len() > 1 {
-                    let narrowed: Vec<&str> = eligible
-                        .iter()
-                        .copied()
+                let eligible: Vec<&str> = if allow_single_foreign && candidates.len() == 1 {
+                    candidates
+                } else {
+                    candidates
+                        .into_iter()
                         .filter(|id| {
                             let cand = self.targets.get(*id).and_then(|t| arch_of(&t.dir_path));
                             arch_compatible(cand.as_ref(), decl_arch.as_ref())
                         })
-                        .collect();
-                    if !narrowed.is_empty() {
-                        eligible = narrowed;
-                    }
-                }
+                        .collect()
+                };
 
                 match eligible.len() {
                     1 => {
-                        let id = eligible[0].to_owned();
-                        if !ids.contains(&id) {
-                            ids.push(id);
+                        // GNU Make's `$^` removes duplicate prerequisites. Do
+                        // the same by producer target, but remove the complete
+                        // pair so MODULES and MEMBER_NAMES stay aligned. The
+                        // first declaration entry supplies the runtime name.
+                        if !members.iter().any(|member| member.target == eligible[0]) {
+                            members.push(ResolvedPackageMember {
+                                target: eligible[0].to_owned(),
+                                runtime_name: member_runtime,
+                            });
                         }
                     }
                     0 => unresolved.push(format!(
-                        "{}: {} {kind}={name} has no target for this architecture (candidates: {})",
+                        "{}: {} {kind}={name} ({member_runtime}) has no target for this architecture (candidates: {})",
                         decl.file,
                         decl.mmake,
                         pool.join(", ")
                     )),
                     _ => unresolved.push(format!(
-                        "{}: {} {kind}={name} is ambiguous ({})",
+                        "{}: {} {kind}={name} ({member_runtime}) is ambiguous ({})",
                         decl.file,
                         decl.mmake,
                         eligible.join(", ")
                     )),
                 }
             }
-            resolved_all.push(ids);
+            resolved_all.push(members);
         }
 
-        for (decl, ids) in self.packages.iter_mut().zip(resolved_all) {
-            decl.resolved = ids;
+        for (decl, members) in self.packages.iter_mut().zip(resolved_all) {
+            decl.resolved = members;
         }
         unresolved
     }
@@ -644,9 +631,45 @@ impl DependencyGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::DependencyGraph;
+    use super::{arch_compatible, target_runtime_name, DependencyGraph};
     use crate::ast::MetaTargetRule;
+    use crate::dirs::DirVars;
+    use crate::packages::{PackageDecl, ResolvedPackageMember};
+    use crate::parse_mmakefile_with_dirs;
     use std::collections::HashSet;
+    use std::path::Path;
+    use walkdir::WalkDir;
+
+    fn root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    }
+
+    fn package_graph(
+        target_file: &str,
+        package_file: &str,
+        kind: &str,
+        name: &str,
+    ) -> DependencyGraph {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs(&root.join(target_file), &root, &dirs).unwrap();
+        let mut graph = DependencyGraph::new();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+        graph.add_packages(vec![PackageDecl {
+            file: package_file.to_owned(),
+            mmake: "test-package".to_owned(),
+            output: "${AROS_BOOT_ARCH_DIR}/test.pkg".to_owned(),
+            members: vec![(kind.to_owned(), name.to_owned())],
+            startup: None,
+            uselibs: Vec::new(),
+            is_kickstart: false,
+            resolved: Vec::new(),
+            arch: String::new(),
+        }]);
+        graph
+    }
 
     #[test]
     fn a_meta_cycle_becomes_one_shared_external_dependency_closure() {
@@ -697,5 +720,248 @@ mod tests {
             graph.meta_targets["test"],
             std::iter::once("test-leaf".to_owned()).collect()
         );
+    }
+
+    #[test]
+    fn wider_cpus_accept_their_32_bit_compatible_candidates() {
+        for (ctx_cpu, cand_cpu) in [("x86_64", "i386"), ("aarch64", "arm"), ("riscv64", "riscv")] {
+            let candidate = (cand_cpu.to_owned(), "pc".to_owned());
+            let context = (ctx_cpu.to_owned(), "pc".to_owned());
+            assert!(arch_compatible(Some(&candidate), Some(&context)));
+            assert!(!arch_compatible(Some(&context), Some(&candidate)));
+        }
+    }
+
+    #[test]
+    fn a_unique_foreign_package_candidate_is_rejected() {
+        let mut graph = package_graph(
+            "arch/all-linux/hidd/linuxinput/mmakefile.src",
+            "arch/x86_64-pc/boot/mmakefile.src",
+            "hidd",
+            "linuxinput",
+        );
+        let unresolved = graph.resolve_packages();
+        assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+        assert!(unresolved[0].contains("no target for this architecture"));
+        assert!(graph.packages[0].resolved.is_empty());
+    }
+
+    #[test]
+    fn a_unique_compatible_32_bit_candidate_is_accepted() {
+        let mut graph = package_graph(
+            "arch/i386-pc/drivers/serial.hidd/mmakefile.src",
+            "arch/x86_64-pc/boot/mmakefile.src",
+            "hidd",
+            "serial",
+        );
+        let unresolved = graph.resolve_packages();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(
+            graph.packages[0].resolved[0].target,
+            "kernel-pc-i386-serial"
+        );
+    }
+
+    #[test]
+    fn one_explicit_foreign_package_candidate_is_accepted() {
+        let mut graph = package_graph(
+            "arch/all-linux/hidd/linuxinput/mmakefile.src",
+            "arch/x86_64-pc/boot/mmakefile.src",
+            "hidd",
+            "linuxinput",
+        );
+        graph.add_meta_rule(MetaTargetRule {
+            name: "test-package".to_owned(),
+            dependencies: vec!["kernel-hidd-linuxinput-kobj".to_owned()],
+        });
+        let unresolved = graph.resolve_packages();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(
+            graph.packages[0].resolved[0].target,
+            "kernel-hidd-linuxinput"
+        );
+    }
+
+    #[test]
+    fn multiple_explicit_candidates_are_still_architecture_filtered() {
+        let mut graph = package_graph(
+            "arch/i386-pc/drivers/serial.hidd/mmakefile.src",
+            "arch/x86_64-pc/boot/mmakefile.src",
+            "hidd",
+            "serial",
+        );
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs(
+            &root.join("arch/m68k-amiga/hidd/serial/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+        graph.add_meta_rule(MetaTargetRule {
+            name: "test-package".to_owned(),
+            dependencies: vec![
+                "kernel-pc-i386-serial-kobj".to_owned(),
+                "amiga-m68k-hidd-serial-kobj".to_owned(),
+            ],
+        });
+
+        let unresolved = graph.resolve_packages();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(
+            graph.packages[0].resolved[0].target,
+            "kernel-pc-i386-serial"
+        );
+    }
+
+    #[test]
+    fn package_targets_and_runtime_names_stay_aligned() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "rom/filesys/ram/mmakefile.src",
+            "rom/log/serial/mmakefile.src",
+            "rom/usb/classes/bootkeyboard/mmakefile.src",
+            "rom/usb/classes/hid/mmakefile.src",
+            "workbench/devs/USB/classes/HID/mmakefile.src",
+        ] {
+            let parsed = parse_mmakefile_with_dirs(&root.join(relative), &root, &dirs).unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+        }
+        graph.add_packages(vec![PackageDecl {
+            file: "rom/test/mmakefile.src".to_owned(),
+            mmake: "test-package".to_owned(),
+            output: "${AROS_BOOT_DIR}/test.pkg".to_owned(),
+            members: vec![
+                ("handler".to_owned(), "ram".to_owned()),
+                ("logger".to_owned(), "serial".to_owned()),
+                ("class".to_owned(), "USB/bootkeyboard".to_owned()),
+                ("class".to_owned(), "USB/hid".to_owned()),
+                ("handler".to_owned(), "missing".to_owned()),
+                // `$^` removes this duplicate producer. Its whole pair must
+                // disappear, not just the target side.
+                ("handler".to_owned(), "ram".to_owned()),
+            ],
+            startup: None,
+            uselibs: Vec::new(),
+            is_kickstart: false,
+            resolved: Vec::new(),
+            arch: String::new(),
+        }]);
+
+        let unresolved = graph.resolve_packages();
+        assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+        assert!(unresolved[0].contains("handler=missing"));
+        assert_eq!(
+            graph.packages[0].resolved,
+            vec![
+                ResolvedPackageMember {
+                    target: "kernel-fs-ram".to_owned(),
+                    runtime_name: "ram-handler".to_owned(),
+                },
+                ResolvedPackageMember {
+                    target: "kernel-log-serial".to_owned(),
+                    runtime_name: "serial.logger".to_owned(),
+                },
+                ResolvedPackageMember {
+                    target: "kernel-usb-classes-bootkeyboard".to_owned(),
+                    runtime_name: "bootkeyboard.class".to_owned(),
+                },
+                ResolvedPackageMember {
+                    target: "kernel-usb-classes-hid".to_owned(),
+                    runtime_name: "hid.class".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn real_tree_packages_resolve_to_exact_runtime_files() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let skip_dirs = ["build", "target", ".git"];
+        let mut files: Vec<_> = WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| {
+                !entry.file_type().is_dir()
+                    || entry.depth() == 0
+                    || !skip_dirs
+                        .iter()
+                        .any(|dir| entry.file_name().to_string_lossy() == *dir)
+            })
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name() == "mmakefile.src")
+            .map(walkdir::DirEntry::into_path)
+            .collect();
+        files.sort();
+
+        let mut graph = DependencyGraph::new();
+        for file in files {
+            let parsed = parse_mmakefile_with_dirs(&file, &root, &dirs).unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+            graph.add_packages(parsed.packages);
+            for rule in parsed.meta_rules {
+                graph.add_meta_rule(rule);
+            }
+        }
+
+        let unresolved = graph.resolve_packages();
+        assert_eq!(
+            unresolved,
+            vec![concat!(
+                "arch/ppc-chrp/efika/boot/mmakefile.src: ",
+                "kernel-package-chrp-ppc-usb class=USB/storage ",
+                "(storage.class) has no target"
+            )
+            .to_owned()]
+        );
+
+        let packages: Vec<_> = graph
+            .packages
+            .iter()
+            .filter(|package| !package.is_kickstart)
+            .collect();
+        let kickstarts: Vec<_> = graph
+            .packages
+            .iter()
+            .filter(|package| package.is_kickstart)
+            .collect();
+        assert_eq!(packages.len(), 17);
+        assert_eq!(kickstarts.len(), 4);
+        assert_eq!(
+            packages
+                .iter()
+                .map(|package| package.resolved.len())
+                .sum::<usize>(),
+            397
+        );
+        assert_eq!(
+            kickstarts
+                .iter()
+                .map(|package| package.resolved.len())
+                .sum::<usize>(),
+            19
+        );
+
+        for package in &graph.packages {
+            for member in &package.resolved {
+                let target = &graph.targets[&member.target];
+                assert_eq!(
+                    target_runtime_name(target).as_deref(),
+                    Some(member.runtime_name.as_str()),
+                    "{}: {}",
+                    package.mmake,
+                    member.target
+                );
+            }
+        }
     }
 }
