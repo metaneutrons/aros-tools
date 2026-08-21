@@ -863,7 +863,7 @@ fn expand_immediate_locals(raw: &str, scope: &VarScope, depth: usize) -> String 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConditionalTruth {
+pub(crate) enum ConditionalTruth {
     False,
     True,
     Unknown,
@@ -2138,6 +2138,14 @@ fn parse_mmakefile_impl(
     // continuation-joined text, which is what makes their line numbers
     // comparable.
     let icon_scan = crate::icons::collect_icons_all(&joined, dirs, &rel_dir);
+    let catalog_scan = crate::catalogs::collect_catalogs_with_line_states(
+        &joined,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        conditional_line_states.as_deref(),
+    );
     let mut skipped_programs: Vec<String> = Vec::new();
     let invocations = select_target_invocations(
         &joined,
@@ -2730,6 +2738,8 @@ fn parse_mmakefile_impl(
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
         skipped_icons: icon_scan.skipped,
+        catalogs: catalog_scan.declarations,
+        skipped_catalogs: catalog_scan.skipped,
         skipped_meta_rules,
         arch_decls,
         unresolved_includes: include_set.unresolved,
@@ -3064,6 +3074,54 @@ mod tests {
             assert_eq!(names, [expected]);
             assert_eq!(skipped.len(), 1, "{skipped:#?}");
             assert!(skipped[0].contains("mmake=unknown"), "{skipped:#?}");
+        }
+    }
+
+    #[test]
+    fn target_context_selects_catalog_branches_and_reports_unknown_guards() {
+        let tree = TempTree::new();
+        let catalogs = tree.0.join("catalogs");
+        fs::create_dir_all(&catalogs).unwrap();
+        fs::write(catalogs.join("messages.cd"), "").unwrap();
+        fs::write(catalogs.join("german.ct"), "").unwrap();
+        let declaration = |mmake: &str| {
+            format!(
+                "%build_catalogs mmake={mmake} name=Sample subdir=Tools \
+                 catalogs=german description=messages source=\"\" \
+                 dir=$(TARGETDIR)/SYS/Locale/Catalogs\n"
+            )
+        };
+        let source = format!(
+            "ifeq ($(AROS_TARGET_CPU),x86_64)\n{}endif\n\
+             ifeq ($(AROS_TARGET_CPU),arm)\n{}endif\n\
+             ifeq ($(EXTERNAL_CATALOG_SWITCH),yes)\n{}endif\n",
+            declaration("catalogs-x86"),
+            declaration("catalogs-arm"),
+            declaration("catalogs-unknown")
+        );
+        let file = catalogs.join("mmakefile.src");
+        fs::write(&file, source).unwrap();
+        let dirs = DirVars::load(&tree.0);
+
+        for (context, expected) in [
+            (target_context("x86_64", "pc", ""), "catalogs-x86"),
+            (target_context("arm", "raspi", "hard"), "catalogs-arm"),
+        ] {
+            let parsed =
+                super::parse_mmakefile_with_dirs_and_context(&file, &tree.0, &dirs, &context)
+                    .unwrap();
+            let names: Vec<_> = parsed
+                .catalogs
+                .iter()
+                .map(|catalog| catalog.mmake.as_str())
+                .collect();
+            assert_eq!(names, [expected]);
+            assert_eq!(parsed.skipped_catalogs.len(), 1);
+            assert!(
+                parsed.skipped_catalogs[0].contains("mmake=catalogs-unknown"),
+                "{:#?}",
+                parsed.skipped_catalogs
+            );
         }
     }
 

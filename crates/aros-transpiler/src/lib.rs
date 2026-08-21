@@ -1,5 +1,6 @@
 pub mod arch_sources;
 pub mod ast;
+pub mod catalogs;
 pub mod copy_includes;
 pub mod dirs;
 pub mod fetch;
@@ -15,6 +16,7 @@ pub mod parser;
 
 pub use arch_sources::ArchSourceDecl;
 pub use ast::{ModuleType, TargetDefinition};
+pub use catalogs::CatalogDecl;
 pub use copy_includes::CopyIncludesDecl;
 pub use fetch::FetchDecl;
 pub use flags::FlagSet;

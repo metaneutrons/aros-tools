@@ -1,5 +1,6 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{MetaTargetRule, ModuleType, TargetDefinition};
+use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
 use crate::fetch::FetchDecl;
 use crate::icons::{IconSet, IconTarget};
@@ -19,6 +20,9 @@ pub struct DependencyGraph {
     /// Resolved icon declarations in source order. Duplicate mmake ids are
     /// intentional and their output rules must be aggregated by CMake.
     pub icons: Vec<IconSet>,
+    /// Fully resolved `%build_catalogs` declarations. These are generated
+    /// runtime resources rather than compiled module targets.
+    pub catalogs: Vec<CatalogDecl>,
     /// Every `%set_archincludes` declaration in the tree, keyed by `modname`.
     pub arch_decls: HashMap<String, Vec<ArchIncludeDecl>>,
     /// Every resolved `%copy_includes` declaration, deduplicated.
@@ -124,6 +128,10 @@ impl DependencyGraph {
                 .or_insert(target);
         }
         self.icons.extend(sets);
+    }
+
+    pub fn add_catalogs(&mut self, declarations: Vec<CatalogDecl>) {
+        self.catalogs.extend(declarations);
     }
 
     pub fn add_fetches(&mut self, decls: Vec<FetchDecl>) {
@@ -477,7 +485,8 @@ impl DependencyGraph {
     pub fn add_copy_includes(&mut self, decls: Vec<CopyIncludesDecl>) {
         for decl in decls {
             let dup = self.copy_includes.iter().any(|d| {
-                d.dest == decl.dest
+                d.name == decl.name
+                    && d.dest == decl.dest
                     && d.source_dir == decl.source_dir
                     && d.patterns == decl.patterns
                     && d.flatten == decl.flatten
@@ -717,6 +726,7 @@ impl DependencyGraph {
 mod tests {
     use super::{arch_compatible, target_runtime_name, DependencyGraph};
     use crate::ast::MetaTargetRule;
+    use crate::copy_includes::CopyIncludesDecl;
     use crate::dirs::DirVars;
     use crate::packages::{PackageDecl, ResolvedPackageMember};
     use crate::{parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context, TargetContext};
@@ -726,6 +736,26 @@ mod tests {
 
     fn root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    }
+
+    #[test]
+    fn identical_header_copies_keep_each_distinct_mmake_owner() {
+        let first = CopyIncludesDecl {
+            name: "first-includes".to_owned(),
+            dest: "GL".to_owned(),
+            source_dir: "${AROS_PORTS_DIR}/example/include/GL".to_owned(),
+            patterns: vec!["gl.h".to_owned()],
+            flatten: true,
+        };
+        let mut second = first.clone();
+        second.name = "second-includes".to_owned();
+
+        let mut graph = DependencyGraph::new();
+        graph.add_copy_includes(vec![first.clone(), first, second]);
+
+        assert_eq!(graph.copy_includes.len(), 2);
+        assert_eq!(graph.copy_includes[0].name, "first-includes");
+        assert_eq!(graph.copy_includes[1].name, "second-includes");
     }
 
     fn package_graph(

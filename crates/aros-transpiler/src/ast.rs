@@ -129,6 +129,12 @@ pub struct ParsedMmakefile {
     pub icons: Vec<crate::icons::IconSet>,
     /// `%build_icons` declarations or variants that could not be resolved.
     pub skipped_icons: Vec<String>,
+    /// Fully resolved `%build_catalogs` declarations. Unlike compiled modules,
+    /// these produce installed locale resources and an optional generated
+    /// source/header.
+    pub catalogs: Vec<crate::catalogs::CatalogDecl>,
+    /// Catalog declarations omitted because an input/default was unresolved.
+    pub skipped_catalogs: Vec<String>,
     /// Dynamic #MM names/dependencies that reference Make variables for which
     /// this CMake build has no counterpart.
     pub skipped_meta_rules: Vec<String>,

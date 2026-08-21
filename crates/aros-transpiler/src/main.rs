@@ -160,6 +160,7 @@ fn main() -> Result<()> {
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
+    let mut skipped_catalogs: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
@@ -170,6 +171,8 @@ fn main() -> Result<()> {
         }
         graph.add_icons(parsed.icon_targets, parsed.icons);
         skipped_icons.extend(parsed.skipped_icons);
+        graph.add_catalogs(parsed.catalogs);
+        skipped_catalogs.extend(parsed.skipped_catalogs);
         skipped_meta_rules.extend(parsed.skipped_meta_rules);
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
@@ -253,6 +256,12 @@ fn main() -> Result<()> {
         "skipped-icons.txt",
         skipped_icons,
         "%build_icons declaration(s) or target variant(s) could not be resolved",
+    );
+    write_report(
+        &args.output,
+        "skipped-catalogs.txt",
+        skipped_catalogs,
+        "%build_catalogs declaration(s) could not be resolved",
     );
     write_report(
         &args.output,
@@ -363,9 +372,14 @@ fn main() -> Result<()> {
         graph.icon_targets.len()
     );
     println!(
-        "🔨 Assembling Dependency Graph with {} concrete targets, {} icon targets and {} meta-targets...",
+        "🌐 {} resolved catalog declaration(s)",
+        graph.catalogs.len()
+    );
+    println!(
+        "🔨 Assembling Dependency Graph with {} concrete targets, {} icon targets, {} catalog targets and {} meta-targets...",
         graph.targets.len(),
         graph.icon_targets.len(),
+        graph.catalogs.len(),
         graph.meta_targets.len()
     );
 
@@ -384,9 +398,10 @@ fn main() -> Result<()> {
     fs::write(&args.output, cmake_content)?;
 
     println!(
-        "✅ Successfully generated {} concrete targets, {} icon targets and {} meta-targets in {}!",
+        "✅ Successfully generated {} concrete targets, {} icon targets, {} catalog targets and {} meta-targets in {}!",
         graph.targets.len(),
         graph.icon_targets.len(),
+        graph.catalogs.len(),
         graph.meta_targets.len(),
         args.output.display()
     );

@@ -26,6 +26,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         .keys()
         .chain(graph.icon_targets.keys())
         .map(String::as_str)
+        .chain(graph.catalogs.iter().map(|catalog| catalog.mmake.as_str()))
         .chain(graph.fetches.iter().map(|fetch| fetch.name.as_str()))
         .collect();
 
@@ -327,6 +328,55 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // Translated Locale catalogs. Each declaration owns every requested
+    // `.catalog` plus its optional generated source/header; unresolved
+    // declarations are deliberately absent and remain visible in the skip and
+    // coverage reports rather than becoming phony stubs.
+    if !graph.catalogs.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Locale catalogs (from %build_catalogs)\n\
+             # ============================================================================="
+        )
+        .unwrap();
+
+        let mut catalogs: Vec<_> = graph.catalogs.iter().collect();
+        catalogs.sort_by(|a, b| {
+            a.mmake
+                .cmp(&b.mmake)
+                .then_with(|| a.declaring_dir.cmp(&b.declaring_dir))
+                .then_with(|| a.line.cmp(&b.line))
+        });
+        for catalog in catalogs {
+            writeln!(out, "aros_build_catalogs(").unwrap();
+            // Deliberately unquoted: aros-verify reads this token as written.
+            writeln!(out, "    MMAKE_ID {}", catalog.mmake).unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&catalog.name)).unwrap();
+            writeln!(out, "    SUBDIR {}", cmake_arg(&catalog.subdir)).unwrap();
+            writeln!(out, "    DIRECTORY {}", cmake_arg(&catalog.declaring_dir)).unwrap();
+            writeln!(out, "    SOURCE_DIR {}", cmake_arg(&catalog.srcdir)).unwrap();
+            writeln!(out, "    DESTINATION {}", cmake_arg(&catalog.dir)).unwrap();
+            writeln!(out, "    DESCRIPTION {}", cmake_arg(&catalog.description)).unwrap();
+            if let Some(source) = &catalog.source {
+                writeln!(out, "    SOURCE {}", cmake_arg(source)).unwrap();
+            }
+            writeln!(
+                out,
+                "    SOURCE_DESCRIPTION {}",
+                cmake_arg(&catalog.source_description)
+            )
+            .unwrap();
+            let languages: Vec<_> = catalog
+                .catalogs
+                .iter()
+                .map(|language| cmake_arg(language))
+                .collect();
+            writeln!(out, "    LANGUAGES {}", languages.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
     // 2. Meta-Targets derived from #MM and #MM-
     writeln!(
         out,
@@ -476,6 +526,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
 mod tests {
     use super::generate_cmake;
     use crate::ast::MetaTargetRule;
+    use crate::catalogs::CatalogDecl;
     use crate::dirs::DirVars;
     use crate::fetch::FetchDecl;
     use crate::graph::DependencyGraph;
@@ -493,6 +544,37 @@ mod tests {
             mmake: name.to_owned(),
             directory: "images/icons".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_catalog_is_a_real_mmake_target_with_all_outputs_described() {
+        let mut graph = DependencyGraph::new();
+        graph.add_catalogs(vec![CatalogDecl {
+            mmake: "sample-catalogs".to_owned(),
+            name: "Sample".to_owned(),
+            subdir: "System/Tools".to_owned(),
+            catalogs: vec!["german".to_owned(), "polish".to_owned()],
+            source: Some("../strings.h".to_owned()),
+            description: "sample".to_owned(),
+            dir: "${AROS_BUILD_DIR}/SYS/Locale/Catalogs".to_owned(),
+            source_description: "${AROS_BUILD_DIR}/hosttools/C_h_aros".to_owned(),
+            srcdir: "${CMAKE_SOURCE_DIR}/workbench/tools/sample/catalogs".to_owned(),
+            declaring_dir: "workbench/tools/sample/catalogs".to_owned(),
+            line: 12,
+        }]);
+        graph.add_meta_rule(MetaTargetRule {
+            name: "workbench".to_owned(),
+            dependencies: vec!["sample-catalogs".to_owned()],
+        });
+
+        let cmake = generate_cmake(&graph);
+        assert!(cmake.contains("aros_build_catalogs(\n    MMAKE_ID sample-catalogs"));
+        assert!(cmake.contains("    NAME \"Sample\""));
+        assert!(cmake.contains("    SUBDIR \"System/Tools\""));
+        assert!(cmake.contains("    SOURCE \"../strings.h\""));
+        assert!(cmake.contains("    LANGUAGES \"german\" \"polish\""));
+        assert!(cmake.contains("aros_add_target_dependency(\"workbench\" \"${dep}\")"));
+        assert!(!cmake.contains("add_custom_target(\"sample-catalogs\")"));
     }
 
     #[test]
