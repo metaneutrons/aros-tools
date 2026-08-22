@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
 use console::{style, Emoji};
 use miette::Result;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
+mod artifact;
+mod host_tools;
 mod toolchain;
 
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
@@ -31,6 +34,34 @@ enum Commands {
         /// Force re-download even if already installed
         #[arg(short, long)]
         force: bool,
+
+        /// Install the AROS cross-toolchain for this target preset
+        #[arg(short, long)]
+        preset: Option<String>,
+
+        /// Install cross-toolchains for every configured target preset
+        #[arg(long)]
+        all: bool,
+
+        /// Never access the network; use only verified cache/store content
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+
+        /// Use and verify an existing AROS-built prefix without copying it
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
+
+    /// Manage the host LLVM tools used to bootstrap builds
+    HostTools {
+        #[command(subcommand)]
+        command: HostToolsCommands,
+    },
+
+    /// Manage deterministic AROS cross-toolchain releases
+    Toolchain {
+        #[command(subcommand)]
+        command: ToolchainCommands,
     },
 
     /// Build AROS for a specific target preset (pc-x86_64, rpi-aarch64, arm-raspi)
@@ -54,6 +85,14 @@ enum Commands {
         /// Enable verbose build logs
         #[arg(short, long)]
         verbose: bool,
+
+        /// Never access the network; use only a verified installed/cached toolchain
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+
+        /// Use an existing AROS-built cross-toolchain prefix
+        #[arg(long)]
+        toolchain_dir: Option<PathBuf>,
     },
 
     /// Clean build directory
@@ -104,15 +143,119 @@ enum Commands {
     Info,
 }
 
+#[derive(Subcommand)]
+enum HostToolsCommands {
+    /// Download and install the pinned host LLVM tools
+    Install {
+        #[arg(short, long)]
+        force: bool,
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolchainCommands {
+    /// Install the exact host + target artifact selected by the lock file
+    Install {
+        #[arg(short, long)]
+        preset: String,
+        #[arg(short, long)]
+        force: bool,
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
+    /// List locked artifacts for the current host
+    List,
+    /// Verify an installed or explicitly local AROS toolchain
+    Verify {
+        #[arg(short, long)]
+        preset: String,
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
+    /// Print the verified toolchain prefix for a target preset
+    Path {
+        #[arg(short, long)]
+        preset: String,
+        #[arg(long)]
+        local: Option<PathBuf>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { force } => {
-            toolchain::setup_toolchain(force).await.map_err(|e| miette::miette!("{e}"))?;
+        Commands::Setup {
+            force,
+            preset,
+            all,
+            offline,
+            local,
+        } => {
+            if all {
+                if local.is_some() {
+                    miette::bail!("--local cannot be combined with --all");
+                }
+                let profiles = aros_common::TargetProfile::load_from_file(std::path::Path::new(
+                    "aros-targets.toml",
+                ))
+                .map_err(|error| miette::miette!("{error}"))?;
+                for profile in profiles {
+                    toolchain::install(&profile.name, offline, force, None)
+                        .await
+                        .map_err(|error| miette::miette!("{error}"))?;
+                }
+            } else if let Some(preset) = preset {
+                toolchain::install(&preset, offline, force, local.as_deref())
+                    .await
+                    .map_err(|error| miette::miette!("{error}"))?;
+            } else if local.is_some() {
+                miette::bail!("--local requires --preset");
+            } else {
+                host_tools::install(force, offline)
+                    .await
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
         }
+
+        Commands::HostTools { command } => match command {
+            HostToolsCommands::Install { force, offline } => {
+                host_tools::install(force, offline)
+                    .await
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
+        },
+
+        Commands::Toolchain { command } => match command {
+            ToolchainCommands::Install {
+                preset,
+                force,
+                offline,
+                local,
+            } => {
+                toolchain::install(&preset, offline, force, local.as_deref())
+                    .await
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
+            ToolchainCommands::List => {
+                toolchain::list().map_err(|error| miette::miette!("{error}"))?;
+            }
+            ToolchainCommands::Verify { preset, local } => {
+                toolchain::verify(&preset, local.as_deref())
+                    .map_err(|error| miette::miette!("{error}"))?;
+            }
+            ToolchainCommands::Path { preset, local } => {
+                let resolved = toolchain::path(&preset, local.as_deref())
+                    .map_err(|error| miette::miette!("{error}"))?;
+                println!("{}", resolved.paths.root.display());
+            }
+        },
 
         Commands::Build {
             preset,
@@ -120,19 +263,28 @@ async fn main() -> Result<()> {
             jobs,
             clean,
             verbose,
+            offline,
+            toolchain_dir,
         } => {
-            // Ensure hermetic toolchain is present
-            let tc_dir = toolchain::default_toolchain_dir();
-            let tc_paths = toolchain::get_toolchain_paths(&tc_dir);
-            if !toolchain::is_toolchain_installed(&tc_paths) && which::which("clang").is_err() {
-                println!("ℹ️ Hermetic toolchain not found. Initializing automatic setup...");
-                toolchain::setup_toolchain(false).await.map_err(|e| miette::miette!("{e}"))?;
-            }
+            let profile =
+                toolchain::target_profile(&preset).map_err(|error| miette::miette!("{error}"))?;
+            let resolved = toolchain::resolve_for_build(&preset, toolchain_dir.as_deref(), offline)
+                .await
+                .map_err(|error| miette::miette!("{error}"))?;
 
             println!(
                 "{ROCKET} {}Building AROS for target preset [{}]...",
                 style("AROS-NG: ").cyan().bold(),
                 style(&preset).yellow().bold()
+            );
+            println!(
+                "🔧 Cross toolchain: {} ({}, {:?})",
+                resolved.paths.root.display(),
+                resolved
+                    .release_id
+                    .as_deref()
+                    .unwrap_or("local-unversioned"),
+                resolved.source
             );
             let start = Instant::now();
 
@@ -156,8 +308,32 @@ async fn main() -> Result<()> {
 
             // Run CMake Configure
             println!("{HAMMER} Configuring CMake build tree...");
+            let cmake_toolchain = std::env::current_dir()
+                .map_err(|error| miette::miette!("Failed to resolve repository root: {error}"))?
+                .join("cmake/toolchains/AROS.cmake");
+            if !cmake_toolchain.is_file() {
+                miette::bail!(
+                    "Required CMake toolchain file is missing: {}",
+                    cmake_toolchain.display()
+                );
+            }
             let mut cfg_cmd = Command::new("cmake");
             cfg_cmd.args(["--preset", &preset]);
+            cfg_cmd.arg(format!(
+                "-DCMAKE_TOOLCHAIN_FILE={}",
+                cmake_toolchain.display()
+            ));
+            cfg_cmd.arg(format!(
+                "-DAROS_CROSS_TOOLCHAIN_ROOT={}",
+                resolved.paths.root.display()
+            ));
+            cfg_cmd.arg(format!("-DAROS_TARGET_CPU={}", profile.arch));
+            cfg_cmd.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));
+            cfg_cmd.arg(format!("-DAROS_TARGET_PROFILE={}", profile.name));
+            cfg_cmd.arg(format!("-DAROS_TARGET_TRIPLE={}", resolved.target_triple));
+            if let Some(float_abi) = &profile.float_abi {
+                cfg_cmd.arg(format!("-DGCC_CONFIG_FLOAT_ABI={float_abi}"));
+            }
             if verbose {
                 cfg_cmd.arg("--log-level=VERBOSE");
             }
@@ -214,14 +390,23 @@ async fn main() -> Result<()> {
             println!(
                 "🧪 Running QEMU test suite for [{}] (mode: {})...",
                 style(&preset).yellow().bold(),
-                if is_headless { style("headless").cyan() } else { style("interactive GUI").magenta().bold() }
+                if is_headless {
+                    style("headless").cyan()
+                } else {
+                    style("interactive GUI").magenta().bold()
+                }
             );
 
             let iso_path = format!("build/{preset}/aros-x86_64-pc.iso");
             if !std::path::Path::new(&iso_path).exists() {
                 println!("{HAMMER} ISO image not found. Building target 'boot-iso'...");
                 let status = Command::new("cmake")
-                    .args(["--build", &format!("build/{preset}"), "--target", "boot-iso"])
+                    .args([
+                        "--build",
+                        &format!("build/{preset}"),
+                        "--target",
+                        "boot-iso",
+                    ])
                     .status()
                     .map_err(|e| miette::miette!("Failed to build boot-iso: {e}"))?;
                 if !status.success() {
@@ -258,7 +443,10 @@ async fn main() -> Result<()> {
                     qemu_cmd.args(["-initrd", &exec_lib]);
                 }
             }
-            qemu_cmd.args(["-cdrom", &iso_path, "-m", "512M", "-smp", "2", "-serial", "stdio", "-boot", "order=c"]);
+            qemu_cmd.args([
+                "-cdrom", &iso_path, "-m", "512M", "-smp", "2", "-serial", "stdio", "-boot",
+                "order=c",
+            ]);
 
             if is_headless {
                 qemu_cmd.args(["-display", "none"]);
@@ -271,7 +459,9 @@ async fn main() -> Result<()> {
                 .map_err(|e| miette::miette!("Failed to start QEMU: {e}"))?;
 
             if timeout > 0 {
-                println!("⏱️  Executing test run for {}s (use --timeout 0 for indefinite run)...", timeout);
+                println!(
+                    "⏱️  Executing test run for {timeout}s (use --timeout 0 for indefinite run)..."
+                );
                 std::thread::sleep(std::time::Duration::from_secs(timeout));
                 let _ = child.kill();
                 let _ = child.wait();
@@ -280,7 +470,9 @@ async fn main() -> Result<()> {
                     style("VERIFIED: ").green().bold()
                 );
             } else {
-                println!("🎮 QEMU is running interactively. Close the window or press Ctrl+C to exit.");
+                println!(
+                    "🎮 QEMU is running interactively. Close the window or press Ctrl+C to exit."
+                );
                 let _ = child.wait();
             }
         }
@@ -324,17 +516,20 @@ async fn main() -> Result<()> {
                 style("AROS Tools v0.1: Workspace Info").cyan().bold()
             );
             println!("  • Toolchain Architecture: Multi-Target Modern CMake + Ninja");
-            
-            let tc_dir = toolchain::default_toolchain_dir();
-            let tc_paths = toolchain::get_toolchain_paths(&tc_dir);
-            let tc_status = if toolchain::is_toolchain_installed(&tc_paths) {
-                format!("Hermetic LLVM ({})", tc_paths.clang.display())
+
+            let host_dir = host_tools::default_host_tools_dir();
+            let host_paths = host_tools::host_tool_paths(&host_dir);
+            let tc_status = if host_tools::is_host_tools_installed(&host_paths) {
+                format!("Pinned host LLVM ({})", host_paths.clang.display())
             } else if let Ok(clang) = which::which("clang") {
-                format!("System LLVM ({})", clang.display())
+                format!("Unmanaged system LLVM ({})", clang.display())
             } else {
-                "Not found (run `aros setup`)".to_string()
+                "Not found (run `aros host-tools install`)".to_string()
             };
-            println!("  • Active C/C++ Compiler:  {}", style(tc_status).green().bold());
+            println!(
+                "  • Active C/C++ Compiler:  {}",
+                style(tc_status).green().bold()
+            );
 
             println!(
                 "  • C/C++ Compiler Launcher: {}",
@@ -349,6 +544,14 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| aros_common::TargetProfile::default_profiles());
             let target_names: Vec<String> = targets.into_iter().map(|t| t.name).collect();
             println!("  • Configured Targets:     {}", target_names.join(", "));
+            match toolchain::load_lock() {
+                Ok(lock) => println!(
+                    "  • AROS Toolchain Lock:    {} ({} assets)",
+                    lock.release_id,
+                    lock.artifacts.len()
+                ),
+                Err(error) => println!("  • AROS Toolchain Lock:    invalid ({error})"),
+            }
         }
     }
 

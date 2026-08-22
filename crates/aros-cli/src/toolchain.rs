@@ -1,20 +1,22 @@
+use crate::artifact::{
+    aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive, tree_inventory,
+    INSTALL_COMPLETE_FILE,
+};
+use crate::host_tools::host_platform_key;
 use anyhow::{bail, Context, Result};
-use aros_common::target::{ArosConfig, TargetProfile, ToolchainConfig};
+use aros_common::target::TargetProfile;
+use aros_common::toolchain_manifest::{
+    ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
+};
 use console::{style, Emoji};
-use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::fs::{self, File};
-use std::io::BufReader;
-use std::os::unix::fs::PermissionsExt;
+use std::fs;
 use std::path::{Path, PathBuf};
-use xz2::read::XzDecoder;
+use std::process::Command;
 
-static DOWNLOAD: Emoji<'_, '_> = Emoji("⬇️  ", "");
-static PACKAGE: Emoji<'_, '_> = Emoji("📦 ", "");
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
-static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
+static DOWNLOAD: Emoji<'_, '_> = Emoji("⬇️  ", "");
 
-#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub struct ToolchainPaths {
     pub root: PathBuf,
     pub clang: PathBuf,
@@ -23,184 +25,511 @@ pub struct ToolchainPaths {
     pub llvm_ar: PathBuf,
 }
 
-pub fn default_toolchain_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("AROS_TOOLCHAIN_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(home) = dirs_home() {
-        home.join(".aros").join("toolchain")
-    } else {
-        PathBuf::from(".aros-toolchain")
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolchainSource {
+    LockedRelease,
+    LocalManifest,
+    LegacyLocal,
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+#[derive(Debug, Clone)]
+pub struct ResolvedToolchain {
+    pub paths: ToolchainPaths,
+    pub target_triple: String,
+    pub release_id: Option<String>,
+    pub source: ToolchainSource,
 }
 
-pub fn load_toolchain_config() -> ToolchainConfig {
-    let config = TargetProfile::load_config(Path::new("aros-targets.toml"))
-        .unwrap_or_else(|_| ArosConfig {
-            toolchain: Some(ToolchainConfig::default()),
-            targets: TargetProfile::default_profiles(),
-        });
-    config.toolchain.unwrap_or_default()
+pub fn lock_file_path() -> PathBuf {
+    std::env::var_os("AROS_TOOLCHAIN_LOCK")
+        .map_or_else(|| PathBuf::from("aros-toolchains.lock.toml"), PathBuf::from)
 }
 
-pub fn detect_host_platform(cfg: &ToolchainConfig) -> Result<(String, String)> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+pub fn load_lock() -> Result<ArosToolchainLock> {
+    let path = lock_file_path();
+    ArosToolchainLock::load(&path)
+        .with_context(|| format!("failed to load AROS toolchain lock '{}'", path.display()))
+}
 
-    let host_key = match (os, arch) {
-        ("macos", "aarch64") => "macos-aarch64",
-        ("macos", "x86_64") => "macos-x86_64",
-        ("linux", "x86_64") => "linux-x86_64",
-        ("linux", "aarch64") => "linux-aarch64",
-        _ => bail!("Unsupported host platform: {} {}", os, arch),
-    };
+pub fn default_store_root() -> PathBuf {
+    std::env::var_os("AROS_CROSS_TOOLCHAINS_DIR")
+        .map_or_else(|| aros_home().join("cross-toolchains"), PathBuf::from)
+}
 
-    let platform_label = match host_key {
-        "macos-aarch64" => "macOS Apple Silicon (aarch64)",
-        "macos-x86_64" => "macOS Intel (x86_64)",
-        "linux-x86_64" => "Linux (x86_64)",
-        "linux-aarch64" => "Linux (aarch64)",
-        _ => host_key,
-    };
-
-    let version = std::env::var("AROS_LLVM_VERSION").unwrap_or_else(|_| cfg.llvm_version.clone());
-    let host_asset = cfg
-        .hosts
-        .get(host_key)
-        .ok_or_else(|| anyhow::anyhow!("Host '{}' not configured in aros-targets.toml", host_key))?;
-
-    let asset_filename = host_asset.asset.replace("{version}", &version);
-    let base_url = std::env::var("AROS_TOOLCHAIN_URL")
-        .unwrap_or_else(|_| cfg.base_url.replace("{version}", &version));
-
-    let download_url = format!("{base_url}/{asset_filename}");
-    Ok((platform_label.to_string(), download_url))
+pub fn explicit_local_override(argument: Option<&Path>) -> Option<PathBuf> {
+    argument
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("AROS_CROSS_TOOLCHAIN_DIR").map(PathBuf::from))
 }
 
 pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
     ToolchainPaths {
-        root: root.to_path_buf(),
-        clang: root.join("bin").join("clang"),
-        clangxx: root.join("bin").join("clang++"),
-        lld: root.join("bin").join("ld.lld"),
-        llvm_ar: root.join("bin").join("llvm-ar"),
+        root: root.into(),
+        clang: root.join("bin/clang"),
+        clangxx: root.join("bin/clang++"),
+        lld: root.join("bin/ld.lld"),
+        llvm_ar: root.join("bin/llvm-ar"),
     }
 }
 
-pub fn is_toolchain_installed(paths: &ToolchainPaths) -> bool {
-    paths.clang.exists() && (paths.lld.exists() || paths.root.join("bin").join("lld").exists())
+pub fn target_profile(name: &str) -> Result<TargetProfile> {
+    TargetProfile::load_from_file(Path::new("aros-targets.toml"))?
+        .into_iter()
+        .find(|profile| profile.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown target preset '{name}' in aros-targets.toml"))
 }
 
-pub async fn setup_toolchain(force: bool) -> Result<ToolchainPaths> {
-    let dest_dir = default_toolchain_dir();
-    let paths = get_toolchain_paths(&dest_dir);
-    let cfg = load_toolchain_config();
+pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
+    format!("{}-unknown-aros", profile.arch)
+}
+
+pub fn locked_store_path(lock: &ArosToolchainLock, artifact: &ArosToolchainArtifact) -> PathBuf {
+    locked_store_envelope(lock, artifact).join("toolchain")
+}
+
+fn locked_store_envelope(lock: &ArosToolchainLock, artifact: &ArosToolchainArtifact) -> PathBuf {
+    default_store_root()
+        .join(&lock.release_id)
+        .join(&artifact.host)
+        .join(&artifact.target_profile)
+        .join(artifact.sha256.to_ascii_lowercase())
+}
+
+pub async fn install(
+    preset: &str,
+    offline: bool,
+    force: bool,
+    local: Option<&Path>,
+) -> Result<ResolvedToolchain> {
+    if let Some(local) = explicit_local_override(local) {
+        let resolved = resolve_local(&local, preset)?;
+        println!(
+            "{CHECK} Using local AROS toolchain without copying it: {}",
+            local.display()
+        );
+        return Ok(resolved);
+    }
+
+    let host = host_platform_key()?;
+    let profile = target_profile(preset)?;
+    let expected_triple = target_triple_for_profile(&profile);
+    let lock = load_lock()?;
+    let artifact = lock.resolve(host, preset).ok_or_else(|| {
+        anyhow::anyhow!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+    })?;
+    if artifact.target_triple != expected_triple {
+        bail!(
+            "locked target triple '{}' does not match preset '{}' ({})",
+            artifact.target_triple,
+            preset,
+            expected_triple
+        );
+    }
+    if !artifact.enabled {
+        bail!(
+            "AROS toolchain {host}/{preset} is locked but disabled: {}",
+            artifact
+                .disabled_reason
+                .as_deref()
+                .unwrap_or("no release asset is available")
+        );
+    }
+
+    let envelope = locked_store_envelope(&lock, artifact);
+    let payload = envelope.join("toolchain");
+    if verify_locked_install(&payload, &lock, artifact, true).is_ok() && !force {
+        return Ok(resolved_locked(&payload, &lock, artifact));
+    }
 
     println!(
-        "{SPARKLES} {}",
-        style("AROS-NG Declarative Toolchain Manager").cyan().bold()
+        "{DOWNLOAD} AROS toolchain {} for {} / {}",
+        style(&lock.release_id).cyan(),
+        style(host).yellow(),
+        style(preset).yellow()
     );
+    let archive = obtain_archive(
+        &lock.asset_url(artifact).map_err(anyhow::Error::msg)?,
+        &artifact.sha256,
+        artifact.size,
+        offline,
+        force,
+    )
+    .await?;
 
-    let (platform_name, url) = detect_host_platform(&cfg)?;
-    println!("  • Host Platform:     {}", style(platform_name).green().bold());
-    println!("  • LLVM Version:      {}", style(&cfg.llvm_version).yellow().bold());
-    println!("  • Target Location:   {}", style(dest_dir.display()).dim());
-    println!("  • Config Source:     {}", style("aros-targets.toml [toolchain]").cyan());
-
-    if !force && is_toolchain_installed(&paths) {
-        println!(
-            "{CHECK} Toolchain is already installed and verified at {}",
-            style(paths.root.display()).green().bold()
-        );
-        return Ok(paths);
+    if envelope.exists() {
+        verify_locked_install(&payload, &lock, artifact, true).with_context(|| {
+            format!(
+                "content-addressed destination '{}' already exists but is invalid; it was not overwritten",
+                envelope.display()
+            )
+        })?;
+        return Ok(resolved_locked(&payload, &lock, artifact));
     }
 
-    fs::create_dir_all(&dest_dir).context("Failed to create toolchain root directory")?;
+    let parent = envelope
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("toolchain destination has no parent"))?;
+    let payload_staging = extract_to_staging(&archive, parent, artifact.strip_components)?;
+    verify_locked_install(payload_staging.path(), &lock, artifact, false)?;
+    let envelope_staging = tempfile::Builder::new()
+        .prefix(".envelope-")
+        .tempdir_in(parent)
+        .context("failed to create toolchain envelope staging directory")?;
+    fs::rename(
+        payload_staging.path(),
+        envelope_staging.path().join("toolchain"),
+    )
+    .context("failed to place verified payload in installation envelope")?;
+    fs::write(
+        envelope_staging.path().join(INSTALL_COMPLETE_FILE),
+        b"complete\n",
+    )
+    .context("failed to write toolchain completion marker")?;
+    commit_staging(&envelope_staging, &envelope)?;
+    verify_locked_install(&payload, &lock, artifact, true)?;
+    println!("{CHECK} Installed at {}", payload.display());
+    Ok(resolved_locked(&payload, &lock, artifact))
+}
 
-    let client = reqwest::Client::builder()
-        .user_agent("aros-tools/0.1.0 (https://aros.org)")
-        .build()?;
-
-    println!("\n{DOWNLOAD} Downloading declarative LLVM/LLD toolchain from GitHub...");
-    println!("  {}", style(&url).dim());
-
-    let res = client.get(&url).send().await.context("Failed to connect to download source")?;
-    if !res.status().is_success() {
-        bail!("Failed to download toolchain from '{}': HTTP {}", url, res.status());
+pub async fn resolve_for_build(
+    preset: &str,
+    local: Option<&Path>,
+    offline: bool,
+) -> Result<ResolvedToolchain> {
+    if let Some(local) = explicit_local_override(local) {
+        return resolve_local(&local, preset);
     }
 
-    let total_size = res.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-            .expect("Failed to set progress bar template")
-            .progress_chars("#>-"),
+    // An explicitly AROS-built legacy prefix remains usable without copying.
+    // A plain host LLVM bundle cannot pass this marker-based check.
+    let legacy = crate::host_tools::default_host_tools_dir();
+    if is_legacy_aros_prefix(&legacy, preset) {
+        return resolve_local(&legacy, preset);
+    }
+
+    install(preset, offline, false, None).await
+}
+
+pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
+    if let Some(local) = explicit_local_override(local) {
+        return resolve_local(&local, preset);
+    }
+    let host = host_platform_key()?;
+    let lock = load_lock()?;
+    let artifact = lock.resolve(host, preset).ok_or_else(|| {
+        anyhow::anyhow!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+    })?;
+    let destination = locked_store_path(&lock, artifact);
+    verify_locked_install(&destination, &lock, artifact, true)?;
+    Ok(resolved_locked(&destination, &lock, artifact))
+}
+
+pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
+    let resolved = path(preset, local)?;
+    smoke_host_tools(&resolved.paths)?;
+    println!(
+        "{CHECK} Verified {} for {} ({})",
+        resolved.paths.root.display(),
+        preset,
+        resolved.target_triple
     );
+    Ok(resolved)
+}
 
-    let temp_archive = tempfile::NamedTempFile::new()
-        .context("Failed to create temporary download file")?;
-    let temp_path = temp_archive.path().to_path_buf();
-
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .context("Failed to open temporary file for writing")?;
-
-    let mut stream = res.bytes_stream();
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.context("Error downloading chunk")?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-            .await
-            .context("Error writing chunk to disk")?;
-        pb.inc(chunk.len() as u64);
-    }
-    pb.finish_with_message("Download complete!");
-
-    println!("{PACKAGE} Extracting toolchain archive into {}...", style(dest_dir.display()).cyan());
-
-    // Extract .tar.xz
-    let tar_file = File::open(&temp_path).context("Failed to open downloaded archive")?;
-    let xz_decoder = XzDecoder::new(BufReader::new(tar_file));
-    let mut archive = tar::Archive::new(xz_decoder);
-
-    // Extract entries stripping top-level directory
-    for entry_res in archive.entries().context("Failed to read tar archive")? {
-        let mut entry = entry_res.context("Tar entry error")?;
-        let path = entry.path().context("Invalid tar entry path")?.to_path_buf();
-
-        let mut components = path.components();
-        components.next(); // Strip root directory (e.g. clang+llvm-18.1.8-arm64-apple-macos11/)
-        let sub_path: PathBuf = components.collect();
-
-        if sub_path.as_os_str().is_empty() {
-            continue;
-        }
-
-        let target_file = dest_dir.join(&sub_path);
-        if entry.header().entry_type().is_dir() {
-            fs::create_dir_all(&target_file)?;
+pub fn list() -> Result<()> {
+    let lock = load_lock()?;
+    let current_host = host_platform_key()?;
+    println!("Release: {}", style(&lock.release_id).cyan());
+    for artifact in lock
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.host == current_host)
+    {
+        let destination = locked_store_path(&lock, artifact);
+        let status = if !artifact.enabled {
+            "disabled"
+        } else if verify_locked_install(&destination, &lock, artifact, true).is_ok() {
+            "installed"
         } else {
-            if let Some(parent) = target_file.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            entry.unpack(&target_file)?;
+            "available"
+        };
+        println!(
+            "  {:<16} {:<22} {}",
+            artifact.target_profile, artifact.target_triple, status
+        );
+    }
+    Ok(())
+}
 
-            // Set executable bit on unix
-            if let Ok(metadata) = target_file.metadata() {
-                let mut perms = metadata.permissions();
-                let mode = perms.mode();
-                if target_file.starts_with(dest_dir.join("bin")) || (mode & 0o111 != 0) {
-                    perms.set_mode(0o755);
-                    let _ = fs::set_permissions(&target_file, perms);
-                }
-            }
+fn resolve_local(root: &Path, preset: &str) -> Result<ResolvedToolchain> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("local toolchain '{}' does not exist", root.display()))?;
+    let profile = target_profile(preset)?;
+    let expected_triple = target_triple_for_profile(&profile);
+    let manifest_path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
+    if manifest_path.exists() {
+        let manifest = ArosToolchainManifest::load(&root)?;
+        let host = host_platform_key()?;
+        if manifest.host != host
+            || manifest.target_profile != preset
+            || manifest.target_triple != expected_triple
+        {
+            bail!(
+                "local manifest is for {}/{}/{}; expected {}/{}/{}",
+                manifest.host,
+                manifest.target_profile,
+                manifest.target_triple,
+                host,
+                preset,
+                expected_triple
+            );
+        }
+        let (actual_tree, actual_files) = tree_inventory(&root)?;
+        if actual_tree != manifest.tree_sha256 {
+            bail!(
+                "local toolchain tree SHA256 mismatch: expected {}, got {}",
+                manifest.tree_sha256,
+                actual_tree
+            );
+        }
+        if actual_files != manifest.files {
+            bail!("local toolchain file inventory does not match its manifest");
+        }
+        require_tool_paths(&root)?;
+        return Ok(ResolvedToolchain {
+            paths: get_toolchain_paths(&root),
+            target_triple: manifest.target_triple,
+            release_id: Some(manifest.release_id),
+            source: ToolchainSource::LocalManifest,
+        });
+    }
+
+    if !is_legacy_aros_prefix(&root, preset) {
+        bail!(
+            "local prefix '{}' has no manifest and does not look like an AROS-built {} cross-toolchain",
+            root.display(),
+            preset
+        );
+    }
+    require_tool_paths(&root)?;
+    Ok(ResolvedToolchain {
+        paths: get_toolchain_paths(&root),
+        target_triple: expected_triple,
+        release_id: None,
+        source: ToolchainSource::LegacyLocal,
+    })
+}
+
+fn verify_locked_install(
+    root: &Path,
+    lock: &ArosToolchainLock,
+    artifact: &ArosToolchainArtifact,
+    require_complete: bool,
+) -> Result<()> {
+    if !root.is_dir() {
+        bail!("toolchain directory '{}' is missing", root.display());
+    }
+    if require_complete
+        && !root
+            .parent()
+            .is_some_and(|parent| parent.join(INSTALL_COMPLETE_FILE).is_file())
+    {
+        bail!("toolchain installation is incomplete");
+    }
+    let manifest = ArosToolchainManifest::load(root)?;
+    if manifest.release_id != lock.release_id
+        || manifest.host != artifact.host
+        || manifest.target_profile != artifact.target_profile
+        || manifest.target_triple != artifact.target_triple
+        || manifest.tree_sha256 != artifact.tree_sha256
+        || manifest.llvm_version != artifact.llvm_version
+    {
+        bail!("embedded toolchain manifest does not match the lock entry");
+    }
+    let (actual_tree, actual_files) = tree_inventory(root)?;
+    if actual_tree != artifact.tree_sha256 {
+        bail!(
+            "toolchain tree SHA256 mismatch: expected {}, got {}",
+            artifact.tree_sha256,
+            actual_tree
+        );
+    }
+    if actual_files != manifest.files {
+        bail!("toolchain file inventory does not match the embedded manifest");
+    }
+    for required in &artifact.required_paths {
+        if fs::symlink_metadata(root.join(required)).is_err() {
+            bail!("required toolchain path '{required}' is missing");
+        }
+    }
+    require_tool_paths(root)
+}
+
+fn require_tool_paths(root: &Path) -> Result<()> {
+    let paths = get_toolchain_paths(root);
+    for (name, path) in [
+        ("clang", &paths.clang),
+        ("clang++", &paths.clangxx),
+        ("ld.lld", &paths.lld),
+        ("llvm-ar", &paths.llvm_ar),
+    ] {
+        if !command_exists(path) {
+            bail!("required tool '{name}' is missing at '{}'", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn resolved_locked(
+    root: &Path,
+    lock: &ArosToolchainLock,
+    artifact: &ArosToolchainArtifact,
+) -> ResolvedToolchain {
+    ResolvedToolchain {
+        paths: get_toolchain_paths(root),
+        target_triple: artifact.target_triple.clone(),
+        release_id: Some(lock.release_id.clone()),
+        source: ToolchainSource::LockedRelease,
+    }
+}
+
+fn is_legacy_aros_prefix(root: &Path, preset: &str) -> bool {
+    let Ok(profile) = target_profile(preset) else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    let cpu = profile.arch.to_string();
+    let mut llvm_marker = false;
+    let mut runtime_marker = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        llvm_marker |= name.starts_with(".installflag-llvm-") && name.ends_with(&cpu);
+        runtime_marker |= name.starts_with(".installflag-compiler_rt-") && name.ends_with(&cpu);
+    }
+    llvm_marker
+        && runtime_marker
+        && require_tool_paths(root).is_ok()
+        && root.join("include/c++/v1").is_dir()
+        && root.join("lib/libc++.a").is_file()
+        && root.join("lib/libc++abi.a").is_file()
+        && root.join("lib/libunwind.a").is_file()
+}
+
+fn smoke_host_tools(paths: &ToolchainPaths) -> Result<()> {
+    for (name, path) in [("clang", &paths.clang), ("llvm-ar", &paths.llvm_ar)] {
+        let status = Command::new(path)
+            .arg("--version")
+            .status()
+            .with_context(|| format!("failed to execute {name} at '{}'", path.display()))?;
+        if !status.success() {
+            bail!("{name} --version failed with {status}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aros_common::toolchain_manifest::AROS_TOOLCHAIN_MANIFEST_SCHEMA;
+
+    #[test]
+    fn store_path_is_content_addressed() {
+        let lock = ArosToolchainLock {
+            schema: 1,
+            release_id: "release-v1".into(),
+            base_url: Some("https://example.invalid".into()),
+            artifacts: Vec::new(),
+        };
+        let artifact = ArosToolchainArtifact {
+            host: "linux-x86_64".into(),
+            target_profile: "pc-x86_64".into(),
+            target_triple: "x86_64-unknown-aros".into(),
+            asset: "asset.tar.xz".into(),
+            sha256: "a".repeat(64),
+            tree_sha256: "b".repeat(64),
+            llvm_version: Some("11.0.0".into()),
+            size: None,
+            enabled: true,
+            disabled_reason: None,
+            strip_components: 1,
+            required_paths: Vec::new(),
+        };
+        let path = locked_store_path(&lock, &artifact);
+        assert!(path.ends_with(format!(
+            "release-v1/linux-x86_64/pc-x86_64/{}/toolchain",
+            "a".repeat(64)
+        )));
+    }
+
+    #[test]
+    fn target_triples_are_profile_exact() {
+        for (name, triple) in [
+            ("pc-x86_64", "x86_64-unknown-aros"),
+            ("arm-raspi", "arm-unknown-aros"),
+            ("rpi-aarch64", "aarch64-unknown-aros"),
+        ] {
+            let profile = TargetProfile::default_profiles()
+                .into_iter()
+                .find(|profile| profile.name == name)
+                .unwrap();
+            assert_eq!(target_triple_for_profile(&profile), triple);
         }
     }
 
-    println!("{CHECK} {} {}", style("Declarative toolchain successfully installed to:").green().bold(), dest_dir.display());
+    #[test]
+    fn completion_marker_lives_outside_immutable_payload() {
+        let store = tempfile::tempdir().unwrap();
+        let envelope = store.path().join("digest");
+        let payload = envelope.join("toolchain");
+        fs::create_dir_all(payload.join("bin")).unwrap();
+        for tool in ["clang", "clang++", "ld.lld", "llvm-ar"] {
+            fs::write(payload.join("bin").join(tool), b"tool").unwrap();
+        }
+        let (tree_sha256, files) = tree_inventory(&payload).unwrap();
+        let manifest = ArosToolchainManifest {
+            schema: AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+            release_id: "release-v1".into(),
+            host: "linux-x86_64".into(),
+            target_profile: "pc-x86_64".into(),
+            target_triple: "x86_64-unknown-aros".into(),
+            tree_sha256: tree_sha256.clone(),
+            llvm_version: Some("11.0.0".into()),
+            files,
+        };
+        fs::write(
+            payload.join(AROS_TOOLCHAIN_MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let artifact = ArosToolchainArtifact {
+            host: manifest.host.clone(),
+            target_profile: manifest.target_profile.clone(),
+            target_triple: manifest.target_triple.clone(),
+            asset: "asset.tar.xz".into(),
+            sha256: "a".repeat(64),
+            tree_sha256,
+            llvm_version: manifest.llvm_version.clone(),
+            size: None,
+            enabled: true,
+            disabled_reason: None,
+            strip_components: 1,
+            required_paths: Vec::new(),
+        };
+        let lock = ArosToolchainLock {
+            schema: 1,
+            release_id: manifest.release_id,
+            base_url: Some("https://example.invalid".into()),
+            artifacts: vec![artifact.clone()],
+        };
 
-    Ok(paths)
+        assert!(verify_locked_install(&payload, &lock, &artifact, true).is_err());
+        fs::write(envelope.join(INSTALL_COMPLETE_FILE), b"complete\n").unwrap();
+        verify_locked_install(&payload, &lock, &artifact, true).unwrap();
+        assert!(!payload.join(INSTALL_COMPLETE_FILE).exists());
+    }
 }

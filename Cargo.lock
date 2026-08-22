@@ -96,6 +96,7 @@ dependencies = [
  "indicatif",
  "miette",
  "reqwest",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",

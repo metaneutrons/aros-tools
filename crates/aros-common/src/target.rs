@@ -5,50 +5,54 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-/// Toolchain asset declaration per host platform.
+/// Host compiler asset declaration per host platform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostAssetConfig {
+pub struct HostCompilerAssetConfig {
     pub asset: String,
     #[serde(default)]
     pub sha256: Option<String>,
 }
 
-/// Declarative Toolchain configuration loaded from aros-targets.toml.
+/// Declarative host compiler configuration loaded from `aros-targets.toml`.
+///
+/// This is deliberately separate from the AROS cross-toolchain release lock.
+/// The host compiler can bootstrap builds, but it does not contain the AROS
+/// target runtimes or C++ standard library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolchainConfig {
+pub struct HostCompilerConfig {
     pub llvm_version: String,
     pub base_url: String,
     #[serde(default)]
-    pub hosts: HashMap<String, HostAssetConfig>,
+    pub hosts: HashMap<String, HostCompilerAssetConfig>,
 }
 
-impl Default for ToolchainConfig {
+impl Default for HostCompilerConfig {
     fn default() -> Self {
         let mut hosts = HashMap::new();
         hosts.insert(
             "macos-aarch64".to_string(),
-            HostAssetConfig {
+            HostCompilerAssetConfig {
                 asset: "clang+llvm-{version}-arm64-apple-macos11.tar.xz".to_string(),
                 sha256: None,
             },
         );
         hosts.insert(
             "macos-x86_64".to_string(),
-            HostAssetConfig {
+            HostCompilerAssetConfig {
                 asset: "clang+llvm-{version}-x86_64-apple-darwin.tar.xz".to_string(),
                 sha256: None,
             },
         );
         hosts.insert(
             "linux-x86_64".to_string(),
-            HostAssetConfig {
+            HostCompilerAssetConfig {
                 asset: "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz".to_string(),
                 sha256: None,
             },
         );
         hosts.insert(
             "linux-aarch64".to_string(),
-            HostAssetConfig {
+            HostCompilerAssetConfig {
                 asset: "clang+llvm-{version}-aarch64-linux-gnu.tar.xz".to_string(),
                 sha256: None,
             },
@@ -56,7 +60,8 @@ impl Default for ToolchainConfig {
 
         Self {
             llvm_version: "18.1.8".to_string(),
-            base_url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}".to_string(),
+            base_url: "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}"
+                .to_string(),
             hosts,
         }
     }
@@ -65,8 +70,8 @@ impl Default for ToolchainConfig {
 /// Root structure of `aros-targets.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArosConfig {
-    #[serde(default)]
-    pub toolchain: Option<ToolchainConfig>,
+    #[serde(default, alias = "toolchain")]
+    pub host_compiler: Option<HostCompilerConfig>,
     #[serde(default)]
     pub targets: Vec<TargetProfile>,
 }
@@ -80,6 +85,8 @@ pub struct TargetProfile {
     pub bsp: String,
     #[serde(default)]
     pub features: Vec<String>,
+    #[serde(default)]
+    pub float_abi: Option<String>,
 }
 
 impl TargetProfile {
@@ -116,7 +123,7 @@ impl TargetProfile {
             Ok(config)
         } else {
             Ok(ArosConfig {
-                toolchain: Some(ToolchainConfig::default()),
+                host_compiler: Some(HostCompilerConfig::default()),
                 targets: Self::default_profiles(),
             })
         }
@@ -132,6 +139,7 @@ impl TargetProfile {
                 platform: "pc".into(),
                 bsp: "generic".into(),
                 features: vec!["smp".into(), "acpi".into(), "hdaudio".into(), "ahci".into()],
+                float_abi: None,
             },
             Self {
                 name: "rpi-aarch64".into(),
@@ -145,6 +153,7 @@ impl TargetProfile {
                     "i2s".into(),
                     "hdmi-audio".into(),
                 ],
+                float_abi: None,
             },
             Self {
                 name: "arm-raspi".into(),
@@ -152,7 +161,32 @@ impl TargetProfile {
                 platform: "raspi".into(),
                 bsp: "bcm2835".into(),
                 features: vec!["pwm-audio".into(), "sdhost".into()],
+                float_abi: Some("hard".into()),
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_legacy_toolchain_table_as_host_compiler() {
+        let config: ArosConfig = toml::from_str(
+            r#"
+                [toolchain]
+                llvm_version = "18.1.8"
+                base_url = "https://example.invalid/llvm"
+
+                [toolchain.hosts.linux-x86_64]
+                asset = "llvm.tar.xz"
+            "#,
+        )
+        .unwrap();
+
+        let host_compiler = config.host_compiler.unwrap();
+        assert_eq!(host_compiler.llvm_version, "18.1.8");
+        assert_eq!(host_compiler.hosts["linux-x86_64"].asset, "llvm.tar.xz");
     }
 }
