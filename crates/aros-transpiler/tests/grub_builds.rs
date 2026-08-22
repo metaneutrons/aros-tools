@@ -94,6 +94,8 @@ fn grub2_contract_emits_real_lanes_and_preserves_the_fetch_alias_edge() {
 
     let cmake = generate_cmake(&graph);
     assert_eq!(cmake.matches("aros_build_grub2(").count(), 3, "{cmake}");
+    assert!(cmake.contains("if(AROS_GRUB2_HOST_LANES_AVAILABLE)"));
+    assert!(cmake.contains("audited GRUB2 host-tool lanes are unavailable on this build host"));
     assert!(cmake.contains("    MMAKE_ID grub2-host\n    MODE \"pc\""));
     assert!(cmake.contains("    MMAKE_ID grub2-efi-host\n    MODE \"efi64\""));
     assert!(cmake.contains("    MMAKE_ID grub2-efi32-host\n    MODE \"efi32\""));

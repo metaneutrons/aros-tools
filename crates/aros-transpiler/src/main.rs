@@ -161,6 +161,7 @@ fn main() -> Result<()> {
     let mut graph = DependencyGraph::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut skipped_headers: Vec<String> = Vec::new();
+    let mut skipped_copy_directories: Vec<String> = Vec::new();
     let mut skipped_flags: Vec<String> = Vec::new();
     let mut ambiguous_flags = 0usize;
     let mut skipped_arch_sources: Vec<String> = Vec::new();
@@ -175,6 +176,7 @@ fn main() -> Result<()> {
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
     let mut skipped_catalogs: Vec<String> = Vec::new();
+    let mut skipped_flexcat_sources: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
     for parsed in parsed_results {
         for target in parsed.targets {
@@ -195,6 +197,8 @@ fn main() -> Result<()> {
         for declaration in parsed.python_outputs {
             graph.add_python_outputs(declaration);
         }
+        graph.add_flexcat_sources(parsed.flexcat_sources);
+        skipped_flexcat_sources.extend(parsed.skipped_flexcat_sources);
         for rule in parsed.meta_rules {
             graph.add_meta_rule(rule);
         }
@@ -205,6 +209,7 @@ fn main() -> Result<()> {
         skipped_meta_rules.extend(parsed.skipped_meta_rules);
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
+        skipped_copy_directories.extend(graph.add_copy_directories(parsed.copy_directories));
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
         graph.add_header_transforms(parsed.header_transforms);
         graph.add_define_headers(parsed.define_headers);
@@ -223,6 +228,7 @@ fn main() -> Result<()> {
         skipped_arch_sources.extend(parsed.skipped_arch_sources);
         unresolved.extend(parsed.unresolved_includes);
         skipped_headers.extend(parsed.skipped_copy_includes);
+        skipped_copy_directories.extend(parsed.skipped_copy_directories);
         skipped_flags.extend(parsed.flags.skipped);
         if parsed.flags.ambiguous {
             ambiguous_flags += 1;
@@ -244,11 +250,17 @@ fn main() -> Result<()> {
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
+    // Catalog generators can emit a source/header adjacent to a module's
+    // sources. CMake rehomes that output, so preserve the completed logical
+    // source-tree consumer relationship before rendering the build graph.
+    graph.resolve_catalog_consumers();
+    graph.resolve_flexcat_source_consumers();
     // A concrete target must order its own fetched sources. Depending on a
     // sibling which happens to use the same archive does not constrain a
     // direct Ninja invocation of this target.
     let mut unowned_port_sources = graph.resolve_port_source_fetches();
     unowned_port_sources.extend(graph.resolve_header_transforms());
+    skipped_copy_directories.extend(graph.resolve_copy_directories());
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
@@ -311,6 +323,12 @@ fn main() -> Result<()> {
     );
     write_report(
         &args.output,
+        "skipped-flexcat-sources.txt",
+        skipped_flexcat_sources,
+        "hand-written FlexCat source/header rule(s) could not be resolved",
+    );
+    write_report(
+        &args.output,
         "skipped-meta-rules.txt",
         skipped_meta_rules,
         "#MM target/dependency token(s) reference unmapped Make variables",
@@ -333,6 +351,16 @@ fn main() -> Result<()> {
         "skipped-header-staging.txt",
         skipped_headers,
         "%copy_includes declaration(s) skipped (out-of-tree or unresolved)",
+    );
+    println!(
+        "📂 {} recursive directory staging rule(s) from %copy_dir_recursive",
+        graph.copy_directories.len()
+    );
+    write_report(
+        &args.output,
+        "skipped-directory-staging.txt",
+        skipped_copy_directories,
+        "%copy_dir_recursive declaration(s) skipped (unsafe, unresolved, or ambiguous)",
     );
 
     write_report(

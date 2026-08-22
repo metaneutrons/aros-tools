@@ -2,6 +2,7 @@ use crate::arch_sources::ArchSourceDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
 use crate::flags::FlagSet;
+use crate::flexcat::FlexCatSourceDecl;
 use crate::includes::ArchIncludeDecl;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -181,6 +182,29 @@ pub struct TargetDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaTargetRule {
     pub name: String,
+    pub dependencies: Vec<String>,
+}
+
+/// One safely resolved `%copy_dir_recursive` declaration.
+///
+/// The historic macro is an output-producing phony target rather than a
+/// source declaration.  Keeping its owning `mmake` name lets generated CMake
+/// replace the fallback phony with a real copy target, while `dependencies`
+/// carries the exact `%fetch` endpoint when the source lives in a port tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyDirectoryDecl {
+    /// `mmake=`: the MetaMake target which owns this copy operation.
+    pub name: String,
+    /// Source directory, rendered as a concrete CMake path.
+    pub source: String,
+    /// Destination directory, rendered as a concrete CMake path.
+    pub destination: String,
+    /// Declaring mmakefile, relative to the source root.
+    pub file: String,
+    /// One-based declaration line in `file`.
+    pub line: usize,
+    /// Exact `%fetch` endpoints that must complete before the copy runs.
+    #[serde(default)]
     pub dependencies: Vec<String>,
 }
 
@@ -440,6 +464,11 @@ pub struct ParsedMmakefile {
     pub ahi_builds: Vec<AhiBuildDecl>,
     /// Strictly modelled fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
+    /// Paired hand-written FlexCat source/header/catalog rules.
+    pub flexcat_sources: Vec<FlexCatSourceDecl>,
+    /// Hand-written FlexCat source rules that did not meet the narrow safe
+    /// contract and therefore remain deliberately unmodelled.
+    pub skipped_flexcat_sources: Vec<String>,
     pub meta_rules: Vec<MetaTargetRule>,
     /// `%build_icons` target identities, including declarations whose inputs
     /// could not be resolved. Keeping the identity makes the gap visible and
@@ -467,6 +496,10 @@ pub struct ParsedMmakefile {
     pub copy_includes: Vec<CopyIncludesDecl>,
     /// `%copy_includes` declarations that could not be resolved, for reporting.
     pub skipped_copy_includes: Vec<String>,
+    /// Safely resolved `%copy_dir_recursive` declarations.
+    pub copy_directories: Vec<CopyDirectoryDecl>,
+    /// `%copy_dir_recursive` declarations that were not safe to model.
+    pub skipped_copy_directories: Vec<String>,
     /// Hand-written Make rules that stage headers; these need a static CMake
     /// counterpart and are reported so new ones do not go unnoticed.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,

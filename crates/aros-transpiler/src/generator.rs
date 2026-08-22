@@ -29,6 +29,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         .chain(graph.catalogs.iter().map(|catalog| catalog.mmake.clone()))
         .chain(
             graph
+                .flexcat_sources
+                .iter()
+                .map(|declaration| declaration.owner.clone()),
+        )
+        .chain(
+            graph
                 .header_transforms
                 .iter()
                 .map(|transform| transform.name.clone()),
@@ -38,6 +44,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .define_headers
                 .iter()
                 .map(|header| header.owner.clone()),
+        )
+        .chain(
+            graph
+                .copy_directories
+                .iter()
+                .map(|declaration| declaration.name.clone()),
         )
         .chain(
             graph
@@ -379,6 +391,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
              # ============================================================================="
         )
         .unwrap();
+        writeln!(out, "if(AROS_GRUB2_HOST_LANES_AVAILABLE)").unwrap();
         let mut declarations: Vec<_> = graph.grub_builds.iter().collect();
         declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
         for declaration in declarations {
@@ -394,6 +407,13 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             .unwrap();
             writeln!(out, ")\n").unwrap();
         }
+        writeln!(out, "else()").unwrap();
+        writeln!(
+            out,
+            "    message(STATUS \"⏭️  AROS-NG: audited GRUB2 host-tool lanes are unavailable on this build host\")"
+        )
+        .unwrap();
+        writeln!(out, "endif()\n").unwrap();
     }
 
     // The AHI subsystem is another configure-style build syntactically, but
@@ -557,18 +577,64 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         ordered.sort_by_key(|d| usize::from(d.source_dir.contains("/arch/")));
         for decl in ordered {
             let patterns: Vec<String> = decl.patterns.iter().map(|p| cmake_arg(p)).collect();
+            let excludes: Vec<String> = decl.excludes.iter().map(|p| cmake_arg(p)).collect();
             writeln!(
                 out,
-                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{})",
+                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{}{})",
                 decl.name,
                 decl.dest,
                 decl.source_dir,
                 patterns.join(" "),
+                if excludes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" EXCLUDES {}", excludes.join(" "))
+                },
                 if decl.flatten { " FLATTEN" } else { "" }
             )
             .unwrap();
         }
         writeln!(out).unwrap();
+    }
+
+    // Recursive directory staging.  Unlike source lists, these are real
+    // output-producing MetaMake targets.  Emit them before the #MM fallback
+    // pass so their legacy identity receives a CMake custom target rather
+    // than an empty phony placeholder.
+    if !graph.copy_directories.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Recursive directory staging (from %copy_dir_recursive)\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.copy_directories.iter().collect();
+        declarations.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        for declaration in declarations {
+            writeln!(out, "aros_copy_dir_recursive(").unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&declaration.name)).unwrap();
+            writeln!(out, "    SOURCE {}", cmake_arg(&declaration.source)).unwrap();
+            writeln!(
+                out,
+                "    DESTINATION {}",
+                cmake_arg(&declaration.destination)
+            )
+            .unwrap();
+            if !declaration.dependencies.is_empty() {
+                let dependencies = declaration
+                    .dependencies
+                    .iter()
+                    .map(|dependency| cmake_arg(dependency))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    DEPENDS {}", dependencies.join(" ")).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
     }
 
     // Hand-written Make rules that stage headers. These cannot be transpiled,
@@ -596,6 +662,73 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             .unwrap();
         }
         writeln!(out).unwrap();
+    }
+
+    // Paired hand-written FlexCat rules must register their generated C source
+    // before concrete targets resolve source lanes. The matching CMake helper
+    // substitutes the build-tree output for the nominal source-tree locale.c;
+    // consumers are attached after targets exist below.
+    if !graph.flexcat_sources.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Paired FlexCat source/header/catalog rules\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.flexcat_sources.iter().collect();
+        declarations.sort_by(|left, right| {
+            left.owner
+                .cmp(&right.owner)
+                .then_with(|| left.declaring_dir.cmp(&right.declaring_dir))
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        for declaration in declarations {
+            writeln!(out, "aros_declare_flexcat_sources(").unwrap();
+            writeln!(out, "    OWNER {}", cmake_arg(&declaration.owner)).unwrap();
+            writeln!(
+                out,
+                "    DIRECTORY {}",
+                cmake_arg(&declaration.declaring_dir)
+            )
+            .unwrap();
+            writeln!(out, "    SOURCE {}", cmake_arg(&declaration.source)).unwrap();
+            writeln!(out, "    HEADER {}", cmake_arg(&declaration.header)).unwrap();
+            writeln!(
+                out,
+                "    DESCRIPTION {}",
+                cmake_arg(&declaration.description)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    HEADER_TEMPLATE {}",
+                cmake_arg(&declaration.header_template)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    SOURCE_TEMPLATE {}",
+                cmake_arg(&declaration.source_template)
+            )
+            .unwrap();
+            if let (Some(destination), Some(name), Some(source_dir)) = (
+                declaration.catalog_destination.as_ref(),
+                declaration.catalog_name.as_ref(),
+                declaration.catalog_source_dir.as_ref(),
+            ) {
+                writeln!(out, "    CATALOG_DESTINATION {}", cmake_arg(destination)).unwrap();
+                writeln!(out, "    CATALOG_NAME {}", cmake_arg(name)).unwrap();
+                writeln!(out, "    CATALOG_SOURCE_DIR {}", cmake_arg(source_dir)).unwrap();
+                let languages = declaration
+                    .languages
+                    .iter()
+                    .map(|language| cmake_arg(language))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    LANGUAGES {}", languages.join(" ")).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
     }
 
     // 1. Concrete Module Targets. HashMap iteration is deliberately avoided:
@@ -815,6 +948,29 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // The source substitution above only registers output ownership. Bind the
+    // exact compile targets once they have been declared, so a direct request
+    // for NListtree/NListviews orders its generated locale.c/.h and keeps the
+    // generated header on a private quoted-include path.
+    if !graph.flexcat_sources.is_empty() {
+        let mut declarations: Vec<_> = graph.flexcat_sources.iter().collect();
+        declarations.sort_by(|left, right| left.owner.cmp(&right.owner));
+        for declaration in declarations {
+            if declaration.consumers.is_empty() {
+                continue;
+            }
+            let consumers = declaration
+                .consumers
+                .iter()
+                .map(|consumer| cmake_arg(consumer))
+                .collect::<Vec<_>>();
+            writeln!(out, "aros_bind_flexcat_source_consumers(").unwrap();
+            writeln!(out, "    OWNER {}", cmake_arg(&declaration.owner)).unwrap();
+            writeln!(out, "    CONSUMERS {}", consumers.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
     // A declaration can link a provider whose reproducible lexical sort key
     // follows the consumer (Atheros' device precedes its HAL, for example).
     // Resolve those forward references only after every concrete target and
@@ -1008,6 +1164,14 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             if let Some(source) = &catalog.source {
                 writeln!(out, "    SOURCE {}", cmake_arg(source)).unwrap();
             }
+            if !catalog.consumers.is_empty() {
+                let consumers: Vec<_> = catalog
+                    .consumers
+                    .iter()
+                    .map(|consumer| cmake_arg(consumer))
+                    .collect();
+                writeln!(out, "    CONSUMERS {}", consumers.join(" ")).unwrap();
+            }
             writeln!(
                 out,
                 "    SOURCE_DESCRIPTION {}",
@@ -1070,9 +1234,16 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if !matches!(meta_name.as_str(), "clean" | "install")
             && !all_targets.contains(meta_name.as_str())
         {
+            let grub_meta = meta_name.contains("grub2");
+            if grub_meta {
+                writeln!(out, "if(AROS_GRUB2_HOST_LANES_AVAILABLE)").unwrap();
+            }
             writeln!(out, "if(NOT TARGET {})", cmake_arg(meta_name)).unwrap();
             writeln!(out, "    add_custom_target({})", cmake_arg(meta_name)).unwrap();
             writeln!(out, "endif()").unwrap();
+            if grub_meta {
+                writeln!(out, "endif()").unwrap();
+            }
         }
     }
     writeln!(out).unwrap();
@@ -1172,7 +1343,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
 #[cfg(test)]
 mod tests {
     use super::generate_cmake;
-    use crate::ast::MetaTargetRule;
+    use crate::ast::{CopyDirectoryDecl, MetaTargetRule};
     use crate::catalogs::CatalogDecl;
     use crate::dirs::DirVars;
     use crate::fetch::FetchDecl;
@@ -1208,6 +1379,10 @@ mod tests {
             srcdir: "${CMAKE_SOURCE_DIR}/workbench/tools/sample/catalogs".to_owned(),
             declaring_dir: "workbench/tools/sample/catalogs".to_owned(),
             line: 12,
+            consumers: vec![
+                "sample-consumer".to_owned(),
+                "sample-program-locale".to_owned(),
+            ],
         }]);
         graph.add_meta_rule(MetaTargetRule {
             name: "workbench".to_owned(),
@@ -1219,9 +1394,58 @@ mod tests {
         assert!(cmake.contains("    NAME \"Sample\""));
         assert!(cmake.contains("    SUBDIR \"System/Tools\""));
         assert!(cmake.contains("    SOURCE \"../strings.h\""));
+        assert!(cmake.contains("    CONSUMERS \"sample-consumer\" \"sample-program-locale\""));
         assert!(cmake.contains("    LANGUAGES \"german\" \"polish\""));
         assert!(cmake.contains("aros_add_target_dependency(\"workbench\" \"${dep}\")"));
         assert!(!cmake.contains("add_custom_target(\"sample-catalogs\")"));
+    }
+
+    #[test]
+    fn hand_written_flexcat_source_is_declared_before_and_bound_after_its_mcp() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs(
+            &root.join("workbench/classes/zune/nlist/nlistviews_mcp/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap();
+        assert!(parsed.skipped_flexcat_sources.is_empty());
+
+        let mut graph = DependencyGraph::new();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+        graph.add_flexcat_sources(parsed.flexcat_sources);
+        graph.resolve_flexcat_source_consumers();
+
+        let declaration = graph
+            .flexcat_sources
+            .iter()
+            .find(|declaration| declaration.owner == "classes-zune-nlistviews-mcp-catalogs")
+            .expect("NListviews FlexCat declaration");
+        assert_eq!(
+            declaration.consumers,
+            [
+                "classes-zune-nlistviews-mcp",
+                "classes-zune-nlistviews-mcp-test"
+            ]
+        );
+
+        let cmake = generate_cmake(&graph);
+        let declaration_at = cmake.find("aros_declare_flexcat_sources(").unwrap();
+        let module_at = cmake.find("MMAKE_ID classes-zune-nlistviews-mcp").unwrap();
+        let binding_at = cmake.find("aros_bind_flexcat_source_consumers(").unwrap();
+        assert!(
+            declaration_at < module_at && module_at < binding_at,
+            "{cmake}"
+        );
+        assert!(cmake.contains(
+            "CATALOG_NAME \"NListviews_mcp\"\n    CATALOG_SOURCE_DIR \"locale\"\n    LANGUAGES"
+        ));
+        assert!(cmake.contains(
+            "OWNER \"classes-zune-nlistviews-mcp-catalogs\"\n    CONSUMERS \"classes-zune-nlistviews-mcp\" \"classes-zune-nlistviews-mcp-test\""
+        ));
     }
 
     #[test]
@@ -1262,6 +1486,45 @@ mod tests {
         assert!(cmake.contains("aros_fetch_archive(NAME \"example-fetch\""));
         assert!(cmake.contains("aros_add_target_dependency(\"consumer\" \"${dep}\")"));
         assert!(!cmake.contains("add_custom_target(\"example-fetch\")"));
+    }
+
+    #[test]
+    fn recursive_directory_copy_emits_concrete_target_and_fetch_dependency() {
+        let mut graph = DependencyGraph::new();
+        graph.add_fetches(vec![FetchDecl {
+            name: "compiler-boost-fetch".to_owned(),
+            archive: "boost_1_89_0".to_owned(),
+            suffixes: "tar.gz".to_owned(),
+            origins: "https://example.invalid/boost.tar.gz".to_owned(),
+            location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
+            destination: "${AROS_PORTS_DIR}/boost".to_owned(),
+            base: String::new(),
+            patch_origins: String::new(),
+            patches: String::new(),
+            dir: "compiler/boost".to_owned(),
+        }]);
+        assert!(graph
+            .add_copy_directories(vec![CopyDirectoryDecl {
+                name: "compiler-boost-geninc-copy".to_owned(),
+                source: "${AROS_PORTS_DIR}/boost/boost_1_89_0/boost".to_owned(),
+                destination: "${AROS_GENINC_DIR}/boost".to_owned(),
+                file: "compiler/boost/mmakefile.src".to_owned(),
+                line: 27,
+                dependencies: Vec::new(),
+            }])
+            .is_empty());
+        assert!(graph.resolve_copy_directories().is_empty());
+        graph.add_meta_rule(MetaTargetRule {
+            name: "ports-includes".to_owned(),
+            dependencies: vec!["compiler-boost-geninc-copy".to_owned()],
+        });
+
+        let cmake = generate_cmake(&graph);
+        assert!(cmake.contains(
+            "aros_copy_dir_recursive(\n    NAME \"compiler-boost-geninc-copy\"\n    SOURCE \"${AROS_PORTS_DIR}/boost/boost_1_89_0/boost\"\n    DESTINATION \"${AROS_GENINC_DIR}/boost\"\n    DEPENDS \"compiler-boost-fetch\"\n)"
+        ));
+        assert!(cmake.contains("aros_add_target_dependency(\"ports-includes\" \"${dep}\")"));
+        assert!(!cmake.contains("add_custom_target(\"compiler-boost-geninc-copy\")"));
     }
 
     #[test]

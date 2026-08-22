@@ -5,6 +5,7 @@ pub mod copy_includes;
 pub mod dirs;
 pub mod fetch;
 pub mod flags;
+pub mod flexcat;
 pub mod generator;
 pub mod genmodule_linklibs;
 pub mod graph;
@@ -18,13 +19,15 @@ pub mod parser;
 
 pub use arch_sources::ArchSourceDecl;
 pub use ast::{
-    AhiBuildDecl, ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl,
-    ModuleType, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
+    AhiBuildDecl, ConfigureBuildDecl, CopyDirectoryDecl, DefineHeaderDecl, ExternalCMakeDecl,
+    GrubBuildDecl, ModuleType, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl,
+    TargetDefinition,
 };
 pub use catalogs::CatalogDecl;
 pub use copy_includes::CopyIncludesDecl;
 pub use fetch::FetchDecl;
 pub use flags::FlagSet;
+pub use flexcat::FlexCatSourceDecl;
 pub use generator::generate_cmake;
 pub use genmodule_linklibs::{resolve_generated_linklib_sources, GeneratedLinklibSources};
 pub use graph::DependencyGraph;

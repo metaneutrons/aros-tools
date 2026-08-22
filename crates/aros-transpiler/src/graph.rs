@@ -1,16 +1,18 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{
-    AhiBuildDecl, ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl,
-    MetaTargetRule, ModuleType, PythonOutputsDecl, TargetDefinition,
+    AhiBuildDecl, ConfigureBuildDecl, CopyDirectoryDecl, DefineHeaderDecl, ExternalCMakeDecl,
+    GrubBuildDecl, MetaTargetRule, ModuleType, PythonOutputsDecl, TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
+use crate::flexcat::FlexCatSourceDecl;
 use crate::icons::{IconSet, IconTarget};
 use crate::includes::ArchIncludeDecl;
 use crate::packages::{runtime_name, ResolvedPackageMember};
 use aros_common::{ArosError, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 /// Dependency Graph for parallel target building and cycle detection.
 #[derive(Debug, Default)]
@@ -37,10 +39,17 @@ pub struct DependencyGraph {
     /// Fully resolved `%build_catalogs` declarations. These are generated
     /// runtime resources rather than compiled module targets.
     pub catalogs: Vec<CatalogDecl>,
+    /// Safe paired hand-written FlexCat source/header/catalog rules.  Their
+    /// source product replaces a nominal source-tree `locale.c` with a
+    /// build-tree output before concrete targets are created.
+    pub flexcat_sources: Vec<FlexCatSourceDecl>,
     /// Every `%set_archincludes` declaration in the tree, keyed by `modname`.
     pub arch_decls: HashMap<String, Vec<ArchIncludeDecl>>,
     /// Every resolved `%copy_includes` declaration, deduplicated.
     pub copy_includes: Vec<CopyIncludesDecl>,
+    /// Every safe `%copy_dir_recursive` output declaration, deduplicated by
+    /// concrete MetaMake owner.
+    pub copy_directories: Vec<CopyDirectoryDecl>,
     /// Hand-written header staging rules found anywhere in the tree.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe hand-written header transforms, with graph-resolved ordering.
@@ -89,6 +98,93 @@ fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<
         // client archive and does not consume the declaration's `uselibs`.
         ModuleType::Abi | ModuleType::Package | ModuleType::Custom => Vec::new(),
         _ => vec![mmake.to_owned()],
+    }
+}
+
+/// Lexically resolves a source-root-relative path without consulting the host
+/// filesystem. Catalog headers are generated into the build tree, so
+/// canonicalization would both require an output that does not exist yet and
+/// make the graph depend on the host platform's path semantics.
+fn normalize_root_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(value) => normalized.push(value),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+/// Resolves the parent directory of a relative `%build_catalogs source=`
+/// output. Absolute and deferred outputs deliberately remain outside this
+/// structural inference: their generator location is owned by the CMake
+/// helper, not by a source-tree directory.
+fn relative_catalog_source_parent(catalog: &CatalogDecl) -> Option<PathBuf> {
+    let source = catalog.source.as_deref()?;
+    if source.is_empty() || source.contains(['$', ';', '\\']) || Path::new(source).is_absolute() {
+        return None;
+    }
+    let output = normalize_root_relative_path(&Path::new(&catalog.declaring_dir).join(source))?;
+    output.parent().map(Path::to_path_buf)
+}
+
+/// Resolves one declared compilation source into its logical source-root
+/// location. This mirrors the in-tree path cases accepted by CMake's source
+/// resolver, while intentionally excluding deferred/absolute port inputs.
+fn resolve_logical_target_source(directory: &Path, source: &str) -> Option<PathBuf> {
+    if source.is_empty() || source.contains(['$', ';', '\\']) {
+        return None;
+    }
+    let source = if let Some(relative) = source.strip_prefix("${CMAKE_SOURCE_DIR}/") {
+        PathBuf::from(relative)
+    } else {
+        let source = Path::new(source);
+        if source.is_absolute() {
+            return None;
+        }
+        directory.join(source)
+    };
+    normalize_root_relative_path(&source)
+}
+
+fn source_shares_logical_directory(directory: &Path, source: &str, expected: &Path) -> bool {
+    resolve_logical_target_source(directory, source)
+        .and_then(|resolved| resolved.parent().map(Path::to_path_buf))
+        .is_some_and(|parent| parent == expected)
+}
+
+/// Whether a declared source points at the exact logical C product of a
+/// paired hand-written FlexCat recipe. MetaMake commonly lists `locale`
+/// without its extension, while the rule itself writes `locale.c`.
+fn source_is_flexcat_product(directory: &Path, source: &str, expected: &Path) -> bool {
+    let Some(resolved) = resolve_logical_target_source(directory, source) else {
+        return false;
+    };
+    let resolved = if resolved.extension().is_none() {
+        resolved.with_extension("c")
+    } else {
+        resolved
+    };
+    resolved == expected
+}
+
+/// Returns the real CMake compile target for one matching source. A program
+/// group expands each source into a separate executable, so its aggregate
+/// mmake id is not a concrete compilation target and must not be used here.
+fn catalog_compile_target_for_source(target: &TargetDefinition, source: &str) -> Option<String> {
+    match target.module_type {
+        ModuleType::ProgramGroup => Path::new(source)
+            .file_stem()
+            .map(|stem| format!("{}-{}", target.mmake_name, stem.to_string_lossy())),
+        ModuleType::Abi | ModuleType::Package => None,
+        _ => Some(target.mmake_name.clone()),
     }
 }
 
@@ -282,6 +378,112 @@ impl DependencyGraph {
 
     pub fn add_catalogs(&mut self, declarations: Vec<CatalogDecl>) {
         self.catalogs.extend(declarations);
+    }
+
+    pub fn add_flexcat_sources(&mut self, declarations: Vec<FlexCatSourceDecl>) {
+        for declaration in declarations {
+            if !self
+                .flexcat_sources
+                .iter()
+                .any(|existing| existing.owner == declaration.owner)
+            {
+                self.flexcat_sources.push(declaration);
+            }
+        }
+    }
+
+    /// Finds concrete compilation targets which require a relative
+    /// `%build_catalogs source=` output.
+    ///
+    /// MetaMake generates such outputs next to their logical source files
+    /// (for example `catalogs/../strings.h`). CMake deliberately rehomes them
+    /// below its generated tree, so the source-tree relationship needs to be
+    /// recorded before that move. Matching exact logical directories avoids a
+    /// speculative include scan while covering both a module's own `locale`
+    /// source and sibling declarations that compile `../locale`.
+    ///
+    /// Program groups are expanded to the individual executable that compiles
+    /// the matching source. All resulting names are sorted and unique so
+    /// generated CMake remains deterministic despite the graph's HashMap
+    /// target storage.
+    pub fn resolve_catalog_consumers(&mut self) {
+        let targets = &self.targets;
+        for catalog in &mut self.catalogs {
+            let Some(source_parent) = relative_catalog_source_parent(catalog) else {
+                catalog.consumers.clear();
+                continue;
+            };
+
+            let mut consumers = BTreeSet::new();
+            for target in targets.values() {
+                let mut matches_source = |directory: &Path, source: &str| {
+                    if source_shares_logical_directory(directory, source, &source_parent) {
+                        if let Some(consumer) = catalog_compile_target_for_source(target, source) {
+                            consumers.insert(consumer);
+                        }
+                    }
+                };
+
+                for source in target
+                    .source_files
+                    .iter()
+                    .chain(&target.cxx_source_files)
+                    .chain(&target.objc_source_files)
+                    .chain(&target.asm_source_files)
+                {
+                    matches_source(&target.dir_path, source);
+                }
+                for (_, directory, files) in &target.arch_sources {
+                    for source in files {
+                        matches_source(Path::new(directory), source);
+                    }
+                }
+            }
+            catalog.consumers = consumers.into_iter().collect();
+        }
+    }
+
+    /// Finds the exact concrete compilation target(s) that list a generated
+    /// hand-written FlexCat C product. The logical source-tree path is matched
+    /// before CMake rehomes the product below `gen/`; no include guessing or
+    /// directory-wide dependency is involved.
+    pub fn resolve_flexcat_source_consumers(&mut self) {
+        let targets = &self.targets;
+        for declaration in &mut self.flexcat_sources {
+            let Some(expected) = normalize_root_relative_path(
+                &Path::new(&declaration.declaring_dir).join(&declaration.source),
+            ) else {
+                declaration.consumers.clear();
+                continue;
+            };
+
+            let mut consumers = BTreeSet::new();
+            for target in targets.values() {
+                let mut matches_source = |directory: &Path, source: &str| {
+                    if source_is_flexcat_product(directory, source, &expected) {
+                        if let Some(consumer) = catalog_compile_target_for_source(target, source) {
+                            consumers.insert(consumer);
+                        }
+                    }
+                };
+
+                for source in target
+                    .source_files
+                    .iter()
+                    .chain(&target.cxx_source_files)
+                    .chain(&target.objc_source_files)
+                    .chain(&target.asm_source_files)
+                {
+                    matches_source(&target.dir_path, source);
+                }
+                for (_, directory, files) in &target.arch_sources {
+                    for source in files {
+                        matches_source(Path::new(directory), source);
+                    }
+                }
+            }
+            declaration.consumers = consumers.into_iter().collect();
+        }
     }
 
     pub fn add_fetches(&mut self, decls: Vec<FetchDecl>) {
@@ -523,6 +725,83 @@ impl DependencyGraph {
             self.meta_targets.entry(target).or_default().insert(fetch);
         }
         unowned.into_iter().collect()
+    }
+
+    /// Joins recursive directory copies sourced from a fetched port to their
+    /// one concrete `%fetch` owner.
+    ///
+    /// Unlike an ordinary #MM edge, this prerequisite belongs on the copy
+    /// target itself: a direct `ninja compiler-boost-includes-copy` must not
+    /// race an empty ports cache.  Equal-length matching owners are rejected
+    /// rather than selected by iteration order, because either archive could
+    /// otherwise populate the same source path.
+    pub fn resolve_copy_directories(&mut self) -> Vec<String> {
+        const PORTS_ROOT: &str = "${AROS_PORTS_DIR}";
+
+        let owners: Vec<&FetchDecl> = self
+            .fetches
+            .iter()
+            .filter(|fetch| {
+                let destination = fetch.destination.trim_end_matches('/');
+                destination == PORTS_ROOT || destination.starts_with("${AROS_PORTS_DIR}/")
+            })
+            .collect();
+        let mut unresolved = BTreeSet::new();
+        let mut resolved = Vec::with_capacity(self.copy_directories.len());
+
+        for mut declaration in std::mem::take(&mut self.copy_directories) {
+            let source_is_port = declaration.source == PORTS_ROOT
+                || declaration.source.starts_with("${AROS_PORTS_DIR}/");
+            if !source_is_port {
+                resolved.push(declaration);
+                continue;
+            }
+
+            let mut matching: Vec<&FetchDecl> = owners
+                .iter()
+                .copied()
+                .filter(|fetch| {
+                    let destination = fetch.destination.trim_end_matches('/');
+                    declaration.source == destination
+                        || declaration
+                            .source
+                            .strip_prefix(destination)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                })
+                .collect();
+            let Some(longest) = matching
+                .iter()
+                .map(|fetch| fetch.destination.trim_end_matches('/').len())
+                .max()
+            else {
+                unresolved.insert(format!(
+                    "{}:{}: {} source {} has no matching %fetch owner",
+                    declaration.file, declaration.line, declaration.name, declaration.source
+                ));
+                continue;
+            };
+            matching.retain(|fetch| fetch.destination.trim_end_matches('/').len() == longest);
+            let matching_names: BTreeSet<String> = matching
+                .into_iter()
+                .map(|fetch| fetch.name.clone())
+                .collect();
+            if matching_names.len() != 1 {
+                unresolved.insert(format!(
+                    "{}:{}: {} source {} has ambiguous %fetch owners [{}]",
+                    declaration.file,
+                    declaration.line,
+                    declaration.name,
+                    declaration.source,
+                    matching_names.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+                continue;
+            }
+            declaration.dependencies = matching_names.into_iter().collect();
+            resolved.push(declaration);
+        }
+
+        self.copy_directories = resolved;
+        unresolved.into_iter().collect()
     }
 
     pub fn add_arch_sources(&mut self, decls: Vec<ArchSourceDecl>) {
@@ -1018,12 +1297,49 @@ impl DependencyGraph {
                     && d.dest == decl.dest
                     && d.source_dir == decl.source_dir
                     && d.patterns == decl.patterns
+                    && d.excludes == decl.excludes
                     && d.flatten == decl.flatten
             });
             if !dup {
                 self.copy_includes.push(decl);
             }
         }
+    }
+
+    /// Adds copy targets while preserving their unique MetaMake owner.
+    ///
+    /// A target name can only map to one CMake custom target.  If two source
+    /// declarations claim it with different paths, the conflict is reported
+    /// to the caller and neither guessed copy is introduced.
+    pub fn add_copy_directories(&mut self, decls: Vec<CopyDirectoryDecl>) -> Vec<String> {
+        let mut skipped = Vec::new();
+        for declaration in decls {
+            let Some(existing) = self
+                .copy_directories
+                .iter()
+                .find(|existing| existing.name == declaration.name)
+            else {
+                self.copy_directories.push(declaration);
+                continue;
+            };
+            if existing.source != declaration.source
+                || existing.destination != declaration.destination
+            {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive {} conflicts with {}:{} ({} -> {} versus {} -> {})",
+                    declaration.file,
+                    declaration.line,
+                    declaration.name,
+                    existing.file,
+                    existing.line,
+                    existing.source,
+                    existing.destination,
+                    declaration.source,
+                    declaration.destination
+                ));
+            }
+        }
+        skipped
     }
 
     pub fn add_arch_decls(&mut self, decls: Vec<ArchIncludeDecl>) {
@@ -1268,9 +1584,10 @@ mod tests {
     use super::{
         arch_compatible, define_header_compile_targets, target_runtime_name, DependencyGraph,
     };
-    use crate::ast::{DefineHeaderDecl, MetaTargetRule, ModuleType};
+    use crate::ast::{CopyDirectoryDecl, DefineHeaderDecl, MetaTargetRule, ModuleType};
     use crate::copy_includes::CopyIncludesDecl;
     use crate::dirs::DirVars;
+    use crate::fetch::FetchDecl;
     use crate::packages::{PackageDecl, ResolvedPackageMember};
     use crate::{parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context, TargetContext};
     use std::collections::HashSet;
@@ -1288,6 +1605,7 @@ mod tests {
             dest: "GL".to_owned(),
             source_dir: "${AROS_PORTS_DIR}/example/include/GL".to_owned(),
             patterns: vec!["gl.h".to_owned()],
+            excludes: Vec::new(),
             flatten: true,
         };
         let mut second = first.clone();
@@ -1299,6 +1617,138 @@ mod tests {
         assert_eq!(graph.copy_includes.len(), 2);
         assert_eq!(graph.copy_includes[0].name, "first-includes");
         assert_eq!(graph.copy_includes[1].name, "second-includes");
+    }
+
+    #[test]
+    fn port_directory_copy_binds_its_unique_fetch_owner() {
+        let mut graph = DependencyGraph::new();
+        graph.add_fetches(vec![FetchDecl {
+            name: "compiler-boost-fetch".to_owned(),
+            archive: "boost_1_89_0".to_owned(),
+            suffixes: "tar.gz".to_owned(),
+            origins: "https://example.invalid/boost.tar.gz".to_owned(),
+            location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
+            destination: "${AROS_PORTS_DIR}/boost".to_owned(),
+            base: String::new(),
+            patch_origins: String::new(),
+            patches: String::new(),
+            dir: "compiler/boost".to_owned(),
+        }]);
+        assert!(graph
+            .add_copy_directories(vec![CopyDirectoryDecl {
+                name: "compiler-boost-geninc-copy".to_owned(),
+                source: "${AROS_PORTS_DIR}/boost/boost_1_89_0/boost".to_owned(),
+                destination: "${AROS_GENINC_DIR}/boost".to_owned(),
+                file: "compiler/boost/mmakefile.src".to_owned(),
+                line: 27,
+                dependencies: Vec::new(),
+            }])
+            .is_empty());
+
+        assert!(graph.resolve_copy_directories().is_empty());
+        assert_eq!(graph.copy_directories.len(), 1);
+        assert_eq!(
+            graph.copy_directories[0].dependencies,
+            ["compiler-boost-fetch"]
+        );
+    }
+
+    #[test]
+    fn catalog_source_consumers_follow_resolved_sibling_sources() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let context = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "workbench/libs/muimaster/mmakefile.src",
+            "workbench/libs/muimaster/classes/mmakefile.src",
+            "workbench/libs/muimaster/catalogs/mmakefile.src",
+        ] {
+            let parsed =
+                parse_mmakefile_with_dirs_and_context(&root.join(relative), &root, &dirs, &context)
+                    .unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+            graph.add_catalogs(parsed.catalogs);
+        }
+
+        graph.resolve_catalog_consumers();
+
+        let catalog = graph
+            .catalogs
+            .iter()
+            .find(|catalog| catalog.mmake == "workbench-libs-muimaster-catalogs")
+            .expect("muimaster catalog declaration");
+        assert_eq!(
+            catalog.consumers,
+            [
+                "workbench-classes-zune-aboutmui",
+                "workbench-classes-zune-coloradjust",
+                "workbench-classes-zune-dirlist",
+                "workbench-classes-zune-frameadjust",
+                "workbench-classes-zune-imageadjust",
+                "workbench-classes-zune-palette",
+                "workbench-classes-zune-penadjust",
+                "workbench-classes-zune-popframe",
+                "workbench-classes-zune-poppen",
+                "workbench-classes-zune-volumelist",
+                "workbench-libs-muimaster",
+            ]
+        );
+    }
+
+    #[test]
+    fn catalog_program_group_consumers_name_only_matching_members() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let mut programs =
+            parse_mmakefile_with_dirs(&root.join("tools/dtdesc/mmakefile.src"), &root, &dirs)
+                .unwrap()
+                .targets
+                .into_iter()
+                .find(|target| target.mmake_name == "tools-dtdesc")
+                .expect("dtdesc program group");
+        assert_eq!(programs.module_type, ModuleType::ProgramGroup);
+        programs.dir_path = "workbench/demo/classes".into();
+        programs.source_files = vec!["../locale".to_owned(), "unrelated".to_owned()];
+        programs.cxx_source_files.clear();
+        programs.objc_source_files.clear();
+        programs.asm_source_files.clear();
+
+        let mut catalog = parse_mmakefile_with_dirs(
+            &root.join("workbench/libs/muimaster/catalogs/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap()
+        .catalogs
+        .into_iter()
+        .next()
+        .expect("catalog declaration");
+        catalog.mmake = "demo-catalogs".to_owned();
+        catalog.declaring_dir = "workbench/demo/catalogs".to_owned();
+        catalog.source = Some("../strings.h".to_owned());
+
+        let mut graph = DependencyGraph::new();
+        graph.add_target(programs);
+        graph.add_catalogs(vec![catalog]);
+        graph.resolve_catalog_consumers();
+
+        assert_eq!(
+            graph.catalogs[0].consumers,
+            ["tools-dtdesc-locale"],
+            "the aggregate program-group id is not a compile target"
+        );
     }
 
     fn package_graph(

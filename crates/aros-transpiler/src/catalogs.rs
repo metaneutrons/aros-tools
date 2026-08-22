@@ -39,6 +39,11 @@ pub struct CatalogDecl {
     pub declaring_dir: String,
     /// One-based line in continuation-joined input, for diagnostics.
     pub line: usize,
+    /// Concrete compilation targets which need the optional generated source
+    /// or header. The completed dependency graph fills this from the logical
+    /// source-tree location after every mmakefile has been parsed.
+    #[serde(default)]
+    pub consumers: Vec<String>,
 }
 
 /// Complete catalog scan of one mmakefile.
@@ -345,6 +350,7 @@ pub(crate) fn collect_catalogs_with_line_states(
             srcdir: srcdir.trim_end_matches('/').to_owned(),
             declaring_dir: slash_path(rel_dir),
             line: line_display,
+            consumers: Vec::new(),
         });
     }
 

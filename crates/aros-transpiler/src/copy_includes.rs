@@ -116,6 +116,14 @@ pub struct CopyIncludesDecl {
     pub source_dir: String,
     /// Glob patterns or explicit file names, relative to `source_dir`.
     pub patterns: Vec<String>,
+    /// File names selected by the source list but deliberately not staged.
+    ///
+    /// MetaMake commonly expresses this as `$(filter-out name.h,$(call
+    /// WILDCARD,...))`.  Retaining it separately is important for generated
+    /// headers: FreeType, for example, replaces `ftoption.h` with its target
+    /// configuration instead of copying the upstream default.
+    #[serde(default)]
+    pub excludes: Vec<String>,
     /// Whether to strip directories from the copied names (`dir=` was given).
     pub flatten: bool,
 }
@@ -172,15 +180,14 @@ fn substitute(
     let mut rest = raw;
     while let Some(start) = rest.find("$(") {
         out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let Some(end) = after.find(')') else {
+        let Some(end) = matching_paren(rest, start + 1) else {
             out.push_str(&rest[start..]);
             return out;
         };
-        let name = &after[..end];
+        let name = &rest[start + 2..end];
         // `$(call WILDCARD, ...)` is handled later, keep it verbatim.
         if name.starts_with("call ") || name.contains(' ') {
-            out.push_str(&rest[start..=(start + 2 + end)]);
+            out.push_str(&rest[start..=end]);
         } else if let Some(m) = map_var(name) {
             out.push_str(m);
         } else if let Some(v) = vars
@@ -190,9 +197,9 @@ fn substitute(
         {
             out.push_str(&substitute(&v, vars, external, depth - 1));
         } else {
-            out.push_str(&rest[start..=(start + 2 + end)]);
+            out.push_str(&rest[start..=end]);
         }
-        rest = &after[end + 1..];
+        rest = &rest[end + 1..];
     }
     out.push_str(rest);
     out
@@ -248,21 +255,94 @@ fn expand_char_classes(pattern: &str) -> Vec<String> {
 /// Returns `None` when the list still references a Make variable we cannot
 /// resolve, which is the case for the third-party ports whose sources live
 /// outside the tree.
+#[derive(Debug, Default)]
+struct ResolvedFileList {
+    patterns: Vec<String>,
+    excludes: Vec<String>,
+}
+
+fn outer_make_function<'a>(expression: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("$({name}");
+    let remainder = expression.strip_prefix(&prefix)?;
+    if !remainder.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let end = matching_paren(expression, 1)?;
+    if end + 1 != expression.len() {
+        return None;
+    }
+    Some(expression[prefix.len()..end].trim())
+}
+
+fn split_top_level_comma(expression: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => return Some((&expression[..index], &expression[index + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn resolve_file_list(
     raw: &str,
     vars: &HashMap<String, String>,
     external: ExternalVarLookup<'_>,
-) -> Option<Vec<String>> {
+) -> Option<ResolvedFileList> {
     let substituted = substitute(raw, vars, external, 8);
-    let mut patterns = Vec::new();
-    let mut rest = substituted.as_str();
+    resolve_file_list_expression(substituted.trim(), vars, external)
+}
+
+fn resolve_file_list_expression(
+    expression: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> Option<ResolvedFileList> {
+    if let Some(arguments) = outer_make_function(expression, "notdir") {
+        let mut resolved = resolve_file_list(arguments, vars, external)?;
+        for list in [&mut resolved.patterns, &mut resolved.excludes] {
+            for entry in list.iter_mut() {
+                *entry = entry.rsplit('/').next().unwrap_or(entry).to_owned();
+            }
+        }
+        return Some(resolved);
+    }
+
+    if let Some(arguments) = outer_make_function(expression, "filter-out") {
+        let (filters, words) = split_top_level_comma(arguments)?;
+        let filters = resolve_file_list(filters.trim(), vars, external)?;
+        // Pattern filters would need to be evaluated against the fetched
+        // directory at build time.  Keep this deliberately bounded to the
+        // literal exclusion form that the header publisher uses; anything
+        // broader remains an explicit skipped declaration rather than a guess.
+        if filters
+            .patterns
+            .iter()
+            .chain(filters.excludes.iter())
+            .any(|entry| entry.contains(['*', '?', '[', '%']))
+        {
+            return None;
+        }
+        let mut resolved = resolve_file_list(words.trim(), vars, external)?;
+        resolved.excludes.extend(filters.patterns);
+        resolved.excludes.extend(filters.excludes);
+        resolved.excludes.sort();
+        resolved.excludes.dedup();
+        return Some(resolved);
+    }
+
+    let mut resolved = ResolvedFileList::default();
+    let mut rest = expression;
 
     // Pull out every `$(call WILDCARD, <globs>)` group. The closing paren must
     // be matched with nesting in mind: `$(call WILDCARD, $(X)/*.h)` would
     // otherwise be cut short at the inner `)`.
     while let Some(start) = rest.find("$(call") {
         let head = &rest[..start];
-        push_plain_tokens(head, &mut patterns)?;
+        push_plain_tokens(head, &mut resolved.patterns)?;
         // `matching_paren` expects to start on the `(`.
         let end = matching_paren(rest, start + 1)?;
         let inner = &rest[start..end];
@@ -278,16 +358,16 @@ fn resolve_file_list(
             if g.contains("$(") {
                 return None;
             }
-            patterns.extend(expand_char_classes(&g));
+            resolved.patterns.extend(expand_char_classes(&g));
         }
         rest = &rest[end + 1..];
     }
-    push_plain_tokens(rest, &mut patterns)?;
+    push_plain_tokens(rest, &mut resolved.patterns)?;
 
-    if patterns.is_empty() {
+    if resolved.patterns.is_empty() {
         return None;
     }
-    Some(patterns)
+    Some(resolved)
 }
 
 /// Adds literal file names, rejecting anything still holding a Make variable.
@@ -778,7 +858,7 @@ fn resolve_directive(
         .or_else(|| arg_value(body, "includes"))
         .unwrap_or_else(|| "$(INCLUDE_FILES)".to_owned());
 
-    let Some(patterns) = resolve_file_list(&raw_includes, vars, external) else {
+    let Some(resolved) = resolve_file_list(&raw_includes, vars, external) else {
         skipped.push(format!("{base}: path={dest} includes={raw_includes}"));
         return;
     };
@@ -801,12 +881,22 @@ fn resolve_directive(
     };
 
     let patterns = if flatten {
-        patterns
+        resolved
+            .patterns
             .iter()
             .map(|p| p.rsplit('/').next().unwrap_or(p).to_owned())
             .collect()
     } else {
-        patterns
+        resolved.patterns
+    };
+    let excludes = if flatten {
+        resolved
+            .excludes
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(p).to_owned())
+            .collect()
+    } else {
+        resolved.excludes
     };
     if patterns.iter().any(|p: &String| p.contains("$(")) {
         skipped.push(format!("{base}: path={dest} has an unresolved glob"));
@@ -818,6 +908,7 @@ fn resolve_directive(
         dest,
         source_dir,
         patterns,
+        excludes,
         flatten,
     });
 }
@@ -1092,6 +1183,53 @@ INCLUDE_FILES = $(call WILDCARD, $(ACPICA_INCLUDES)/*.h)
         );
         assert_eq!(decls[0].patterns, vec!["*.h"]);
         assert!(decls[0].flatten);
+    }
+
+    #[test]
+    fn preserves_nested_notdir_wildcards_and_literal_filter_out_for_freetype() {
+        // workbench/libs/freetype2/mmakefile.src publishes a fetched header
+        // tree, but deliberately generates ftoption.h instead of copying its
+        // upstream default.  The source directory does not exist at configure
+        // time, so the resulting glob and exclusion must remain declarative.
+        let src = "\
+FT2NAME := freetype
+FT2VERS := 2.14.3
+ARCHBASE := $(FT2NAME)-$(FT2VERS)
+FT2SRCDIR := $(PORTSDIR)/$(FT2NAME)2/$(ARCHBASE)
+FT2_INCLUDE_FILES := $(notdir $(call WILDCARD, $(FT2SRCDIR)/include/*.h))
+%copy_includes mmake=workbench-libs-freetype-includes-copy dir=$(FT2SRCDIR)/include includes=$(FT2_INCLUDE_FILES)
+FT2I_INCLUDE_FILES := $(notdir $(call WILDCARD, $(FT2SRCDIR)/include/freetype/*.h))
+%copy_includes mmake=workbench-libs-freetype-includes-copy path=freetype dir=$(FT2SRCDIR)/include/freetype includes=$(FT2I_INCLUDE_FILES)
+FT2OPTIONFILE := ftoption.h
+FT2CONFIG_INCLUDE_FILES := $(filter-out $(FT2OPTIONFILE),$(notdir $(call WILDCARD, $(FT2SRCDIR)/include/freetype/config/*.h)))
+%copy_includes mmake=workbench-libs-freetype-includes-copy path=freetype/config dir=$(FT2SRCDIR)/include/freetype/config includes=$(FT2CONFIG_INCLUDE_FILES)
+FT2INT_INCLUDE_FILES := $(notdir $(call WILDCARD, $(FT2SRCDIR)/include/freetype/internal/*.h))
+%copy_includes mmake=workbench-libs-freetype-includes-copy path=freetype/internal dir=$(FT2SRCDIR)/include/freetype/internal includes=$(FT2INT_INCLUDE_FILES)
+FT2SVC_INCLUDE_FILES := $(notdir $(call WILDCARD, $(FT2SRCDIR)/include/freetype/internal/services/*.h))
+%copy_includes mmake=workbench-libs-freetype-includes-copy path=freetype/internal/services dir=$(FT2SRCDIR)/include/freetype/internal/services includes=$(FT2SVC_INCLUDE_FILES)
+";
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("workbench/libs/freetype2"));
+
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(decls.len(), 5, "decls: {decls:?}");
+        assert!(decls.iter().all(|decl| {
+            decl.name == "workbench-libs-freetype-includes-copy"
+                && decl
+                    .source_dir
+                    .starts_with("${AROS_PORTS_DIR}/freetype2/freetype-2.14.3/include")
+                && decl.patterns == ["*.h"]
+                && decl.flatten
+        }));
+        let config = decls
+            .iter()
+            .find(|decl| decl.dest == "freetype/config")
+            .expect("freetype config header group");
+        assert_eq!(config.excludes, ["ftoption.h"]);
+        assert!(decls
+            .iter()
+            .filter(|decl| decl.dest != "freetype/config")
+            .all(|decl| decl.excludes.is_empty()));
     }
 
     #[test]

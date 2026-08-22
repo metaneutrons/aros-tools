@@ -2,13 +2,15 @@
 //!
 //! The historic build feeds `USER_INCLUDES` straight into a target's CFLAGS
 //! (see `config/make.tmpl`, `%(mmake)_CFLAGS := $(strip $(CFLAGS) $(USER_INCLUDES))`).
-//! Without those paths, modules such as `exec` cannot find their private and
-//! architecture-specific headers.
+//! Individual modules also legitimately put `-I`-style options in
+//! `USER_CPPFLAGS` and `USER_CFLAGS`. Without all three sources, modules such
+//! as `exec` cannot find their private and architecture-specific headers.
 //!
 //! Two mechanisms are covered.
 //!
-//! 1. Plain `USER_INCLUDES` assignments, including Make variables defined in
-//!    the same file (`PRIV_EXEC_INCLUDES`, `KERNEL_INCLUDES`, ...).
+//! 1. Plain `USER_INCLUDES`, `USER_CPPFLAGS`, and `USER_CFLAGS` assignments,
+//!    including Make variables defined in the same file
+//!    (`PRIV_EXEC_INCLUDES`, `KERNEL_INCLUDES`, ...).
 //!
 //! 2. The `%set_archincludes` / `%get_archincludes` pair. `%set_archincludes`
 //!    is declared in the architecture directory that owns the headers and
@@ -307,8 +309,11 @@ fn collapse_dot_dot(path: &str) -> String {
     parts.join("/")
 }
 
+/// Make variables that can legitimately carry `-I`-style include options.
+const INCLUDE_FLAG_VARIABLES: [&str; 3] = ["USER_INCLUDES", "USER_CPPFLAGS", "USER_CFLAGS"];
+
 /// Flags that introduce an include directory as the following token.
-const SEPARATE_FLAGS: [&str; 3] = ["-isystem", "-idirafter", "-iquote"];
+const SEPARATE_FLAGS: [&str; 4] = ["-I", "-isystem", "-idirafter", "-iquote"];
 
 /// Extracts include directories from an expanded token list.
 fn tokens_to_dirs(tokens: &[String], rel_dir: &Path, set: &mut IncludeSet) {
@@ -361,23 +366,21 @@ pub fn collect_includes(content: &str, rel_dir: &Path) -> IncludeSet {
     let vars = collect_flag_vars(content);
     let mut set = IncludeSet::default();
 
-    let Some(raw) = vars.get("USER_INCLUDES") else {
-        // A file may still ask for architecture includes without touching
-        // USER_INCLUDES directly, so fall through to the %get_archincludes scan.
-        collect_get_archincludes(content, &mut set);
-        return set;
-    };
-
-    let mut expanded = Vec::new();
-    let mut guard = vec!["USER_INCLUDES".to_owned()];
-    expand(raw, &vars, 8, &mut guard, &mut expanded);
-    tokens_to_dirs(&expanded, rel_dir, &mut set);
+    for name in INCLUDE_FLAG_VARIABLES {
+        let Some(raw) = vars.get(name) else {
+            continue;
+        };
+        let mut expanded = Vec::new();
+        let mut guard = vec![name.to_owned()];
+        expand(raw, &vars, 8, &mut guard, &mut expanded);
+        tokens_to_dirs(&expanded, rel_dir, &mut set);
+    }
 
     collect_get_archincludes(content, &mut set);
     set
 }
 
-/// Collects `USER_INCLUDES` as it stands at one build declaration.
+/// Collects `-I`-style user flags as they stand at one build declaration.
 ///
 /// This is the include-path counterpart of the parser's positional source
 /// scope. It prevents a later reassignment in a multi-target mmakefile from
@@ -391,13 +394,15 @@ pub(crate) fn collect_includes_at(
     rel_dir: &Path,
 ) -> IncludeSet {
     let mut set = IncludeSet::default();
-    if scope.conditionally_assigned_before("USER_INCLUDES", line) {
-        set.unresolved.push("$(USER_INCLUDES)".to_owned());
-    } else if let Some(raw) = scope.raw_at("USER_INCLUDES", line) {
-        let mut tokens = Vec::new();
-        let mut guard = vec!["USER_INCLUDES".to_owned()];
-        expand_scoped_tokens(&raw, scope, line, 8, &mut guard, &mut tokens);
-        tokens_to_dirs(&tokens, rel_dir, &mut set);
+    for name in INCLUDE_FLAG_VARIABLES {
+        if scope.conditionally_assigned_before(name, line) {
+            set.unresolved.push(format!("$({name})"));
+        } else if let Some(raw) = scope.raw_at(name, line) {
+            let mut tokens = Vec::new();
+            let mut guard = vec![name.to_owned()];
+            expand_scoped_tokens(&raw, scope, line, 8, &mut guard, &mut tokens);
+            tokens_to_dirs(&tokens, rel_dir, &mut set);
+        }
     }
     collect_get_archincludes(content, &mut set);
     set
@@ -684,11 +689,39 @@ USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
 
     #[test]
     fn handles_separate_flag_forms() {
-        let src = "USER_INCLUDES := -isystem $(SRCDIR)/rom/a -idirafter $(SRCDIR)/rom/b -iquote $(SRCDIR)/rom/c\n";
+        let src = "USER_INCLUDES := -I $(SRCDIR)/rom/a -isystem $(SRCDIR)/rom/b -idirafter $(SRCDIR)/rom/c -iquote $(SRCDIR)/rom/d\n";
         let set = collect_includes(src, &dir("x"));
         assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/a".to_owned()));
         assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/b".to_owned()));
         assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/c".to_owned()));
+        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/d".to_owned()));
+    }
+
+    #[test]
+    fn collects_include_flags_from_all_user_flag_bundles() {
+        let src = "\
+USER_CPPFLAGS := -I$(SRCDIR)/cpp\n\
+USER_CFLAGS := -I $(SRCDIR)/c -isystem $(SRCDIR)/system\n";
+        let set = collect_includes(src, &dir("x"));
+        assert_eq!(
+            set.dirs,
+            vec![
+                "${CMAKE_SOURCE_DIR}/cpp",
+                "${CMAKE_SOURCE_DIR}/c",
+                "${CMAKE_SOURCE_DIR}/system",
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_user_cflags_at_the_declaration_position() {
+        let src = "\
+USER_CFLAGS := -I$(SRCDIR)/first\n\
+%build_module mmake=first modname=first modtype=library files=first\n\
+USER_CFLAGS := -I$(SRCDIR)/later\n";
+        let scope = crate::parser::collect_vars(src);
+        let set = collect_includes_at(src, &scope, 1, &dir("x"));
+        assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/first"]);
     }
 
     #[test]

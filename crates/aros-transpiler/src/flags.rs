@@ -236,6 +236,53 @@ fn is_identifier_shaped(name: &str) -> bool {
         && !bare.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// Removes one simple shell-quote pair around a flag token.
+///
+/// MetaMake uses this for the imported FreeBSD `__FBSDID` no-op macro:
+/// `'-D__FBSDID(x)='`. Keep the recognition deliberately narrow: a quoted
+/// argument containing whitespace, another quote, or an escape sequence is
+/// not a standalone compiler flag we can safely reinterpret here.
+fn unquote_simple_shell_token(token: &str) -> Option<&str> {
+    let bytes = token.as_bytes();
+    if bytes.len() < 3 {
+        return None;
+    }
+    let quote = bytes[0];
+    if !matches!(quote, b'\'' | b'"') || bytes.last().copied() != Some(quote) {
+        return None;
+    }
+
+    let inner = &token[1..token.len() - 1];
+    if inner.contains(char::is_whitespace) || inner.contains(quote as char) || inner.contains('\\')
+    {
+        return None;
+    }
+    Some(inner)
+}
+
+/// Recognises a safe no-op function-like preprocessor definition.
+///
+/// CMake deliberately drops function-like definitions supplied through
+/// `target_compile_definitions()`. The only portable route is a raw `-D`
+/// compiler option, which is safe to preserve only for an empty replacement
+/// and ordinary C identifiers in the macro name and parameter list.
+fn empty_function_like_define(body: &str) -> bool {
+    let Some((name, parameters_and_value)) = body.split_once('(') else {
+        return false;
+    };
+    let Some(parameters) = parameters_and_value.strip_suffix(")=") else {
+        return false;
+    };
+
+    let identifier = |value: &str| {
+        !value.is_empty()
+            && !value.starts_with(|c: char| c.is_ascii_digit())
+            && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+
+    identifier(name) && (parameters.is_empty() || parameters.split(',').all(identifier))
+}
+
 /// Accepts only the simple define forms: an identifier, optionally followed by
 /// `=` and an unquoted value.
 fn simple_define(body: &str) -> Option<String> {
@@ -703,6 +750,19 @@ fn expand_scoped(
 }
 
 fn classify(tok: &str, set: &mut FlagSet) {
+    // CMake drops function-like preprocessor definitions in
+    // target_compile_definitions(), so preserve only a strictly safe no-op
+    // form as a raw compiler option. The classic stdc math import spells this
+    // as `'-D__FBSDID(x)='`; the shell quotes must not become part of the
+    // compiler argument.
+    let unquoted = unquote_simple_shell_token(tok).unwrap_or(tok);
+    if let Some(body) = unquoted.strip_prefix("-D") {
+        if empty_function_like_define(body) {
+            push_unique(&mut set.compile_options, unquoted.to_owned());
+            return;
+        }
+    }
+
     // A bare variable reference: only an allowlisted codegen flag survives.
     if let Some(name) = tok.strip_prefix("$(").and_then(|t| t.strip_suffix(')')) {
         if let Some(flag) = map_flag_var(name) {
@@ -1064,6 +1124,25 @@ USER_CPPFLAGS += -DINTUITION_INLINE_NEWOBJECT
         let toks = split_flags("-DA=\"$(shell date '+%d.%m.%Y')\" -DB=1");
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[1], "-DB=1");
+    }
+
+    #[test]
+    fn carries_quoted_empty_function_macro_as_compile_option() {
+        // compiler/crt/stdc imports FreeBSD math sources that invoke
+        // __FBSDID() before any header can define it. CMake rejects such a
+        // function-like definition in target_compile_definitions(), so it
+        // must remain a raw compiler option.
+        let f = collect_flags("USER_CPPFLAGS := -Dlint '-D__FBSDID(x)='\n");
+        assert_eq!(f.defines, vec!["lint"]);
+        assert_eq!(f.compile_options, vec!["-D__FBSDID(x)="]);
+        assert!(f.skipped.is_empty());
+    }
+
+    #[test]
+    fn refuses_function_macro_with_a_replacement() {
+        let f = collect_flags("USER_CPPFLAGS := -DFOO(x)=value\n");
+        assert!(f.compile_options.is_empty());
+        assert_eq!(f.skipped, vec!["-DFOO(x)=value"]);
     }
 
     #[test]

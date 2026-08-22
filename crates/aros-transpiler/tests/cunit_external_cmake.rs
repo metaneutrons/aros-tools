@@ -329,11 +329,14 @@ fn every_llvm_external_cmake_declaration_stays_explicitly_skipped() {
             .collect();
         let mut expected = BTreeSet::from([
             "crosstools-libunwind",
+            "crosstools-libunwind-release",
             "crosstools-compiler-rt",
+            "crosstools-compiler-rt-release",
             "crosstools-llvm-toolchain",
         ]);
         if cpu == "x86_64" {
             expected.insert("crosstools-compiler-rt32");
+            expected.insert("crosstools-compiler-rt32-release");
         }
         assert_eq!(identities, expected, "{cpu}: {skipped:#?}");
     }

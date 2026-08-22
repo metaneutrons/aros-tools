@@ -1,12 +1,13 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
-    AhiBuildDecl, ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs,
-    GrubBuildDecl, MetaTargetRule, ModuleType, ParsedMmakefile, PythonGeneratorJob,
-    PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
+    AhiBuildDecl, ConfigureBuildDecl, CopyDirectoryDecl, DefineHeaderDecl, ExternalCMakeDecl,
+    GenmoduleLinklibs, GrubBuildDecl, MetaTargetRule, ModuleType, ParsedMmakefile,
+    PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at};
+use crate::flexcat::collect_flexcat_source_rules;
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
 use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
 use crate::local_make_includes::{
@@ -1742,6 +1743,346 @@ fn macro_argument_names(args: &str) -> Vec<String> {
         cursor += 1;
     }
     names
+}
+
+/// The directory roots which map to stable CMake locations in a generated
+/// copy target.  A `%copy_dir_recursive` recipe runs below the source tree;
+/// accepting an arbitrary host path here would make the generated graph both
+/// non-reproducible and unsafe to configure.
+const COPY_DIRECTORY_CMAKE_ROOTS: &[&str] = &[
+    "${CMAKE_SOURCE_DIR}",
+    "${CMAKE_BINARY_DIR}",
+    "${AROS_BUILD_DIR}",
+    "${AROS_PORTS_DIR}",
+    "${AROS_PORTS_SOURCE_DIR}",
+    "${AROS_SDK_INCLUDE_DIR}",
+    "${AROS_GENINC_DIR}",
+];
+
+/// Maps the two historic staging roots to the CMake roots which actually feed
+/// compilation.  `AROS_INCLUDES` is the target SDK bootstrap tree in this
+/// build, while `GENINCDIR` is the host-tool header tree; expanding the legacy
+/// config literally would otherwise point at its unused `gen/include` and
+/// `SYS/Developer/include` layouts.
+fn normalize_copy_directory_root_alias(path: &str) -> String {
+    for (legacy, cmake) in [
+        ("${AROS_BUILD_DIR}/gen/include", "${AROS_GENINC_DIR}"),
+        (
+            "${AROS_BUILD_DIR}/SYS/Developer/include",
+            "${AROS_SDK_INCLUDE_DIR}",
+        ),
+    ] {
+        if path == legacy {
+            return cmake.to_owned();
+        }
+        if let Some(tail) = path
+            .strip_prefix(legacy)
+            .filter(|tail| tail.starts_with('/'))
+        {
+            return format!("{cmake}{tail}");
+        }
+    }
+    path.to_owned()
+}
+
+/// Accepts only ordinary path components.  CMake receives every path quoted,
+/// but rejecting list separators, quotes, newlines and deferred variables here
+/// keeps a declaration from changing CMake syntax or from acquiring a
+/// machine-local meaning later.
+fn safe_copy_directory_component(component: &str) -> bool {
+    !component.is_empty()
+        && component.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '-' | '.' | ' ' | '+' | '@')
+        })
+}
+
+/// Normalises a path already rooted in one CMake variable.
+fn normalize_cmake_copy_directory_path(raw: &str) -> Option<String> {
+    let raw = normalize_copy_directory_root_alias(raw.trim());
+    let root = COPY_DIRECTORY_CMAKE_ROOTS.iter().find(|root| {
+        raw == ***root
+            || raw
+                .strip_prefix(**root)
+                .is_some_and(|tail| tail.starts_with('/'))
+    })?;
+    let tail = raw.strip_prefix(*root).unwrap_or_default();
+    let mut components = Vec::new();
+    for component in tail.split('/') {
+        match component {
+            "" | "." => {}
+            // A CMake-rooted path has no lexical source-tree owner above its
+            // root.  Rejecting this is both stricter and clearer than relying
+            // on CMake's normalisation after a variable expansion.
+            ".." => return None,
+            value if safe_copy_directory_component(value) => components.push(value),
+            _ => return None,
+        }
+    }
+    if components.is_empty() {
+        Some((*root).to_owned())
+    } else {
+        Some(format!("{root}/{}", components.join("/")))
+    }
+}
+
+/// Normalises one path relative to the declaring mmakefile directory.
+fn normalize_relative_copy_directory_path(raw: &str, relative_dir: &Path) -> Option<String> {
+    let mut components = Vec::new();
+    for component in relative_dir.components() {
+        let Component::Normal(value) = component else {
+            return None;
+        };
+        components.push(value.to_str()?.to_owned());
+    }
+    for component in raw.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value if safe_copy_directory_component(value) => components.push(value.to_owned()),
+            _ => return None,
+        }
+    }
+    if components.is_empty() {
+        Some("${CMAKE_SOURCE_DIR}".to_owned())
+    } else {
+        Some(format!("${{CMAKE_SOURCE_DIR}}/{}", components.join("/")))
+    }
+}
+
+/// Renders a `%copy_dir_recursive` path at the declaration site.
+fn render_copy_directory_path(
+    raw: &str,
+    context: &MakeExprContext<'_>,
+    relative_dir: &Path,
+) -> std::result::Result<String, String> {
+    let value = evaluate_make_expr(raw, context)
+        .map_err(|error| format!("cannot evaluate `{raw}`: {error}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("`{raw}` expands to an empty path"));
+    }
+    if value.starts_with("${") {
+        return normalize_cmake_copy_directory_path(value)
+            .ok_or_else(|| format!("`{value}` is not a safe CMake-rooted path"));
+    }
+    if value.starts_with('/') || value.contains('$') {
+        return Err(format!("`{value}` is not a safe source-tree-relative path"));
+    }
+    normalize_relative_copy_directory_path(value, relative_dir)
+        .ok_or_else(|| format!("`{value}` escapes or is not a safe source-tree-relative path"))
+}
+
+fn copy_directory_source_is_owned_path(path: &str) -> bool {
+    ["${CMAKE_SOURCE_DIR}", "${AROS_PORTS_DIR}"]
+        .iter()
+        .any(|root| {
+            path == *root
+                || path
+                    .strip_prefix(root)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        })
+}
+
+/// Ensures that a source-tree copy names a real directory below the checked
+/// out tree.  Port paths deliberately cannot be tested here: their owner is
+/// fetched at build time and may be absent during a clean configure.
+fn in_tree_copy_directory_source_is_safe(path: &str, source_root: &Path) -> bool {
+    let Some(tail) = path.strip_prefix("${CMAKE_SOURCE_DIR}") else {
+        return true;
+    };
+    if !tail.is_empty() && !tail.starts_with('/') {
+        return false;
+    }
+    let Ok(root) = fs::canonicalize(source_root) else {
+        return false;
+    };
+    let Ok(candidate) = fs::canonicalize(root.join(tail.trim_start_matches('/'))) else {
+        return false;
+    };
+    candidate.is_dir() && candidate.starts_with(root)
+}
+
+fn copy_directory_destination_is_build_path(path: &str) -> bool {
+    [
+        "${CMAKE_BINARY_DIR}",
+        "${AROS_BUILD_DIR}",
+        "${AROS_SDK_INCLUDE_DIR}",
+        "${AROS_GENINC_DIR}",
+    ]
+    .iter()
+    .any(|root| {
+        path == *root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|tail| tail.starts_with('/'))
+    })
+}
+
+fn valid_copy_directory_target_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+}
+
+/// Extracts the bounded `%copy_dir_recursive` capability.
+///
+/// The legacy macro accepts a general recursive copy and therefore could
+/// receive arbitrary source/destination text.  Only declarations whose paths
+/// reduce to a source-tree or known fetched-port root and to a build-owned
+/// destination are admitted.  This means the CMake graph has a concrete owner
+/// for every product rather than a configure-time host leak.
+fn collect_copy_directories(
+    invocations: &[Invocation],
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    relative_dir: &Path,
+    line_states: Option<&[ConditionalTruth]>,
+) -> (Vec<CopyDirectoryDecl>, Vec<String>) {
+    let file = if relative_dir.as_os_str().is_empty() {
+        "mmakefile.src".to_owned()
+    } else {
+        format!("{}/mmakefile.src", relative_dir.display())
+    };
+    let mut declarations = Vec::new();
+    let mut skipped = Vec::new();
+
+    for invocation in invocations
+        .iter()
+        .filter(|invocation| invocation.name == "copy_dir_recursive")
+    {
+        match line_states
+            .and_then(|states| states.get(invocation.line))
+            .copied()
+            .unwrap_or(ConditionalTruth::Unknown)
+        {
+            ConditionalTruth::False => continue,
+            ConditionalTruth::Unknown => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive is guarded by an unresolved Make conditional",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+            ConditionalTruth::True => {}
+        }
+
+        let names = macro_argument_names(&invocation.args);
+        let mut unique_names = names.clone();
+        unique_names.sort();
+        unique_names.dedup();
+        let has_only_supported_arguments = unique_names
+            .iter()
+            .all(|name| matches!(name.as_str(), "mmake" | "src" | "dst" | "excludefiles"));
+        if names.len() != unique_names.len() || !has_only_supported_arguments {
+            skipped.push(format!(
+                "{}:{}: %copy_dir_recursive has unsupported or duplicate arguments",
+                file,
+                invocation.line + 1
+            ));
+            continue;
+        }
+
+        let Some(name) = macro_arg(&invocation.args, "mmake") else {
+            skipped.push(format!(
+                "{}:{}: %copy_dir_recursive has no concrete mmake= owner",
+                file,
+                invocation.line + 1
+            ));
+            continue;
+        };
+        if !valid_copy_directory_target_name(&name) {
+            skipped.push(format!(
+                "{}:{}: %copy_dir_recursive mmake={name} is not a concrete target name",
+                file,
+                invocation.line + 1
+            ));
+            continue;
+        }
+        if macro_arg(&invocation.args, "excludefiles").is_some_and(|value| !value.trim().is_empty())
+        {
+            skipped.push(format!(
+                "{}:{}: %copy_dir_recursive mmake={name} uses excludefiles=, which has no audited CMake equivalent",
+                file,
+                invocation.line + 1
+            ));
+            continue;
+        }
+
+        let source_raw = macro_arg(&invocation.args, "src").unwrap_or_else(|| ".".to_owned());
+        let Some(destination_raw) = macro_arg(&invocation.args, "dst") else {
+            skipped.push(format!(
+                "{}:{}: %copy_dir_recursive mmake={name} has no dst=",
+                file,
+                invocation.line + 1
+            ));
+            continue;
+        };
+        let context = MakeExprContext::new(scope, dirs, invocation.line, root, relative_dir);
+        let source = match render_copy_directory_path(&source_raw, &context, relative_dir) {
+            Ok(value) if !copy_directory_source_is_owned_path(&value) => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive mmake={name} source {value} has no source-tree or port owner",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+            Ok(value) if !in_tree_copy_directory_source_is_safe(&value, root) => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive mmake={name} source {value} is not a real in-tree directory",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+            Ok(value) => value,
+            Err(reason) => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive mmake={name} src={source_raw} {reason}",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+        };
+        let destination = match render_copy_directory_path(&destination_raw, &context, relative_dir)
+        {
+            Ok(value) if copy_directory_destination_is_build_path(&value) => value,
+            Ok(value) => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive mmake={name} destination {value} is not build-owned",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+            Err(reason) => {
+                skipped.push(format!(
+                    "{}:{}: %copy_dir_recursive mmake={name} dst={destination_raw} {reason}",
+                    file,
+                    invocation.line + 1
+                ));
+                continue;
+            }
+        };
+
+        declarations.push(CopyDirectoryDecl {
+            name,
+            source,
+            destination,
+            file: file.clone(),
+            line: invocation.line + 1,
+            dependencies: Vec::new(),
+        });
+    }
+
+    (declarations, skipped)
 }
 
 /// Canonicalises one audited Make capability block for exact comparison.
@@ -5146,6 +5487,7 @@ fn implicit_module_meta_rules(
     use_libs: &[String],
     has_abi: bool,
     has_library: bool,
+    emit_archspecific_rules: bool,
 ) -> Vec<MetaTargetRule> {
     const fn rule(name: String, dependencies: Vec<String>) -> MetaTargetRule {
         MetaTargetRule { name, dependencies }
@@ -5248,45 +5590,51 @@ fn implicit_module_meta_rules(
         ));
     }
 
-    // `%gen_archspecificrules` is expanded unconditionally for these six
-    // suffixes, including the kobj identities of an ABI-only declaration.
-    // Register every endpoint as a meta key: generator phase two deliberately
-    // filters dependencies whose identities are unknown.
-    for suffix in [
-        "",
-        "-set-archincludes",
-        "-linklib",
-        "-kobj",
-        "-kobj-quick",
-        "-quick",
-    ] {
-        let base = format!("{mmake}{suffix}");
-        let cpu = format!("{mmake}-${{AROS_TARGET_CPU}}{suffix}");
-        let family = format!("{mmake}-${{AROS_TARGET_FAMILY}}{suffix}");
-        let arch = format!("{mmake}-${{AROS_TARGET_PLATFORM}}{suffix}");
-        let arch_variant =
-            format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_VARIANT}}{suffix}");
-        let arch_cpu = format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}{suffix}");
-        let arch_cpu_variant = format!(
-            "{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
-        );
+    if emit_archspecific_rules {
+        // `%gen_archspecificrules` is expanded for the ABI/genmodule-only
+        // forms.  Sourceful modules deliberately do not receive this CMake
+        // translation: MetaMake marks its architecture chain virtual and uses
+        // a pre-marked traversal to break its circular return to the concrete
+        // module producer.  CMake rejects that strong cycle.  Their ordinary
+        // ABI/linklib aliases above remain real dependencies, while explicit
+        // source-tree architecture selectors retain their own mappings.
+        for suffix in [
+            "",
+            "-set-archincludes",
+            "-linklib",
+            "-kobj",
+            "-kobj-quick",
+            "-quick",
+        ] {
+            let base = format!("{mmake}{suffix}");
+            let cpu = format!("{mmake}-${{AROS_TARGET_CPU}}{suffix}");
+            let family = format!("{mmake}-${{AROS_TARGET_FAMILY}}{suffix}");
+            let arch = format!("{mmake}-${{AROS_TARGET_PLATFORM}}{suffix}");
+            let arch_variant =
+                format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_VARIANT}}{suffix}");
+            let arch_cpu =
+                format!("{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}{suffix}");
+            let arch_cpu_variant = format!(
+                "{mmake}-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
+            );
 
-        rules.push(rule(base, vec![cpu.clone()]));
-        rules.push(rule(cpu, vec![family.clone()]));
-        rules.push(rule(family, vec![arch.clone()]));
-        rules.push(rule(arch, vec![arch_variant.clone()]));
-        rules.push(rule(arch_variant, vec![arch_cpu.clone()]));
-        rules.push(rule(arch_cpu, vec![arch_cpu_variant.clone()]));
-        rules.push(rule(arch_cpu_variant, Vec::new()));
+            rules.push(rule(base, vec![cpu.clone()]));
+            rules.push(rule(cpu, vec![family.clone()]));
+            rules.push(rule(family, vec![arch.clone()]));
+            rules.push(rule(arch, vec![arch_variant.clone()]));
+            rules.push(rule(arch_variant, vec![arch_cpu.clone()]));
+            rules.push(rule(arch_cpu, vec![arch_cpu_variant.clone()]));
+            rules.push(rule(arch_cpu_variant, Vec::new()));
+        }
+        rules.push(rule(
+            format!("{mmake}-kobj"),
+            vec![format!("{mmake}-${{AROS_TARGET_CPU}}")],
+        ));
+        rules.push(rule(
+            format!("{mmake}-kobj-quick"),
+            vec![format!("{mmake}-${{AROS_TARGET_CPU}}-quick")],
+        ));
     }
-    rules.push(rule(
-        format!("{mmake}-kobj"),
-        vec![format!("{mmake}-${{AROS_TARGET_CPU}}")],
-    ));
-    rules.push(rule(
-        format!("{mmake}-kobj-quick"),
-        vec![format!("{mmake}-${{AROS_TARGET_CPU}}-quick")],
-    ));
 
     rules
 }
@@ -6902,6 +7250,24 @@ fn parse_mmakefile_impl(
         &rel_dir,
         &mut skipped_programs,
     );
+    // `%copy_dir_recursive` owns filesystem output, so unlike a generic
+    // auxiliary macro it must not survive an inactive or unknown conditional.
+    // Non-profiled parser callers still get a line-state scan: only their
+    // unconditional declarations are safe to materialise.
+    let fallback_copy_directory_states = conditional_line_states
+        .is_none()
+        .then(|| collect_vars_impl(&joined, None).1);
+    let copy_directory_line_states = conditional_line_states
+        .as_deref()
+        .or(fallback_copy_directory_states.as_deref());
+    let (copy_directories, skipped_copy_directories) = collect_copy_directories(
+        &invocations,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+    );
     let mut external_cmake = Vec::new();
     for invocation in invocations
         .iter()
@@ -7226,31 +7592,34 @@ fn parse_mmakefile_impl(
             None
         };
 
-        if is_abi || genmodule_only {
-            let include_set = match macro_arg(rest, "include_set") {
-                Some(raw) => {
-                    let Some(rendered) = render_meta_token(&raw) else {
-                        skipped_programs.push(format!(
-                            "{}:{}: %{} mmake={mmake_raw} include_set={raw} contains an unmapped Make variable",
-                            rel_dir.display(),
-                            inv.line + 1,
-                            inv.name
-                        ));
-                        continue;
-                    };
-                    rendered
-                }
-                None => "includes-all".to_owned(),
-            };
-            meta_rules.extend(implicit_module_meta_rules(
-                &mmake_name,
-                &mod_name,
-                &include_set,
-                &use_libs,
-                inv.name != "build_module_library",
-                inv.name != "build_module_abi",
-            ));
-        }
+        // All three %build_module* forms expand the implicit MetaMake
+        // aliases and architecture endpoints.  `genmodule_only` describes
+        // only how sources are materialised; using it as a guard here made
+        // ordinary sourceful modules lose their upstream prerequisite graph.
+        let include_set = match macro_arg(rest, "include_set") {
+            Some(raw) => {
+                let Some(rendered) = render_meta_token(&raw) else {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} include_set={raw} contains an unmapped Make variable",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                };
+                rendered
+            }
+            None => "includes-all".to_owned(),
+        };
+        meta_rules.extend(implicit_module_meta_rules(
+            &mmake_name,
+            &mod_name,
+            &include_set,
+            &use_libs,
+            inv.name != "build_module_library",
+            inv.name != "build_module_abi",
+            is_abi || genmodule_only,
+        ));
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -7373,6 +7742,18 @@ fn parse_mmakefile_impl(
 
         let use_libs =
             macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
+        let always_cxx_link =
+            match resolve_yes_argument(&inv.args, "alwayscxxlink", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1
+                    ));
+                    continue;
+                }
+            };
         let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
             Ok(directory) => directory,
             Err(reason) => {
@@ -7393,7 +7774,7 @@ fn parse_mmakefile_impl(
             empty_archive: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
-            always_cxx_link: false,
+            always_cxx_link,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -7985,6 +8366,11 @@ fn parse_mmakefile_impl(
         }
     }
 
+    // Paired FlexCat recipes are normal Make rules rather than a MetaMake
+    // macro.  Parse them after all concrete source lists are known, so the
+    // graph can bind their generated `locale.c` only to real consumers.
+    let flexcat_scan = collect_flexcat_source_rules(&content, root, &rel_dir, &scope, dirs);
+
     // 3. Extract #MM and #MM- meta-target rules
     let mm_content = join_mm_continuations(&content);
     for cap in META_RULE_RE.captures_iter(&mm_content) {
@@ -8023,6 +8409,8 @@ fn parse_mmakefile_impl(
         grub_builds,
         ahi_builds,
         python_outputs,
+        flexcat_sources: flexcat_scan.declarations,
+        skipped_flexcat_sources: flexcat_scan.skipped,
         meta_rules,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
@@ -8034,6 +8422,8 @@ fn parse_mmakefile_impl(
         unresolved_includes: include_set.unresolved,
         copy_includes: copy_scan.decls,
         skipped_copy_includes: copy_scan.skipped,
+        copy_directories,
+        skipped_copy_directories,
         adhoc_header_rules: copy_scan.adhoc,
         header_transforms: copy_scan.transforms,
         define_headers,
@@ -8269,6 +8659,7 @@ mod tests {
             "module",
             "includes-set",
             &["dependency_rel".to_owned()],
+            true,
             true,
             true,
         );
@@ -9334,6 +9725,80 @@ mod tests {
                 parsed.skipped_catalogs
             );
         }
+    }
+
+    #[test]
+    fn boost_recursive_copies_render_sdk_roots_and_port_source() {
+        let root = root();
+        let dirs = dirs();
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &root.join("compiler/boost/mmakefile.src"),
+            &root,
+            &dirs,
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+
+        assert!(parsed.skipped_copy_directories.is_empty(), "{parsed:#?}");
+        assert_eq!(parsed.copy_directories.len(), 2);
+        let geninc = parsed
+            .copy_directories
+            .iter()
+            .find(|declaration| declaration.name == "compiler-boost-geninc-copy")
+            .expect("GENINCDIR staging declaration");
+        assert_eq!(geninc.source, "${AROS_PORTS_DIR}/boost/boost_1_89_0/boost");
+        assert_eq!(geninc.destination, "${AROS_GENINC_DIR}/boost");
+        let sdk = parsed
+            .copy_directories
+            .iter()
+            .find(|declaration| declaration.name == "compiler-boost-includes-copy")
+            .expect("SDK staging declaration");
+        assert_eq!(sdk.source, geninc.source);
+        assert_eq!(sdk.destination, "${AROS_SDK_INCLUDE_DIR}/boost");
+    }
+
+    #[test]
+    fn recursive_copy_collector_rejects_host_paths_and_unaudited_excludes() {
+        let tree = TempTree::new();
+        let module = tree.0.join("module");
+        fs::create_dir_all(&module).unwrap();
+        fs::create_dir_all(module.join("assets")).unwrap();
+        let file = module.join("mmakefile.src");
+        fs::write(
+            &file,
+            "%copy_dir_recursive mmake=safe-copy src=assets/. dst=$(TARGETDIR)/staged\n\
+             %copy_dir_recursive mmake=host-copy src=/tmp/host dst=$(TARGETDIR)/staged\n\
+             %copy_dir_recursive mmake=filtered-copy src=assets dst=$(TARGETDIR)/staged excludefiles=\"*.py\"\n",
+        )
+        .unwrap();
+        let dirs = DirVars::load(&tree.0);
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &file,
+            &tree.0,
+            &dirs,
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.copy_directories.len(), 1, "{parsed:#?}");
+        assert_eq!(parsed.copy_directories[0].name, "safe-copy");
+        assert_eq!(
+            parsed.copy_directories[0].source,
+            "${CMAKE_SOURCE_DIR}/module/assets"
+        );
+        assert_eq!(
+            parsed.copy_directories[0].destination,
+            "${AROS_BUILD_DIR}/staged"
+        );
+        assert_eq!(parsed.skipped_copy_directories.len(), 2, "{parsed:#?}");
+        assert!(parsed
+            .skipped_copy_directories
+            .iter()
+            .any(|message| message.contains("host-copy")));
+        assert!(parsed
+            .skipped_copy_directories
+            .iter()
+            .any(|message| message.contains("filtered-copy")));
     }
 
     #[test]
@@ -11429,6 +11894,58 @@ FILES := gdbstop
             .iter()
             .any(|rule| rule.name == "linklibs-version"
                 && rule.dependencies == ["workbench-libs-version-linklib"]));
+    }
+
+    #[test]
+    fn sourceful_module_forms_keep_their_noncyclic_implicit_metamake_graph() {
+        let root = root();
+        let dirs = dirs();
+        for (file, mmake, modname, has_abi) in [
+            (
+                "compiler/crt/stdc/mmakefile.src",
+                "compiler-stdc",
+                "stdc",
+                true,
+            ),
+            (
+                "rom/usb/classes/serialpl2303/mmakefile.src",
+                "kernel-usb-classes-serialpl2303",
+                "serialpl2303",
+                false,
+            ),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs(&root.join(file), &root, &dirs)
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            let mut metas: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for rule in &parsed.meta_rules {
+                metas
+                    .entry(&rule.name)
+                    .or_default()
+                    .extend(rule.dependencies.iter().map(String::as_str));
+            }
+
+            let quick = format!("{mmake}-quick");
+            let kobj = format!("{mmake}-kobj");
+            assert!(metas[quick.as_str()].contains(mmake), "{file}");
+            assert!(metas[kobj.as_str()].contains("core-linklibs"), "{file}");
+            // MetaMake's virtual architecture chain returns to the concrete
+            // sourceful producer, which MetaMake breaks through pre-marked
+            // traversal. CMake rejects that cycle, so only ABI/genmodule-only
+            // forms emit it in the translated graph.
+            let arch_cpu = format!("{mmake}-${{AROS_TARGET_CPU}}");
+            assert!(!metas[kobj.as_str()].contains(arch_cpu.as_str()), "{file}");
+
+            let includes_alias = format!("includes-{modname}");
+            if has_abi {
+                let includes = format!("{mmake}-includes");
+                assert!(
+                    metas[includes_alias.as_str()].contains(includes.as_str()),
+                    "{file}"
+                );
+            } else {
+                assert!(!metas.contains_key(includes_alias.as_str()), "{file}");
+            }
+        }
     }
 
     #[test]
