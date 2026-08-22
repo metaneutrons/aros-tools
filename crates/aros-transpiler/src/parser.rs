@@ -3201,7 +3201,7 @@ const NOUVEAU_DRM_MMAKE: &str = "hidd-nouveau-drm";
 const NOUVEAU_DRM_MMAKEFILE: &str = "workbench/hidds/nouveau/mmakefile.src";
 const NOUVEAU_DRM_SOURCE_MANIFEST: &str = "workbench/hidds/nouveau/sources.drm.mak";
 const NOUVEAU_DRM_MMAKE_SHA256: &str =
-    "c799ba3670f9f767946ba5ed04c9e4acebaf76fd50ce3bac9736293eef323134";
+    "4c0fd8b41d3590b4303c84be7c670220567b8b86e7e29fd6d05c4a36c7d4ee56";
 const NOUVEAU_DRM_SOURCE_MANIFEST_SHA256: &str =
     "f51d30d4b9f182aca412e535b32dab35b9bbcadffc4a480b3bacf55ab8afc28a";
 const NOUVEAU_DRM_CORE_SOURCE_COUNT: usize = 67;
@@ -3209,16 +3209,24 @@ const NOUVEAU_DRM_NVIDIA_SOURCE_COUNT: usize = 758;
 const NOUVEAU_DRM_TOTAL_SOURCE_COUNT: usize =
     NOUVEAU_DRM_CORE_SOURCE_COUNT + NOUVEAU_DRM_NVIDIA_SOURCE_COUNT;
 const NOUVEAU_DRM_SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
+const NOUVEAU_GALLIUM_MMAKE: &str = "hidd-nouveau-gallium";
+const NOUVEAU_GALLIUM_SOURCE_MANIFEST: &str =
+    "workbench/hidds/nouveau/nouveau-gallium-20.0.8.sources";
+const NOUVEAU_GALLIUM_SOURCE_MANIFEST_SHA256: &str =
+    "86ffb0c1e959615833b9d7b937dfcaf237c5f25da8d5706d8354ba5314acc15f";
+const NOUVEAU_GALLIUM_C_SOURCE_COUNT: usize = 81;
+const NOUVEAU_GALLIUM_CXX_SOURCE_COUNT: usize = 24;
+const NOUVEAU_GALLIUM_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
 
 /// Selects the three profiles for which the DRM-side Nouveau source snapshot
 /// was audited.  The archive has no architecture-specific source lane, but a
 /// concrete profile is still required so unsupported configurations cannot
 /// silently inherit this closed capability.
-fn nouveau_drm_current_profile(
+fn nouveau_current_profile(
     target: Option<&TargetContext>,
 ) -> std::result::Result<&'static str, String> {
     let Some(profile) = target else {
-        return Err("Nouveau DRM archive capability requires a concrete target profile".to_owned());
+        return Err("Nouveau archive capability requires a concrete target profile".to_owned());
     };
     match (
         profile.cpu.as_deref(),
@@ -3238,7 +3246,7 @@ fn nouveau_drm_current_profile(
             Ok("aarch64")
         }
         _ => Err(format!(
-            "Nouveau DRM archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+            "Nouveau archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
             profile.cpu.as_deref().unwrap_or("<unset>"),
             profile.platform.as_deref().unwrap_or("<unset>"),
             profile.toolchain.as_deref().unwrap_or("<unset>"),
@@ -3262,7 +3270,7 @@ fn nouveau_drm_sources(
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_DRM_MMAKE {
         return Ok(None);
     }
-    nouveau_drm_current_profile(target)?;
+    nouveau_current_profile(target)?;
 
     let core = mesa20_inventory(root, NOUVEAU_DRM_SOURCE_MANIFEST, "AROS_DRM_CORE_SOURCES")?;
     let nvidia = mesa20_inventory(root, NOUVEAU_DRM_SOURCE_MANIFEST, "AROS_DRM_NVIDIA_SOURCES")?;
@@ -3322,7 +3330,7 @@ fn nouveau_drm_compile_contract(
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_DRM_MMAKE {
         return Ok(None);
     }
-    nouveau_drm_current_profile(target)?;
+    nouveau_current_profile(target)?;
     Ok(Some(NouveauDrmCompileContract {
         defines: [
             "__KERNEL__",
@@ -3435,6 +3443,187 @@ fn validate_nouveau_drm_capability(
     if !exact {
         return Err(
             "source, language, flag, include or canonical-output contract differs from the audited Nouveau DRM capability"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Loads the exact Mesa 20.0.8 Nouveau Gallium source lanes.  The upstream
+/// `Makefile.sources` lives below the fetched port tree and cannot be read on
+/// a cold configure, so the AROS port keeps this versioned, literal inventory
+/// beside the declaring mmakefile.  It deliberately names only extensionless
+/// stems: the C/C++ lane is the declaration's source-language authority.
+fn nouveau_gallium_sources(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<EvaluatedSources>, String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_GALLIUM_MMAKE {
+        return Ok(None);
+    }
+    nouveau_current_profile(target)?;
+
+    let c = mesa20_inventory(
+        root,
+        NOUVEAU_GALLIUM_SOURCE_MANIFEST,
+        "NOUVEAU20_GALLIUM_C_SOURCES",
+    )?;
+    let cxx = mesa20_inventory(
+        root,
+        NOUVEAU_GALLIUM_SOURCE_MANIFEST,
+        "NOUVEAU20_GALLIUM_CXX_SOURCES",
+    )?;
+    if c.len() != NOUVEAU_GALLIUM_C_SOURCE_COUNT || cxx.len() != NOUVEAU_GALLIUM_CXX_SOURCE_COUNT {
+        return Err(format!(
+            "{NOUVEAU_GALLIUM_SOURCE_MANIFEST} has {} C and {} C++ entries, expected {NOUVEAU_GALLIUM_C_SOURCE_COUNT} and {NOUVEAU_GALLIUM_CXX_SOURCE_COUNT}",
+            c.len(),
+            cxx.len()
+        ));
+    }
+
+    let materialize = |sources: Vec<String>, language: &str| {
+        sources
+            .into_iter()
+            .map(|source| {
+                if Path::new(&source).extension().is_some() {
+                    Err(format!(
+                        "{NOUVEAU_GALLIUM_SOURCE_MANIFEST} {language} inventory must contain extensionless stems: {source}"
+                    ))
+                } else {
+                    Ok(format!("{NOUVEAU_GALLIUM_SOURCE_PREFIX}/{source}"))
+                }
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+    };
+    Ok(Some(EvaluatedSources {
+        c: materialize(c, "C")?,
+        cxx: materialize(cxx, "C++")?,
+        declared: true,
+        ..EvaluatedSources::default()
+    }))
+}
+
+/// The concrete compile contract for the Mesa 20.0.8 Nouveau Gallium port.
+/// Its C++ lane is intentionally an ordinary C++14 lane, not the tiny Mesa
+/// compiler `cxx-compat/new` shim: Nouveau uses the real STL container API.
+/// A target toolchain must therefore provide its own compatible C++ headers
+/// and runtime before this archive can be built.
+fn nouveau_gallium_compile_contract(
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<Mesa20CompileContract>, String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_GALLIUM_MMAKE {
+        return Ok(None);
+    }
+    let profile = nouveau_current_profile(target)?;
+    Ok(Some(Mesa20CompileContract {
+        defines: mesa20_base_defines(profile),
+        includes: [
+            "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
+            "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
+            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/nouveau",
+            "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        options: [
+            "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>",
+            "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>",
+            "-fno-strict-aliasing",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    }))
+}
+
+fn validate_nouveau_gallium_capability(
+    root: &Path,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+    targets: &[TargetDefinition],
+) -> std::result::Result<(), String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
+        return Ok(());
+    }
+    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, NOUVEAU_DRM_MMAKE_SHA256)
+        || !file_has_sha256(
+            root,
+            NOUVEAU_GALLIUM_SOURCE_MANIFEST,
+            NOUVEAU_GALLIUM_SOURCE_MANIFEST_SHA256,
+        )
+    {
+        return Err(
+            "mmakefile or Nouveau Gallium source manifest differs from the audited capability"
+                .to_owned(),
+        );
+    }
+    let expected_sources =
+        nouveau_gallium_sources(root, relative_dir, NOUVEAU_GALLIUM_MMAKE, target)?
+            .ok_or_else(|| format!("missing source capability for {NOUVEAU_GALLIUM_MMAKE}"))?;
+    let expected_flags =
+        nouveau_gallium_compile_contract(relative_dir, NOUVEAU_GALLIUM_MMAKE, target)?
+            .ok_or_else(|| format!("missing compile capability for {NOUVEAU_GALLIUM_MMAKE}"))?;
+    let matching = targets
+        .iter()
+        .filter(|candidate| candidate.mmake_name == NOUVEAU_GALLIUM_MMAKE)
+        .collect::<Vec<_>>();
+    let [declaration] = matching.as_slice() else {
+        return Err(format!(
+            "requires exactly one {NOUVEAU_GALLIUM_MMAKE} declaration, found {}",
+            matching.len()
+        ));
+    };
+    let exact = declaration.target_name == "gallium_nouveau"
+        && declaration.module_type == ModuleType::LinkLib
+        && !declaration.genmodule_only
+        && !declaration.empty_archive
+        && declaration.source_files == expected_sources.c
+        && declaration.cxx_source_files == expected_sources.cxx
+        && declaration.objc_source_files.is_empty()
+        && declaration.asm_source_files.is_empty()
+        && declaration.use_libs.is_empty()
+        && declaration.dependencies.is_empty()
+        && declaration.dir_path == relative_dir
+        && declaration.target_dir.is_none()
+        && !declaration.variant_32bit
+        && declaration.link_libs.is_empty()
+        && declaration.declared_mod_type.is_none()
+        && declaration.mod_suffix.is_none()
+        && declaration.linklib_name.is_none()
+        && declaration.genmodule_linklibs.is_none()
+        && declaration.linklib_output_dir.is_none()
+        && declaration.canonical_linklib_output
+        && declaration.canonical_linklib_eligible
+        && declaration.compiler_flags.is_empty()
+        && declaration.arch_modules.is_empty()
+        && declaration.arch_includes.is_empty()
+        && declaration.undefines.is_empty()
+        && declaration.link_options.is_empty()
+        && declaration.arch_sources.is_empty()
+        && declaration.arch_defines.is_empty()
+        && declaration.arch_compile_options.is_empty()
+        && declaration.defines == expected_flags.defines
+        && declaration.include_dirs == expected_flags.includes
+        && declaration.compile_options == expected_flags.options;
+    if !exact {
+        return Err(
+            "source, language, flag, include or canonical-output contract differs from the audited Nouveau Gallium capability"
                 .to_owned(),
         );
     }
@@ -7176,6 +7365,24 @@ fn parse_mmakefile_impl(
                 }
             };
         let nouveau_drm_capability_active = nouveau_drm_capability_sources.is_some();
+        let nouveau_gallium_capability_sources = match nouveau_gallium_sources(
+            root,
+            &rel_dir,
+            &mmake_name,
+            target,
+        ) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium archive capability skipped: {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                continue;
+            }
+        };
+        let nouveau_gallium_capability_active = nouveau_gallium_capability_sources.is_some();
         match mesa20_compile_contract(&rel_dir, &mmake_name, target) {
             Ok(Some(contract)) => {
                 declaration_flags.defines = contract.defines;
@@ -7209,6 +7416,26 @@ fn parse_mmakefile_impl(
             Err(reason) => {
                 skipped_programs.push(format!(
                     "{}:{}: %{} mmake={mmake_raw} Nouveau DRM compile contract skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        }
+        match nouveau_gallium_compile_contract(&rel_dir, &mmake_name, target) {
+            Ok(Some(contract)) => {
+                declaration_flags.defines = contract.defines;
+                declaration_flags.undefines.clear();
+                declaration_flags.compile_options = contract.options;
+                declaration_flags.link_options.clear();
+                declaration_includes.dirs = contract.includes;
+                declaration_includes.arch_modules.clear();
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium compile contract skipped: {reason}",
                     rel_dir.display(),
                     inv.line + 1,
                     inv.name
@@ -7294,6 +7521,8 @@ fn parse_mmakefile_impl(
         let mut sources = if let Some(sources) = mesa20_capability_sources {
             sources
         } else if let Some(sources) = nouveau_drm_capability_sources {
+            sources
+        } else if let Some(sources) = nouveau_gallium_capability_sources {
             sources
         } else {
             match evaluate_macro_sources_with_files(
@@ -7427,7 +7656,9 @@ fn parse_mmakefile_impl(
             && macro_arg(&inv.args, "compiler").is_none_or(|value| value == "target")
             && !variant_32bit;
         let canonical_linklib_output = canonical_linklib_eligible
-            && (all_sources_are_fetch_owned(&sources, &fetches) || nouveau_drm_capability_active);
+            && (all_sources_are_fetch_owned(&sources, &fetches)
+                || nouveau_drm_capability_active
+                || nouveau_gallium_capability_active);
         let linklib_output_dir = if mesa_sse41_profile.is_some() || mesa20_capability_active {
             Some(MESA20_PRIVATE_LIBDIR.to_owned())
         } else if matches!(module_type, ModuleType::LinkLib) {
@@ -7547,6 +7778,23 @@ fn parse_mmakefile_impl(
             targets.retain(|candidate| candidate.mmake_name != NOUVEAU_DRM_MMAKE);
             skipped_programs.push(format!(
                 "{}: Nouveau DRM link library skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
+    }
+
+    if targets
+        .iter()
+        .any(|candidate| candidate.mmake_name == NOUVEAU_GALLIUM_MMAKE)
+    {
+        if let Err(reason) = validate_nouveau_gallium_capability(root, &rel_dir, target, &targets) {
+            // The fetched Mesa lane contains a C++ source inventory. Keep it
+            // atomic with its pinned source and flag contract rather than
+            // leaving an inferred C-only or private-output approximation in
+            // the graph.
+            targets.retain(|candidate| candidate.mmake_name != NOUVEAU_GALLIUM_MMAKE);
+            skipped_programs.push(format!(
+                "{}: Nouveau Gallium link library skipped: {reason}",
                 rel_dir.display()
             ));
         }

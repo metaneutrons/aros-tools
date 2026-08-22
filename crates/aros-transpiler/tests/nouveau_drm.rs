@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
 const SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
-const MMAKE_SHA256: &str = "c799ba3670f9f767946ba5ed04c9e4acebaf76fd50ce3bac9736293eef323134";
+const MMAKE_SHA256: &str = "4c0fd8b41d3590b4303c84be7c670220567b8b86e7e29fd6d05c4a36c7d4ee56";
 const SOURCE_MANIFEST_SHA256: &str =
     "f51d30d4b9f182aca412e535b32dab35b9bbcadffc4a480b3bacf55ab8afc28a";
 
