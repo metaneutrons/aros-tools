@@ -30,6 +30,7 @@ use aros_common::read_source;
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -226,6 +227,174 @@ struct Declaration {
     mmake: String,
     macro_name: String,
     file: String,
+    /// Complete continuation-joined macro arguments with insignificant
+    /// whitespace collapsed.  Provisioning exclusions use this rather than
+    /// only the target name, so changing a compiler, prefix, source, option
+    /// owner, or adding an argument fails closed into the normal target gate.
+    arguments: String,
+}
+
+const LLVM_PROVISIONING_FILE: &str = "tools/crosstools/llvm/mmakefile.src";
+
+/// Exact legacy declarations that provision the compiler installation used as
+/// an input by the modern CMake build.  They are not target-tree products.
+///
+/// The declaration contract is only one layer of the check: the whole
+/// semantic LLVM provisioning file, its toolchain config, the unresolved
+/// CROSSTOOLSDIR placeholder, and CMake's compiler-before-project preamble are
+/// fingerprinted below.  Any drift restores these declarations to ordinary
+/// target-graph obligations until the provisioning boundary is re-audited.
+const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
+    (
+        "crosstools-libunwind",
+        "mmake=crosstools-libunwind package=libunwind srcdir=$(LIBUNWIND_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_LIBUNWIND_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
+        "crosstools-compiler-rt",
+        "mmake=crosstools-compiler-rt package=compiler-rt srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
+        "crosstools-compiler-rt32",
+        "mmake=crosstools-compiler-rt32 package=compiler-rt32 srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
+        "crosstools-llvm-toolchain",
+        "mmake=crosstools-llvm-toolchain package=llvm srcdir=$(LLVM_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_CMAKEOPTIONS)\" compiler=host usecppflags=no usecrosstoolsdir=no",
+    ),
+];
+
+// Filled from a canonical semantic projection: continuations and whitespace
+// do not matter, ordinary comments are omitted, while #MM dependency lines
+// remain because they are executable MetaMake graph input.
+const LLVM_PROVISIONING_MMAKE_SHA256: &str =
+    "d9c3a153d46208a8465eb206752c9c5b8ec5194f8e73622c3b7d8da280dd286f";
+const LLVM_PROVISIONING_CONFIG_SHA256: &str =
+    "00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0";
+const CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256: &str =
+    "0fc47e199240d50a53d0da841afb4918519ba5cfcabb654a16dc5a5056985ce6";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ToolchainProvisioningContext {
+    llvm: bool,
+}
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Canonical semantic view of a Make input used for fail-closed fingerprints.
+/// `#MM` is MetaMake syntax rather than documentation and must be retained.
+fn canonical_make_semantics(content: &str) -> String {
+    let continuations = Regex::new(r"\\\r?\n").unwrap();
+    let joined = continuations.replace_all(content, "");
+    joined
+        .lines()
+        .filter_map(|raw_line| {
+            let trimmed = raw_line.trim();
+            let semantic = if trimmed.starts_with("#MM") {
+                trimmed
+            } else {
+                strip_make_comment(raw_line).trim()
+            };
+            (!semantic.is_empty()).then(|| collapse_whitespace(semantic))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// CMake chooses the compiler before `project()`, making the toolchain an
+/// input to every target profile.  Fingerprint precisely that preamble rather
+/// than the rest of the independently evolving target build.
+fn canonical_cmake_toolchain_input_preamble(content: &str) -> Option<String> {
+    let mut semantic_lines = Vec::new();
+    let mut project_depth = None;
+
+    for raw_line in content.lines() {
+        let semantic = collapse_whitespace(strip_make_comment(raw_line).trim());
+        if semantic.is_empty() {
+            continue;
+        }
+        if project_depth.is_none() && semantic.starts_with("project(") {
+            project_depth = Some(0isize);
+        }
+        semantic_lines.push(semantic.clone());
+
+        if let Some(depth) = project_depth.as_mut() {
+            for character in semantic.chars() {
+                match character {
+                    '(' => *depth += 1,
+                    ')' => *depth -= 1,
+                    _ => {}
+                }
+            }
+            if *depth == 0 {
+                return Some(semantic_lines.join("\n"));
+            }
+        }
+    }
+    None
+}
+
+fn llvm_provisioning_context_matches_sources(
+    llvm_mmake: &str,
+    llvm_config: &str,
+    make_config: &str,
+    cmake_lists: &str,
+) -> bool {
+    let make_config_semantics = canonical_make_semantics(make_config);
+    let crosstools_placeholders: Vec<_> = make_config_semantics
+        .lines()
+        .filter(|line| line.starts_with("CROSSTOOLSDIR "))
+        .collect();
+    let Some(cmake_preamble) = canonical_cmake_toolchain_input_preamble(cmake_lists) else {
+        return false;
+    };
+
+    sha256_hex(&canonical_make_semantics(llvm_mmake)) == LLVM_PROVISIONING_MMAKE_SHA256
+        && sha256_hex(&canonical_make_semantics(llvm_config)) == LLVM_PROVISIONING_CONFIG_SHA256
+        && crosstools_placeholders == ["CROSSTOOLSDIR := @AROS_CROSSTOOLSDIR@"]
+        && !cmake_lists.contains("CROSSTOOLSDIR")
+        && sha256_hex(&cmake_preamble) == CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256
+}
+
+fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningContext {
+    let read = |relative: &str| read_source(&root.join(relative)).ok();
+    let llvm = read(LLVM_PROVISIONING_FILE)
+        .zip(read("tools/crosstools/llvm.cfg"))
+        .zip(read("config/make.cfg.in"))
+        .zip(read("CMakeLists.txt"))
+        .is_some_and(|(((mmake, config), make_config), cmake_lists)| {
+            llvm_provisioning_context_matches_sources(&mmake, &config, &make_config, &cmake_lists)
+        });
+    ToolchainProvisioningContext { llvm }
+}
+
+fn is_toolchain_provisioning_declaration(
+    declaration: &Declaration,
+    context: ToolchainProvisioningContext,
+) -> bool {
+    context.llvm
+        && declaration.file == LLVM_PROVISIONING_FILE
+        && declaration.macro_name == "build_with_cmake"
+        && LLVM_PROVISIONING_DECLARATIONS
+            .iter()
+            .any(|(mmake, arguments)| {
+                declaration.mmake == *mmake && declaration.arguments == *arguments
+            })
+}
+
+fn split_toolchain_provisioning<'a>(
+    declarations: &[&'a Declaration],
+    context: ToolchainProvisioningContext,
+) -> (Vec<&'a Declaration>, Vec<&'a Declaration>) {
+    declarations
+        .iter()
+        .copied()
+        .partition(|declaration| is_toolchain_provisioning_declaration(declaration, context))
 }
 
 /// What the reference expansion says about one target.
@@ -288,7 +457,7 @@ fn main() -> Result<()> {
     let declaration_candidates = conditional_declarations
         .as_deref()
         .unwrap_or(declarations.as_slice());
-    let scoped_declarations: Vec<&Declaration> = declaration_candidates
+    let scoped_inventory: Vec<&Declaration> = declaration_candidates
         .iter()
         .filter(|declaration| {
             architecture
@@ -296,6 +465,9 @@ fn main() -> Result<()> {
                 .is_none_or(|scope| scope.declaration_is_eligible(declaration))
         })
         .collect();
+    let provisioning_context = detect_toolchain_provisioning_context(&root);
+    let (toolchain_provisioning, scoped_declarations) =
+        split_toolchain_provisioning(&scoped_inventory, provisioning_context);
 
     // 2. What the historic build makes of it.
     let expansion = expand_all(&root, &cache, &mmakefiles, args.refresh);
@@ -458,6 +630,10 @@ fn main() -> Result<()> {
         declared.len() - missing.len(),
         declared.len()
     );
+    println!(
+        "   provisioning  {} legacy toolchain target(s) tracked outside the target graph",
+        toolchain_provisioning.len()
+    );
     let reference_count = if architecture.is_some() {
         shapes
             .keys()
@@ -483,6 +659,19 @@ fn main() -> Result<()> {
             "{} mmakefile(s) could not be expanded by genmf",
             expansion_failures.len()
         ),
+    )?;
+
+    write_inventory_report(
+        &report_dir.join("toolchain-provisioning-targets.txt"),
+        toolchain_provisioning
+            .iter()
+            .map(|declaration| {
+                format!(
+                    "{:32} %{:22} {}  compiler=host prefix=$(CROSSTOOLSDIR)",
+                    declaration.mmake, declaration.macro_name, declaration.file
+                )
+            })
+            .collect(),
     )?;
 
     write_report(
@@ -565,6 +754,24 @@ fn write_failure_report(path: &Path, mut lines: Vec<String>, headline: &str) -> 
     lines.dedup();
     fs::write(path, lines.join("\n") + "\n")?;
     println!("   ⚠️  {headline} -> {}", path.display());
+    Ok(())
+}
+
+/// Writes an intentional non-gating inventory.  Unlike a failure report it is
+/// expected to remain present: it prevents excluded provisioning work from
+/// disappearing behind a denominator adjustment.
+fn write_inventory_report(path: &Path, mut lines: Vec<String>) -> Result<()> {
+    if lines.is_empty() {
+        let _ = fs::remove_file(path);
+        return Ok(());
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    fs::write(path, lines.join("\n") + "\n")?;
+    println!(
+        "   ℹ️  external toolchain provisioning inventory -> {}",
+        path.display()
+    );
     Ok(())
 }
 
@@ -1119,6 +1326,7 @@ fn collect_declarations_impl(
                 mmake: id[1].to_owned(),
                 macro_name: captures[1].to_owned(),
                 file: relative.clone(),
+                arguments: collapse_whitespace(&captures[2]),
             });
         }
     }
@@ -1361,6 +1569,7 @@ mod tests {
             mmake: "test-target".to_owned(),
             macro_name: macro_name.to_owned(),
             file: file.to_owned(),
+            arguments: "mmake=test-target".to_owned(),
         }
     }
 
@@ -1549,7 +1758,12 @@ mod tests {
     fn current_architecture_denominators_are_pinned() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
         let files = find_mmakefiles(&root);
-        let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
+        let context = detect_toolchain_provisioning_context(&root);
+        assert!(
+            context.llvm,
+            "the audited LLVM provisioning context drifted"
+        );
+        let declarations = |scope: &ArchitectureScope, conditional: bool| {
             let declarations = if conditional {
                 collect_declarations_for_profile(&root, &files, scope)
             } else {
@@ -1558,6 +1772,25 @@ mod tests {
             declarations
                 .into_iter()
                 .filter(|declaration| scope.declaration_is_eligible(declaration))
+                .collect::<Vec<_>>()
+        };
+        let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
+            declarations(scope, conditional)
+                .into_iter()
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+        let target_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
+            declarations(scope, true)
+                .into_iter()
+                .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+        let provisioning_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
+            declarations(scope, true)
+                .into_iter()
+                .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
                 .map(|declaration| declaration.mmake)
                 .collect()
         };
@@ -1565,9 +1798,20 @@ mod tests {
         let x86 = ArchitectureScope::new("x86_64", "pc");
         let arm = ArchitectureScope::new("arm", "raspi");
         let aarch64 = ArchitectureScope::new("aarch64", "raspi");
-        let global: BTreeSet<String> = collect_declarations(&root, &files)
-            .into_iter()
-            .map(|declaration| declaration.mmake)
+        let global_declarations = collect_declarations(&root, &files);
+        let global: BTreeSet<String> = global_declarations
+            .iter()
+            .map(|declaration| declaration.mmake.clone())
+            .collect();
+        let global_target: BTreeSet<String> = global_declarations
+            .iter()
+            .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
+            .map(|declaration| declaration.mmake.clone())
+            .collect();
+        let global_provisioning: BTreeSet<String> = global_declarations
+            .iter()
+            .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
+            .map(|declaration| declaration.mmake.clone())
             .collect();
         // Retiring Gallivm removes one false obligation; preserving
         // dummytest_auto and separating the formerly colliding 2View, HDTool
@@ -1576,15 +1820,30 @@ mod tests {
         assert_eq!(ids(&x86, true).len(), 1004);
         assert_eq!(ids(&arm, true).len(), 996);
         assert_eq!(ids(&aarch64, true).len(), 996);
+        assert_eq!(global_target.len(), 1119);
+        assert_eq!(target_ids(&x86).len(), 1000);
+        assert_eq!(target_ids(&arm).len(), 993);
+        assert_eq!(target_ids(&aarch64).len(), 993);
+        let common_provisioning = BTreeSet::from([
+            "crosstools-compiler-rt".to_owned(),
+            "crosstools-libunwind".to_owned(),
+            "crosstools-llvm-toolchain".to_owned(),
+        ]);
+        let mut x86_provisioning = common_provisioning.clone();
+        x86_provisioning.insert("crosstools-compiler-rt32".to_owned());
+        assert_eq!(global_provisioning, x86_provisioning);
+        assert_eq!(provisioning_ids(&x86), x86_provisioning);
+        assert_eq!(provisioning_ids(&arm), common_provisioning);
+        assert_eq!(provisioning_ids(&aarch64), common_provisioning);
         assert!(global.contains("test-library-dummytest_auto"));
         assert!(!global.contains("mesa3d-linklib-galliumvm"));
-        for inventory in [
-            ids(&x86, true),
-            ids(&arm, true),
-            ids(&aarch64, true),
-        ] {
+        // GCC libatomic is a target-compiled runtime, not a host-compiler
+        // CROSSTOOLSDIR declaration.  Keep it in the normal target gate.
+        assert!(global_target.contains("tools-crosstools-gcc-libatomic"));
+        for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
             assert!(inventory.contains("test-library-dummytest_auto"));
             assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
+            assert!(inventory.contains("tools-crosstools-gcc-libatomic"));
         }
 
         let arm_removed: BTreeSet<String> = ids(&arm, false)
@@ -1605,6 +1864,110 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(aarch64_removed, arm_removed);
+    }
+
+    #[test]
+    fn llvm_provisioning_context_is_semantically_fingerprinted() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
+        let config = read_source(&root.join("tools/crosstools/llvm.cfg")).unwrap();
+        let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
+        let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
+        let preamble = canonical_cmake_toolchain_input_preamble(&cmake_lists).unwrap();
+
+        assert!(
+            llvm_provisioning_context_matches_sources(&mmake, &config, &make_config, &cmake_lists,),
+            "provisioning fingerprints changed: mmake={} config={} cmake={}",
+            sha256_hex(&canonical_make_semantics(&mmake)),
+            sha256_hex(&canonical_make_semantics(&config)),
+            sha256_hex(&preamble),
+        );
+    }
+
+    #[test]
+    fn llvm_provisioning_contract_mutations_fail_closed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
+        let config = read_source(&root.join("tools/crosstools/llvm.cfg")).unwrap();
+        let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
+        let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
+        assert!(llvm_provisioning_context_matches_sources(
+            &mmake,
+            &config,
+            &make_config,
+            &cmake_lists,
+        ));
+
+        let assert_context_rejected =
+            |mmake: &str, config: &str, make_config: &str, cmake_lists: &str| {
+                assert!(!llvm_provisioning_context_matches_sources(
+                    mmake,
+                    config,
+                    make_config,
+                    cmake_lists,
+                ));
+            };
+        assert_context_rejected(
+            &mmake.replace(
+                "LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin",
+                "LLVM_BUILD_BINDIR:=$(HOSTDIR)/bin",
+            ),
+            &config,
+            &make_config,
+            &cmake_lists,
+        );
+        assert_context_rejected(
+            &mmake,
+            &config.replace("LLVM_VERSION:=11.0.0", "LLVM_VERSION:=12.0.0"),
+            &make_config,
+            &cmake_lists,
+        );
+        assert_context_rejected(
+            &mmake,
+            &config,
+            &make_config.replace("@AROS_CROSSTOOLSDIR@", "${AROS_BUILD_DIR}/toolchain"),
+            &cmake_lists,
+        );
+        assert_context_rejected(
+            &mmake,
+            &config,
+            &make_config,
+            &cmake_lists.replace(
+                "$ENV{HOME}/.aros/toolchain/bin/clang",
+                "$ENV{HOME}/bin/clang",
+            ),
+        );
+
+        let declarations = collect_declarations(
+            &root,
+            std::slice::from_ref(&root.join(LLVM_PROVISIONING_FILE)),
+        );
+        let context = ToolchainProvisioningContext { llvm: true };
+        for (needle, replacement) in [
+            ("compiler=host", "compiler=target"),
+            (
+                "prefix=\"$(CROSSTOOLSDIR)\"",
+                "prefix=\"$(AROS_DEVELOPER)\"",
+            ),
+            ("usecppflags=no", "usecppflags=yes"),
+        ] {
+            let mut declaration = declarations
+                .iter()
+                .find(|declaration| declaration.mmake == "crosstools-compiler-rt")
+                .unwrap()
+                .clone();
+            declaration.arguments = declaration.arguments.replace(needle, replacement);
+            assert!(!is_toolchain_provisioning_declaration(
+                &declaration,
+                context
+            ));
+            // With no generated target, falling out of the provisioning
+            // contract makes this an ordinary missing target again.
+            let inventory = [&declaration];
+            let (provisioning, target_graph) = split_toolchain_provisioning(&inventory, context);
+            assert!(provisioning.is_empty());
+            assert_eq!(target_graph[0].mmake, "crosstools-compiler-rt");
+        }
     }
 
     #[test]

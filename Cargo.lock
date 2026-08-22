@@ -173,6 +173,7 @@ dependencies = [
  "clap",
  "rayon",
  "regex",
+ "sha2",
 ]
 
 [[package]]
