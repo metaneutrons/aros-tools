@@ -494,10 +494,11 @@ pub fn render(iface: &Interface) -> String {
 pub fn write_interface(iface: &Interface, out_inc: &Path) -> std::io::Result<()> {
     let dir = out_inc.join("interface");
     fs::create_dir_all(&dir)?;
-    fs::write(
+    crate::write_if_changed(
         dir.join(format!("{}.h", iface.interface_name)),
         render(iface),
     )
+    .map(|_| ())
 }
 
 #[cfg(test)]

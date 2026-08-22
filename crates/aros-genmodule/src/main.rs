@@ -6,8 +6,30 @@ use clap::Parser;
 use rayon::prelude::*;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Writes generated output only when its bytes have actually changed.
+///
+/// Configure-time SDK generation runs before every CMake regeneration. Keeping
+/// the timestamp of identical headers prevents all of their consumers from
+/// being rebuilt even though neither the source nor the generated ABI changed.
+pub(crate) fn write_if_changed(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<bool> {
+    let path = path.as_ref();
+    let contents = contents.as_ref();
+    match fs::read(path) {
+        Ok(existing) if existing == contents => return Ok(false),
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::write(path, contents)?;
+    Ok(true)
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -489,7 +511,7 @@ fn generate_sdk_headers(
          #endif /* PROTO_{mod_upper}_H */\n"
     );
     if public {
-        fs::write(proto_dir.join(format!("{mod_lower}.h")), proto_content)?;
+        write_if_changed(proto_dir.join(format!("{mod_lower}.h")), proto_content)?;
     }
 
     // 2. clib/<mod>_protos.h
@@ -523,7 +545,7 @@ fn generate_sdk_headers(
     protos.push_str("_PROTOS_H */\n");
 
     if public {
-        fs::write(clib_dir.join(format!("{mod_lower}_protos.h")), protos)?;
+        write_if_changed(clib_dir.join(format!("{mod_lower}_protos.h")), protos)?;
     }
 
     // 3. defines/<mod>.h, including the varargs convenience stubs.
@@ -534,9 +556,9 @@ fn generate_sdk_headers(
     };
     let defines = varargs::render_defines(&include_name, &module.lib_base, &module.functions);
     if public {
-        fs::write(defines_dir.join(format!("{include_name}.h")), &defines.text)?;
+        write_if_changed(defines_dir.join(format!("{include_name}.h")), &defines.text)?;
         // Function LVOs, a separate header in the reference too.
-        fs::write(
+        write_if_changed(
             defines_dir.join(format!("{include_name}_LVO.h")),
             varargs::render_lvo(&include_name, &module.functions),
         )?;
@@ -618,7 +640,7 @@ fn generate_sdk_headers(
     // in different subsystems cannot overwrite each other.
     let libdefs_dir = out_gen.map_or_else(|| out_inc.to_path_buf(), |g| g.join(&module.rel_dir));
     fs::create_dir_all(&libdefs_dir)?;
-    fs::write(libdefs_dir.join(format!("{mod_lower}_libdefs.h")), libdefs)?;
+    write_if_changed(libdefs_dir.join(format!("{mod_lower}_libdefs.h")), libdefs)?;
 
     // 5. interface/<Name>.h for every declared OOP interface.
     for iface in &module.interfaces {
@@ -706,7 +728,7 @@ fn main() {
     } else {
         clashes.sort_unstable();
         let _ = fs::create_dir_all(&args.output_inc);
-        let _ = fs::write(&report, format!("{}\n", clashes.join("\n")));
+        let _ = write_if_changed(&report, format!("{}\n", clashes.join("\n")));
         println!(
             "⚠️  {} module name(s) still share SDK headers (both export a public API) -> {}",
             clashes.len(),
@@ -728,6 +750,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn generated_output_is_written_only_when_its_bytes_change() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aros-genmodule-write-if-changed-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let path = dir.join("generated.h");
+
+        assert!(write_if_changed(&path, b"first\n").expect("initial write"));
+        assert!(!write_if_changed(&path, b"first\n").expect("unchanged write"));
+        assert!(write_if_changed(&path, b"second\n").expect("changed write"));
+        assert_eq!(fs::read(&path).expect("read generated output"), b"second\n");
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
 
     fn module(mod_type: &str, funcs: usize, cdef: &str) -> ConfModule {
         ConfModule {
