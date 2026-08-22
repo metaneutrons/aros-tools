@@ -38,6 +38,131 @@ fn scan_scopes(
     )
 }
 
+fn scan_define_headers(
+    root: &Path,
+    mmake: &str,
+    content: &str,
+) -> local_make_includes::LocalMakeIncludeScan {
+    inline_local_make_includes(
+        content,
+        root,
+        Path::new(mmake),
+        LocalMakeIncludeLimits::default(),
+        LocalMakeFragmentPolicy::LiteralDefineHeader,
+    )
+}
+
+#[test]
+fn literal_define_header_fragment_is_inserted_only_as_a_complete_unit() {
+    let tree = TempDir::new().unwrap();
+    write(
+        &tree.path().join("module/options.mk"),
+        "FILES := common\n\
+ifeq ($(AROS_TARGET_CPU),arm)\n\
+FILES += arm\n\
+endif\n\
+$(OUTPUT):\n\
+\techo \"#define COMMON 1\" >options.h\n\
+ifeq ($(AROS_TARGET_CPU),arm)\n\
+\techo \"#define ARM 1\" >>options.h\n\
+endif\n",
+    );
+    let source = "include $(SRCDIR)/$(CURDIR)/options.mk\n%build_linklib files=$(FILES)\n";
+
+    let result = scan_define_headers(tree.path(), "module/mmakefile.src", source);
+
+    assert!(result.issues.is_empty(), "{:?}", result.issues);
+    assert_eq!(result.fragments.len(), 1);
+    let fragment = &result.fragments[0];
+    assert_eq!(fragment.path, Path::new("module/options.mk"));
+    assert_eq!(fragment.assigned_variables, ["FILES"]);
+    assert!(fragment.has_conditionals);
+    assert!(!fragment.plain_source_list);
+    assert!(fragment.literal_define_header);
+    assert!(result.expanded.contains("#define COMMON 1"));
+    assert!(result.expanded.contains("#define ARM 1"));
+}
+
+#[test]
+fn literal_define_header_policy_rejects_every_broader_recipe_shape() {
+    let cases = [
+        ("$(OUT):\n\techo \"#define ONE 1\" >>one.h\n", "first define"),
+        (
+            "$(OUT):\n\techo \"#define ONE 1\" >one.h\n\techo \"#define TWO 1\" >one.h\n",
+            "must append",
+        ),
+        (
+            "$(OUT):\n\techo \"#define ONE 1\" >one.h\n\techo \"#define TWO 1\" >>two.h\n",
+            "same header",
+        ),
+        ("$(OUT):\n\techo \"#define ONE 1\" >../one.h\n", "only literal"),
+        ("$(OUT):\n\t@echo \"#define ONE 1\" >one.h\n", "only literal"),
+        (
+            "$(OUT):\n\techo \"#define ONE 1\" >one.h && touch marker\n",
+            "only literal",
+        ),
+        ("$(OUT): input\n\techo \"#define ONE 1\" >one.h\n", "only assignments"),
+        (
+            "$(OUT):\n\techo \"#define ONE 1\" >one.h\nsecond.h:\n\techo \"#define TWO 1\" >>one.h\n",
+            "one unconditional",
+        ),
+        (
+            "include $(SRCDIR)/$(CURDIR)/nested.mk\n$(OUT):\n\techo \"#define ONE 1\" >one.h\n",
+            "may not import",
+        ),
+        ("$(OUT):\n\techo \"#define ONE $(VALUE)\" >one.h\n", "only literal"),
+        (
+            "$(OUT):\n\techo \"#define ONE two words\" >one.h\n",
+            "only literal",
+        ),
+    ];
+
+    for (recipe, expected) in cases {
+        let tree = TempDir::new().unwrap();
+        write(
+            &tree.path().join("module/options.mk"),
+            &format!("FILES := one\n{recipe}"),
+        );
+        write(&tree.path().join("module/nested.mk"), "NESTED := one\n");
+        let source = "include $(SRCDIR)/$(CURDIR)/options.mk\n";
+        let result = scan_define_headers(tree.path(), "module/mmakefile.src", source);
+        assert!(result.fragments.is_empty(), "{recipe}");
+        assert!(
+            result.issues.iter().any(|item| {
+                item.kind == LocalMakeIncludeIssueKind::UnsafeSyntax
+                    && (item.subject.contains(expected) || item.detail.contains(expected))
+            }),
+            "{recipe}: {:?}",
+            result.issues
+        );
+    }
+}
+
+#[test]
+fn production_atheros_fragment_matches_the_literal_header_grammar() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../../../..").canonicalize().unwrap();
+    let mmake = Path::new("workbench/devs/networks/atheros5000/hal/mmakefile.src");
+    let content = fs::read_to_string(root.join(mmake)).unwrap();
+
+    let result = scan_define_headers(&root, mmake.to_str().unwrap(), &content);
+
+    assert!(result.issues.is_empty(), "{:?}", result.issues);
+    assert_eq!(result.fragments.len(), 1);
+    let fragment = &result.fragments[0];
+    assert_eq!(
+        fragment.path,
+        Path::new("workbench/devs/networks/atheros5000/hal/Makefile.inc")
+    );
+    assert!(fragment.literal_define_header);
+    assert!(fragment.has_conditionals);
+    assert!(!fragment.plain_source_list);
+    assert!(fragment.assigned_variables.contains(&"HAL_OBJS".to_owned()));
+    assert!(fragment
+        .assigned_variables
+        .contains(&"OPT_AH_PATH".to_owned()));
+}
+
 #[test]
 fn assignment_fragment_is_inserted_at_the_include_site() {
     let tree = TempDir::new().unwrap();

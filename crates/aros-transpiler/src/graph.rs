@@ -1,5 +1,5 @@
 use crate::arch_sources::ArchSourceDecl;
-use crate::ast::{MetaTargetRule, ModuleType, TargetDefinition};
+use crate::ast::{DefineHeaderDecl, MetaTargetRule, ModuleType, TargetDefinition};
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
@@ -31,6 +31,8 @@ pub struct DependencyGraph {
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe hand-written header transforms, with graph-resolved ordering.
     pub header_transforms: Vec<HeaderTransformDecl>,
+    /// Declaration-owned literal define headers, with their compile consumers.
+    pub define_headers: Vec<DefineHeaderDecl>,
     /// `%build_archspecific` declarations, keyed by the target they extend.
     pub arch_sources: HashMap<String, Vec<ArchSourceDecl>>,
     /// `%fetch` declarations for third-party sources.
@@ -46,6 +48,34 @@ fn arch_of(dir: &std::path::Path) -> Option<(String, String)> {
     let first = rest.split('/').next()?;
     let (cpu, platform) = first.split_once('-')?;
     Some((cpu.to_owned(), platform.to_owned()))
+}
+
+fn define_header_compile_targets(mmake: &str, target: &TargetDefinition) -> Vec<String> {
+    match target.module_type {
+        ModuleType::ProgramGroup => {
+            let mut members = target
+                .source_files
+                .iter()
+                .chain(&target.cxx_source_files)
+                .chain(&target.objc_source_files)
+                .chain(&target.asm_source_files)
+                .filter_map(|source| std::path::Path::new(source).file_stem())
+                .map(|stem| format!("{mmake}-{}", stem.to_string_lossy()))
+                .collect::<Vec<_>>();
+            members.sort();
+            members.dedup();
+            members
+        }
+        // Despite having no declaration sources, this is a real compiler
+        // target: aros_add_library(GENMODULE_ONLY) creates the runtime with
+        // libentry plus the generated start/end sources under the mmake id.
+        ModuleType::Library if target.genmodule_only => vec![mmake.to_owned()],
+        // These declarations materialise only utility/package orchestration
+        // under their mmake id. An ABI's compiling target is its generated
+        // client archive and does not consume the declaration's `uselibs`.
+        ModuleType::Abi | ModuleType::Package | ModuleType::Custom => Vec::new(),
+        _ => vec![mmake.to_owned()],
+    }
 }
 
 /// Whether a candidate's directory can serve a declaration made under `ctx`.
@@ -169,6 +199,71 @@ impl DependencyGraph {
 
     pub fn add_header_transforms(&mut self, decls: Vec<HeaderTransformDecl>) {
         self.header_transforms.extend(decls);
+    }
+
+    pub fn add_define_headers(&mut self, declarations: Vec<DefineHeaderDecl>) {
+        self.define_headers.extend(declarations);
+    }
+
+    /// Gives every target which compiles against a declaration-owned literal
+    /// header a direct edge to the real header owner.
+    ///
+    /// The source provider itself always consumes the header. Any target whose
+    /// resolved `uselibs` names that provider consumes the public provider
+    /// headers too; this covers a device which includes its HAL declarations
+    /// without relying on a transitive link-order edge.
+    pub fn resolve_define_headers(&mut self) -> Vec<String> {
+        let target_links: Vec<(Vec<String>, Vec<String>)> = self
+            .targets
+            .iter()
+            .map(|(mmake, target)| {
+                (
+                    define_header_compile_targets(mmake, target),
+                    target.link_libs.clone(),
+                )
+            })
+            .collect();
+        let compile_targets: HashMap<String, Vec<String>> = self
+            .targets
+            .iter()
+            .map(|(mmake, target)| (mmake.clone(), define_header_compile_targets(mmake, target)))
+            .collect();
+        let mut unresolved = Vec::new();
+        let mut edges = BTreeSet::new();
+
+        for header in &mut self.define_headers {
+            let Some(provider_consumers) = compile_targets.get(&header.provider) else {
+                unresolved.push(format!(
+                    "{}:{}: {} provider {} has no concrete target",
+                    header.file, header.line, header.owner, header.provider
+                ));
+                continue;
+            };
+            if provider_consumers.is_empty() {
+                unresolved.push(format!(
+                    "{}:{}: {} provider {} has no compiling target",
+                    header.file, header.line, header.owner, header.provider
+                ));
+                continue;
+            }
+
+            header.consumers.extend(provider_consumers.iter().cloned());
+            for (consumers, providers) in &target_links {
+                if providers.contains(&header.provider) {
+                    header.consumers.extend(consumers.iter().cloned());
+                }
+            }
+            header.consumers.sort();
+            header.consumers.dedup();
+            for consumer in &header.consumers {
+                edges.insert((consumer.clone(), header.owner.clone()));
+            }
+        }
+
+        for (consumer, owner) in edges {
+            self.meta_targets.entry(consumer).or_default().insert(owner);
+        }
+        unresolved
     }
 
     /// Joins promoted header recipes to the fetch which owns their input and
@@ -1029,8 +1124,10 @@ impl DependencyGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::{arch_compatible, target_runtime_name, DependencyGraph};
-    use crate::ast::MetaTargetRule;
+    use super::{
+        arch_compatible, define_header_compile_targets, target_runtime_name, DependencyGraph,
+    };
+    use crate::ast::{DefineHeaderDecl, MetaTargetRule, ModuleType};
     use crate::copy_includes::CopyIncludesDecl;
     use crate::dirs::DirVars;
     use crate::packages::{PackageDecl, ResolvedPackageMember};
@@ -1329,6 +1426,167 @@ mod tests {
                 "workbench-libs-z-minigzip",
             ]
         );
+    }
+
+    #[test]
+    fn atheros_hal_header_has_direct_provider_and_device_edges() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let context = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "workbench/devs/networks/atheros5000/hal/mmakefile.src",
+            "workbench/devs/networks/atheros5000/mmakefile.src",
+        ] {
+            let parsed =
+                parse_mmakefile_with_dirs_and_context(&root.join(relative), &root, &dirs, &context)
+                    .unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+            for rule in parsed.meta_rules {
+                graph.add_meta_rule(rule);
+            }
+            graph.add_define_headers(parsed.define_headers);
+        }
+
+        let unresolved = graph.resolve_use_libs();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(
+            graph.targets["workbench-devs-networks-atheros5000"].link_libs,
+            ["workbench-devs-networks-atheros5000-hal"]
+        );
+        let unresolved = graph.resolve_define_headers();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(graph.define_headers.len(), 1);
+        assert_eq!(
+            graph.define_headers[0].consumers,
+            [
+                "workbench-devs-networks-atheros5000",
+                "workbench-devs-networks-atheros5000-hal",
+            ]
+        );
+        for consumer in [
+            "workbench-devs-networks-atheros5000",
+            "workbench-devs-networks-atheros5000-hal",
+        ] {
+            assert!(graph.meta_targets[consumer]
+                .contains("workbench-devs-networks-atheros5000-hal-opts"));
+        }
+    }
+
+    #[test]
+    fn define_header_program_group_consumers_expand_to_compile_members() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let context = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let hal = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/devs/networks/atheros5000/hal/mmakefile.src"),
+            &root,
+            &dirs,
+            &context,
+        )
+        .unwrap();
+        let mut programs = parse_mmakefile_with_dirs_and_context(
+            &root.join("tools/dtdesc/mmakefile.src"),
+            &root,
+            &dirs,
+            &context,
+        )
+        .unwrap()
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "tools-dtdesc")
+        .expect("dtdesc program group");
+        assert_eq!(programs.module_type, ModuleType::ProgramGroup);
+        programs.link_libs = vec!["workbench-devs-networks-atheros5000-hal".to_owned()];
+
+        let mut graph = DependencyGraph::new();
+        for target in hal.targets {
+            graph.add_target(target);
+        }
+        graph.add_define_headers(hal.define_headers);
+        graph.add_target(programs);
+
+        let unresolved = graph.resolve_define_headers();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
+        assert_eq!(
+            graph.define_headers[0].consumers,
+            [
+                "tools-dtdesc-createdtdesc",
+                "tools-dtdesc-examinedtdesc",
+                "workbench-devs-networks-atheros5000-hal",
+            ]
+        );
+        assert!(!graph.meta_targets.contains_key("tools-dtdesc"));
+        for member in ["tools-dtdesc-createdtdesc", "tools-dtdesc-examinedtdesc"] {
+            assert!(
+                graph.meta_targets[member].contains("workbench-devs-networks-atheros5000-hal-opts")
+            );
+        }
+    }
+
+    #[test]
+    fn genmodule_only_library_mmake_id_is_still_a_compile_target() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let target = parse_mmakefile_with_dirs(
+            &root.join("workbench/libs/version/mmakefile.src"),
+            &root,
+            &dirs,
+        )
+        .unwrap()
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-libs-version")
+        .expect("version genmodule-only library");
+        assert_eq!(target.module_type, ModuleType::Library);
+        assert!(target.genmodule_only);
+        assert_eq!(
+            define_header_compile_targets(&target.mmake_name, &target),
+            ["workbench-libs-version"]
+        );
+    }
+
+    #[test]
+    fn define_header_without_a_concrete_provider_stays_unresolved() {
+        let mut graph = DependencyGraph::new();
+        graph.add_define_headers(vec![DefineHeaderDecl {
+            owner: "example-options".to_owned(),
+            file: "example/options.mk".to_owned(),
+            line: 7,
+            output: "${AROS_BUILD_DIR}/example/options.h".to_owned(),
+            definitions: vec!["EXAMPLE 1".to_owned()],
+            dependencies: vec!["${CMAKE_SOURCE_DIR}/example/options.mk".to_owned()],
+            provider: "missing-provider".to_owned(),
+            consumers: Vec::new(),
+        }]);
+
+        let unresolved = graph.resolve_define_headers();
+        assert_eq!(
+            unresolved,
+            ["example/options.mk:7: example-options provider missing-provider has no concrete target"]
+        );
+        assert!(graph.meta_targets.is_empty());
+        assert!(graph.define_headers[0].consumers.is_empty());
     }
 
     #[test]

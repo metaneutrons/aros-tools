@@ -33,6 +33,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .iter()
                 .map(|transform| transform.name.clone()),
         )
+        .chain(
+            graph
+                .define_headers
+                .iter()
+                .map(|header| header.owner.clone()),
+        )
         .chain(graph.fetches.iter().map(|fetch| fetch.name.clone()))
         .collect();
 
@@ -341,6 +347,61 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
 
         writeln!(out, ")").unwrap();
         writeln!(out).unwrap();
+    }
+
+    // A declaration can link a provider whose reproducible lexical sort key
+    // follows the consumer (Atheros' device precedes its HAL, for example).
+    // Resolve those forward references only after every concrete target and
+    // generated link-library product has had a chance to exist.
+    writeln!(out, "aros_finalize_link_libraries()\n").unwrap();
+
+    // Declaration-owned literal define headers. Concrete compile targets have
+    // already been declared, so the helper can attach direct dependencies and
+    // the output directory as a private include path without deferred target
+    // lookup. The owner is a real output target, never a configure-time phony.
+    if !graph.define_headers.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Generated headers from literal define fragments\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut headers: Vec<_> = graph.define_headers.iter().collect();
+        headers.sort_by(|left, right| {
+            left.owner
+                .cmp(&right.owner)
+                .then_with(|| left.file.cmp(&right.file))
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        for header in headers {
+            writeln!(out, "aros_generate_defines_header(").unwrap();
+            writeln!(out, "    OWNER {}", cmake_arg(&header.owner)).unwrap();
+            writeln!(out, "    OUTPUT {}", cmake_arg(&header.output)).unwrap();
+            let definitions: Vec<_> = header
+                .definitions
+                .iter()
+                .map(|definition| cmake_arg(definition))
+                .collect();
+            writeln!(out, "    DEFINES {}", definitions.join(" ")).unwrap();
+            if !header.dependencies.is_empty() {
+                let dependencies: Vec<_> = header
+                    .dependencies
+                    .iter()
+                    .map(|dependency| cmake_arg(dependency))
+                    .collect();
+                writeln!(out, "    DEPENDS {}", dependencies.join(" ")).unwrap();
+            }
+            if !header.consumers.is_empty() {
+                let consumers: Vec<_> = header
+                    .consumers
+                    .iter()
+                    .map(|consumer| cmake_arg(consumer))
+                    .collect();
+                writeln!(out, "    CONSUMERS {}", consumers.join(" ")).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
     }
 
     // Safe hand-written header transforms.  Concrete consumers have already
@@ -982,6 +1043,83 @@ mod tests {
         assert!(cmake.contains("aros_transform_header(\n    NAME \"workbench-libs-z-geninc\""));
         assert!(cmake.contains("    DEPENDS \"zlib-fetch\""));
         assert!(cmake.contains("\"workbench-libs-z-linklib\""));
+    }
+
+    #[test]
+    fn atheros_define_header_is_a_real_owner_after_both_compile_consumers() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let context = crate::TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let mut graph = DependencyGraph::new();
+        for relative in [
+            "workbench/devs/networks/atheros5000/hal/mmakefile.src",
+            "workbench/devs/networks/atheros5000/mmakefile.src",
+        ] {
+            let parsed = crate::parse_mmakefile_with_dirs_and_context(
+                &root.join(relative),
+                &root,
+                &dirs,
+                &context,
+            )
+            .unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+            for rule in parsed.meta_rules {
+                graph.add_meta_rule(rule);
+            }
+            graph.add_define_headers(parsed.define_headers);
+        }
+        assert!(graph.resolve_use_libs().is_empty());
+        assert!(graph.resolve_define_headers().is_empty());
+
+        let cmake = generate_cmake(&graph);
+        let device_at = cmake
+            .find("MMAKE_ID workbench-devs-networks-atheros5000\n")
+            .expect("device declaration");
+        let hal_at = cmake
+            .find("MMAKE_ID workbench-devs-networks-atheros5000-hal\n")
+            .expect("HAL declaration");
+        let header_at = cmake
+            .find("aros_generate_defines_header(\n")
+            .expect("literal define header");
+        let finalize_at = cmake
+            .find("aros_finalize_link_libraries()\n")
+            .expect("deferred link finalizer");
+        assert!(device_at < finalize_at && hal_at < finalize_at);
+        assert!(finalize_at < header_at);
+        assert_eq!(cmake.matches("aros_finalize_link_libraries()").count(), 1);
+        assert_eq!(cmake.matches("aros_generate_defines_header(").count(), 1);
+        let device_end = cmake[device_at..].find("\n)\n").unwrap() + device_at;
+        assert!(cmake[device_at..device_end]
+            .contains("    LIBS \"workbench-devs-networks-atheros5000-hal\""));
+        let header_end = cmake[header_at..].find("\n)\n").unwrap() + header_at;
+        let header = &cmake[header_at..header_end];
+        assert!(header.contains("    OWNER \"workbench-devs-networks-atheros5000-hal-opts\""));
+        assert!(header.contains(
+            "    OUTPUT \"${AROS_BUILD_DIR}/workbench/devs/networks/atheros5000/hal/opt_ah.h\""
+        ));
+        assert!(header.contains(
+            "    DEFINES \"AH_HAS_RF 1\" \"AH_SUPPORT_AR5211 1\" \"AH_SUPPORT_AR5212 1\" \"AH_SUPPORT_AR5416 1\" \"AH_SUPPORT_2316 1\" \"AH_SUPPORT_2317 1\" \"AH_SUPPORT_2133 1\" \"AH_SUPPORT_2413 1\" \"AH_SUPPORT_2417 1\" \"AH_SUPPORT_2425 1\" \"AH_SUPPORT_5111 1\" \"AH_SUPPORT_5112 1\" \"AH_SUPPORT_5413 1\" \"AH_ENABLE_FORCEBIAS 1\""
+        ));
+        assert!(header.contains(
+            "    DEPENDS \"${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/Makefile.inc\" \"${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/mmakefile.src\""
+        ));
+        assert!(header.contains(
+            "    CONSUMERS \"workbench-devs-networks-atheros5000\" \"workbench-devs-networks-atheros5000-hal\""
+        ));
+        assert!(
+            !cmake.contains("add_custom_target(\"workbench-devs-networks-atheros5000-hal-opts\")")
+        );
     }
 
     #[test]

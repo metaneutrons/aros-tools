@@ -52,6 +52,14 @@ pub enum LocalMakeFragmentPolicy {
     /// Callers using this mode must separately account for generated outputs
     /// and recipes required by each declaration which consumes the variables.
     SafeVariableScopes,
+    /// Accept one complete variable scope accompanied by one strictly literal
+    /// generated `#define` header rule.
+    ///
+    /// The only admitted recipe is an unconditional literal overwrite followed
+    /// by conditional literal appends to the same basename. Callers must still
+    /// prove declaration ownership, select every conditional for a concrete
+    /// target profile and materialise the header as a real build output.
+    LiteralDefineHeader,
 }
 
 impl Default for LocalMakeIncludeLimits {
@@ -142,6 +150,8 @@ pub struct IncludedLocalMakeFragment {
     pub has_conditionals: bool,
     /// Whether this is exactly one plain, self-contained list assignment.
     pub plain_source_list: bool,
+    /// Whether the fragment passed the complete literal-define-header grammar.
+    pub literal_define_header: bool,
 }
 
 /// Result of scanning one mmakefile for local source-tree includes.
@@ -270,6 +280,7 @@ struct FragmentSafety {
     assigned_variables: Vec<String>,
     has_conditionals: bool,
     plain_source_list: bool,
+    literal_define_header: bool,
 }
 
 fn expand_text(
@@ -415,7 +426,11 @@ fn expand_one_fragment(
         .strip_prefix(&state.root)
         .unwrap_or(&path)
         .to_path_buf();
-    let safety = validate_fragment(&body, &relative)?;
+    let safety = if state.policy == LocalMakeFragmentPolicy::LiteralDefineHeader {
+        validate_literal_define_header_fragment(&body, &relative)?
+    } else {
+        validate_fragment(&body, &relative)?
+    };
     if state.policy == LocalMakeFragmentPolicy::PlainSourceLists && !safety.plain_source_list {
         return Err(vec![issue(
             included_from,
@@ -441,6 +456,7 @@ fn expand_one_fragment(
         assigned_variables: safety.assigned_variables,
         has_conditionals: safety.has_conditionals,
         plain_source_list: safety.plain_source_list,
+        literal_define_header: safety.literal_define_header,
     });
     fragments.append(&mut nested.fragments);
     nested.fragments = fragments;
@@ -652,10 +668,331 @@ fn validate_fragment(
                 && all_assignments_are_plain_lists,
             assigned_variables: assigned.into_iter().collect(),
             has_conditionals,
+            literal_define_header: false,
         })
     } else {
         Err(issues)
     }
+}
+
+/// Validates the one recipe-bearing local fragment shape which can be
+/// represented without executing Make or a shell.
+///
+/// The complete fragment is checked atomically. Assignments and balanced Make
+/// conditionals may compute the source inventory before the output rule. The
+/// rule itself has no prerequisites and its recipe is exactly one literal
+/// overwrite followed by literal appends to the same header basename. No
+/// assignment or second rule may follow the output rule.
+fn validate_literal_define_header_fragment(
+    content: &str,
+    source: &Path,
+) -> Result<FragmentSafety, Vec<LocalMakeIncludeIssue>> {
+    let mut assigned = BTreeSet::new();
+    let mut conditional_depth = 0usize;
+    let mut has_conditionals = false;
+    let mut rule_seen = false;
+    let mut recipe_count = 0usize;
+    let mut recipe_destination: Option<String> = None;
+    let mut issues = Vec::new();
+
+    for logical in logical_lines(content) {
+        let trimmed = logical.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if logical.recipe {
+            let Some((definition, destination, append)) = literal_define_recipe(trimmed) else {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    trimmed,
+                    "only literal `echo \"#define IDENT VALUE\" >header` recipes are permitted",
+                ));
+                continue;
+            };
+            if !rule_seen {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    trimmed,
+                    "a define recipe must follow its single header output rule",
+                ));
+                continue;
+            }
+            if recipe_count == 0 {
+                if conditional_depth != 0 || append {
+                    issues.push(issue(
+                        source,
+                        logical.line,
+                        LocalMakeIncludeIssueKind::UnsafeSyntax,
+                        trimmed,
+                        "the first define must unconditionally overwrite the output",
+                    ));
+                }
+            } else if !append {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    trimmed,
+                    "every define after the first must append to the output",
+                ));
+            }
+            if let Some(previous) = &recipe_destination {
+                if previous != destination {
+                    issues.push(issue(
+                        source,
+                        logical.line,
+                        LocalMakeIncludeIssueKind::UnsafeSyntax,
+                        trimmed,
+                        "all literal defines must redirect to the same header basename",
+                    ));
+                }
+            } else {
+                recipe_destination = Some(destination.to_owned());
+            }
+            debug_assert!(!definition.is_empty());
+            recipe_count += 1;
+            continue;
+        }
+        if trimmed.starts_with("#MM") {
+            issues.push(issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                trimmed,
+                "MetaMake graph declarations are not permitted in local variable fragments",
+            ));
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let uncommented = strip_make_comment(trimmed).trim();
+        if uncommented.is_empty() {
+            continue;
+        }
+        if let Some(function) = unsafe_make_function(uncommented) {
+            issues.push(issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                format!("the side-effecting Make function `{function}` is not permitted"),
+            ));
+            continue;
+        }
+        if parse_include_directive(uncommented).is_some() {
+            issues.push(issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "a literal define-header fragment may not import another Make scope",
+            ));
+            continue;
+        }
+        if starts_directive(uncommented, "ifeq")
+            || starts_directive(uncommented, "ifneq")
+            || starts_directive(uncommented, "ifdef")
+            || starts_directive(uncommented, "ifndef")
+        {
+            conditional_depth += 1;
+            has_conditionals = true;
+            continue;
+        }
+        if uncommented == "else"
+            || starts_directive(uncommented, "else ifeq")
+            || starts_directive(uncommented, "else ifneq")
+            || starts_directive(uncommented, "else ifdef")
+            || starts_directive(uncommented, "else ifndef")
+        {
+            if conditional_depth == 0 {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    uncommented,
+                    "an else directive has no matching local conditional",
+                ));
+            }
+            continue;
+        }
+        if uncommented == "endif" {
+            if conditional_depth == 0 {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    uncommented,
+                    "an endif directive has no matching local conditional",
+                ));
+            } else {
+                conditional_depth -= 1;
+            }
+            continue;
+        }
+        if let Some((name, _)) = assignment(uncommented) {
+            if rule_seen {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    uncommented,
+                    "assignments after a generated-header rule are not permitted",
+                ));
+            } else {
+                assigned.insert(name.to_owned());
+            }
+            continue;
+        }
+        if let Some(target) = literal_header_rule_target(uncommented) {
+            if rule_seen || conditional_depth != 0 {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    uncommented,
+                    "the fragment must contain one unconditional header output rule",
+                ));
+            } else {
+                debug_assert!(!target.is_empty());
+                rule_seen = true;
+            }
+            continue;
+        }
+
+        issues.push(issue(
+            source,
+            logical.line,
+            LocalMakeIncludeIssueKind::UnsafeSyntax,
+            uncommented,
+            "only assignments, conditionals and one literal define-header rule are permitted",
+        ));
+    }
+
+    if conditional_depth != 0 {
+        issues.push(issue(
+            source,
+            content.lines().count().max(1),
+            LocalMakeIncludeIssueKind::UnsafeSyntax,
+            "conditional",
+            "a local fragment leaves a Make conditional open",
+        ));
+    }
+    if !rule_seen || recipe_count == 0 || assigned.is_empty() {
+        issues.push(issue(
+            source,
+            1,
+            LocalMakeIncludeIssueKind::DeferredScope,
+            source.display().to_string(),
+            "the fragment is not a complete declaration-owned literal define-header scope",
+        ));
+    }
+
+    if issues.is_empty() {
+        Ok(FragmentSafety {
+            assigned_variables: assigned.into_iter().collect(),
+            has_conditionals,
+            plain_source_list: false,
+            literal_define_header: true,
+        })
+    } else {
+        Err(issues)
+    }
+}
+
+/// Returns the rule target only for a single-token rule with no prerequisites.
+fn literal_header_rule_target(line: &str) -> Option<&str> {
+    if line.contains("::") || line.contains('|') || line.contains(';') {
+        return None;
+    }
+    let (target, prerequisites) = line.split_once(':')?;
+    let target = target.trim();
+    if !prerequisites.trim().is_empty()
+        || target.is_empty()
+        || target.chars().any(char::is_whitespace)
+        || target.contains('%')
+        || target.contains('`')
+        || target.contains('\\')
+    {
+        return None;
+    }
+    Some(target)
+}
+
+/// Parses exactly `echo "#define IDENT VALUE" >header` or its append form.
+fn literal_define_recipe(line: &str) -> Option<(&str, &str, bool)> {
+    let quoted = line.strip_prefix("echo \"")?;
+    let close = quoted.rfind('"')?;
+    let definition = quoted[..close].strip_prefix("#define ")?.trim();
+    let redirect = quoted[close + 1..].trim();
+    let (append, destination) = if let Some(destination) = redirect.strip_prefix(">>") {
+        (true, destination.trim())
+    } else {
+        (false, redirect.strip_prefix('>')?.trim())
+    };
+    if redirect
+        .strip_prefix(if append { ">>" } else { ">" })?
+        .trim()
+        != destination
+        || destination.is_empty()
+        || destination == "."
+        || destination == ".."
+        || destination.contains('/')
+        || destination.contains('\\')
+        || Path::new(destination).extension() != Some(std::ffi::OsStr::new("h"))
+        || !destination.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        return None;
+    }
+
+    let mut words = definition.split_whitespace();
+    let name = words.next()?;
+    let value = words.next()?;
+    if name.is_empty()
+        || value.is_empty()
+        || words.next().is_some()
+        || !name.chars().enumerate().all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_alphabetic()
+                || (index > 0 && character.is_ascii_digit())
+        })
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '+'
+                        | '.'
+                        | ','
+                        | ':'
+                        | '/'
+                        | '<'
+                        | '>'
+                        | '='
+                        | '!'
+                        | '&'
+                        | '|'
+                        | '%'
+                        | '*'
+                        | '~'
+                        | '?'
+                        | '@'
+                        | '#'
+                        | '^'
+                        | '('
+                        | ')'
+                        | '-'
+                )
+        })
+    {
+        return None;
+    }
+    Some((definition, destination, append))
 }
 
 struct LogicalLine {

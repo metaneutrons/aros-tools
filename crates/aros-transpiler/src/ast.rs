@@ -167,6 +167,35 @@ pub struct MetaTargetRule {
     pub dependencies: Vec<String>,
 }
 
+/// A generated header whose complete contents are proven literal `#define`
+/// lines from one declaration-owned local Make fragment.
+///
+/// This deliberately does not represent arbitrary Make recipes. The local
+/// fragment validator accepts only one header rule made from a literal
+/// overwrite followed by literal appends, and the parser selects its concrete
+/// conditional branches for the active target profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefineHeaderDecl {
+    /// Real MetaMake target which owns the generated output.
+    pub owner: String,
+    /// Declaring fragment, relative to the source root.
+    pub file: String,
+    /// One-based line of the output rule in `file`.
+    pub line: usize,
+    /// Concrete CMake build-tree output.
+    pub output: String,
+    /// Text following `#define `, in exact output order.
+    pub definitions: Vec<String>,
+    /// Source files which must trigger reconfiguration and regeneration.
+    pub dependencies: Vec<String>,
+    /// Concrete build target whose source declaration owns the fragment.
+    pub provider: String,
+    /// Compile targets requiring the output and its parent include directory.
+    /// The graph fills this after resolving link-library consumers.
+    #[serde(default)]
+    pub consumers: Vec<String>,
+}
+
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
@@ -203,6 +232,8 @@ pub struct ParsedMmakefile {
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe, literal hand-written recipes promoted to real build outputs.
     pub header_transforms: Vec<HeaderTransformDecl>,
+    /// Safe declaration-owned literal `#define` headers.
+    pub define_headers: Vec<DefineHeaderDecl>,
     /// Hand-written `$(GENDIR)` rules producing something other than a header,
     /// for reporting.
     pub generated_file_rules: Vec<String>,

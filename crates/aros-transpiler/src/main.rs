@@ -179,6 +179,7 @@ fn main() -> Result<()> {
         graph.add_copy_includes(parsed.copy_includes);
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
         graph.add_header_transforms(parsed.header_transforms);
+        graph.add_define_headers(parsed.define_headers);
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
         partial_source_lists.extend(parsed.partial_source_lists);
@@ -211,6 +212,7 @@ fn main() -> Result<()> {
     // uselibs names a link library by its libname, which only resolves once
     // every %build_linklib in the tree has been seen.
     let unresolved_libs = graph.resolve_use_libs();
+    let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
     graph.resolve_arch_sources();
@@ -254,6 +256,12 @@ fn main() -> Result<()> {
         "unowned-port-sources.txt",
         unowned_port_sources,
         "port source(s) have no matching %fetch destination owner",
+    );
+    write_report(
+        &args.output,
+        "unresolved-generated-headers.txt",
+        unresolved_generated_headers,
+        "generated literal header(s) have no concrete provider target",
     );
     write_report(
         &args.output,
