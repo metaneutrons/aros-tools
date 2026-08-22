@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 const CURRENT_FORMAT_VERSION: u32 = 1;
 const DEFAULT_PRESET: &str = "rpi4-aarch64-debug";
+const DEFAULT_TOOLCHAIN_PRESET: &str = "rpi-aarch64";
 const DEFAULT_BUILD_TARGET: &str = "rpi-artifacts";
 const DEFAULT_SERIAL_BAUD: u32 = 115_200;
 
@@ -29,6 +30,10 @@ pub struct BoardConfig {
     /// Internally this is the CMake preset used by the shared build path.
     #[serde(default = "default_preset", alias = "target")]
     pub preset: String,
+    /// Locked cross-toolchain profile for this CMake preset. A board-specific
+    /// debug preset can intentionally share the audited `rpi-aarch64` release.
+    #[serde(default = "default_toolchain_preset")]
+    pub toolchain_preset: String,
     /// The CMake target that produces a deployable board bundle.
     #[serde(default = "default_build_target")]
     pub build_target: String,
@@ -322,6 +327,7 @@ impl Board {
             miette::bail!("Board '{}' has serial_baud = 0.", self.name);
         }
         crate::build::validate_preset(&self.config.preset)?;
+        crate::build::validate_preset(&self.config.toolchain_preset)?;
         if self.config.build_target.trim().is_empty() {
             miette::bail!("Board '{}' has an empty build_target.", self.name);
         }
@@ -516,6 +522,10 @@ fn default_preset() -> String {
     DEFAULT_PRESET.to_string()
 }
 
+fn default_toolchain_preset() -> String {
+    DEFAULT_TOOLCHAIN_PRESET.to_string()
+}
+
 fn board_template(board_name: &str) -> String {
     format!(
         r#"# Local AROS Pi lab profile. This file contains host-specific data;
@@ -529,6 +539,7 @@ format_version = 1
 [boards.{board_name}]
 model = "rpi4"
 target = "rpi4-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
 transport = "uboot-usb-ecm"
 artifact_directory = "build/rpi4-aarch64-debug/boot/raspi"
 dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
@@ -794,6 +805,7 @@ mod tests {
 
         let board = load_board(Some(&config), "rpi4").expect("board");
         assert_eq!(board.config.preset, "rpi4-aarch64-debug");
+        assert_eq!(board.config.toolchain_preset, "rpi-aarch64");
         assert_eq!(board.config.build_target, "rpi-artifacts");
         assert_eq!(
             board

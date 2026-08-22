@@ -2,6 +2,10 @@
 
 Board profiles describe a specific lab device: transport, TFTP destination, UART adapter, debugger endpoint, and optional explicitly authorized power control. They are local and must not be added to portable target metadata.
 
+`target` / `preset` names the CMake preset, while `toolchain_preset` names the
+locked AROS cross-toolchain profile. For the Pi 4 debug CMake preset, set
+`toolchain_preset = "rpi-aarch64"`; do not invent a separate lock-profile name.
+
 For USB-ECM, a profile must use a stable USB identity rather than a host network
 name: USB vendor ID, product ID, USB serial, and the expected Pi-side
 CDC-ECM MAC. macOS (`enX`) and Linux (`enx…` or another name) assign the host

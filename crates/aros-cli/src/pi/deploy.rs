@@ -377,6 +377,7 @@ mod tests {
             config: BoardConfig {
                 model: "rpi4".to_string(),
                 preset: "rpi-aarch64".to_string(),
+                toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::NativeTftp,
                 artifact_dir: None,

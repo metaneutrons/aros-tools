@@ -1,6 +1,6 @@
 use super::config::Board;
 use super::console;
-use crate::hosttools;
+use crate::{hosttools, toolchain};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,7 @@ pub fn inspect(board: &Board, repo_root: &Path) -> DoctorReport {
 
     check_command(&mut report, "cmake", "cmake");
     check_command(&mut report, "cargo", "cargo");
+    check_toolchain_profile(&mut report, board);
     check_hosttools(&mut report, repo_root);
     check_artifacts(&mut report, board, repo_root);
     check_dtb(&mut report, board, repo_root);
@@ -125,6 +126,24 @@ fn check_command(report: &mut DoctorReport, label: &str, command: &str) {
     }
 }
 
+fn check_toolchain_profile(report: &mut DoctorReport, board: &Board) {
+    match toolchain::target_profile(&board.config.toolchain_preset) {
+        Ok(profile) => report.push(
+            CheckStatus::Pass,
+            "toolchain profile",
+            format!("{} ({}-{})", profile.name, profile.arch, profile.platform),
+        ),
+        Err(error) => report.push(
+            CheckStatus::Failure,
+            "toolchain profile",
+            format!(
+                "'{}' is not a configured locked target profile: {error}",
+                board.config.toolchain_preset
+            ),
+        ),
+    }
+}
+
 fn check_hosttools(report: &mut DoctorReport, repo_root: &Path) {
     let hosttools = hosttools::check(repo_root);
     if hosttools.is_complete() {
@@ -144,7 +163,7 @@ fn check_hosttools(report: &mut DoctorReport, repo_root: &Path) {
         report.push(
             CheckStatus::Warning,
             "host tools",
-            format!("missing {missing}; `aros build` will build them automatically"),
+            format!("missing {missing}; `aros pi build` will build them automatically"),
         );
     }
 }
@@ -251,6 +270,7 @@ mod tests {
             config: BoardConfig {
                 model: "rpi4".to_string(),
                 preset: "rpi4-aarch64-debug".to_string(),
+                toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::NativeTftp,
                 artifact_dir: None,

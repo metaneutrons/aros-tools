@@ -489,6 +489,7 @@ mod tests {
             config: BoardConfig {
                 model: "rpi4".to_string(),
                 preset: "rpi4-aarch64-debug".to_string(),
+                toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::UbootUsbEcm,
                 artifact_dir: None,

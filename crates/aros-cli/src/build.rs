@@ -12,10 +12,16 @@ static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildOptions {
     pub preset: String,
+    /// The locked AROS cross-toolchain profile. This is intentionally distinct
+    /// from the CMake preset: a board-specific debug preset can share the
+    /// audited `rpi-aarch64` target toolchain.
+    pub toolchain_preset: String,
     pub target: Option<String>,
     pub jobs: Option<usize>,
     pub clean: bool,
     pub verbose: bool,
+    pub offline: bool,
+    pub toolchain_dir: Option<PathBuf>,
     pub cmake_definitions: Vec<CmakeDefinition>,
 }
 
@@ -27,13 +33,30 @@ pub struct CmakeDefinition {
 
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let build_dir = build_dir(repo_root, &options.preset)?;
-    ensure_toolchain(repo_root).await?;
+    let profile = toolchain::target_profile(&options.toolchain_preset)
+        .map_err(|error| miette::miette!("{error}"))?;
+    let resolved = toolchain::resolve_for_build(
+        &options.toolchain_preset,
+        options.toolchain_dir.as_deref(),
+        options.offline,
+    )
+    .await
+    .map_err(|error| miette::miette!("{error}"))?;
     hosttools::ensure(repo_root)?;
 
     println!(
         "{ROCKET} {}Building AROS for target preset [{}]...",
         style("AROS-NG: ").cyan().bold(),
         style(&options.preset).yellow().bold()
+    );
+    println!(
+        "🔧 Cross toolchain: {} ({}, {:?})",
+        resolved.paths.root.display(),
+        resolved
+            .release_id
+            .as_deref()
+            .unwrap_or("local-unversioned"),
+        resolved.source
     );
     let start = Instant::now();
 
@@ -56,10 +79,32 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     );
 
     println!("{HAMMER} Configuring CMake build tree...");
+    let cmake_toolchain = repo_root.join("cmake/toolchains/AROS.cmake");
+    if !cmake_toolchain.is_file() {
+        miette::bail!(
+            "Required CMake toolchain file is missing: {}",
+            cmake_toolchain.display()
+        );
+    }
     let mut configure = Command::new("cmake");
     configure
         .current_dir(repo_root)
         .args(["--preset", &options.preset]);
+    configure.arg(format!(
+        "-DCMAKE_TOOLCHAIN_FILE={}",
+        cmake_toolchain.display()
+    ));
+    configure.arg(format!(
+        "-DAROS_CROSS_TOOLCHAIN_ROOT={}",
+        resolved.paths.root.display()
+    ));
+    configure.arg(format!("-DAROS_TARGET_CPU={}", profile.arch));
+    configure.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));
+    configure.arg(format!("-DAROS_TARGET_PROFILE={}", profile.name));
+    configure.arg(format!("-DAROS_TARGET_TRIPLE={}", resolved.target_triple));
+    if let Some(float_abi) = &profile.float_abi {
+        configure.arg(format!("-DGCC_CONFIG_FLOAT_ABI={float_abi}"));
+    }
     for definition in &options.cmake_definitions {
         validate_cmake_definition(definition)?;
         configure.arg(format!("-D{}={}", definition.key, definition.value));
@@ -92,17 +137,6 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         style("SUCCESS: ").green().bold(),
         start.elapsed()
     );
-    Ok(())
-}
-
-pub async fn ensure_toolchain(repo_root: &Path) -> Result<()> {
-    let paths = toolchain::get_toolchain_paths(&toolchain::default_toolchain_dir());
-    if !toolchain::is_toolchain_installed(&paths) && which::which("clang").is_err() {
-        println!("ℹ️ Hermetic toolchain not found. Initializing automatic setup...");
-        toolchain::setup_toolchain_at(&repo_root.join("aros-targets.toml"), false)
-            .await
-            .map_err(|error| miette::miette!("{error}"))?;
-    }
     Ok(())
 }
 

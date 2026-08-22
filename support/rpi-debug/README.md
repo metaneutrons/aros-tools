@@ -65,6 +65,12 @@ It creates parent directories when needed but refuses to overwrite or merge an
 existing file, so comments and local choices cannot be lost. Replace every
 `REPLACE_ME` value before using the profile.
 
+The board's `target` / `preset` selects its CMake configuration. Its
+`toolchain_preset` independently selects the locked cross-toolchain profile;
+the Pi 4 debug preset deliberately uses `rpi-aarch64`. This keeps
+board-specific CMake settings separate from the portable, audited toolchain
+identity.
+
 ## Boot contracts
 
 ### Native Ethernet TFTP

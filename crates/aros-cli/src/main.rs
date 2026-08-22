@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use console::{style, Emoji};
 use miette::Result;
 use std::path::PathBuf;
@@ -6,7 +6,11 @@ use std::process::Command;
 use std::time::Instant;
 
 mod artifact;
+mod build;
 mod host_tools;
+mod hosttools;
+mod pi;
+mod repo;
 mod toolchain;
 
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
@@ -58,10 +62,22 @@ enum Commands {
         command: HostToolsCommands,
     },
 
+    /// Build or inspect the local Rust helpers consumed by CMake
+    Hosttools {
+        #[command(subcommand)]
+        command: HosttoolsCommand,
+    },
+
     /// Manage deterministic AROS cross-toolchain releases
     Toolchain {
         #[command(subcommand)]
         command: ToolchainCommands,
+    },
+
+    /// Manage a locally configured Raspberry Pi development board
+    Pi {
+        #[command(subcommand)]
+        command: PiCommand,
     },
 
     /// Build AROS for a specific target preset (pc-x86_64, rpi-aarch64, arm-raspi)
@@ -185,10 +201,233 @@ enum ToolchainCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum HosttoolsCommand {
+    /// Build the CMake configure-time Rust helpers in tools/aros-tools/target/release
+    Build,
+    /// Verify that all mandatory CMake configure-time Rust helpers are ready
+    Check,
+}
+
+#[derive(Subcommand)]
+enum PiCommand {
+    /// Print or explicitly create a new local USB-ECM board-profile template
+    Init {
+        /// Local profile name to create
+        #[arg(long)]
+        board: String,
+
+        /// Board configuration file; defaults to ~/.config/aros/boards.toml
+        #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
+        config: Option<PathBuf>,
+
+        /// Create the new file. Without this flag the template is only shown.
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Find USB CDC-ECM adapters that can be paired with an AROS Pi board
+    Scan,
+
+    /// Check a local board profile and its non-mutating prerequisites
+    Doctor(BoardSelection),
+
+    /// Build using the board profile's CMake preset and locked toolchain profile
+    Build {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Optional specific CMake target to build
+        #[arg(short, long)]
+        target: Option<String>,
+
+        /// Number of parallel build jobs
+        #[arg(short, long)]
+        jobs: Option<usize>,
+
+        /// Clean the board preset's build directory first
+        #[arg(long)]
+        clean: bool,
+
+        /// Enable verbose CMake configure logs
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Never access the network; use only a verified installed/cached toolchain
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+
+        /// Use an existing AROS-built cross-toolchain prefix
+        #[arg(long)]
+        toolchain_dir: Option<PathBuf>,
+
+        /// Override the board profile's pinned Raspberry Pi 4 DTB for this build
+        #[arg(long, value_name = "PATH")]
+        dtb_path: Option<PathBuf>,
+
+        /// Override the board profile's legacy Raspberry Pi 4 core KOBJ directory
+        #[arg(long, value_name = "DIR")]
+        core_kobj_dir: Option<PathBuf>,
+    },
+
+    /// Stage the built boot bundle into a local TFTP root (dry-run by default)
+    Deploy {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Override the artifact directory for this deployment
+        #[arg(long, value_name = "DIR")]
+        artifact_dir: Option<PathBuf>,
+
+        /// Publish the staged bundle. Without this flag deploy is a dry run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Explicitly request dry-run output (the default unless --apply is given)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Run restricted DHCP and read-only TFTP for one verified board profile
+    Serve {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Resolve identity, address and deployment without opening sockets
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Create a verified SD-card image from an external, pinned boot bundle
+    Sd {
+        #[command(subcommand)]
+        command: SdCommand,
+    },
+
+    /// Open an external serial terminal for the board; no UART driver is embedded
+    Console {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Serial terminal implementation to invoke
+        #[arg(long, value_enum, default_value_t = pi::console::ConsoleProgram::Auto)]
+        program: pi::console::ConsoleProgram,
+
+        /// Override the configured serial device for this invocation
+        #[arg(long, value_name = "PATH")]
+        device: Option<PathBuf>,
+
+        /// Override the configured serial baud rate for this invocation
+        #[arg(long)]
+        baud: Option<u32>,
+
+        /// Print the external terminal command without starting it
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SdCommand {
+    /// Validate an external boot bundle and create a raw MBR/FAT32 image
+    Image {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Directory containing boot-bundle.toml and all hash-pinned inputs
+        #[arg(long, value_name = "DIR")]
+        boot_bundle: PathBuf,
+
+        /// New output artifact directory; an existing directory is refused
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+
+        /// Create the image after validation. Without this flag it is a dry run.
+        #[arg(long)]
+        apply: bool,
+
+        /// Explicitly request dry-run output (the default unless --apply is given)
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List only safe, unmounted removable SD-card targets
+    Scan {
+        /// Optionally verify an image artifact and print its write token for each target
+        #[arg(long, value_name = "DIR")]
+        artifact: Option<PathBuf>,
+    },
+
+    /// List or explicitly unmount one mounted removable whole-disk target
+    Unmount {
+        /// Opaque whole-disk ID printed by this command; raw device paths are rejected
+        #[arg(long, value_name = "SCAN_ID", value_parser = parse_opaque_scan_id)]
+        device: Option<String>,
+
+        /// Unmount the explicitly selected disk; without this flag only show a preview
+        #[arg(long, requires = "device", conflicts_with = "dry_run")]
+        apply: bool,
+
+        /// Explicitly request non-mutating preview output
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Write one verified SD image after an explicit disk/token confirmation
+    Write {
+        #[command(flatten)]
+        board: BoardSelection,
+
+        /// Directory created by `aros pi sd image --apply`
+        #[arg(long, value_name = "DIR")]
+        artifact: PathBuf,
+
+        /// Opaque whole-disk ID printed by `aros pi sd scan`
+        #[arg(long, value_name = "SCAN_ID", value_parser = parse_opaque_scan_id)]
+        device: String,
+
+        /// Exact token printed by `aros pi sd scan --artifact ...`; without it this is a preview
+        #[arg(long, value_name = "TOKEN")]
+        confirm: Option<String>,
+
+        /// Validate the selected disk and token plan without writing it
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
+    if value.is_empty() || value.trim() != value || value.contains('/') || value.contains('\\') {
+        return Err(
+            "expected an opaque scan ID printed by the corresponding `aros pi sd` scan command, not a device path"
+                .to_string(),
+        );
+    }
+    Ok(value.to_string())
+}
+
+#[derive(Args, Clone)]
+struct BoardSelection {
+    /// Local board profile name from ~/.config/aros/boards.toml
+    #[arg(long)]
+    board: String,
+
+    /// Board configuration file; overrides AROS_BOARDS_FILE and the default path
+    #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
+    config: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let repo_root = repo::find_root()?;
+    std::env::set_current_dir(&repo_root).map_err(|error| {
+        miette::miette!(
+            "Could not enter AROS-NG checkout '{}': {error}",
+            repo_root.display()
+        )
+    })?;
 
     match cli.command {
         Commands::Setup {
@@ -232,6 +471,15 @@ async fn main() -> Result<()> {
             }
         },
 
+        Commands::Hosttools { command } => match command {
+            HosttoolsCommand::Build => {
+                hosttools::build(&repo_root)?;
+            }
+            HosttoolsCommand::Check => {
+                hosttools::print_check(&repo_root)?;
+            }
+        },
+
         Commands::Toolchain { command } => match command {
             ToolchainCommands::Install {
                 preset,
@@ -254,6 +502,115 @@ async fn main() -> Result<()> {
                 let resolved = toolchain::path(&preset, local.as_deref())
                     .map_err(|error| miette::miette!("{error}"))?;
                 println!("{}", resolved.paths.root.display());
+            }
+        },
+
+        Commands::Pi { command } => match command {
+            PiCommand::Init {
+                board,
+                config,
+                apply,
+            } => {
+                pi::config::initialize_template(config.as_deref(), &board, apply)?;
+            }
+            PiCommand::Scan => {
+                pi::scan()?;
+            }
+            PiCommand::Doctor(board) => {
+                let board = load_board(&board)?;
+                pi::doctor(&board, &repo_root)?;
+            }
+            PiCommand::Build {
+                board,
+                target,
+                jobs,
+                clean,
+                verbose,
+                offline,
+                toolchain_dir,
+                dtb_path,
+                core_kobj_dir,
+            } => {
+                let board = load_board(&board)?;
+                pi::build(
+                    &board,
+                    &repo_root,
+                    build::BuildOptions {
+                        preset: board.config.preset.clone(),
+                        toolchain_preset: board.config.toolchain_preset.clone(),
+                        target: target.or_else(|| Some(board.config.build_target.clone())),
+                        jobs,
+                        clean,
+                        verbose,
+                        offline,
+                        toolchain_dir,
+                        cmake_definitions: Vec::new(),
+                    },
+                    dtb_path.as_deref(),
+                    core_kobj_dir.as_deref(),
+                )
+                .await?;
+            }
+            PiCommand::Deploy {
+                board,
+                artifact_dir,
+                apply,
+                dry_run,
+            } => {
+                if apply && dry_run {
+                    miette::bail!("--apply and --dry-run cannot be used together.");
+                }
+                let board = load_board(&board)?;
+                pi::deploy(&board, &repo_root, artifact_dir.as_deref(), apply)?;
+            }
+            PiCommand::Serve { board, dry_run } => {
+                let board = load_board(&board)?;
+                pi::serve::run(&board, dry_run).await?;
+            }
+            PiCommand::Sd { command } => match command {
+                SdCommand::Image {
+                    board,
+                    boot_bundle,
+                    output,
+                    apply,
+                    dry_run,
+                } => {
+                    if apply && dry_run {
+                        miette::bail!("--apply and --dry-run cannot be used together.");
+                    }
+                    let board = load_board(&board)?;
+                    pi::create_sd_image(&board, &boot_bundle, &output, apply)?;
+                }
+                SdCommand::Scan { artifact } => {
+                    pi::scan_sd_disks(artifact.as_deref())?;
+                }
+                SdCommand::Unmount {
+                    device,
+                    apply,
+                    dry_run,
+                } => {
+                    pi::unmount_sd_disk(device.as_deref(), apply, dry_run)?;
+                }
+                SdCommand::Write {
+                    board,
+                    artifact,
+                    device,
+                    confirm,
+                    dry_run,
+                } => {
+                    let board = load_board(&board)?;
+                    pi::write_sd_image(&board, &artifact, &device, confirm.as_deref(), dry_run)?;
+                }
+            },
+            PiCommand::Console {
+                board,
+                program,
+                device,
+                baud,
+                dry_run,
+            } => {
+                let board = load_board(&board)?;
+                pi::console(&board, program, device, baud, dry_run)?;
             }
         },
 
@@ -556,4 +913,8 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_board(selection: &BoardSelection) -> Result<pi::config::Board> {
+    pi::load_board(selection.config.as_deref(), &selection.board)
 }
