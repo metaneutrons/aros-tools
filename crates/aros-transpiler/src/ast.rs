@@ -203,10 +203,59 @@ pub struct DefineHeaderDecl {
     pub consumers: Vec<String>,
 }
 
+/// One strictly capability-checked third-party CMake build.
+///
+/// `%build_with_cmake` is intentionally not represented as an open-ended bag
+/// of legacy macro arguments. Cross-building and installing an upstream CMake
+/// project is safe only after its source provenance, products and public
+/// interface are known. Each admitted declaration therefore carries the
+/// complete contract consumed by `aros_build_external_cmake`; declarations
+/// outside the supported capability profiles remain reported as skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalCMakeDecl {
+    /// MetaMake workflow identity used by #MM dependencies.
+    pub mmake_name: String,
+    /// Configured upstream source tree.
+    pub source_dir: String,
+    /// Private out-of-source build directory.
+    pub binary_dir: String,
+    /// Prefix passed to the upstream install step.
+    pub install_prefix: String,
+    /// Proven `%fetch` target which materialises `source_dir`.
+    pub fetch_target: String,
+    /// Exact archive whose digest is checked before configuration.
+    pub source_archive: String,
+    pub source_sha256: String,
+    /// Legacy `uselibs=` spelling published by this build.
+    pub provided_library: String,
+    /// Linkable interface target created by the external-build helper. This is
+    /// deliberately distinct from `mmake_name`, which remains the utility/meta
+    /// endpoint used to request the configure/build/install workflow.
+    pub provider_target: String,
+    /// Installed static/shared library products used to make the build
+    /// incremental and to define the imported CMake target.
+    pub library_products: Vec<String>,
+    /// Installed public headers. Listing them explicitly lets Ninja detect an
+    /// incomplete install rather than accepting the library alone as success.
+    pub header_products: Vec<String>,
+    /// Other deterministic install products, such as package metadata. They
+    /// participate in collision, existence and incremental-repair checks but
+    /// are not exposed as include roots or link items.
+    pub auxiliary_products: Vec<String>,
+    /// Installed include roots propagated to consumers.
+    pub public_include_dirs: Vec<String>,
+    /// Fully selected, allowlisted upstream CMake options.
+    pub options: Vec<String>,
+    /// Source-root-relative directory of the declaring mmakefile.
+    pub dir_path: PathBuf,
+}
+
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
     pub targets: Vec<TargetDefinition>,
+    /// Strictly modelled `%build_with_cmake` declarations.
+    pub external_cmake: Vec<ExternalCMakeDecl>,
     pub meta_rules: Vec<MetaTargetRule>,
     /// `%build_icons` target identities, including declarations whose inputs
     /// could not be resolved. Keeping the identity makes the gap visible and

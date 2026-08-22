@@ -1,7 +1,7 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
-    DefineHeaderDecl, GenmoduleLinklibs, MetaTargetRule, ModuleType, ParsedMmakefile,
-    TargetDefinition,
+    DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs, MetaTargetRule, ModuleType,
+    ParsedMmakefile, TargetDefinition,
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
@@ -708,6 +708,7 @@ fn join_mm_continuations(content: &str) -> String {
 /// line of the continuation-joined file it stands on.
 ///
 /// The line is what makes positional variable lookup possible; see `VarScope`.
+#[derive(Clone, Debug)]
 struct Invocation {
     name: String,
     args: String,
@@ -1601,6 +1602,7 @@ fn is_concrete_build_invocation(name: &str) -> bool {
             | "build_progs"
             | "build_linklib"
             | "build_module_simple"
+            | "build_with_cmake"
     )
 }
 
@@ -1672,6 +1674,257 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
         }
         from = hit + 1;
     }
+}
+
+/// Returns the top-level keyword names in one macro invocation.
+///
+/// Values may contain quoted whitespace or nested Make functions. Neither may
+/// manufacture another macro argument: only an identifier beginning at a
+/// top-level word boundary and followed immediately by `=` is retained.
+fn macro_argument_names(args: &str) -> Vec<String> {
+    let bytes = args.as_bytes();
+    let mut names = Vec::new();
+    let mut cursor = 0usize;
+    let mut quote = None;
+    let mut make_depth = 0usize;
+    let mut word_boundary = true;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+            cursor += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            word_boundary = false;
+            cursor += 1;
+            continue;
+        }
+        if byte == b'$' && bytes.get(cursor + 1) == Some(&b'(') {
+            make_depth += 1;
+            word_boundary = false;
+            cursor += 2;
+            continue;
+        }
+        if byte == b')' && make_depth > 0 {
+            make_depth -= 1;
+            cursor += 1;
+            continue;
+        }
+        if make_depth == 0 && byte.is_ascii_whitespace() {
+            word_boundary = true;
+            cursor += 1;
+            continue;
+        }
+        if make_depth == 0 && word_boundary && (byte.is_ascii_alphabetic() || byte == b'_') {
+            let start = cursor;
+            cursor += 1;
+            while bytes
+                .get(cursor)
+                .is_some_and(|candidate| candidate.is_ascii_alphanumeric() || *candidate == b'_')
+            {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'=') {
+                names.push(args[start..cursor].to_owned());
+            }
+            word_boundary = false;
+            continue;
+        }
+        word_boundary = false;
+        cursor += 1;
+    }
+    names
+}
+
+/// Parses the first deliberately narrow `%build_with_cmake` capability.
+///
+/// Generic external-project passthrough would let a newly added host compiler,
+/// source tree or install prefix silently execute in target builds. CUnit is
+/// admitted only after the complete declaration and its owning fetch match the
+/// audited 3.5.5 profile. Both examples and upstream self-tests must remain
+/// disabled: neither is an installed product and either would broaden the
+/// cross-build capability beyond the declared library contract.
+fn parse_external_cmake_invocation(
+    invocation: &Invocation,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    relative_dir: &Path,
+    fetches: &[FetchDecl],
+) -> std::result::Result<ExternalCMakeDecl, String> {
+    const CUNIT_MMAKE: &str = "linklibs-yes-cunit";
+    const CUNIT_SOURCE: &str = "${AROS_PORTS_DIR}/cunit/cunit-3.5.5";
+    const CUNIT_PREFIX: &str = "${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras";
+    const CUNIT_FETCH: &str = "cunit-fetch";
+    const CUNIT_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/cunit-3.5.5.tar.bz2";
+    const CUNIT_SHA256: &str = "a0a49b37c731303168481f387bb551b8381422d1b447d32f9e558293ceea9a10";
+    const DECLARED_OPTIONS: &[&str] = &[
+        "-DCUNIT_DISABLE_EXAMPLES=yes",
+        "-DCUNIT_DISABLE_TESTS=yes",
+        "-DCMAKE_BUILD_TYPE=DEBUG",
+        "-Wno-error=dev",
+    ];
+
+    let context = MakeExprContext::new(scope, dirs, invocation.line, root, relative_dir);
+    let mmake_raw = macro_arg(&invocation.args, "mmake")
+        .ok_or_else(|| "missing required mmake= argument".to_owned())?;
+    let mmake = evaluate_name(&mmake_raw, &context)
+        .map_err(|reason| format!("mmake={mmake_raw} is unresolved: {reason}"))?;
+    if relative_dir != Path::new("compiler/cunit") || mmake != CUNIT_MMAKE {
+        return Err(format!(
+            "unsupported external-CMake capability (only compiler/cunit mmake={CUNIT_MMAKE} is modelled)"
+        ));
+    }
+
+    let argument_names = macro_argument_names(&invocation.args);
+    let mut unique_names = argument_names.clone();
+    unique_names.sort();
+    unique_names.dedup();
+    if unique_names.len() != argument_names.len() {
+        return Err("duplicate macro argument".to_owned());
+    }
+    let mut expected_names = vec!["extraoptions", "mmake", "prefix", "srcdir"];
+    expected_names.sort_unstable();
+    if unique_names != expected_names {
+        return Err(format!(
+            "argument set [{}] does not match audited CUnit capability [{}]",
+            unique_names.join(", "),
+            expected_names.join(", ")
+        ));
+    }
+
+    let evaluate_path = |key: &str| -> std::result::Result<String, String> {
+        let raw = macro_arg(&invocation.args, key)
+            .ok_or_else(|| format!("missing required {key}= argument"))?;
+        let value = evaluate_make_expr(&raw, &context)
+            .map_err(|reason| format!("{key}={raw} cannot be evaluated: {reason}"))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("{key}={raw} expanded to an empty value"));
+        }
+        Ok(value.to_owned())
+    };
+    let source_dir = evaluate_path("srcdir")?;
+    if source_dir != CUNIT_SOURCE {
+        return Err(format!(
+            "srcdir resolves to {source_dir}, expected {CUNIT_SOURCE}"
+        ));
+    }
+    let install_prefix = evaluate_path("prefix")?;
+    if install_prefix != CUNIT_PREFIX {
+        return Err(format!(
+            "prefix resolves to {install_prefix}, expected {CUNIT_PREFIX}"
+        ));
+    }
+
+    let options_raw = macro_arg(&invocation.args, "extraoptions")
+        .ok_or_else(|| "missing required extraoptions= argument".to_owned())?;
+    let options = evaluate_make_list(&options_raw, &context)
+        .map_err(|reason| format!("extraoptions={options_raw} cannot be evaluated: {reason}"))?;
+    if options != DECLARED_OPTIONS {
+        return Err(format!(
+            "extraoptions resolve to [{}], expected [{}]",
+            options.join(" "),
+            DECLARED_OPTIONS.join(" ")
+        ));
+    }
+
+    let matching_fetches: Vec<_> = fetches
+        .iter()
+        .filter(|fetch| fetch.name == CUNIT_FETCH)
+        .collect();
+    let [fetch] = matching_fetches.as_slice() else {
+        return Err(format!(
+            "requires exactly one %fetch mmake={CUNIT_FETCH} declaration, found {}",
+            matching_fetches.len()
+        ));
+    };
+    for (field, actual, expected) in [
+        ("archive", fetch.archive.as_str(), "cunit-3.5.5"),
+        ("suffixes", fetch.suffixes.as_str(), "tar.bz2"),
+        (
+            "location",
+            fetch.location.as_str(),
+            "${AROS_PORTS_SOURCE_DIR}",
+        ),
+        (
+            "destination",
+            fetch.destination.as_str(),
+            "${AROS_PORTS_DIR}/cunit",
+        ),
+        (
+            "patches_specs",
+            fetch.patches.as_str(),
+            "cunit-3.5.5-aros.diff:cunit-3.5.5:-f,-p1",
+        ),
+        (
+            "patches_origins",
+            fetch.patch_origins.as_str(),
+            "${CMAKE_SOURCE_DIR}/compiler/cunit",
+        ),
+        ("base", fetch.base.as_str(), ""),
+        ("declaring directory", fetch.dir.as_str(), "compiler/cunit"),
+    ] {
+        if actual != expected {
+            return Err(format!(
+                "%{CUNIT_FETCH} {field} is {actual}, expected {expected}"
+            ));
+        }
+    }
+
+    Ok(ExternalCMakeDecl {
+        mmake_name: mmake,
+        source_dir,
+        binary_dir: "${AROS_BUILD_DIR}/gen/external-cmake/compiler/cunit".to_owned(),
+        install_prefix: install_prefix.clone(),
+        fetch_target: CUNIT_FETCH.to_owned(),
+        source_archive: CUNIT_ARCHIVE.to_owned(),
+        source_sha256: CUNIT_SHA256.to_owned(),
+        provided_library: "cunit".to_owned(),
+        provider_target: "linklibs-yes-cunit-external-cunit".to_owned(),
+        library_products: vec![format!("{install_prefix}/lib/libcunit.a")],
+        header_products: [
+            "Automated.h",
+            "AutomatedJUnitXml.h",
+            "Basic.h",
+            "CUAssert.h",
+            "CUCurses.h",
+            "CUError.h",
+            "CUnit.h",
+            "CUnitCI.h",
+            "CUnitCITypes.h",
+            "CUnit_intl.h",
+            "Console.h",
+            "MessageHandlers.h",
+            "MyMem.h",
+            "Simple.h",
+            "TestDB.h",
+            "TestFixture.h",
+            "TestRun.h",
+            "Util.h",
+            "wxWidget.h",
+        ]
+        .into_iter()
+        .map(|header| format!("{install_prefix}/include/CUnit/{header}"))
+        .collect(),
+        // CUnit also installs build-system source files and CMake package
+        // metadata, but no AROS target consumes them. Only public, repaired
+        // capability products belong in this contract.
+        auxiliary_products: Vec::new(),
+        public_include_dirs: vec![format!("{install_prefix}/include")],
+        options: vec![
+            "-DCUNIT_DISABLE_EXAMPLES=yes".to_owned(),
+            "-DCUNIT_DISABLE_TESTS=yes".to_owned(),
+            "-DCMAKE_BUILD_TYPE=DEBUG".to_owned(),
+            "-Wno-error=dev".to_owned(),
+        ],
+        dir_path: relative_dir.to_path_buf(),
+    })
 }
 
 /// Whether a full library intentionally delegates all of its sources to
@@ -3463,6 +3716,24 @@ fn parse_mmakefile_impl(
         &rel_dir,
         &mut skipped_programs,
     );
+    let mut external_cmake = Vec::new();
+    for invocation in invocations
+        .iter()
+        .filter(|invocation| invocation.name == "build_with_cmake")
+    {
+        match parse_external_cmake_invocation(invocation, &scope, dirs, root, &rel_dir, &fetches) {
+            Ok(declaration) => external_cmake.push(declaration),
+            Err(reason) => {
+                let mmake = macro_arg(&invocation.args, "mmake")
+                    .map_or_else(String::new, |name| format!(" mmake={name}"));
+                skipped_programs.push(format!(
+                    "{}:{}: %build_with_cmake{mmake} skipped: {reason}",
+                    rel_dir.display(),
+                    invocation.line + 1
+                ));
+            }
+        }
+    }
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
@@ -4225,6 +4496,7 @@ fn parse_mmakefile_impl(
 
     Ok(ParsedMmakefile {
         targets,
+        external_cmake,
         meta_rules,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
@@ -4261,9 +4533,10 @@ mod tests {
     use super::{
         collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
         implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
-        join_mm_continuations, macro_arg, macro_invocations, render_meta_token,
-        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
-        select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
+        join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
+        parse_external_cmake_invocation, render_meta_token, resolve_module_suffix,
+        resolve_module_target_dir, sanitize_ident, select_target_invocations, MakeExprContext,
+        TargetContext, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
@@ -4569,6 +4842,188 @@ mod tests {
             assert_eq!(skipped.len(), 1, "{skipped:#?}");
             assert!(skipped[0].contains("mmake=unknown"), "{skipped:#?}");
         }
+    }
+
+    #[test]
+    fn target_context_selects_external_cmake_invocations() {
+        let joined = join_continuations(
+            "ifeq ($(AROS_TARGET_CPU),x86_64)\n\
+             %build_with_cmake mmake=cmake-x86 srcdir=x prefix=x extraoptions=x\n\
+             endif\n\
+             ifeq ($(AROS_TARGET_CPU),arm)\n\
+             %build_with_cmake mmake=cmake-arm srcdir=x prefix=x extraoptions=x\n\
+             endif\n\
+             ifeq ($(UNKNOWN_EXTERNAL_SWITCH),yes)\n\
+             %build_with_cmake mmake=cmake-unknown srcdir=x prefix=x extraoptions=x\n\
+             endif\n",
+        );
+
+        for (context, expected) in [
+            (target_context("x86_64", "pc", ""), "cmake-x86"),
+            (target_context("arm", "raspi", "hard"), "cmake-arm"),
+        ] {
+            let (_, states) = collect_vars_impl(&joined, Some(&context));
+            let mut skipped = Vec::new();
+            let invocations = select_target_invocations(
+                &joined,
+                Some(&states),
+                Path::new("fixture"),
+                &mut skipped,
+            );
+            let selected: Vec<_> = invocations
+                .iter()
+                .filter(|invocation| invocation.name == "build_with_cmake")
+                .filter_map(|invocation| macro_arg(&invocation.args, "mmake"))
+                .collect();
+            assert_eq!(selected, [expected]);
+            assert_eq!(skipped.len(), 1, "{skipped:#?}");
+            assert!(
+                skipped[0].contains("%build_with_cmake mmake=cmake-unknown"),
+                "{skipped:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_argument_scanner_ignores_nested_and_quoted_assignments() {
+        assert_eq!(
+            macro_argument_names(
+                "mmake=x extraoptions=\"-DFOO=yes INNER=not-an-argument\" \
+                 srcdir=$(if $(COND),A=B,C=D) prefix=x"
+            ),
+            ["mmake", "extraoptions", "srcdir", "prefix"]
+        );
+    }
+
+    fn parsed_cunit_capability() -> (
+        super::Invocation,
+        super::VarScope,
+        Vec<crate::fetch::FetchDecl>,
+    ) {
+        let root = root();
+        let relative_dir = Path::new("compiler/cunit");
+        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
+        let joined = join_continuations(&content);
+        let profile = target_context("x86_64", "pc", "");
+        let (scope, states) = collect_vars_impl(&joined, Some(&profile));
+        let mut skipped = Vec::new();
+        let invocation =
+            select_target_invocations(&joined, Some(&states), relative_dir, &mut skipped)
+                .into_iter()
+                .find(|invocation| invocation.name == "build_with_cmake")
+                .unwrap();
+        assert!(skipped.is_empty(), "{skipped:#?}");
+        let (fetches, skipped_fetches) =
+            crate::fetch::collect_fetches_with_scope(&content, relative_dir, &scope);
+        assert!(skipped_fetches.is_empty(), "{skipped_fetches:#?}");
+        (invocation, scope, fetches)
+    }
+
+    #[test]
+    fn cunit_external_cmake_capability_is_complete_and_exact() {
+        let root = root();
+        let relative_dir = Path::new("compiler/cunit");
+        let (invocation, scope, fetches) = parsed_cunit_capability();
+        let declaration = parse_external_cmake_invocation(
+            &invocation,
+            &scope,
+            &dirs(),
+            &root,
+            relative_dir,
+            &fetches,
+        )
+        .unwrap();
+
+        assert_eq!(declaration.mmake_name, "linklibs-yes-cunit");
+        assert_eq!(
+            declaration.source_dir,
+            "${AROS_PORTS_DIR}/cunit/cunit-3.5.5"
+        );
+        assert_eq!(
+            declaration.install_prefix,
+            "${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras"
+        );
+        assert_eq!(declaration.fetch_target, "cunit-fetch");
+        assert_eq!(declaration.provided_library, "cunit");
+        assert_eq!(
+            declaration.provider_target,
+            "linklibs-yes-cunit-external-cunit"
+        );
+        assert_eq!(
+            declaration.library_products,
+            ["${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras/lib/libcunit.a"]
+        );
+        assert_eq!(
+            declaration.public_include_dirs,
+            ["${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras/include"]
+        );
+        assert_eq!(declaration.header_products.len(), 19);
+        assert!(declaration.auxiliary_products.is_empty());
+        assert_eq!(
+            declaration.header_products.first().map(String::as_str),
+            Some("${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras/include/CUnit/Automated.h")
+        );
+        assert_eq!(
+            declaration.header_products.last().map(String::as_str),
+            Some("${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras/include/CUnit/wxWidget.h")
+        );
+        assert_eq!(
+            declaration.options,
+            [
+                "-DCUNIT_DISABLE_EXAMPLES=yes",
+                "-DCUNIT_DISABLE_TESTS=yes",
+                "-DCMAKE_BUILD_TYPE=DEBUG",
+                "-Wno-error=dev",
+            ]
+        );
+    }
+
+    #[test]
+    fn cunit_external_cmake_capability_rejects_any_contract_drift() {
+        let root = root();
+        let relative_dir = Path::new("compiler/cunit");
+        let (invocation, scope, fetches) = parsed_cunit_capability();
+        let parse = |invocation: &super::Invocation, fetches: &[crate::fetch::FetchDecl]| {
+            parse_external_cmake_invocation(
+                invocation,
+                &scope,
+                &dirs(),
+                &root,
+                relative_dir,
+                fetches,
+            )
+            .unwrap_err()
+        };
+
+        let mut changed = invocation.clone();
+        changed.args = changed.args.replace(
+            "srcdir=$(PORTSDIR)/cunit/$(ARCHBASE)",
+            "srcdir=$(AROS_DEVELOPER)",
+        );
+        assert!(parse(&changed, &fetches).contains("srcdir resolves to"));
+
+        let mut changed = invocation.clone();
+        changed.args = changed
+            .args
+            .replace("prefix=$(AROS_CONTRIB_SDK)", "prefix=$(AROS_DEVELOPER)");
+        assert!(parse(&changed, &fetches).contains("prefix resolves to"));
+
+        let mut changed = invocation.clone();
+        changed.args = changed.args.replace(
+            "extraoptions=$(CUNIT_CMAKE_FLAGS)",
+            "extraoptions=-DUNAUDITED=yes",
+        );
+        assert!(parse(&changed, &fetches).contains("extraoptions resolve to"));
+
+        let mut changed = invocation.clone();
+        changed.args.push_str(" compiler=host");
+        assert!(parse(&changed, &fetches).contains("argument set"));
+
+        let mut changed_fetches = fetches;
+        changed_fetches[0].archive = "cunit-unreviewed".to_owned();
+        assert!(parse(&invocation, &changed_fetches).contains("archive is"));
+
+        assert!(parse(&invocation, &[]).contains("exactly one"));
     }
 
     #[test]

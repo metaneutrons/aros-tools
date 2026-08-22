@@ -40,6 +40,18 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .map(|header| header.owner.clone()),
         )
         .chain(graph.fetches.iter().map(|fetch| fetch.name.clone()))
+        .chain(
+            graph
+                .external_cmake
+                .iter()
+                .map(|declaration| declaration.mmake_name.clone()),
+        )
+        .chain(
+            graph
+                .external_cmake
+                .iter()
+                .map(|declaration| declaration.provider_target.clone()),
+        )
         .collect();
 
     // Full genmodule and ABI declarations create product targets inside the
@@ -102,6 +114,96 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             .unwrap();
         }
         writeln!(out).unwrap();
+    }
+
+    // Audited external CMake projects must exist before ordinary consumers
+    // are declared. The helper creates both the mmake workflow endpoint and a
+    // distinct linkable interface target, so an explicit `uselibs=` edge can
+    // bind immediately and a same-named #MM rule must not manufacture a
+    // duplicate phony target later.
+    if !graph.external_cmake.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked external CMake builds\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.external_cmake.iter().collect();
+        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+        for declaration in declarations {
+            writeln!(out, "aros_build_external_cmake(").unwrap();
+            // MMAKE identities have already passed the strict capability
+            // profile's target-name validation. Keep the canonical unquoted
+            // spelling used by every other generated declaration so
+            // aros-verify can pair the declaration with its realised target.
+            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    SOURCE_DIR {}", cmake_arg(&declaration.source_dir)).unwrap();
+            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+            writeln!(
+                out,
+                "    INSTALL_PREFIX {}",
+                cmake_arg(&declaration.install_prefix)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    FETCH_TARGET {}",
+                cmake_arg(&declaration.fetch_target)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    SOURCE_ARCHIVE {}",
+                cmake_arg(&declaration.source_archive)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    SOURCE_SHA256 {}",
+                cmake_arg(&declaration.source_sha256)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    PROVIDED_LIBRARY {}",
+                cmake_arg(&declaration.provided_library)
+            )
+            .unwrap();
+            let products: Vec<_> = declaration
+                .library_products
+                .iter()
+                .map(|product| cmake_arg(product))
+                .collect();
+            writeln!(out, "    LIBRARY_PRODUCTS {}", products.join(" ")).unwrap();
+            let headers: Vec<_> = declaration
+                .header_products
+                .iter()
+                .map(|header| cmake_arg(header))
+                .collect();
+            writeln!(out, "    HEADER_PRODUCTS {}", headers.join(" ")).unwrap();
+            let auxiliary: Vec<_> = declaration
+                .auxiliary_products
+                .iter()
+                .map(|product| cmake_arg(product))
+                .collect();
+            if !auxiliary.is_empty() {
+                writeln!(out, "    AUXILIARY_PRODUCTS {}", auxiliary.join(" ")).unwrap();
+            }
+            let includes: Vec<_> = declaration
+                .public_include_dirs
+                .iter()
+                .map(|include| cmake_arg(include))
+                .collect();
+            writeln!(out, "    PUBLIC_INCLUDE_DIRS {}", includes.join(" ")).unwrap();
+            let options: Vec<_> = declaration
+                .options
+                .iter()
+                .map(|option| cmake_arg(option))
+                .collect();
+            writeln!(out, "    OPTIONS {}", options.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
     }
 
     // SDK header staging.  In-tree sources are copied at configure time;

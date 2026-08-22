@@ -1,5 +1,7 @@
 use crate::arch_sources::ArchSourceDecl;
-use crate::ast::{DefineHeaderDecl, MetaTargetRule, ModuleType, TargetDefinition};
+use crate::ast::{
+    DefineHeaderDecl, ExternalCMakeDecl, MetaTargetRule, ModuleType, TargetDefinition,
+};
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
@@ -13,6 +15,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
     pub targets: HashMap<String, TargetDefinition>,
+    /// Strictly capability-checked third-party CMake builds. Each contributes
+    /// both a real mmake workflow endpoint and a distinct link interface.
+    pub external_cmake: Vec<ExternalCMakeDecl>,
     pub meta_targets: HashMap<String, HashSet<String>>,
     /// Every unique `%build_icons` mmake id. This is separate from `targets`:
     /// icons are generated runtime resources, not compiled modules.
@@ -205,6 +210,16 @@ impl DependencyGraph {
 
     pub fn add_target(&mut self, target: TargetDefinition) {
         self.targets.insert(target.mmake_name.clone(), target);
+    }
+
+    pub fn add_external_cmake(&mut self, declaration: ExternalCMakeDecl) {
+        if !self
+            .external_cmake
+            .iter()
+            .any(|existing| existing.mmake_name == declaration.mmake_name)
+        {
+            self.external_cmake.push(declaration);
+        }
     }
 
     pub fn add_icons(&mut self, targets: Vec<IconTarget>, sets: Vec<IconSet>) {
@@ -620,6 +635,15 @@ impl DependencyGraph {
                 }
             }
         }
+        for declaration in &self.external_cmake {
+            by_name
+                .entry(declaration.provided_library.clone())
+                .or_default()
+                .push((
+                    declaration.mmake_name.clone(),
+                    declaration.provider_target.clone(),
+                ));
+        }
 
         let mut unresolved = Vec::new();
         let mut resolved: Vec<(String, Vec<String>)> = Vec::new();
@@ -694,6 +718,17 @@ impl DependencyGraph {
                         // duplicate remains an explicit ambiguity.
                         let selected = if candidates.len() == 1 {
                             Some(candidates[0])
+                        } else if candidates
+                            .iter()
+                            .any(|(declaration, _)| !self.targets.contains_key(declaration))
+                        {
+                            // An external interface and an ordinary archive
+                            // publishing the same uselib name is a capability
+                            // collision, not a native/32-bit flavour pair.
+                            // Never let the ordinary-provider preference hide
+                            // an external build that would otherwise own the
+                            // request.
+                            None
                         } else {
                             let main: Vec<_> = candidates
                                 .iter()
@@ -1094,10 +1129,14 @@ impl DependencyGraph {
                     deps.extend(external.iter().cloned());
                 }
             }
-            let kind = if component
-                .iter()
-                .any(|name| self.targets.contains_key(name) || self.icon_targets.contains_key(name))
-            {
+            let kind = if component.iter().any(|name| {
+                self.targets.contains_key(name)
+                    || self.icon_targets.contains_key(name)
+                    || self
+                        .external_cmake
+                        .iter()
+                        .any(|declaration| declaration.mmake_name == *name)
+            }) {
                 "build/meta"
             } else {
                 "meta"
