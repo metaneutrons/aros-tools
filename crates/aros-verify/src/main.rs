@@ -1082,10 +1082,10 @@ fn collect_declarations_impl(
     files: &[PathBuf],
     target: Option<&ArchitectureScope>,
 ) -> Vec<Declaration> {
-    // Keep the established global inventory's continuation semantics byte for
-    // byte. Profile mode must only remove false conditional branches; it must
-    // not gain declarations because its logical-line splitter changed.
-    let cont = Regex::new(r"\\\s*\n\s*").unwrap();
+    // genmf removes the backslash/newline pair and joins exactly the next
+    // physical line, retaining its indentation. Do not let whitespace matching
+    // cross an intervening blank line and consume the declaration after it.
+    let cont = Regex::new(r"\\\r?\n").unwrap();
     let decl = Regex::new(r"^\s*%(build_\w+|make_package|link_kickstart)\b([^\n]*)").unwrap();
     let mmake = Regex::new(r"\bmmake=([\w.-]+)").unwrap();
 
@@ -1094,7 +1094,7 @@ fn collect_declarations_impl(
         let Ok(text) = read_source(file) else {
             continue;
         };
-        let joined = cont.replace_all(&text, " ");
+        let joined = cont.replace_all(&text, "");
         let states = target.map(|target| make_conditional_line_states(&joined, target));
         let relative = file
             .strip_prefix(root)
@@ -1311,20 +1311,42 @@ fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> 
 /// kickstart declarations carry `NAME <id>` instead and have no separate
 /// build name; counting only MMAKE_ID reported all 21 of them as missing.
 fn collect_ours(generated: &str) -> BTreeMap<String, String> {
-    let re =
-        Regex::new(r"(?m)^\s*TARGET\s+(\S+)\s*$|^\s*MMAKE_ID\s+(\S+)\s*$|^\s*NAME\s+(\S+)\s*$")
-            .unwrap();
+    let block_start = Regex::new(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$").unwrap();
+    let target_arg = Regex::new(r"^\s*TARGET\s+(\S+)\s*$").unwrap();
+    let mmake_arg = Regex::new(r"^\s*MMAKE_ID\s+(\S+)\s*$").unwrap();
+    let name_arg = Regex::new(r"^\s*NAME\s+(\S+)\s*$").unwrap();
     let mut out = BTreeMap::new();
-    let mut pending_target: Option<String> = None;
-    for c in re.captures_iter(generated) {
-        if let Some(t) = c.get(1) {
-            pending_target = Some(t.as_str().to_string());
-        } else if let Some(id) = c.get(2) {
-            let name = pending_target.take().unwrap_or_default();
-            out.insert(id.as_str().to_string(), name);
-        } else if let Some(id) = c.get(3) {
-            // A package has no build name of its own.
-            out.entry(id.as_str().to_string()).or_default();
+    let mut lines = generated.lines();
+
+    while let Some(line) = lines.next() {
+        let Some(start) = block_start.captures(line) else {
+            continue;
+        };
+        let function = &start[1];
+        let mut target = None;
+        let mut mmake = None;
+        let mut name = None;
+
+        for line in lines.by_ref() {
+            if line.trim() == ")" {
+                break;
+            }
+            if let Some(captures) = target_arg.captures(line) {
+                target = Some(captures[1].to_owned());
+            } else if let Some(captures) = mmake_arg.captures(line) {
+                mmake = Some(captures[1].to_owned());
+            } else if let Some(captures) = name_arg.captures(line) {
+                name = Some(captures[1].to_owned());
+            }
+        }
+
+        if let Some(mmake) = mmake {
+            out.insert(mmake, target.unwrap_or_default());
+        } else if matches!(function, "aros_make_package" | "aros_link_kickstart") {
+            if let Some(name) = name {
+                // A package has no build name of its own.
+                out.entry(name).or_default();
+            }
         }
     }
     out
@@ -1547,10 +1569,23 @@ mod tests {
             .into_iter()
             .map(|declaration| declaration.mmake)
             .collect();
-        assert_eq!(global.len(), 1120);
-        assert_eq!(ids(&x86, true).len(), 1001);
-        assert_eq!(ids(&arm, true).len(), 993);
-        assert_eq!(ids(&aarch64, true).len(), 993);
+        // Retiring Gallivm removes one false obligation; preserving
+        // dummytest_auto and separating the formerly colliding 2View, HDTool
+        // and target Zopfli declarations restores four real declarations.
+        assert_eq!(global.len(), 1123);
+        assert_eq!(ids(&x86, true).len(), 1004);
+        assert_eq!(ids(&arm, true).len(), 996);
+        assert_eq!(ids(&aarch64, true).len(), 996);
+        assert!(global.contains("test-library-dummytest_auto"));
+        assert!(!global.contains("mesa3d-linklib-galliumvm"));
+        for inventory in [
+            ids(&x86, true),
+            ids(&arm, true),
+            ids(&aarch64, true),
+        ] {
+            assert!(inventory.contains("test-library-dummytest_auto"));
+            assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
+        }
 
         let arm_removed: BTreeSet<String> = ids(&arm, false)
             .difference(&ids(&arm, true))
@@ -1739,6 +1774,22 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_continuation_does_not_swallow_the_next_declaration() {
+        let dir = std::env::temp_dir().join("aros-verify-test-trailing-continuation");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mmakefile.src");
+        fs::write(
+            &f,
+            "%build_prog mmake=first files=first \\\n\n%build_prog mmake=second files=second\n",
+        )
+        .unwrap();
+        let decls = collect_declarations(&dir, &[f]);
+        let names: Vec<&str> = decls.iter().map(|d| d.mmake.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn reads_every_declaration_in_one_file() {
         // The case the transpiler's own regex used to miss: several modules in
         // one mmakefile with a single %common at the end.
@@ -1805,6 +1856,27 @@ aros_declare_icon_target(
         let ours = collect_ours(generated);
         assert!(ours.contains_key("iconset-Gorilla-wbench-icons"));
         assert_eq!(ours["iconset-Gorilla-wbench-icons"], "");
+    }
+
+    #[test]
+    fn ignores_names_owned_by_catalogs_and_header_transforms() {
+        let generated = "\
+aros_build_catalogs(
+    MMAKE_ID locale-catalogs-dos
+    NAME \"dos\"
+    SOURCE_DIR \"workbench/catalogs\"
+)
+aros_transform_header(
+    NAME \"workbench-libs-z-geninc\"
+    INPUT \"zconf.h.in\"
+    OUTPUT \"zconf.h\"
+)
+";
+        let ours = collect_ours(generated);
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours["locale-catalogs-dos"], "");
+        assert!(!ours.contains_key("\"dos\""));
+        assert!(!ours.contains_key("\"workbench-libs-z-geninc\""));
     }
 
     #[test]
