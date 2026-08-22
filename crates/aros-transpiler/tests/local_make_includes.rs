@@ -581,6 +581,7 @@ fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
         accepted,
         [
             "rom/bluetooth/stack/mmakefile.src -> rom/bluetooth/stack/core.files",
+            "workbench/devs/monitors/IntelGMA/i915/mmakefile.src -> workbench/devs/monitors/IntelGMA/i915/i915-20.0.8.sources",
             "workbench/libs/zstd/mmakefile.src -> workbench/libs/zstd/zstd-1.5.7.files",
         ]
     );

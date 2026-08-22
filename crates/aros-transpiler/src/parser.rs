@@ -4,7 +4,7 @@ use crate::ast::{
     TargetDefinition,
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
-use crate::fetch::collect_fetches_with_scope;
+use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at};
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
 use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
@@ -798,7 +798,7 @@ pub struct VarScope {
     /// condition branches separately. Generic expression evaluation must be
     /// stricter: using the last textual branch would silently merge or select
     /// architecture-specific source lists without knowing the condition.
-    conditional_assignments: HashMap<String, Vec<usize>>,
+    conditional_assignments: HashMap<String, Vec<(usize, AssignmentKind)>>,
     /// Names introduced as file-local switches, including an assignment in a
     /// branch proven false and explicitly commented-out `#NAME=value` feature
     /// toggles. Once seen, absence of an active assignment has GNU Make's
@@ -845,7 +845,22 @@ impl VarScope {
     pub fn conditionally_assigned_before(&self, name: &str, line: usize) -> bool {
         self.conditional_assignments
             .get(name)
-            .is_some_and(|assignments| assignments.iter().any(|at| *at < line))
+            .is_some_and(|assignments| assignments.iter().any(|(at, _)| *at < line))
+    }
+
+    /// Whether every unresolved conditional assignment before `line` merely
+    /// appends to the known value accumulated outside those branches.
+    ///
+    /// This is useful for flag bundles: their unconditional prefix remains a
+    /// sound lower bound when optional feature probes only add flags. An
+    /// unresolved replacement (`=`, `:=` or `?=`) invalidates the whole value.
+    #[must_use]
+    pub(crate) fn conditionally_appended_only_before(&self, name: &str, line: usize) -> bool {
+        let Some(assignments) = self.conditional_assignments.get(name) else {
+            return false;
+        };
+        let mut assignments = assignments.iter().filter(|(at, _)| *at < line).peekable();
+        assignments.peek().is_some() && assignments.all(|(_, kind)| *kind == AssignmentKind::Append)
     }
 
     /// The most recent raw value of `name` while the assignment scan is in
@@ -875,12 +890,13 @@ enum VariableFlavor {
 
 /// Splits a plain Make variable assignment without mistaking a rule for one.
 ///
-/// The tree uses `:=`, `=`, `?=` and `+=`. Keeping the operator is important:
+/// The tree uses `::=`, `:=`, `=`, `?=` and `+=`. Keeping the operator is important:
 /// two icon lists are built incrementally, and treating their `+=` lines as
 /// either invalid or ordinary assignments silently drops 118 generated files.
 fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
     let trimmed = line.trim();
     let (at, width, kind) = [
+        ("::=", AssignmentKind::SimpleSet),
         (":=", AssignmentKind::SimpleSet),
         ("+=", AssignmentKind::Append),
         ("?=", AssignmentKind::SetIfUnset),
@@ -1347,12 +1363,31 @@ fn collect_vars_impl(
     joined: &str,
     context: Option<&TargetContext>,
 ) -> (VarScope, Vec<ConditionalTruth>) {
+    collect_vars_impl_with_forward_locals(joined, context, false)
+}
+
+fn collect_vars_impl_with_forward_locals(
+    joined: &str,
+    context: Option<&TargetContext>,
+    forward_locals: bool,
+) -> (VarScope, Vec<ConditionalTruth>) {
     let mut scope = VarScope {
         assignments: HashMap::new(),
         raw: HashMap::new(),
         conditional_assignments: HashMap::new(),
         local_names: HashSet::new(),
     };
+    if context.is_some() && forward_locals {
+        for raw_line in joined.lines() {
+            let commented = raw_line.trim_start().strip_prefix('#').map(str::trim_start);
+            let assignment = commented
+                .and_then(variable_assignment)
+                .or_else(|| variable_assignment(strip_make_comment(raw_line)));
+            if let Some((name, _, _)) = assignment {
+                scope.local_names.insert(name.to_owned());
+            }
+        }
+    }
     let mut conditional_depth = 0usize;
     let mut conditional_stack: Vec<ConditionalFrame> = Vec::new();
     let mut flavors: HashMap<String, VariableFlavor> = HashMap::new();
@@ -1430,7 +1465,7 @@ fn collect_vars_impl(
             continue;
         }
 
-        // Make has four assignment forms and the tree uses all of them.
+        // Make has five assignment spellings here and the tree uses them.
         // Reading only `:=` lost every list written with `=` or `?=`:
         // rom/hidds/pci/pcitool declares `FILES = main pciids support locale`
         // that way, while the icon sets append to two lists with `+=`.
@@ -1444,7 +1479,7 @@ fn collect_vars_impl(
                 .conditional_assignments
                 .entry(var_name.to_owned())
                 .or_default()
-                .push(line_no);
+                .push((line_no, kind));
         }
         if context.is_some() && branch_state != ConditionalTruth::True {
             continue;
@@ -2057,7 +2092,7 @@ pub fn parse_mmakefile_with_dirs(
     root: &Path,
     dirs: &crate::dirs::DirVars,
 ) -> Result<ParsedMmakefile> {
-    parse_mmakefile_impl(path, root, dirs, None)
+    parse_mmakefile_impl(path, root, dirs, None, &[])
 }
 
 /// Parses one mmakefile for a concrete target using a shared directory table.
@@ -2072,7 +2107,61 @@ pub fn parse_mmakefile_with_dirs_and_context(
     dirs: &crate::dirs::DirVars,
     target: &TargetContext,
 ) -> Result<ParsedMmakefile> {
-    parse_mmakefile_impl(path, root, dirs, Some(target))
+    parse_mmakefile_impl(path, root, dirs, Some(target), &[])
+}
+
+/// Parses one mmakefile with a tree-wide inventory of proven `%fetch`
+/// declarations available for declaration-local input ownership checks.
+///
+/// The inventory does not add fetches to this file's result. It only lets a
+/// safe local variable fragment prove that a source or include path belongs to
+/// a fetch declared centrally elsewhere in the tree.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn parse_mmakefile_with_dirs_and_context_and_fetches(
+    path: &Path,
+    root: &Path,
+    dirs: &crate::dirs::DirVars,
+    target: &TargetContext,
+    known_fetches: &[FetchDecl],
+) -> Result<ParsedMmakefile> {
+    parse_mmakefile_impl(path, root, dirs, Some(target), known_fetches)
+}
+
+/// Collects the target-selected `%fetch` declarations of one mmakefile.
+///
+/// This cheap first pass supplies the tree-wide ownership inventory required
+/// by centrally declared ports without parsing the file's build targets.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read.
+#[allow(clippy::missing_panics_doc)]
+pub fn collect_mmakefile_fetches_with_context(
+    path: &Path,
+    root: &Path,
+    target: &TargetContext,
+) -> Result<Vec<FetchDecl>> {
+    let content = read_source(path)?;
+    let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let rel_dir = parent_dir
+        .strip_prefix(root)
+        .unwrap_or(parent_dir)
+        .to_path_buf();
+    let mut visited = HashSet::new();
+    let collector_content =
+        inline_collector_make_includes(&content, root, &rel_dir, &mut visited, 8);
+    let collector_joined = join_continuations(&collector_content);
+    let collector_input = format!(
+        "{}{}",
+        collector_forward_local_prelude(&collector_joined),
+        collector_joined
+    );
+    let scope = collect_vars_impl(&collector_input, Some(target)).0;
+    Ok(collect_fetches_with_scope(&content, &rel_dir, &scope).0)
 }
 
 /// Inlines source-tree Make includes for collector variable evaluation.
@@ -2227,10 +2316,6 @@ fn declaration_owned_port_scope(
     if candidate.expanded == plain.expanded
         || candidate.fragments.is_empty()
         || !candidate.issues.is_empty()
-        || candidate
-            .fragments
-            .iter()
-            .any(|fragment| fragment.has_conditionals)
         || fetches.is_empty()
     {
         return false;
@@ -2238,8 +2323,10 @@ fn declaration_owned_port_scope(
 
     let plain_joined = join_continuations(&plain.expanded);
     let candidate_joined = join_continuations(&candidate.expanded);
-    let (plain_scope, plain_states) = collect_vars_impl(&plain_joined, Some(target));
-    let (candidate_scope, candidate_states) = collect_vars_impl(&candidate_joined, Some(target));
+    let (plain_scope, plain_states) =
+        collect_vars_impl_with_forward_locals(&plain_joined, Some(target), true);
+    let (candidate_scope, candidate_states) =
+        collect_vars_impl_with_forward_locals(&candidate_joined, Some(target), true);
     let mut ignored = Vec::new();
     let plain_invocations =
         select_target_invocations(&plain_joined, Some(&plain_states), rel_dir, &mut ignored)
@@ -2289,16 +2376,53 @@ fn declaration_owned_port_scope(
         if !candidate_sources.declared || candidate_sources.is_empty() {
             return false;
         }
-        if !all_sources_are_fetch_owned(&candidate_sources, fetches) {
-            return false;
-        }
-
         let plain_vars = plain_scope.snapshot(plain_invocation.line);
         let plain_context =
             MakeExprContext::new(&plain_scope, dirs, plain_invocation.line, root, rel_dir);
-        match evaluate_macro_sources(&plain_invocation.args, &plain_vars, &plain_context) {
-            Ok(sources) if !sources.is_empty() => {}
-            _ => newly_resolved = true,
+        let plain_sources =
+            evaluate_macro_sources(&plain_invocation.args, &plain_vars, &plain_context).ok();
+        for source in candidate_sources
+            .c
+            .iter()
+            .chain(&candidate_sources.cxx)
+            .chain(&candidate_sources.objc)
+            .chain(&candidate_sources.asm)
+        {
+            if source.starts_with("${AROS_PORTS_DIR}/") {
+                if !owns_fetched_source(source, fetches) {
+                    return false;
+                }
+                let existed = plain_sources.as_ref().is_some_and(|sources| {
+                    sources
+                        .c
+                        .iter()
+                        .chain(&sources.cxx)
+                        .chain(&sources.objc)
+                        .chain(&sources.asm)
+                        .any(|plain| plain == source)
+                });
+                newly_resolved |= !existed;
+            }
+        }
+
+        let candidate_includes = collect_includes_at(
+            &candidate_joined,
+            &candidate_scope,
+            candidate_invocation.line,
+            rel_dir,
+        );
+        if !candidate_includes.unresolved.is_empty() {
+            return false;
+        }
+        let plain_includes =
+            collect_includes_at(&plain_joined, &plain_scope, plain_invocation.line, rel_dir);
+        for directory in &candidate_includes.dirs {
+            if directory.starts_with("${AROS_PORTS_DIR}/") {
+                if !owns_fetched_source(directory, fetches) {
+                    return false;
+                }
+                newly_resolved |= !plain_includes.dirs.contains(directory);
+            }
         }
     }
     newly_resolved
@@ -2747,6 +2871,22 @@ fn safe_define_header_output(output: &str) -> bool {
     })
 }
 
+fn safe_build_tree_output_directory(output: &str) -> bool {
+    let Some(relative) = output.strip_prefix("${AROS_BUILD_DIR}/") else {
+        return false;
+    };
+    if relative.is_empty()
+        || relative.contains('$')
+        || relative.contains(';')
+        || relative.contains('\\')
+    {
+        return false;
+    }
+    normalize_relative_path(Path::new(relative)).is_some_and(|normalized| {
+        normalized == Path::new(relative) && !normalized.as_os_str().is_empty()
+    })
+}
+
 fn parse_literal_define_recipe_line(line: &str) -> Option<(&str, &str)> {
     let quoted = line.trim().strip_prefix("echo \"")?;
     let close = quoted.rfind('"')?;
@@ -3129,6 +3269,7 @@ fn parse_mmakefile_impl(
     root: &Path,
     dirs: &crate::dirs::DirVars,
     target: Option<&TargetContext>,
+    known_fetches: &[FetchDecl],
 ) -> Result<ParsedMmakefile> {
     let content = read_source(path)?;
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -3157,6 +3298,8 @@ fn parse_mmakefile_impl(
     );
     let (fetches, skipped_fetches) =
         collect_fetches_with_scope(&content, &rel_dir, &collector_scope);
+    let mut ownership_fetches = known_fetches.to_vec();
+    ownership_fetches.extend(fetches.iter().cloned());
 
     // A small number of declarations keep a plain source inventory in a
     // sibling Make fragment. This remains the global default. A broader safe
@@ -3184,7 +3327,7 @@ fn parse_mmakefile_impl(
         dirs,
         root,
         &rel_dir,
-        &fetches,
+        &ownership_fetches,
     );
     let define_scope_candidate = inline_local_make_includes(
         &content,
@@ -3229,7 +3372,11 @@ fn parse_mmakefile_impl(
     let joined = join_continuations(&local_make_scan.expanded);
     let (scope, conditional_line_states) = match target {
         Some(target) => {
-            let (scope, states) = collect_vars_impl(&joined, Some(target));
+            let (scope, states) = if port_scope_adopted {
+                collect_vars_impl_with_forward_locals(&joined, Some(target), true)
+            } else {
+                collect_vars_impl(&joined, Some(target))
+            };
             (scope, Some(states))
         }
         None => (collect_vars(&joined), None),
@@ -3601,6 +3748,7 @@ fn parse_mmakefile_impl(
             genmodule_linklibs,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
+            linklib_output_dir: None,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = declaration_includes.dirs.clone();
@@ -3731,6 +3879,7 @@ fn parse_mmakefile_impl(
             genmodule_linklibs: None,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
+            linklib_output_dir: None,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = declaration_includes.dirs.clone();
@@ -3957,6 +4106,35 @@ fn parse_mmakefile_impl(
             && !variant_32bit;
         let canonical_linklib_output =
             canonical_linklib_eligible && all_sources_are_fetch_owned(&sources, &fetches);
+        let linklib_output_dir = if matches!(module_type, ModuleType::LinkLib) {
+            macro_arg(&inv.args, "libdir").and_then(|raw| {
+                match evaluate_make_expr(&raw, &expression_context) {
+                    Ok(directory) if safe_build_tree_output_directory(&directory) => {
+                        Some(directory)
+                    }
+                    Ok(directory) => {
+                        unresolved_output_paths.push(format!(
+                            "{}:{}: %{} mmake={mmake_raw} libdir={raw} resolves outside the build tree ({directory})",
+                            rel_dir.display(),
+                            inv.line + 1,
+                            inv.name
+                        ));
+                        None
+                    }
+                    Err(reason) => {
+                        unresolved_output_paths.push(format!(
+                            "{}:{}: %{} mmake={mmake_raw} libdir={raw} is unresolved: {reason}",
+                            rel_dir.display(),
+                            inv.line + 1,
+                            inv.name
+                        ));
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -3979,6 +4157,7 @@ fn parse_mmakefile_impl(
             genmodule_linklibs: None,
             canonical_linklib_output,
             canonical_linklib_eligible,
+            linklib_output_dir,
             compiler_flags: Vec::new(),
             include_dirs: {
                 let mut d = declaration_includes.dirs.clone();
@@ -4646,6 +4825,12 @@ FILES := gdbstop
     fn a_conditional_assignment_does_not_overwrite_an_existing_value() {
         let scope = collect_vars("A := first\nA ?= second\n%build_prog mmake=x progname=X\n");
         assert_eq!(scope.raw_at("A", usize::MAX).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_posix_simple_assignment_is_not_mistaken_for_colon_equals() {
+        let scope = collect_vars("A ::= immediate\n%build_prog mmake=x progname=X\n");
+        assert_eq!(scope.raw_at("A", usize::MAX).as_deref(), Some("immediate"));
     }
 
     #[test]

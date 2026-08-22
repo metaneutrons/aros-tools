@@ -103,6 +103,23 @@ fn map_flag_var(name: &str) -> Option<&'static str> {
         // rom/exec needs this on x86_64: interrupt-context code must not touch
         // SSE registers.
         "CFLAGS_GENERAL_REGS_ONLY" => Some("-mgeneral-regs-only"),
+        // Mesa deliberately relies on type-punning. Keep the build-system
+        // spelling instead of trusting a declaration-local reassignment of
+        // this global toolchain variable.
+        "CFLAGS_NO_STRICT_ALIASING" => Some("-fno-strict-aliasing"),
+        _ => None,
+    }
+}
+
+/// Make roots accepted in a direct-linker `-L` option.
+///
+/// A private archive is useful only inside this build tree. Mapping the roots
+/// here also prevents a local assignment such as `GENDIR := /tmp/other` from
+/// smuggling an arbitrary host directory into the generated link command.
+fn map_link_dir_var(name: &str) -> Option<&'static str> {
+    match name {
+        "TOP" | "TARGETDIR" => Some("${AROS_BUILD_DIR}"),
+        "GENDIR" => Some("${AROS_BUILD_DIR}/gen"),
         _ => None,
     }
 }
@@ -406,7 +423,10 @@ fn expand(raw: &str, vars: &HashMap<String, String>, self_name: &str, depth: usi
         if name == self_name || name.starts_with("shell") || name.contains(' ') {
             // Self-reference from `+=`, or a shell call we refuse to run.
             out.push_str(verbatim);
-        } else if map_var(name).is_some() || map_flag_var(name).is_some() {
+        } else if map_var(name).is_some()
+            || map_flag_var(name).is_some()
+            || map_link_dir_var(name).is_some()
+        {
             out.push_str(verbatim);
         } else if let Some(v) = vars.get(name) {
             out.push_str(&expand(v, vars, self_name, depth - 1));
@@ -595,14 +615,16 @@ pub fn collect_flags(content: &str) -> FlagSet {
 /// GNU Make freezes the `USER_*` values into the build macro at its invocation
 /// line. Reading the file's final assignment leaks later flags into earlier
 /// targets when one mmakefile declares several variants. A concrete target
-/// context has already selected conditional assignments in [`VarScope`], so
-/// this collector only has to perform bounded local-variable expansion.
+/// context has already selected every decidable conditional assignment in
+/// [`VarScope`]. An unresolved conditional append cannot invalidate the known
+/// prefix accumulated outside the branch, while an unresolved replacement
+/// makes the variable unusable.
 #[must_use]
 pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
     let mut set = FlagSet::default();
 
     for key in ["USER_CPPFLAGS", "USER_CFLAGS"] {
-        if scope.conditionally_assigned_before(key, line) {
+        if conditionally_replaced_before(scope, key, line) {
             set.skipped.push(format!("$({key})"));
             continue;
         }
@@ -615,7 +637,7 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
         }
     }
 
-    if scope.conditionally_assigned_before("USER_LDFLAGS", line) {
+    if conditionally_replaced_before(scope, "USER_LDFLAGS", line) {
         set.skipped.push("$(USER_LDFLAGS)".to_owned());
     } else if let Some(raw) = scope.raw_at("USER_LDFLAGS", line) {
         let expanded = expand_scoped(&raw, scope, line, "USER_LDFLAGS", 8);
@@ -630,6 +652,13 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
     set.link_options.dedup();
     set.skipped.dedup();
     set
+}
+
+/// Whether an unresolved conditional can replace, rather than merely extend,
+/// the value known at `line`.
+fn conditionally_replaced_before(scope: &VarScope, name: &str, line: usize) -> bool {
+    scope.conditionally_assigned_before(name, line)
+        && !scope.conditionally_appended_only_before(name, line)
 }
 
 fn expand_scoped(
@@ -658,7 +687,8 @@ fn expand_scoped(
             || name.contains(' ')
             || map_var(name).is_some()
             || map_flag_var(name).is_some()
-            || scope.conditionally_assigned_before(name, line)
+            || map_link_dir_var(name).is_some()
+            || conditionally_replaced_before(scope, name, line)
         {
             out.push_str(verbatim);
         } else if let Some(value) = scope.raw_at(name, line) {
@@ -718,6 +748,21 @@ fn classify(tok: &str, set: &mut FlagSet) {
         return;
     }
 
+    // These options are semantic inputs to Mesa's C compilation, rather than
+    // a broad warning-policy import. Keep only the exact audited spellings;
+    // near matches remain visible in the skipped-flags report.
+    if matches!(
+        tok,
+        "-std=gnu11"
+            | "-fno-strict-aliasing"
+            | "-Wno-unused-value"
+            | "-Wno-unused-variable"
+            | "-Wno-strict-aliasing"
+    ) {
+        push_unique(&mut set.compile_options, tok.to_owned());
+        return;
+    }
+
     // Anything else is a compiler option we do not second-guess.
     if tok.starts_with('-') {
         push_unique(&mut set.skipped, tok.to_owned());
@@ -736,9 +781,52 @@ fn classify_link(tok: &str, set: &mut FlagSet) {
     // `-lpthread` is an ordinary linker library and is safe here.
     if valid_library {
         push_unique(&mut set.link_options, tok.to_owned());
+    } else if let Some(raw_directory) = tok.strip_prefix("-L") {
+        match safe_link_directory(raw_directory) {
+            Some(directory) => {
+                push_unique(&mut set.link_options, format!("-L{directory}"));
+            }
+            None => push_unique(&mut set.skipped, tok.to_owned()),
+        }
     } else if !tok.is_empty() {
         push_unique(&mut set.skipped, tok.to_owned());
     }
+}
+
+/// Resolves one private link search path and proves it stays below the build
+/// tree. This intentionally accepts no absolute host path, shell syntax,
+/// parent traversal or unrecognised variable.
+fn safe_link_directory(raw: &str) -> Option<String> {
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut rendered = String::with_capacity(raw.len() + 24);
+    let mut rest = raw;
+    while let Some(start) = rest.find("$(") {
+        rendered.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find(')')?;
+        let name = &after[..end];
+        rendered.push_str(map_link_dir_var(name)?);
+        rest = &after[end + 1..];
+    }
+    rendered.push_str(rest);
+
+    let relative = rendered.strip_prefix("${AROS_BUILD_DIR}/")?;
+    if relative.is_empty()
+        || relative.contains(['$', '\\', ';', '"', '\'', ':'])
+        || relative.split('/').any(|component| {
+            component.is_empty()
+                || matches!(component, "." | "..")
+                || !component.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '+')
+                })
+        })
+    {
+        return None;
+    }
+    Some(rendered)
 }
 
 fn push_unique(v: &mut Vec<String>, s: String) {
@@ -750,12 +838,141 @@ fn push_unique(v: &mut Vec<String>, s: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{collect_vars_with_context, join_continuations, TargetContext};
+
+    fn collect_target_flags(content: &str) -> FlagSet {
+        let joined = join_continuations(content);
+        let scope = collect_vars_with_context(
+            &joined,
+            &TargetContext {
+                cpu: Some("aarch64".to_owned()),
+                platform: Some("raspi".to_owned()),
+                ..TargetContext::default()
+            },
+        );
+        collect_flags_at(&scope, usize::MAX)
+    }
 
     #[test]
     fn direct_linker_options_reject_compiler_driver_switches() {
         let flags = collect_flags("USER_LDFLAGS := -lpthread -pthread -Wl,-dead_strip\n");
         assert_eq!(flags.link_options, ["-lpthread"]);
         assert_eq!(flags.skipped, ["-pthread", "-Wl,-dead_strip"]);
+    }
+
+    #[test]
+    fn private_link_directories_are_build_rooted_and_literal() {
+        let flags = collect_flags(
+            "GENDIR := /tmp/host-override\n\
+             USER_LDFLAGS := -L$(GENDIR)/lib/mesa20.0.8 -lgallium_i915 \
+                 -L$(UNKNOWN)/lib -L$(GENDIR)/../escape -L/opt/host\n",
+        );
+        assert_eq!(
+            flags.link_options,
+            ["-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8", "-lgallium_i915"]
+        );
+        assert_eq!(
+            flags.skipped,
+            ["-L$(UNKNOWN)/lib", "-L$(GENDIR)/../escape", "-L/opt/host"]
+        );
+    }
+
+    #[test]
+    fn mesa_keeps_only_the_audited_semantic_compile_options() {
+        let flags = collect_flags(
+            "CFLAGS_NO_STRICT_ALIASING := -fstrict-aliasing\n\
+             USER_CFLAGS := -std=gnu11 $(CFLAGS_NO_STRICT_ALIASING) \
+                 -Wno-unused-value -Wno-unused-variable -Wno-strict-aliasing \
+                 -std=gnu17 -Wno-unused-parameter\n",
+        );
+        assert_eq!(
+            flags.compile_options,
+            [
+                "-std=gnu11",
+                "-fno-strict-aliasing",
+                "-Wno-unused-value",
+                "-Wno-unused-variable",
+                "-Wno-strict-aliasing"
+            ]
+        );
+        assert_eq!(flags.skipped, ["-std=gnu17", "-Wno-unused-parameter"]);
+    }
+
+    #[test]
+    fn mesa_keeps_the_known_prefix_of_conditionally_appended_base_flags() {
+        let flags = collect_target_flags(
+            "MESA_STDC_FLAGS := -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS\n\
+             MESA_POSIXC_FLAGS := -D_GNU_SOURCE -DHAVE_PTHREAD\n\
+             MESA_BASEFLAGS := $(MESA_STDC_FLAGS) $(MESA_POSIXC_FLAGS) -DHAVE_ZLIB\n\
+             ifneq ($(CFLAGS_NO_BUILTIN_FFS),)\n\
+             MESA_BASEFLAGS += -DHAVE___BUILTIN_FFS\n\
+             endif\n\
+             ifneq ($(CFLAGS_NO_BUILTIN_BSWAP32),)\n\
+             MESA_BASEFLAGS += -DHAVE___BUILTIN_BSWAP32\n\
+             endif\n\
+             USER_CPPFLAGS = $(MESA_BASEFLAGS) -DMAPI_MODE_GLAPI\n",
+        );
+
+        assert_eq!(
+            flags.defines,
+            [
+                "__STDC_CONSTANT_MACROS",
+                "__STDC_FORMAT_MACROS",
+                "_GNU_SOURCE",
+                "HAVE_PTHREAD",
+                "HAVE_ZLIB",
+                "MAPI_MODE_GLAPI",
+            ]
+        );
+        assert!(!flags.defines.contains(&"HAVE___BUILTIN_FFS".to_owned()));
+        assert!(!flags.defines.contains(&"HAVE___BUILTIN_BSWAP32".to_owned()));
+        assert!(flags.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_conditionally_appended_user_flag_keeps_its_known_prefix() {
+        let flags = collect_target_flags(
+            "USER_CFLAGS := -std=gnu11 -DKNOWN\n\
+             ifneq ($(OPTIONAL_FLAGS),)\n\
+             USER_CFLAGS += -DOPTIONAL\n\
+             endif\n",
+        );
+
+        assert_eq!(flags.compile_options, ["-std=gnu11"]);
+        assert_eq!(flags.defines, ["KNOWN"]);
+        assert!(!flags.defines.contains(&"OPTIONAL".to_owned()));
+        assert!(flags.skipped.is_empty());
+    }
+
+    #[test]
+    fn unknown_conditional_replacements_reject_a_nested_flag_bundle() {
+        for operator in ["=", ":=", "::=", "?="] {
+            let flags = collect_target_flags(&format!(
+                "BASE_FLAGS := -DKNOWN\n\
+                 ifneq ($(OPTIONAL_FLAGS),)\n\
+                 BASE_FLAGS {operator} -DREPLACED\n\
+                 endif\n\
+                 USER_CPPFLAGS = $(BASE_FLAGS) -DOUTER\n"
+            ));
+
+            assert_eq!(flags.defines, ["OUTER"], "operator {operator}");
+            assert_eq!(flags.skipped, ["$(BASE_FLAGS)"], "operator {operator}");
+        }
+    }
+
+    #[test]
+    fn unknown_conditional_replacements_reject_a_user_flag_value() {
+        for operator in ["=", ":=", "::=", "?="] {
+            let flags = collect_target_flags(&format!(
+                "USER_CPPFLAGS := -DKNOWN\n\
+                 ifneq ($(OPTIONAL_FLAGS),)\n\
+                 USER_CPPFLAGS {operator} -DREPLACED\n\
+                 endif\n"
+            ));
+
+            assert!(flags.defines.is_empty(), "operator {operator}");
+            assert_eq!(flags.skipped, ["$(USER_CPPFLAGS)"], "operator {operator}");
+        }
     }
 
     #[test]

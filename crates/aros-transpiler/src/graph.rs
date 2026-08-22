@@ -166,6 +166,37 @@ fn has_public_link_archive(target: &TargetDefinition) -> bool {
     }
 }
 
+/// Whether a raw linker spelling can reach this declaration's private archive.
+///
+/// `-L` is intentionally compared for exact equality with the parser-proven
+/// build-tree output directory. A parent directory, a child directory or a
+/// similarly named path does not establish archive visibility.
+fn has_matching_private_link_archive(
+    provider: &TargetDefinition,
+    consumer: &TargetDefinition,
+) -> bool {
+    provider.linklib_output_dir.as_ref().is_some_and(|output| {
+        consumer.link_options.iter().any(|option| {
+            option
+                .strip_prefix("-L")
+                .is_some_and(|directory| directory == output)
+        })
+    })
+}
+
+fn raw_link_archive_visible(provider: &TargetDefinition, consumer: &TargetDefinition) -> bool {
+    has_public_link_archive(provider) || has_matching_private_link_archive(provider, consumer)
+}
+
+/// A private provider must retain its declared output location even when a raw
+/// `-l` consumer binds to it. Only a public-eligible ordinary linklib may be
+/// promoted into the canonical SDK archive directory.
+fn needs_canonical_link_archive(provider: &TargetDefinition) -> bool {
+    provider.module_type == ModuleType::LinkLib
+        && provider.linklib_output_dir.is_none()
+        && provider.canonical_linklib_eligible
+}
+
 impl DependencyGraph {
     #[must_use]
     pub fn new() -> Self {
@@ -368,7 +399,8 @@ impl DependencyGraph {
     }
 
     /// Adds direct fetch prerequisites for concrete targets compiling port
-    /// sources and returns port sources for which no `%fetch` owner exists.
+    /// sources or reading port-owned include trees, and returns paths for
+    /// which no `%fetch` owner exists.
     ///
     /// A sibling target's dependency is insufficient: Ninja may build the
     /// consumer directly, before the archive has been unpacked. Ownership is
@@ -397,27 +429,28 @@ impl DependencyGraph {
         let mut edges = BTreeSet::new();
         let mut unowned = BTreeSet::new();
         for target in self.targets.values() {
-            for source in target
+            for input in target
                 .source_files
                 .iter()
                 .chain(&target.cxx_source_files)
                 .chain(&target.objc_source_files)
                 .chain(&target.asm_source_files)
+                .chain(&target.include_dirs)
             {
-                if source != PORTS_ROOT && !source.starts_with("${AROS_PORTS_DIR}/") {
+                if input != PORTS_ROOT && !input.starts_with("${AROS_PORTS_DIR}/") {
                     continue;
                 }
                 let owner = owners.iter().copied().find(|fetch| {
                     let destination = fetch.destination.trim_end_matches('/');
-                    source == destination
-                        || source
+                    input == destination
+                        || input
                             .strip_prefix(destination)
                             .is_some_and(|tail| tail.starts_with('/'))
                 });
                 if let Some(owner) = owner {
                     edges.insert((target.mmake_name.clone(), owner.name.clone()));
                 } else {
-                    unowned.insert(format!("{}|{source}", target.mmake_name));
+                    unowned.insert(format!("{}|{input}", target.mmake_name));
                 }
             }
         }
@@ -629,82 +662,83 @@ impl DependencyGraph {
             requested.retain(|name| seen_requested.insert(name.clone()));
             for name in &requested {
                 match by_name.get(name.as_str()) {
-                    Some(c) if c.len() == 1 => {
-                        if link_flag_libraries.contains(name)
-                            && !self
-                                .targets
-                                .get(&c[0].0)
-                                .is_some_and(has_public_link_archive)
-                        {
+                    Some(c) => {
+                        let raw_link = link_flag_libraries.contains(name);
+                        // A raw linker name may have several declarations in
+                        // the graph. Its concrete search path is authoritative:
+                        // retain only public providers and private providers
+                        // whose complete output directory is named by this
+                        // consumer. This lets two private archives with the
+                        // same basename remain safely disambiguated by -L.
+                        let candidates: Vec<&(String, String)> = c
+                            .iter()
+                            .filter(|(declaration, _)| {
+                                !raw_link
+                                    || self.targets.get(declaration).is_some_and(|provider| {
+                                        raw_link_archive_visible(provider, target)
+                                    })
+                            })
+                            .collect();
+                        if candidates.is_empty() {
                             rejected_link_options.push((mmake.clone(), name.clone()));
                             unresolved.push(format!(
-                                "{}: {mmake} link option -l{name} has no public SDK archive",
+                                "{}: {mmake} link option -l{name} has no public or matching private archive",
                                 target.dir_path.display()
                             ));
                             continue;
                         }
-                        let id = c[0].1.clone();
-                        if explicitly_linked.contains(name) && !ids.contains(&id) {
-                            ids.push(id);
-                        } else if link_flag_libraries.contains(name) {
-                            link_option_edges.push((mmake.clone(), id));
-                        }
-                        if link_flag_libraries.contains(name)
-                            && !promote_canonical.contains(&c[0].0)
-                        {
-                            promote_canonical.push(c[0].0.clone());
-                        }
-                    }
-                    Some(c) => {
-                        // Two link libraries share a libname when one is the
-                        // extra 32-bit flavour a 64-bit target keeps for its
-                        // bootstrap. The main target wants the other one.
-                        let main: Vec<&(String, String)> = c
-                            .iter()
-                            .filter(|(declaration, _)| {
-                                self.targets
-                                    .get(declaration)
-                                    .is_some_and(|t| !t.variant_32bit)
-                            })
-                            .collect();
-                        if main.len() == 1 {
-                            if link_flag_libraries.contains(name)
-                                && !self
-                                    .targets
-                                    .get(&main[0].0)
-                                    .is_some_and(has_public_link_archive)
-                            {
-                                rejected_link_options.push((mmake.clone(), name.clone()));
-                                unresolved.push(format!(
-                                    "{}: {mmake} link option -l{name} has no public SDK archive",
-                                    target.dir_path.display()
-                                ));
-                                continue;
-                            }
-                            let id = main[0].1.clone();
-                            if explicitly_linked.contains(name) && !ids.contains(&id) {
-                                ids.push(id);
-                            } else if link_flag_libraries.contains(name) {
-                                link_option_edges.push((mmake.clone(), id));
-                            }
-                            if link_flag_libraries.contains(name)
-                                && !promote_canonical.contains(&main[0].0)
-                            {
-                                promote_canonical.push(main[0].0.clone());
-                            }
+
+                        // The usual duplicate is a native archive plus the
+                        // 32-bit bootstrap flavour. Prefer the native one only
+                        // when that leaves exactly one candidate; any other
+                        // duplicate remains an explicit ambiguity.
+                        let selected = if candidates.len() == 1 {
+                            Some(candidates[0])
                         } else {
-                            if link_flag_libraries.contains(name) {
+                            let main: Vec<_> = candidates
+                                .iter()
+                                .copied()
+                                .filter(|(declaration, _)| {
+                                    self.targets
+                                        .get(declaration)
+                                        .is_some_and(|provider| !provider.variant_32bit)
+                                })
+                                .collect();
+                            (main.len() == 1).then_some(main[0])
+                        };
+                        let Some(selected) = selected else {
+                            if raw_link {
                                 rejected_link_options.push((mmake.clone(), name.clone()));
                             }
-                            let declarations: Vec<&str> = c
+                            let declarations: Vec<_> = candidates
                                 .iter()
                                 .map(|(declaration, _)| declaration.as_str())
                                 .collect();
+                            let request = if raw_link {
+                                format!("link option -l{name}")
+                            } else {
+                                format!("uselibs={name}")
+                            };
                             unresolved.push(format!(
-                                "{}: {mmake} uselibs={name} is ambiguous ({})",
+                                "{}: {mmake} {request} is ambiguous ({})",
                                 target.dir_path.display(),
                                 declarations.join(", ")
                             ));
+                            continue;
+                        };
+
+                        let id = selected.1.clone();
+                        if explicitly_linked.contains(name) && !ids.contains(&id) {
+                            ids.push(id);
+                        } else if raw_link {
+                            link_option_edges.push((mmake.clone(), id));
+                        }
+                        let provider = self.targets.get(&selected.0);
+                        if raw_link
+                            && provider.is_some_and(needs_canonical_link_archive)
+                            && !promote_canonical.contains(&selected.0)
+                        {
+                            promote_canonical.push(selected.0.clone());
                         }
                     }
                     // Not every uselib is built here: some name a host library
@@ -1373,6 +1407,101 @@ mod tests {
     }
 
     #[test]
+    fn private_linklib_requires_the_exact_consumer_search_directory() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/z/mmakefile.src"),
+            &root,
+            &dirs,
+            &TargetContext {
+                cpu: Some("x86_64".to_owned()),
+                platform: Some("pc".to_owned()),
+                family: Some(String::new()),
+                variant: Some(String::new()),
+                toolchain: Some("llvm".to_owned()),
+                cpu32: Some("i386".to_owned()),
+                use_mmu: Some("1".to_owned()),
+                float_abi: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let mut provider = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "linklibs-z-static")
+            .expect("ordinary linklib")
+            .clone();
+        provider.mmake_name = "private-gallium-provider".to_owned();
+        provider.target_name = "gallium_i915".to_owned();
+        provider.canonical_linklib_output = false;
+        provider.canonical_linklib_eligible = false;
+        provider.linklib_output_dir = Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8".to_owned());
+        provider.use_libs.clear();
+        provider.link_libs.clear();
+        provider.link_options.clear();
+        let mut other_provider = provider.clone();
+        other_provider.mmake_name = "other-private-gallium-provider".to_owned();
+        other_provider.linklib_output_dir = Some("${AROS_BUILD_DIR}/gen/lib/other-mesa".to_owned());
+
+        let mut matching = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "workbench-libs-z-minigzip")
+            .expect("sourceful consumer")
+            .clone();
+        matching.mmake_name = "matching-private-consumer".to_owned();
+        matching.use_libs.clear();
+        matching.link_libs.clear();
+        matching.link_options = vec![
+            "-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8".to_owned(),
+            "-lgallium_i915".to_owned(),
+        ];
+
+        let mut mismatched = matching.clone();
+        mismatched.mmake_name = "mismatched-private-consumer".to_owned();
+        mismatched.link_options = vec![
+            "-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8/subdir".to_owned(),
+            "-lgallium_i915".to_owned(),
+        ];
+
+        let mut graph = DependencyGraph::new();
+        graph.add_target(provider);
+        graph.add_target(other_provider);
+        graph.add_target(matching);
+        graph.add_target(mismatched);
+
+        let unresolved = graph.resolve_use_libs();
+        assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+        assert!(
+            unresolved[0].contains(
+                "mismatched-private-consumer link option -lgallium_i915 has no public or matching private archive"
+            ),
+            "{unresolved:#?}"
+        );
+        assert_eq!(
+            graph.targets["matching-private-consumer"].link_options,
+            ["-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8", "-lgallium_i915"]
+        );
+        assert_eq!(
+            graph.targets["mismatched-private-consumer"].link_options,
+            ["-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8/subdir"]
+        );
+        assert!(
+            graph.meta_targets["matching-private-consumer"].contains("private-gallium-provider")
+        );
+        assert!(!graph.meta_targets["matching-private-consumer"]
+            .contains("other-private-gallium-provider"));
+        assert!(graph
+            .meta_targets
+            .get("mismatched-private-consumer")
+            .is_none_or(HashSet::is_empty));
+        assert!(!graph.targets["private-gallium-provider"].canonical_linklib_output);
+        assert!(!graph.targets["other-private-gallium-provider"].canonical_linklib_output);
+    }
+
+    #[test]
     fn zlib_sources_and_transformed_header_have_direct_fetch_edges() {
         let root = root();
         let dirs = DirVars::load(&root);
@@ -1684,6 +1813,10 @@ mod tests {
         consumer.cxx_source_files.clear();
         consumer.objc_source_files.clear();
         consumer.asm_source_files.clear();
+        consumer.include_dirs = vec![
+            "${AROS_PORTS_DIR}/libpng/include".to_owned(),
+            "${AROS_PORTS_DIR}/include-ownerless".to_owned(),
+        ];
 
         let template = parsed.fetches.into_iter().next().unwrap();
         let mut broad = template.clone();
@@ -1698,11 +1831,17 @@ mod tests {
         graph.add_fetches(vec![broad, narrow]);
         assert_eq!(
             graph.resolve_port_source_fetches(),
-            ["synthetic-consumer|${AROS_PORTS_DIR}/ownerless/source"]
+            [
+                "synthetic-consumer|${AROS_PORTS_DIR}/include-ownerless",
+                "synthetic-consumer|${AROS_PORTS_DIR}/ownerless/source"
+            ]
         );
         assert_eq!(
             graph.meta_targets["synthetic-consumer"],
-            std::iter::once("libpng-narrow-fetch".to_owned()).collect()
+            ["libpng-broad-fetch", "libpng-narrow-fetch"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
         );
     }
 

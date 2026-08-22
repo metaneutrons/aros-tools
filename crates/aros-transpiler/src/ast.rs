@@ -116,6 +116,13 @@ pub struct TargetDefinition {
     /// Full-module normal/relative client archive composition.
     #[serde(default)]
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,
+    /// Explicit private archive directory from a proven `%build_linklib`
+    /// `libdir=` expression. The parser records this only after resolving the
+    /// path below the build tree. A raw `-l<name>` consumer may use this
+    /// provider only when its own declaration carries the exact matching
+    /// `-L<directory>` option.
+    #[serde(default)]
+    pub linklib_output_dir: Option<String>,
     /// Whether an ordinary `%build_linklib` is proven to own the canonical
     /// target-SDK archive name. This is intentionally false for host, 32-bit,
     /// custom-libdir and in-tree declarations; the CMake layer may migrate

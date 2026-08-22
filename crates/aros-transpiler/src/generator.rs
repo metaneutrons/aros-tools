@@ -232,6 +232,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if target.canonical_linklib_output {
             writeln!(out, "    CANONICAL_OUTPUT").unwrap();
         }
+        if let Some(output_dir) = &target.linklib_output_dir {
+            writeln!(out, "    OUTPUT_DIR {}", cmake_arg(output_dir)).unwrap();
+        }
         if !target.link_libs.is_empty() {
             let libs: Vec<String> = target.link_libs.iter().map(|l| cmake_arg(l)).collect();
             writeln!(out, "    LIBS {}", libs.join(" ")).unwrap();
@@ -912,6 +915,73 @@ mod tests {
         assert!(cmake.contains("    MODTYPE \"usbclass\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"class\""), "{cmake}");
         assert!(cmake.contains("    MODSUFFIX \"sysexp\""), "{cmake}");
+    }
+
+    #[test]
+    fn private_linklib_output_and_search_path_are_emitted_verbatim() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = crate::parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/z/mmakefile.src"),
+            &root,
+            &dirs,
+            &crate::TargetContext {
+                cpu: Some("x86_64".to_owned()),
+                platform: Some("pc".to_owned()),
+                family: Some(String::new()),
+                variant: Some(String::new()),
+                toolchain: Some("llvm".to_owned()),
+                cpu32: Some("i386".to_owned()),
+                use_mmu: Some("1".to_owned()),
+                float_abi: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let mut provider = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "linklibs-z-static")
+            .expect("ordinary linklib")
+            .clone();
+        provider.mmake_name = "private-gallium-provider".to_owned();
+        provider.target_name = "gallium_i915".to_owned();
+        provider.canonical_linklib_output = false;
+        provider.canonical_linklib_eligible = false;
+        provider.linklib_output_dir = Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8".to_owned());
+
+        let mut consumer = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "workbench-libs-z-minigzip")
+            .expect("sourceful consumer")
+            .clone();
+        consumer.mmake_name = "private-gallium-consumer".to_owned();
+        consumer.link_options = vec![
+            "-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8".to_owned(),
+            "-lgallium_i915".to_owned(),
+        ];
+
+        let mut graph = DependencyGraph::new();
+        graph.add_target(provider);
+        graph.add_target(consumer);
+        let cmake = generate_cmake(&graph);
+
+        let provider_at = cmake
+            .find("MMAKE_ID private-gallium-provider")
+            .expect("private provider declaration");
+        let provider_end = cmake[provider_at..].find("\n)\n").unwrap() + provider_at;
+        let provider_decl = &cmake[provider_at..provider_end];
+        assert!(provider_decl.contains("    OUTPUT_DIR \"${AROS_BUILD_DIR}/gen/lib/mesa20.0.8\""));
+        assert!(!provider_decl.contains("CANONICAL_OUTPUT"));
+
+        let consumer_at = cmake
+            .find("MMAKE_ID private-gallium-consumer")
+            .expect("private consumer declaration");
+        let consumer_end = cmake[consumer_at..].find("\n)\n").unwrap() + consumer_at;
+        assert!(cmake[consumer_at..consumer_end].contains(
+            "    LINK_OPTIONS \"-L${AROS_BUILD_DIR}/gen/lib/mesa20.0.8\" \"-lgallium_i915\""
+        ));
     }
 
     #[test]

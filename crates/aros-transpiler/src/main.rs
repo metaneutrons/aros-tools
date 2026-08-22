@@ -1,8 +1,8 @@
 use aros_common::Result;
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
-    generate_cmake, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context,
-    DependencyGraph, TargetContext,
+    collect_mmakefile_fetches_with_context, generate_cmake, parse_mmakefile_with_dirs,
+    parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, TargetContext,
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -128,13 +128,26 @@ fn main() -> Result<()> {
         use_mmu: args.use_mmu.clone(),
         float_abi: args.float_abi.clone(),
     });
+    let known_fetches = target.as_ref().map_or_else(Vec::new, |target| {
+        files
+            .par_iter()
+            .filter_map(|path| {
+                collect_mmakefile_fetches_with_context(path, &args.source_dir, target).ok()
+            })
+            .flatten()
+            .collect()
+    });
     let parsed_results: Vec<_> = files
         .par_iter()
         .filter_map(|path| {
             let res = match &target {
-                Some(target) => {
-                    parse_mmakefile_with_dirs_and_context(path, &args.source_dir, &dirs, target)
-                }
+                Some(target) => parse_mmakefile_with_dirs_and_context_and_fetches(
+                    path,
+                    &args.source_dir,
+                    &dirs,
+                    target,
+                    &known_fetches,
+                ),
                 None => parse_mmakefile_with_dirs(path, &args.source_dir, &dirs),
             }
             .ok();
