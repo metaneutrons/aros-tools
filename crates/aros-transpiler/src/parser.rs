@@ -1,7 +1,8 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
-    DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs, MetaTargetRule, ModuleType,
-    ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl, TargetDefinition,
+    ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs, GrubBuildDecl,
+    MetaTargetRule, ModuleType, ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl,
+    PythonPackageDecl, TargetDefinition,
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
@@ -1604,6 +1605,7 @@ fn is_concrete_build_invocation(name: &str) -> bool {
             | "build_linklib"
             | "build_module_simple"
             | "build_with_cmake"
+            | "build_with_configure"
     )
 }
 
@@ -2255,17 +2257,1201 @@ fn parse_external_cmake_invocation(
     })
 }
 
+const ADFLIB_CONFIGURE_DIR: &str = "tools/ADFlib";
+const ADFLIB_CONFIGURE_MANIFEST: &str = "tools/ADFlib/adflib-configure.inputs";
+const ADFLIB_CONFIGURE_MANIFEST_SHA256: &str =
+    "a63a7498752d68175093b94dba873cc8a343d75179feec5cd6a6020e56e779a5";
+const WIRELESS_CONFIGURE_DIR: &str = "workbench/network/WirelessManager/wpa_supplicant";
+const WIRELESS_CONFIGURE_SOURCE_ROOT: &str = "workbench/network/WirelessManager";
+const WIRELESS_CONFIGURE_MANIFEST: &str =
+    "workbench/network/WirelessManager/wirelessmanager-configure.inputs";
+const WIRELESS_CONFIGURE_MANIFEST_SHA256: &str =
+    "27e629e694f6cbc8dd036f7b188604fd03ed901d181962db143a0789512af760";
+const GRUB2_HOST_DIR: &str = "arch/all-pc/boot/grub2-host";
+const GRUB2_HOST_MMAKE_SHA256: &str =
+    "66c464606f16a8ce594aac96875498beb9429836c3036095193a3e135e5b85f8";
+const GRUB2_AROS_MMAKE_SHA256: &str =
+    "74cf4a179dd75163c40f6931bab1521d9cfe251a09552d76abac8e98eb640f83";
+const GRUB2_VERSION_FILE_SHA256: &str =
+    "f487eb5226f64295c10fa7fcd3aba777dd763d2a0d2e58d9e2e43cf5f3023d0c";
+
+const ADFLIB_PUBLIC_HEADERS: &[&str] = &[
+    "adf_defs.h",
+    "adf_blk.h",
+    "adf_err.h",
+    "adf_str.h",
+    "adflib.h",
+    "adf_bitm.h",
+    "adf_cache.h",
+    "adf_dir.h",
+    "adf_disk.h",
+    "adf_dump.h",
+    "adf_env.h",
+    "adf_file.h",
+    "adf_hd.h",
+    "adf_link.h",
+    "adf_raw.h",
+    "adf_salv.h",
+    "adf_util.h",
+    "defendian.h",
+    "hd_blk.h",
+    "prefix.h",
+    "adf_nativ.h",
+];
+
+/// Verifies the complete source allowlist and every content digest before a
+/// configure-style capability is admitted.  The same manifest is checked and
+/// staged by CMake at build time; doing it here too ensures source drift turns
+/// the declaration back into an explicit skip on the next configure.
+fn configure_input_manifest_is_pinned(
+    root: &Path,
+    source_dir: &str,
+    manifest: &str,
+    expected_manifest_sha256: &str,
+) -> std::result::Result<(), String> {
+    let manifest_path = root.join(manifest);
+    let bytes = fs::read(&manifest_path)
+        .map_err(|reason| format!("cannot read input manifest {manifest}: {reason}"))?;
+    let actual_manifest_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if actual_manifest_sha256 != expected_manifest_sha256 {
+        return Err(format!(
+            "input manifest digest is {actual_manifest_sha256}, expected {expected_manifest_sha256}"
+        ));
+    }
+    let body = std::str::from_utf8(&bytes)
+        .map_err(|_| format!("input manifest {manifest} is not UTF-8"))?;
+    let source_root = root.join(source_dir);
+    let mut paths = HashSet::new();
+    let mut count = 0usize;
+    for (index, line) in body.lines().enumerate() {
+        let (digest, relative) = line.split_once("  ").ok_or_else(|| {
+            format!(
+                "input manifest {manifest}:{} is not `<sha256>  <relative-path>`",
+                index + 1
+            )
+        })?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(format!(
+                "input manifest {manifest}:{} has an invalid SHA-256",
+                index + 1
+            ));
+        }
+        let path = Path::new(relative);
+        if relative.is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "input manifest {manifest}:{} has an unsafe path `{relative}`",
+                index + 1
+            ));
+        }
+        if !paths.insert(relative.to_owned()) {
+            return Err(format!(
+                "input manifest {manifest}:{} repeats `{relative}`",
+                index + 1
+            ));
+        }
+        let input = source_root.join(path);
+        let input_bytes = fs::read(&input).map_err(|reason| {
+            format!(
+                "input manifest {manifest}:{} cannot read {relative}: {reason}",
+                index + 1
+            )
+        })?;
+        let actual = format!("{:x}", Sha256::digest(&input_bytes));
+        if actual != digest {
+            return Err(format!(
+                "input manifest {manifest}:{} digest for {relative} is {actual}, expected {digest}",
+                index + 1
+            ));
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err(format!("input manifest {manifest} is empty"));
+    }
+    Ok(())
+}
+
+fn configure_profile_is_supported(
+    target: Option<&TargetContext>,
+) -> std::result::Result<(), String> {
+    let Some(profile) = target else {
+        return Err("configure-style capability requires a concrete target profile".to_owned());
+    };
+    let key = (
+        profile.cpu.as_deref(),
+        profile.platform.as_deref(),
+        profile.toolchain.as_deref(),
+        profile.cpu32.as_deref(),
+        profile.use_mmu.as_deref(),
+        profile.float_abi.as_deref(),
+    );
+    match key {
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some(""))
+        | (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard"))
+        | (
+            Some("aarch64"),
+            Some("raspi"),
+            Some("llvm"),
+            Some(""),
+            Some("1"),
+            Some(""),
+        ) => Ok(()),
+        _ => Err(format!(
+            "configure-style capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+            profile.cpu.as_deref().unwrap_or("<unset>"),
+            profile.platform.as_deref().unwrap_or("<unset>"),
+            profile.toolchain.as_deref().unwrap_or("<unset>"),
+            profile.cpu32.as_deref().unwrap_or("<unset>"),
+            profile.use_mmu.as_deref().unwrap_or("<unset>"),
+            profile.float_abi.as_deref().unwrap_or("<unset>")
+        )),
+    }
+}
+
+fn require_exact_macro_arguments(
+    invocation: &Invocation,
+    expected: &[(&str, &str)],
+) -> std::result::Result<(), String> {
+    let names = macro_argument_names(&invocation.args);
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != names.len() {
+        return Err("duplicate macro argument".to_owned());
+    }
+    let mut expected_names = expected
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
+    expected_names.sort();
+    if unique != expected_names {
+        return Err(format!(
+            "argument set [{}] does not match audited capability [{}]",
+            unique.join(", "),
+            expected_names.join(", ")
+        ));
+    }
+    for (name, expected_value) in expected {
+        // MetaMake accepts a literal empty `key=` argument. `macro_arg`
+        // intentionally returns None for it, because ordinary consumers use
+        // absence and emptiness equivalently. Closed capabilities sometimes
+        // need to distinguish it, however: the name-set check above proves
+        // the key exists, and this branch proves it has no value.
+        if expected_value.is_empty() {
+            if let Some(actual) = macro_arg(&invocation.args, name) {
+                return Err(format!(
+                    "{name} uses `{actual}`, expected an audited empty argument"
+                ));
+            }
+            continue;
+        }
+        let actual = macro_arg(&invocation.args, name)
+            .ok_or_else(|| format!("missing required {name}= argument"))?;
+        if actual != *expected_value {
+            return Err(format!(
+                "{name} uses `{actual}`, expected audited form `{expected_value}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parses the deliberately small, local-source subset of
+/// `%build_with_configure`.  No legacy command/environment text is forwarded:
+/// a target is admitted only when its identity, argument set, profile and full
+/// source manifest match one of these closed contracts.
+fn parse_configure_build_invocation(
+    root: &Path,
+    invocation: &Invocation,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+) -> std::result::Result<ConfigureBuildDecl, String> {
+    configure_profile_is_supported(target)?;
+    let mmake = macro_arg(&invocation.args, "mmake")
+        .ok_or_else(|| "missing required mmake= argument".to_owned())?;
+
+    if relative_dir == Path::new(ADFLIB_CONFIGURE_DIR) && mmake == "host-adflib" {
+        require_exact_macro_arguments(
+            invocation,
+            &[
+                ("mmake", "host-adflib"),
+                ("compiler", "host"),
+                ("prefix", "$(CROSSTOOLSDIR)"),
+            ],
+        )?;
+        configure_input_manifest_is_pinned(
+            root,
+            ADFLIB_CONFIGURE_DIR,
+            ADFLIB_CONFIGURE_MANIFEST,
+            ADFLIB_CONFIGURE_MANIFEST_SHA256,
+        )?;
+        let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/host".to_owned();
+        let install_prefix = "${AROS_BUILD_DIR}/hosttools".to_owned();
+        let mut install_products = vec![format!("{install_prefix}/lib/libadf.a")];
+        install_products.extend(
+            ADFLIB_PUBLIC_HEADERS
+                .iter()
+                .map(|header| format!("{install_prefix}/include/{header}")),
+        );
+        install_products.push(format!("{install_prefix}/lib/pkgconfig/adflib.pc"));
+        return Ok(ConfigureBuildDecl {
+            mmake_name: mmake,
+            mode: "adflib-host".to_owned(),
+            source_dir: "${CMAKE_SOURCE_DIR}/tools/ADFlib".to_owned(),
+            binary_dir: binary_dir.clone(),
+            install_prefix,
+            input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
+            input_manifest_sha256: ADFLIB_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            private_products: vec![format!("{binary_dir}/build/libadf.a")],
+            install_products,
+            dependency_products: Vec::new(),
+            provided_library: None,
+            provider_target: None,
+            dir_path: relative_dir.to_path_buf(),
+        });
+    }
+
+    if relative_dir == Path::new(ADFLIB_CONFIGURE_DIR) && mmake == "linklib-adflib" {
+        require_exact_macro_arguments(
+            invocation,
+            &[
+                ("mmake", "linklib-adflib"),
+                ("prefix", "$(AROS_DEVELOPER)"),
+                ("extraoptions", "$(AROSADFLIB_OPTS)"),
+                ("config_env_extra", "$(AROSADFLIB_ENV)"),
+                ("use_build_env", "yes"),
+                ("nlsflag", "no"),
+                ("xflag", "no"),
+            ],
+        )?;
+        configure_input_manifest_is_pinned(
+            root,
+            ADFLIB_CONFIGURE_DIR,
+            ADFLIB_CONFIGURE_MANIFEST,
+            ADFLIB_CONFIGURE_MANIFEST_SHA256,
+        )?;
+        let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/target".to_owned();
+        let install_prefix = "${AROS_BUILD_DIR}/SYS/Developer".to_owned();
+        let mut install_products = vec![format!("{install_prefix}/lib/libadf.a")];
+        install_products.extend(
+            ADFLIB_PUBLIC_HEADERS
+                .iter()
+                .map(|header| format!("{install_prefix}/include/{header}")),
+        );
+        install_products.push(format!("{install_prefix}/lib/pkgconfig/adflib.pc"));
+        return Ok(ConfigureBuildDecl {
+            mmake_name: mmake,
+            mode: "adflib-target".to_owned(),
+            source_dir: "${CMAKE_SOURCE_DIR}/tools/ADFlib".to_owned(),
+            binary_dir: binary_dir.clone(),
+            install_prefix,
+            input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
+            input_manifest_sha256: ADFLIB_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            private_products: vec![format!("{binary_dir}/build/libadf.a")],
+            install_products,
+            dependency_products: Vec::new(),
+            provided_library: Some("adf".to_owned()),
+            provider_target: Some("linklib-adflib-configure-adf".to_owned()),
+            dir_path: relative_dir.to_path_buf(),
+        });
+    }
+
+    if relative_dir == Path::new(WIRELESS_CONFIGURE_DIR)
+        && mmake == "workbench-network-wirelessmanager"
+    {
+        require_exact_macro_arguments(
+            invocation,
+            &[
+                ("mmake", "workbench-network-wirelessmanager"),
+                ("install_env", "BINDIR=$(AROS_C)"),
+                ("use_build_env", "yes"),
+            ],
+        )?;
+        configure_input_manifest_is_pinned(
+            root,
+            WIRELESS_CONFIGURE_SOURCE_ROOT,
+            WIRELESS_CONFIGURE_MANIFEST,
+            WIRELESS_CONFIGURE_MANIFEST_SHA256,
+        )?;
+        let binary_dir =
+            "${AROS_BUILD_DIR}/gen/configure/workbench/network/WirelessManager".to_owned();
+        let private_root = format!("{binary_dir}/source/wpa_supplicant");
+        return Ok(ConfigureBuildDecl {
+            mmake_name: mmake,
+            mode: "wirelessmanager".to_owned(),
+            source_dir:
+                "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager".to_owned(),
+            binary_dir,
+            install_prefix: "${AROS_BUILD_DIR}/SYS".to_owned(),
+            input_manifest: "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager/wirelessmanager-configure.inputs".to_owned(),
+            input_manifest_sha256: WIRELESS_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            private_products: ["wpa_supplicant", "wpa_passphrase", "wpa_cli"]
+                .into_iter()
+                .map(|product| format!("{private_root}/{product}"))
+                .collect(),
+            install_products: vec!["${AROS_BUILD_DIR}/SYS/C/WirelessManager".to_owned()],
+            dependency_products: vec!["${AROS_BUILD_DIR}/liblinklibs-mui.a".to_owned()],
+            provided_library: None,
+            provider_target: None,
+            dir_path: relative_dir.to_path_buf(),
+        });
+    }
+
+    Err(format!(
+        "unsupported configure-style capability (modelled: tools/ADFlib mmake=host-adflib,linklib-adflib; workbench/network/WirelessManager/wpa_supplicant mmake=workbench-network-wirelessmanager)"
+    ))
+}
+
+/// Parses the three x86 GRUB 2.12 host-tool lanes without admitting the
+/// legacy macro's open-ended configure environment.  The downstream helper
+/// owns the source URL, patch, cross targets, host dependencies and complete
+/// product manifests; this parser verifies that the legacy declaration is the
+/// exact audited input before selecting its fixed lane roots.
+fn parse_grub2_build_invocation(
+    root: &Path,
+    invocation: &Invocation,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<GrubBuildDecl>, String> {
+    if relative_dir != Path::new(GRUB2_HOST_DIR) {
+        return Ok(None);
+    }
+    let Some(mmake) = macro_arg(&invocation.args, "mmake") else {
+        return Ok(None);
+    };
+    if !matches!(
+        mmake.as_str(),
+        "grub2-host" | "grub2-efi-host" | "grub2-efi32-host"
+    ) {
+        return Ok(None);
+    }
+
+    let Some(profile) = target else {
+        return Err("GRUB2 host-tool capability requires a concrete target profile".to_owned());
+    };
+    let profile_key = (
+        profile.cpu.as_deref(),
+        profile.platform.as_deref(),
+        profile.toolchain.as_deref(),
+        profile.cpu32.as_deref(),
+        profile.use_mmu.as_deref(),
+        profile.float_abi.as_deref(),
+    );
+    if profile_key
+        != (
+            Some("x86_64"),
+            Some("pc"),
+            Some("llvm"),
+            Some("i386"),
+            Some("1"),
+            Some(""),
+        )
+    {
+        return Err(format!(
+            "GRUB2 host-tool capability only supports x86_64-pc LLVM with the i386 companion (cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={})",
+            profile.cpu.as_deref().unwrap_or("<unset>"),
+            profile.platform.as_deref().unwrap_or("<unset>"),
+            profile.toolchain.as_deref().unwrap_or("<unset>"),
+            profile.cpu32.as_deref().unwrap_or("<unset>"),
+            profile.use_mmu.as_deref().unwrap_or("<unset>"),
+            profile.float_abi.as_deref().unwrap_or("<unset>")
+        ));
+    }
+    if !file_has_sha256(
+        root,
+        "arch/all-pc/boot/grub2-host/mmakefile.src",
+        GRUB2_HOST_MMAKE_SHA256,
+    ) || !file_has_sha256(
+        root,
+        "arch/all-pc/boot/grub2-aros/mmakefile.src",
+        GRUB2_AROS_MMAKE_SHA256,
+    ) || !file_has_sha256(
+        root,
+        "arch/all-pc/boot/grub2_def",
+        GRUB2_VERSION_FILE_SHA256,
+    ) {
+        return Err(
+            "GRUB2 host, fetch-owner or version declaration differs from the audited 2.12 capability"
+                .to_owned(),
+        );
+    }
+
+    let (mode, lane) = match mmake.as_str() {
+        "grub2-host" => {
+            require_exact_macro_arguments(
+                invocation,
+                &[
+                    ("mmake", "grub2-host"),
+                    ("compiler", "host"),
+                    ("prefix", "$(DESTDIR)"),
+                    ("srcdir", "$(GRUBSRCDIR)"),
+                    ("package", "pc"),
+                    ("extraoptions", "$(GRUB2_HOST_OPTS) --with-platform=pc"),
+                    ("targetisaflags", ""),
+                    ("config_env_extra", "$(GRUB2_HOST_ENV)"),
+                ],
+            )?;
+            ("pc", "pc")
+        }
+        "grub2-efi-host" => {
+            require_exact_macro_arguments(
+                invocation,
+                &[
+                    ("mmake", "grub2-efi-host"),
+                    ("compiler", "host"),
+                    ("prefix", "$(DESTDIR)"),
+                    ("srcdir", "$(GRUBSRCDIR)"),
+                    ("touch", "no"),
+                    ("package", "efi-$(AROS_TARGET_CPU)"),
+                    ("extraoptions", "$(GRUB2_HOST_OPTS) --with-platform=efi"),
+                    ("targetisaflags", ""),
+                    ("config_env_extra", "$(GRUB2_EFI_ENV)"),
+                ],
+            )?;
+            ("efi64", "efi-x86_64")
+        }
+        "grub2-efi32-host" => {
+            require_exact_macro_arguments(
+                invocation,
+                &[
+                    ("mmake", "grub2-efi32-host"),
+                    ("compiler", "host"),
+                    ("prefix", "$(DESTDIR)"),
+                    ("srcdir", "$(GRUBSRCDIR)"),
+                    ("touch", "no"),
+                    ("package", "efi-$(AROS_TARGET_CPU32)"),
+                    ("extraoptions", "$(GRUB2_EFI32_OPTS) --with-platform=efi"),
+                    ("targetisaflags", ""),
+                    ("config_env_extra", "$(GRUB2_EFI32_ENV)"),
+                ],
+            )?;
+            ("efi32", "efi-i386")
+        }
+        _ => unreachable!("the GRUB2 identity was checked above"),
+    };
+
+    Ok(Some(GrubBuildDecl {
+        mmake_name: mmake,
+        mode: mode.to_owned(),
+        binary_dir: format!("${{AROS_BUILD_DIR}}/gen/configure/arch/all-pc/boot/grub2-host/{lane}"),
+        install_prefix: format!("${{AROS_BUILD_DIR}}/hosttools/grub2/{lane}"),
+        dir_path: relative_dir.to_path_buf(),
+    }))
+}
+
+const MESA20_SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
+const MESA20_BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
+const MESA20_PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
+const MESA20_CXX_COMPAT_NEW: &str = "workbench/libs/mesa/libcompiler/cxx-compat/new";
+const MESA20_CXX_COMPAT_NEW_SHA256: &str =
+    "a1163dd966449e85f08deeb4775716a34c69b68831e1ac5fc75ea121814bf0ba";
+
+/// Exact, version-pinned source lanes for the remaining Mesa 20.0.8 private
+/// archives.  The adjacent manifests contain only literal upstream-relative
+/// inventories; generated products are kept in separate variables so they can
+/// acquire real build owners before CMake resolves the source lanes.
+fn mesa20_inventory(
+    root: &Path,
+    relative: &str,
+    variable: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let path = root.join(relative);
+    let content =
+        read_source(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let joined = join_continuations(&content);
+    let scope = collect_vars(&joined);
+    let values = scope
+        .snapshot(usize::MAX)
+        .remove(variable)
+        .ok_or_else(|| format!("{relative} does not define {variable}"))?;
+    if values.is_empty()
+        || values.iter().any(|value| {
+            value.contains("$(")
+                || value.contains("${")
+                || value.starts_with('/')
+                || value.split('/').any(|part| part == "..")
+        })
+    {
+        return Err(format!(
+            "{relative} contains an empty or unsafe {variable} inventory"
+        ));
+    }
+    Ok(values)
+}
+
+fn mesa20_inventory_stems(
+    root: &Path,
+    relative: &str,
+    variable: &str,
+    suffix: &str,
+    prefix: &str,
+) -> std::result::Result<Vec<String>, String> {
+    mesa20_inventory(root, relative, variable)?
+        .into_iter()
+        .map(|source| {
+            source
+                .strip_suffix(suffix)
+                .map(|stem| format!("{prefix}/{stem}"))
+                .ok_or_else(|| format!("{relative} {variable} entry lacks {suffix}: {source}"))
+        })
+        .collect()
+}
+
+fn mesa20_inventory_paths(
+    root: &Path,
+    relative: &str,
+    variable: &str,
+    suffix: &str,
+    prefix: &str,
+) -> std::result::Result<Vec<String>, String> {
+    mesa20_inventory(root, relative, variable)?
+        .into_iter()
+        .map(|source| {
+            if source.ends_with(suffix) {
+                Ok(format!("{prefix}/{source}"))
+            } else {
+                Err(format!(
+                    "{relative} {variable} entry lacks {suffix}: {source}"
+                ))
+            }
+        })
+        .collect()
+}
+
+fn mesa20_current_profile(
+    target: Option<&TargetContext>,
+) -> std::result::Result<&'static str, String> {
+    let Some(profile) = target else {
+        return Err("Mesa 20.0.8 archive capability requires a concrete target profile".to_owned());
+    };
+    match (
+        profile.cpu.as_deref(),
+        profile.platform.as_deref(),
+        profile.toolchain.as_deref(),
+        profile.cpu32.as_deref(),
+        profile.use_mmu.as_deref(),
+        profile.float_abi.as_deref(),
+    ) {
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => {
+            Ok("x86_64")
+        }
+        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => {
+            Ok("arm")
+        }
+        (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
+            Ok("aarch64")
+        }
+        _ => Err(format!(
+            "Mesa 20.0.8 archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+            profile.cpu.as_deref().unwrap_or("<unset>"),
+            profile.platform.as_deref().unwrap_or("<unset>"),
+            profile.toolchain.as_deref().unwrap_or("<unset>"),
+            profile.cpu32.as_deref().unwrap_or("<unset>"),
+            profile.use_mmu.as_deref().unwrap_or("<unset>"),
+            profile.float_abi.as_deref().unwrap_or("<unset>")
+        )),
+    }
+}
+
+struct Mesa20CompileContract {
+    defines: Vec<String>,
+    includes: Vec<String>,
+    options: Vec<String>,
+}
+
+fn mesa20_base_defines(profile: &str) -> Vec<String> {
+    let mut defines = [
+        "__STDC_CONSTANT_MACROS",
+        "__STDC_FORMAT_MACROS",
+        "__STDC_LIMIT_MACROS",
+        "_GNU_SOURCE",
+        "HAVE_PTHREAD",
+        "HAVE_TIMESPEC_GET",
+        "POSIXC_SLOWSTACK_VAARGS",
+        "USE_GCC_ATOMIC_BUILTINS",
+        "HAVE_ZLIB",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if profile == "x86_64" {
+        defines.extend(["USE_X86_64_ASM".to_owned(), "USE_SSE41".to_owned()]);
+    }
+    defines.extend(["MAPI_MODE_GLAPI".to_owned(), "MAPI_MODE_UTIL".to_owned()]);
+    defines
+}
+
+fn mesa20_compile_contract(
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<Mesa20CompileContract>, String> {
+    let supported = matches!(
+        (relative_dir.to_str(), mmake),
+        (
+            Some("workbench/libs/mesa/libcompiler"),
+            "mesa3d-linklib-compiler"
+        ) | (
+            Some("workbench/libs/mesa/libgalliumaux"),
+            "mesa3d-linklib-galliumauxiliary"
+        ) | (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa")
+            | (
+                Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+                "linklibs-gallium_vc4"
+            )
+    );
+    if !supported {
+        return Ok(None);
+    }
+    let profile = mesa20_current_profile(target)?;
+    let base = [
+        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
+        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
+    ];
+    let (mut defines, includes, options) = match (relative_dir.to_str(), mmake) {
+        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => (
+            mesa20_base_defines(profile),
+            base.into_iter()
+                .chain([
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl/glcpp",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/spirv",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl/glcpp",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/spirv",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+                ])
+                .map(str::to_owned)
+                .collect(),
+            vec![
+                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
+                "-fno-strict-aliasing".to_owned(),
+            ],
+        ),
+        (
+            Some("workbench/libs/mesa/libgalliumaux"),
+            "mesa3d-linklib-galliumauxiliary",
+        ) => (
+            mesa20_base_defines(profile),
+            base.into_iter()
+                .chain([
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary/util",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary/indices",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+                ])
+                .map(str::to_owned)
+                .collect(),
+            vec![
+                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
+                "-fno-strict-aliasing".to_owned(),
+            ],
+        ),
+        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => (
+            mesa20_base_defines(profile),
+            base.into_iter()
+                .chain([
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa/main",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main",
+                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+                ])
+                .map(str::to_owned)
+                .collect(),
+            vec![
+                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
+                "-fno-strict-aliasing".to_owned(),
+            ],
+        ),
+        (
+            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+            "linklibs-gallium_vc4",
+        ) if profile != "x86_64" => {
+            let mut defines = mesa20_base_defines(profile);
+            defines.extend(
+                [
+                    "GALLIUM_VC4",
+                    "HAVE_STRUCT_TIMESPEC",
+                    "USE_ARM_ASM",
+                    "GCA_CONSUMER_MODULE",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            (
+                defines,
+                base.into_iter()
+                    .chain([
+                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/drm_compat",
+                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/vc4",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom",
+                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/broadcom",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
+                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
+                    ])
+                    .map(str::to_owned)
+                    .collect(),
+                vec!["-std=gnu99".to_owned(), "-fno-strict-aliasing".to_owned()],
+            )
+        }
+        _ => return Ok(None),
+    };
+    if mmake == "mesa3d-linklib-mesa" {
+        defines.extend([
+            "PACKAGE_VERSION=\"20.0.8\"".to_owned(),
+            "PACKAGE_BUGREPORT=\"https://bugs.freedesktop.org/enter_bug.cgi?product=Mesa\""
+                .to_owned(),
+        ]);
+    }
+    // Keep declarations deterministic even when a legacy include repeats one
+    // of the common paths.
+    let mut seen = HashSet::new();
+    defines.retain(|define| seen.insert(define.clone()));
+    Ok(Some(Mesa20CompileContract {
+        defines,
+        includes,
+        options,
+    }))
+}
+
+fn mesa20_remaining_linklib_sources(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<EvaluatedSources>, String> {
+    let supported_declaration = matches!(
+        (relative_dir.to_str(), mmake),
+        (
+            Some("workbench/libs/mesa/libcompiler"),
+            "mesa3d-linklib-compiler"
+        ) | (
+            Some("workbench/libs/mesa/libgalliumaux"),
+            "mesa3d-linklib-galliumauxiliary"
+        ) | (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa")
+            | (
+                Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+                "linklibs-gallium_vc4"
+            )
+    );
+    if !supported_declaration {
+        return Ok(None);
+    }
+    let profile = mesa20_current_profile(target)?;
+    let mut sources = EvaluatedSources {
+        declared: true,
+        ..EvaluatedSources::default()
+    };
+    match (relative_dir.to_str(), mmake) {
+        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => {
+            const MANIFEST: &str = "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources";
+            sources.c = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_COMPILER_STATIC_C_SOURCES",
+                ".c",
+                &format!("{MESA20_SOURCE_ROOT}/src/compiler"),
+            )?;
+            sources.c.extend(mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_COMPILER_GENERATED_C_SOURCES",
+                ".c",
+                &format!("{MESA20_BUILD_ROOT}/src/compiler"),
+            )?);
+            sources.cxx = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_COMPILER_STATIC_CXX_SOURCES",
+                ".cpp",
+                &format!("{MESA20_SOURCE_ROOT}/src/compiler"),
+            )?;
+            sources.cxx.extend(mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_COMPILER_GENERATED_CXX_SOURCES",
+                ".cpp",
+                &format!("{MESA20_BUILD_ROOT}/src/compiler"),
+            )?);
+        }
+        (Some("workbench/libs/mesa/libgalliumaux"), "mesa3d-linklib-galliumauxiliary") => {
+            const MANIFEST: &str = "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources";
+            sources.c = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_GALLIUMAUX_STATIC_C_SOURCES",
+                ".c",
+                &format!("{MESA20_SOURCE_ROOT}/src/gallium/auxiliary"),
+            )?;
+            sources.c.extend(mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_GALLIUMAUX_GENERATED_C_SOURCES",
+                ".c",
+                &format!("{MESA20_BUILD_ROOT}/src/gallium/auxiliary"),
+            )?);
+        }
+        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => {
+            const MANIFEST: &str = "workbench/libs/mesa/libmesa/mesa-20.0.8.sources";
+            sources.c = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_CORE_C_SOURCES",
+                ".c",
+                &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
+            )?;
+            for generated in [
+                "main/api_exec.c",
+                "main/enums.c",
+                "main/format_pack.c",
+                "main/format_unpack.c",
+                "main/format_fallback.c",
+                "main/marshal_generated.c",
+                "program/program_parse.tab.c",
+                "program/lex.yy.c",
+            ] {
+                sources.c.push(format!(
+                    "{MESA20_BUILD_ROOT}/src/mesa/{}",
+                    generated.trim_end_matches(".c")
+                ));
+            }
+            sources.cxx = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA20_CORE_CXX_SOURCES",
+                ".cpp",
+                &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
+            )?;
+            if profile == "x86_64" {
+                sources.c.extend(mesa20_inventory_stems(
+                    root,
+                    MANIFEST,
+                    "MESA20_CORE_X86_64_C_SOURCES",
+                    ".c",
+                    &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
+                )?);
+                sources.asm = mesa20_inventory_paths(
+                    root,
+                    MANIFEST,
+                    "MESA20_CORE_X86_64_ASM_SOURCES",
+                    ".S",
+                    &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
+                )?;
+            }
+        }
+        (Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"), "linklibs-gallium_vc4")
+            if profile != "x86_64" =>
+        {
+            const MANIFEST: &str =
+                "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources";
+            sources.c = mesa20_inventory_stems(
+                root,
+                MANIFEST,
+                "MESA3D_VC4_C_SOURCES",
+                ".c",
+                &format!("{MESA20_SOURCE_ROOT}/src/gallium/drivers/vc4"),
+            )?;
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(sources))
+}
+
+const NOUVEAU_DRM_DIR: &str = "workbench/hidds/nouveau";
+const NOUVEAU_DRM_MMAKE: &str = "hidd-nouveau-drm";
+const NOUVEAU_DRM_MMAKEFILE: &str = "workbench/hidds/nouveau/mmakefile.src";
+const NOUVEAU_DRM_SOURCE_MANIFEST: &str = "workbench/hidds/nouveau/sources.drm.mak";
+const NOUVEAU_DRM_MMAKE_SHA256: &str =
+    "c799ba3670f9f767946ba5ed04c9e4acebaf76fd50ce3bac9736293eef323134";
+const NOUVEAU_DRM_SOURCE_MANIFEST_SHA256: &str =
+    "f51d30d4b9f182aca412e535b32dab35b9bbcadffc4a480b3bacf55ab8afc28a";
+const NOUVEAU_DRM_CORE_SOURCE_COUNT: usize = 67;
+const NOUVEAU_DRM_NVIDIA_SOURCE_COUNT: usize = 758;
+const NOUVEAU_DRM_TOTAL_SOURCE_COUNT: usize =
+    NOUVEAU_DRM_CORE_SOURCE_COUNT + NOUVEAU_DRM_NVIDIA_SOURCE_COUNT;
+const NOUVEAU_DRM_SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
+
+/// Selects the three profiles for which the DRM-side Nouveau source snapshot
+/// was audited.  The archive has no architecture-specific source lane, but a
+/// concrete profile is still required so unsupported configurations cannot
+/// silently inherit this closed capability.
+fn nouveau_drm_current_profile(
+    target: Option<&TargetContext>,
+) -> std::result::Result<&'static str, String> {
+    let Some(profile) = target else {
+        return Err("Nouveau DRM archive capability requires a concrete target profile".to_owned());
+    };
+    match (
+        profile.cpu.as_deref(),
+        profile.platform.as_deref(),
+        profile.toolchain.as_deref(),
+        profile.cpu32.as_deref(),
+        profile.use_mmu.as_deref(),
+        profile.float_abi.as_deref(),
+    ) {
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => {
+            Ok("x86_64")
+        }
+        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => {
+            Ok("arm")
+        }
+        (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
+            Ok("aarch64")
+        }
+        _ => Err(format!(
+            "Nouveau DRM archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+            profile.cpu.as_deref().unwrap_or("<unset>"),
+            profile.platform.as_deref().unwrap_or("<unset>"),
+            profile.toolchain.as_deref().unwrap_or("<unset>"),
+            profile.cpu32.as_deref().unwrap_or("<unset>"),
+            profile.use_mmu.as_deref().unwrap_or("<unset>"),
+            profile.float_abi.as_deref().unwrap_or("<unset>")
+        )),
+    }
+}
+
+/// Loads the two literal source inventories kept with the Nouveau DRM port.
+/// This deliberately does not broaden the local-Make include parser: the
+/// capability owns this exact, SHA-pinned fragment and nothing else in the
+/// surrounding mixed DRM/Gallium makefile.
+fn nouveau_drm_sources(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<EvaluatedSources>, String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_DRM_MMAKE {
+        return Ok(None);
+    }
+    nouveau_drm_current_profile(target)?;
+
+    let core = mesa20_inventory(root, NOUVEAU_DRM_SOURCE_MANIFEST, "AROS_DRM_CORE_SOURCES")?;
+    let nvidia = mesa20_inventory(root, NOUVEAU_DRM_SOURCE_MANIFEST, "AROS_DRM_NVIDIA_SOURCES")?;
+    if core.len() != NOUVEAU_DRM_CORE_SOURCE_COUNT
+        || nvidia.len() != NOUVEAU_DRM_NVIDIA_SOURCE_COUNT
+    {
+        return Err(format!(
+            "{NOUVEAU_DRM_SOURCE_MANIFEST} source inventory has {} core and {} NVIDIA entries, expected {NOUVEAU_DRM_CORE_SOURCE_COUNT} and {NOUVEAU_DRM_NVIDIA_SOURCE_COUNT}",
+            core.len(),
+            nvidia.len()
+        ));
+    }
+
+    let mut sources = EvaluatedSources {
+        declared: true,
+        ..EvaluatedSources::default()
+    };
+    for source in core.into_iter().chain(nvidia) {
+        let physical_source = root.join(NOUVEAU_DRM_DIR).join(format!("{source}.c"));
+        if !physical_source.is_file() {
+            return Err(format!(
+                "{NOUVEAU_DRM_SOURCE_MANIFEST} declares missing C source {}",
+                physical_source.display()
+            ));
+        }
+        sources
+            .c
+            .push(format!("{NOUVEAU_DRM_SOURCE_PREFIX}/{source}"));
+    }
+    if sources.c.len() != NOUVEAU_DRM_TOTAL_SOURCE_COUNT {
+        return Err(format!(
+            "{NOUVEAU_DRM_SOURCE_MANIFEST} materialized {} C sources, expected {NOUVEAU_DRM_TOTAL_SOURCE_COUNT}",
+            sources.c.len()
+        ));
+    }
+    Ok(Some(sources))
+}
+
+struct NouveauDrmCompileContract {
+    defines: Vec<String>,
+    includes: Vec<String>,
+    options: Vec<String>,
+}
+
+/// The compile inputs of the legacy `hidd-nouveau-drm` target, written as an
+/// explicit CMake contract so each source can be materialised on a cold tree.
+///
+/// The legacy target inherits the LLVM toolchain's normal-build `-O2` through
+/// `OPTIMIZATION_CFLAGS`; it is not optional for this source snapshot.
+/// `drm_edid.c` uses an `__always_inline` table lookup in a `BUILD_BUG_ON`,
+/// which Clang cannot reduce at `-O0`.
+fn nouveau_drm_compile_contract(
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> std::result::Result<Option<NouveauDrmCompileContract>, String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != NOUVEAU_DRM_MMAKE {
+        return Ok(None);
+    }
+    nouveau_drm_current_profile(target)?;
+    Ok(Some(NouveauDrmCompileContract {
+        defines: [
+            "__KERNEL__",
+            "CONFIG_NOUVEAU_DEBUG=5",
+            "CONFIG_NOUVEAU_DEBUG_DEFAULT=3",
+            "CONFIG_DRM_NOUVEAU_GSP_DEFAULT=1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        includes: [
+            "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
+            "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include/nvkm",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm",
+            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/gsp",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        options: [
+            "-O2",
+            "-Wno-uninitialized",
+            "-Wno-strict-aliasing",
+            "-Wno-unused-but-set-variable",
+            "-Wno-unused-variable",
+            "-Wno-unused-function",
+            "-Wno-missing-braces",
+            "-std=gnu11",
+            "-fno-strict-aliasing",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    }))
+}
+
+fn validate_nouveau_drm_capability(
+    root: &Path,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+    targets: &[TargetDefinition],
+) -> std::result::Result<(), String> {
+    if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
+        return Ok(());
+    }
+    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, NOUVEAU_DRM_MMAKE_SHA256)
+        || !file_has_sha256(
+            root,
+            NOUVEAU_DRM_SOURCE_MANIFEST,
+            NOUVEAU_DRM_SOURCE_MANIFEST_SHA256,
+        )
+    {
+        return Err(
+            "mmakefile or sources.drm.mak differs from the audited Nouveau DRM capability"
+                .to_owned(),
+        );
+    }
+    let expected_sources = nouveau_drm_sources(root, relative_dir, NOUVEAU_DRM_MMAKE, target)?
+        .ok_or_else(|| format!("missing source capability for {NOUVEAU_DRM_MMAKE}"))?;
+    let expected_flags = nouveau_drm_compile_contract(relative_dir, NOUVEAU_DRM_MMAKE, target)?
+        .ok_or_else(|| format!("missing compile capability for {NOUVEAU_DRM_MMAKE}"))?;
+    let matching = targets
+        .iter()
+        .filter(|candidate| candidate.mmake_name == NOUVEAU_DRM_MMAKE)
+        .collect::<Vec<_>>();
+    let [declaration] = matching.as_slice() else {
+        return Err(format!(
+            "requires exactly one {NOUVEAU_DRM_MMAKE} declaration, found {}",
+            matching.len()
+        ));
+    };
+    let exact = declaration.target_name == "drm_nouveau"
+        && declaration.module_type == ModuleType::LinkLib
+        && !declaration.genmodule_only
+        && !declaration.empty_archive
+        && declaration.source_files == expected_sources.c
+        && declaration.cxx_source_files.is_empty()
+        && declaration.objc_source_files.is_empty()
+        && declaration.asm_source_files.is_empty()
+        && declaration.use_libs.is_empty()
+        && declaration.dependencies.is_empty()
+        && declaration.dir_path == relative_dir
+        && declaration.target_dir.is_none()
+        && !declaration.variant_32bit
+        && declaration.link_libs.is_empty()
+        && declaration.declared_mod_type.is_none()
+        && declaration.mod_suffix.is_none()
+        && declaration.linklib_name.is_none()
+        && declaration.genmodule_linklibs.is_none()
+        && declaration.linklib_output_dir.is_none()
+        && declaration.canonical_linklib_output
+        && declaration.canonical_linklib_eligible
+        && declaration.compiler_flags.is_empty()
+        && declaration.arch_modules.is_empty()
+        && declaration.arch_includes.is_empty()
+        && declaration.undefines.is_empty()
+        && declaration.link_options.is_empty()
+        && declaration.arch_sources.is_empty()
+        && declaration.arch_defines.is_empty()
+        && declaration.arch_compile_options.is_empty()
+        && declaration.defines == expected_flags.defines
+        && (declaration.include_dirs == expected_flags.includes)
+        && declaration.compile_options == expected_flags.options;
+    if !exact {
+        return Err(
+            "source, language, flag, include or canonical-output contract differs from the audited Nouveau DRM capability"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 const MESA_SSE41_DIR: &str = "workbench/libs/mesa/libmesa";
 const MESA_SSE41_MMAKE: &str = "mesa3d-linklib-mesa-sse41";
 const MESA_SSE41_CAPABILITY_SHA256: &str =
-    "472ac8ef3d70e5ef380bf76ff427e78c990cdda96db479aa5504fdf8c23d6768";
+    "70cd3cc7603b73fba1f5048621cd95bfcde8632d1425664fa9982c6aab4e0fac";
 const MESA_SSE41_LOCAL_CONTEXT_SHA256: &str =
-    "0401b0258394c2890b6a21cf9dd243c8ec7379905ac8d839f878bfc698cb11f5";
+    "c954ef928824194f9b91208946e00482d9d1d83cc9496f137cf3a9d92e93b320";
 const MESA_SSE41_CONFIG_CONTEXT_SHA256: &str =
     "2614a0d07eaf97b18de5a120a61b124c40375b0bedaeac9af2fd1660797e2176";
 const MESA_SSE41_MANIFEST_SHA256: &str =
     "4cf786a7beef96b541213b992adf4df84e866afb8f8b2ef855b119f097538497";
-const MESA_PATCH_SHA256: &str = "1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882";
+const MESA_PATCH_SHA256: &str = "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e";
 const MESA_SSE41_INCLUDES: &[&str] = &[
     "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
@@ -2765,12 +3951,15 @@ fn parse_glapi_python_outputs(
         source_sha256: SOURCE_SHA256.to_owned(),
         source_inputs: vec!["src/mapi/glapi/gen/gl_and_es_API.xml".to_owned()],
         jobs,
+        driver_script: None,
+        driver_sha256: None,
+        python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         local_patch_sha256: vec![
-            "1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882".to_owned(),
+            "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e".to_owned(),
         ],
         consumers: vec![GLAPI_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -3043,14 +4232,606 @@ fn parse_mesautil_python_outputs(
                 arguments: vec![CSV.to_owned()],
             },
         ],
+        driver_script: None,
+        driver_sha256: None,
+        python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         local_patch_sha256: vec![
-            "1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882".to_owned(),
+            "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e".to_owned(),
         ],
         consumers: vec![MESAUTIL_MMAKE.to_owned(), MESADEVUTIL_MMAKE.to_owned()],
+        dir_path: relative_dir.to_path_buf(),
+    }))
+}
+
+const MESA20_SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
+const MESA20_SOURCE_SHA256: &str =
+    "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c";
+const MESA20_DRIVER: &str = "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py";
+const MESA20_DRIVER_SHA256: &str =
+    "773b7c856a83be11bdc205f2e43a1bfaeab1533d658fcb854b16207970ee4599";
+const MESA20_MAIN_MMAKE_SHA256: &str =
+    "9b3842c1d004b0b761b451b967e4c6e804a7e47fa19d9d0bb0b57aefa20aaac1";
+const MESA20_CONFIG_SHA256: &str =
+    "db45d23fc15d771df7811341af9834c720f552dabcd87db58876018a5142987c";
+const MESA20_MAKO_SHA256: &str = "99579a6f39583fa7e5630a28c3c1f440e4e97a414b80372649c0ce338da2ea28";
+const MESA20_MARKUPSAFE_SHA256: &str =
+    "ee55d3edf80167e48ea11a923c7386f4669df67d7994554387f84e7d8b0a2bf0";
+
+fn mesa20_generator_job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
+    PythonGeneratorJob {
+        script: script.to_owned(),
+        output: output.to_owned(),
+        arguments: arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect(),
+    }
+}
+
+fn mesa20_python_packages() -> Vec<PythonPackageDecl> {
+    vec![
+        PythonPackageDecl {
+            fetch_target: "mesa3d-mako-fetch".to_owned(),
+            source_root: "${AROS_PORTS_DIR}/mesa-python/mako-1.3.10".to_owned(),
+            source_archive: "${AROS_PORTS_SOURCE_DIR}/mako-1.3.10.tar.gz".to_owned(),
+            source_sha256: MESA20_MAKO_SHA256.to_owned(),
+            python_path: ".".to_owned(),
+        },
+        PythonPackageDecl {
+            fetch_target: "mesa3d-markupsafe-fetch".to_owned(),
+            source_root: "${AROS_PORTS_DIR}/mesa-python/markupsafe-3.0.2".to_owned(),
+            source_archive: "${AROS_PORTS_SOURCE_DIR}/markupsafe-3.0.2.tar.gz".to_owned(),
+            source_sha256: MESA20_MARKUPSAFE_SHA256.to_owned(),
+            python_path: "src".to_owned(),
+        },
+    ]
+}
+
+fn mesa20_fetch_is_exact(fetch: &FetchDecl, name: &str) -> bool {
+    match name {
+        "mesa3d-fetch" => {
+            fetch.archive == "mesa-20.0.8"
+                && fetch.suffixes == "tar.xz tar.gz"
+                && fetch.origins.split_whitespace().eq([
+                    "cache://",
+                    "https://archive.mesa3d.org/",
+                    "https://archive.mesa3d.org/older-versions/20.x",
+                ])
+                && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
+                && fetch.destination == "${AROS_PORTS_DIR}/mesa"
+                && fetch.base.is_empty()
+                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patches == "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
+                && fetch.dir == "workbench/libs/mesa"
+        }
+        "mesa3d-mako-fetch" => {
+            fetch.archive == "mako-1.3.10"
+                && fetch.suffixes == "tar.gz"
+                && fetch.origins
+                    == "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535"
+                && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
+                && fetch.destination == "${AROS_PORTS_DIR}/mesa-python"
+                && fetch.base.is_empty()
+                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patches == "::"
+                && fetch.dir == "workbench/libs/mesa"
+        }
+        "mesa3d-markupsafe-fetch" => {
+            fetch.archive == "markupsafe-3.0.2"
+                && fetch.suffixes == "tar.gz"
+                && fetch.origins
+                    == "https://files.pythonhosted.org/packages/b2/97/5d42485e71dfc078108a86d6de8fa46db44a1a9295e89c5d6d4a06e23a62"
+                && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
+                && fetch.destination == "${AROS_PORTS_DIR}/mesa-python"
+                && fetch.base.is_empty()
+                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patches == "::"
+                && fetch.dir == "workbench/libs/mesa"
+        }
+        _ => false,
+    }
+}
+
+fn require_mesa20_fetches(fetches: &[FetchDecl]) -> std::result::Result<(), String> {
+    for name in [
+        "mesa3d-fetch",
+        "mesa3d-mako-fetch",
+        "mesa3d-markupsafe-fetch",
+    ] {
+        let matching = fetches
+            .iter()
+            .filter(|fetch| fetch.name == name)
+            .collect::<Vec<_>>();
+        let [fetch] = matching.as_slice() else {
+            return Err(format!(
+                "requires exactly one %fetch mmake={name} declaration, found {}",
+                matching.len()
+            ));
+        };
+        if !mesa20_fetch_is_exact(fetch, name) {
+            return Err(format!(
+                "%fetch mmake={name} differs from the audited Mesa 20.0.8 generator capability"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mesa20_target_contract_is_exact(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+    targets: &[TargetDefinition],
+) -> std::result::Result<(), String> {
+    let expected_sources = mesa20_remaining_linklib_sources(root, relative_dir, mmake, target)?
+        .ok_or_else(|| format!("missing source capability for {mmake}"))?;
+    let expected_flags = mesa20_compile_contract(relative_dir, mmake, target)?
+        .ok_or_else(|| format!("missing compile capability for {mmake}"))?;
+    let matching = targets
+        .iter()
+        .filter(|candidate| candidate.mmake_name == mmake)
+        .collect::<Vec<_>>();
+    let [declaration] = matching.as_slice() else {
+        return Err(format!(
+            "requires exactly one {mmake} declaration, found {}",
+            matching.len()
+        ));
+    };
+    let target_name = match mmake {
+        "mesa3d-linklib-compiler" => "compiler",
+        "mesa3d-linklib-galliumauxiliary" => "galliumauxiliary",
+        "mesa3d-linklib-mesa" => "mesa",
+        "linklibs-gallium_vc4" => "gallium_vc4",
+        _ => return Err(format!("unsupported Mesa target contract {mmake}")),
+    };
+    let exact = declaration.target_name == target_name
+        && declaration.module_type == ModuleType::LinkLib
+        && !declaration.genmodule_only
+        && !declaration.empty_archive
+        && declaration.source_files == expected_sources.c
+        && declaration.cxx_source_files == expected_sources.cxx
+        && declaration.objc_source_files.is_empty()
+        && declaration.asm_source_files == expected_sources.asm
+        && declaration.use_libs.is_empty()
+        && declaration.dependencies.is_empty()
+        && declaration.dir_path == relative_dir
+        && declaration.target_dir.is_none()
+        && !declaration.variant_32bit
+        && declaration.link_libs.is_empty()
+        && declaration.declared_mod_type.is_none()
+        && declaration.mod_suffix.is_none()
+        && declaration.linklib_name.is_none()
+        && declaration.genmodule_linklibs.is_none()
+        && declaration.linklib_output_dir.as_deref() == Some(MESA20_PRIVATE_LIBDIR)
+        && !declaration.canonical_linklib_output
+        && !declaration.canonical_linklib_eligible
+        && declaration.compiler_flags.is_empty()
+        && declaration.arch_modules.is_empty()
+        && declaration.arch_includes.is_empty()
+        && declaration.undefines.is_empty()
+        && declaration.link_options.is_empty()
+        && declaration.arch_sources.is_empty()
+        && declaration.arch_defines.is_empty()
+        && declaration.arch_compile_options.is_empty()
+        && declaration.defines == expected_flags.defines
+        && declaration.include_dirs == expected_flags.includes
+        && declaration.compile_options == expected_flags.options;
+    if !exact {
+        return Err(format!(
+            "{mmake} source, language, flag, include or private-output contract differs from the audited capability"
+        ));
+    }
+    Ok(())
+}
+
+fn mesa20_compiler_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
+    const NIR: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir";
+    const GLSL: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl";
+    const SPIRV: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/spirv";
+    let inputs = [
+        "src/compiler/nir/nir_opcodes.py",
+        "src/compiler/nir/nir_intrinsics.py",
+        "src/compiler/nir/nir_algebraic.py",
+        "src/compiler/nir/nir_constant_expressions.h",
+        "src/compiler/glsl/float64.glsl",
+        "src/compiler/spirv/spirv.core.grammar.json",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let jobs = vec![
+        mesa20_generator_job(
+            "src/compiler/nir/nir_builder_opcodes_h.py",
+            "src/compiler/nir/nir_builder_opcodes.h",
+            &["python-stdout"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_constant_expressions.py",
+            "src/compiler/nir/nir_constant_expressions.c",
+            &["python-stdout"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_intrinsics_c.py",
+            "src/compiler/nir/nir_intrinsics.c",
+            &["python-outdir", "--outdir", "@OUTDIR@"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_intrinsics_h.py",
+            "src/compiler/nir/nir_intrinsics.h",
+            &["python-outdir", "--outdir", "@OUTDIR@"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_opcodes_c.py",
+            "src/compiler/nir/nir_opcodes.c",
+            &["python-stdout"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_opcodes_h.py",
+            "src/compiler/nir/nir_opcodes.h",
+            &["python-stdout"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/nir/nir_opt_algebraic.py",
+            "src/compiler/nir/nir_opt_algebraic.c",
+            &["python-stdout"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/ir_expression_operation.py",
+            "src/compiler/glsl/ir_expression_operation.h",
+            &["python-stdout", "enum"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/ir_expression_operation.py",
+            "src/compiler/glsl/ir_expression_operation_constant.h",
+            &["python-stdout", "constant"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/ir_expression_operation.py",
+            "src/compiler/glsl/ir_expression_operation_strings.h",
+            &["python-stdout", "strings"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/xxd.py",
+            "src/compiler/glsl/float64_glsl.h",
+            &[
+                "python-output",
+                &format!("{GLSL}/float64.glsl"),
+                "@OUTPUT@",
+                "-n",
+                "float64_source",
+            ],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glcpp/glcpp-lex.l",
+            "src/compiler/glsl/glcpp/glcpp-lex.c",
+            &["flex", "--nounistd"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glcpp/glcpp-parse.y",
+            "src/compiler/glsl/glcpp/glcpp-parse.c",
+            &["bison", "glcpp-parse.c", "glcpp-parse.h", "glcpp_parser_"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glcpp/glcpp-parse.y",
+            "src/compiler/glsl/glcpp/glcpp-parse.h",
+            &["bison", "glcpp-parse.c", "glcpp-parse.h", "glcpp_parser_"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glsl_lexer.ll",
+            "src/compiler/glsl/glsl_lexer.cpp",
+            &["flex", "--nounistd"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glsl_parser.yy",
+            "src/compiler/glsl/glsl_parser.cpp",
+            &["bison", "glsl_parser.cpp", "glsl_parser.h", "_mesa_glsl_"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/glsl/glsl_parser.yy",
+            "src/compiler/glsl/glsl_parser.h",
+            &["bison", "glsl_parser.cpp", "glsl_parser.h", "_mesa_glsl_"],
+        ),
+        mesa20_generator_job(
+            "src/compiler/spirv/spirv_info_c.py",
+            "src/compiler/spirv/spirv_info.c",
+            &[
+                "python-output",
+                &format!("{SPIRV}/spirv.core.grammar.json"),
+                "@OUTPUT@",
+            ],
+        ),
+        mesa20_generator_job(
+            "src/compiler/spirv/vtn_gather_types_c.py",
+            "src/compiler/spirv/vtn_gather_types.c",
+            &[
+                "python-output",
+                &format!("{SPIRV}/spirv.core.grammar.json"),
+                "@OUTPUT@",
+            ],
+        ),
+    ];
+    let _ = NIR;
+    (inputs, jobs)
+}
+
+fn mesa20_galliumaux_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
+    (
+        Vec::new(),
+        vec![
+            mesa20_generator_job(
+                "src/gallium/auxiliary/indices/u_indices_gen.py",
+                "src/gallium/auxiliary/indices/u_indices_gen.c",
+                &["python-stdout"],
+            ),
+            mesa20_generator_job(
+                "src/gallium/auxiliary/indices/u_unfilled_gen.py",
+                "src/gallium/auxiliary/indices/u_unfilled_gen.c",
+                &["python-stdout"],
+            ),
+        ],
+    )
+}
+
+fn mesa20_mesa_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
+    const GLAPI: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen";
+    const MAIN: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main";
+    const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
+    let inputs = [
+        "src/mapi/glapi/gen/gl_and_es_API.xml",
+        "src/mapi/glapi/gen/gl_XML.py",
+        "src/mapi/glapi/gen/glX_XML.py",
+        "src/mapi/glapi/gen/license.py",
+        "src/mapi/glapi/gen/static_data.py",
+        "src/mesa/main/get_hash_params.py",
+        "src/mesa/main/formats.csv",
+        "src/mesa/main/format_parser.py",
+        "VERSION",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let jobs = vec![
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/gl_table.py",
+            "src/mesa/main/dispatch.h",
+            &["python-stdout", "-m", "remap_table", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/remap_helper.py",
+            "src/mesa/main/remap_helper.h",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/gl_enums.py",
+            "src/mesa/main/enums.c",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/gl_genexec.py",
+            "src/mesa/main/api_exec.c",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/gl_marshal_h.py",
+            "src/mesa/main/marshal_generated.h",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mapi/glapi/gen/gl_marshal.py",
+            "src/mesa/main/marshal_generated.c",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mesa/main/get_hash_generator.py",
+            "src/mesa/main/get_hash.h",
+            &["python-stdout", "-f", XML],
+        ),
+        mesa20_generator_job(
+            "src/mesa/main/format_info.py",
+            "src/mesa/main/format_info.h",
+            &["python-stdout", &format!("{MAIN}/formats.csv")],
+        ),
+        mesa20_generator_job(
+            "src/mesa/main/format_fallback.py",
+            "src/mesa/main/format_fallback.c",
+            &["python-output", &format!("{MAIN}/formats.csv"), "@OUTPUT@"],
+        ),
+        mesa20_generator_job(
+            "src/mesa/main/format_pack.py",
+            "src/mesa/main/format_pack.c",
+            &["python-stdout", &format!("{MAIN}/formats.csv")],
+        ),
+        mesa20_generator_job(
+            "src/mesa/main/format_unpack.py",
+            "src/mesa/main/format_unpack.c",
+            &["python-stdout", &format!("{MAIN}/formats.csv")],
+        ),
+        mesa20_generator_job("VERSION", "src/mesa/main/git_sha1.h", &["mesa-git-sha1"]),
+        mesa20_generator_job(
+            "src/mesa/program/program_lexer.l",
+            "src/mesa/program/lex.yy.c",
+            &["flex", "--nounistd", "--never-interactive"],
+        ),
+        mesa20_generator_job(
+            "src/mesa/program/program_parse.y",
+            "src/mesa/program/program_parse.tab.c",
+            &[
+                "bison",
+                "program_parse.tab.c",
+                "program_parse.tab.h",
+                "_mesa_program_",
+            ],
+        ),
+        mesa20_generator_job(
+            "src/mesa/program/program_parse.y",
+            "src/mesa/program/program_parse.tab.h",
+            &[
+                "bison",
+                "program_parse.tab.c",
+                "program_parse.tab.h",
+                "_mesa_program_",
+            ],
+        ),
+    ];
+    let _ = GLAPI;
+    (inputs, jobs)
+}
+
+fn mesa20_vc4_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
+    const CLE: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle";
+    let inputs = [
+        "src/broadcom/cle/v3d_packet_v21.xml",
+        "src/broadcom/cle/v3d_packet_v33.xml",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let jobs = [
+        ("v3d_packet_v21.xml", "v3d_packet_v21_pack.h", "21"),
+        ("v3d_packet_v33.xml", "v3d_packet_v33_pack.h", "33"),
+        ("v3d_packet_v33.xml", "v3d_packet_v41_pack.h", "41"),
+        ("v3d_packet_v33.xml", "v3d_packet_v42_pack.h", "42"),
+    ]
+    .into_iter()
+    .map(|(xml, output, version)| {
+        mesa20_generator_job(
+            "src/broadcom/cle/gen_pack_header.py",
+            &format!("src/broadcom/cle/{output}"),
+            &["python-stdout", &format!("{CLE}/{xml}"), version],
+        )
+    })
+    .collect();
+    (inputs, jobs)
+}
+
+fn parse_mesa20_remaining_python_outputs(
+    root: &Path,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+    make_source: &str,
+    targets: &[TargetDefinition],
+    fetches: &[FetchDecl],
+) -> std::result::Result<Option<PythonOutputsDecl>, String> {
+    if !matches!(
+        relative_dir.to_str(),
+        Some("workbench/libs/mesa/libcompiler")
+            | Some("workbench/libs/mesa/libgalliumaux")
+            | Some("workbench/libs/mesa/libmesa")
+            | Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
+    ) {
+        return Ok(None);
+    }
+    let profile = mesa20_current_profile(target)?;
+    let (mmake, owner, mmake_sha256, manifest, manifest_sha256, source_inputs, jobs, packages) =
+        match relative_dir.to_str() {
+            Some("workbench/libs/mesa/libcompiler") => {
+                let (inputs, jobs) = mesa20_compiler_jobs();
+                (
+                    "mesa3d-linklib-compiler",
+                    "mesa3d-linklib-compiler-generated",
+                    "77af02d75be9c1c4e35c64dfe5e084b9735a2acd2636a8641b420295e7f91f15",
+                    "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources",
+                    "88cdeedf3091fadf1678af939ed582329523081b748f2b0abd39ae3e6f5f2481",
+                    inputs,
+                    jobs,
+                    mesa20_python_packages(),
+                )
+            }
+            Some("workbench/libs/mesa/libgalliumaux") => {
+                let (inputs, jobs) = mesa20_galliumaux_jobs();
+                (
+                    "mesa3d-linklib-galliumauxiliary",
+                    "mesa3d-linklib-galliumauxiliary-generated",
+                    "20f6eb054f0aa4313a33ae6e2bf5cfa1fcf132bfabe5cf64085039e7ecf4f1a4",
+                    "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources",
+                    "eebe8fe19dd4cc1531d93a72ac8ca8e38408a7ecad3799f3f896663a2f996705",
+                    inputs,
+                    jobs,
+                    Vec::new(),
+                )
+            }
+            Some("workbench/libs/mesa/libmesa") => {
+                let (inputs, jobs) = mesa20_mesa_jobs();
+                (
+                    "mesa3d-linklib-mesa",
+                    "mesa3d-linklib-mesa-generated",
+                    "899ffe50dd00f767f33acdee91f01083d79461f17dd27194c6dae07919d47c40",
+                    "workbench/libs/mesa/libmesa/mesa-20.0.8.sources",
+                    "61c034fdbd34bf963c73cf1d89765dbc10ad45865c0d42f4d6f8c60dd0bbbfcc",
+                    inputs,
+                    jobs,
+                    mesa20_python_packages(),
+                )
+            }
+            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") if profile != "x86_64" => {
+                let (inputs, jobs) = mesa20_vc4_jobs();
+                (
+                    "linklibs-gallium_vc4",
+                    "linklibs-gallium_vc4-gen-cle",
+                    "a6482a1b4758ff74b76b479ea226e2ffab17b7f50095687a252facf96530be20",
+                    "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
+                    "27067482f43902b58872ae0c2e92a9e4f6bc51328b6b035e79d75357ec002a72",
+                    inputs,
+                    jobs,
+                    Vec::new(),
+                )
+            }
+            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") => return Ok(None),
+            _ => return Ok(None),
+        };
+
+    let make_digest = format!("{:x}", Sha256::digest(make_source.as_bytes()));
+    if make_digest != mmake_sha256
+        || !file_has_sha256(root, manifest, manifest_sha256)
+        || !file_has_sha256(
+            root,
+            "workbench/libs/mesa/mesa20_generate.py",
+            MESA20_DRIVER_SHA256,
+        )
+        || !file_has_sha256(
+            root,
+            "workbench/libs/mesa/mmakefile.src",
+            MESA20_MAIN_MMAKE_SHA256,
+        )
+        || !file_has_sha256(root, "workbench/libs/mesa/mesa.cfg", MESA20_CONFIG_SHA256)
+        || !file_has_sha256(
+            root,
+            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
+            MESA_PATCH_SHA256,
+        )
+        || (matches!(mmake, "mesa3d-linklib-compiler" | "mesa3d-linklib-mesa")
+            && !file_has_sha256(root, MESA20_CXX_COMPAT_NEW, MESA20_CXX_COMPAT_NEW_SHA256))
+    {
+        return Err(format!(
+            "{mmake} declaration, inventory, driver, central Mesa context or patch differs from the audited capability"
+        ));
+    }
+    require_mesa20_fetches(fetches)?;
+    mesa20_target_contract_is_exact(root, relative_dir, mmake, target, targets)?;
+
+    Ok(Some(PythonOutputsDecl {
+        owner: owner.to_owned(),
+        source_root: MESA20_SOURCE_ROOT.to_owned(),
+        build_root: MESA20_BUILD_ROOT.to_owned(),
+        fetch_target: "mesa3d-fetch".to_owned(),
+        source_archive: MESA20_SOURCE_ARCHIVE.to_owned(),
+        source_sha256: MESA20_SOURCE_SHA256.to_owned(),
+        source_inputs,
+        jobs,
+        driver_script: Some(MESA20_DRIVER.to_owned()),
+        driver_sha256: Some(MESA20_DRIVER_SHA256.to_owned()),
+        python_packages: packages,
+        audited_source_dir: MESA20_SOURCE_ROOT.to_owned(),
+        local_patch_files: vec![
+            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+        ],
+        local_patch_sha256: vec![MESA_PATCH_SHA256.to_owned()],
+        consumers: vec![mmake.to_owned()],
         dir_path: relative_dir.to_path_buf(),
     }))
 }
@@ -4871,6 +6652,39 @@ fn parse_mmakefile_impl(
             }
         }
     }
+    let mut configure_builds = Vec::new();
+    let mut grub_builds = Vec::new();
+    for invocation in invocations
+        .iter()
+        .filter(|invocation| invocation.name == "build_with_configure")
+    {
+        match parse_grub2_build_invocation(root, invocation, &rel_dir, target) {
+            Ok(Some(declaration)) => grub_builds.push(declaration),
+            Ok(None) => {
+                match parse_configure_build_invocation(root, invocation, &rel_dir, target) {
+                    Ok(declaration) => configure_builds.push(declaration),
+                    Err(reason) => {
+                        let mmake = macro_arg(&invocation.args, "mmake")
+                            .map_or_else(String::new, |name| format!(" mmake={name}"));
+                        skipped_programs.push(format!(
+                            "{}:{}: %build_with_configure{mmake} skipped: {reason}",
+                            rel_dir.display(),
+                            invocation.line + 1
+                        ));
+                    }
+                }
+            }
+            Err(reason) => {
+                let mmake = macro_arg(&invocation.args, "mmake")
+                    .map_or_else(String::new, |name| format!(" mmake={name}"));
+                skipped_programs.push(format!(
+                    "{}:{}: %build_with_configure{mmake} skipped: {reason}",
+                    rel_dir.display(),
+                    invocation.line + 1
+                ));
+            }
+        }
+    }
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
@@ -5334,6 +7148,74 @@ fn parse_mmakefile_impl(
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
         );
         let mmake_name = sanitize_ident(&mmake_raw);
+        let mesa20_capability_sources =
+            match mesa20_remaining_linklib_sources(root, &rel_dir, &mmake_name, target) {
+                Ok(sources) => sources,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 archive capability skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                    continue;
+                }
+            };
+        let mesa20_capability_active = mesa20_capability_sources.is_some();
+        let nouveau_drm_capability_sources =
+            match nouveau_drm_sources(root, &rel_dir, &mmake_name, target) {
+                Ok(sources) => sources,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} Nouveau DRM archive capability skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                    continue;
+                }
+            };
+        let nouveau_drm_capability_active = nouveau_drm_capability_sources.is_some();
+        match mesa20_compile_contract(&rel_dir, &mmake_name, target) {
+            Ok(Some(contract)) => {
+                declaration_flags.defines = contract.defines;
+                declaration_flags.undefines.clear();
+                declaration_flags.compile_options = contract.options;
+                declaration_flags.link_options.clear();
+                declaration_includes.dirs = contract.includes;
+                declaration_includes.arch_modules.clear();
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        }
+        match nouveau_drm_compile_contract(&rel_dir, &mmake_name, target) {
+            Ok(Some(contract)) => {
+                declaration_flags.defines = contract.defines;
+                declaration_flags.undefines.clear();
+                declaration_flags.compile_options = contract.options;
+                declaration_flags.link_options.clear();
+                declaration_includes.dirs = contract.includes;
+                declaration_includes.arch_modules.clear();
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %{} mmake={mmake_raw} Nouveau DRM compile contract skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                    inv.name
+                ));
+                continue;
+            }
+        }
         let mesa_sse41_profile = (mmake_name == MESA_SSE41_MMAKE
             && mesa_sse41_static_contract_is_pinned(root, &content))
         .then(|| mesa_sse41_profile(&rel_dir, target).ok().flatten())
@@ -5409,23 +7291,29 @@ fn parse_mmakefile_impl(
             None
         };
         let capability_files = mesa_sse41_profile.map(mesa_sse41_sources);
-        let mut sources = match evaluate_macro_sources_with_files(
-            &inv.args,
-            &vars,
-            &expression_context,
-            capability_files
-                .as_deref()
-                .or(resolved_generated_files.as_deref()),
-        ) {
-            Ok(sources) => sources,
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
+        let mut sources = if let Some(sources) = mesa20_capability_sources {
+            sources
+        } else if let Some(sources) = nouveau_drm_capability_sources {
+            sources
+        } else {
+            match evaluate_macro_sources_with_files(
+                &inv.args,
+                &vars,
+                &expression_context,
+                capability_files
+                    .as_deref()
+                    .or(resolved_generated_files.as_deref()),
+            ) {
+                Ok(sources) => sources,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
             }
         };
         record_partial_source_lists(
@@ -5538,10 +7426,10 @@ fn parse_mmakefile_impl(
             && macro_arg(&inv.args, "libdir").is_none()
             && macro_arg(&inv.args, "compiler").is_none_or(|value| value == "target")
             && !variant_32bit;
-        let canonical_linklib_output =
-            canonical_linklib_eligible && all_sources_are_fetch_owned(&sources, &fetches);
-        let linklib_output_dir = if mesa_sse41_profile.is_some() {
-            Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8".to_owned())
+        let canonical_linklib_output = canonical_linklib_eligible
+            && (all_sources_are_fetch_owned(&sources, &fetches) || nouveau_drm_capability_active);
+        let linklib_output_dir = if mesa_sse41_profile.is_some() || mesa20_capability_active {
+            Some(MESA20_PRIVATE_LIBDIR.to_owned())
         } else if matches!(module_type, ModuleType::LinkLib) {
             macro_arg(&inv.args, "libdir").and_then(|raw| {
                 match evaluate_make_expr(&raw, &expression_context) {
@@ -5647,6 +7535,23 @@ fn parse_mmakefile_impl(
         ));
     }
 
+    if targets
+        .iter()
+        .any(|candidate| candidate.mmake_name == NOUVEAU_DRM_MMAKE)
+    {
+        if let Err(reason) = validate_nouveau_drm_capability(root, &rel_dir, target, &targets) {
+            // The DRM source fragment is intentionally admitted only as one
+            // closed capability.  Do not leave a partially inferred target in
+            // the graph when its recipe, inventory or canonical archive proof
+            // has drifted.
+            targets.retain(|candidate| candidate.mmake_name != NOUVEAU_DRM_MMAKE);
+            skipped_programs.push(format!(
+                "{}: Nouveau DRM link library skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
+    }
+
     let mut python_outputs = Vec::new();
     match parse_glapi_python_outputs(&rel_dir, target, &content, &targets, &ownership_fetches) {
         Ok(Some(declaration)) => python_outputs.push(declaration),
@@ -5663,6 +7568,40 @@ fn parse_mmakefile_impl(
             "{}: Mesa utility Python generator skipped: {reason}",
             rel_dir.display()
         )),
+    }
+    let mesa20_required_target = match rel_dir.to_str() {
+        Some("workbench/libs/mesa/libcompiler") => Some("mesa3d-linklib-compiler"),
+        Some("workbench/libs/mesa/libgalliumaux") => Some("mesa3d-linklib-galliumauxiliary"),
+        Some("workbench/libs/mesa/libmesa") => Some("mesa3d-linklib-mesa"),
+        Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
+            if mesa20_current_profile(target).ok() != Some("x86_64") =>
+        {
+            Some("linklibs-gallium_vc4")
+        }
+        _ => None,
+    };
+    match parse_mesa20_remaining_python_outputs(
+        root,
+        &rel_dir,
+        target,
+        &content,
+        &targets,
+        &ownership_fetches,
+    ) {
+        Ok(Some(declaration)) => python_outputs.push(declaration),
+        Ok(None) => {}
+        Err(reason) => {
+            if let Some(mmake) = mesa20_required_target {
+                // Source admission and every generator product form one
+                // capability. A partial archive with missing generated
+                // translation units is never an executable fallback.
+                targets.retain(|candidate| candidate.mmake_name != mmake);
+            }
+            skipped_programs.push(format!(
+                "{}: Mesa 20.0.8 archive/generator capability skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
     }
 
     // 3. Extract #MM and #MM- meta-target rules
@@ -5699,6 +7638,8 @@ fn parse_mmakefile_impl(
     Ok(ParsedMmakefile {
         targets,
         external_cmake,
+        configure_builds,
+        grub_builds,
         python_outputs,
         meta_rules,
         icon_targets: icon_scan.targets,
@@ -5737,11 +7678,12 @@ mod tests {
         collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
         implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
         join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
+        mesa20_compile_contract, mesa20_remaining_linklib_sources,
         mesa_sse41_static_contract_is_pinned, parse_external_cmake_invocation,
         parse_glapi_python_outputs, parse_mesautil_python_outputs, render_meta_token,
         resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
         select_target_invocations, validate_mesa_sse41_capability, MakeExprContext, TargetContext,
-        MESA_SSE41_MMAKE, META_RULE_RE,
+        MESA_PATCH_SHA256, MESA_SSE41_MMAKE, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
@@ -6737,6 +8679,171 @@ mod tests {
     }
 
     #[test]
+    fn mesa20_placement_new_shim_is_limited_to_two_cxx_lanes() {
+        let profile = target_context("x86_64", "pc", "");
+        let shim = "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>";
+        for (relative_dir, mmake, expects_shim) in [
+            (
+                "workbench/libs/mesa/libcompiler",
+                "mesa3d-linklib-compiler",
+                true,
+            ),
+            (
+                "workbench/libs/mesa/libgalliumaux",
+                "mesa3d-linklib-galliumauxiliary",
+                false,
+            ),
+            ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa", true),
+        ] {
+            let contract = mesa20_compile_contract(Path::new(relative_dir), mmake, Some(&profile))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                contract.options.iter().any(|option| option == shim),
+                expects_shim,
+                "{mmake}"
+            );
+            assert!(
+                contract
+                    .includes
+                    .iter()
+                    .all(|include| !include.contains("cxx-compat")),
+                "{mmake}: the shim must never become a C-visible include directory"
+            );
+        }
+
+        for cpu in ["arm", "aarch64"] {
+            let profile = target_context(cpu, "raspi", if cpu == "arm" { "hard" } else { "" });
+            let contract = mesa20_compile_contract(
+                Path::new("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+                "linklibs-gallium_vc4",
+                Some(&profile),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                contract.options.iter().all(|option| option != shim),
+                "{cpu}"
+            );
+            assert!(
+                contract
+                    .includes
+                    .iter()
+                    .all(|include| !include.contains("cxx-compat")),
+                "{cpu}"
+            );
+        }
+    }
+
+    #[test]
+    fn mesa20_release_patch_and_archive_inventories_are_exact() {
+        let root = root();
+        let patch_relative = "workbench/libs/mesa/mesa-20.0.8-aros.diff";
+        assert!(super::file_has_sha256(
+            &root,
+            patch_relative,
+            MESA_PATCH_SHA256
+        ));
+        let patch = read_source(&root.join(patch_relative)).unwrap();
+        for required in [
+            "-#include <algorithm>",
+            "st_glsl_to_tgsi_private.h mesa-20.0.8.aros/src/mesa/state_tracker/st_glsl_to_tgsi_private.h",
+            "+#ifndef NDEBUG",
+            "while (j > 0 && sorter(value, decls[j - 1]))",
+            "while (j > 0 && sort_by_begin(value, ranges[j - 1]))",
+            "int *idx_map = (int *) CALLOC(narrays + 1, sizeof(*idx_map));",
+            "if (!idx_map || (narrays > 0 && !old_sizes))",
+            "if (narrays > 0)\n+      memcpy(&old_sizes[0]",
+            "temp_comp_access::conditionality_untouched = INT_MAX;",
+            "qsort(reg_access, used_temps, sizeof(register_merge_record)",
+        ] {
+            assert!(
+                patch.contains(required),
+                "missing release-patch contract: {required}"
+            );
+        }
+        for forbidden in [
+            "+#include <memory>",
+            "+#include <limits>",
+            "+#include <algorithm>",
+            "+   std::sort(inout_decls.begin(), inout_decls.end()",
+            "+   unique_ptr<int[]>",
+        ] {
+            assert!(
+                !patch.contains(forbidden),
+                "release patch reintroduced a target STL dependency: {forbidden}"
+            );
+        }
+
+        for (cpu, platform, float_abi, expected) in [
+            ("x86_64", "pc", "", (239, 11, 1)),
+            ("arm", "raspi", "hard", (238, 11, 0)),
+            ("aarch64", "raspi", "", (238, 11, 0)),
+        ] {
+            let profile = target_context(cpu, platform, float_abi);
+            let sources = mesa20_remaining_linklib_sources(
+                &root,
+                Path::new("workbench/libs/mesa/libmesa"),
+                "mesa3d-linklib-mesa",
+                Some(&profile),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                (sources.c.len(), sources.cxx.len(), sources.asm.len()),
+                expected,
+                "{cpu}"
+            );
+            if cpu == "x86_64" {
+                assert_eq!(
+                    sources.asm,
+                    ["${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/x86-64/xform4.S"]
+                );
+            }
+        }
+
+        let x86 = target_context("x86_64", "pc", "");
+        for (relative, mmake, expected) in [
+            (
+                "workbench/libs/mesa/libcompiler",
+                "mesa3d-linklib-compiler",
+                (154, 105, 0),
+            ),
+            (
+                "workbench/libs/mesa/libgalliumaux",
+                "mesa3d-linklib-galliumauxiliary",
+                (176, 0, 0),
+            ),
+        ] {
+            let sources =
+                mesa20_remaining_linklib_sources(&root, Path::new(relative), mmake, Some(&x86))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                (sources.c.len(), sources.cxx.len(), sources.asm.len()),
+                expected,
+                "{mmake}"
+            );
+        }
+
+        for (cpu, float_abi) in [("arm", "hard"), ("aarch64", "")] {
+            let profile = target_context(cpu, "raspi", float_abi);
+            let sources = mesa20_remaining_linklib_sources(
+                &root,
+                Path::new("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+                "linklibs-gallium_vc4",
+                Some(&profile),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                (sources.c.len(), sources.cxx.len(), sources.asm.len()),
+                (43, 0, 0)
+            );
+        }
+    }
+
+    #[test]
     fn target_context_selects_catalog_branches_and_reports_unknown_guards() {
         let tree = TempTree::new();
         let catalogs = tree.0.join("catalogs");
@@ -7272,8 +9379,12 @@ FILES := gdbstop
                 "{cpu}: {:#?}",
                 parsed.skipped_copy_includes
             );
-            assert_eq!(parsed.fetches.len(), 1, "{cpu}");
-            let fetch = &parsed.fetches[0];
+            assert_eq!(parsed.fetches.len(), 3, "{cpu}");
+            let fetch = parsed
+                .fetches
+                .iter()
+                .find(|fetch| fetch.name == "mesa3d-fetch")
+                .unwrap();
             assert_eq!(fetch.name, "mesa3d-fetch");
             assert_eq!(fetch.archive, "mesa-20.0.8");
             assert_eq!(fetch.suffixes, "tar.xz tar.gz");
@@ -7281,6 +9392,30 @@ FILES := gdbstop
             assert_eq!(fetch.location, "${AROS_PORTS_SOURCE_DIR}");
             assert!(fetch.origins.ends_with("older-versions/20.x"));
             assert_eq!(fetch.patches, "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1");
+            for (name, archive, origin) in [
+                (
+                    "mesa3d-mako-fetch",
+                    "mako-1.3.10",
+                    "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535",
+                ),
+                (
+                    "mesa3d-markupsafe-fetch",
+                    "markupsafe-3.0.2",
+                    "https://files.pythonhosted.org/packages/b2/97/5d42485e71dfc078108a86d6de8fa46db44a1a9295e89c5d6d4a06e23a62",
+                ),
+            ] {
+                let package = parsed
+                    .fetches
+                    .iter()
+                    .find(|fetch| fetch.name == name)
+                    .unwrap();
+                assert_eq!(package.archive, archive);
+                assert_eq!(package.suffixes, "tar.gz");
+                assert_eq!(package.origins, origin);
+                assert_eq!(package.destination, "${AROS_PORTS_DIR}/mesa-python");
+                assert_eq!(package.location, "${AROS_PORTS_SOURCE_DIR}");
+                assert_eq!(package.patches, "::");
+            }
 
             assert_eq!(parsed.copy_includes.len(), 4, "{cpu}");
             assert!(parsed

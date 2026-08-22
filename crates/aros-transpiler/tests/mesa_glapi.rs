@@ -55,7 +55,7 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&fetch_file, &root, &context)
             .expect("collect the central Mesa fetch declaration");
-        assert_eq!(fetches.len(), 1, "{cpu}: {fetches:#?}");
+        assert_eq!(fetches.len(), 3, "{cpu}: {fetches:#?}");
 
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &glapi_file,
@@ -191,7 +191,7 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(
             generated.local_patch_sha256,
-            ["1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882"],
+            ["153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e"],
             "{cpu}"
         );
         assert_eq!(generated.consumers, ["mesa3d-linklib-glapi"], "{cpu}");
@@ -247,7 +247,7 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         assert!(cmake.contains(
             "    SOURCE_DIR \"${AROS_PORTS_DIR}/mesa/mesa-20.0.8\"\n\
              \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff\"\n\
-             \x20   LOCAL_PATCH_SHA256 \"1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882\""
+             \x20   LOCAL_PATCH_SHA256 \"153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e\""
         ));
         assert!(cmake.contains(
             "        SCRIPT \"src/mapi/glapi/gen/gl_apitemp.py\"\n\

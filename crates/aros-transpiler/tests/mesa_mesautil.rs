@@ -102,7 +102,7 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
             collect_mmakefile_fetches_with_context(&zlib_fetch_file, &root, &context)
                 .expect("collect the zlib fetch declaration"),
         );
-        assert_eq!(fetches.len(), 2, "{cpu}: {fetches:#?}");
+        assert_eq!(fetches.len(), 4, "{cpu}: {fetches:#?}");
 
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &utility_file,
@@ -301,7 +301,7 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(
             generated.local_patch_sha256,
-            ["1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882"],
+            ["153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e"],
             "{cpu}"
         );
         assert_eq!(

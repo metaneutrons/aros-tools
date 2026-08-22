@@ -262,6 +262,67 @@ pub struct ExternalCMakeDecl {
     pub dir_path: PathBuf,
 }
 
+/// One strictly capability-checked legacy `%build_with_configure` build.
+///
+/// The original macro can execute arbitrary configure scripts with an open
+/// ended environment.  The standalone build deliberately models only audited
+/// local-source projects.  Each declaration pins its complete input manifest,
+/// private build root and every installed product; the CMake runner accepts no
+/// command text from the mmakefile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigureBuildDecl {
+    /// MetaMake workflow identity used by `#MM` dependencies.
+    pub mmake_name: String,
+    /// Closed runner capability (`adflib-host`, `adflib-target`, or
+    /// `wirelessmanager`).
+    pub mode: String,
+    /// Read-only local source root.
+    pub source_dir: String,
+    /// Private stage/build root below `${AROS_BUILD_DIR}/gen/configure`.
+    pub binary_dir: String,
+    /// Build-tree prefix receiving the public products.
+    pub install_prefix: String,
+    /// SHA-256/path manifest which is both the source allowlist and the exact
+    /// content fingerprint used by the runner.
+    pub input_manifest: String,
+    pub input_manifest_sha256: String,
+    /// Outputs retained below the private build root.
+    pub private_products: Vec<String>,
+    /// Complete installed product contract.
+    pub install_products: Vec<String>,
+    /// Existing build products needed by the private build command.
+    #[serde(default)]
+    pub dependency_products: Vec<String>,
+    /// Optional `uselibs=` spelling published by an installed archive.
+    #[serde(default)]
+    pub provided_library: Option<String>,
+    /// Distinct linkable interface target for `provided_library`.
+    #[serde(default)]
+    pub provider_target: Option<String>,
+    /// Source-root-relative directory of the declaring mmakefile.
+    pub dir_path: PathBuf,
+}
+
+/// One strictly capability-checked GRUB 2.12 host-tool lane.
+///
+/// The legacy `%build_with_configure` declarations are intentionally not
+/// generalised: the CMake helper owns the fixed upstream archive, local patch,
+/// toolchain and complete product manifest.  The parser only selects one of
+/// the three audited lanes and provides its private build/install roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrubBuildDecl {
+    /// MetaMake workflow identity used by `#MM` dependencies.
+    pub mmake_name: String,
+    /// Closed runner capability (`pc`, `efi64`, or `efi32`).
+    pub mode: String,
+    /// Private build root below `${AROS_BUILD_DIR}/gen/configure`.
+    pub binary_dir: String,
+    /// Lane-specific host-tool install root below `${AROS_BUILD_DIR}`.
+    pub install_prefix: String,
+    /// Source-root-relative directory of the declaring mmakefile.
+    pub dir_path: PathBuf,
+}
+
 /// One output-producing invocation inside a strictly admitted Python
 /// generator group.
 ///
@@ -274,6 +335,21 @@ pub struct PythonGeneratorJob {
     pub script: String,
     pub output: String,
     pub arguments: Vec<String>,
+}
+
+/// One pinned pure-Python package made available to a generator group.
+///
+/// Packages are fetched like any other port, but are never installed into the
+/// host interpreter.  Their audited import roots are passed through a private
+/// `PYTHONPATH`, keeping generator results independent from whatever happens
+/// to be installed globally on the build host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonPackageDecl {
+    pub fetch_target: String,
+    pub source_root: String,
+    pub source_archive: String,
+    pub source_sha256: String,
+    pub python_path: String,
 }
 
 /// A capability-checked group of fetched Python generators.
@@ -298,6 +374,16 @@ pub struct PythonOutputsDecl {
     /// Fetched, source-root-relative inputs shared by the jobs.
     pub source_inputs: Vec<String>,
     pub jobs: Vec<PythonGeneratorJob>,
+    /// Optional repository-owned, content-pinned adapter for generators which
+    /// write named files or need host Flex/Bison rather than stdout-only
+    /// Python.  Absence retains the original direct-Python contract.
+    #[serde(default)]
+    pub driver_script: Option<String>,
+    #[serde(default)]
+    pub driver_sha256: Option<String>,
+    /// Pure-Python packages exposed only to this owner.
+    #[serde(default)]
+    pub python_packages: Vec<PythonPackageDecl>,
     /// Exact unpacked source directory refreshed when the local patch changes.
     pub audited_source_dir: String,
     /// Source-tree patches paired positionally with their pinned SHA-256.
@@ -315,6 +401,10 @@ pub struct ParsedMmakefile {
     pub targets: Vec<TargetDefinition>,
     /// Strictly modelled `%build_with_cmake` declarations.
     pub external_cmake: Vec<ExternalCMakeDecl>,
+    /// Strictly modelled local `%build_with_configure` declarations.
+    pub configure_builds: Vec<ConfigureBuildDecl>,
+    /// Strictly modelled GRUB 2.12 host-tool lanes.
+    pub grub_builds: Vec<GrubBuildDecl>,
     /// Strictly modelled fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_rules: Vec<MetaTargetRule>,

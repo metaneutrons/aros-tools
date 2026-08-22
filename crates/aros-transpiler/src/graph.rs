@@ -1,7 +1,7 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{
-    DefineHeaderDecl, ExternalCMakeDecl, MetaTargetRule, ModuleType, PythonOutputsDecl,
-    TargetDefinition,
+    ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl, MetaTargetRule,
+    ModuleType, PythonOutputsDecl, TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
@@ -19,6 +19,10 @@ pub struct DependencyGraph {
     /// Strictly capability-checked third-party CMake builds. Each contributes
     /// both a real mmake workflow endpoint and a distinct link interface.
     pub external_cmake: Vec<ExternalCMakeDecl>,
+    /// Strictly capability-checked local configure-style builds.
+    pub configure_builds: Vec<ConfigureBuildDecl>,
+    /// Strictly capability-checked GRUB 2.12 host-tool lanes.
+    pub grub_builds: Vec<GrubBuildDecl>,
     /// Strictly capability-checked fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_targets: HashMap<String, HashSet<String>>,
@@ -222,6 +226,26 @@ impl DependencyGraph {
             .any(|existing| existing.mmake_name == declaration.mmake_name)
         {
             self.external_cmake.push(declaration);
+        }
+    }
+
+    pub fn add_configure_build(&mut self, declaration: ConfigureBuildDecl) {
+        if !self
+            .configure_builds
+            .iter()
+            .any(|existing| existing.mmake_name == declaration.mmake_name)
+        {
+            self.configure_builds.push(declaration);
+        }
+    }
+
+    pub fn add_grub_build(&mut self, declaration: GrubBuildDecl) {
+        if !self
+            .grub_builds
+            .iter()
+            .any(|existing| existing.mmake_name == declaration.mmake_name)
+        {
+            self.grub_builds.push(declaration);
         }
     }
 
@@ -656,6 +680,17 @@ impl DependencyGraph {
                     declaration.mmake_name.clone(),
                     declaration.provider_target.clone(),
                 ));
+        }
+        for declaration in &self.configure_builds {
+            if let (Some(library), Some(provider)) = (
+                declaration.provided_library.as_ref(),
+                declaration.provider_target.as_ref(),
+            ) {
+                by_name
+                    .entry(library.clone())
+                    .or_default()
+                    .push((declaration.mmake_name.clone(), provider.clone()));
+            }
         }
 
         let mut unresolved = Vec::new();
@@ -1147,6 +1182,14 @@ impl DependencyGraph {
                     || self.icon_targets.contains_key(name)
                     || self
                         .external_cmake
+                        .iter()
+                        .any(|declaration| declaration.mmake_name == *name)
+                    || self
+                        .configure_builds
+                        .iter()
+                        .any(|declaration| declaration.mmake_name == *name)
+                    || self
+                        .grub_builds
                         .iter()
                         .any(|declaration| declaration.mmake_name == *name)
             }) {

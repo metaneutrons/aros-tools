@@ -580,6 +580,7 @@ fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
     assert_eq!(
         accepted,
         [
+            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/mmakefile.src -> arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
             "rom/bluetooth/stack/mmakefile.src -> rom/bluetooth/stack/core.files",
             "workbench/devs/monitors/IntelGMA/i915/mmakefile.src -> workbench/devs/monitors/IntelGMA/i915/i915-20.0.8.sources",
             "workbench/hidds/nouveau/mmakefile.src -> workbench/hidds/nouveau/nouveau-libdrm.sources",

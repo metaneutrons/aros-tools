@@ -18,8 +18,8 @@ pub mod parser;
 
 pub use arch_sources::ArchSourceDecl;
 pub use ast::{
-    DefineHeaderDecl, ExternalCMakeDecl, ModuleType, PythonGeneratorJob, PythonOutputsDecl,
-    TargetDefinition,
+    ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl, ModuleType,
+    PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
 };
 pub use catalogs::CatalogDecl;
 pub use copy_includes::CopyIncludesDecl;

@@ -58,7 +58,34 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .iter()
                 .map(|declaration| declaration.provider_target.clone()),
         )
+        .chain(
+            graph
+                .configure_builds
+                .iter()
+                .map(|declaration| declaration.mmake_name.clone()),
+        )
+        .chain(
+            graph
+                .configure_builds
+                .iter()
+                .filter_map(|declaration| declaration.provider_target.clone()),
+        )
+        .chain(
+            graph
+                .grub_builds
+                .iter()
+                .map(|declaration| declaration.mmake_name.clone()),
+        )
         .collect();
+
+    // The closed GRUB2 helper creates one shared source-fetch endpoint and
+    // exposes the legacy alias itself.  Keep both names in the endpoint
+    // registry so #MM edges retain their original ordering rather than being
+    // silently filtered as unknown meta dependencies.
+    if !graph.grub_builds.is_empty() {
+        all_targets.insert("grub2-aros--fetch".to_owned());
+        all_targets.insert("grub2-aros-fetch".to_owned());
+    }
 
     // Full genmodule and ABI declarations create product targets inside the
     // CMake helper rather than as independent AST declarations. They are still
@@ -259,6 +286,102 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // Local projects admitted from `%build_with_configure` use a closed
+    // runner contract rather than arbitrary shell text.  Declarations precede
+    // ordinary consumers so a published archive interface can bind exactly
+    // like an in-tree link library.
+    if !graph.configure_builds.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked configure-style builds\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.configure_builds.iter().collect();
+        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+        for declaration in declarations {
+            writeln!(out, "aros_build_configure(").unwrap();
+            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
+            writeln!(out, "    SOURCE_DIR {}", cmake_arg(&declaration.source_dir)).unwrap();
+            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+            writeln!(
+                out,
+                "    INSTALL_PREFIX {}",
+                cmake_arg(&declaration.install_prefix)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    INPUT_MANIFEST {}",
+                cmake_arg(&declaration.input_manifest)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    INPUT_MANIFEST_SHA256 {}",
+                cmake_arg(&declaration.input_manifest_sha256)
+            )
+            .unwrap();
+            let private_products = declaration
+                .private_products
+                .iter()
+                .map(|product| cmake_arg(product))
+                .collect::<Vec<_>>();
+            writeln!(out, "    PRIVATE_PRODUCTS {}", private_products.join(" ")).unwrap();
+            let install_products = declaration
+                .install_products
+                .iter()
+                .map(|product| cmake_arg(product))
+                .collect::<Vec<_>>();
+            writeln!(out, "    INSTALL_PRODUCTS {}", install_products.join(" ")).unwrap();
+            if !declaration.dependency_products.is_empty() {
+                let products = declaration
+                    .dependency_products
+                    .iter()
+                    .map(|product| cmake_arg(product))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    DEPENDENCY_PRODUCTS {}", products.join(" ")).unwrap();
+            }
+            if let Some(library) = &declaration.provided_library {
+                writeln!(out, "    PROVIDED_LIBRARY {}", cmake_arg(library)).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    // GRUB2's legacy configure declarations are host-tool lanes with a
+    // substantially narrower contract than the local-source helper above.
+    // The emitted selector cannot carry arbitrary source paths, flags or
+    // command text: GrubBuild.cmake pins those internally.  Emit the real
+    // targets before #MM fallback utility targets so their aliases and edges
+    // bind to the actual build products.
+    if !graph.grub_builds.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked GRUB2 host-tool lanes\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.grub_builds.iter().collect();
+        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+        for declaration in declarations {
+            writeln!(out, "aros_build_grub2(").unwrap();
+            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
+            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+            writeln!(
+                out,
+                "    INSTALL_PREFIX {}",
+                cmake_arg(&declaration.install_prefix)
+            )
+            .unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
     // Capability-checked Python/stdout generators are declared before their
     // compile targets.  This registers each build-tree output while source
     // lanes are still being resolved, so a generated `.s` file is retained on
@@ -302,6 +425,50 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 cmake_arg(&declaration.source_sha256)
             )
             .unwrap();
+            if let (Some(driver), Some(digest)) = (
+                declaration.driver_script.as_ref(),
+                declaration.driver_sha256.as_ref(),
+            ) {
+                writeln!(out, "    DRIVER_SCRIPT {}", cmake_arg(driver)).unwrap();
+                writeln!(out, "    DRIVER_SHA256 {}", cmake_arg(digest)).unwrap();
+            }
+            if !declaration.python_packages.is_empty() {
+                let fetch_targets = declaration
+                    .python_packages
+                    .iter()
+                    .map(|package| cmake_arg(&package.fetch_target))
+                    .collect::<Vec<_>>();
+                let source_roots = declaration
+                    .python_packages
+                    .iter()
+                    .map(|package| cmake_arg(&package.source_root))
+                    .collect::<Vec<_>>();
+                let source_archives = declaration
+                    .python_packages
+                    .iter()
+                    .map(|package| cmake_arg(&package.source_archive))
+                    .collect::<Vec<_>>();
+                let source_sha256 = declaration
+                    .python_packages
+                    .iter()
+                    .map(|package| cmake_arg(&package.source_sha256))
+                    .collect::<Vec<_>>();
+                let python_paths = declaration
+                    .python_packages
+                    .iter()
+                    .map(|package| cmake_arg(&package.python_path))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    PACKAGE_FETCH_TARGETS {}", fetch_targets.join(" ")).unwrap();
+                writeln!(out, "    PACKAGE_SOURCE_ROOTS {}", source_roots.join(" ")).unwrap();
+                writeln!(
+                    out,
+                    "    PACKAGE_SOURCE_ARCHIVES {}",
+                    source_archives.join(" ")
+                )
+                .unwrap();
+                writeln!(out, "    PACKAGE_SOURCE_SHA256 {}", source_sha256.join(" ")).unwrap();
+                writeln!(out, "    PACKAGE_PYTHON_PATHS {}", python_paths.join(" ")).unwrap();
+            }
             if !declaration.source_inputs.is_empty() {
                 let inputs = declaration
                     .source_inputs

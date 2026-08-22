@@ -120,9 +120,12 @@ fn production_i915_is_exact_for_all_current_architectures() {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&fetch_file, &root, &context)
             .expect("collect the central Mesa fetch declaration");
-        assert_eq!(fetches.len(), 1, "{cpu}: {fetches:#?}");
-        assert_eq!(fetches[0].name, "mesa3d-fetch", "{cpu}");
-        assert_eq!(fetches[0].destination, "${AROS_PORTS_DIR}/mesa", "{cpu}");
+        assert_eq!(fetches.len(), 3, "{cpu}: {fetches:#?}");
+        let mesa_fetch = fetches
+            .iter()
+            .find(|fetch| fetch.name == "mesa3d-fetch")
+            .unwrap();
+        assert_eq!(mesa_fetch.destination, "${AROS_PORTS_DIR}/mesa", "{cpu}");
 
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &i915_file, &root, &dirs, &context, &fetches,
@@ -280,7 +283,7 @@ fn production_softpipe_is_exact_for_all_current_architectures() {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&fetch_file, &root, &context)
             .expect("collect the central Mesa fetch declaration");
-        assert_eq!(fetches.len(), 1, "{cpu}: {fetches:#?}");
+        assert_eq!(fetches.len(), 3, "{cpu}: {fetches:#?}");
 
         let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
             &softpipe_file,
