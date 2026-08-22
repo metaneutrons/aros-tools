@@ -985,6 +985,84 @@ mod tests {
     }
 
     #[test]
+    fn sourceful_and_sourceless_full_modules_keep_their_exact_cmake_contracts() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let target = crate::TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some(String::new()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+        };
+        let zstd = crate::parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/zstd/mmakefile.src"),
+            &root,
+            &dirs,
+            &target,
+        )
+        .unwrap();
+        let version = crate::parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/version/mmakefile.src"),
+            &root,
+            &dirs,
+            &target,
+        )
+        .unwrap();
+
+        let mut graph = DependencyGraph::new();
+        for target in zstd.targets.into_iter().chain(version.targets) {
+            graph.add_target(target);
+        }
+        for rule in zstd.meta_rules.into_iter().chain(version.meta_rules) {
+            graph.add_meta_rule(rule);
+        }
+        graph.add_fetches(zstd.fetches);
+        graph.add_copy_includes(zstd.copy_includes);
+        assert!(graph.resolve_port_source_fetches().is_empty());
+        for mmake in ["linklibs-zstd", "workbench-libs-zstd-library"] {
+            assert!(
+                graph.meta_targets[mmake].contains("workbench-libs-zstd-fetch"),
+                "{mmake}: {:#?}",
+                graph.meta_targets[mmake]
+            );
+        }
+
+        let cmake = generate_cmake(&graph);
+        let static_at = cmake
+            .find("aros_add_linklib(\n    TARGET zstd-static\n    MMAKE_ID linklibs-zstd")
+            .expect("real zstd static target");
+        let static_end = cmake[static_at..].find("\n)\n").unwrap() + static_at;
+        let static_decl = &cmake[static_at..static_end];
+        assert!(static_decl.contains("    CANONICAL_OUTPUT"));
+        assert!(static_decl.contains("    DEFINES \"ZSTD_NO_TRACE\""));
+        assert_eq!(static_decl.matches("/zstd/zstd-1.5.7/").count(), 30);
+
+        let module_at = cmake
+            .find("aros_add_library(\n    TARGET zstd\n    MMAKE_ID workbench-libs-zstd-library")
+            .expect("sourceful zstd module");
+        let module_end = cmake[module_at..].find("\n)\n").unwrap() + module_at;
+        let module = &cmake[module_at..module_end];
+        assert!(
+            static_at < module_at,
+            "the real colliding target must exist first"
+        );
+        assert!(module.contains("    LINKLIB_NAME \"zstd\""));
+        assert!(module.contains("    GENMODULE_LINKLIBS"));
+        assert!(module.contains("    DEFINES \"ZSTD_NO_TRACE\""));
+        assert_eq!(module.matches("/zstd/zstd-1.5.7/").count(), 30);
+
+        let version_at = cmake
+            .find("aros_add_library(\n    TARGET version\n    MMAKE_ID workbench-libs-version")
+            .expect("source-free version module");
+        let version_end = cmake[version_at..].find("\n)\n").unwrap() + version_at;
+        assert!(cmake[version_at..version_end].contains("    GENMODULE_ONLY"));
+    }
+
+    #[test]
     fn abi_and_genmodule_only_targets_use_their_dedicated_cmake_contracts() {
         let root = root();
         let dirs = DirVars::load(&root);

@@ -4443,6 +4443,137 @@ FILES := gdbstop
     }
 
     #[test]
+    fn zstd_plain_source_inventory_is_cold_fetch_exact_in_all_current_profiles() {
+        let root = root();
+        let dirs = dirs();
+        let file = root.join("workbench/libs/zstd/mmakefile.src");
+        let expected: Vec<String> = [
+            "lib/common/debug",
+            "lib/common/entropy_common",
+            "lib/common/error_private",
+            "lib/common/fse_decompress",
+            "lib/common/pool",
+            "lib/common/threading",
+            "lib/common/xxhash",
+            "lib/common/zstd_common",
+            "lib/compress/fse_compress",
+            "lib/compress/hist",
+            "lib/compress/huf_compress",
+            "lib/compress/zstd_compress",
+            "lib/compress/zstd_compress_literals",
+            "lib/compress/zstd_compress_sequences",
+            "lib/compress/zstd_compress_superblock",
+            "lib/compress/zstd_double_fast",
+            "lib/compress/zstd_fast",
+            "lib/compress/zstd_lazy",
+            "lib/compress/zstd_ldm",
+            "lib/compress/zstd_opt",
+            "lib/compress/zstd_preSplit",
+            "lib/compress/zstdmt_compress",
+            "lib/decompress/huf_decompress",
+            "lib/decompress/zstd_ddict",
+            "lib/decompress/zstd_decompress",
+            "lib/decompress/zstd_decompress_block",
+            "lib/dictBuilder/cover",
+            "lib/dictBuilder/divsufsort",
+            "lib/dictBuilder/fastcover",
+            "lib/dictBuilder/zdict",
+        ]
+        .into_iter()
+        .map(|stem| format!("${{AROS_PORTS_DIR}}/zstd/zstd-1.5.7/{stem}"))
+        .collect();
+
+        for (cpu, platform, float_abi) in [
+            ("x86_64", "pc", ""),
+            ("arm", "raspi", "hard"),
+            ("aarch64", "raspi", ""),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &file,
+                &root,
+                &dirs,
+                &target_context(cpu, platform, float_abi),
+            )
+            .unwrap();
+            let targets: BTreeMap<_, _> = parsed
+                .targets
+                .iter()
+                .map(|target| (target.mmake_name.as_str(), target))
+                .collect();
+
+            let module = targets
+                .get("workbench-libs-zstd-library")
+                .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
+            let static_lib = targets
+                .get("linklibs-zstd")
+                .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
+            for target in [module, static_lib] {
+                assert_eq!(
+                    target.source_files, expected,
+                    "{cpu}: {}",
+                    target.mmake_name
+                );
+                assert_eq!(
+                    target.include_dirs,
+                    ["${CMAKE_SOURCE_DIR}/workbench/libs/zstd"],
+                    "{cpu}: {}",
+                    target.mmake_name
+                );
+                assert_eq!(
+                    target.defines,
+                    ["ZSTD_NO_TRACE"],
+                    "{cpu}: {}",
+                    target.mmake_name
+                );
+                assert!(
+                    target.link_options.is_empty(),
+                    "{cpu}: {}",
+                    target.mmake_name
+                );
+            }
+
+            assert_eq!(module.module_type, ModuleType::Library);
+            assert_eq!(module.target_name, "zstd");
+            assert_eq!(module.linklib_name.as_deref(), Some("zstd"));
+            let genmodule = module.genmodule_linklibs.as_ref().unwrap();
+            assert!(genmodule.enabled && genmodule.has_relative && genmodule.inputs_exact);
+            assert_eq!(genmodule.relative_libraries, ["posixc", "stdc"]);
+            assert!(genmodule.source_files.is_empty());
+            assert!(genmodule.object_sources.is_empty());
+
+            assert_eq!(static_lib.module_type, ModuleType::LinkLib);
+            assert_eq!(static_lib.target_name, "zstd-static");
+            assert!(static_lib.canonical_linklib_output);
+            assert!(parsed.flags.skipped.iter().any(|flag| flag == "-static"));
+
+            let copy = parsed
+                .copy_includes
+                .iter()
+                .find(|copy| copy.name == "workbench-libs-zstd-includes-copy")
+                .unwrap();
+            assert_eq!(copy.dest, ".");
+            assert_eq!(copy.source_dir, "${AROS_PORTS_DIR}/zstd/zstd-1.5.7/lib");
+            assert_eq!(copy.patterns, ["zstd.h", "zstd_errors.h", "zdict.h"]);
+            assert!(copy.flatten);
+
+            let fetch = parsed
+                .fetches
+                .iter()
+                .find(|fetch| fetch.name == "workbench-libs-zstd-fetch")
+                .unwrap();
+            assert_eq!(fetch.archive, "zstd-1.5.7");
+            assert_eq!(fetch.destination, "${AROS_PORTS_DIR}/zstd");
+            assert!(fetch.origins.contains("/v1.5.7"));
+            assert!(parsed.skipped_local_make_includes.is_empty(), "{cpu}");
+            assert!(parsed
+                .skipped_programs
+                .iter()
+                .all(|message| !message.contains("workbench-libs-zstd-library")
+                    && !message.contains("linklibs-zstd")));
+        }
+    }
+
+    #[test]
     fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
         let root = root();
         let dirs = dirs();

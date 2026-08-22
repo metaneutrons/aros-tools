@@ -408,7 +408,7 @@ fn broad_or_recipe_bearing_real_fragments_remain_reported_and_unexpanded() {
 }
 
 #[test]
-fn strict_tree_inventory_enables_only_the_btcore_fragment() {
+fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
     fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
         let mut entries = fs::read_dir(dir)
             .unwrap()
@@ -454,6 +454,9 @@ fn strict_tree_inventory_enables_only_the_btcore_fragment() {
 
     assert_eq!(
         accepted,
-        ["rom/bluetooth/stack/mmakefile.src -> rom/bluetooth/stack/core.files"]
+        [
+            "rom/bluetooth/stack/mmakefile.src -> rom/bluetooth/stack/core.files",
+            "workbench/libs/zstd/mmakefile.src -> workbench/libs/zstd/zstd-1.5.7.files",
+        ]
     );
 }
