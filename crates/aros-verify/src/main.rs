@@ -267,7 +267,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
 // do not matter, ordinary comments are omitted, while #MM dependency lines
 // remain because they are executable MetaMake graph input.
 const LLVM_PROVISIONING_MMAKE_SHA256: &str =
-    "d9c3a153d46208a8465eb206752c9c5b8ec5194f8e73622c3b7d8da280dd286f";
+    "2a44782069731ab3f4d582ad77e405f656c3403177288dc7d05f6a3cdaa14719";
 const LLVM_PROVISIONING_CONFIG_SHA256: &str =
     "00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0";
 const CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256: &str =
@@ -1911,6 +1911,15 @@ mod tests {
             &mmake.replace(
                 "LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin",
                 "LLVM_BUILD_BINDIR:=$(HOSTDIR)/bin",
+            ),
+            &config,
+            &make_config,
+            &cmake_lists,
+        );
+        assert_context_rejected(
+            &mmake.replace(
+                "AROS_TOOLCHAIN_DEFAULT_SYSROOT ?= $(AROS_DEVELOPER)",
+                "AROS_TOOLCHAIN_DEFAULT_SYSROOT := /fixed/non-relocatable/sysroot",
             ),
             &config,
             &make_config,
