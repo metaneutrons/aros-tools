@@ -66,6 +66,11 @@ pub struct TargetDefinition {
     /// explicit `files=""`, never for a source expression that resolved empty.
     #[serde(default)]
     pub genmodule_only: bool,
+    /// The legacy `%build_linklib` deliberately invokes the archiver with no
+    /// objects for this profile. This is accepted only by a target-specific
+    /// audited capability; an unresolved source expression must never set it.
+    #[serde(default)]
+    pub empty_archive: bool,
     /// C source stems or paths from the macro's `files=` lane.
     pub source_files: Vec<String>,
     /// C++ source stems or paths from `cxxfiles=`. Keeping this lane separate

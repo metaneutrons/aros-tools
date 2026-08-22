@@ -426,6 +426,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if target.genmodule_only {
             writeln!(out, "    GENMODULE_ONLY").unwrap();
         }
+        if target.empty_archive {
+            writeln!(out, "    EMPTY_ARCHIVE").unwrap();
+        }
         if let Some(linklib_name) = &target.linklib_name {
             writeln!(out, "    LINKLIB_NAME {}", cmake_arg(linklib_name)).unwrap();
         }
