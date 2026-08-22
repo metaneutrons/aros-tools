@@ -133,8 +133,8 @@ fn create(output: &Path, files: &[PathBuf], basename: bool, allow_non_elf: bool)
 }
 
 fn list(package: &Path) -> Result<()> {
-    let bytes =
-        fs::read(package).with_context(|| format!("cannot read package '{}'", package.display()))?;
+    let bytes = fs::read(package)
+        .with_context(|| format!("cannot read package '{}'", package.display()))?;
     let entries = pkg::parse(&bytes)?;
 
     println!("📦 {} — {} member(s)", package.display(), entries.len());
@@ -159,8 +159,8 @@ fn list(package: &Path) -> Result<()> {
 }
 
 fn extract(package: &Path, directory: &Path) -> Result<()> {
-    let bytes =
-        fs::read(package).with_context(|| format!("cannot read package '{}'", package.display()))?;
+    let bytes = fs::read(package)
+        .with_context(|| format!("cannot read package '{}'", package.display()))?;
     let entries = pkg::parse(&bytes)?;
 
     fs::create_dir_all(directory)

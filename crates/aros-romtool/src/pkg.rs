@@ -94,17 +94,14 @@ pub fn serialize(entries: &[Entry]) -> Result<Vec<u8>> {
 
     for entry in entries {
         let padded = padded_path_len(&entry.path);
-        let path_field = u32::try_from(padded - 1)
-            .with_context(|| format!("path too long: {}", entry.path))?;
+        let path_field =
+            u32::try_from(padded - 1).with_context(|| format!("path too long: {}", entry.path))?;
         let data_len = u32::try_from(entry.data.len())
             .with_context(|| format!("member too large: {}", entry.path))?;
 
         // The historic packer encodes paths as ISO-8859-1 (latin-1).
         if !entry.path.chars().all(|c| (c as u32) < 0x100) {
-            bail!(
-                "path '{}' is not representable in ISO-8859-1",
-                entry.path
-            );
+            bail!("path '{}' is not representable in ISO-8859-1", entry.path);
         }
         let path_bytes: Vec<u8> = entry.path.chars().map(|c| c as u8).collect();
 
@@ -133,14 +130,13 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Entry>> {
         bail!("package is shorter than its {HEADER_LEN}-byte header");
     }
     if bytes[0..3] != MAGIC {
-        bail!(
-            "bad magic {:02x?}, expected {:02x?}",
-            &bytes[0..3],
-            &MAGIC
-        );
+        bail!("bad magic {:02x?}, expected {:02x?}", &bytes[0..3], &MAGIC);
     }
     if bytes[3] != VERSION {
-        bail!("unsupported package version {}, expected {VERSION}", bytes[3]);
+        bail!(
+            "unsupported package version {}, expected {VERSION}",
+            bytes[3]
+        );
     }
 
     let mut entries = Vec::new();
@@ -289,8 +285,14 @@ mod tests {
     #[test]
     fn data_length_field_stays_aligned() {
         let entries = vec![
-            Entry { path: "abcd".to_owned(), data: b"x".to_vec() },
-            Entry { path: "exec.library".to_owned(), data: b"yy".to_vec() },
+            Entry {
+                path: "abcd".to_owned(),
+                data: b"x".to_vec(),
+            },
+            Entry {
+                path: "exec.library".to_owned(),
+                data: b"yy".to_vec(),
+            },
         ];
         let bytes = serialize(&entries).unwrap();
         let back = parse(&bytes).unwrap();
@@ -318,7 +320,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_payload() {
-        let entries = vec![Entry { path: "a".to_owned(), data: vec![1, 2, 3, 4] }];
+        let entries = vec![Entry {
+            path: "a".to_owned(),
+            data: vec![1, 2, 3, 4],
+        }];
         let mut bytes = serialize(&entries).unwrap();
         bytes.truncate(bytes.len() - 2);
         assert!(parse(&bytes).is_err());
