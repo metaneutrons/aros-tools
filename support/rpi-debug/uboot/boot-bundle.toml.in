@@ -1,0 +1,90 @@
+# External Pi 4 U-Boot USB-ECM boot bundle, format 1.
+#
+# Copy this file into a new input directory as `boot-bundle.toml`. Every
+# `REPLACE_ME` and 64-zero SHA-256 value below must be replaced before
+# `aros pi sd image --board <name> --boot-bundle <dir> --output <new-dir>`
+# validates it. Add `--apply` only to create the raw image artifact. All
+# `source` paths are relative to this directory and must be ordinary files,
+# never symlinks.
+#
+# This manifest is deliberately an input contract. It does not download
+# firmware, build U-Boot, compile boot.cmd.in, or create the arosboot patch.
+# After `sd image --apply` creates the artifact, `sd scan --artifact` must
+# produce a current disk-specific token before `sd write --confirm` can write
+# it on Linux or macOS. macOS requires an exclusive Disk Arbitration
+# DADiskClaim RAII guard before raw open, revalidates the target under that
+# claim, and closes the raw descriptor before releasing it; there is no
+# unclaimed raw-device fallback. The CLI never selects, unmounts or
+# repartitions a disk automatically and has no force bypass.
+
+format_version = 1
+
+[board]
+# Must exactly match the local `--board` profile.
+name = "REPLACE_ME"
+model = "rpi4"
+transport = "uboot-usb-ecm"
+
+[usb_ecm]
+# Must exactly match [boards.<name>.usb_ecm.identity].
+vendor_id = 0xffff # REPLACE_ME
+product_id = 0xffff # REPLACE_ME
+serial = "REPLACE_ME"
+expected_target_mac = "02:aa:00:00:00:01"
+
+[partition]
+# Format 1 creates one MBR/FAT32 boot partition. This default is 64 MiB at
+# 1 MiB alignment. If any of the first five values change, recompute
+# layout_sha256 from exactly:
+# aros-pi-sd-partition-v1
+# scheme=<scheme>
+# filesystem=<filesystem>
+# start_lba=<start_lba>
+# size_bytes=<size_bytes>
+# label=<label>
+scheme = "mbr"
+filesystem = "fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+layout_sha256 = "2a7c865c4ae5e1a69c65d05ead4b7eaa3ffed9ca7a62e3569197758bea6ef433"
+
+# Exact required Pi 4 USB-ECM roles and their non-negotiable FAT destination
+# names. `source` names are an external-bundle convention and can be changed
+# only as relative paths; SHA-256 must follow the selected files.
+
+[[files]]
+role = "config"
+source = "config.txt"
+destination = "config.txt"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[files]]
+role = "firmware-start"
+source = "start4.elf"
+destination = "start4.elf"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[files]]
+role = "firmware-fixup"
+source = "fixup4.dat"
+destination = "fixup4.dat"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[files]]
+role = "device-tree"
+source = "bcm2711-rpi-4-b.dtb"
+destination = "bcm2711-rpi-4-b.dtb"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[files]]
+role = "u-boot"
+source = "u-boot.bin"
+destination = "u-boot.bin"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[files]]
+role = "boot-script"
+source = "boot.scr"
+destination = "boot.scr"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"

@@ -12,6 +12,12 @@ workspace = true
 name = "aros"
 path = "src/main.rs"
 
+[features]
+default = []
+# Kept as a no-op compatibility feature for early local users.  The Pi lab
+# TFTP implementation is now part of the normal `aros` binary.
+pi-lab-tftp = []
+
 [dependencies]
 aros-common.workspace = true
 aros-transpiler.workspace = true
@@ -32,3 +38,14 @@ futures-util.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+serde.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+if-addrs.workspace = true
+socket2.workspace = true
+fatfs.workspace = true
+rustix.workspace = true
+tftp-rs = { git = "https://github.com/metaneutrons/tftp-rs.git", rev = "f29959b", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+aros-macos-disk-claim.workspace = true

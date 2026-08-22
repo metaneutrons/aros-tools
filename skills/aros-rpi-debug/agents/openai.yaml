@@ -1,0 +1,4 @@
+interface:
+  display_name: "AROS Raspberry Pi Debug"
+  short_description: "Diagnose AROS auf Raspberry Pi 4 und 5"
+  default_prompt: "Use $aros-rpi-debug to diagnose an AROS Raspberry Pi boot failure."

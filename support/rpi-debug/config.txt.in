@@ -1,0 +1,20 @@
+# Raspberry Pi 4 SD boot-partition template for the optional U-Boot USB-ECM
+# transport.  This is a template, not a complete SD card image.
+#
+# Render @UBOOT_BINARY@ to the U-Boot filename placed beside this file.  Keep
+# start4.elf, fixup4.dat and bcm2711-rpi-4-b.dtb from the same revision recorded
+# in firmware.lock.toml on that FAT boot partition.
+
+[pi4]
+arm_64bit=1
+enable_uart=1
+kernel=@UBOOT_BINARY@
+
+# Enable only when a Pi-4-compatible external JTAG probe is connected.  This
+# is independent of USB-C CDC-ECM and changes the GPIO 22--27 pin mux.
+# enable_jtag_gpio=1
+
+[all]
+
+# Do not add the Linux `dwc2` overlay here.  U-Boot, not Linux, must configure
+# the DWC2 controller as a USB device for the USB-ECM transport.

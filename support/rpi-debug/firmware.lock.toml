@@ -1,0 +1,37 @@
+# Raspberry Pi firmware source lock for the Pi 4 debug bootstrap.
+#
+# This is intentionally a source-revision lock, not a vendored firmware copy.
+# No current tooling reads it yet.  An implementation may only automate a
+# fetch after it also records and verifies SHA-256 values for the acquired
+# files.  Do not substitute rolling `master` for this revision.
+
+format_version = 1
+purpose = "Pi 4 U-Boot USB-ECM bootstrap and native-TFTP reference assets"
+
+[raspberry_pi_firmware]
+repository = "https://github.com/raspberrypi/firmware"
+revision = "1.20260521"
+boot_directory = "boot"
+platform = "bcm2711"
+fetch_policy = "manual-and-explicit"
+
+# The Pi 4 firmware loads this matched pair by name.  Keep both from exactly
+# the same revision.  The DTB is needed by the firmware/U-Boot hand-off path.
+required_files = [
+  "LICENCE.broadcom",
+  "fixup4.dat",
+  "start4.elf",
+  "bcm2711-rpi-4-b.dtb",
+]
+
+[raspberry_pi_firmware.integrity]
+algorithm = "sha256"
+status = "checksums-must-be-recorded-before-automated-fetch"
+
+# This lock deliberately does not pin U-Boot yet.  The first proof-of-concept
+# must record an upstream tag or immutable commit together with the reviewed
+# patch series in tools/rpi-debug/uboot/patches/ before a bootstrap builder is
+# added to the AROS CLI.
+[u_boot]
+repository = "https://source.denx.de/u-boot/u-boot.git"
+revision_status = "to-be-pinned-with-first-reviewed-patch-series"

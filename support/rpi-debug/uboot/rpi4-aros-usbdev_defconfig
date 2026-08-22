@@ -1,0 +1,29 @@
+# Configuration delta for an upstream rpi_4_defconfig-based U-Boot build.
+#
+# This file is deliberately NOT a complete, directly selectable U-Boot
+# defconfig.  It records the minimum additions the eventual reproducible
+# bootstrap builder must merge after pinning a specific U-Boot revision.
+# See README.md for the required conversion to a full defconfig.
+
+# The upstream Pi 4 profile provides the DWC2 gadget base.  Keep these explicit
+# so a future U-Boot rebase fails visibly if that assumption changes.
+CONFIG_USB_GADGET=y
+CONFIG_USB_GADGET_DWC2_OTG=y
+
+# Present the Pi's USB-C DWC2 peripheral as a standard CDC-ECM Ethernet device
+# to macOS.  Do not enable RNDIS solely for the Mac use case.
+CONFIG_USB_ETHER=y
+CONFIG_USB_ETH_CDC=y
+# CONFIG_USB_ETH_RNDIS is not set
+
+# The transport proof uses normal U-Boot network commands after the gadget
+# interface is registered.  Their final availability must be checked against
+# the pinned upstream base configuration.
+CONFIG_CMD_DHCP=y
+CONFIG_CMD_PING=y
+CONFIG_CMD_TFTPBOOT=y
+
+# A generated boot.scr is needed only after the reviewed `arosboot` hand-off
+# command exists.  Keep the source command support explicit in the future full
+# profile.
+CONFIG_CMD_SOURCE=y

@@ -1,0 +1,39 @@
+# Source template for the Pi 4 U-Boot USB-ECM boot script.
+#
+# This file is NOT provisionable as boot.scr yet.  A future renderer replaces
+# all @...@ values from a signed/verified AROS boot manifest only after the
+# `arosboot` hand-off command in patches/README.md exists.
+#
+# Do not replace `arosboot` with Linux `booti`: AROS' raw bootstrap image and
+# AROS BSP package have a different hand-off contract.
+
+setenv serverip "@TFTP_SERVER_ADDRESS@"
+setenv ipaddr "@UBOOT_USB_ECM_ADDRESS@"
+
+# These addresses and the final image/package/FDT layout are build-manifest
+# values, not guesses hard-coded by this script.
+setenv aros_image_addr_r "@AROS_IMAGE_ADDRESS@"
+setenv aros_bsp_addr_r "@AROS_BSP_ADDRESS@"
+setenv aros_fdt_addr_r "@AROS_FDT_ADDRESS@"
+
+# Each name is a *bare filename*. `aros pi serve` exposes the already
+# published board deployment as its TFTP root, not the parent `tftp_root`;
+# do not add a board prefix or a leading slash here.
+setenv aros_image "@AROS_IMAGE_FILENAME@"
+setenv aros_bsp "@AROS_BSP_FILENAME@"
+setenv aros_fdt "@AROS_FDT_FILENAME@"
+
+echo "AROS Pi 4 USB-ECM bootstrap: fetching deployment-root bundle"
+tftpboot ${aros_image_addr_r} ${serverip}:${aros_image}
+setenv aros_image_size ${filesize}
+
+tftpboot ${aros_bsp_addr_r} ${serverip}:${aros_bsp}
+setenv aros_bsp_size ${filesize}
+
+tftpboot ${aros_fdt_addr_r} ${serverip}:${aros_fdt}
+setenv aros_fdt_size ${filesize}
+
+# `arosboot` is a required, reviewed U-Boot extension.  It must verify its
+# inputs, pass the Pi 4 FDT in the AArch64 x0 register, and preserve the BSP
+# package for the AROS bootstrap.  It is intentionally unavailable today.
+arosboot ${aros_image_addr_r} ${aros_image_size} ${aros_bsp_addr_r} ${aros_bsp_size} ${aros_fdt_addr_r} ${aros_fdt_size}

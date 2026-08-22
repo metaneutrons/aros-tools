@@ -7,6 +7,7 @@ members = [
     "crates/aros-romtool",
     "crates/aros-cli",
     "crates/aros-verify",
+    "crates/aros-macos-disk-claim",
 ]
 
 [workspace.package]
@@ -41,6 +42,7 @@ aros-common = { path = "crates/aros-common" }
 aros-transpiler = { path = "crates/aros-transpiler" }
 aros-genmodule = { path = "crates/aros-genmodule" }
 aros-romtool = { path = "crates/aros-romtool" }
+aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
 
 # CLI & UX
 clap = { version = "4.5", features = ["derive", "env", "cargo", "color"] }
@@ -79,3 +81,19 @@ which = "7.0"
 regex = "1.11"
 sha2 = "0.10"
 tempfile = "3.17"
+# The Pi lab service must verify an address on the exact USB-ECM interface;
+# this is a small native interface-enumeration crate, not an external command.
+if-addrs = "0.15"
+# Safe, platform-native socket options for the fail-closed DHCP interface
+# binding (`SO_BINDTODEVICE` on Linux and `IP_BOUND_IF` on macOS).
+socket2 = { version = "0.6", features = ["all"] }
+# Pure-Rust FAT formatter/writer used only to create a staged SD-card image;
+# raw-device writes have a separate, explicit safety path.
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
+# Safe POSIX file-descriptor operations used by the Linux SD writer to open a
+# whole block device with O_EXCL | O_NOFOLLOW without local unsafe code.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount"] }
+# Minimal, typed bindings used by the macOS whole-disk claim RAII guard.
+# They are linked only on macOS by the guard crate.
+objc2-disk-arbitration = { version = "0.3.2", default-features = false, features = ["std", "DADisk", "DADissenter", "DASession", "libc"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDate", "CFDictionary", "CFRunLoop"] }
