@@ -1741,21 +1741,330 @@ fn macro_argument_names(args: &str) -> Vec<String> {
     names
 }
 
-/// Parses the first deliberately narrow `%build_with_cmake` capability.
+/// Canonicalises one audited Make capability block for exact comparison.
+///
+/// Continuation layout and comments have no GNU Make semantics, so they may
+/// vary without changing the capability. Every remaining logical line,
+/// conditional and assignment is retained in order with whitespace collapsed.
+fn normalized_make_capability_block(
+    content: &str,
+    first_line_prefix: &str,
+    end_line_prefix: &str,
+) -> Option<String> {
+    let joined = join_continuations(content);
+    let mut active = false;
+    let mut lines = Vec::new();
+    for raw_line in joined.lines() {
+        let semantic = strip_make_comment(raw_line).trim();
+        if !active {
+            if !semantic.starts_with(first_line_prefix) {
+                continue;
+            }
+            active = true;
+        } else if semantic.starts_with(end_line_prefix) {
+            return Some(lines.join("\n"));
+        }
+        if !semantic.is_empty() {
+            lines.push(semantic.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    None
+}
+
+const AOM_DECLARED_CAPABILITY: &str = "\
+LIBAOM_CMAKEOPTIONS := -DBUILD_SHARED_LIBS=OFF -DENABLE_NASM=ON -DENABLE_EXAMPLES=OFF -DENABLE_TESTS=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_ENCODER=0 -DCONFIG_AV1_DECODER=1 -DCONFIG_MULTITHREAD=0\n\
+ifneq (,$(findstring x86_64,$(AROS_TARGET_CPU)))\n\
+ifeq ($(NASM),)\n\
+LIBAOM_TARGET_CPU=generic\n\
+endif\n\
+else\n\
+ifneq (,$(findstring i386,$(AROS_TARGET_CPU)))\n\
+ifeq ($(NASM),)\n\
+LIBAOM_TARGET_CPU=generic\n\
+endif\n\
+endif\n\
+endif\n\
+ifeq ($(LIBAOM_TARGET_CPU),)\n\
+LIBAOM_CMAKEOPTIONS += -DAOM_TARGET_CPU=$(AROS_TARGET_CPU)\n\
+else\n\
+LIBAOM_CMAKEOPTIONS += -DAOM_TARGET_CPU=$(LIBAOM_TARGET_CPU)\n\
+endif\n\
+ifneq (,$(findstring arm,$(AROS_TARGET_CPU)))\n\
+AOM_NOCPUDETECT=yes\n\
+LIBAOM_CMAKEOPTIONS += -DENABLE_NEON=0\n\
+endif\n\
+ifneq (,$(findstring riscv64,$(AROS_TARGET_CPU)))\n\
+AOM_NOCPUDETECT=yes\n\
+else\n\
+ifneq (,$(findstring riscv,$(AROS_TARGET_CPU)))\n\
+LIBAOM_CMAKEOPTIONS += -DENABLE_RVV=0\n\
+AOM_NOCPUDETECT=yes\n\
+endif\n\
+endif\n\
+ifneq (,$(findstring ppc,$(AROS_TARGET_CPU)))\n\
+AOM_NOCPUDETECT=yes\n\
+endif\n\
+ifeq ($(AOM_NOCPUDETECT),yes)\n\
+LIBAOM_CMAKEOPTIONS += -DCONFIG_RUNTIME_CPU_DETECT=0\n\
+endif\n\
+LIBAOM_LDFLAGS+=$(TARGET_CXX_LDFLAGS)\n\
+ifneq ($(TARGET_CXX_LIBS),)\n\
+LIBAOM_LDFLAGS+=-Wl,--start-group $(TARGET_CXX_LIBS) -Wl,--end-group\n\
+endif";
+
+const AOM_COMMON_OPTIONS: &[&str] = &[
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DENABLE_NASM=ON",
+    "-DENABLE_EXAMPLES=OFF",
+    "-DENABLE_TESTS=OFF",
+    "-DENABLE_TOOLS=OFF",
+    "-DCONFIG_AV1_ENCODER=0",
+    "-DCONFIG_AV1_DECODER=1",
+    "-DCONFIG_MULTITHREAD=0",
+    // config/make-cmake.tmpl supplies this legacy default outside
+    // LIBAOM_CMAKEOPTIONS. Make it explicit in the standalone capability.
+    "-DCMAKE_BUILD_TYPE=Release",
+];
+
+fn aom_profile_options(target: Option<&TargetContext>) -> std::result::Result<Vec<String>, String> {
+    let Some(target) = target else {
+        return Err("AOM capability requires a concrete target profile".to_owned());
+    };
+    let profile = (
+        target.cpu.as_deref(),
+        target.platform.as_deref(),
+        target.toolchain.as_deref(),
+        target.cpu32.as_deref(),
+        target.use_mmu.as_deref(),
+        target.float_abi.as_deref(),
+    );
+    let specific: &[&str] = match profile {
+        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => &[
+            "-DAOM_TARGET_CPU=arm",
+            "-DENABLE_NEON=0",
+            "-DCONFIG_RUNTIME_CPU_DETECT=0",
+        ],
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some(""))
+        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
+            // The legacy expression expands to `aarch64`, but the audited
+            // migration contract deliberately retains the probe-proven scalar
+            // configuration shared with the reproducible x86_64 profile.
+            &["-DAOM_TARGET_CPU=generic"]
+        }
+        _ => {
+            return Err(format!(
+                "AOM capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+                target.cpu.as_deref().unwrap_or("<unset>"),
+                target.platform.as_deref().unwrap_or("<unset>"),
+                target.toolchain.as_deref().unwrap_or("<unset>"),
+                target.cpu32.as_deref().unwrap_or("<unset>"),
+                target.use_mmu.as_deref().unwrap_or("<unset>"),
+                target.float_abi.as_deref().unwrap_or("<unset>")
+            ));
+        }
+    };
+    Ok(AOM_COMMON_OPTIONS
+        .iter()
+        .chain(specific)
+        .map(|option| (*option).to_owned())
+        .collect())
+}
+
+fn parse_aom_external_cmake_invocation(
+    invocation: &Invocation,
+    expression_context: &MakeExprContext<'_>,
+    target: Option<&TargetContext>,
+    make_source: &str,
+    fetches: &[FetchDecl],
+    relative_dir: &Path,
+    mmake: String,
+) -> std::result::Result<ExternalCMakeDecl, String> {
+    const AOM_FETCH: &str = "linklibs-aom-fetch";
+    const AOM_SOURCE: &str = "${AROS_PORTS_DIR}/libaom/libaom-3.12.1";
+    const AOM_PREFIX: &str = "${AROS_BUILD_DIR}/SYS/Developer";
+
+    let argument_names = macro_argument_names(&invocation.args);
+    let mut unique_names = argument_names.clone();
+    unique_names.sort();
+    unique_names.dedup();
+    if unique_names.len() != argument_names.len() {
+        return Err("duplicate macro argument".to_owned());
+    }
+    let mut expected_names = vec![
+        "extraoptions",
+        "extraldflags",
+        "mmake",
+        "package",
+        "prefix",
+        "srcdir",
+    ];
+    expected_names.sort_unstable();
+    if unique_names != expected_names {
+        return Err(format!(
+            "argument set [{}] does not match audited AOM capability [{}]",
+            unique_names.join(", "),
+            expected_names.join(", ")
+        ));
+    }
+
+    for (key, expected) in [
+        ("package", "aom"),
+        ("srcdir", "$(AOMARCHSRCDIR)"),
+        ("prefix", "$(AROS_DEVELOPER)"),
+        ("extraoptions", "$(LIBAOM_CMAKEOPTIONS)"),
+        ("extraldflags", "$(LIBAOM_LDFLAGS)"),
+    ] {
+        let actual = macro_arg(&invocation.args, key)
+            .ok_or_else(|| format!("missing required {key}= argument"))?;
+        if actual != expected {
+            return Err(format!(
+                "{key} uses `{actual}`, expected audited form `{expected}`"
+            ));
+        }
+    }
+
+    let declared_block = normalized_make_capability_block(
+        make_source,
+        "LIBAOM_CMAKEOPTIONS :=",
+        "%build_with_cmake",
+    )
+    .ok_or_else(|| "AOM option/extraldflags capability block is missing".to_owned())?;
+    if declared_block != AOM_DECLARED_CAPABILITY {
+        return Err(
+            "AOM option/extraldflags declaration block differs from audited capability".to_owned(),
+        );
+    }
+
+    let evaluate_path = |key: &str| -> std::result::Result<String, String> {
+        let raw = macro_arg(&invocation.args, key)
+            .ok_or_else(|| format!("missing required {key}= argument"))?;
+        let value = evaluate_make_expr(&raw, expression_context)
+            .map_err(|reason| format!("{key}={raw} cannot be evaluated: {reason}"))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("{key}={raw} expanded to an empty value"));
+        }
+        Ok(value.to_owned())
+    };
+    let source_dir = evaluate_path("srcdir")?;
+    if source_dir != AOM_SOURCE {
+        return Err(format!(
+            "srcdir resolves to {source_dir}, expected {AOM_SOURCE}"
+        ));
+    }
+    let install_prefix = evaluate_path("prefix")?;
+    if install_prefix != AOM_PREFIX {
+        return Err(format!(
+            "prefix resolves to {install_prefix}, expected {AOM_PREFIX}"
+        ));
+    }
+    let options = aom_profile_options(target)?;
+
+    let matching_fetches: Vec<_> = fetches
+        .iter()
+        .filter(|fetch| fetch.name == AOM_FETCH)
+        .collect();
+    let [fetch] = matching_fetches.as_slice() else {
+        return Err(format!(
+            "requires exactly one %fetch mmake={AOM_FETCH} declaration, found {}",
+            matching_fetches.len()
+        ));
+    };
+    for (field, actual, expected) in [
+        ("archive", fetch.archive.as_str(), "libaom-3.12.1"),
+        ("suffixes", fetch.suffixes.as_str(), "tar.gz"),
+        (
+            "archive_origins",
+            fetch.origins.as_str(),
+            "https://storage.googleapis.com/aom-releases",
+        ),
+        (
+            "location",
+            fetch.location.as_str(),
+            "${AROS_PORTS_SOURCE_DIR}",
+        ),
+        (
+            "destination",
+            fetch.destination.as_str(),
+            "${AROS_PORTS_DIR}/libaom",
+        ),
+        (
+            "patches_specs",
+            fetch.patches.as_str(),
+            "libaom-3.12.1-aros.diff:libaom-3.12.1:-f,-p1",
+        ),
+        (
+            "patches_origins",
+            fetch.patch_origins.as_str(),
+            "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic",
+        ),
+        ("base", fetch.base.as_str(), ""),
+        (
+            "declaring directory",
+            fetch.dir.as_str(),
+            "workbench/classes/datatypes/heic",
+        ),
+    ] {
+        if actual != expected {
+            return Err(format!(
+                "%fetch mmake={AOM_FETCH} {field} is {actual}, expected {expected}"
+            ));
+        }
+    }
+
+    Ok(ExternalCMakeDecl {
+        mmake_name: mmake,
+        source_dir,
+        binary_dir: "${AROS_BUILD_DIR}/gen/external-cmake/workbench/classes/datatypes/heic/aom"
+            .to_owned(),
+        install_prefix: install_prefix.clone(),
+        fetch_target: AOM_FETCH.to_owned(),
+        source_archive: "${AROS_PORTS_SOURCE_DIR}/libaom-3.12.1.tar.gz".to_owned(),
+        source_sha256: "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
+            .to_owned(),
+        local_patch_files: vec![
+            "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"
+                .to_owned(),
+        ],
+        local_patch_sha256: vec![
+            "c3caf62de4cd3524ddcf7c1b0111909c6d0f44081200324ab12090fcd8fb48ce".to_owned(),
+        ],
+        provided_library: "aom".to_owned(),
+        provider_target: "datatypes-heic-linklibs-aom-external-aom".to_owned(),
+        library_products: vec![format!("{install_prefix}/lib/libaom.a")],
+        header_products: [
+            "aom.h",
+            "aom_codec.h",
+            "aom_decoder.h",
+            "aom_frame_buffer.h",
+            "aom_image.h",
+            "aom_integer.h",
+            "aomdx.h",
+        ]
+        .into_iter()
+        .map(|header| format!("{install_prefix}/include/aom/{header}"))
+        .collect(),
+        auxiliary_products: vec![format!("{install_prefix}/lib/pkgconfig/aom.pc")],
+        public_include_dirs: vec![format!("{install_prefix}/include")],
+        options,
+        dir_path: relative_dir.to_path_buf(),
+    })
+}
+
+/// Parses one deliberately narrow `%build_with_cmake` capability.
 ///
 /// Generic external-project passthrough would let a newly added host compiler,
-/// source tree or install prefix silently execute in target builds. CUnit is
-/// admitted only after the complete declaration and its owning fetch match the
-/// audited 3.5.5 profile. Both examples and upstream self-tests must remain
-/// disabled: neither is an installed product and either would broaden the
-/// cross-build capability beyond the declared library contract.
+/// source tree or install prefix silently execute in target builds. Each
+/// admitted declaration must match its complete audited arguments, owning
+/// fetch and target-profile contract. Everything else remains an explicit
+/// skip with a precise diagnostic.
 fn parse_external_cmake_invocation(
     invocation: &Invocation,
-    scope: &VarScope,
-    dirs: &crate::dirs::DirVars,
-    root: &Path,
+    expression_context: &MakeExprContext<'_>,
     relative_dir: &Path,
     fetches: &[FetchDecl],
+    target: Option<&TargetContext>,
+    make_source: &str,
 ) -> std::result::Result<ExternalCMakeDecl, String> {
     const CUNIT_MMAKE: &str = "linklibs-yes-cunit";
     const CUNIT_SOURCE: &str = "${AROS_PORTS_DIR}/cunit/cunit-3.5.5";
@@ -1770,14 +2079,26 @@ fn parse_external_cmake_invocation(
         "-Wno-error=dev",
     ];
 
-    let context = MakeExprContext::new(scope, dirs, invocation.line, root, relative_dir);
     let mmake_raw = macro_arg(&invocation.args, "mmake")
         .ok_or_else(|| "missing required mmake= argument".to_owned())?;
-    let mmake = evaluate_name(&mmake_raw, &context)
+    let mmake = evaluate_name(&mmake_raw, expression_context)
         .map_err(|reason| format!("mmake={mmake_raw} is unresolved: {reason}"))?;
+    if relative_dir == Path::new("workbench/classes/datatypes/heic")
+        && mmake == "datatypes-heic-linklibs-aom"
+    {
+        return parse_aom_external_cmake_invocation(
+            invocation,
+            expression_context,
+            target,
+            make_source,
+            fetches,
+            relative_dir,
+            mmake,
+        );
+    }
     if relative_dir != Path::new("compiler/cunit") || mmake != CUNIT_MMAKE {
         return Err(format!(
-            "unsupported external-CMake capability (only compiler/cunit mmake={CUNIT_MMAKE} is modelled)"
+            "unsupported external-CMake capability (modelled: compiler/cunit mmake={CUNIT_MMAKE}; workbench/classes/datatypes/heic mmake=datatypes-heic-linklibs-aom)"
         ));
     }
 
@@ -1801,7 +2122,7 @@ fn parse_external_cmake_invocation(
     let evaluate_path = |key: &str| -> std::result::Result<String, String> {
         let raw = macro_arg(&invocation.args, key)
             .ok_or_else(|| format!("missing required {key}= argument"))?;
-        let value = evaluate_make_expr(&raw, &context)
+        let value = evaluate_make_expr(&raw, expression_context)
             .map_err(|reason| format!("{key}={raw} cannot be evaluated: {reason}"))?;
         let value = value.trim();
         if value.is_empty() {
@@ -1824,7 +2145,7 @@ fn parse_external_cmake_invocation(
 
     let options_raw = macro_arg(&invocation.args, "extraoptions")
         .ok_or_else(|| "missing required extraoptions= argument".to_owned())?;
-    let options = evaluate_make_list(&options_raw, &context)
+    let options = evaluate_make_list(&options_raw, expression_context)
         .map_err(|reason| format!("extraoptions={options_raw} cannot be evaluated: {reason}"))?;
     if options != DECLARED_OPTIONS {
         return Err(format!(
@@ -1885,6 +2206,12 @@ fn parse_external_cmake_invocation(
         fetch_target: CUNIT_FETCH.to_owned(),
         source_archive: CUNIT_ARCHIVE.to_owned(),
         source_sha256: CUNIT_SHA256.to_owned(),
+        local_patch_files: vec![
+            "${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff".to_owned()
+        ],
+        local_patch_sha256: vec![
+            "481b9d4544e7fae9f47dc821f343cbb5f417ea8abc76c1a8f9f9177ab7420197".to_owned(),
+        ],
         provided_library: "cunit".to_owned(),
         provider_target: "linklibs-yes-cunit-external-cunit".to_owned(),
         library_products: vec![format!("{install_prefix}/lib/libcunit.a")],
@@ -3721,7 +4048,16 @@ fn parse_mmakefile_impl(
         .iter()
         .filter(|invocation| invocation.name == "build_with_cmake")
     {
-        match parse_external_cmake_invocation(invocation, &scope, dirs, root, &rel_dir, &fetches) {
+        let expression_context =
+            MakeExprContext::new(&scope, dirs, invocation.line, root, &rel_dir);
+        match parse_external_cmake_invocation(
+            invocation,
+            &expression_context,
+            &rel_dir,
+            &fetches,
+            target,
+            &content,
+        ) {
             Ok(declaration) => external_cmake.push(declaration),
             Err(reason) => {
                 let mmake = macro_arg(&invocation.args, "mmake")
@@ -4924,13 +5260,21 @@ mod tests {
         let root = root();
         let relative_dir = Path::new("compiler/cunit");
         let (invocation, scope, fetches) = parsed_cunit_capability();
-        let declaration = parse_external_cmake_invocation(
-            &invocation,
+        let directory_vars = dirs();
+        let expression_context = MakeExprContext::new(
             &scope,
-            &dirs(),
+            &directory_vars,
+            invocation.line,
             &root,
             relative_dir,
+        );
+        let declaration = parse_external_cmake_invocation(
+            &invocation,
+            &expression_context,
+            relative_dir,
             &fetches,
+            None,
+            "",
         )
         .unwrap();
 
@@ -4983,14 +5327,22 @@ mod tests {
         let root = root();
         let relative_dir = Path::new("compiler/cunit");
         let (invocation, scope, fetches) = parsed_cunit_capability();
+        let directory_vars = dirs();
+        let expression_context = MakeExprContext::new(
+            &scope,
+            &directory_vars,
+            invocation.line,
+            &root,
+            relative_dir,
+        );
         let parse = |invocation: &super::Invocation, fetches: &[crate::fetch::FetchDecl]| {
             parse_external_cmake_invocation(
                 invocation,
-                &scope,
-                &dirs(),
-                &root,
+                &expression_context,
                 relative_dir,
                 fetches,
+                None,
+                "",
             )
             .unwrap_err()
         };
@@ -5024,6 +5376,194 @@ mod tests {
         assert!(parse(&invocation, &changed_fetches).contains("archive is"));
 
         assert!(parse(&invocation, &[]).contains("exactly one"));
+    }
+
+    fn parsed_aom_capability(
+        profile: &TargetContext,
+    ) -> (
+        super::Invocation,
+        super::VarScope,
+        Vec<crate::fetch::FetchDecl>,
+        String,
+    ) {
+        let root = root();
+        let relative_dir = Path::new("workbench/classes/datatypes/heic");
+        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
+        let joined = join_continuations(&content);
+        let (scope, states) = collect_vars_impl(&joined, Some(profile));
+        let mut skipped = Vec::new();
+        let invocation =
+            select_target_invocations(&joined, Some(&states), relative_dir, &mut skipped)
+                .into_iter()
+                .find(|invocation| {
+                    invocation.name == "build_with_cmake"
+                        && macro_arg(&invocation.args, "mmake").as_deref()
+                            == Some("datatypes-heic-linklibs-aom")
+                })
+                .unwrap();
+        assert!(
+            skipped
+                .iter()
+                .all(|diagnostic| !diagnostic.contains("datatypes-heic-linklibs-aom")),
+            "{skipped:#?}"
+        );
+        let (fetches, skipped_fetches) =
+            crate::fetch::collect_fetches_with_scope(&content, relative_dir, &scope);
+        assert!(
+            skipped_fetches
+                .iter()
+                .all(|diagnostic| !diagnostic.contains("linklibs-aom-fetch")),
+            "{skipped_fetches:#?}"
+        );
+        (invocation, scope, fetches, content)
+    }
+
+    #[test]
+    fn aom_external_cmake_capability_is_profile_exact() {
+        let root = root();
+        let relative_dir = Path::new("workbench/classes/datatypes/heic");
+        let directory_vars = dirs();
+        for (profile, specific) in [
+            (
+                target_context("x86_64", "pc", ""),
+                vec!["-DAOM_TARGET_CPU=generic"],
+            ),
+            (
+                target_context("arm", "raspi", "hard"),
+                vec![
+                    "-DAOM_TARGET_CPU=arm",
+                    "-DENABLE_NEON=0",
+                    "-DCONFIG_RUNTIME_CPU_DETECT=0",
+                ],
+            ),
+            (
+                target_context("aarch64", "raspi", ""),
+                vec!["-DAOM_TARGET_CPU=generic"],
+            ),
+        ] {
+            let (invocation, scope, fetches, content) = parsed_aom_capability(&profile);
+            let expression_context = MakeExprContext::new(
+                &scope,
+                &directory_vars,
+                invocation.line,
+                &root,
+                relative_dir,
+            );
+            let declaration = parse_external_cmake_invocation(
+                &invocation,
+                &expression_context,
+                relative_dir,
+                &fetches,
+                Some(&profile),
+                &content,
+            )
+            .unwrap();
+            let mut expected: Vec<_> = super::AOM_COMMON_OPTIONS
+                .iter()
+                .map(|option| (*option).to_owned())
+                .collect();
+            expected.extend(specific.into_iter().map(str::to_owned));
+
+            assert_eq!(declaration.mmake_name, "datatypes-heic-linklibs-aom");
+            assert_eq!(
+                declaration.provider_target,
+                "datatypes-heic-linklibs-aom-external-aom"
+            );
+            assert_eq!(
+                declaration.source_dir,
+                "${AROS_PORTS_DIR}/libaom/libaom-3.12.1"
+            );
+            assert_eq!(
+                declaration.binary_dir,
+                "${AROS_BUILD_DIR}/gen/external-cmake/workbench/classes/datatypes/heic/aom"
+            );
+            assert_eq!(
+                declaration.install_prefix,
+                "${AROS_BUILD_DIR}/SYS/Developer"
+            );
+            assert_eq!(declaration.fetch_target, "linklibs-aom-fetch");
+            assert_eq!(declaration.provided_library, "aom");
+            assert_eq!(declaration.header_products.len(), 7);
+            assert!(declaration
+                .options
+                .contains(&"-DCMAKE_BUILD_TYPE=Release".to_owned()));
+            assert_eq!(
+                declaration.auxiliary_products,
+                ["${AROS_BUILD_DIR}/SYS/Developer/lib/pkgconfig/aom.pc"]
+            );
+            assert_eq!(declaration.options, expected);
+        }
+    }
+
+    #[test]
+    fn aom_external_cmake_capability_rejects_declaration_fetch_and_profile_drift() {
+        let root = root();
+        let relative_dir = Path::new("workbench/classes/datatypes/heic");
+        let profile = target_context("x86_64", "pc", "");
+        let (invocation, scope, fetches, content) = parsed_aom_capability(&profile);
+        let directory_vars = dirs();
+        let expression_context = MakeExprContext::new(
+            &scope,
+            &directory_vars,
+            invocation.line,
+            &root,
+            relative_dir,
+        );
+        let parse = |invocation: &super::Invocation,
+                     fetches: &[crate::fetch::FetchDecl],
+                     profile: &TargetContext,
+                     content: &str| {
+            parse_external_cmake_invocation(
+                invocation,
+                &expression_context,
+                relative_dir,
+                fetches,
+                Some(profile),
+                content,
+            )
+            .unwrap_err()
+        };
+
+        let mut changed = invocation.clone();
+        changed.args.push_str(" compiler=host");
+        assert!(parse(&changed, &fetches, &profile, &content).contains("argument set"));
+
+        let mut changed = invocation.clone();
+        changed.args = changed.args.replace("package=aom", "package=other");
+        assert!(parse(&changed, &fetches, &profile, &content).contains("package uses"));
+
+        let mut changed = invocation.clone();
+        changed.args = changed.args.replace(
+            "extraldflags=\"$(LIBAOM_LDFLAGS)\"",
+            "extraldflags=\"-lstdc++\"",
+        );
+        assert!(parse(&changed, &fetches, &profile, &content).contains("extraldflags uses"));
+
+        let changed_content = content.replace("-DENABLE_TESTS=OFF", "-DENABLE_TESTS=ON");
+        assert!(parse(&invocation, &fetches, &profile, &changed_content)
+            .contains("declaration block differs"));
+
+        let changed_content = content.replace(
+            "LIBAOM_LDFLAGS+=$(TARGET_CXX_LDFLAGS)",
+            "LIBAOM_LDFLAGS+=-Wl,--unreviewed",
+        );
+        assert!(parse(&invocation, &fetches, &profile, &changed_content)
+            .contains("declaration block differs"));
+
+        let mut changed_fetches = fetches.clone();
+        changed_fetches[0].origins = "https://unreviewed.invalid".to_owned();
+        assert!(
+            parse(&invocation, &changed_fetches, &profile, &content).contains("archive_origins")
+        );
+
+        let mut changed_fetches = fetches.clone();
+        changed_fetches[0].patches = "unreviewed.diff".to_owned();
+        assert!(parse(&invocation, &changed_fetches, &profile, &content).contains("patches_specs"));
+
+        let mut unsupported = profile;
+        unsupported.toolchain = Some("gnu".to_owned());
+        assert!(parse(&invocation, &fetches, &unsupported, &content)
+            .contains("does not support target profile"));
     }
 
     #[test]

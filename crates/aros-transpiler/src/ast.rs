@@ -226,6 +226,13 @@ pub struct ExternalCMakeDecl {
     /// Exact archive whose digest is checked before configuration.
     pub source_archive: String,
     pub source_sha256: String,
+    /// Local patches admitted by the capability, paired positionally with
+    /// their exact digests. The fetch helper uses both lists to invalidate a
+    /// previously materialised source tree when a patch input changes.
+    #[serde(default)]
+    pub local_patch_files: Vec<String>,
+    #[serde(default)]
+    pub local_patch_sha256: Vec<String>,
     /// Legacy `uselibs=` spelling published by this build.
     pub provided_library: String,
     /// Linkable interface target created by the external-build helper. This is

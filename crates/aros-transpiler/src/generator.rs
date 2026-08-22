@@ -97,10 +97,10 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         )
         .unwrap();
         for f in &graph.fetches {
-            writeln!(
+            write!(
                 out,
                 "aros_fetch_archive(NAME \"{}\" ARCHIVE \"{}\" SUFFIXES \"{}\" ORIGINS \"{}\"\n\
-                 \x20   LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\")",
+                 \x20   LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\"",
                 f.name,
                 f.archive,
                 f.suffixes,
@@ -112,6 +112,35 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 f.patches
             )
             .unwrap();
+            if let Some(declaration) = graph
+                .external_cmake
+                .iter()
+                .find(|declaration| declaration.fetch_target == f.name)
+            {
+                if declaration.local_patch_files.is_empty() {
+                    writeln!(out, ")").unwrap();
+                    continue;
+                }
+                let patch_files: Vec<_> = declaration
+                    .local_patch_files
+                    .iter()
+                    .map(|path| cmake_arg(path))
+                    .collect();
+                let patch_sha256: Vec<_> = declaration
+                    .local_patch_sha256
+                    .iter()
+                    .map(|digest| cmake_arg(digest))
+                    .collect();
+                write!(
+                    out,
+                    "\n    SOURCE_DIR {}\n    LOCAL_PATCH_FILES {}\n    LOCAL_PATCH_SHA256 {}",
+                    cmake_arg(&declaration.source_dir),
+                    patch_files.join(" "),
+                    patch_sha256.join(" ")
+                )
+                .unwrap();
+            }
+            writeln!(out, ")").unwrap();
         }
         writeln!(out).unwrap();
     }
