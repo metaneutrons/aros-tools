@@ -257,12 +257,61 @@ pub struct ExternalCMakeDecl {
     pub dir_path: PathBuf,
 }
 
+/// One output-producing invocation inside a strictly admitted Python
+/// generator group.
+///
+/// The script and source inputs are relative to the group's fetched source
+/// root, while the output is relative to its private build root.  Keeping
+/// these roots separate lets the CMake helper reject source-tree writes and
+/// build-tree escapes before it ever starts the interpreter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonGeneratorJob {
+    pub script: String,
+    pub output: String,
+    pub arguments: Vec<String>,
+}
+
+/// A capability-checked group of fetched Python generators.
+///
+/// This is deliberately not a representation of arbitrary Make recipes.
+/// Each instance is constructed by a target-specific parser capability which
+/// pins the scripts, arguments, products, fetch owner and local patch.  The
+/// generated CMake then gives all products one real MetaMake owner target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonOutputsDecl {
+    /// MetaMake target which owns every generated output.
+    pub owner: String,
+    /// Fetched source root containing scripts and read-only inputs.
+    pub source_root: String,
+    /// Private build root below which every output must live.
+    pub build_root: String,
+    /// Fetch target whose completion stamp orders and invalidates the jobs.
+    pub fetch_target: String,
+    /// Exact downloaded archive whose digest is verified before Python runs.
+    pub source_archive: String,
+    pub source_sha256: String,
+    /// Fetched, source-root-relative inputs shared by the jobs.
+    pub source_inputs: Vec<String>,
+    pub jobs: Vec<PythonGeneratorJob>,
+    /// Exact unpacked source directory refreshed when the local patch changes.
+    pub audited_source_dir: String,
+    /// Source-tree patches paired positionally with their pinned SHA-256.
+    pub local_patch_files: Vec<String>,
+    pub local_patch_sha256: Vec<String>,
+    /// Concrete compile targets which consume the generated products.
+    pub consumers: Vec<String>,
+    /// Source-root-relative directory of the declaring mmakefile.
+    pub dir_path: PathBuf,
+}
+
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
     pub targets: Vec<TargetDefinition>,
     /// Strictly modelled `%build_with_cmake` declarations.
     pub external_cmake: Vec<ExternalCMakeDecl>,
+    /// Strictly modelled fetched Python output groups.
+    pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_rules: Vec<MetaTargetRule>,
     /// `%build_icons` target identities, including declarations whose inputs
     /// could not be resolved. Keeping the identity makes the gap visible and

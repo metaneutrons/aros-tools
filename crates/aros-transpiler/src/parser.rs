@@ -1,7 +1,7 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
     DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs, MetaTargetRule, ModuleType,
-    ParsedMmakefile, TargetDefinition,
+    ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl, TargetDefinition,
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
@@ -16,6 +16,7 @@ use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, 
 use crate::make_opts::collect_make_opts;
 use aros_common::{read_source, Result};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -2252,6 +2253,236 @@ fn parse_external_cmake_invocation(
         ],
         dir_path: relative_dir.to_path_buf(),
     })
+}
+
+const GLAPI_GENERATOR_CAPABILITY_SHA256: &str =
+    "c42d77ef950bf439e04c36df203309c24a3a931b0c294edce875ae969d8143e5";
+
+/// Admits the one hand-written Python generator family needed by Mesa 20.0.8
+/// libglapi.
+///
+/// The legacy recipes are not treated as a general command language.  Their
+/// complete semantic block is pinned, as are the selected source/flag profile,
+/// central fetch declaration and local patch.  Any drift leaves the ordinary
+/// target visible but does not emit executable Python commands.
+fn parse_glapi_python_outputs(
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+    make_source: &str,
+    targets: &[TargetDefinition],
+    fetches: &[FetchDecl],
+) -> std::result::Result<Option<PythonOutputsDecl>, String> {
+    const GLAPI_DIR: &str = "workbench/libs/mesa/libglapi";
+    const GLAPI_MMAKE: &str = "mesa3d-linklib-glapi";
+    const GLAPI_FETCH: &str = "mesa3d-fetch";
+    const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
+    const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
+    const SOURCE_SHA256: &str = "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c";
+    const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
+    const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
+
+    if relative_dir != Path::new(GLAPI_DIR) {
+        return Ok(None);
+    }
+
+    let Some(profile) = target else {
+        return Err(
+            "Mesa glapi generator capability requires a concrete target profile".to_owned(),
+        );
+    };
+    let profile_key = (
+        profile.cpu.as_deref(),
+        profile.platform.as_deref(),
+        profile.toolchain.as_deref(),
+        profile.cpu32.as_deref(),
+        profile.use_mmu.as_deref(),
+        profile.float_abi.as_deref(),
+    );
+    let x86_64 = match profile_key {
+        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => true,
+        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard"))
+        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => false,
+        _ => {
+            return Err(format!(
+                "Mesa glapi generator capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
+                profile.cpu.as_deref().unwrap_or("<unset>"),
+                profile.platform.as_deref().unwrap_or("<unset>"),
+                profile.toolchain.as_deref().unwrap_or("<unset>"),
+                profile.cpu32.as_deref().unwrap_or("<unset>"),
+                profile.use_mmu.as_deref().unwrap_or("<unset>"),
+                profile.float_abi.as_deref().unwrap_or("<unset>")
+            ));
+        }
+    };
+
+    let matching_targets = targets
+        .iter()
+        .filter(|candidate| candidate.mmake_name == GLAPI_MMAKE)
+        .collect::<Vec<_>>();
+    let [glapi] = matching_targets.as_slice() else {
+        return Err(format!(
+            "requires exactly one {GLAPI_MMAKE} declaration, found {}",
+            matching_targets.len()
+        ));
+    };
+    let expected_sources = [
+        "glapi/glapi_dispatch",
+        "glapi/glapi_entrypoint",
+        "glapi/glapi_getproc",
+        "glapi/glapi_nop",
+        "glapi/glapi",
+        "u_current",
+        "u_execmem",
+    ]
+    .into_iter()
+    .map(|source| format!("{SOURCE_ROOT}/src/mapi/{source}"))
+    .collect::<Vec<_>>();
+    let expected_asm = if x86_64 {
+        vec![format!("{BUILD_ROOT}/src/mapi/glapi/glapi_x86-64")]
+    } else {
+        Vec::new()
+    };
+    let mut expected_defines = vec![
+        "__STDC_CONSTANT_MACROS",
+        "__STDC_FORMAT_MACROS",
+        "__STDC_LIMIT_MACROS",
+        "_GNU_SOURCE",
+        "HAVE_PTHREAD",
+        "HAVE_TIMESPEC_GET",
+        "POSIXC_SLOWSTACK_VAARGS",
+        "USE_GCC_ATOMIC_BUILTINS",
+        "HAVE_ZLIB",
+    ];
+    if x86_64 {
+        expected_defines.extend(["USE_X86_64_ASM", "USE_SSE41"]);
+    }
+    expected_defines.extend(["MAPI_MODE_GLAPI", "MAPI_MODE_UTIL"]);
+    let mut expected_includes = vec![
+        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
+        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
+        "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mapi",
+        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
+        "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mapi/glapi",
+        "${CMAKE_SOURCE_DIR}/workbench/libs/mesa",
+    ];
+    if x86_64 {
+        expected_includes.push("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa");
+    }
+    let target_contract_ok = glapi.target_name == "glapi"
+        && glapi.module_type == ModuleType::LinkLib
+        && glapi.source_files == expected_sources
+        && glapi.cxx_source_files.is_empty()
+        && glapi.objc_source_files.is_empty()
+        && glapi.asm_source_files == expected_asm
+        && glapi.linklib_output_dir.as_deref() == Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8")
+        && !glapi.canonical_linklib_output
+        && glapi
+            .defines
+            .iter()
+            .map(String::as_str)
+            .eq(expected_defines)
+        && glapi
+            .include_dirs
+            .iter()
+            .map(String::as_str)
+            .eq(expected_includes)
+        && glapi.compile_options == ["-std=gnu11", "-fno-strict-aliasing"];
+    if !target_contract_ok {
+        return Err("Mesa glapi source, flag, include or output contract differs from the audited capability".to_owned());
+    }
+
+    let generator_block = normalized_make_capability_block(
+        make_source,
+        "$(top_builddir)/$(CUR_MESADIR)/glapi/glapitemp.h:",
+        "%build_linklib",
+    )
+    .ok_or_else(|| "Mesa glapi generator recipe block is missing".to_owned())?;
+    let generator_digest = format!("{:x}", Sha256::digest(generator_block.as_bytes()));
+    if generator_digest != GLAPI_GENERATOR_CAPABILITY_SHA256 {
+        return Err(format!(
+            "Mesa glapi generator recipe block differs from the audited capability ({generator_digest})"
+        ));
+    }
+
+    let matching_fetches = fetches
+        .iter()
+        .filter(|fetch| fetch.name == GLAPI_FETCH)
+        .collect::<Vec<_>>();
+    let [fetch] = matching_fetches.as_slice() else {
+        return Err(format!(
+            "requires exactly one %fetch mmake={GLAPI_FETCH} declaration, found {}",
+            matching_fetches.len()
+        ));
+    };
+    let origin_words = fetch.origins.split_whitespace().collect::<Vec<_>>();
+    if fetch.archive != "mesa-20.0.8"
+        || fetch.suffixes != "tar.xz tar.gz"
+        || origin_words
+            != [
+                "cache://",
+                "https://archive.mesa3d.org/",
+                "https://archive.mesa3d.org/older-versions/20.x",
+            ]
+        || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
+        || fetch.destination != "${AROS_PORTS_DIR}/mesa"
+        || !fetch.base.is_empty()
+        || fetch.patch_origins != "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+        || fetch.patches != "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
+        || fetch.dir != "workbench/libs/mesa"
+    {
+        return Err(
+            "central Mesa 20.0.8 fetch declaration differs from the audited glapi capability"
+                .to_owned(),
+        );
+    }
+
+    let mut jobs = vec![
+        PythonGeneratorJob {
+            script: "src/mapi/glapi/gen/gl_apitemp.py".to_owned(),
+            output: "src/mapi/glapi/glapitemp.h".to_owned(),
+            arguments: vec!["-f".to_owned(), XML.to_owned()],
+        },
+        PythonGeneratorJob {
+            script: "src/mapi/glapi/gen/gl_table.py".to_owned(),
+            output: "src/mapi/glapi/glapitable.h".to_owned(),
+            arguments: vec!["-f".to_owned(), XML.to_owned()],
+        },
+        PythonGeneratorJob {
+            script: "src/mapi/glapi/gen/gl_procs.py".to_owned(),
+            output: "src/mapi/glapi/glprocs.h".to_owned(),
+            arguments: vec!["-c".to_owned(), "-f".to_owned(), XML.to_owned()],
+        },
+    ];
+    if x86_64 {
+        jobs.push(PythonGeneratorJob {
+            script: "src/mapi/glapi/gen/gl_x86-64_asm.py".to_owned(),
+            output: "src/mapi/glapi/glapi_x86-64.s".to_owned(),
+            arguments: vec!["-f".to_owned(), XML.to_owned()],
+        });
+    }
+
+    Ok(Some(PythonOutputsDecl {
+        owner: "mesa3d-linklib-glapi-generate".to_owned(),
+        source_root: SOURCE_ROOT.to_owned(),
+        build_root: BUILD_ROOT.to_owned(),
+        fetch_target: GLAPI_FETCH.to_owned(),
+        source_archive: SOURCE_ARCHIVE.to_owned(),
+        source_sha256: SOURCE_SHA256.to_owned(),
+        source_inputs: vec!["src/mapi/glapi/gen/gl_and_es_API.xml".to_owned()],
+        jobs,
+        audited_source_dir: SOURCE_ROOT.to_owned(),
+        local_patch_files: vec![
+            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+        ],
+        local_patch_sha256: vec![
+            "1d8fff48ab9007545bac07c34990eda9a1f72f905104451028ddf5bca4406882".to_owned(),
+        ],
+        consumers: vec![GLAPI_MMAKE.to_owned()],
+        dir_path: relative_dir.to_path_buf(),
+    }))
 }
 
 /// Whether a full library intentionally delegates all of its sources to
@@ -4799,6 +5030,16 @@ fn parse_mmakefile_impl(
         }
     }
 
+    let mut python_outputs = Vec::new();
+    match parse_glapi_python_outputs(&rel_dir, target, &content, &targets, &ownership_fetches) {
+        Ok(Some(declaration)) => python_outputs.push(declaration),
+        Ok(None) => {}
+        Err(reason) => skipped_programs.push(format!(
+            "{}: Mesa glapi Python generator skipped: {reason}",
+            rel_dir.display()
+        )),
+    }
+
     // 3. Extract #MM and #MM- meta-target rules
     let mm_content = join_mm_continuations(&content);
     for cap in META_RULE_RE.captures_iter(&mm_content) {
@@ -4833,6 +5074,7 @@ fn parse_mmakefile_impl(
     Ok(ParsedMmakefile {
         targets,
         external_cmake,
+        python_outputs,
         meta_rules,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
@@ -4870,9 +5112,9 @@ mod tests {
         collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
         implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
         join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
-        parse_external_cmake_invocation, render_meta_token, resolve_module_suffix,
-        resolve_module_target_dir, sanitize_ident, select_target_invocations, MakeExprContext,
-        TargetContext, META_RULE_RE,
+        parse_external_cmake_invocation, parse_glapi_python_outputs, render_meta_token,
+        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
@@ -5564,6 +5806,71 @@ mod tests {
         unsupported.toolchain = Some("gnu".to_owned());
         assert!(parse(&invocation, &fetches, &unsupported, &content)
             .contains("does not support target profile"));
+    }
+
+    #[test]
+    fn glapi_python_capability_rejects_recipe_source_fetch_and_profile_drift() {
+        let root = root();
+        let relative_dir = Path::new("workbench/libs/mesa/libglapi");
+        let profile = target_context("x86_64", "pc", "");
+        let central_fetches = super::collect_mmakefile_fetches_with_context(
+            &root.join("workbench/libs/mesa/mmakefile.src"),
+            &root,
+            &profile,
+        )
+        .unwrap();
+        let parsed = super::parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join(relative_dir).join("mmakefile.src"),
+            &root,
+            &dirs(),
+            &profile,
+            &central_fetches,
+        )
+        .unwrap();
+        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
+        let parse = |content: &str,
+                     targets: &[crate::ast::TargetDefinition],
+                     fetches: &[crate::fetch::FetchDecl],
+                     profile: &TargetContext| {
+            parse_glapi_python_outputs(relative_dir, Some(profile), content, targets, fetches)
+                .unwrap_err()
+        };
+
+        let changed_content = content.replace("gl_table.py", "unreviewed_table.py");
+        assert!(parse(
+            &changed_content,
+            &parsed.targets,
+            &central_fetches,
+            &profile
+        )
+        .contains("recipe block differs"));
+
+        let mut changed_targets = parsed.targets.clone();
+        let glapi = changed_targets
+            .iter_mut()
+            .find(|target| target.mmake_name == "mesa3d-linklib-glapi")
+            .unwrap();
+        glapi.source_files.pop();
+        assert!(
+            parse(&content, &changed_targets, &central_fetches, &profile)
+                .contains("source, flag, include or output contract")
+        );
+
+        let mut changed_fetches = central_fetches.clone();
+        changed_fetches[0].patches = "mesa-20.0.8-unreviewed.diff:mesa-20.0.8:-p1".to_owned();
+        assert!(parse(&content, &parsed.targets, &changed_fetches, &profile)
+            .contains("fetch declaration differs"));
+        assert!(parse(&content, &parsed.targets, &[], &profile).contains("exactly one"));
+
+        let mut changed_profile = profile;
+        changed_profile.toolchain = Some("gnu".to_owned());
+        assert!(parse(
+            &content,
+            &parsed.targets,
+            &central_fetches,
+            &changed_profile
+        )
+        .contains("does not support target profile"));
     }
 
     #[test]

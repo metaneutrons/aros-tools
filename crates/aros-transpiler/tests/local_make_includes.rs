@@ -584,6 +584,7 @@ fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
             "workbench/devs/monitors/IntelGMA/i915/mmakefile.src -> workbench/devs/monitors/IntelGMA/i915/i915-20.0.8.sources",
             "workbench/hidds/nouveau/mmakefile.src -> workbench/hidds/nouveau/nouveau-libdrm.sources",
             "workbench/hidds/softpipe/mmakefile.src -> workbench/hidds/softpipe/softpipe-20.0.8.sources",
+            "workbench/libs/mesa/libglapi/mmakefile.src -> workbench/libs/mesa/libglapi/glapi-20.0.8.sources",
             "workbench/libs/zstd/mmakefile.src -> workbench/libs/zstd/zstd-1.5.7.files",
         ]
     );

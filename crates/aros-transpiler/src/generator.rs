@@ -39,6 +39,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .iter()
                 .map(|header| header.owner.clone()),
         )
+        .chain(
+            graph
+                .python_outputs
+                .iter()
+                .map(|declaration| declaration.owner.clone()),
+        )
         .chain(graph.fetches.iter().map(|fetch| fetch.name.clone()))
         .chain(
             graph
@@ -112,29 +118,47 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 f.patches
             )
             .unwrap();
-            if let Some(declaration) = graph
+            let external_audit = graph
                 .external_cmake
                 .iter()
                 .find(|declaration| declaration.fetch_target == f.name)
+                .map(|declaration| {
+                    (
+                        declaration.source_dir.as_str(),
+                        declaration.local_patch_files.as_slice(),
+                        declaration.local_patch_sha256.as_slice(),
+                    )
+                });
+            let python_audit = graph
+                .python_outputs
+                .iter()
+                .find(|declaration| declaration.fetch_target == f.name)
+                .map(|declaration| {
+                    (
+                        declaration.audited_source_dir.as_str(),
+                        declaration.local_patch_files.as_slice(),
+                        declaration.local_patch_sha256.as_slice(),
+                    )
+                });
+            if let Some((source_dir, local_patch_files, local_patch_sha256)) =
+                external_audit.or(python_audit)
             {
-                if declaration.local_patch_files.is_empty() {
+                if local_patch_files.is_empty() {
                     writeln!(out, ")").unwrap();
                     continue;
                 }
-                let patch_files: Vec<_> = declaration
-                    .local_patch_files
+                let patch_files: Vec<_> = local_patch_files
                     .iter()
                     .map(|path| cmake_arg(path))
                     .collect();
-                let patch_sha256: Vec<_> = declaration
-                    .local_patch_sha256
+                let patch_sha256: Vec<_> = local_patch_sha256
                     .iter()
                     .map(|digest| cmake_arg(digest))
                     .collect();
                 write!(
                     out,
                     "\n    SOURCE_DIR {}\n    LOCAL_PATCH_FILES {}\n    LOCAL_PATCH_SHA256 {}",
-                    cmake_arg(&declaration.source_dir),
+                    cmake_arg(source_dir),
                     patch_files.join(" "),
                     patch_sha256.join(" ")
                 )
@@ -231,6 +255,74 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .map(|option| cmake_arg(option))
                 .collect();
             writeln!(out, "    OPTIONS {}", options.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    // Capability-checked Python/stdout generators are declared before their
+    // compile targets.  This registers each build-tree output while source
+    // lanes are still being resolved, so a generated `.s` file is retained on
+    // a clean configure even though it does not exist yet. Consumers are bound
+    // in a second phase after all concrete targets have been created.
+    if !graph.python_outputs.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked fetched Python generators\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.python_outputs.iter().collect();
+        declarations.sort_by(|left, right| left.owner.cmp(&right.owner));
+        for declaration in declarations {
+            writeln!(out, "aros_generate_python_outputs(").unwrap();
+            writeln!(out, "    OWNER {}", declaration.owner).unwrap();
+            writeln!(
+                out,
+                "    SOURCE_ROOT {}",
+                cmake_arg(&declaration.source_root)
+            )
+            .unwrap();
+            writeln!(out, "    BUILD_ROOT {}", cmake_arg(&declaration.build_root)).unwrap();
+            writeln!(
+                out,
+                "    FETCH_TARGET {}",
+                cmake_arg(&declaration.fetch_target)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    SOURCE_ARCHIVE {}",
+                cmake_arg(&declaration.source_archive)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    SOURCE_SHA256 {}",
+                cmake_arg(&declaration.source_sha256)
+            )
+            .unwrap();
+            if !declaration.source_inputs.is_empty() {
+                let inputs = declaration
+                    .source_inputs
+                    .iter()
+                    .map(|input| cmake_arg(input))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    SOURCE_INPUTS {}", inputs.join(" ")).unwrap();
+            }
+            for job in &declaration.jobs {
+                writeln!(out, "    JOB").unwrap();
+                writeln!(out, "        SCRIPT {}", cmake_arg(&job.script)).unwrap();
+                writeln!(out, "        OUTPUT {}", cmake_arg(&job.output)).unwrap();
+                if !job.arguments.is_empty() {
+                    let arguments = job
+                        .arguments
+                        .iter()
+                        .map(|argument| cmake_arg(argument))
+                        .collect::<Vec<_>>();
+                    writeln!(out, "        ARGUMENTS {}", arguments.join(" ")).unwrap();
+                }
+            }
             writeln!(out, ")\n").unwrap();
         }
     }
@@ -481,6 +573,28 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
 
         writeln!(out, ")").unwrap();
         writeln!(out).unwrap();
+    }
+
+    // Python output groups had to register their clean-tree products before
+    // source resolution. Their compile consumers exist now, so attach the
+    // explicit owner edges without relying on include discovery.
+    if !graph.python_outputs.is_empty() {
+        let mut declarations: Vec<_> = graph.python_outputs.iter().collect();
+        declarations.sort_by(|left, right| left.owner.cmp(&right.owner));
+        for declaration in declarations {
+            if declaration.consumers.is_empty() {
+                continue;
+            }
+            let consumers = declaration
+                .consumers
+                .iter()
+                .map(|consumer| cmake_arg(consumer))
+                .collect::<Vec<_>>();
+            writeln!(out, "aros_bind_python_output_consumers(").unwrap();
+            writeln!(out, "    OWNER {}", cmake_arg(&declaration.owner)).unwrap();
+            writeln!(out, "    CONSUMERS {}", consumers.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
     }
 
     // A declaration can link a provider whose reproducible lexical sort key

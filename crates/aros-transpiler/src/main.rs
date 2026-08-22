@@ -183,6 +183,9 @@ fn main() -> Result<()> {
         for declaration in parsed.external_cmake {
             graph.add_external_cmake(declaration);
         }
+        for declaration in parsed.python_outputs {
+            graph.add_python_outputs(declaration);
+        }
         for rule in parsed.meta_rules {
             graph.add_meta_rule(rule);
         }
@@ -410,9 +413,10 @@ fn main() -> Result<()> {
         graph.catalogs.len()
     );
     println!(
-        "🔨 Assembling Dependency Graph with {} concrete targets, {} external CMake targets, {} icon targets, {} catalog targets and {} meta-targets...",
+        "🔨 Assembling Dependency Graph with {} concrete targets, {} external CMake targets, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets...",
         graph.targets.len(),
         graph.external_cmake.len(),
+        graph.python_outputs.len(),
         graph.icon_targets.len(),
         graph.catalogs.len(),
         graph.meta_targets.len()
@@ -433,9 +437,10 @@ fn main() -> Result<()> {
     fs::write(&args.output, cmake_content)?;
 
     println!(
-        "✅ Successfully generated {} concrete targets, {} external CMake targets, {} icon targets, {} catalog targets and {} meta-targets in {}!",
+        "✅ Successfully generated {} concrete targets, {} external CMake targets, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets in {}!",
         graph.targets.len(),
         graph.external_cmake.len(),
+        graph.python_outputs.len(),
         graph.icon_targets.len(),
         graph.catalogs.len(),
         graph.meta_targets.len(),

@@ -1,6 +1,7 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{
-    DefineHeaderDecl, ExternalCMakeDecl, MetaTargetRule, ModuleType, TargetDefinition,
+    DefineHeaderDecl, ExternalCMakeDecl, MetaTargetRule, ModuleType, PythonOutputsDecl,
+    TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
@@ -18,6 +19,8 @@ pub struct DependencyGraph {
     /// Strictly capability-checked third-party CMake builds. Each contributes
     /// both a real mmake workflow endpoint and a distinct link interface.
     pub external_cmake: Vec<ExternalCMakeDecl>,
+    /// Strictly capability-checked fetched Python output groups.
+    pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_targets: HashMap<String, HashSet<String>>,
     /// Every unique `%build_icons` mmake id. This is separate from `targets`:
     /// icons are generated runtime resources, not compiled modules.
@@ -219,6 +222,16 @@ impl DependencyGraph {
             .any(|existing| existing.mmake_name == declaration.mmake_name)
         {
             self.external_cmake.push(declaration);
+        }
+    }
+
+    pub fn add_python_outputs(&mut self, declaration: PythonOutputsDecl) {
+        if !self
+            .python_outputs
+            .iter()
+            .any(|existing| existing.owner == declaration.owner)
+        {
+            self.python_outputs.push(declaration);
         }
     }
 
