@@ -271,7 +271,7 @@ const LLVM_PROVISIONING_MMAKE_SHA256: &str =
 const LLVM_PROVISIONING_CONFIG_SHA256: &str =
     "00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0";
 const CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256: &str =
-    "0fc47e199240d50a53d0da841afb4918519ba5cfcabb654a16dc5a5056985ce6";
+    "5c2d0de107d41bd90635868517f4577df229d0afda3208c572df9b37d50025f9";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ToolchainProvisioningContext {
@@ -1933,8 +1933,8 @@ mod tests {
             &config,
             &make_config,
             &cmake_lists.replace(
-                "$ENV{HOME}/.aros/toolchain/bin/clang",
-                "$ENV{HOME}/bin/clang",
+                "set(CMAKE_SYSTEM_NAME Generic)",
+                "set(CMAKE_SYSTEM_NAME Darwin)",
             ),
         );
 
