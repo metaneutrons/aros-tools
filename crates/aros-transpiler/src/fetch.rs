@@ -34,6 +34,8 @@ pub struct FetchDecl {
     pub location: String,
     /// `destination=`: where it is unpacked.
     pub destination: String,
+    /// `base=`: working directory used while unpacking and applying patches.
+    pub base: String,
     /// `patches_origins=`: directory holding the patches.
     pub patch_origins: String,
     /// `patches_specs=`: `<patch>[:<subdir>[:<options>]]` entries.
@@ -291,8 +293,7 @@ fn collect_fetches_with_lookup(
 
     for body in crate::includes::directive_bodies_pub(content, "%fetch") {
         let get = |key: &str| -> Option<String> {
-            crate::includes::arg_value_quoted(&body, key)
-                .or_else(|| crate::includes::arg_value(&body, key))
+            last_arg_value(&body, key)
                 .map(|v| expand(&v, lookup, &dir, 8))
                 // Values reach here with whatever quoting the mmakefile used;
                 // the generator adds its own, so strip any leftovers.
@@ -311,6 +312,7 @@ fn collect_fetches_with_lookup(
             origins: get("archive_origins").unwrap_or_else(|| ".".to_owned()),
             location: get("location").unwrap_or_default(),
             destination: get("destination").unwrap_or_else(|| ".".to_owned()),
+            base: get("base").unwrap_or_default(),
             patch_origins: get("patches_origins")
                 .unwrap_or_else(|| format!("${{CMAKE_SOURCE_DIR}}/{dir}")),
             patches: get("patches_specs")
@@ -341,6 +343,7 @@ fn collect_fetches_with_lookup(
             &decl.origins,
             &decl.location,
             &decl.destination,
+            &decl.base,
             &decl.patch_origins,
             &decl.patches,
         ]
@@ -355,6 +358,46 @@ fn collect_fetches_with_lookup(
     }
 
     (out, skipped)
+}
+
+/// Reads the final `key=value` argument from a directive.
+///
+/// GNU Make macros receive the last assignment when an invocation repeats an
+/// argument.  A few legacy declarations intentionally rely on that behaviour
+/// (zlib supplies a broad destination first, then the concrete unpack path),
+/// so using the first whitespace token would silently change the recipe.
+fn last_arg_value(body: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=");
+    let mut from = 0usize;
+    let mut value = None;
+
+    while let Some(relative_hit) = body[from..].find(&needle) {
+        let hit = from + relative_hit;
+        let boundary = hit == 0
+            || body[..hit]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let start = hit + needle.len();
+        if boundary && start < body.len() {
+            let rest = &body[start..];
+            if let Some(quoted) = rest.strip_prefix('"') {
+                if let Some(end) = quoted.find('"') {
+                    value = Some(quoted[..end].to_owned());
+                    from = start + end + 2;
+                    continue;
+                }
+            } else {
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                if end > 0 {
+                    value = Some(rest[..end].to_owned());
+                }
+            }
+        }
+        from = hit + 1;
+    }
+
+    value
 }
 
 #[cfg(test)]
@@ -395,6 +438,7 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
         assert_eq!(d.name, "acpica-fetch");
         assert_eq!(d.archive, "acpica-unix-20260408");
         assert_eq!(d.destination, "${AROS_PORTS_DIR}/acpica");
+        assert!(d.base.is_empty());
         assert_eq!(d.location, "${AROS_PORTS_SOURCE_DIR}");
         assert_eq!(d.dir, "arch/all-native/acpica");
     }
@@ -518,6 +562,15 @@ endif
         let src = "%fetch mmake=z archive=pkg-1 destination=$(PORTSDIR)/z suffixes=\"tar.gz\"\n";
         let (decls, _) = collect_fetches(src, &PathBuf::from("d"));
         assert_eq!(decls[0].suffixes, "tar.gz", "no stray quotes");
+    }
+
+    #[test]
+    fn the_last_duplicate_argument_wins_and_base_is_preserved() {
+        let src = "%fetch mmake=z archive=zlib destination=$(PORTSDIR)/zlib \\\n            base=$(PORTSDIR)/zlib destination=$(PORTSDIR)/zlib/zlib\n";
+        let (decls, skipped) = collect_fetches(src, &PathBuf::from("workbench/libs/z"));
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(decls[0].base, "${AROS_PORTS_DIR}/zlib");
+        assert_eq!(decls[0].destination, "${AROS_PORTS_DIR}/zlib/zlib");
     }
 
     #[test]

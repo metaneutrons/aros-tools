@@ -22,6 +22,7 @@
 //! than guessed at, so an unresolved path shows up as a missing include instead
 //! of a wrong one.
 
+use crate::parser::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -374,6 +375,120 @@ pub fn collect_includes(content: &str, rel_dir: &Path) -> IncludeSet {
 
     collect_get_archincludes(content, &mut set);
     set
+}
+
+/// Collects `USER_INCLUDES` as it stands at one build declaration.
+///
+/// This is the include-path counterpart of the parser's positional source
+/// scope. It prevents a later reassignment in a multi-target mmakefile from
+/// changing an earlier target, and it can see a proven-safe local fragment
+/// which the declaration-aware parser selected for a fetched port.
+#[must_use]
+pub(crate) fn collect_includes_at(
+    content: &str,
+    scope: &VarScope,
+    line: usize,
+    rel_dir: &Path,
+) -> IncludeSet {
+    let mut set = IncludeSet::default();
+    if scope.conditionally_assigned_before("USER_INCLUDES", line) {
+        set.unresolved.push("$(USER_INCLUDES)".to_owned());
+    } else if let Some(raw) = scope.raw_at("USER_INCLUDES", line) {
+        let mut tokens = Vec::new();
+        let mut guard = vec!["USER_INCLUDES".to_owned()];
+        expand_scoped_tokens(&raw, scope, line, 8, &mut guard, &mut tokens);
+        tokens_to_dirs(&tokens, rel_dir, &mut set);
+    }
+    collect_get_archincludes(content, &mut set);
+    set
+}
+
+fn expand_scoped_tokens(
+    raw: &str,
+    scope: &VarScope,
+    line: usize,
+    depth: usize,
+    guard: &mut Vec<String>,
+    output: &mut Vec<String>,
+) {
+    if depth == 0 {
+        output.extend(raw.split_whitespace().map(str::to_owned));
+        return;
+    }
+    for token in raw.split_whitespace() {
+        if let Some(name) = token
+            .strip_prefix("$(")
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            if map_known_var(name).is_some() || arch_include_var(name).is_some() {
+                output.push(token.to_owned());
+                continue;
+            }
+            if !guard.iter().any(|item| item == name)
+                && !scope.conditionally_assigned_before(name, line)
+            {
+                if let Some(value) = scope.raw_at(name, line) {
+                    guard.push(name.to_owned());
+                    expand_scoped_tokens(&value, scope, line, depth - 1, guard, output);
+                    guard.pop();
+                    continue;
+                }
+            }
+        }
+        output.push(substitute_inline_scoped(token, scope, line, depth, guard));
+    }
+}
+
+fn substitute_inline_scoped(
+    token: &str,
+    scope: &VarScope,
+    line: usize,
+    depth: usize,
+    guard: &mut Vec<String>,
+) -> String {
+    if depth == 0 || !token.contains("$(") {
+        return token.to_owned();
+    }
+    let mut output = String::with_capacity(token.len() + 32);
+    let mut rest = token;
+    while let Some(start) = rest.find("$(") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find(')') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let name = &after[..end];
+        let verbatim = &rest[start..=start + 2 + end];
+        if map_known_var(name).is_some()
+            || arch_include_var(name).is_some()
+            || guard.iter().any(|item| item == name)
+            || scope.conditionally_assigned_before(name, line)
+        {
+            output.push_str(verbatim);
+        } else if let Some(value) = scope.raw_at(name, line) {
+            // An inline replacement must be one path token. A multi-token
+            // value cannot be embedded safely inside another token.
+            if value.split_whitespace().count() == 1 {
+                guard.push(name.to_owned());
+                output.push_str(&substitute_inline_scoped(
+                    &value,
+                    scope,
+                    line,
+                    depth - 1,
+                    guard,
+                ));
+                guard.pop();
+            } else {
+                output.push_str(verbatim);
+            }
+        } else {
+            output.push_str(verbatim);
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }
 
 /// Records `%get_archincludes modname=<x>` requests.

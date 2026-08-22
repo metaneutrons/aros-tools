@@ -178,6 +178,7 @@ fn main() -> Result<()> {
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
         graph.add_adhoc_header_rules(parsed.adhoc_header_rules);
+        graph.add_header_transforms(parsed.header_transforms);
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
         partial_source_lists.extend(parsed.partial_source_lists);
@@ -216,7 +217,8 @@ fn main() -> Result<()> {
     // A concrete target must order its own fetched sources. Depending on a
     // sibling which happens to use the same archive does not constrain a
     // direct Ninja invocation of this target.
-    let unowned_port_sources = graph.resolve_port_source_fetches();
+    let mut unowned_port_sources = graph.resolve_port_source_fetches();
+    unowned_port_sources.extend(graph.resolve_header_transforms());
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
@@ -301,7 +303,7 @@ fn main() -> Result<()> {
         &args.output,
         "unresolved-uselibs.txt",
         unresolved_libs,
-        "uselibs name(s) matched no link library",
+        "uselibs/link-option name(s) matched no public link library",
     );
     // A package missing a member still builds. The gap only shows up as a
     // system that does not boot, so it has to be visible here.

@@ -55,6 +55,37 @@ pub struct AdhocHeaderRule {
     pub prereqs: String,
 }
 
+/// A hand-written SDK-header rule whose recipe is a safe, literal one-line
+/// substitution.
+///
+/// This is intentionally narrower than arbitrary Make recipes.  The parser
+/// accepts only `$(SED) -e 's/^literal/literal/' $< > $@`, records the exact
+/// input/output and lets CMake own the real build-time transform.  Dependencies
+/// and consumers are joined later from the complete target/fetch graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeaderTransformDecl {
+    /// Make target which owns the generated header.
+    pub name: String,
+    /// Declaring mmakefile, relative to the source root.
+    pub file: String,
+    /// 1-based line number of the output rule.
+    pub line: usize,
+    /// Concrete CMake input path.
+    pub input: String,
+    /// Concrete CMake output path below the build tree.
+    pub output: String,
+    /// Exact line prefix stripped from the anchored sed expression.
+    pub match_text: String,
+    /// Literal replacement text.
+    pub replacement: String,
+    /// Direct fetch targets owning the input, filled by the graph.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    /// Concrete compile targets whose port source tree contains the input.
+    #[serde(default)]
+    pub consumers: Vec<String>,
+}
+
 /// What one mmakefile yielded for header staging.
 #[derive(Debug, Default)]
 pub struct CopyIncludesScan {
@@ -64,6 +95,8 @@ pub struct CopyIncludesScan {
     pub skipped: Vec<String>,
     /// Hand-written rules producing a header.
     pub adhoc: Vec<AdhocHeaderRule>,
+    /// Safe literal transforms promoted from hand-written header recipes.
+    pub transforms: Vec<HeaderTransformDecl>,
     /// Hand-written rules under `$(GENDIR)` producing something other than a
     /// header (objects, ELF images, linker scripts). Reported only, since a
     /// missing one of these surfaces as a link or packaging failure rather
@@ -321,9 +354,11 @@ fn collect_copy_includes_with_lookup(
     let mut decls = Vec::new();
     let mut skipped = Vec::new();
     let mut adhoc = Vec::new();
+    let mut transforms = Vec::new();
     let mut generated_files = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
+    let output_owners = collect_header_output_owners(&lines);
     let mut i = 0usize;
     // Tracks a variable assignment continued over several lines.
     let mut pending_var: Option<String> = None;
@@ -380,7 +415,13 @@ fn collect_copy_includes_with_lookup(
         //   $(AROS_INCLUDES)/hidd/pci.h: include/pci_hidd.h
         match parse_adhoc_rule(payload, &mmakefile, line_no) {
             Some(ParsedRule::Header(rule)) => {
-                adhoc.push(rule);
+                if let Some(transform) =
+                    parse_header_transform(&rule, &lines, i, &base, &vars, external, &output_owners)
+                {
+                    transforms.push(transform);
+                } else {
+                    adhoc.push(rule);
+                }
                 i += 1;
                 continue;
             }
@@ -417,8 +458,221 @@ fn collect_copy_includes_with_lookup(
         decls,
         skipped,
         adhoc,
+        transforms,
         generated_files,
     }
+}
+
+/// Maps a concrete generated-output token to the simple Make target which
+/// owns it, for example `workbench-libs-z-geninc : $(AROS_INCLUDES)/zconf.h`.
+fn collect_header_output_owners(lines: &[&str]) -> HashMap<String, String> {
+    let mut owners = HashMap::new();
+    for raw in lines {
+        if raw.starts_with('\t') {
+            continue;
+        }
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.contains('=') {
+            continue;
+        }
+        let Some((target, prereqs)) = line.split_once(':') else {
+            continue;
+        };
+        let target = target.trim();
+        if target.is_empty()
+            || target.contains(char::is_whitespace)
+            || target.contains(['$', '/', '%'])
+        {
+            continue;
+        }
+        let mut words = prereqs.split_whitespace();
+        let Some(output) = words.next() else { continue };
+        if words.next().is_some()
+            || !["$(AROS_INCLUDES)/", "$(GENINCDIR)/", "$(GENDIR)/"]
+                .iter()
+                .any(|root| output.starts_with(root))
+        {
+            continue;
+        }
+        owners
+            .entry(output.to_owned())
+            .or_insert_with(|| target.to_owned());
+    }
+    owners
+}
+
+fn resolve_transform_path(
+    raw: &str,
+    base: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+    output: bool,
+) -> Option<String> {
+    let mut rendered = substitute(raw, vars, external, 8);
+    rendered = rendered
+        .replace("$(AROS_INCLUDES)", "${AROS_SDK_INCLUDE_DIR}")
+        .replace("$(GENINCDIR)", "${AROS_GENINC_DIR}")
+        .replace("$(GENDIR)", "${CMAKE_BINARY_DIR}/gen")
+        .replace("$(SRCDIR)", "${CMAKE_SOURCE_DIR}")
+        .replace("$(PORTSDIR)", "${AROS_PORTS_DIR}");
+    if rendered.contains("$(") || rendered.contains(';') || rendered.contains('\n') {
+        return None;
+    }
+    if output {
+        if !rendered.starts_with("${AROS_SDK_INCLUDE_DIR}/")
+            && !rendered.starts_with("${AROS_GENINC_DIR}/")
+            && !rendered.starts_with("${CMAKE_BINARY_DIR}/gen/")
+        {
+            return None;
+        }
+    } else if !rendered.starts_with("${") && !rendered.starts_with('/') {
+        rendered = if base.is_empty() {
+            format!("${{CMAKE_SOURCE_DIR}}/{rendered}")
+        } else {
+            format!("${{CMAKE_SOURCE_DIR}}/{base}/{rendered}")
+        };
+    }
+    Some(rendered)
+}
+
+/// Parses a non-regex sed field up to `delimiter`, unescaping only the
+/// delimiter and a literal backslash. Other backslash escapes would change
+/// sed semantics and therefore make the recipe ineligible.
+fn parse_literal_sed_field(chars: &[char], at: &mut usize, delimiter: char) -> Option<String> {
+    let mut value = String::new();
+    while *at < chars.len() {
+        let ch = chars[*at];
+        *at += 1;
+        if ch == delimiter {
+            return Some(value);
+        }
+        if ch == '\\' {
+            let escaped = *chars.get(*at)?;
+            if escaped != delimiter && escaped != '\\' {
+                return None;
+            }
+            value.push(escaped);
+            *at += 1;
+        } else {
+            value.push(ch);
+        }
+    }
+    None
+}
+
+fn safe_mkdir_guard(command: &str) -> bool {
+    let Some(rest) = command.strip_prefix("@$(IF) $(TEST) ! -d ") else {
+        return false;
+    };
+    let Some((checked, rest)) = rest.split_once(" ; then $(MKDIR) ") else {
+        return false;
+    };
+    let Some((created, tail)) = rest.split_once(" ; else $(NOP) ; fi") else {
+        return false;
+    };
+    !checked.is_empty()
+        && checked == created
+        && tail.is_empty()
+        && checked.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '-' | '.' | '/' | '$' | '(' | ')' | '{' | '}'
+                )
+        })
+}
+
+fn literal_sed_substitution(commands: &[String]) -> Option<(String, String)> {
+    let recipe = match commands {
+        [sed] => sed.as_str(),
+        [guard, sed] if safe_mkdir_guard(guard) => sed.as_str(),
+        _ => return None,
+    };
+    let body = recipe.strip_prefix("@$(SED) -e 's")?;
+    if body.contains('\n') {
+        return None;
+    }
+    let chars: Vec<char> = body.chars().collect();
+    let delimiter = *chars.first()?;
+    if delimiter.is_ascii_alphanumeric() || delimiter.is_whitespace() || delimiter == '\\' {
+        return None;
+    }
+    let mut at = 1usize;
+    let pattern = parse_literal_sed_field(&chars, &mut at, delimiter)?;
+    let replacement = parse_literal_sed_field(&chars, &mut at, delimiter)?;
+    // Only an anchored, literal basic-regex pattern and no sed flags.  BRE
+    // parentheses are literal; all actual metacharacters are rejected.
+    let match_text = pattern.strip_prefix('^')?;
+    if match_text.is_empty()
+        || match_text
+            .chars()
+            .any(|ch| matches!(ch, '.' | '*' | '[' | ']' | '$' | '\\'))
+    {
+        return None;
+    }
+    if replacement.contains(['&', '\\']) {
+        // Both have special meaning in a sed replacement and therefore are
+        // not equivalent to CMake's literal replacement operation.
+        return None;
+    }
+    let tail: String = chars[at..].iter().collect();
+    if tail != "' $< > $@" {
+        return None;
+    }
+    Some((match_text.to_owned(), replacement))
+}
+
+fn parse_header_transform(
+    rule: &AdhocHeaderRule,
+    lines: &[&str],
+    rule_index: usize,
+    base: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+    output_owners: &HashMap<String, String>,
+) -> Option<HeaderTransformDecl> {
+    let raw_output = format!("{}/{}", rule.root.trim_end_matches('/'), rule.dest);
+    let owner = output_owners.get(&raw_output)?.clone();
+    let mut prereqs = rule.prereqs.split_whitespace();
+    let raw_input = prereqs.next()?;
+    if prereqs.next().is_some() || raw_input.contains(['%', '*', '?']) {
+        return None;
+    }
+
+    let mut commands = Vec::new();
+    let mut command = String::new();
+    for line in lines.iter().skip(rule_index + 1) {
+        if !line.starts_with('\t') {
+            break;
+        }
+        let trimmed = line.trim();
+        let continued = trimmed.ends_with('\\');
+        if !command.is_empty() {
+            command.push(' ');
+        }
+        command.push_str(trimmed.trim_end_matches('\\').trim());
+        if !continued {
+            commands.push(std::mem::take(&mut command));
+        }
+    }
+    if !command.is_empty() {
+        return None;
+    }
+    let (match_text, replacement) = literal_sed_substitution(&commands)?;
+    let input = resolve_transform_path(raw_input, base, vars, external, false)?;
+    let output = resolve_transform_path(&raw_output, base, vars, external, true)?;
+
+    Some(HeaderTransformDecl {
+        name: owner,
+        file: rule.file.clone(),
+        line: rule.line,
+        input,
+        output,
+        match_text,
+        replacement,
+        dependencies: Vec::new(),
+        consumers: Vec::new(),
+    })
 }
 
 /// A hand-written rule, classified by what it produces.
@@ -741,6 +995,69 @@ $(GENINCDIR)/hidd/pci.h: include/pci_hidd.h
         assert_eq!(adhoc[0].dest, "hidd/pci.h");
         assert_eq!(adhoc[0].prereqs, "include/pci_hidd.h");
         assert_eq!(adhoc[1].dest, "hidd/pci.h");
+    }
+
+    #[test]
+    fn promotes_a_literal_anchored_sed_header_to_a_real_transform() {
+        let src = r"
+ARCHSRCDIR := $(PORTSDIR)/zlib/zlib
+z-geninc : $(AROS_INCLUDES)/zconf.h
+
+$(AROS_INCLUDES)/zconf.h : $(ARCHSRCDIR)/zconf.h.chr
+	@$(IF) $(TEST) ! -d $(AROS_LIB)/pkgconfig ; then $(MKDIR) $(AROS_LIB)/pkgconfig ; else $(NOP) ; fi
+	@$(SED) -e 's/^#if !defined(CHROMIUM_ZLIB_NO_CHROMECONF)/#if defined(ZLIB_USE_CHROMECONF)/' \
+	    $< > $@
+";
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/libs/z"));
+        assert!(adhoc.is_empty(), "promoted rule stayed adhoc: {adhoc:?}");
+        assert_eq!(transforms.len(), 1, "transforms: {transforms:?}");
+        let transform = &transforms[0];
+        assert_eq!(transform.name, "z-geninc");
+        assert_eq!(transform.input, "${AROS_PORTS_DIR}/zlib/zlib/zconf.h.chr");
+        assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/zconf.h");
+        assert_eq!(
+            transform.match_text,
+            "#if !defined(CHROMIUM_ZLIB_NO_CHROMECONF)"
+        );
+        assert_eq!(transform.replacement, "#if defined(ZLIB_USE_CHROMECONF)");
+    }
+
+    #[test]
+    fn arbitrary_sed_regex_remains_reported_as_adhoc() {
+        let src = r"
+x-geninc : $(AROS_INCLUDES)/x.h
+$(AROS_INCLUDES)/x.h : input.h
+	@$(SED) -e 's/^version=.*/version=1/' $< > $@
+";
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/libs/x"));
+        assert!(transforms.is_empty());
+        assert_eq!(adhoc.len(), 1);
+        assert_eq!(adhoc[0].dest, "x.h");
+    }
+
+    #[test]
+    fn sed_transform_rejects_extra_commands_suffixes_and_special_replacements() {
+        let recipes = [
+            "\t@$(NOP)\n\t@$(SED) -e 's/^literal/changed/' $< > $@",
+            "\t@$(SED) -e 's/^literal/changed/' $< > $@ ; $(TOUCH) marker",
+            "\t@$(SED) -e 's/^literal/prefix-&/' $< > $@",
+            "\t@$(SED) -e 's/^literal/changed/' $< > $@\n\t@$(NOP)",
+        ];
+        for recipe in recipes {
+            let src = format!(
+                "x-geninc : $(AROS_INCLUDES)/x.h\n\
+                 $(AROS_INCLUDES)/x.h : input.h\n{recipe}\n"
+            );
+            let CopyIncludesScan {
+                transforms, adhoc, ..
+            } = collect_copy_includes(&src, &PathBuf::from("workbench/libs/x"));
+            assert!(transforms.is_empty(), "unsafe recipe promoted: {recipe}");
+            assert_eq!(adhoc.len(), 1, "unsafe recipe disappeared: {recipe}");
+        }
     }
 
     #[test]

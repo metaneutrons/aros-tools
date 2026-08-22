@@ -1,5 +1,5 @@
 use crate::arch_sources::ArchSourceDecl;
-use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
+use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
 use crate::flags::FlagSet;
 use crate::includes::ArchIncludeDecl;
@@ -31,8 +31,32 @@ pub enum ModuleType {
     Custom,
 }
 
+/// Exact client-link metadata carried by a full genmodule declaration.
+///
+/// `linklibfiles=` are compiled specifically for both normal and relative
+/// client archives. `linklibobjs=` names implementation objects reused by
+/// those archives; the parser maps them back to declaration-owned sources so
+/// CMake can reproduce them without depending on opaque legacy object paths.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GenmoduleLinklibs {
+    /// Whether this declaration must materialise its client archives. Explicit
+    /// `linklibname=` sets this immediately; the dependency graph may also set
+    /// it for a module required by another config's `rellib` directive.
+    pub enabled: bool,
+    pub has_relative: bool,
+    pub relative_libraries: Vec<String>,
+    pub source_files: Vec<String>,
+    pub object_sources: Vec<String>,
+    /// False if any explicit archive input could not be represented exactly.
+    pub inputs_exact: bool,
+}
+
 /// A parsed build target definition from an mmakefile.src.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// These booleans are independent facts from the legacy declarations and build
+// graph. Collapsing them into a mode enum would admit invalid combinations or
+// hide the distinction needed while canonical link-library ownership resolves.
+#[allow(clippy::struct_excessive_bools)]
 pub struct TargetDefinition {
     pub mmake_name: String,
     pub target_name: String,
@@ -82,6 +106,28 @@ pub struct TargetDefinition {
     /// Bluetooth classes use the type-default suffix `class`.
     #[serde(default)]
     pub mod_suffix: Option<String>,
+    /// Public client-link library name requested with `linklibname=`.
+    ///
+    /// A full library module always exposes its module name as a client-link
+    /// library too. This optional alias is kept separately from `target_name`
+    /// so `uselibs` can resolve both spellings to the same generated archive.
+    #[serde(default)]
+    pub linklib_name: Option<String>,
+    /// Full-module normal/relative client archive composition.
+    #[serde(default)]
+    pub genmodule_linklibs: Option<GenmoduleLinklibs>,
+    /// Whether an ordinary `%build_linklib` is proven to own the canonical
+    /// target-SDK archive name. This is intentionally false for host, 32-bit,
+    /// custom-libdir and in-tree declarations; the CMake layer may migrate
+    /// output naming only when this proof is present.
+    #[serde(default)]
+    pub canonical_linklib_output: bool,
+    /// The declaration uses the default target compiler, SDK libdir and native
+    /// word size, so a proven `-l<name>` consumer may safely promote it to the
+    /// canonical archive path. This remains separate from the actual decision
+    /// to avoid moving unrelated in-tree or host archives.
+    #[serde(default)]
+    pub canonical_linklib_eligible: bool,
     pub compiler_flags: Vec<String>,
     /// Include directories from the mmakefile's `USER_INCLUDES`, already
     /// rendered as CMake paths.
@@ -98,6 +144,12 @@ pub struct TargetDefinition {
     pub undefines: Vec<String>,
     /// Allowlisted codegen options.
     pub compile_options: Vec<String>,
+    /// Direct-linker library options from the declaration-local
+    /// `USER_LDFLAGS` snapshot. The dependency graph keeps an option only when
+    /// it can bind the library name to a public archive producer; `-lpthread`,
+    /// for example, is retained together with its `linklibs-pthread` edge.
+    #[serde(default)]
+    pub link_options: Vec<String>,
     /// Architecture-specific source overrides, as `(arch_tag, dir, files)`.
     /// A file listed here replaces the same-named generic source.
     pub arch_sources: Vec<(String, String, Vec<String>)>,
@@ -149,6 +201,8 @@ pub struct ParsedMmakefile {
     /// Hand-written Make rules that stage headers; these need a static CMake
     /// counterpart and are reported so new ones do not go unnoticed.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
+    /// Safe, literal hand-written recipes promoted to real build outputs.
+    pub header_transforms: Vec<HeaderTransformDecl>,
     /// Hand-written `$(GENDIR)` rules producing something other than a header,
     /// for reporting.
     pub generated_file_rules: Vec<String>,

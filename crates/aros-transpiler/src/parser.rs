@@ -1,12 +1,15 @@
 use crate::arch_sources::collect_arch_sources;
-use crate::ast::{MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition};
+use crate::ast::{
+    GenmoduleLinklibs, MetaTargetRule, ModuleType, ParsedMmakefile, TargetDefinition,
+};
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::collect_fetches_with_scope;
-use crate::flags::collect_flags;
+use crate::flags::{collect_flags, collect_flags_at};
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
-use crate::includes::{collect_arch_decls, collect_includes};
+use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
 use crate::local_make_includes::{
     inline_local_make_includes, LocalMakeFragmentPolicy, LocalMakeIncludeLimits,
+    LocalMakeIncludeScan,
 };
 use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
 use crate::make_opts::collect_make_opts;
@@ -470,6 +473,115 @@ fn evaluate_macro_sources_with_files(
         }
     }
     Ok(sources)
+}
+
+fn evaluate_linklib_list(
+    args: &str,
+    key: &str,
+    legacy_vars: &HashMap<String, Vec<String>>,
+    context: &MakeExprContext<'_>,
+) -> std::result::Result<Vec<String>, String> {
+    let Some(raw) = macro_arg(args, key) else {
+        return Ok(Vec::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    if raw.contains('"') {
+        return Err(format!("{key}={raw} contains an unsupported quote"));
+    }
+    let synthetic = format!("files=\"{raw}\"");
+    let evaluated = evaluate_macro_sources(&synthetic, legacy_vars, context)
+        .map_err(|error| format!("{key}={raw} cannot be evaluated: {error}"))?;
+    if evaluated.c.is_empty() {
+        return Err(format!("{key}={raw} expanded to no inputs"));
+    }
+    Ok(evaluated.c)
+}
+
+fn source_basename(source: &str) -> Option<String> {
+    Path::new(source)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+}
+
+/// Maps the legacy `linklibobjs=` paths back to declaration-owned sources.
+///
+/// Generated objects below a `linklib/` component are already represented by
+/// `linklibfiles=` or the genmodule manifest. Every other object must have one
+/// unambiguous implementation source with the same basename; otherwise CMake
+/// cannot reproduce the archive composition safely.
+fn map_linklib_object_sources(
+    objects: &[String],
+    implementation_sources: &[String],
+) -> std::result::Result<Vec<String>, String> {
+    let mut mapped = Vec::new();
+    for object in objects {
+        let normalized = object.replace('\\', "/");
+        if normalized
+            .split('/')
+            .any(|component| component == "linklib")
+        {
+            continue;
+        }
+        // MetaMake's object suffix is case-sensitive; `.O` is not an object
+        // reference here even on a case-insensitive host filesystem.
+        if Path::new(&normalized).extension() != Some(std::ffi::OsStr::new("o")) {
+            return Err(format!("linklibobjs contains non-object `{object}`"));
+        }
+        let Some(stem) = source_basename(&normalized) else {
+            return Err(format!("cannot determine object basename for `{object}`"));
+        };
+        let candidates: Vec<&String> = implementation_sources
+            .iter()
+            .filter(|source| source_basename(source).as_deref() == Some(stem.as_str()))
+            .collect();
+        if candidates.len() != 1 {
+            return Err(format!(
+                "linklib object `{object}` maps to {} implementation sources named `{stem}`",
+                candidates.len()
+            ));
+        }
+        if !mapped.contains(candidates[0]) {
+            mapped.push(candidates[0].clone());
+        }
+    }
+    Ok(mapped)
+}
+
+fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<(bool, Vec<String>)> {
+    let content = fs::read_to_string(directory.join(format!("{module}.conf"))).ok()?;
+    let mut in_config = false;
+    let mut has_relative = false;
+    let mut relative_libraries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "##begin config" => {
+                in_config = true;
+                continue;
+            }
+            "##end config" => {
+                in_config = false;
+                continue;
+            }
+            _ => {}
+        }
+        if !in_config || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(options) = trimmed.strip_prefix("options ") {
+            has_relative = options
+                .split([',', ' ', '\t'])
+                .any(|option| option == "rellinklib");
+        } else if let Some(library) = trimmed.strip_prefix("rellib ") {
+            let library = library.split_whitespace().next().unwrap_or_default();
+            if !library.is_empty() && !relative_libraries.iter().any(|value| value == library) {
+                relative_libraries.push(library.to_owned());
+            }
+        }
+    }
+    Some((has_relative, relative_libraries))
 }
 
 /// Resolves a single output name through the bounded Make evaluator.
@@ -2060,6 +2172,137 @@ fn collector_forward_local_prelude(content: &str) -> String {
     prelude
 }
 
+/// Whether a broad-but-syntactically-safe local variable fragment may be used
+/// for this mmakefile's concrete declarations.
+///
+/// This is deliberately stricter than enabling `SafeVariableScopes` for every
+/// file. The candidate is accepted only for a concrete target profile, only
+/// when every build declaration resolves to sources owned by a `%fetch` from
+/// the same mmakefile, and only when it makes at least one previously
+/// unresolved declaration concrete. Consequently a safe-looking configuration
+/// fragment cannot silently affect an unrelated in-tree target or imply an
+/// unmodelled source owner.
+fn owns_fetched_source(source: &str, fetches: &[crate::fetch::FetchDecl]) -> bool {
+    const PORTS_ROOT: &str = "${AROS_PORTS_DIR}";
+    if source == PORTS_ROOT || !source.starts_with("${AROS_PORTS_DIR}/") {
+        return false;
+    }
+    fetches.iter().any(|fetch| {
+        let destination = fetch.destination.trim_end_matches('/');
+        (destination == PORTS_ROOT || destination.starts_with("${AROS_PORTS_DIR}/"))
+            && (source == destination
+                || source
+                    .strip_prefix(destination)
+                    .is_some_and(|tail| tail.starts_with('/')))
+    })
+}
+
+fn all_sources_are_fetch_owned(
+    sources: &EvaluatedSources,
+    fetches: &[crate::fetch::FetchDecl],
+) -> bool {
+    !sources.is_empty()
+        && sources
+            .c
+            .iter()
+            .chain(&sources.cxx)
+            .chain(&sources.objc)
+            .chain(&sources.asm)
+            .all(|source| owns_fetched_source(source, fetches))
+}
+
+fn declaration_owned_port_scope(
+    plain: &LocalMakeIncludeScan,
+    candidate: &LocalMakeIncludeScan,
+    target: Option<&TargetContext>,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    rel_dir: &Path,
+    fetches: &[crate::fetch::FetchDecl],
+) -> bool {
+    let Some(target) = target else {
+        return false;
+    };
+    if candidate.expanded == plain.expanded
+        || candidate.fragments.is_empty()
+        || !candidate.issues.is_empty()
+        || candidate
+            .fragments
+            .iter()
+            .any(|fragment| fragment.has_conditionals)
+        || fetches.is_empty()
+    {
+        return false;
+    }
+
+    let plain_joined = join_continuations(&plain.expanded);
+    let candidate_joined = join_continuations(&candidate.expanded);
+    let (plain_scope, plain_states) = collect_vars_impl(&plain_joined, Some(target));
+    let (candidate_scope, candidate_states) = collect_vars_impl(&candidate_joined, Some(target));
+    let mut ignored = Vec::new();
+    let plain_invocations =
+        select_target_invocations(&plain_joined, Some(&plain_states), rel_dir, &mut ignored)
+            .into_iter()
+            .filter(|invocation| is_concrete_build_invocation(&invocation.name))
+            .collect::<Vec<_>>();
+    ignored.clear();
+    let candidate_invocations = select_target_invocations(
+        &candidate_joined,
+        Some(&candidate_states),
+        rel_dir,
+        &mut ignored,
+    )
+    .into_iter()
+    .filter(|invocation| is_concrete_build_invocation(&invocation.name))
+    .collect::<Vec<_>>();
+
+    if candidate_invocations.is_empty()
+        || candidate_invocations.len() != plain_invocations.len()
+        || candidate_invocations
+            .iter()
+            .zip(&plain_invocations)
+            .any(|(candidate, plain)| candidate.name != plain.name || candidate.args != plain.args)
+    {
+        return false;
+    }
+
+    let mut newly_resolved = false;
+    for (candidate_invocation, plain_invocation) in
+        candidate_invocations.iter().zip(&plain_invocations)
+    {
+        let candidate_vars = candidate_scope.snapshot(candidate_invocation.line);
+        let candidate_context = MakeExprContext::new(
+            &candidate_scope,
+            dirs,
+            candidate_invocation.line,
+            root,
+            rel_dir,
+        );
+        let Ok(candidate_sources) = evaluate_macro_sources(
+            &candidate_invocation.args,
+            &candidate_vars,
+            &candidate_context,
+        ) else {
+            return false;
+        };
+        if !candidate_sources.declared || candidate_sources.is_empty() {
+            return false;
+        }
+        if !all_sources_are_fetch_owned(&candidate_sources, fetches) {
+            return false;
+        }
+
+        let plain_vars = plain_scope.snapshot(plain_invocation.line);
+        let plain_context =
+            MakeExprContext::new(&plain_scope, dirs, plain_invocation.line, root, rel_dir);
+        match evaluate_macro_sources(&plain_invocation.args, &plain_vars, &plain_context) {
+            Ok(sources) if !sources.is_empty() => {}
+            _ => newly_resolved = true,
+        }
+    }
+    newly_resolved
+}
+
 fn parse_mmakefile_impl(
     path: &Path,
     root: &Path,
@@ -2073,19 +2316,59 @@ fn parse_mmakefile_impl(
         .unwrap_or(parent_dir)
         .to_path_buf();
 
-    // A small number of declarations keep a plain source inventory in a
-    // sibling Make fragment. Insert only the proven-safe single-list shape at
-    // the original include site, so the ordinary positional scope evaluates
-    // it without a target-specific variable name. Broader configuration files
-    // and recipe-bearing fragments remain untouched and reportable.
     let relative_path = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-    let local_make_scan = inline_local_make_includes(
+
+    // Fetch recipes expand after the complete file has been read. Their
+    // collector owns the existing bounded include traversal and supplies the
+    // ownership proof used by the declaration-specific port scope below.
+    let mut collector_visited = HashSet::new();
+    let collector_content =
+        inline_collector_make_includes(&content, root, &rel_dir, &mut collector_visited, 8);
+    let collector_joined = join_continuations(&collector_content);
+    let collector_input = format!(
+        "{}{}",
+        collector_forward_local_prelude(&collector_joined),
+        collector_joined
+    );
+    let collector_scope = target.map_or_else(
+        || collect_vars(&collector_input),
+        |target| collect_vars_impl(&collector_input, Some(target)).0,
+    );
+    let (fetches, skipped_fetches) =
+        collect_fetches_with_scope(&content, &rel_dir, &collector_scope);
+
+    // A small number of declarations keep a plain source inventory in a
+    // sibling Make fragment. This remains the global default. A broader safe
+    // variable scope is considered separately and adopted only when every
+    // declaration is proven to compile sources owned by one of the fetches
+    // above; there is deliberately no broad fallback.
+    let plain_local_make_scan = inline_local_make_includes(
         &content,
         root,
         &relative_path,
         LocalMakeIncludeLimits::default(),
         LocalMakeFragmentPolicy::PlainSourceLists,
     );
+    let port_scope_candidate = inline_local_make_includes(
+        &content,
+        root,
+        &relative_path,
+        LocalMakeIncludeLimits::default(),
+        LocalMakeFragmentPolicy::SafeVariableScopes,
+    );
+    let local_make_scan = if declaration_owned_port_scope(
+        &plain_local_make_scan,
+        &port_scope_candidate,
+        target,
+        dirs,
+        root,
+        &rel_dir,
+        &fetches,
+    ) {
+        port_scope_candidate
+    } else {
+        plain_local_make_scan
+    };
     let skipped_local_make_includes = local_make_scan
         .issues
         .iter()
@@ -2104,19 +2387,6 @@ fn parse_mmakefile_impl(
         }
         None => (collect_vars(&joined), None),
     };
-    let mut collector_visited = HashSet::new();
-    let collector_content =
-        inline_collector_make_includes(&content, root, &rel_dir, &mut collector_visited, 8);
-    let collector_joined = join_continuations(&collector_content);
-    let collector_input = format!(
-        "{}{}",
-        collector_forward_local_prelude(&collector_joined),
-        collector_joined
-    );
-    let collector_scope = target.map_or_else(
-        || collect_vars(&collector_input),
-        |target| collect_vars_impl(&collector_input, Some(target)).0,
-    );
     let mut targets = Vec::new();
     let mut meta_rules = Vec::new();
     let mut skipped_meta_rules = Vec::new();
@@ -2139,9 +2409,6 @@ fn parse_mmakefile_impl(
         d.defines = flag_set.defines.clone();
         d.compile_options = flag_set.compile_options.clone();
     }
-    let (fetches, skipped_fetches) =
-        collect_fetches_with_scope(&content, &rel_dir, &collector_scope);
-
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
@@ -2223,6 +2490,12 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let declaration_flags =
+            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let declaration_includes = target.map_or_else(
+            || include_set.clone(),
+            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
+        );
         let mmake_name = sanitize_ident(&mmake_raw);
         let mod_name = sanitize_ident(&mod_raw);
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
@@ -2245,6 +2518,21 @@ fn parse_mmakefile_impl(
             }
         };
         let genmodule_only = is_explicit_genmodule_only(&inv.name, rest, mod_type_str);
+        let linklib_name = match macro_arg(rest, "linklibname") {
+            Some(raw) if !raw.is_empty() => match evaluate_name(&raw, &expression_context) {
+                Ok(name) => Some(name),
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} linklibname={raw} is unresolved: {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            },
+            _ => None,
+        };
 
         let arch_specific = match resolve_yes_argument(rest, "archspecific", &scope, dirs, inv.line)
         {
@@ -2353,6 +2641,72 @@ fn parse_mmakefile_impl(
         let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
             .then(|| mod_type_owned.clone());
 
+        let genmodule_linklibs = if module_type == ModuleType::Library {
+            read_genmodule_linklib_config(parent_dir, &mod_name).map(
+                |(has_relative, relative_libraries)| {
+                    let mut inputs_exact = true;
+                    let source_files = match evaluate_linklib_list(
+                        rest,
+                        "linklibfiles",
+                        &vars,
+                        &expression_context,
+                    ) {
+                        Ok(files) => files,
+                        Err(error) => {
+                            partial_source_lists.push(format!(
+                                "{}:{}: %{} mmake={mmake_raw} {error}",
+                                rel_dir.display(),
+                                inv.line + 1,
+                                inv.name
+                            ));
+                            inputs_exact = false;
+                            Vec::new()
+                        }
+                    };
+                    let object_sources = match evaluate_linklib_list(
+                        rest,
+                        "linklibobjs",
+                        &vars,
+                        &expression_context,
+                    ) {
+                        Ok(objects) => match map_linklib_object_sources(&objects, &sources.c) {
+                            Ok(mapped) => mapped,
+                            Err(error) => {
+                                partial_source_lists.push(format!(
+                                    "{}:{}: %{} mmake={mmake_raw} {error}",
+                                    rel_dir.display(),
+                                    inv.line + 1,
+                                    inv.name
+                                ));
+                                inputs_exact = false;
+                                Vec::new()
+                            }
+                        },
+                        Err(error) => {
+                            partial_source_lists.push(format!(
+                                "{}:{}: %{} mmake={mmake_raw} {error}",
+                                rel_dir.display(),
+                                inv.line + 1,
+                                inv.name
+                            ));
+                            inputs_exact = false;
+                            Vec::new()
+                        }
+                    };
+                    GenmoduleLinklibs {
+                        enabled: linklib_name.is_some(),
+                        has_relative,
+                        relative_libraries,
+                        source_files,
+                        object_sources,
+                        inputs_exact,
+                    }
+                },
+            )
+        } else {
+            None
+        };
+
         if is_abi || genmodule_only {
             let include_set = match macro_arg(rest, "include_set") {
                 Some(raw) => {
@@ -2396,17 +2750,22 @@ fn parse_mmakefile_impl(
             variant_32bit: false,
             declared_mod_type,
             mod_suffix,
+            linklib_name,
+            genmodule_linklibs,
+            canonical_linklib_output: false,
+            canonical_linklib_eligible: false,
             compiler_flags: Vec::new(),
             include_dirs: {
-                let mut d = include_set.dirs.clone();
+                let mut d = declaration_includes.dirs.clone();
                 d.extend(opts_include_dirs.iter().cloned());
                 d
             },
-            arch_modules: include_set.arch_modules.clone(),
+            arch_modules: declaration_includes.arch_modules.clone(),
             arch_includes: opts_arch_includes.clone(),
-            defines: flag_set.defines.clone(),
-            undefines: flag_set.undefines.clone(),
-            compile_options: flag_set.compile_options.clone(),
+            defines: declaration_flags.defines,
+            undefines: declaration_flags.undefines,
+            compile_options: declaration_flags.compile_options,
+            link_options: declaration_flags.link_options,
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -2429,6 +2788,12 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let declaration_flags =
+            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let declaration_includes = target.map_or_else(
+            || include_set.clone(),
+            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
+        );
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // progname is declared /A, so a declaration without one is malformed
@@ -2515,17 +2880,22 @@ fn parse_mmakefile_impl(
             variant_32bit: false,
             declared_mod_type: None,
             mod_suffix: None,
+            linklib_name: None,
+            genmodule_linklibs: None,
+            canonical_linklib_output: false,
+            canonical_linklib_eligible: false,
             compiler_flags: Vec::new(),
             include_dirs: {
-                let mut d = include_set.dirs.clone();
+                let mut d = declaration_includes.dirs.clone();
                 d.extend(opts_include_dirs.iter().cloned());
                 d
             },
-            arch_modules: include_set.arch_modules.clone(),
+            arch_modules: declaration_includes.arch_modules.clone(),
             arch_includes: opts_arch_includes.clone(),
-            defines: flag_set.defines.clone(),
-            undefines: flag_set.undefines.clone(),
-            compile_options: flag_set.compile_options.clone(),
+            defines: declaration_flags.defines,
+            undefines: declaration_flags.undefines,
+            compile_options: declaration_flags.compile_options,
+            link_options: declaration_flags.link_options,
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -2551,6 +2921,12 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let declaration_flags =
+            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let declaration_includes = target.map_or_else(
+            || include_set.clone(),
+            |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
+        );
         let mmake_name = sanitize_ident(&mmake_raw);
 
         // %build_progs has no name of its own: each source file names its own
@@ -2728,6 +3104,12 @@ fn parse_mmakefile_impl(
         let variant_32bit = ["libdir", "objdir"].iter().any(|k| {
             macro_arg(&inv.args, k).is_some_and(|v| v.contains("lib32") || v.contains("32bit"))
         });
+        let canonical_linklib_eligible = matches!(module_type, ModuleType::LinkLib)
+            && macro_arg(&inv.args, "libdir").is_none()
+            && macro_arg(&inv.args, "compiler").is_none_or(|value| value == "target")
+            && !variant_32bit;
+        let canonical_linklib_output =
+            canonical_linklib_eligible && all_sources_are_fetch_owned(&sources, &fetches);
 
         targets.push(TargetDefinition {
             mmake_name,
@@ -2746,17 +3128,22 @@ fn parse_mmakefile_impl(
             variant_32bit,
             declared_mod_type,
             mod_suffix,
+            linklib_name: None,
+            genmodule_linklibs: None,
+            canonical_linklib_output,
+            canonical_linklib_eligible,
             compiler_flags: Vec::new(),
             include_dirs: {
-                let mut d = include_set.dirs.clone();
+                let mut d = declaration_includes.dirs.clone();
                 d.extend(opts_include_dirs.iter().cloned());
                 d
             },
-            arch_modules: include_set.arch_modules.clone(),
+            arch_modules: declaration_includes.arch_modules.clone(),
             arch_includes: opts_arch_includes.clone(),
-            defines: flag_set.defines.clone(),
-            undefines: flag_set.undefines.clone(),
-            compile_options: flag_set.compile_options.clone(),
+            defines: declaration_flags.defines,
+            undefines: declaration_flags.undefines,
+            compile_options: declaration_flags.compile_options,
+            link_options: declaration_flags.link_options,
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -2824,6 +3211,7 @@ fn parse_mmakefile_impl(
         copy_includes: copy_scan.decls,
         skipped_copy_includes: copy_scan.skipped,
         adhoc_header_rules: copy_scan.adhoc,
+        header_transforms: copy_scan.transforms,
         generated_file_rules: copy_scan.generated_files,
         flags: flag_set,
         arch_sources,
@@ -4051,6 +4439,267 @@ FILES := gdbstop
                 .skipped_programs
                 .iter()
                 .all(|message| !message.contains("linklibs-btcore")));
+        }
+    }
+
+    #[test]
+    fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
+        let root = root();
+        let dirs = dirs();
+        let file = root.join("workbench/libs/z/mmakefile.src");
+        for (cpu, platform, float_abi, source_count) in [
+            ("x86_64", "pc", "", 21),
+            ("arm", "raspi", "hard", 15),
+            ("aarch64", "raspi", "", 20),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &file,
+                &root,
+                &dirs,
+                &target_context(cpu, platform, float_abi),
+            )
+            .unwrap();
+            let targets: BTreeMap<_, _> = parsed
+                .targets
+                .iter()
+                .map(|target| (target.mmake_name.as_str(), target))
+                .collect();
+
+            for mmake in [
+                "workbench-libs-z",
+                "linklibs-z-static",
+                "linklibs-z-nogzip-static",
+            ] {
+                let target = targets.get(mmake).unwrap_or_else(|| {
+                    panic!(
+                        "{cpu}-{platform}: missing {mmake}: {:#?}",
+                        parsed.skipped_programs
+                    )
+                });
+                assert_eq!(target.source_files.len(), source_count, "{cpu}: {mmake}");
+                assert!(target.source_files.iter().all(|source| source.starts_with(
+                    "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/"
+                )));
+                assert_eq!(
+                    target.include_dirs,
+                    ["${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"],
+                    "{cpu}: {mmake}"
+                );
+                assert_eq!(target.link_options, ["-lpthread"], "{cpu}: {mmake}");
+            }
+
+            let module = targets["workbench-libs-z"];
+            assert_eq!(module.linklib_name.as_deref(), Some("z"));
+            let genmodule = module.genmodule_linklibs.as_ref().unwrap();
+            assert!(genmodule.enabled && genmodule.has_relative);
+            assert!(genmodule.inputs_exact);
+            assert_eq!(genmodule.relative_libraries, ["posixc", "stdc"]);
+            assert!(genmodule.source_files.is_empty());
+            assert!(genmodule.object_sources.is_empty());
+            for define in ["_XOPEN_SOURCE=600", "STDC", "AMIGA"] {
+                assert!(
+                    module.defines.iter().any(|value| value == define),
+                    "{cpu}: {define}"
+                );
+            }
+            assert!(!module
+                .defines
+                .iter()
+                .any(|value| { matches!(value.as_str(), "NO_STRERROR" | "NDEBUG" | "NO_GZIP") }));
+
+            let static_lib = targets["linklibs-z-static"];
+            assert!(static_lib
+                .defines
+                .iter()
+                .any(|value| value == "NO_STRERROR"));
+            assert!(static_lib.defines.iter().any(|value| value == "NDEBUG"));
+            assert!(!static_lib.defines.iter().any(|value| value == "NO_GZIP"));
+
+            let no_gzip = targets["linklibs-z-nogzip-static"];
+            assert!(no_gzip.defines.iter().any(|value| value == "NO_GZIP"));
+            assert!(static_lib.canonical_linklib_output, "{cpu}: z.static");
+            assert!(no_gzip.canonical_linklib_output, "{cpu}: z-nogzip.static");
+            assert!(!module.canonical_linklib_output);
+
+            let minigzip = targets["workbench-libs-z-minigzip"];
+            assert_eq!(
+                minigzip.source_files,
+                ["${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/test/minigzip"]
+            );
+            assert!(minigzip.defines.iter().any(|value| value == "NO_GZIP"));
+            assert_eq!(minigzip.link_options, ["-lpthread"]);
+            assert!(!minigzip.canonical_linklib_output);
+
+            assert_eq!(parsed.header_transforms.len(), 1, "{cpu}: transforms");
+            let fetch = parsed
+                .fetches
+                .iter()
+                .find(|fetch| fetch.name == "zlib-fetch")
+                .expect("production zlib fetch");
+            assert_eq!(
+                fetch.base,
+                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7"
+            );
+            assert_eq!(fetch.destination, fetch.base);
+            assert!(fetch.location.contains("chromium-da752eb2a3660cf1"));
+            assert!(!fetch.origins.contains("cache://"));
+            assert!(fetch
+                .origins
+                .contains("da752eb2a3660cf1bf8dac620f6380b89dd953a7"));
+            let transform = &parsed.header_transforms[0];
+            assert_eq!(transform.name, "workbench-libs-z-geninc");
+            assert_eq!(
+                transform.input,
+                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/zconf.h.chr"
+            );
+            assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/zconf.h");
+            assert!(parsed
+                .adhoc_header_rules
+                .iter()
+                .all(|rule| rule.dest != "zconf.h"));
+
+            let x86_define = module
+                .defines
+                .iter()
+                .any(|value| value == "INFLATE_CHUNK_SIMD_SSE2");
+            let arm64_define = module
+                .defines
+                .iter()
+                .any(|value| value == "INFLATE_CHUNK_SIMD_NEON");
+            assert_eq!(x86_define, cpu == "x86_64", "{cpu}: x86 flags");
+            assert_eq!(arm64_define, cpu == "aarch64", "{cpu}: arm64 flags");
+            assert_eq!(
+                module.compile_options,
+                if cpu == "aarch64" {
+                    vec!["-march=armv8-a+crc+crypto".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                "{cpu}: compile options"
+            );
+
+            assert!(parsed.skipped_local_make_includes.is_empty(), "{cpu}");
+            assert!(parsed
+                .skipped_programs
+                .iter()
+                .all(|message| !message.contains("workbench-libs-z")
+                    && !message.contains("linklibs-z")));
+        }
+    }
+
+    #[test]
+    fn relative_zlib_dependencies_have_exact_full_module_archive_inputs() {
+        let root = root();
+        let dirs = dirs();
+        for (relative, mmake, source_count, object_count) in [
+            ("compiler/crt/posixc/mmakefile.src", "compiler-posixc", 8, 1),
+            ("compiler/crt/stdc/mmakefile.src", "compiler-stdc", 9, 13),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &root.join(relative),
+                &root,
+                &dirs,
+                &target_context("x86_64", "pc", ""),
+            )
+            .unwrap();
+            let target = parsed
+                .targets
+                .iter()
+                .find(|target| target.mmake_name == mmake)
+                .unwrap();
+            let genmodule = target.genmodule_linklibs.as_ref().unwrap();
+            assert!(genmodule.has_relative, "{mmake}");
+            assert!(
+                genmodule.inputs_exact,
+                "{mmake}: {:#?}",
+                parsed.partial_source_lists
+            );
+            assert_eq!(genmodule.source_files.len(), source_count, "{mmake}");
+            assert_eq!(genmodule.object_sources.len(), object_count, "{mmake}");
+        }
+    }
+
+    #[test]
+    fn broad_safe_fragment_without_a_fetch_owner_remains_deferred() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.0.join("module")).unwrap();
+        fs::write(
+            tree.0.join("module/make.opt"),
+            "ARCHSRCDIR := $(PORTSDIR)/unowned/src\nUSER_INCLUDES += -I$(ARCHSRCDIR)\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.0.join("module/mmakefile.src"),
+            "include $(SRCDIR)/$(CURDIR)/make.opt\nFILES := one two\n%build_linklib mmake=unowned libname=unowned files=\"$(addprefix $(ARCHSRCDIR)/,$(FILES))\"\n",
+        )
+        .unwrap();
+
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &tree.0.join("module/mmakefile.src"),
+            &tree.0,
+            &DirVars::load(&tree.0),
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+        assert!(parsed
+            .targets
+            .iter()
+            .all(|target| target.mmake_name != "unowned"));
+        assert!(parsed
+            .skipped_local_make_includes
+            .iter()
+            .any(|message| message.contains("broader than one plain source-list")));
+    }
+
+    #[test]
+    fn canonical_linklib_output_requires_target_owned_port_sources() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.0.join("module")).unwrap();
+        fs::write(
+            tree.0.join("module/mmakefile.src"),
+            "\
+%fetch mmake=owned-fetch archive=owned destination=$(PORTSDIR)/owned
+%build_linklib mmake=owned libname=owned files=$(PORTSDIR)/owned/x
+%build_linklib mmake=owned-target libname=owned-target files=$(PORTSDIR)/owned/x compiler=target
+%build_linklib mmake=owned-host libname=owned-host files=$(PORTSDIR)/owned/x compiler=host
+%build_linklib mmake=owned-libdir libname=owned-libdir files=$(PORTSDIR)/owned/x libdir=$(GENDIR)/lib
+%build_linklib mmake=owned-32 libname=owned-32 files=$(PORTSDIR)/owned/x objdir=$(GENDIR)/module/32bit
+%build_linklib mmake=foreign libname=foreign files=$(PORTSDIR)/foreign/x
+",
+        )
+        .unwrap();
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &tree.0.join("module/mmakefile.src"),
+            &tree.0,
+            &DirVars::load(&tree.0),
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+        let targets: BTreeMap<_, _> = parsed
+            .targets
+            .iter()
+            .map(|target| (target.mmake_name.as_str(), target))
+            .collect();
+        assert!(targets["owned"].canonical_linklib_output);
+        assert!(targets["owned-target"].canonical_linklib_output);
+        for mmake in ["owned-host", "owned-libdir", "owned-32", "foreign"] {
+            assert!(!targets[mmake].canonical_linklib_output, "{mmake}");
+        }
+
+        let zopfli = super::parse_mmakefile_with_dirs_and_context(
+            &root().join("tools/zopfli/mmakefile.src"),
+            &root(),
+            &dirs(),
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+        for target in zopfli.targets.iter().filter(|target| {
+            matches!(
+                target.mmake_name.as_str(),
+                "linklibs-zopfli" | "host-linklibs-zopfli"
+            )
+        }) {
+            assert!(!target.canonical_linklib_output, "{}", target.mmake_name);
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{MetaTargetRule, ModuleType, TargetDefinition};
 use crate::catalogs::CatalogDecl;
-use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl};
+use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
 use crate::icons::{IconSet, IconTarget};
 use crate::includes::ArchIncludeDecl;
@@ -29,6 +29,8 @@ pub struct DependencyGraph {
     pub copy_includes: Vec<CopyIncludesDecl>,
     /// Hand-written header staging rules found anywhere in the tree.
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
+    /// Safe hand-written header transforms, with graph-resolved ordering.
+    pub header_transforms: Vec<HeaderTransformDecl>,
     /// `%build_archspecific` declarations, keyed by the target they extend.
     pub arch_sources: HashMap<String, Vec<ArchSourceDecl>>,
     /// `%fetch` declarations for third-party sources.
@@ -111,6 +113,29 @@ fn target_runtime_name(target: &TargetDefinition) -> Option<String> {
     Some(runtime_name(kind, &target.target_name))
 }
 
+/// Whether a raw `-l<name>` consumer can find this declaration's archive in
+/// the target SDK library directory.
+///
+/// Full genmodule/ABI client archives are public by construction. An ordinary
+/// link library is public only when it already owns, or may safely be promoted
+/// to, its canonical SDK archive name. In-tree/private `libdir=` outputs are
+/// deliberately excluded: the direct AROS linker rule has no proven search
+/// path for them.
+fn has_public_link_archive(target: &TargetDefinition) -> bool {
+    match target.module_type {
+        ModuleType::Abi => true,
+        ModuleType::Library => {
+            target.genmodule_only
+                || target
+                    .genmodule_linklibs
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.enabled)
+        }
+        ModuleType::LinkLib => target.canonical_linklib_output || target.canonical_linklib_eligible,
+        _ => false,
+    }
+}
+
 impl DependencyGraph {
     #[must_use]
     pub fn new() -> Self {
@@ -140,6 +165,111 @@ impl DependencyGraph {
                 self.fetches.push(d);
             }
         }
+    }
+
+    pub fn add_header_transforms(&mut self, decls: Vec<HeaderTransformDecl>) {
+        self.header_transforms.extend(decls);
+    }
+
+    /// Joins promoted header recipes to the fetch which owns their input and
+    /// to every concrete target compiling from that same port subtree.
+    ///
+    /// The fetch dependency belongs on the custom command itself; attaching it
+    /// only to a sibling/meta target lets Ninja race a cache-empty transform.
+    /// Consumers likewise receive a direct edge so ordinary static linklibs,
+    /// which have no genmodule config to reveal the include, remain safe.
+    pub fn resolve_header_transforms(&mut self) -> Vec<String> {
+        const PORTS_ROOT: &str = "${AROS_PORTS_DIR}";
+
+        let mut fetches: Vec<(String, String)> = self
+            .fetches
+            .iter()
+            .filter(|fetch| {
+                fetch.destination == PORTS_ROOT
+                    || fetch.destination.starts_with("${AROS_PORTS_DIR}/")
+            })
+            .map(|fetch| {
+                (
+                    fetch.name.clone(),
+                    fetch.destination.trim_end_matches('/').to_owned(),
+                )
+            })
+            .collect();
+        fetches.sort_by(|left, right| {
+            right
+                .1
+                .len()
+                .cmp(&left.1.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+
+        let target_sources: Vec<(String, ModuleType, bool, Vec<String>)> = self
+            .targets
+            .values()
+            .map(|target| {
+                let mut sources: Vec<String> = target
+                    .source_files
+                    .iter()
+                    .chain(&target.cxx_source_files)
+                    .chain(&target.objc_source_files)
+                    .chain(&target.asm_source_files)
+                    .cloned()
+                    .collect();
+                for (_, directory, files) in &target.arch_sources {
+                    sources.extend(files.iter().map(|file| format!("{directory}/{file}")));
+                }
+                (
+                    target.mmake_name.clone(),
+                    target.module_type.clone(),
+                    target.linklib_name.is_some() || target.genmodule_only,
+                    sources,
+                )
+            })
+            .collect();
+
+        let mut unresolved = Vec::new();
+        for transform in &mut self.header_transforms {
+            let owner = fetches.iter().find(|(_, destination)| {
+                transform.input == *destination
+                    || transform
+                        .input
+                        .strip_prefix(destination)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            });
+            let Some((fetch, _)) = owner else {
+                unresolved.push(format!(
+                    "{}:{}: {} input {} has no matching %fetch owner",
+                    transform.file, transform.line, transform.name, transform.input
+                ));
+                continue;
+            };
+            transform.dependencies.push(fetch.clone());
+
+            let input_dir = transform
+                .input
+                .rsplit_once('/')
+                .map_or(transform.input.as_str(), |(directory, _)| directory);
+            for (mmake, module_type, has_client_linklib, sources) in &target_sources {
+                let consumes_tree = sources.iter().any(|source| {
+                    source == input_dir
+                        || source
+                            .strip_prefix(input_dir)
+                            .is_some_and(|tail| tail.starts_with('/'))
+                });
+                if !consumes_tree {
+                    continue;
+                }
+                transform.consumers.push(mmake.clone());
+                if *module_type == ModuleType::Library && *has_client_linklib {
+                    transform.consumers.push(format!("{mmake}-linklib"));
+                }
+            }
+            transform.dependencies.sort();
+            transform.dependencies.dedup();
+            transform.consumers.sort();
+            transform.consumers.dedup();
+        }
+        unresolved
     }
 
     /// Adds direct fetch prerequisites for concrete targets compiling port
@@ -277,6 +407,31 @@ impl DependencyGraph {
     ///
     /// Returns the names that matched no link library.
     pub fn resolve_use_libs(&mut self) -> Vec<String> {
+        // A sourceful module may request relative libraries from its .conf
+        // even though the `%build_module` invocation has no `uselibs=` text.
+        // Enable only those full-module providers required by an already
+        // enabled declaration (z1 is the first production case), and only
+        // when every explicit linklib input was modelled exactly.
+        let required_relative: std::collections::HashSet<String> = self
+            .targets
+            .values()
+            .filter_map(|target| target.genmodule_linklibs.as_ref())
+            .filter(|metadata| metadata.enabled)
+            .flat_map(|metadata| metadata.relative_libraries.iter().cloned())
+            .collect();
+        for target in self.targets.values_mut() {
+            if target.module_type != ModuleType::Library
+                || !required_relative.contains(&target.target_name)
+            {
+                continue;
+            }
+            if let Some(metadata) = target.genmodule_linklibs.as_mut() {
+                if metadata.has_relative && metadata.inputs_exact {
+                    metadata.enabled = true;
+                }
+            }
+        }
+
         // Keep the declaration identity for architecture/flavour selection
         // separate from the target a consumer may actually link. ABI-only
         // declarations expose a workflow aggregate under their mmake id; the
@@ -284,29 +439,125 @@ impl DependencyGraph {
         let mut by_name: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
         for (mmake, target) in &self.targets {
-            if matches!(target.module_type, ModuleType::Abi | ModuleType::LinkLib) {
-                let link_target = if matches!(target.module_type, ModuleType::Abi) {
-                    format!("{mmake}-linklib")
-                } else {
-                    mmake.clone()
-                };
-                by_name
-                    .entry(target.target_name.clone())
-                    .or_default()
-                    .push((mmake.clone(), link_target));
+            let mut providers: Vec<(String, Vec<String>)> = match target.module_type {
+                ModuleType::Abi => vec![(
+                    format!("{mmake}-linklib"),
+                    vec![
+                        target.target_name.clone(),
+                        format!("{}_rel", target.target_name),
+                    ],
+                )],
+                ModuleType::LinkLib => {
+                    vec![(mmake.clone(), vec![target.target_name.clone()])]
+                }
+                // A full library module materialises its genmodule client-link
+                // archive under `<mmake>-linklib`. The default provider name is
+                // the module name; `linklibname=` publishes an additional
+                // spelling for the same archive.
+                ModuleType::Library
+                    if target.genmodule_only
+                        || target
+                            .genmodule_linklibs
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.enabled) =>
+                {
+                    let mut names = vec![target.target_name.clone()];
+                    if let Some(alias) = &target.linklib_name {
+                        if !names.contains(alias) {
+                            names.push(alias.clone());
+                        }
+                    }
+                    let mut providers = vec![(format!("{mmake}-linklib"), names.clone())];
+                    if target
+                        .genmodule_linklibs
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
+                    {
+                        let relative_names =
+                            names.iter().map(|name| format!("{name}_rel")).collect();
+                        providers.push((format!("{mmake}-linklib-rel"), relative_names));
+                    }
+                    providers
+                }
+                _ => continue,
+            };
+            for (link_target, names) in &mut providers {
+                names.sort();
+                names.dedup();
+                for name in names {
+                    by_name
+                        .entry(name.clone())
+                        .or_default()
+                        .push((mmake.clone(), link_target.clone()));
+                }
             }
         }
 
         let mut unresolved = Vec::new();
         let mut resolved: Vec<(String, Vec<String>)> = Vec::new();
+        let mut promote_canonical = Vec::new();
+        let mut link_option_edges = Vec::new();
+        let mut rejected_link_options = Vec::new();
         for (mmake, target) in &self.targets {
             let mut ids = Vec::new();
-            for name in &target.use_libs {
+            let mut requested = target.use_libs.clone();
+            if let Some(metadata) = target
+                .genmodule_linklibs
+                .as_ref()
+                .filter(|metadata| metadata.enabled)
+            {
+                requested.extend(
+                    metadata
+                        .relative_libraries
+                        .iter()
+                        .map(|name| format!("{name}_rel")),
+                );
+            }
+            let explicitly_linked: std::collections::HashSet<String> =
+                requested.iter().cloned().collect();
+            let mut link_flag_libraries: Vec<String> =
+                if matches!(target.module_type, ModuleType::LinkLib | ModuleType::Abi) {
+                    Vec::new()
+                } else {
+                    target
+                        .link_options
+                        .iter()
+                        .filter_map(|option| option.strip_prefix("-l"))
+                        .filter(|name| !name.is_empty() && !name.starts_with(':'))
+                        .map(str::to_owned)
+                        .collect()
+                };
+            link_flag_libraries.sort();
+            link_flag_libraries.dedup();
+            requested.extend(link_flag_libraries.iter().cloned());
+            let mut seen_requested = std::collections::HashSet::new();
+            requested.retain(|name| seen_requested.insert(name.clone()));
+            for name in &requested {
                 match by_name.get(name.as_str()) {
                     Some(c) if c.len() == 1 => {
+                        if link_flag_libraries.contains(name)
+                            && !self
+                                .targets
+                                .get(&c[0].0)
+                                .is_some_and(has_public_link_archive)
+                        {
+                            rejected_link_options.push((mmake.clone(), name.clone()));
+                            unresolved.push(format!(
+                                "{}: {mmake} link option -l{name} has no public SDK archive",
+                                target.dir_path.display()
+                            ));
+                            continue;
+                        }
                         let id = c[0].1.clone();
-                        if !ids.contains(&id) {
+                        if explicitly_linked.contains(name) && !ids.contains(&id) {
                             ids.push(id);
+                        } else if link_flag_libraries.contains(name) {
+                            link_option_edges.push((mmake.clone(), id));
+                        }
+                        if link_flag_libraries.contains(name)
+                            && !promote_canonical.contains(&c[0].0)
+                        {
+                            promote_canonical.push(c[0].0.clone());
                         }
                     }
                     Some(c) => {
@@ -322,11 +573,34 @@ impl DependencyGraph {
                             })
                             .collect();
                         if main.len() == 1 {
+                            if link_flag_libraries.contains(name)
+                                && !self
+                                    .targets
+                                    .get(&main[0].0)
+                                    .is_some_and(has_public_link_archive)
+                            {
+                                rejected_link_options.push((mmake.clone(), name.clone()));
+                                unresolved.push(format!(
+                                    "{}: {mmake} link option -l{name} has no public SDK archive",
+                                    target.dir_path.display()
+                                ));
+                                continue;
+                            }
                             let id = main[0].1.clone();
-                            if !ids.contains(&id) {
+                            if explicitly_linked.contains(name) && !ids.contains(&id) {
                                 ids.push(id);
+                            } else if link_flag_libraries.contains(name) {
+                                link_option_edges.push((mmake.clone(), id));
+                            }
+                            if link_flag_libraries.contains(name)
+                                && !promote_canonical.contains(&main[0].0)
+                            {
+                                promote_canonical.push(main[0].0.clone());
                             }
                         } else {
+                            if link_flag_libraries.contains(name) {
+                                rejected_link_options.push((mmake.clone(), name.clone()));
+                            }
                             let declarations: Vec<&str> = c
                                 .iter()
                                 .map(|(declaration, _)| declaration.as_str())
@@ -340,10 +614,22 @@ impl DependencyGraph {
                     }
                     // Not every uselib is built here: some name a host library
                     // or a port that is not fetched. Reported, not guessed at.
-                    None => unresolved.push(format!(
+                    None if explicitly_linked.contains(name) => unresolved.push(format!(
                         "{}: {mmake} uselibs={name} has no link library",
                         target.dir_path.display()
                     )),
+                    // The generated rule invokes ld.lld directly. An opaque
+                    // compiler/toolchain library cannot be assumed to exist,
+                    // and preserving it would turn an otherwise unrelated
+                    // target into a link failure. Keep the gap in the report,
+                    // not in the generated command line.
+                    None => {
+                        rejected_link_options.push((mmake.clone(), name.clone()));
+                        unresolved.push(format!(
+                            "{}: {mmake} link option -l{name} has no link library",
+                            target.dir_path.display()
+                        ));
+                    }
                 }
             }
             if !ids.is_empty() {
@@ -355,6 +641,25 @@ impl DependencyGraph {
             if let Some(t) = self.targets.get_mut(&mmake) {
                 t.link_libs = ids;
             }
+        }
+        for (mmake, name) in rejected_link_options {
+            if let Some(target) = self.targets.get_mut(&mmake) {
+                let option = format!("-l{name}");
+                target.link_options.retain(|candidate| candidate != &option);
+            }
+        }
+        for mmake in promote_canonical {
+            if let Some(target) = self.targets.get_mut(&mmake) {
+                if target.canonical_linklib_eligible {
+                    target.canonical_linklib_output = true;
+                }
+            }
+        }
+        for (consumer, provider) in link_option_edges {
+            self.meta_targets
+                .entry(consumer)
+                .or_default()
+                .insert(provider);
         }
         unresolved
     }
@@ -818,7 +1123,8 @@ mod tests {
         let mut graph = DependencyGraph::new();
         graph.add_target(abi);
         graph.add_target(consumer);
-        assert!(graph.resolve_use_libs().is_empty());
+        let unresolved = graph.resolve_use_libs();
+        assert!(unresolved.is_empty(), "{unresolved:#?}");
         assert_eq!(
             graph.targets["test-abi-consumer"].link_libs,
             ["kernel-bluetooth-btclass-linklib"]
@@ -839,6 +1145,190 @@ mod tests {
         assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
         assert!(unresolved[0].contains("(btclass.library) has no target"));
         assert!(graph.packages[0].resolved.is_empty());
+    }
+
+    #[test]
+    fn a_library_provides_its_module_and_explicit_linklib_names() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/z/mmakefile.src"),
+            &root,
+            &dirs,
+            &TargetContext {
+                cpu: Some("x86_64".to_owned()),
+                platform: Some("pc".to_owned()),
+                family: Some(String::new()),
+                variant: Some(String::new()),
+                toolchain: Some("llvm".to_owned()),
+                cpu32: Some("i386".to_owned()),
+                use_mmu: Some("1".to_owned()),
+                float_abi: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let mut alias_consumer = parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == "workbench-libs-z-minigzip")
+            .expect("minigzip")
+            .clone();
+        alias_consumer.mmake_name = "z-alias-consumer".to_owned();
+        alias_consumer.use_libs = vec!["z".to_owned()];
+        alias_consumer.link_libs.clear();
+
+        let mut external_flag_consumer = alias_consumer.clone();
+        external_flag_consumer.mmake_name = "raw-external-consumer".to_owned();
+        external_flag_consumer.use_libs.clear();
+        external_flag_consumer.link_options = vec!["-lprivate-port-runtime".to_owned()];
+
+        let mut graph = DependencyGraph::new();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+        graph.add_target(alias_consumer);
+        graph.add_target(external_flag_consumer);
+        for relative in [
+            "compiler/crt/posixc/mmakefile.src",
+            "compiler/crt/stdc/mmakefile.src",
+            "compiler/pthread/mmakefile.src",
+        ] {
+            let provider = parse_mmakefile_with_dirs_and_context(
+                &root.join(relative),
+                &root,
+                &dirs,
+                &TargetContext {
+                    cpu: Some("x86_64".to_owned()),
+                    platform: Some("pc".to_owned()),
+                    family: Some(String::new()),
+                    variant: Some(String::new()),
+                    toolchain: Some("llvm".to_owned()),
+                    cpu32: Some("i386".to_owned()),
+                    use_mmu: Some("1".to_owned()),
+                    float_abi: Some(String::new()),
+                },
+            )
+            .unwrap();
+            for mut target in provider.targets.into_iter().filter(|target| {
+                matches!(
+                    target.mmake_name.as_str(),
+                    "compiler-posixc" | "compiler-stdc" | "linklibs-pthread"
+                )
+            }) {
+                if target.mmake_name != "linklibs-pthread" {
+                    target.use_libs.clear();
+                }
+                graph.add_target(target);
+            }
+        }
+        let unresolved = graph.resolve_use_libs();
+        assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+        assert!(
+            unresolved[0].contains(
+                "raw-external-consumer link option -lprivate-port-runtime has no link library"
+            ),
+            "{unresolved:#?}"
+        );
+        assert_eq!(
+            graph.targets["workbench-libs-z-minigzip"].link_libs,
+            ["workbench-libs-z-linklib"]
+        );
+        assert_eq!(
+            graph.targets["z-alias-consumer"].link_libs,
+            ["workbench-libs-z-linklib"]
+        );
+        assert!(graph.targets["raw-external-consumer"].link_libs.is_empty());
+        assert!(graph.targets["raw-external-consumer"]
+            .link_options
+            .is_empty());
+        assert!(graph
+            .meta_targets
+            .get("raw-external-consumer")
+            .is_none_or(HashSet::is_empty));
+        assert_eq!(
+            graph.targets["workbench-libs-z"].link_libs,
+            ["compiler-posixc-linklib-rel", "compiler-stdc-linklib-rel"]
+        );
+        for consumer in [
+            "workbench-libs-z",
+            "workbench-libs-z-minigzip",
+            "z-alias-consumer",
+        ] {
+            assert!(graph.meta_targets[consumer].contains("linklibs-pthread"));
+            assert_eq!(graph.targets[consumer].link_options, ["-lpthread"]);
+        }
+        assert!(
+            graph.targets["compiler-posixc"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            graph.targets["compiler-stdc"]
+                .genmodule_linklibs
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+        assert!(graph.targets["linklibs-pthread"].canonical_linklib_output);
+    }
+
+    #[test]
+    fn zlib_sources_and_transformed_header_have_direct_fetch_edges() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let parsed = parse_mmakefile_with_dirs_and_context(
+            &root.join("workbench/libs/z/mmakefile.src"),
+            &root,
+            &dirs,
+            &TargetContext {
+                cpu: Some("x86_64".to_owned()),
+                platform: Some("pc".to_owned()),
+                family: Some(String::new()),
+                variant: Some(String::new()),
+                toolchain: Some("llvm".to_owned()),
+                cpu32: Some("i386".to_owned()),
+                use_mmu: Some("1".to_owned()),
+                float_abi: Some(String::new()),
+            },
+        )
+        .unwrap();
+
+        let mut graph = DependencyGraph::new();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+        graph.add_fetches(parsed.fetches);
+        graph.add_header_transforms(parsed.header_transforms);
+        assert!(graph.resolve_port_source_fetches().is_empty());
+        for target in [
+            "workbench-libs-z",
+            "linklibs-z-static",
+            "linklibs-z-nogzip-static",
+            "workbench-libs-z-minigzip",
+        ] {
+            assert!(
+                graph.meta_targets[target].contains("zlib-fetch"),
+                "{target}"
+            );
+        }
+
+        assert!(graph.resolve_header_transforms().is_empty());
+        assert_eq!(graph.header_transforms.len(), 1);
+        let transform = &graph.header_transforms[0];
+        assert_eq!(transform.dependencies, ["zlib-fetch"]);
+        assert_eq!(
+            transform.consumers,
+            [
+                "linklibs-z-nogzip-static",
+                "linklibs-z-static",
+                "workbench-libs-z",
+                "workbench-libs-z-linklib",
+                "workbench-libs-z-minigzip",
+            ]
+        );
     }
 
     #[test]

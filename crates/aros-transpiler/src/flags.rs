@@ -29,6 +29,7 @@
 //! flags are set once above the `%build_module` line. A file that reassigns the
 //! flags *and* builds several modules could disagree, so those are reported.
 
+use crate::parser::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -41,6 +42,9 @@ pub struct FlagSet {
     pub undefines: Vec<String>,
     /// Allowlisted codegen options, verbatim.
     pub compile_options: Vec<String>,
+    /// Driver-level link options from `USER_LDFLAGS`.
+    #[serde(default)]
+    pub link_options: Vec<String>,
     /// Flag tokens that were not propagated, for reporting.
     pub skipped: Vec<String>,
     /// True when the file reassigns the flags and also builds more than one
@@ -545,6 +549,13 @@ pub fn collect_flags(content: &str) -> FlagSet {
         }
     }
 
+    if let Some(raw) = vars.get("USER_LDFLAGS") {
+        let expanded = expand(raw, &vars, "USER_LDFLAGS", 8);
+        for tok in split_flags(&expanded) {
+            classify_link(tok, &mut set);
+        }
+    }
+
     // Assignments inside a Make conditional must not be applied unconditionally.
     // A plain test on the CPU or the platform becomes an architecture tag that
     // CMake filters; anything else is dropped and reported.
@@ -574,8 +585,91 @@ pub fn collect_flags(content: &str) -> FlagSet {
     set.defines.dedup();
     set.undefines.dedup();
     set.compile_options.dedup();
+    set.link_options.dedup();
     set.skipped.dedup();
     set
+}
+
+/// Collects compiler and linker flags as they stand at one build declaration.
+///
+/// GNU Make freezes the `USER_*` values into the build macro at its invocation
+/// line. Reading the file's final assignment leaks later flags into earlier
+/// targets when one mmakefile declares several variants. A concrete target
+/// context has already selected conditional assignments in [`VarScope`], so
+/// this collector only has to perform bounded local-variable expansion.
+#[must_use]
+pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
+    let mut set = FlagSet::default();
+
+    for key in ["USER_CPPFLAGS", "USER_CFLAGS"] {
+        if scope.conditionally_assigned_before(key, line) {
+            set.skipped.push(format!("$({key})"));
+            continue;
+        }
+        let Some(raw) = scope.raw_at(key, line) else {
+            continue;
+        };
+        let expanded = expand_scoped(&raw, scope, line, key, 8);
+        for tok in split_flags(&expanded) {
+            classify(tok, &mut set);
+        }
+    }
+
+    if scope.conditionally_assigned_before("USER_LDFLAGS", line) {
+        set.skipped.push("$(USER_LDFLAGS)".to_owned());
+    } else if let Some(raw) = scope.raw_at("USER_LDFLAGS", line) {
+        let expanded = expand_scoped(&raw, scope, line, "USER_LDFLAGS", 8);
+        for tok in split_flags(&expanded) {
+            classify_link(tok, &mut set);
+        }
+    }
+
+    set.defines.dedup();
+    set.undefines.dedup();
+    set.compile_options.dedup();
+    set.link_options.dedup();
+    set.skipped.dedup();
+    set
+}
+
+fn expand_scoped(
+    raw: &str,
+    scope: &VarScope,
+    line: usize,
+    self_name: &str,
+    depth: usize,
+) -> String {
+    if depth == 0 || !raw.contains("$(") {
+        return raw.to_owned();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("$(") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find(')') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let name = &after[..end];
+        let verbatim = &rest[start..=start + 2 + end];
+        if name == self_name
+            || name.starts_with("shell")
+            || name.contains(' ')
+            || map_var(name).is_some()
+            || map_flag_var(name).is_some()
+            || scope.conditionally_assigned_before(name, line)
+        {
+            out.push_str(verbatim);
+        } else if let Some(value) = scope.raw_at(name, line) {
+            out.push_str(&expand_scoped(&value, scope, line, self_name, depth - 1));
+        } else {
+            out.push_str(verbatim);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn classify(tok: &str, set: &mut FlagSet) {
@@ -612,8 +706,37 @@ fn classify(tok: &str, set: &mut FlagSet) {
         return;
     }
 
+    // Architecture selection materially changes which intrinsics are legal.
+    // Keep the plain driver spelling, but reject quoting, variables and other
+    // shell syntax rather than forwarding an arbitrary command fragment.
+    if tok.starts_with("-march=")
+        && tok.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '+' | '=')
+        })
+    {
+        push_unique(&mut set.compile_options, tok.to_owned());
+        return;
+    }
+
     // Anything else is a compiler option we do not second-guess.
     if tok.starts_with('-') {
+        push_unique(&mut set.skipped, tok.to_owned());
+    }
+}
+
+fn classify_link(tok: &str, set: &mut FlagSet) {
+    let valid_library = tok.strip_prefix("-l").is_some_and(|name| {
+        !name.is_empty()
+            && name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '+')
+            })
+    });
+    // The generated AROS rules invoke ld.lld directly. `-pthread` is a
+    // compiler-driver switch and must never reach that command; an explicit
+    // `-lpthread` is an ordinary linker library and is safe here.
+    if valid_library {
+        push_unique(&mut set.link_options, tok.to_owned());
+    } else if !tok.is_empty() {
         push_unique(&mut set.skipped, tok.to_owned());
     }
 }
@@ -627,6 +750,13 @@ fn push_unique(v: &mut Vec<String>, s: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_linker_options_reject_compiler_driver_switches() {
+        let flags = collect_flags("USER_LDFLAGS := -lpthread -pthread -Wl,-dead_strip\n");
+        assert_eq!(flags.link_options, ["-lpthread"]);
+        assert_eq!(flags.skipped, ["-pthread", "-Wl,-dead_strip"]);
+    }
 
     #[test]
     fn propagates_the_ahci_case() {
