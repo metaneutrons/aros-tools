@@ -1,7 +1,7 @@
 use crate::arch_sources::ArchSourceDecl;
 use crate::ast::{
-    ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl, MetaTargetRule,
-    ModuleType, PythonOutputsDecl, TargetDefinition,
+    AhiBuildDecl, ConfigureBuildDecl, DefineHeaderDecl, ExternalCMakeDecl, GrubBuildDecl,
+    MetaTargetRule, ModuleType, PythonOutputsDecl, TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
@@ -23,6 +23,8 @@ pub struct DependencyGraph {
     pub configure_builds: Vec<ConfigureBuildDecl>,
     /// Strictly capability-checked GRUB 2.12 host-tool lanes.
     pub grub_builds: Vec<GrubBuildDecl>,
+    /// Strictly capability-checked AHI subsystem build.
+    pub ahi_builds: Vec<AhiBuildDecl>,
     /// Strictly capability-checked fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_targets: HashMap<String, HashSet<String>>,
@@ -246,6 +248,16 @@ impl DependencyGraph {
             .any(|existing| existing.mmake_name == declaration.mmake_name)
         {
             self.grub_builds.push(declaration);
+        }
+    }
+
+    pub fn add_ahi_build(&mut self, declaration: AhiBuildDecl) {
+        if !self
+            .ahi_builds
+            .iter()
+            .any(|existing| existing.mmake_name == declaration.mmake_name)
+        {
+            self.ahi_builds.push(declaration);
         }
     }
 

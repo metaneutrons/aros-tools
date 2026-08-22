@@ -328,6 +328,32 @@ pub struct GrubBuildDecl {
     pub dir_path: PathBuf,
 }
 
+/// One strictly capability-checked AHI subsystem build.
+///
+/// AHI's legacy `%build_with_configure` invocation carries an open-ended
+/// Autoconf environment.  This deliberately admits only the one audited
+/// subsystem declaration and forwards no source paths, command text or
+/// compiler flags.  The CMake helper owns the complete source/product
+/// manifest; these fields only select a current target profile and bind the
+/// already-materialised host tools by their explicit paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AhiBuildDecl {
+    /// MetaMake workflow identity used by `#MM` dependencies.
+    pub mmake_name: String,
+    /// Closed runner profile (`x86_64`, `arm`, or `aarch64`).
+    pub mode: String,
+    /// Private build root below `${AROS_BUILD_DIR}/gen/configure`.
+    pub binary_dir: String,
+    /// Target system prefix receiving the installed AHI subsystem.
+    pub install_prefix: String,
+    /// Explicit output of the closed host `sfdc` target.
+    pub host_sfdc: String,
+    /// Explicit, already-validated absolute Perl interpreter chosen by CMake.
+    pub host_perl: String,
+    /// Source-root-relative directory of the declaring mmakefile.
+    pub dir_path: PathBuf,
+}
+
 /// One output-producing invocation inside a strictly admitted Python
 /// generator group.
 ///
@@ -410,6 +436,8 @@ pub struct ParsedMmakefile {
     pub configure_builds: Vec<ConfigureBuildDecl>,
     /// Strictly modelled GRUB 2.12 host-tool lanes.
     pub grub_builds: Vec<GrubBuildDecl>,
+    /// Strictly modelled AHI subsystem configure-style build.
+    pub ahi_builds: Vec<AhiBuildDecl>,
     /// Strictly modelled fetched Python output groups.
     pub python_outputs: Vec<PythonOutputsDecl>,
     pub meta_rules: Vec<MetaTargetRule>,

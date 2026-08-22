@@ -76,6 +76,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .iter()
                 .map(|declaration| declaration.mmake_name.clone()),
         )
+        .chain(
+            graph
+                .ahi_builds
+                .iter()
+                .map(|declaration| declaration.mmake_name.clone()),
+        )
         .collect();
 
     // The closed GRUB2 helper creates one shared source-fetch endpoint and
@@ -85,6 +91,14 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     if !graph.grub_builds.is_empty() {
         all_targets.insert("grub2-aros--fetch".to_owned());
         all_targets.insert("grub2-aros-fetch".to_owned());
+    }
+
+    // AHI invokes the explicitly materialised host `sfdc` tool through its
+    // closed helper.  It has no legacy #MM declaration of its own, but keeping
+    // the endpoint visible prevents an explicit future meta edge from being
+    // silently discarded during generated-target filtering.
+    if !graph.ahi_builds.is_empty() {
+        all_targets.insert("host-sfdc".to_owned());
     }
 
     // Full genmodule and ABI declarations create product targets inside the
@@ -378,6 +392,37 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 cmake_arg(&declaration.install_prefix)
             )
             .unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    // The AHI subsystem is another configure-style build syntactically, but
+    // it needs a fixed AROS source/product closure and the private host sfdc
+    // compiler.  Its helper intentionally accepts neither arbitrary options
+    // nor a command string, so do not collapse it into aros_build_configure.
+    if !graph.ahi_builds.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked AHI subsystem builds\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.ahi_builds.iter().collect();
+        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+        for declaration in declarations {
+            writeln!(out, "aros_build_ahi(").unwrap();
+            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
+            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+            writeln!(
+                out,
+                "    INSTALL_PREFIX {}",
+                cmake_arg(&declaration.install_prefix)
+            )
+            .unwrap();
+            writeln!(out, "    HOST_SFDC {}", cmake_arg(&declaration.host_sfdc)).unwrap();
+            writeln!(out, "    HOST_PERL {}", cmake_arg(&declaration.host_perl)).unwrap();
             writeln!(out, ")\n").unwrap();
         }
     }
