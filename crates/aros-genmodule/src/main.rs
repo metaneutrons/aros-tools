@@ -191,34 +191,81 @@ fn conf_key_value(line: &str) -> Option<(&str, &str)> {
     Some((k, v))
 }
 
-/// Reads `modtype=` for `modname` from the mmakefile.src next to the .conf.
+/// The exact `modname`/`modtype` invocation associated with one `.conf`.
 ///
-/// The module type lives in the build description, not in the .conf, because
-/// one directory can build several modules. Without it the generated
-/// MOD_NAME_STRING would call every module a `.library`.
-fn read_mod_type(conf_path: &Path, module_name: &str) -> Option<String> {
+/// `genmodule` receives both values on its command line. They cannot in
+/// general be reconstructed from the config file stem: Wanderer's private
+/// `icon.conf`, for example, is invoked as `Icon mui`, whereas icon.library is
+/// invoked as `icon library`.
+#[derive(Debug)]
+struct ModuleDeclaration {
+    name: String,
+    mod_type: String,
+}
+
+fn module_macro_value(block: &str, key: &str) -> Option<String> {
+    block
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix(key))
+        .map(|value| value.trim_matches(['"', '\'']).to_owned())
+}
+
+/// Reads the genmodule invocation associated with a `.conf` from its sibling
+/// mmakefile.src. The module type and default include name both come from that
+/// invocation, not from the config file name.
+fn read_module_declaration(conf_path: &Path, stem: &str) -> Option<ModuleDeclaration> {
     let mmakefile = conf_path.parent()?.join("mmakefile.src");
     let content = read_source(&mmakefile).ok()?;
     // Directives span continuation lines, so flatten before matching.
     let flat = content.replace("\\\n", " ");
-    let mut best: Option<String> = None;
+    let config_name = conf_path.file_name()?.to_string_lossy();
+    let mut fallback_type: Option<String> = None;
+    let mut default_declaration: Option<ModuleDeclaration> = None;
     for block in flat.split("%build_module").skip(1) {
-        let head: String = block.chars().take(600).collect();
-        let name = head
-            .split_whitespace()
-            .find_map(|t| t.strip_prefix("modname="))
-            .map(str::to_owned);
-        let ty = head
-            .split_whitespace()
-            .find_map(|t| t.strip_prefix("modtype="))
-            .map(str::to_owned);
-        match (name.as_deref(), ty) {
-            (Some(n), Some(t)) if n == module_name => return Some(t),
-            (_, Some(t)) if best.is_none() => best = Some(t),
-            _ => {}
+        // The next macro begins with '%'; values of interest are all in this
+        // one declaration, so never let a later build_module donate its args.
+        let head = block.split('%').next().unwrap_or(block);
+        let name = module_macro_value(head, "modname=");
+        let mod_type = module_macro_value(head, "modtype=");
+        let conffile = module_macro_value(head, "conffile=");
+        if fallback_type.is_none() {
+            fallback_type = mod_type.clone();
+        }
+
+        let matches_explicit_config = conffile.as_deref().is_some_and(|config| {
+            Path::new(config)
+                .file_name()
+                .is_some_and(|file| file == config_name.as_ref())
+        });
+        let matches_default_config = conffile.is_none()
+            && name
+                .as_deref()
+                .is_some_and(|module_name| module_name == stem);
+        // An explicit `conffile=` binds this config even if an earlier
+        // declaration would select it by the default `<modname>.conf` rule.
+        // Wanderer's `Icon mui conffile=icon.conf` is the important real
+        // example: it must not inherit icon.library's declaration merely
+        // because that one appears first in the same make fragment.
+        if matches_explicit_config {
+            if let (Some(name), Some(mod_type)) = (name.as_ref(), mod_type.as_ref()) {
+                return Some(ModuleDeclaration {
+                    name: name.clone(),
+                    mod_type: mod_type.clone(),
+                });
+            }
+        }
+        if matches_default_config && default_declaration.is_none() {
+            if let (Some(name), Some(mod_type)) = (name, mod_type) {
+                default_declaration = Some(ModuleDeclaration { name, mod_type });
+            }
         }
     }
-    best
+    default_declaration.or_else(|| {
+        fallback_type.map(|mod_type| ModuleDeclaration {
+            name: stem.to_owned(),
+            mod_type,
+        })
+    })
 }
 
 /// Suffix and separator used to build the module's run-time name.
@@ -230,7 +277,36 @@ fn mod_name_string(module: &ConfModule) -> String {
     };
     // Handlers are named `<name>-handler`, everything else `<name>.<type>`.
     let sep = if suffix == "handler" { '-' } else { '.' };
-    format!("{}{}{}", module.name.to_lowercase(), sep, suffix)
+    format!("{}{}{}", module.name, sep, suffix)
+}
+
+/// The basename used by all public genmodule headers.
+///
+/// `includename` defaults to the command-line module name in the reference
+/// generator.  It is deliberately not normalised: `Icon` and `icon` are
+/// distinct header paths on a case-sensitive build host.
+fn public_include_name(module: &ConfModule) -> &str {
+    if module.include_name.is_empty() {
+        &module.name
+    } else {
+        &module.include_name
+    }
+}
+
+/// Turns a public header basename into the reference's include-guard token.
+///
+/// `config.c` uppercases the name and maps every non-alphanumeric byte to an
+/// underscore.  Header paths themselves retain the original spelling.
+fn header_guard_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// RESIDENTFLAGS, following the thresholds in writeinclibdefs.c.
@@ -274,14 +350,18 @@ fn default_basename(module_name: &str) -> String {
 fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
     let content = read_source(path).ok()?;
     let stem = path.file_stem()?.to_string_lossy().to_string();
+    let declaration = read_module_declaration(path, &stem);
+    let module_name = declaration
+        .as_ref()
+        .map_or_else(|| stem.clone(), |declaration| declaration.name.clone());
 
     let mut module = ConfModule {
-        name: stem.clone(),
-        lib_base: format!("{}Base", default_basename(&stem)),
+        name: module_name.clone(),
+        lib_base: format!("{}Base", default_basename(&module_name)),
         // Left empty on purpose: the default depends on libbasetypeextern,
         // which may be read later in the config section. Resolved below.
         lib_base_type: String::new(),
-        mod_type: read_mod_type(path, &stem).unwrap_or_default(),
+        mod_type: declaration.map_or_else(String::new, |declaration| declaration.mod_type),
         rel_dir: path
             .parent()
             .and_then(|d| d.strip_prefix(root).ok())
@@ -448,6 +528,13 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
             .clone()
             .unwrap_or_else(|| "struct Library".to_owned());
     }
+    // config.c:1413-1416 defaults `includename` to the command-line module
+    // name. Preserve its spelling: header paths are case-sensitive on some
+    // supported host filesystems, while case-insensitive hosts are handled by
+    // the collision barrier below.
+    if module.include_name.is_empty() {
+        module.include_name = module.name.clone();
+    }
 
     Some(module)
 }
@@ -456,10 +543,12 @@ fn generate_sdk_headers(
     module: &ConfModule,
     out_inc: &Path,
     out_gen: Option<&Path>,
+    publish_public_headers: bool,
 ) -> std::io::Result<()> {
-    let mod_upper = module.name.to_uppercase();
-    let mod_lower = module.name.to_lowercase();
-    let public = exports_public_headers(module);
+    let include_name = public_include_name(module);
+    let include_upper = header_guard_name(include_name);
+    let mod_upper = header_guard_name(&module.name);
+    let public = publish_public_headers && exports_public_headers(module);
 
     let proto_dir = out_inc.join("proto");
     let clib_dir = out_inc.join("clib");
@@ -479,13 +568,13 @@ fn generate_sdk_headers(
     let base = &module.lib_base;
     let mut proto_content = format!(
         "/* Auto-generated by AROS-NG genmodule v0.1.0 */\n\
-         #ifndef PROTO_{mod_upper}_H\n\
-         #define PROTO_{mod_upper}_H\n\n\
+         #ifndef PROTO_{include_upper}_H\n\
+         #define PROTO_{include_upper}_H\n\n\
          #include <exec/types.h>\n\
          #include <aros/system.h>\n\
-         #include <clib/{mod_lower}_protos.h>\n\
-         #include <defines/{mod_lower}.h>\n\n\
-         #if !defined(__NOLIBBASE__) && !defined(__{mod_upper}_NOLIBBASE__)\n\
+         #include <clib/{include_name}_protos.h>\n\
+         #include <defines/{include_name}.h>\n\n\
+         #if !defined(__NOLIBBASE__) && !defined(__{include_upper}_NOLIBBASE__)\n\
          \x20#if !defined({base})\n"
     );
     if ptr == "struct Library *" {
@@ -494,7 +583,7 @@ fn generate_sdk_headers(
         // A non-Library base can still be requested as a plain Library.
         let _ = write!(
             proto_content,
-            "  #ifdef __{mod_upper}_STDLIBBASE__\n\
+            "  #ifdef __{include_upper}_STDLIBBASE__\n\
              \x20  extern struct Library *{base};\n\
              \x20 #else\n\
              \x20  extern {ptr}{base};\n\
@@ -508,17 +597,17 @@ fn generate_sdk_headers(
          \x20 #define __aros_getbase_{base}() ({base})\n\
          \x20#endif\n\
          #endif\n\n\
-         #endif /* PROTO_{mod_upper}_H */\n"
+         #endif /* PROTO_{include_upper}_H */\n"
     );
     if public {
-        write_if_changed(proto_dir.join(format!("{mod_lower}.h")), proto_content)?;
+        write_if_changed(proto_dir.join(format!("{include_name}.h")), proto_content)?;
     }
 
     // 2. clib/<mod>_protos.h
     let mut protos = format!(
         "/* Auto-generated by AROS-NG genmodule v0.1.0 */\n\
-         #ifndef CLIB_{mod_upper}_PROTOS_H\n\
-         #define CLIB_{mod_upper}_PROTOS_H\n\n\
+         #ifndef CLIB_{include_upper}_PROTOS_H\n\
+         #define CLIB_{include_upper}_PROTOS_H\n\n\
          #include <exec/types.h>\n\
          #include <aros/system.h>\n\n\
          {}\n\n\
@@ -541,26 +630,21 @@ fn generate_sdk_headers(
          #endif\n\n\
          #endif /* CLIB_",
     );
-    protos.push_str(&mod_upper);
+    protos.push_str(&include_upper);
     protos.push_str("_PROTOS_H */\n");
 
     if public {
-        write_if_changed(clib_dir.join(format!("{mod_lower}_protos.h")), protos)?;
+        write_if_changed(clib_dir.join(format!("{include_name}_protos.h")), protos)?;
     }
 
     // 3. defines/<mod>.h, including the varargs convenience stubs.
-    let include_name = if module.include_name.is_empty() {
-        mod_lower.clone()
-    } else {
-        module.include_name.to_lowercase()
-    };
-    let defines = varargs::render_defines(&include_name, &module.lib_base, &module.functions);
+    let defines = varargs::render_defines(include_name, &module.lib_base, &module.functions);
     if public {
         write_if_changed(defines_dir.join(format!("{include_name}.h")), &defines.text)?;
         // Function LVOs, a separate header in the reference too.
         write_if_changed(
             defines_dir.join(format!("{include_name}_LVO.h")),
-            varargs::render_lvo(&include_name, &module.functions),
+            varargs::render_lvo(include_name, &module.functions),
         )?;
     }
 
@@ -577,7 +661,7 @@ fn generate_sdk_headers(
         "#include <exec/types.h>".to_owned(),
         "#include <exec/libraries.h>".to_owned(),
         String::new(),
-        format!("#define GM_UNIQUENAME(n) {mod_lower}_ ## n"),
+        format!("#define GM_UNIQUENAME(n) {}_ ## n", module.name),
         format!("#define LIBBASE          {}", module.lib_base),
         format!("#define LIBBASETYPE      {}", module.lib_base_type),
         format!("#define LIBBASETYPEPTR   {} *", module.lib_base_type),
@@ -640,7 +724,10 @@ fn generate_sdk_headers(
     // in different subsystems cannot overwrite each other.
     let libdefs_dir = out_gen.map_or_else(|| out_inc.to_path_buf(), |g| g.join(&module.rel_dir));
     fs::create_dir_all(&libdefs_dir)?;
-    write_if_changed(libdefs_dir.join(format!("{mod_lower}_libdefs.h")), libdefs)?;
+    write_if_changed(
+        libdefs_dir.join(format!("{}_libdefs.h", module.name)),
+        libdefs,
+    )?;
 
     // 5. interface/<Name>.h for every declared OOP interface.
     for iface in &module.interfaces {
@@ -656,6 +743,70 @@ fn generate_sdk_headers(
             existing.push('\n');
         }
         let _ = fs::write(&report, existing);
+    }
+
+    Ok(())
+}
+
+/// Names whose `proto/` and `clib/` paths have more than one potential owner.
+///
+/// The reference build runs genmodule through a concrete `<mmake>-includes`
+/// target.  That target's dependency closure determines which declaration owns
+/// a shared SDK path at that moment.  This broad bootstrap scan has no such
+/// closure, so writing both owners would make the resulting headers depend on
+/// traversal and thread scheduling.  Keep those public paths absent until the
+/// concrete CMake producer materialises the selected declaration.
+fn colliding_public_include_names(modules: &[ConfModule]) -> std::collections::HashSet<String> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for module in modules {
+        if exports_public_headers(module) {
+            // Treat the output namespace as case-insensitive here. The
+            // bootstrap can run on case-insensitive APFS, while the project
+            // still supports case-sensitive hosts where `Icon` and `icon`
+            // are distinct. Withholding both is safer than a host-dependent
+            // race; a concrete includes target later owns the exact spelling.
+            *counts
+                .entry(public_include_name(module).to_ascii_lowercase())
+                .or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect()
+}
+
+/// Removes bootstrap products whose shared name is ambiguous.
+///
+/// `BootstrapSDK.cmake` reruns this scanner during every configuration.  A
+/// stale header from a previous non-conflicting configuration would otherwise
+/// look usable to Ninja even though there is no longer an unambiguous owner.
+fn remove_colliding_public_headers(module: &ConfModule, out_inc: &Path) -> std::io::Result<()> {
+    let include_name = public_include_name(module);
+    for path in [
+        out_inc.join("proto").join(format!("{include_name}.h")),
+        out_inc
+            .join("clib")
+            .join(format!("{include_name}_protos.h")),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    for path in [
+        out_inc.join("defines").join(format!("{include_name}.h")),
+        out_inc
+            .join("defines")
+            .join(format!("{include_name}_LVO.h")),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     Ok(())
@@ -687,10 +838,17 @@ fn main() {
 
     // Parse first, then write: the collision check needs to know which modules
     // actually claim an SDK namespace, and that follows from the parsed config.
-    let modules: Vec<ConfModule> = conf_files
+    let mut modules: Vec<ConfModule> = conf_files
         .par_iter()
         .filter_map(|p| parse_conf(p, &args.scan_dir))
         .collect();
+    modules.sort_by(|left, right| {
+        left.rel_dir
+            .cmp(&right.rel_dir)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let colliding_names = colliding_public_include_names(&modules);
 
     // Only modules that export public headers can collide there. Module-private
     // headers are written per module directory and cannot.
@@ -698,7 +856,10 @@ fn main() {
         std::collections::HashMap::new();
     for m in &modules {
         if exports_public_headers(m) {
-            by_name.entry(m.name.to_lowercase()).or_default().push(m);
+            by_name
+                .entry(public_include_name(m).to_ascii_lowercase())
+                .or_default()
+                .push(m);
         }
     }
     let mut clashes: Vec<String> = by_name
@@ -730,15 +891,35 @@ fn main() {
         let _ = fs::create_dir_all(&args.output_inc);
         let _ = write_if_changed(&report, format!("{}\n", clashes.join("\n")));
         println!(
-            "⚠️  {} module name(s) still share SDK headers (both export a public API) -> {}",
+            "⚠️  {} module name(s) have conflicting public headers; bootstrap output is withheld until a concrete includes target owns it -> {}",
             clashes.len(),
             report.display()
         );
     }
 
-    modules.par_iter().for_each(|module| {
-        let _ = generate_sdk_headers(module, &args.output_inc, args.output_gen.as_deref());
-    });
+    for module in &modules {
+        let conflicting =
+            colliding_names.contains(&public_include_name(module).to_ascii_lowercase());
+        if conflicting {
+            if let Err(error) = remove_colliding_public_headers(module, &args.output_inc) {
+                eprintln!(
+                    "aros-genmodule: failed to remove ambiguous public headers for {}: {error}",
+                    module.rel_dir.display()
+                );
+            }
+        }
+        if let Err(error) = generate_sdk_headers(
+            module,
+            &args.output_inc,
+            args.output_gen.as_deref(),
+            !conflicting,
+        ) {
+            eprintln!(
+                "aros-genmodule: failed to generate headers for {}: {error}",
+                module.rel_dir.display()
+            );
+        }
+    }
 
     println!(
         "⚡ aros-genmodule: Processed {} .conf files -> SDK includes in {}",
@@ -916,5 +1097,92 @@ mod tests {
     #[test]
     fn default_basename_handles_an_empty_name() {
         assert_eq!(default_basename(""), "");
+    }
+
+    #[test]
+    fn explicit_conffile_invocation_beats_the_default_module_name_match() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aros-genmodule-invocation-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let conf = dir.join("icon.conf");
+        fs::write(&conf, "##begin config\n##end config\n").expect("write config");
+        fs::write(
+            dir.join("mmakefile.src"),
+            "%build_module mmake=workbench-libs-icon modname=icon modtype=library files=icon.c\n\
+             %build_module mmake=wanderer-classes-icon modname=Icon modtype=mui conffile=icon.conf files=icon.c\n",
+        )
+        .expect("write make fragment");
+
+        let declaration = read_module_declaration(&conf, "icon").expect("read declaration");
+        assert_eq!(declaration.name, "Icon");
+        assert_eq!(declaration.mod_type, "mui");
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn public_headers_keep_the_exact_include_name_spelling() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aros-genmodule-include-name-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test directory");
+        let module = ConfModule {
+            name: "Icon".to_owned(),
+            include_name: "Icon".to_owned(),
+            lib_base: "IconBase".to_owned(),
+            lib_base_type: "struct Library".to_owned(),
+            mod_type: "mui".to_owned(),
+            // A MUI module with a cdef block owns public headers in the
+            // reference generator too.
+            cdef: "typedef int IconPublic;\n".to_owned(),
+            ..ConfModule::default()
+        };
+
+        generate_sdk_headers(&module, &dir, Some(&dir.join("gen")), true)
+            .expect("generate headers");
+        let proto = dir.join("proto/Icon.h");
+        assert!(proto.exists());
+        let names: Vec<String> = fs::read_dir(dir.join("proto"))
+            .expect("read proto directory")
+            .map(|entry| {
+                entry
+                    .expect("read proto entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(names.iter().any(|name| name == "Icon.h"));
+        assert!(!names.iter().any(|name| name == "icon.h"));
+        let contents = fs::read_to_string(proto).expect("read proto header");
+        assert!(contents.contains("#include <clib/Icon_protos.h>"));
+        assert!(contents.contains("#include <defines/Icon.h>"));
+
+        fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn bootstrap_withholds_case_only_public_header_collisions() {
+        let mut library = module("library", 0, "");
+        library.name = "icon".to_owned();
+        library.include_name = "icon".to_owned();
+        let mut mui = module("mui", 0, "typedef int IconPublic;");
+        mui.name = "Icon".to_owned();
+        mui.include_name = "Icon".to_owned();
+
+        let collisions = colliding_public_include_names(&[library, mui]);
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions.contains("icon"));
     }
 }
