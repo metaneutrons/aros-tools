@@ -6952,6 +6952,19 @@ fn parse_mmakefile_impl(
                 continue;
             }
         };
+        let always_cxx_link =
+            match resolve_yes_argument(rest, "alwayscxxlink", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            };
         let target_dir = match resolve_module_target_dir(
             rest,
             &scope,
@@ -7146,6 +7159,7 @@ fn parse_mmakefile_impl(
             empty_archive: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
+            always_cxx_link,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -7278,6 +7292,7 @@ fn parse_mmakefile_impl(
             empty_archive: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
+            always_cxx_link: false,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -7581,6 +7596,22 @@ fn parse_mmakefile_impl(
         let use_libs =
             macro_arg(&inv.args, "uselibs").map_or_else(Vec::new, |l| expand_file_list(&l, &vars));
         let is_simple_module = matches!(module_type, ModuleType::SimpleModule);
+        let always_cxx_link = if is_simple_module {
+            match resolve_yes_argument(&inv.args, "alwayscxxlink", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
         let declared_mod_type = if is_simple_module {
             macro_arg(&inv.args, "modtype")
         } else {
@@ -7699,6 +7730,7 @@ fn parse_mmakefile_impl(
             empty_archive,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
+            always_cxx_link,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,

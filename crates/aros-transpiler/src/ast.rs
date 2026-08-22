@@ -78,6 +78,11 @@ pub struct TargetDefinition {
     /// configures and therefore cannot be classified by probing extensions.
     #[serde(default)]
     pub cxx_source_files: Vec<String>,
+    /// `alwayscxxlink=yes` selects the C++ linker even when every declared
+    /// translation unit is C.  Mesa HIDDs use this to retain the C++ runtime
+    /// link contract of the legacy module macro.
+    #[serde(default)]
+    pub always_cxx_link: bool,
     /// Objective-C source stems or paths from `objcfiles=`.
     #[serde(default)]
     pub objc_source_files: Vec<String>,
