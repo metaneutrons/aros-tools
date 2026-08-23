@@ -1,5 +1,6 @@
 pub mod arch_sources;
 pub mod ast;
+pub mod binary_objects;
 pub mod catalogs;
 pub mod copy_includes;
 pub mod default_link_set;

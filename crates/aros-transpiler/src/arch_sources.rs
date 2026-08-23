@@ -37,6 +37,9 @@ pub struct ArchSourceDecl {
     /// object root and so inherit these overrides; see
     /// `DependencyGraph::resolve_arch_sources`.
     pub maindir: Option<String>,
+    /// `modname=`: needed with maindir to name the arch object root, which is
+    /// `$(GENDIR)/<maindir>/<modname>/arch` (config/make.tmpl:3296).
+    pub modname: Option<String>,
     /// `arch=`: the architecture tag this declaration applies to.
     pub tag: String,
     /// Directory holding the sources, relative to the source root.
@@ -56,6 +59,25 @@ pub struct ArchSourceDecl {
 }
 
 /// Collects `VAR := / = / += value` file lists, keeping plain names only.
+/// Expands a single `$(VAR)` from the declaring file's own variables.
+///
+/// `maindir=` and `modname=` are written either literally
+/// (arch/x86_64-all/stdc) or through a file-local variable
+/// (arch/x86_64-pc/kernel says `maindir=$(MAINDIR)`). Both name the arch object
+/// root, so a raw value silently fails to match it.
+fn file_local(value: &Option<String>, raw: &HashMap<String, String>) -> Option<String> {
+    let stated = value.as_ref()?.trim();
+    if stated.is_empty() {
+        return None;
+    }
+    let Some(name) = stated.strip_prefix("$(").and_then(|v| v.strip_suffix(')')) else {
+        return (!stated.contains('$')).then(|| stated.to_owned());
+    };
+    let resolved = raw.get(name)?.trim();
+    (!resolved.is_empty() && !resolved.contains('$') && !resolved.contains(char::is_whitespace))
+        .then(|| resolved.to_owned())
+}
+
 /// State of one `ifeq`/`ifneq` block.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Branch {
@@ -129,6 +151,7 @@ fn collect_file_vars(
     content: &str,
     target: Option<&TargetContext>,
     undecided: &mut Vec<String>,
+    raw: &mut HashMap<String, String>,
 ) -> HashMap<String, Vec<String>> {
     let mut vars: HashMap<String, Vec<String>> = HashMap::new();
     let mut pending: Option<String> = None;
@@ -216,6 +239,21 @@ fn collect_file_vars(
         if name.is_empty() || name.contains(char::is_whitespace) {
             continue;
         }
+        // plain_tokens keeps only usable source base names, so a path value
+        // like `MAINDIR := rom/kernel` is filtered out of `vars` entirely.
+        // Keep the raw right-hand side too: maindir= is written through such a
+        // variable, and without it the arch object root cannot be named.
+        let trimmed_rhs = rhs.trim();
+        if append {
+            raw.entry(name.clone())
+                .and_modify(|value| {
+                    value.push(' ');
+                    value.push_str(trimmed_rhs);
+                })
+                .or_insert_with(|| trimmed_rhs.to_owned());
+        } else {
+            raw.insert(name.clone(), trimmed_rhs.to_owned());
+        }
         let entry = vars.entry(name.clone()).or_default();
         if !append {
             entry.clear();
@@ -288,7 +326,8 @@ pub fn collect_arch_sources(
 ) -> (Vec<ArchSourceDecl>, Vec<String>) {
     let dir = rel_dir.to_string_lossy().replace('\\', "/");
     let mut undecided = Vec::new();
-    let vars = collect_file_vars(content, target, &mut undecided);
+    let mut raw_vars: HashMap<String, String> = HashMap::new();
+    let vars = collect_file_vars(content, target, &mut undecided, &mut raw_vars);
     let mut out = Vec::new();
     let mut skipped: Vec<String> = undecided
         .into_iter()
@@ -328,7 +367,8 @@ pub fn collect_arch_sources(
 
         out.push(ArchSourceDecl {
             mainmmake,
-            maindir: crate::includes::arg_value(&body, "maindir"),
+            maindir: file_local(&crate::includes::arg_value(&body, "maindir"), &raw_vars),
+            modname: file_local(&crate::includes::arg_value(&body, "modname"), &raw_vars),
             tag,
             dir: dir.clone(),
             files,

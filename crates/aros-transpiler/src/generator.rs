@@ -1462,6 +1462,42 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out).unwrap();
     }
 
+    // A flat binary wrapped as a relocatable object, and the target that links
+    // it. config/make.tmpl:1552.
+    if !graph.binary_objects.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Flat binaries wrapped as objects (from %rule_link_binary)\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        for decl in &graph.binary_objects {
+            writeln!(out, "aros_link_binary_object(").unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&decl.name)).unwrap();
+            writeln!(out, "    OUTPUT {}", cmake_arg(&decl.output)).unwrap();
+            writeln!(
+                out,
+                "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",
+                decl.directory
+            )
+            .unwrap();
+            let sources: Vec<String> = decl.sources.iter().map(|s| cmake_arg(s)).collect();
+            writeln!(out, "    SOURCES {}", sources.join(" ")).unwrap();
+            writeln!(out, "    START {}", cmake_arg(&decl.start)).unwrap();
+            if !decl.ldflags.is_empty() {
+                let flags: Vec<String> = decl.ldflags.iter().map(|f| cmake_arg(f)).collect();
+                writeln!(out, "    LDFLAGS {}", flags.join(" ")).unwrap();
+            }
+            writeln!(out, "    CONSUMER {}", cmake_arg(&decl.consumer)).unwrap();
+            if !decl.arch_tag.is_empty() {
+                writeln!(out, "    ARCH_TAG {}", cmake_arg(&decl.arch_tag)).unwrap();
+            }
+            writeln!(out, ")").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
     // The compiler spec's default link set, in spec order. Declared here and
     // applied by CMakeLists.txt once every target exists, because the archives
     // and their consumers are created by this same file.

@@ -38,7 +38,7 @@ const MAX_DEPTH_FOR_IMMEDIATE_EXPANSION: usize = 16;
 /// A dot survives: CMake admits it, and dropping it renamed the binary. The
 /// reference builds `atheros5000.device` and `wasapiaudio.dll`, which came out
 /// as `atheros5000_device` and `wasapiaudio_dll`.
-fn sanitize_ident(s: &str) -> String {
+pub(crate) fn sanitize_ident(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
@@ -8572,6 +8572,32 @@ fn parse_mmakefile_impl(
         }
     }
 
+    // %rule_link_binary needs the file's targets, to check an explicit mmake=,
+    // and the %build_archspecific object roots, which is how the reference
+    // attaches an unnamed one.
+    let known_target_names: Vec<String> = targets.iter().map(|t| t.mmake_name.clone()).collect();
+    let arch_object_roots: Vec<(String, String, String)> = arch_sources
+        .iter()
+        .filter_map(|decl| {
+            let maindir = decl.maindir.as_ref()?.trim_matches('/');
+            let modname = decl.modname.as_ref()?;
+            Some((
+                format!("${{AROS_BUILD_DIR}}/gen/{maindir}/{modname}/arch"),
+                decl.mainmmake.clone(),
+                decl.tag.clone(),
+            ))
+        })
+        .collect();
+    let (binary_objects, skipped_binary_objects) = crate::binary_objects::collect_binary_objects(
+        &content,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        &known_target_names,
+        &arch_object_roots,
+    );
+
     Ok(ParsedMmakefile {
         targets,
         external_cmake,
@@ -8601,6 +8627,8 @@ fn parse_mmakefile_impl(
         flags: flag_set,
         arch_sources,
         skipped_arch_sources,
+        binary_objects,
+        skipped_binary_objects,
         fetches,
         skipped_fetches,
         skipped_make_opts,

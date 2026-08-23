@@ -532,6 +532,10 @@ pub struct ParsedMmakefile {
     pub flags: FlagSet,
     /// `%build_archspecific` declarations contributed by this file.
     pub arch_sources: Vec<ArchSourceDecl>,
+    /// `%rule_link_binary`: flat binaries wrapped as relocatable objects.
+    pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
+    /// The ones that could not be resolved, for reporting.
+    pub skipped_binary_objects: Vec<String>,
     /// Declarations whose file list could not be resolved, for reporting.
     pub skipped_arch_sources: Vec<String>,
     /// `%fetch` declarations for third-party sources.

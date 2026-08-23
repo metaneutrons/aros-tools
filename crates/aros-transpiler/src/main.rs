@@ -174,6 +174,7 @@ fn main() -> Result<()> {
     let mut skipped_programs: Vec<String> = Vec::new();
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
+    let mut skipped_binary_objects: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
@@ -209,6 +210,8 @@ fn main() -> Result<()> {
         graph.add_catalogs(parsed.catalogs);
         skipped_catalogs.extend(parsed.skipped_catalogs);
         skipped_meta_rules.extend(parsed.skipped_meta_rules);
+        graph.add_binary_objects(parsed.binary_objects);
+        skipped_binary_objects.extend(parsed.skipped_binary_objects);
         graph.add_arch_decls(parsed.arch_decls);
         graph.add_copy_includes(parsed.copy_includes);
         skipped_copy_directories.extend(graph.add_copy_directories(parsed.copy_directories));
@@ -302,6 +305,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "skipped-binary-objects.txt",
+        skipped_binary_objects,
+        "%rule_link_binary declaration(s) could not be resolved",
+    );
     write_report(
         &args.output,
         "inherited-arch-sources.txt",
