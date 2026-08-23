@@ -816,6 +816,49 @@ fn classify(tok: &str, set: &mut FlagSet) {
         return;
     }
 
+    // An instruction-set feature switch, for the same reason -march= is kept:
+    // it decides which intrinsics compile at all. arch/i386-all/hidd/gfx builds
+    // rgbconv_sse.c with -msse2 and rgbconv_avx.c with -mavx2, and without the
+    // flag neither translation unit compiles.
+    //
+    // A vocabulary rather than a shape, and deliberately: `-m` also spells
+    // switches that change the ABI or the target rather than the instruction set
+    // -- -m32, -mabi=, -mcmodel=, -mno-red-zone -- and importing one of those
+    // for a single lane silently changes what its objects are. An unlisted
+    // spelling stays in the skipped-flags report, which fails loudly. The four
+    // the tree uses today are -msse2, -mavx, -mavx2 and -m68020.
+    if matches!(
+        tok,
+        "-mmmx"
+            | "-msse"
+            | "-msse2"
+            | "-msse3"
+            | "-mssse3"
+            | "-msse4"
+            | "-msse4.1"
+            | "-msse4.2"
+            | "-mavx"
+            | "-mavx2"
+            | "-mavx512f"
+            | "-mno-mmx"
+            | "-mno-sse"
+            | "-mno-sse2"
+            | "-mno-sse3"
+            | "-mno-ssse3"
+            | "-mno-sse4"
+            | "-mno-avx"
+            | "-mno-avx2"
+            | "-m68000"
+            | "-m68010"
+            | "-m68020"
+            | "-m68030"
+            | "-m68040"
+            | "-m68060"
+    ) {
+        push_unique(&mut set.compile_options, tok.to_owned());
+        return;
+    }
+
     // These options are semantic inputs to Mesa's C compilation, rather than
     // a broad warning-policy import. Keep only the exact audited spellings;
     // near matches remain visible in the skipped-flags report.
