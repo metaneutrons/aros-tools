@@ -127,7 +127,14 @@ pub enum MakeExprError {
     UnsupportedFunction { name: String },
     /// A single-character or automatic Make reference cannot be decided here.
     UnsupportedReference { reference: String },
-    /// A glob depends on a value which is intentionally deferred to CMake.
+    /// A glob over a build-tree location the transpiler does not resolve, so
+    /// the fragment containing it is dropped. Named "deferred" because the
+    /// intent was for CMake to expand it; nothing does, and the glob results
+    /// feed further Make functions (`:%.c=%`, `filter-out`, `addprefix`) that
+    /// only this evaluator can apply, so an opaque marker would not work
+    /// either. The real blocker is ordering: these globs cover Ports content
+    /// that a build step fetches, and a source list is needed at configure
+    /// time.
     DeferredWildcard { pattern: String },
     /// A glob pattern or one of its filesystem results was invalid.
     Wildcard { pattern: String, detail: String },
@@ -176,7 +183,11 @@ impl fmt::Display for MakeExprError {
                 write!(f, "unsupported Make reference `{reference}`")
             }
             Self::DeferredWildcard { pattern } => {
-                write!(f, "wildcard pattern is deferred to CMake: `{pattern}`")
+                write!(
+                    f,
+                    "wildcard over an unresolved build-tree path was dropped, \
+                     not deferred: `{pattern}`"
+                )
             }
             Self::Wildcard { pattern, detail } => {
                 write!(f, "cannot evaluate wildcard `{pattern}`: {detail}")
