@@ -170,9 +170,9 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
         let asm_text = read_lossy(&asm);
         match locate(&kickstart, &asm_text, &report.faults) {
             Ok(lines) => report.resolved = lines,
-            Err(error) => report
-                .untested
-                .push(format!("the faulting address could not be resolved: {error}")),
+            Err(error) => report.untested.push(format!(
+                "the faulting address could not be resolved: {error}"
+            )),
         }
     }
 
@@ -279,7 +279,9 @@ fn read_failures(serial: &str, trace: &str) -> Vec<String> {
     while let Some(line) = lines.next() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("[ELF Loader] Undefined symbol ") {
-            *undefined.entry(rest.trim_matches('\'').to_owned()).or_default() += 1;
+            *undefined
+                .entry(rest.trim_matches('\'').to_owned())
+                .or_default() += 1;
             continue;
         }
         if line.contains("Relocation error in section") {
@@ -383,7 +385,10 @@ fn read_faults(trace: &str) -> Vec<Fault> {
 /// every allocatable one, plus the string and symbol tables, honouring each
 /// section's own alignment. Writable sections go to a second block, which is not
 /// modelled here: a faulting instruction pointer is in code.
-fn packed_readonly(object: &aros_common::elf::Object, file: &[u8]) -> (Vec<(String, u64, u64)>, Vec<u8>) {
+fn packed_readonly(
+    object: &aros_common::elf::Object,
+    file: &[u8],
+) -> (Vec<(String, u64, u64)>, Vec<u8>) {
     let mut packed: Vec<u8> = Vec::new();
     let mut placed = Vec::new();
     for section in &object.sections {
@@ -492,9 +497,7 @@ fn describe(
             .symbols
             .iter()
             .filter(|symbol| symbol.home == aros_common::elf::Home::Section(index))
-            .filter(|symbol| {
-                symbol.value <= offset && offset < symbol.value + symbol.size.max(1)
-            })
+            .filter(|symbol| symbol.value <= offset && offset < symbol.value + symbol.size.max(1))
             .min_by_key(|symbol| symbol.size)
     });
     let mut text = format!(
@@ -502,12 +505,7 @@ fn describe(
         fault.vector, fault.cpl, fault.ip
     );
     if let Some(symbol) = symbol {
-        let _ = write!(
-            text,
-            " = {}+{:#x}",
-            symbol.name,
-            offset - symbol.value
-        );
+        let _ = write!(text, " = {}+{:#x}", symbol.name, offset - symbol.value);
     } else {
         text.push_str(" (no symbol covers it)");
     }
@@ -613,7 +611,9 @@ mod tests {
             "{failures:?}"
         );
         assert!(
-            failures.iter().any(|line| line.contains("refused a module")),
+            failures
+                .iter()
+                .any(|line| line.contains("refused a module")),
             "{failures:?}"
         );
     }
@@ -626,9 +626,7 @@ mod tests {
                       \n";
         let failures = read_failures(serial, "");
         assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("APIC descriptor")),
+            failures.iter().any(|line| line.contains("APIC descriptor")),
             "{failures:?}"
         );
     }

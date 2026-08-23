@@ -559,7 +559,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "endif()\n").unwrap();
     }
 
-
     // Capability-checked Python/stdout generators are declared before their
     // compile targets.  This registers each build-tree output while source
     // lanes are still being resolved, so a generated `.s` file is retained on
@@ -581,7 +580,11 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
         entries.sort();
         if !entries.is_empty() {
-            writeln!(out, "# ---- Per-lane codegen options (USER_CFLAGS of a %build_archspecific) ----").unwrap();
+            writeln!(
+                out,
+                "# ---- Per-lane codegen options (USER_CFLAGS of a %build_archspecific) ----"
+            )
+            .unwrap();
             writeln!(out, "aros_set_arch_source_options(").unwrap();
             for entry in entries {
                 writeln!(out, "    {}", cmake_arg(&entry)).unwrap();
@@ -597,9 +600,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         let mut named: Vec<(&String, &String)> = graph
             .targets
             .iter()
-            .filter_map(|(mmake, target)| {
-                target.config_file.as_ref().map(|config| (mmake, config))
-            })
+            .filter_map(|(mmake, target)| target.config_file.as_ref().map(|config| (mmake, config)))
             .collect();
         named.sort();
         if !named.is_empty() {

@@ -144,13 +144,15 @@ pub fn discover(sections: &[String]) -> (Vec<SymbolSet>, Vec<String>) {
             Some(Err(reason)) => skipped.push(reason),
             Some(Ok(parsed)) => {
                 let base = parsed.section;
-                let entry = found.entry(parsed.name.clone()).or_insert_with(|| SymbolSet {
-                    name: parsed.name,
-                    section: base.clone(),
-                    priorities: Vec::new(),
-                    bare: false,
-                    aros_set: parsed.aros_set,
-                });
+                let entry = found
+                    .entry(parsed.name.clone())
+                    .or_insert_with(|| SymbolSet {
+                        name: parsed.name,
+                        section: base.clone(),
+                        priorities: Vec::new(),
+                        bare: false,
+                        aros_set: parsed.aros_set,
+                    });
                 if entry.section != base {
                     skipped.push(format!(
                         "{section}: set {} already comes from {}, and one set \

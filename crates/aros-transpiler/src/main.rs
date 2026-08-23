@@ -311,8 +311,7 @@ fn main() -> Result<()> {
             match tokens.as_slice() {
                 [] => {}
                 ["-T", script] => {
-                    graph.kickstart_kobj_ldscript =
-                        vec!["-T".to_owned(), (*script).to_owned()];
+                    graph.kickstart_kobj_ldscript = vec!["-T".to_owned(), (*script).to_owned()];
                 }
                 _ => unresolved_kobj_ldscript.push(format!(
                     "KERNEL_KOBJ_LDSCRIPT is `{value}`, and only an empty value \
@@ -320,10 +319,8 @@ fn main() -> Result<()> {
                 )),
             }
         }
-        None => unresolved_kobj_ldscript.push(
-            "KERNEL_KOBJ_LDSCRIPT could not be resolved from config/make.cfg.in"
-                .to_owned(),
-        ),
+        None => unresolved_kobj_ldscript
+            .push("KERNEL_KOBJ_LDSCRIPT could not be resolved from config/make.cfg.in".to_owned()),
     }
     // DirVars cannot decide `ifeq ($(AROS_TARGET_ARCH),amiga)`, because this
     // build supplies the arch as a CMake expression, so the amiga-m68k override

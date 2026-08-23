@@ -776,9 +776,7 @@ async fn main() -> Result<()> {
                     let mut found: Vec<PathBuf> = entries
                         .flatten()
                         .map(|entry| entry.path())
-                        .filter(|path| {
-                            path.extension().is_some_and(|extension| extension == "pkg")
-                        })
+                        .filter(|path| path.extension().is_some_and(|extension| extension == "pkg"))
                         .collect();
                     found.sort();
                     module_list.extend(found);

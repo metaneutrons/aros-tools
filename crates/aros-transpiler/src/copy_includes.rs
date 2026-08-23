@@ -1465,24 +1465,35 @@ $(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
     fn the_udis86_itab_rule_is_modelled_not_reported() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
         let rel = "arch/all-pc/udis86";
-        let content =
-            aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
+        let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
         let scan = collect_copy_includes(&content, std::path::Path::new(rel));
 
-        assert_eq!(scan.skipped_script_outputs.len(), 0, "{:?}", scan.skipped_script_outputs);
+        assert_eq!(
+            scan.skipped_script_outputs.len(),
+            0,
+            "{:?}",
+            scan.skipped_script_outputs
+        );
         assert_eq!(scan.script_outputs.len(), 1, "{:?}", scan.script_outputs);
         let decl = &scan.script_outputs[0];
         assert_eq!(
             decl.output,
             "${CMAKE_BINARY_DIR}/gen/arch/all-pc/udis86/libudis86/itab.c"
         );
-        assert!(decl.script.ends_with("scripts/ud_itab.py"), "{}", decl.script);
+        assert!(
+            decl.script.ends_with("scripts/ud_itab.py"),
+            "{}",
+            decl.script
+        );
         assert_eq!(decl.arguments.len(), 2, "{:?}", decl.arguments);
         assert!(decl.arguments[0].ends_with("docs/x86/optable.xml"));
         assert!(decl.arguments[1].ends_with("gen/arch/all-pc/udis86/libudis86"));
         // The rule stays out of the unmodelled report now that it is modelled.
         assert!(
-            !scan.generated_files.iter().any(|note| note.contains("itab.c")),
+            !scan
+                .generated_files
+                .iter()
+                .any(|note| note.contains("itab.c")),
             "{:?}",
             scan.generated_files
         );

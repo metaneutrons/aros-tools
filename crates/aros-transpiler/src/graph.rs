@@ -1258,12 +1258,7 @@ impl DependencyGraph {
                     // with different flags share one tag.
                     for opt in &d.compile_options {
                         for file in &d.files {
-                            let e = (
-                                d.tag.clone(),
-                                d.dir.clone(),
-                                file.clone(),
-                                opt.clone(),
-                            );
+                            let e = (d.tag.clone(), d.dir.clone(), file.clone(), opt.clone());
                             if !target.arch_source_options.contains(&e) {
                                 target.arch_source_options.push(e);
                             }

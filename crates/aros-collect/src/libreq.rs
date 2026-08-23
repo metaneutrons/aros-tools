@@ -220,7 +220,10 @@ mod tests {
             symbol: "__aros_libreq_SysBase".to_owned(),
             version: 50,
         }]);
-        assert!(text.contains("PROVIDE(__aros_libreq_SysBase = .);"), "{text}");
+        assert!(
+            text.contains("PROVIDE(__aros_libreq_SysBase = .);"),
+            "{text}"
+        );
         assert!(text.contains("LONG(50)"), "{text}");
     }
 }

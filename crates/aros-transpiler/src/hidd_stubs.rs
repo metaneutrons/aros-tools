@@ -177,13 +177,15 @@ mod tests {
         let (decls, skipped) = collect_fixture("%make_hidd_stubs hidd=nothing\n");
         assert!(decls.is_empty(), "{decls:#?}");
         assert_eq!(skipped.len(), 1, "{skipped:?}");
-        assert!(skipped[0].contains("cannot resolve $(STUBS)"), "{skipped:?}");
+        assert!(
+            skipped[0].contains("cannot resolve $(STUBS)"),
+            "{skipped:?}"
+        );
     }
 
     #[test]
     fn a_declaration_with_an_empty_stubs_variable_is_reported() {
-        let (decls, skipped) =
-            collect_fixture("STUBS :=\n%make_hidd_stubs hidd=nothing\n");
+        let (decls, skipped) = collect_fixture("STUBS :=\n%make_hidd_stubs hidd=nothing\n");
         assert!(decls.is_empty(), "{decls:#?}");
         assert_eq!(skipped.len(), 1, "{skipped:?}");
         assert!(skipped[0].contains("empty $(STUBS)"), "{skipped:?}");
