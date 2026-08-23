@@ -3038,9 +3038,7 @@ fn parse_configure_build_invocation(
         });
     }
 
-    Err(format!(
-        "unsupported configure-style capability (modelled: tools/ADFlib mmake=host-adflib,linklib-adflib; workbench/network/WirelessManager/wpa_supplicant mmake=workbench-network-wirelessmanager)"
-    ))
+    Err("unsupported configure-style capability (modelled: tools/ADFlib mmake=host-adflib,linklib-adflib; workbench/network/WirelessManager/wpa_supplicant mmake=workbench-network-wirelessmanager)".to_owned())
 }
 
 /// Parses the one current AHI subsystem declaration without turning the

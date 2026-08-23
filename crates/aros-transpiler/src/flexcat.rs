@@ -6,8 +6,11 @@
 //! ```make
 //! locale.h: locale.c
 //! locale.c: locale/Module.pot C_h.sd C_c.sd
-//! 	$(FLEXCAT) locale/Module.pot locale.h=C_h.sd locale.c=C_c.sd
+//!     $(FLEXCAT) locale/Module.pot locale.h=C_h.sd locale.c=C_c.sd
 //! ```
+//!
+//! The recipe line begins with a tab in the file, as Make requires; it is
+//! spelled with spaces above so the doc comment stays tab-free.
 //!
 //! The generated `locale.c` is a real translation unit and `locale.h` exposes
 //! `OpenCat`, `CloseCat`, `tr`, and the `MSG_*` constants used by the module.
@@ -178,10 +181,7 @@ pub fn collect_flexcat_source_rules(
             continue;
         }
 
-        let (catalog_destination, catalog_name, catalog_source_dir, languages) = catalog_outputs(
-            &rules, root, rel_dir, scope, dirs,
-        )
-        .unwrap_or((None, None, None, Vec::new()));
+        let catalog = catalog_outputs(&rules, root, rel_dir, scope, dirs);
 
         let rendered = cmake_source_path(&description, root).zip(
             cmake_source_path(&header_template, root)
@@ -204,10 +204,10 @@ pub fn collect_flexcat_source_rules(
             description,
             header_template,
             source_template,
-            catalog_destination,
-            catalog_name,
-            catalog_source_dir,
-            languages,
+            catalog_destination: catalog.destination,
+            catalog_name: catalog.name,
+            catalog_source_dir: catalog.source_dir,
+            languages: catalog.languages,
             consumers: Vec::new(),
         });
     }
@@ -276,13 +276,25 @@ fn flexcat_recipe(rule: &Rule<'_>) -> Option<(String, Vec<(String, String)>)> {
     (outputs.len() == 2).then_some((description, outputs))
 }
 
+/// The catalog products that accompany a hand-written FlexCat source rule.
+/// Each field stays absent unless the declaring directory carries exactly one
+/// `.catalog` rule of the accepted shape; naming them keeps the four-place
+/// tuple of `Option`s out of the signature.
+#[derive(Default)]
+struct CatalogOutputs {
+    destination: Option<String>,
+    name: Option<String>,
+    source_dir: Option<String>,
+    languages: Vec<String>,
+}
+
 fn catalog_outputs(
     rules: &[Rule<'_>],
     root: &Path,
     rel_dir: &Path,
     scope: &VarScope,
     dirs: &DirVars,
-) -> Option<(Option<String>, Option<String>, Option<String>, Vec<String>)> {
+) -> CatalogOutputs {
     let mut matches = Vec::new();
     for rule in rules {
         let target = rule.target.trim();
@@ -343,10 +355,16 @@ fn catalog_outputs(
             languages,
         ));
     }
-    (matches.len() == 1).then(|| {
-        let (destination, name, source_dir, languages) = matches.pop().expect("one catalog match");
-        (Some(destination), Some(name), Some(source_dir), languages)
-    })
+    if matches.len() != 1 {
+        return CatalogOutputs::default();
+    }
+    let (destination, name, source_dir, languages) = matches.pop().expect("one catalog match");
+    CatalogOutputs {
+        destination: Some(destination),
+        name: Some(name),
+        source_dir: Some(source_dir),
+        languages,
+    }
 }
 
 fn is_po_catalog_recipe(recipe: &str) -> bool {

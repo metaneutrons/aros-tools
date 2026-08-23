@@ -523,7 +523,7 @@ fn traced_block(line: &str) -> Option<(u64, Vec<u8>)> {
     let (address, rest) = rest.split_once(':')?;
     let address = u64::from_str_radix(address.trim(), 16).ok()?;
     let mut bytes = Vec::new();
-    for token in rest.trim().split_whitespace() {
+    for token in rest.split_whitespace() {
         if token.len() != 2 {
             break;
         }
