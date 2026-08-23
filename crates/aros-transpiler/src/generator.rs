@@ -595,6 +595,33 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     // lanes are still being resolved, so a generated `.s` file is retained on
     // a clean configure even though it does not exist yet. Consumers are bound
     // in a second phase after all concrete targets have been created.
+    // The genmodule config a declaration names with `conffile=`. Declared
+    // before every target, because the module builders consult it while they
+    // are read.
+    {
+        let mut named: Vec<(&String, &String)> = graph
+            .targets
+            .iter()
+            .filter_map(|(mmake, target)| {
+                target.config_file.as_ref().map(|config| (mmake, config))
+            })
+            .collect();
+        named.sort();
+        if !named.is_empty() {
+            writeln!(out, "# ---- Explicit genmodule configs (conffile=) ----").unwrap();
+            for (mmake, config) in named {
+                writeln!(
+                    out,
+                    "aros_set_module_config({} {})",
+                    cmake_arg(mmake),
+                    cmake_arg(config)
+                )
+                .unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+    }
+
     // Files an in-tree script generates. Emitted here, beside the fetched
     // generators and before every target, because aros_resolve_sources consults
     // the generator registry before it probes the filesystem and a generated

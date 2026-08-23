@@ -7674,6 +7674,46 @@ fn parse_mmakefile_impl(
         let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
             .then(|| mod_type_owned.clone());
 
+        // `conffile=` names the genmodule config, and 81 of the 83 declarations
+        // that state one give a file whose stem is not modname:
+        // con_handler.conf for modname=con, VMM_Handler.conf for modname=VMM.
+        // Without carrying it, CMake derives `<modname>.conf`, finds nothing and
+        // generates no scaffolding at all -- silently, because a module with no
+        // config is a legitimate hand-written one.
+        let config_file = macro_arg(&inv.args, "conffile").and_then(|raw| {
+            let raw = raw.trim().trim_matches('"');
+            match evaluate_make_expr(raw, &expression_context) {
+                Ok(value) => {
+                    let value = value.trim().trim_matches('"').to_owned();
+                    if value.is_empty() || value.contains(char::is_whitespace) {
+                        skipped_programs.push(format!(
+                            "{}: %{} mmake={mmake_raw} conffile={raw} is not one path",
+                            rel_dir.display(),
+                            inv.name
+                        ));
+                        None
+                    } else if value.starts_with("${") || value.starts_with('/') {
+                        Some(value)
+                    } else {
+                        // Relative to the declaring directory, as Make reads it.
+                        Some(format!(
+                            "${{CMAKE_SOURCE_DIR}}/{}/{value}",
+                            rel_dir.display()
+                        ))
+                    }
+                }
+                Err(error) => {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} conffile={raw} cannot be \
+                         evaluated: {error}",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    None
+                }
+            }
+        });
+
         // Upstream creates the client archive when `<mod>_LINKLIB` is
         // non-empty, and make.tmpl derives that from the file set, not from
         // `linklibname=`:
@@ -7837,6 +7877,7 @@ fn parse_mmakefile_impl(
             declared_mod_type,
             mod_suffix,
             linklib_name,
+            config_file,
             genmodule_linklibs,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
@@ -8001,6 +8042,7 @@ fn parse_mmakefile_impl(
             declared_mod_type: None,
             mod_suffix: None,
             linklib_name: None,
+            config_file: None,
             genmodule_linklibs: None,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
@@ -8458,6 +8500,7 @@ fn parse_mmakefile_impl(
             declared_mod_type,
             mod_suffix,
             linklib_name: None,
+            config_file: None,
             genmodule_linklibs: None,
             canonical_linklib_output,
             canonical_linklib_eligible,

@@ -124,6 +124,11 @@ pub struct TargetDefinition {
     /// so `uselibs` can resolve both spellings to the same generated archive.
     #[serde(default)]
     pub linklib_name: Option<String>,
+    /// The genmodule config a declaration names with `conffile=`, as a CMake
+    /// path. Absent means `<modname>.conf` beside the declaration, which is what
+    /// a declaration without `conffile=` means.
+    #[serde(default)]
+    pub config_file: Option<String>,
     /// Full-module normal/relative client archive composition.
     #[serde(default)]
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,
