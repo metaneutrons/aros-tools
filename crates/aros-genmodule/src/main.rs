@@ -67,6 +67,17 @@ struct Args {
     #[arg(long)]
     output_gen: Option<PathBuf>,
 
+    /// Where to write the list of library bases this tree declares, one per
+    /// line, sorted.
+    ///
+    /// A relocatable AROS module leaves its library bases undefined on purpose:
+    /// the loader sets them. `ninja symbol-audit` needs to know which names
+    /// those are, or its count conflates "the loader will fill this in" with
+    /// "nothing provides this". SysBase alone accounted for 611 of 9268
+    /// references.
+    #[arg(long)]
+    output_libbases: Option<PathBuf>,
+
     /// Root for the module link library sources (e.g. build/pc-x86_64/linklib).
     ///
     /// One directory per module, holding one C file per stack-call stub plus
@@ -994,6 +1005,24 @@ fn main() {
         conf_files.len(),
         args.output_inc.display()
     );
+    if let Some(path) = args.output_libbases.as_deref() {
+        // Every declared base, including modules whose headers are withheld for
+        // a name collision: the base is still real and still left to the loader.
+        let mut bases: Vec<&str> = modules.iter().map(|m| m.lib_base.as_str()).collect();
+        bases.sort_unstable();
+        bases.dedup();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match write_if_changed(path, &(bases.join("\n") + "\n")) {
+            Ok(_) => println!(
+                "🏷️  aros-genmodule: {} library base(s) -> {}",
+                bases.len(),
+                path.display()
+            ),
+            Err(error) => eprintln!("aros-genmodule: failed to write library bases: {error}"),
+        }
+    }
     if let Some(root) = args.output_linklib.as_deref() {
         println!(
             "🔗 aros-genmodule: {linklib_files} link library source(s) in {}",
