@@ -559,36 +559,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "endif()\n").unwrap();
     }
 
-    // The AHI subsystem is another configure-style build syntactically, but
-    // it needs a fixed AROS source/product closure and the private host sfdc
-    // compiler.  Its helper intentionally accepts neither arbitrary options
-    // nor a command string, so do not collapse it into aros_build_configure.
-    if !graph.ahi_builds.is_empty() {
-        writeln!(
-            out,
-            "# =============================================================================\n\
-             # Capability-checked AHI subsystem builds\n\
-             # ============================================================================="
-        )
-        .unwrap();
-        let mut declarations: Vec<_> = graph.ahi_builds.iter().collect();
-        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
-        for declaration in declarations {
-            writeln!(out, "aros_build_ahi(").unwrap();
-            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
-            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
-            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
-            writeln!(
-                out,
-                "    INSTALL_PREFIX {}",
-                cmake_arg(&declaration.install_prefix)
-            )
-            .unwrap();
-            writeln!(out, "    HOST_SFDC {}", cmake_arg(&declaration.host_sfdc)).unwrap();
-            writeln!(out, "    HOST_PERL {}", cmake_arg(&declaration.host_perl)).unwrap();
-            writeln!(out, ")\n").unwrap();
-        }
-    }
 
     // Capability-checked Python/stdout generators are declared before their
     // compile targets.  This registers each build-tree output while source
@@ -1223,6 +1193,44 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "aros_bind_python_output_consumers(").unwrap();
             writeln!(out, "    OWNER {}", cmake_arg(&declaration.owner)).unwrap();
             writeln!(out, "    CONSUMERS {}", consumers.join(" ")).unwrap();
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    // Emitted after every concrete target, not with the other
+    // capability-checked builds: aros_build_ahi asks the three link-library
+    // targets where their archives are, and a linklib's archive name and
+    // directory depend on whether anything named it -- linklibs-libm is
+    // private while linklibs-amiga and linklibs-mui are canonical. Declared
+    // before the targets exist, the helper could only guess a filename, and
+    // the guess broke the moment a consumer promoted one of them.
+    // The AHI subsystem is another configure-style build syntactically, but
+    // it needs a fixed AROS source/product closure and the private host sfdc
+    // compiler.  Its helper intentionally accepts neither arbitrary options
+    // nor a command string, so do not collapse it into aros_build_configure.
+    if !graph.ahi_builds.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Capability-checked AHI subsystem builds\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        let mut declarations: Vec<_> = graph.ahi_builds.iter().collect();
+        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+        for declaration in declarations {
+            writeln!(out, "aros_build_ahi(").unwrap();
+            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
+            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+            writeln!(
+                out,
+                "    INSTALL_PREFIX {}",
+                cmake_arg(&declaration.install_prefix)
+            )
+            .unwrap();
+            writeln!(out, "    HOST_SFDC {}", cmake_arg(&declaration.host_sfdc)).unwrap();
+            writeln!(out, "    HOST_PERL {}", cmake_arg(&declaration.host_perl)).unwrap();
             writeln!(out, ")\n").unwrap();
         }
     }
