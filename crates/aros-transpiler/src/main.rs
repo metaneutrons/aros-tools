@@ -282,6 +282,47 @@ fn main() -> Result<()> {
             "compiler/autoinit/auto is absent, so no default link set was applied".to_owned(),
         );
     }
+
+    // The section-ordering script a kickstart member's partial link needs.
+    // config/make.tmpl:2168 and :2758 pass $(KERNEL_KOBJ_LDSCRIPT) to the `-Ur`
+    // link, and config/make.cfg.in sets it. Without that ordering a link merges
+    // every module's Resident tag into one block and every End marker into a
+    // block behind it, so the first rt_EndSkip the romtag scanner reads leaps
+    // over the rest of the kickstart.
+    let mut unresolved_kobj_ldscript: Vec<String> = Vec::new();
+    match dirs.expand("$(KERNEL_KOBJ_LDSCRIPT)") {
+        Some(value) => {
+            let tokens: Vec<&str> = value.split_whitespace().collect();
+            match tokens.as_slice() {
+                [] => {}
+                ["-T", script] => {
+                    graph.kickstart_kobj_ldscript =
+                        vec!["-T".to_owned(), (*script).to_owned()];
+                }
+                _ => unresolved_kobj_ldscript.push(format!(
+                    "KERNEL_KOBJ_LDSCRIPT is `{value}`, and only an empty value \
+                     or `-T <script>` is modelled"
+                )),
+            }
+        }
+        None => unresolved_kobj_ldscript.push(
+            "KERNEL_KOBJ_LDSCRIPT could not be resolved from config/make.cfg.in"
+                .to_owned(),
+        ),
+    }
+    // DirVars cannot decide `ifeq ($(AROS_TARGET_ARCH),amiga)`, because this
+    // build supplies the arch as a CMake expression, so the amiga-m68k override
+    // of the script is never taken. Say so when that is the target being
+    // configured rather than let the generic script stand in for it.
+    if args.cpu.as_deref() == Some("m68k") && args.platform.as_deref() == Some("amiga") {
+        unresolved_kobj_ldscript.push(
+            "the amiga-m68k override of KERNEL_KOBJ_LDSCRIPT was not applied: \
+             config/make.cfg.in guards it with ifeq on AROS_TARGET_ARCH, which \
+             this build supplies as a CMake expression"
+                .to_owned(),
+        );
+    }
+
     let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
@@ -313,6 +354,12 @@ fn main() -> Result<()> {
         "skipped-host-generated-headers.txt",
         skipped_host_generated_headers,
         "host-tool header rule(s) could not be represented",
+    );
+    write_report(
+        &args.output,
+        "kickstart-kobj-ldscript.txt",
+        unresolved_kobj_ldscript,
+        "kickstart section-ordering script issue(s)",
     );
     write_report(
         &args.output,

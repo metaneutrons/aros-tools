@@ -1528,6 +1528,24 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out).unwrap();
     }
 
+    // The section-ordering script a kickstart member's partial link needs.
+    // Declared before the package section for the same reason as the default
+    // link set: aros_link_kickstart and the member objects it asks for are
+    // created while that section is read.
+    if !graph.kickstart_kobj_ldscript.is_empty() {
+        let tokens: Vec<String> = graph
+            .kickstart_kobj_ldscript
+            .iter()
+            .map(|token| cmake_arg(token))
+            .collect();
+        writeln!(
+            out,
+            "aros_set_kickstart_kobj_ldscript({})\n",
+            tokens.join(" ")
+        )
+        .unwrap();
+    }
+
     // The compiler spec's default link set, in spec order. Declared before the
     // package section, because aros_link_kickstart resolves it while this file
     // is being read: the kickstart link is one of its consumers, and with the

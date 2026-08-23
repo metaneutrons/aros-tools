@@ -26,6 +26,11 @@ pub struct DependencyGraph {
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
     /// Public headers a host tool writes.
     pub host_generated_headers: Vec<crate::host_generated_headers::HostGeneratedHeader>,
+    /// The section-ordering script a kickstart member's partial link needs,
+    /// already split into the tokens the link takes (`-T <path>`), from
+    /// KERNEL_KOBJ_LDSCRIPT in config/make.cfg.in. Empty when the target names
+    /// none.
+    pub kickstart_kobj_ldscript: Vec<String>,
     /// Strictly capability-checked third-party CMake builds. Each contributes
     /// both a real mmake workflow endpoint and a distinct link interface.
     pub external_cmake: Vec<ExternalCMakeDecl>,
