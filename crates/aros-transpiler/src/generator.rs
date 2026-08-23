@@ -146,6 +146,24 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
 pub fn generate_cmake(graph: &DependencyGraph) -> String {
     let mut out = String::new();
 
+    // A kickstart member is linked into one image with the others, so it needs
+    // a second artefact built without the compiler spec's default link set and
+    // with its library bases made local (config/make.tmpl:2743). Marked here
+    // because the module targets are emitted before the package declarations.
+    // Carries the kickstart's architecture, because a module can be a member of
+    // another architecture's kickstart and must not grow a second artefact
+    // here for that.
+    let mut kickstart_members: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for package in graph.packages.iter().filter(|p| p.is_kickstart) {
+        for member in &package.resolved {
+            let arches = kickstart_members.entry(member.target.clone()).or_default();
+            if !arches.contains(&package.arch) {
+                arches.push(package.arch.clone());
+            }
+        }
+    }
+
     let mut all_targets: HashSet<String> = graph
         .targets
         .keys()
@@ -938,6 +956,10 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             let libs: Vec<String> = target.link_libs.iter().map(|l| cmake_arg(l)).collect();
             writeln!(out, "    LIBS {}", libs.join(" ")).unwrap();
         }
+        if let Some(arches) = kickstart_members.get(&target.mmake_name) {
+            let arches: Vec<String> = arches.iter().map(|a| cmake_arg(a)).collect();
+            writeln!(out, "    KICKSTART_MEMBER {}", arches.join(" ")).unwrap();
+        }
         if let Some(mod_type) = &target.declared_mod_type {
             writeln!(out, "    MODTYPE {}", cmake_arg(mod_type)).unwrap();
         }
@@ -1415,6 +1437,70 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "    endforeach()").unwrap();
         writeln!(out, "endif()\n").unwrap();
     }
+    // A flat binary wrapped as a relocatable object, and the target that links
+    // it. config/make.tmpl:1552.
+    if !graph.binary_objects.is_empty() {
+        writeln!(
+            out,
+            "# =============================================================================\n\
+             # Flat binaries wrapped as objects (from %rule_link_binary)\n\
+             # ============================================================================="
+        )
+        .unwrap();
+        for decl in &graph.binary_objects {
+            writeln!(out, "aros_link_binary_object(").unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&decl.name)).unwrap();
+            writeln!(out, "    OUTPUT {}", cmake_arg(&decl.output)).unwrap();
+            writeln!(
+                out,
+                "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",
+                decl.directory
+            )
+            .unwrap();
+            let sources: Vec<String> = decl.sources.iter().map(|s| cmake_arg(s)).collect();
+            writeln!(out, "    SOURCES {}", sources.join(" ")).unwrap();
+            writeln!(out, "    START {}", cmake_arg(&decl.start)).unwrap();
+            if !decl.ldflags.is_empty() {
+                let flags: Vec<String> = decl.ldflags.iter().map(|f| cmake_arg(f)).collect();
+                writeln!(out, "    LDFLAGS {}", flags.join(" ")).unwrap();
+            }
+            writeln!(out, "    CONSUMER {}", cmake_arg(&decl.consumer)).unwrap();
+            if !decl.arch_tag.is_empty() {
+                writeln!(out, "    ARCH_TAG {}", cmake_arg(&decl.arch_tag)).unwrap();
+            }
+            writeln!(out, ")").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
+    // The compiler spec's default link set, in spec order. Declared before the
+    // package section, because aros_link_kickstart resolves it while this file
+    // is being read: the kickstart link is one of its consumers, and with the
+    // declaration at the end it saw an empty set and linked no libraries at
+    // all. Applied to ordinary targets by CMakeLists.txt once every target
+    // exists.
+    //
+    // Each item is `<name>|<archive target>|<switches that must be absent>|
+    // <switches that must be present>`, the switch lists comma-separated.
+    if !graph.default_link_set.is_empty() {
+        writeln!(out, "aros_set_default_link_set(").unwrap();
+        for item in &graph.default_link_set {
+            writeln!(
+                out,
+                "    {}",
+                cmake_arg(&format!(
+                    "{}|{}|{}|{}",
+                    item.name,
+                    item.archive,
+                    item.require_absent.join(","),
+                    item.require_present.join(",")
+                ))
+            )
+            .unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
     // Packages and the kickstart link, last: both check whether each member
     // is a configured target that produces a file, so the targets have to
     // exist by the time CMake reaches these calls.
@@ -1460,67 +1546,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, ")").unwrap();
         }
         writeln!(out).unwrap();
-    }
-
-    // A flat binary wrapped as a relocatable object, and the target that links
-    // it. config/make.tmpl:1552.
-    if !graph.binary_objects.is_empty() {
-        writeln!(
-            out,
-            "# =============================================================================\n\
-             # Flat binaries wrapped as objects (from %rule_link_binary)\n\
-             # ============================================================================="
-        )
-        .unwrap();
-        for decl in &graph.binary_objects {
-            writeln!(out, "aros_link_binary_object(").unwrap();
-            writeln!(out, "    NAME {}", cmake_arg(&decl.name)).unwrap();
-            writeln!(out, "    OUTPUT {}", cmake_arg(&decl.output)).unwrap();
-            writeln!(
-                out,
-                "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",
-                decl.directory
-            )
-            .unwrap();
-            let sources: Vec<String> = decl.sources.iter().map(|s| cmake_arg(s)).collect();
-            writeln!(out, "    SOURCES {}", sources.join(" ")).unwrap();
-            writeln!(out, "    START {}", cmake_arg(&decl.start)).unwrap();
-            if !decl.ldflags.is_empty() {
-                let flags: Vec<String> = decl.ldflags.iter().map(|f| cmake_arg(f)).collect();
-                writeln!(out, "    LDFLAGS {}", flags.join(" ")).unwrap();
-            }
-            writeln!(out, "    CONSUMER {}", cmake_arg(&decl.consumer)).unwrap();
-            if !decl.arch_tag.is_empty() {
-                writeln!(out, "    ARCH_TAG {}", cmake_arg(&decl.arch_tag)).unwrap();
-            }
-            writeln!(out, ")").unwrap();
-        }
-        writeln!(out).unwrap();
-    }
-
-    // The compiler spec's default link set, in spec order. Declared here and
-    // applied by CMakeLists.txt once every target exists, because the archives
-    // and their consumers are created by this same file.
-    //
-    // Each item is `<name>|<archive target>|<switches that must be absent>|
-    // <switches that must be present>`, the switch lists comma-separated.
-    if !graph.default_link_set.is_empty() {
-        writeln!(out, "aros_set_default_link_set(").unwrap();
-        for item in &graph.default_link_set {
-            writeln!(
-                out,
-                "    {}",
-                cmake_arg(&format!(
-                    "{}|{}|{}|{}",
-                    item.name,
-                    item.archive,
-                    item.require_absent.join(","),
-                    item.require_present.join(",")
-                ))
-            )
-            .unwrap();
-        }
-        writeln!(out, ")\n").unwrap();
     }
 
     out
