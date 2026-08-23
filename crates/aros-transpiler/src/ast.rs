@@ -195,6 +195,15 @@ pub struct TargetDefinition {
     pub arch_defines: Vec<(String, String)>,
     /// Codegen options from an architecture `make.opts`, as `(arch_tag, opt)`.
     pub arch_compile_options: Vec<(String, String)>,
+    /// Codegen options that belong to one architecture lane's own sources:
+    /// `(tag, directory, file, option)`. Kept per file rather than per tag
+    /// because a lane's flags are the lane's: arch/i386-all/hidd/gfx compiles
+    /// rgbconv_sse.c with -msse2 and rgbconv_avx.c with -mavx2 while the
+    /// baseline dispatcher beside them must stay baseline ISA, and after a lane
+    /// is attached to another lane (see resolve_arch_lane_attachments) the tag
+    /// no longer tells them apart.
+    #[serde(default)]
+    pub arch_source_options: Vec<(String, String, String, String)>,
 }
 
 /// A parsed meta-target rule (#MM or #MM-).

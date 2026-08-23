@@ -1040,6 +1040,7 @@ impl DependencyGraph {
                 arch_sources: Vec::new(),
                 arch_defines: Vec::new(),
                 arch_compile_options: Vec::new(),
+                arch_source_options: Vec::new(),
             },
         );
         reports
@@ -1084,6 +1085,99 @@ impl DependencyGraph {
     /// broader than Make: a declaration in the directory with a deliberately
     /// separate objdir (`linklibs-libm` is one) would also inherit. Every such
     /// inheritance is returned so it stays visible rather than implied.
+    /// Gives a `%build_archspecific` lane the tag of the lane that pulls it in.
+    ///
+    /// `arch=` is not always an architecture. `arch/i386-all/hidd/gfx` declares
+    /// three lanes for one module -- `i386`, `x86_sse` and `x86_avx` -- and the
+    /// last two are names, not targets: what attaches them is a MetaMake edge in
+    /// the x86_64 file,
+    ///
+    /// ```text
+    /// #MM- kernel-hidd-gfx-x86_64 : kernel-hidd-gfx-x86_sse kernel-hidd-gfx-x86_avx
+    /// ```
+    ///
+    /// and the metatarget of a lane is `<mainmmake>-<arch>`. CMake selects a lane
+    /// by matching its tag against the configured target's tags, so a lane whose
+    /// tag is a name matches nothing and its sources are dropped. gfx.hidd then
+    /// referenced 18 `convert_*_SSE2/_SSE3/_AVX` implementations that were never
+    /// compiled, and the ELF loader refused the boot over the first of them.
+    ///
+    /// The rule is structural and closed over the declarations at hand: when an
+    /// edge attaches `<mainmmake>-<a>` to `<mainmmake>-<b>` and both `a` and `b`
+    /// are tags of lanes of that same mainmmake, lane `a` is also a lane of `b`.
+    /// The lane keeps its own tag as well, so a target that really does select
+    /// `x86_sse` is unaffected.
+    ///
+    /// Retagging here rather than in CMake because CMake reads the declarations
+    /// before the meta edges exist.
+    ///
+    /// Returns the attachments made, for the record, and the lanes whose tag
+    /// nothing attaches.
+    pub fn resolve_arch_lane_attachments(&mut self) -> Vec<String> {
+        let mut notes = Vec::new();
+        // (mainmmake, lane tag) of every declaration, so an edge can be read as
+        // an attachment only between two lanes of the same module.
+        let mut lanes: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for decl in self.arch_sources.values().flatten() {
+            lanes.insert((decl.mainmmake.clone(), decl.tag.clone()));
+        }
+
+        let mut attachments: Vec<(String, String, String)> = Vec::new();
+        for (consumer, deps) in &self.meta_targets {
+            for dep in deps {
+                for (mainmmake, tag) in &lanes {
+                    let prefix = format!("{mainmmake}-");
+                    let Some(puller) = consumer.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    if dep.strip_prefix(&prefix) != Some(tag.as_str()) {
+                        continue;
+                    }
+                    if puller == tag.as_str() {
+                        continue;
+                    }
+                    if !lanes.contains(&(mainmmake.clone(), puller.to_owned())) {
+                        continue;
+                    }
+                    attachments.push((mainmmake.clone(), tag.clone(), puller.to_owned()));
+                }
+            }
+        }
+        attachments.sort();
+        attachments.dedup();
+
+        for (mainmmake, lane, puller) in attachments {
+            let mut added = Vec::new();
+            for decls in self.arch_sources.values_mut() {
+                let clones: Vec<ArchSourceDecl> = decls
+                    .iter()
+                    .filter(|decl| decl.mainmmake == mainmmake && decl.tag == lane)
+                    .map(|decl| ArchSourceDecl {
+                        tag: puller.clone(),
+                        ..decl.clone()
+                    })
+                    .collect();
+                for clone in clones {
+                    if decls
+                        .iter()
+                        .any(|decl| decl.tag == clone.tag && decl.files == clone.files)
+                    {
+                        continue;
+                    }
+                    added.extend(clone.files.iter().cloned());
+                    decls.push(clone);
+                }
+            }
+            if !added.is_empty() {
+                notes.push(format!(
+                    "{mainmmake}: lane {lane} also applies to {puller}, contributing {added:?}"
+                ));
+            }
+        }
+        notes
+    }
+
     pub fn resolve_arch_sources(&mut self) -> Vec<String> {
         let mut inherited: Vec<String> = Vec::new();
         // (directory, tag, dir, files) of every declaration that names a
@@ -1157,10 +1251,22 @@ impl DependencyGraph {
                             target.arch_defines.push(e);
                         }
                     }
+                    // Per file, not per tag. Applying a lane's flags to the
+                    // whole target would put -mavx2 on the baseline dispatcher
+                    // that arch/x86_64-all/hidd/gfx/rgbconv_arch.c's own comment
+                    // says must not have it, and after lane attachment two lanes
+                    // with different flags share one tag.
                     for opt in &d.compile_options {
-                        let e = (d.tag.clone(), opt.clone());
-                        if !target.arch_compile_options.contains(&e) {
-                            target.arch_compile_options.push(e);
+                        for file in &d.files {
+                            let e = (
+                                d.tag.clone(),
+                                d.dir.clone(),
+                                file.clone(),
+                                opt.clone(),
+                            );
+                            if !target.arch_source_options.contains(&e) {
+                                target.arch_source_options.push(e);
+                            }
                         }
                     }
                 }

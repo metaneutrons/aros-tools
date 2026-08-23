@@ -341,6 +341,9 @@ fn main() -> Result<()> {
     let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
+    // A lane whose `arch=` is a name rather than an architecture gets the tag of
+    // the lane that pulls it in, before the overrides are resolved.
+    let arch_lane_attachments = graph.resolve_arch_lane_attachments();
     let inherited_arch_sources = graph.resolve_arch_sources();
     // Catalog generators can emit a source/header adjacent to a module's
     // sources. CMake rehomes that output, so preserve the completed logical
@@ -393,6 +396,12 @@ fn main() -> Result<()> {
         "skipped-binary-objects.txt",
         skipped_binary_objects,
         "%rule_link_binary declaration(s) could not be resolved",
+    );
+    write_report(
+        &args.output,
+        "arch-lane-attachments.txt",
+        arch_lane_attachments,
+        "architecture lane(s) attached to another lane by a #MM edge",
     );
     write_report(
         &args.output,

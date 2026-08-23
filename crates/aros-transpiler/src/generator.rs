@@ -595,6 +595,31 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     // lanes are still being resolved, so a generated `.s` file is retained on
     // a clean configure even though it does not exist yet. Consumers are bound
     // in a second phase after all concrete targets have been created.
+    // Codegen options that belong to one architecture lane's own sources.
+    // Declared before every target, as a global keyed by the lane and the file,
+    // so aros_resolve_arch_sources can apply them where it resolves the file and
+    // no builder signature has to learn a field it only forwards.
+    {
+        let mut entries: Vec<String> = Vec::new();
+        for target in graph.targets.values() {
+            for (tag, dir, file, option) in &target.arch_source_options {
+                let entry = format!("{tag}|{dir}|{file}|{option}");
+                if !entries.contains(&entry) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries.sort();
+        if !entries.is_empty() {
+            writeln!(out, "# ---- Per-lane codegen options (USER_CFLAGS of a %build_archspecific) ----").unwrap();
+            writeln!(out, "aros_set_arch_source_options(").unwrap();
+            for entry in entries {
+                writeln!(out, "    {}", cmake_arg(&entry)).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
     // The genmodule config a declaration names with `conffile=`. Declared
     // before every target, because the module builders consult it while they
     // are read.
