@@ -8657,6 +8657,8 @@ fn parse_mmakefile_impl(
         .collect();
     let (host_generated_headers, skipped_host_generated_headers) =
         crate::host_generated_headers::collect_host_generated_headers(&content, &rel_dir);
+    let (hidd_stubs, skipped_hidd_stubs) =
+        crate::hidd_stubs::collect_hidd_stubs(&content, &scope, dirs, root, &rel_dir);
     let (binary_objects, skipped_binary_objects) = crate::binary_objects::collect_binary_objects(
         &content,
         &scope,
@@ -8698,6 +8700,8 @@ fn parse_mmakefile_impl(
         skipped_arch_sources,
         binary_objects,
         skipped_binary_objects,
+        hidd_stubs,
+        skipped_hidd_stubs,
         host_generated_headers,
         skipped_host_generated_headers,
         fetches,

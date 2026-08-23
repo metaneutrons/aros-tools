@@ -546,6 +546,8 @@ pub struct ParsedMmakefile {
     /// `%rule_link_binary`: flat binaries wrapped as relocatable objects.
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
     /// Public headers a host tool writes.
+    pub hidd_stubs: Vec<crate::hidd_stubs::HiddStubsDecl>,
+    pub skipped_hidd_stubs: Vec<String>,
     pub host_generated_headers: Vec<crate::host_generated_headers::HostGeneratedHeader>,
     /// Rules of that shape this could not represent, for reporting.
     pub skipped_host_generated_headers: Vec<String>,

@@ -176,6 +176,7 @@ fn main() -> Result<()> {
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut skipped_binary_objects: Vec<String> = Vec::new();
     let mut skipped_host_generated_headers: Vec<String> = Vec::new();
+    let mut skipped_hidd_stubs: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
@@ -212,6 +213,8 @@ fn main() -> Result<()> {
         skipped_catalogs.extend(parsed.skipped_catalogs);
         skipped_meta_rules.extend(parsed.skipped_meta_rules);
         graph.add_host_generated_headers(parsed.host_generated_headers);
+        graph.add_hidd_stubs(parsed.hidd_stubs);
+        skipped_hidd_stubs.extend(parsed.skipped_hidd_stubs);
         skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
         graph.add_binary_objects(parsed.binary_objects);
         skipped_binary_objects.extend(parsed.skipped_binary_objects);
@@ -254,6 +257,11 @@ fn main() -> Result<()> {
 
     // uselibs names a link library by its libname, which only resolves once
     // every %build_linklib in the tree has been seen.
+    // The HIDD stub archive has to exist before uselibs are resolved: 61
+    // declarations name `uselibs=hiddstubs`, and until %make_hidd_stubs was
+    // modelled every one of them was reported as having no link library.
+    skipped_hidd_stubs.extend(graph.resolve_hidd_stubs());
+
     let unresolved_libs = graph.resolve_use_libs();
 
     // The compiler spec's default link set. configure.in:3044 selects
@@ -349,6 +357,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "skipped-hidd-stubs.txt",
+        skipped_hidd_stubs,
+        "%make_hidd_stubs declaration(s) could not be used",
+    );
     write_report(
         &args.output,
         "skipped-host-generated-headers.txt",

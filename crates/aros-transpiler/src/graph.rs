@@ -24,6 +24,10 @@ pub struct DependencyGraph {
     pub default_link_set: Vec<ResolvedDefaultLinkItem>,
     /// `%rule_link_binary` declarations, in declaration order.
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
+    /// `%make_hidd_stubs` declarations, in declaration order. They are the
+    /// inputs of one archive, so they are resolved together rather than one at
+    /// a time.
+    pub hidd_stubs: Vec<crate::hidd_stubs::HiddStubsDecl>,
     /// Public headers a host tool writes.
     pub host_generated_headers: Vec<crate::host_generated_headers::HostGeneratedHeader>,
     /// The section-ordering script a kickstart member's partial link needs,
@@ -835,6 +839,117 @@ impl DependencyGraph {
         decls: Vec<crate::host_generated_headers::HostGeneratedHeader>,
     ) {
         self.host_generated_headers.extend(decls);
+    }
+
+    pub fn add_hidd_stubs(&mut self, decls: Vec<crate::hidd_stubs::HiddStubsDecl>) {
+        self.hidd_stubs.extend(decls);
+    }
+
+    /// Turns the `%make_hidd_stubs` declarations into the one link library they
+    /// feed.
+    ///
+    /// `compiler/libhiddstubs/mmakefile.src` archives
+    /// `$(call WILDCARD, $(GENDIR)/lib/hidd/*.o)`, and the contents of that
+    /// directory are exactly the `$(STUBS)` of every `%make_hidd_stubs` in the
+    /// tree. Once the tree is parsed that is a known list, so the wildcard needs
+    /// no modelling: one archive with those sources is the same artefact.
+    ///
+    /// The synthesised declaration takes the mmake id and the archive name the
+    /// reference uses, so `uselibs=hiddstubs` resolves through the ordinary
+    /// path. Its directory is the source root, because the sources come from six
+    /// different places and the macro applies no per-directory include flags:
+    /// `%make_hidd_stubs` calls `%compile_q` with `$(CFLAGS) $(CPPFLAGS)`
+    /// directly instead of the `%(mmake)_CFLAGS` lane that would add
+    /// `$(USER_INCLUDES)` (`config/make.tmpl:3562` against `:1681`).
+    ///
+    /// Returns what it could not use, for reporting.
+    pub fn resolve_hidd_stubs(&mut self) -> Vec<String> {
+        if self.hidd_stubs.is_empty() {
+            return Vec::new();
+        }
+        const MMAKE: &str = "linklibs-hiddstubs";
+        const ARCHIVE: &str = "hiddstubs";
+
+        let mut reports = Vec::new();
+        if let Some(existing) = self.targets.get(MMAKE) {
+            reports.push(format!(
+                "{MMAKE} is already declared as {}, so the {}                  %make_hidd_stubs declaration(s) were not attached",
+                existing.target_name,
+                self.hidd_stubs.len()
+            ));
+            return reports;
+        }
+
+        let mut sources: Vec<String> = Vec::new();
+        for decl in &self.hidd_stubs {
+            for source in &decl.sources {
+                if sources.contains(source) {
+                    reports.push(format!(
+                        "{}: %make_hidd_stubs hidd={} contributes {source},                          which another declaration already contributes",
+                        decl.directory, decl.hidd
+                    ));
+                    continue;
+                }
+                sources.push(source.clone());
+            }
+        }
+        if sources.is_empty() {
+            return reports;
+        }
+
+        self.targets.insert(
+            MMAKE.to_owned(),
+            TargetDefinition {
+                mmake_name: MMAKE.to_owned(),
+                target_name: ARCHIVE.to_owned(),
+                module_type: ModuleType::LinkLib,
+                genmodule_only: false,
+                empty_archive: false,
+                source_files: sources,
+                cxx_source_files: Vec::new(),
+                always_cxx_link: false,
+                objc_source_files: Vec::new(),
+                asm_source_files: Vec::new(),
+                use_libs: Vec::new(),
+                dependencies: Vec::new(),
+                dir_path: PathBuf::from("."),
+                target_dir: None,
+                link_libs: Vec::new(),
+                variant_32bit: false,
+                declared_mod_type: None,
+                mod_suffix: None,
+                // The archive name is TARGET here; `linklib_name` is the
+                // separate `libname=` lane, which aros_add_linklib does not
+                // accept for a plain link library.
+                linklib_name: None,
+                genmodule_linklibs: None,
+                linklib_output_dir: None,
+                // Public, and not by inference: `compiler/libhiddstubs`
+                // states the output as `$(AROS_LIB)/libhiddstubs.a`, which is
+                // the default target library directory, built with the default
+                // target compiler and no port sources. Without this the
+                // archive keeps its CMake target name and stays in the build
+                // root, so a declaration that spells `-lhiddstubs` as a raw
+                // link option cannot see it.
+                canonical_linklib_output: true,
+                canonical_linklib_eligible: true,
+                compiler_flags: Vec::new(),
+                include_dirs: Vec::new(),
+                arch_modules: Vec::new(),
+                arch_includes: Vec::new(),
+                defines: Vec::new(),
+                undefines: Vec::new(),
+                compile_options: Vec::new(),
+                link_options: Vec::new(),
+                spec_switches: Vec::new(),
+                driver_link_options: Vec::new(),
+                isa_link_options: Vec::new(),
+                arch_sources: Vec::new(),
+                arch_defines: Vec::new(),
+                arch_compile_options: Vec::new(),
+            },
+        );
+        reports
     }
 
     pub fn add_binary_objects(&mut self, decls: Vec<crate::binary_objects::BinaryObjectDecl>) {

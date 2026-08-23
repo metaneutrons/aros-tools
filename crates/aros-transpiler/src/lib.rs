@@ -11,6 +11,7 @@ pub mod flexcat;
 pub mod generator;
 pub mod genmodule_linklibs;
 pub mod graph;
+pub mod hidd_stubs;
 pub mod host_generated_headers;
 pub mod icons;
 pub mod includes;
