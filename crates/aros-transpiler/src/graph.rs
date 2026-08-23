@@ -833,7 +833,82 @@ impl DependencyGraph {
     /// Attaches the architecture source overrides to their target.
     ///
     /// The join key is `mainmmake`, which the declaration states outright.
-    pub fn resolve_arch_sources(&mut self) {
+    ///
+    /// A second declaration in the same directory can inherit the same
+    /// overrides, because make.tmpl keys the arch objects on the object
+    /// directory rather than on the target:
+    ///
+    ///   config/make.tmpl:3296  %build_archspecific writes its objects to
+    ///                          $(GENDIR)/<maindir>/<modname>/arch
+    ///   config/make.tmpl:2921  %build_linklib picks them up with
+    ///                          $(wildcard $(OBJDIR)/arch/*.o) and filters the
+    ///                          same basenames out of its own file list
+    ///
+    /// compiler/crt/stdc is the case in the tree: `linklibs-romhack` declares
+    /// `objdir=$(GENDIR)/$(CURDIR)/stdc`, which is exactly compiler-stdc's arch
+    /// object root, so its `setjmp` and `longjmp` come from
+    /// arch/x86_64-all/stdc/*.s. Without this, romhack compiles
+    /// compiler/crt/stdc/setjmp.c, which is nothing but
+    /// `#error setjmp has to be implemented for each cpu`, and dos.library
+    /// never links because romhack is its uselibs.
+    ///
+    /// Keyed on the directory rather than on the objdir string, which is
+    /// broader than Make: a declaration in the directory with a deliberately
+    /// separate objdir (`linklibs-libm` is one) would also inherit. Every such
+    /// inheritance is returned so it stays visible rather than implied.
+    pub fn resolve_arch_sources(&mut self) -> Vec<String> {
+        let mut inherited: Vec<String> = Vec::new();
+        // (directory, tag, dir, files) of every declaration that names a
+        // maindir, to offer to the other declarations living there.
+        let offers: Vec<(String, String, String, Vec<String>)> = self
+            .arch_sources
+            .values()
+            .flatten()
+            .filter_map(|d| {
+                d.maindir.as_ref().map(|maindir| {
+                    (
+                        maindir.trim_matches('/').to_owned(),
+                        d.tag.clone(),
+                        d.dir.clone(),
+                        d.files.clone(),
+                    )
+                })
+            })
+            .collect();
+        let owners: std::collections::HashSet<&String> = self.arch_sources.keys().collect();
+        let mut adopt: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        for (mmake, target) in &self.targets {
+            if owners.contains(mmake) {
+                continue;
+            }
+            let directory = target.dir_path.to_string_lossy().replace('\\', "/");
+            for (maindir, tag, dir, files) in &offers {
+                if *maindir != directory {
+                    continue;
+                }
+                let shadowed: Vec<String> = files
+                    .iter()
+                    .filter(|file| target.source_files.iter().any(|source| source == *file))
+                    .cloned()
+                    .collect();
+                if shadowed.is_empty() {
+                    continue;
+                }
+                inherited.push(format!(
+                    "{directory}: {mmake} takes {} from arch={tag} {dir} \
+                     (shared arch object root with the declaration in that directory)",
+                    shadowed.join(",")
+                ));
+                adopt.push((mmake.clone(), tag.clone(), dir.clone(), shadowed));
+            }
+        }
+        for (mmake, tag, dir, files) in adopt {
+            if let Some(target) = self.targets.get_mut(&mmake) {
+                target.arch_sources.push((tag, dir, files));
+            }
+        }
+        inherited.sort();
+
         for (name, decls) in &self.arch_sources {
             if let Some(target) = self.targets.get_mut(name) {
                 for d in decls {
@@ -863,6 +938,7 @@ impl DependencyGraph {
                 }
             }
         }
+        inherited
     }
 
     pub fn add_packages(&mut self, decls: Vec<crate::packages::PackageDecl>) {

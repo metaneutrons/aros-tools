@@ -1254,8 +1254,8 @@ mod tests {
         assert!(matches!(cycle, MakeExprError::VariableCycle { .. }));
 
         assert!(matches!(
-            evaluate("", "$(foreach item,a b,$(item))"),
-            Err(MakeExprError::UnsupportedFunction { name }) if name == "foreach"
+            evaluate("", "$(eval SOMETHING := x)"),
+            Err(MakeExprError::UnsupportedFunction { name }) if name == "eval"
         ));
         assert!(matches!(
             evaluate("", "$(call SOMETHING,x)"),

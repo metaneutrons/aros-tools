@@ -31,6 +31,11 @@ use std::path::Path;
 pub struct ArchSourceDecl {
     /// The `mainmmake=` target these sources belong to.
     pub mainmmake: String,
+    /// `maindir=`: the directory of the declaration being extended. Needed
+    /// because a second declaration in that directory can share the arch
+    /// object root and so inherit these overrides; see
+    /// `DependencyGraph::resolve_arch_sources`.
+    pub maindir: Option<String>,
     /// `arch=`: the architecture tag this declaration applies to.
     pub tag: String,
     /// Directory holding the sources, relative to the source root.
@@ -181,6 +186,7 @@ pub fn collect_arch_sources(content: &str, rel_dir: &Path) -> (Vec<ArchSourceDec
 
         out.push(ArchSourceDecl {
             mainmmake,
+            maindir: crate::includes::arg_value(&body, "maindir"),
             tag,
             dir: dir.clone(),
             files,

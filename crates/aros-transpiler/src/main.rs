@@ -278,7 +278,7 @@ fn main() -> Result<()> {
     let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
-    graph.resolve_arch_sources();
+    let inherited_arch_sources = graph.resolve_arch_sources();
     // Catalog generators can emit a source/header adjacent to a module's
     // sources. CMake rehomes that output, so preserve the completed logical
     // source-tree consumer relationship before rendering the build graph.
@@ -301,6 +301,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "inherited-arch-sources.txt",
+        inherited_arch_sources,
+        "declaration(s) inherit architecture sources through a shared arch object root",
+    );
     write_report(
         &args.output,
         "unresolved-default-link-set.txt",
