@@ -7270,13 +7270,27 @@ fn parse_mmakefile_impl(
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
     let (packages, skipped_packages) = crate::packages::collect_packages(&content, &rel_dir);
-    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir, target);
+    // Collected from `joined`, not from `content`: the declaration line has to
+    // be in the same coordinate system as `scope`, which is built from the
+    // joined and locally-included text. Read against the raw file the line
+    // numbers drift with every continuation and every inlined fragment, so the
+    // positional flag lookup below would read some other declaration's flags.
+    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&joined, &rel_dir, target);
     // A %build_archspecific file contributes to a target defined elsewhere, so
     // its own USER_INCLUDES and flags have to travel with the declaration.
+    //
+    // Read at the declaration's own line, not file-wide. One mmakefile can hold
+    // several declarations with different flags:
+    // arch/i386-all/hidd/gfx sets `USER_CFLAGS :=` before the baseline lane,
+    // `$(HIDDGFX_SSE_CFLAGS)` before the SSE lane and `$(HIDDGFX_AVX_CFLAGS)`
+    // before the AVX one. The file-wide value is whichever assignment happens to
+    // win, and with it rgbconv_avx.c cannot compile at all.
     for d in &mut arch_sources {
-        d.include_dirs = include_set.dirs.clone();
-        d.defines = flag_set.defines.clone();
-        d.compile_options = flag_set.compile_options.clone();
+        let at = collect_includes_at(&joined, &scope, d.line, &rel_dir);
+        let flags = collect_flags_at(&scope, d.line);
+        d.include_dirs = at.dirs;
+        d.defines = flags.defines;
+        d.compile_options = flags.compile_options;
     }
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
@@ -7900,6 +7914,7 @@ fn parse_mmakefile_impl(
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
+            arch_source_options: Vec::new(),
         });
     }
 
@@ -8065,6 +8080,7 @@ fn parse_mmakefile_impl(
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
+            arch_source_options: Vec::new(),
         });
     }
 
@@ -8523,6 +8539,7 @@ fn parse_mmakefile_impl(
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
+            arch_source_options: Vec::new(),
         });
     }
 

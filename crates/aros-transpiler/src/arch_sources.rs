@@ -56,6 +56,10 @@ pub struct ArchSourceDecl {
     pub defines: Vec<String>,
     /// Codegen options the declaring mmakefile sets.
     pub compile_options: Vec<String>,
+    /// 0-based line the declaration starts on. The flags belong to the
+    /// declaration, not to the file: `arch/i386-all/hidd/gfx` sets
+    /// `USER_CFLAGS` three times, once per lane.
+    pub line: usize,
 }
 
 /// Collects `VAR := / = / += value` file lists, keeping plain names only.
@@ -336,7 +340,7 @@ pub fn collect_arch_sources(
         })
         .collect();
 
-    for body in crate::includes::directive_bodies_pub(content, "%build_archspecific") {
+    for (line, body) in crate::includes::directive_bodies_at(content, "%build_archspecific") {
         let Some(mainmmake) = crate::includes::arg_value(&body, "mainmmake") else {
             continue;
         };
@@ -376,6 +380,7 @@ pub fn collect_arch_sources(
             include_dirs: Vec::new(),
             defines: Vec::new(),
             compile_options: Vec::new(),
+            line,
         });
     }
 
@@ -404,6 +409,52 @@ AFILES := \
   asmfiles=$(AFILES) files=$(FILES) \
   arch=x86_64 modname=exec
 ";
+
+    #[test]
+    fn each_gfx_lane_gets_its_own_codegen_flags() {
+        // One mmakefile, three lanes, three different USER_CFLAGS. Read
+        // file-wide instead of at the declaration, the SSE lane would get the
+        // AVX flag or none, and rgbconv_avx.c does not compile without -mavx2.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let rel = PathBuf::from("arch/i386-all/hidd/gfx");
+        let content = aros_common::read_source(&root.join(&rel).join("mmakefile.src")).unwrap();
+        let joined = crate::parser::join_continuations(&content);
+        let scope = crate::parser::collect_vars(&joined);
+        let (decls, _) = collect_arch_sources(&joined, &rel, None);
+
+        let mut seen: Vec<(String, Vec<String>, Vec<String>)> = decls
+            .iter()
+            .map(|decl| {
+                let flags = crate::flags::collect_flags_at(&scope, decl.line);
+                (
+                    decl.tag.clone(),
+                    decl.files.clone(),
+                    flags.compile_options.clone(),
+                )
+            })
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                (
+                    "i386".to_owned(),
+                    vec!["rgbconv_arch".to_owned()],
+                    Vec::<String>::new()
+                ),
+                (
+                    "x86_avx".to_owned(),
+                    vec!["rgbconv_avx".to_owned()],
+                    vec!["-mavx2".to_owned()]
+                ),
+                (
+                    "x86_sse".to_owned(),
+                    vec!["rgbconv_sse".to_owned()],
+                    vec!["-msse2".to_owned()]
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn parses_the_exec_declaration() {

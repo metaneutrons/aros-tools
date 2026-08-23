@@ -552,6 +552,39 @@ pub(crate) fn directive_bodies_pub(content: &str, directive: &str) -> Vec<String
     directive_bodies(content, directive)
 }
 
+/// The same bodies, each with the 0-based line the directive starts on.
+///
+/// A declaration's flags are positional: `arch/i386-all/hidd/gfx` sets
+/// `USER_CFLAGS` three times, once before each `%build_archspecific`, and the
+/// file-wide value is whichever assignment happens to win. Reading the flags at
+/// the declaration's own line is the only way to give the SSE lane `-msse2` and
+/// the AVX lane `-mavx2`.
+pub(crate) fn directive_bodies_at(content: &str, directive: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut number = 0usize;
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
+        let start = number;
+        number += 1;
+        let trimmed = line.trim();
+        if !trimmed.starts_with(directive) {
+            continue;
+        }
+        let mut body = trimmed.trim_end_matches('\\').to_owned();
+        let mut cont = trimmed.ends_with('\\');
+        while cont {
+            let Some(next) = lines.next() else { break };
+            number += 1;
+            let t = next.trim();
+            cont = t.ends_with('\\');
+            body.push(' ');
+            body.push_str(t.trim_end_matches('\\').trim());
+        }
+        out.push((start, body));
+    }
+    out
+}
+
 fn directive_bodies(content: &str, directive: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut lines = content.lines();
