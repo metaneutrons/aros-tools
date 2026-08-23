@@ -153,7 +153,7 @@ pub fn stack_stub(m: &ModuleFacts<'_>, funcs: &[Function], f: &Function, is_rel:
     let version = resolved_version(m, funcs, f);
     let _ = writeln!(
         out,
-        "void __{}_{}_libreq(){{ AROS_LIBREQ({},{}) ; }}",
+        "void __{}_{}_libreq(){{ AROS_LIBREQ({},{}); }}",
         f.name, m.lib_base, m.lib_base, version
     );
     let _ = writeln!(
@@ -170,7 +170,138 @@ pub fn stack_stub(m: &ModuleFacts<'_>, funcs: &[Function], f: &Function, is_rel:
     out
 }
 
-/// Why the register-call stubs are not generated here.
+/// The `AROS_LC` variant suffix for one function's argument list.
+///
+/// `writeutils.c:3`: runs of arguments of the same kind become `<n>`, `QUAD<n>`
+/// or `DOUBLE<n>`, concatenated without a separator, so one quad followed by two
+/// normal arguments gives `QUAD12`. An empty list gives `0`.
+///
+/// The kind comes from the register spec, not from the C type alone: a register
+/// pair means the value occupies two, and `double` distinguishes DOUBLE from
+/// QUAD (writestubs.c:196-204).
+fn lc_suffix(f: &Function) -> String {
+    if f.args.is_empty() {
+        return "0".to_owned();
+    }
+    #[derive(PartialEq, Clone, Copy)]
+    enum Kind {
+        Normal,
+        Quad,
+        Double,
+    }
+    let kinds: Vec<Kind> = f
+        .args
+        .iter()
+        .map(|a| {
+            if a.reg.as_deref().is_some_and(|r| r.contains('/')) {
+                if a.ty.trim() == "double" {
+                    Kind::Double
+                } else {
+                    Kind::Quad
+                }
+            } else {
+                Kind::Normal
+            }
+        })
+        .collect();
+
+    let mut out = String::new();
+    let mut current = kinds[0];
+    let mut run = 0usize;
+    let mut flush = |kind: Kind, run: usize, out: &mut String| match kind {
+        Kind::Double => {
+            let _ = write!(out, "DOUBLE{run}");
+        }
+        Kind::Quad => {
+            let _ = write!(out, "QUAD{run}");
+        }
+        Kind::Normal => {
+            let _ = write!(out, "{run}");
+        }
+    };
+    for k in kinds {
+        if k == current {
+            run += 1;
+        } else {
+            flush(current, run, &mut out);
+            current = k;
+            run = 1;
+        }
+    }
+    flush(current, run, &mut out);
+    out
+}
+
+/// One register-call function, as a full C function body.
+fn regcall_stub(m: &ModuleFacts<'_>, f: &Function) -> String {
+    // Types are trimmed at every use. The parser keeps a declaration as
+    // written, so `APTR ` would otherwise reach the generated C as
+    // `APTR  AllocMem` and `AROS_LC2(APTR , ...)`.
+    let ret = f.ret_type.trim();
+    let is_void = matches!(ret, "void" | "VOID");
+    let mut out = String::new();
+    let decls: Vec<&str> = f.args.iter().map(|a| a.decl.trim()).collect();
+    let _ = write!(out, "\n{} {}({})\n{{\n", ret, f.name, decls.join(", "));
+    let _ = writeln!(
+        out,
+        "    {}AROS_LC{}{}({}, {},\\",
+        if is_void { "" } else { "return " },
+        lc_suffix(f),
+        if is_void { "NR" } else { "" },
+        ret,
+        f.name
+    );
+    for a in &f.args {
+        let reg = a.reg.as_deref().unwrap_or("");
+        let ty = a.ty.trim();
+        if let Some((first, second)) = reg.split_once('/') {
+            // The reference truncates the first register to two characters.
+            let first = if first.len() > 2 { &first[..2] } else { first };
+            let _ = writeln!(
+                out,
+                "         AROS_LCA2({ty}, {}, {first}, {second}), \\",
+                a.name
+            );
+        } else {
+            let reg = if reg.len() > 2 { &reg[..2] } else { reg };
+            let _ = writeln!(out, "         AROS_LCA({ty}, {}, {reg}), \\", a.name);
+        }
+    }
+    let _ = write!(
+        out,
+        "                    {}, __aros_getbase_{}(), {}, {});\n}}\n",
+        m.lib_base_type_extern, m.lib_base, f.lvo, m.basename
+    );
+    for alias in &f.aliases {
+        let _ = writeln!(out, "AROS_GM_LIBFUNCALIAS({}, {alias})", f.name);
+    }
+    out
+}
+
+/// The shared `<mod>_regcall_stubs.c`.
+///
+/// All register-call stubs share one object file, unlike the stack-call ones.
+/// writestubs.c:11-18 explains why: the linker pulls a whole object out of an
+/// archive, and a register-call function is normally reached through an inline
+/// or a define rather than the linklib, so the aggregation costs little.
+///
+/// This is what covers exec: all 153 of its functions carry register specs, so
+/// exec produces no stack-call stubs at all, and the symbols the audit reports
+/// most -- CloseLibrary, OpenLibrary, AllocVec, FreeVec, FindTask -- are all
+/// here rather than in the per-function files.
+#[must_use]
+pub fn regcall_stubs(m: &ModuleFacts<'_>, funcs: &[Function], is_rel: bool) -> String {
+    let mut out = stub_header(m, is_rel);
+    for f in funcs {
+        if f.stack_call || f.private {
+            continue;
+        }
+        out.push_str(&regcall_stub(m, f));
+    }
+    out
+}
+
+/// Historical note kept for the record.
 ///
 /// writestubs.c also writes one shared `<mod>_regcall_stubs.c` holding a full C
 /// function per register-call entry, expanded through `AROS_LC<n>` with an
@@ -274,6 +405,12 @@ pub fn sources(m: &ModuleFacts<'_>, funcs: &[Function], is_rel: bool) -> Vec<(St
             stack_stub(m, funcs, f, is_rel),
         ));
     }
+    if funcs.iter().any(|f| !f.stack_call && !f.private) {
+        out.push((
+            format!("{}_regcall_{rel}stubs.c", m.name),
+            regcall_stubs(m, funcs, is_rel),
+        ));
+    }
     out.push((
         format!("{}_{rel}autoinit.c", m.name),
         autoinit(m, is_rel),
@@ -326,7 +463,7 @@ mod tests {
         let f = func("AllocMem", 33);
         let s = stack_stub(&m, std::slice::from_ref(&f), &f, false);
         assert!(s.contains("AROS_GM_LIBFUNCSTUB(AllocMem, SysBase, 33)"), "{s}");
-        assert!(s.contains("void __AllocMem_SysBase_libreq(){ AROS_LIBREQ(SysBase,41) ; }"), "{s}");
+        assert!(s.contains("void __AllocMem_SysBase_libreq(){ AROS_LIBREQ(SysBase,41); }"), "{s}");
         assert!(s.contains("#include <proto/exec.h>"), "{s}");
         // The non-rel header must undefine the nolibbase guards, or the stub
         // compiles without a library base and calls through nothing.
@@ -396,6 +533,87 @@ mod tests {
         assert!(rel.contains("__aros_getoffsettable()"), "{rel}");
     }
 
+    fn reg_func(name: &str, lvo: u32, ret: &str, args: &[(&str, &str, &str)]) -> Function {
+        Function {
+            name: name.to_owned(),
+            ret_type: ret.to_owned(),
+            args: args
+                .iter()
+                .map(|(ty, nm, reg)| crate::varargs::Arg {
+                    decl: format!("{ty} {nm}"),
+                    ty: (*ty).to_owned(),
+                    name: (*nm).to_owned(),
+                    reg: Some((*reg).to_owned()),
+                })
+                .collect(),
+            private: false,
+            novararg: false,
+            lvo,
+            stack_call: false,
+            declared_version: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_register_call_stub_matches_the_reference_shape() {
+        // exec's AllocMem: two normal arguments in D0 and D1.
+        let m = facts();
+        let f = reg_func("AllocMem", 33, "APTR", &[("IPTR", "byteSize", "D0"), ("ULONG", "requirements", "D1")]);
+        let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
+        assert!(s.contains("APTR AllocMem(IPTR byteSize, ULONG requirements)"), "{s}");
+        assert!(s.contains("return AROS_LC2(APTR, AllocMem,"), "{s}");
+        assert!(s.contains("AROS_LCA(IPTR, byteSize, D0), \\"), "{s}");
+        assert!(s.contains("struct ExecBase *, __aros_getbase_SysBase(), 33, Exec);"), "{s}");
+    }
+
+    #[test]
+    fn a_void_return_uses_the_nr_variant() {
+        let m = facts();
+        let f = reg_func("FreeMem", 35, "void", &[("APTR", "memoryBlock", "A1")]);
+        let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
+        assert!(s.contains("    AROS_LC1NR(void, FreeMem,"), "{s}");
+        assert!(!s.contains("return AROS_LC"), "{s}");
+    }
+
+    #[test]
+    fn a_register_pair_becomes_lca2_and_names_the_run() {
+        // writeutils.c:3 concatenates runs, so a quad followed by two normal
+        // arguments gives QUAD12, not 3 and not QUAD1_2.
+        let m = facts();
+        let f = reg_func(
+            "Seek64",
+            40,
+            "LONG",
+            &[("QUAD", "pos", "D0/D1"), ("LONG", "mode", "D2"), ("LONG", "flags", "D3")],
+        );
+        let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
+        assert!(s.contains("AROS_LCQUAD12(LONG, Seek64,"), "{s}");
+        assert!(s.contains("AROS_LCA2(QUAD, pos, D0, D1), \\"), "{s}");
+    }
+
+    #[test]
+    fn a_double_in_a_register_pair_is_named_double() {
+        let m = facts();
+        let f = reg_func("SPFix", 41, "LONG", &[("double", "x", "D0/D1")]);
+        let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
+        assert!(s.contains("AROS_LCDOUBLE1(LONG, SPFix,"), "{s}");
+    }
+
+    #[test]
+    fn a_register_call_module_gets_one_shared_file() {
+        let m = facts();
+        let funcs = vec![
+            reg_func("AllocMem", 33, "APTR", &[("IPTR", "n", "D0")]),
+            reg_func("FreeMem", 34, "void", &[("APTR", "p", "A1")]),
+        ];
+        let files: Vec<String> = sources(&m, &funcs, false).into_iter().map(|(n, _)| n).collect();
+        assert!(files.contains(&"exec_regcall_stubs.c".to_owned()), "{files:?}");
+        // No per-function file for a register-call entry.
+        assert!(!files.iter().any(|f| f.contains("AllocMem")), "{files:?}");
+        assert_eq!(files.len(), 3);
+    }
+
     #[test]
     fn one_file_per_stack_stub_and_none_for_register_calls() {
         let m = facts();
@@ -413,6 +631,8 @@ mod tests {
         // public stub at all.
         assert!(!files.iter().any(|f| f.contains("RegOnly")), "{files:?}");
         assert!(!files.iter().any(|f| f.contains("Hidden")), "{files:?}");
-        assert_eq!(files.len(), 4);
+        // The register-call entry lands in the one shared file instead.
+        assert!(files.contains(&"exec_regcall_stubs.c".to_owned()), "{files:?}");
+        assert_eq!(files.len(), 5);
     }
 }

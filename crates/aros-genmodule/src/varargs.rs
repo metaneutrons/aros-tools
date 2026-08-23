@@ -35,6 +35,14 @@ pub struct Arg {
     pub ty: String,
     /// Parameter name, e.g. `tags`.
     pub name: String,
+    /// The register this argument arrives in, from the declaration's second
+    /// parenthesised group. `D0`, or `D0/D1` for a value that occupies two.
+    ///
+    /// Transcribed, never derived: the AROS_LCA macros take the register as a
+    /// token, so passing through what the .conf says cannot introduce a mapping
+    /// error. None means the declaration had no register group at all, which is
+    /// what makes the function stack-call.
+    pub reg: Option<String>,
 }
 
 /// A function from a `##begin functionlist` section.
@@ -314,13 +322,30 @@ pub fn parse_function_line(line: &str) -> Option<Function> {
         for decl in split_args(arg_text) {
             // A parameter may be unnamed; keep it, it just cannot be referenced.
             let (ty, nm) = split_decl(&decl).unwrap_or_else(|| (decl.clone(), String::new()));
-            args.push(Arg { decl, ty, name: nm });
+            args.push(Arg { decl, ty, name: nm, reg: None });
         }
     }
 
     // A register specification is a second parenthesised group after the
     // argument list. Its absence is what makes the function stack-call.
-    let stack_call = !after[close + 1..].trim_start().starts_with('(');
+    let tail = after[close + 1..].trim_start();
+    let stack_call = !tail.starts_with('(');
+    if !stack_call {
+        // Positional: the reference rejects a count mismatch outright
+        // (config.c:2043), so a short list means the declaration is malformed
+        // and the extra arguments keep None rather than borrowing a neighbour's
+        // register.
+        let inner = tail
+            .strip_prefix('(')
+            .and_then(|t| t.rfind(')').map(|e| &t[..e]))
+            .unwrap_or("");
+        for (arg, reg) in args.iter_mut().zip(inner.split(',')) {
+            let reg = reg.trim();
+            if !reg.is_empty() {
+                arg.reg = Some(reg.to_owned());
+            }
+        }
+    }
 
     Some(Function {
         name,
@@ -429,6 +454,7 @@ mod tests {
             decl: decl.to_owned(),
             ty: ty.to_owned(),
             name: name.to_owned(),
+            reg: None,
         }
     }
 

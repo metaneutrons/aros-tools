@@ -66,6 +66,16 @@ struct Args {
     /// directory; mirroring that keeps them apart.
     #[arg(long)]
     output_gen: Option<PathBuf>,
+
+    /// Root for the module link library sources (e.g. build/pc-x86_64/linklib).
+    ///
+    /// One directory per module, holding one C file per stack-call stub plus
+    /// the autoinit and getlibbase files. These are what makes a cross-library
+    /// call resolve: without them a consumer carries the call as a dangling
+    /// external, and because every link here is `ld.lld -r` nothing complains.
+    /// `ninja symbol-audit` is what measures the difference.
+    #[arg(long)]
+    output_linklib: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -937,6 +947,7 @@ fn main() {
         );
     }
 
+    let mut linklib_files = 0usize;
     for module in &modules {
         let conflicting =
             colliding_names.contains(&public_include_name(module).to_ascii_lowercase());
@@ -959,6 +970,15 @@ fn main() {
                 module.rel_dir.display()
             );
         }
+        if let Some(root) = args.output_linklib.as_deref() {
+            match generate_linklib_sources(module, root) {
+                Ok(n) => linklib_files += n,
+                Err(error) => eprintln!(
+                    "aros-genmodule: failed to generate link library sources for {}: {error}",
+                    module.rel_dir.display()
+                ),
+            }
+        }
     }
 
     println!(
@@ -966,6 +986,59 @@ fn main() {
         conf_files.len(),
         args.output_inc.display()
     );
+    if let Some(root) = args.output_linklib.as_deref() {
+        println!(
+            "🔗 aros-genmodule: {linklib_files} link library source(s) in {}",
+            root.display()
+        );
+    }
+}
+
+/// Writes one module's link library sources under `<root>/<rel_dir>/<mod>/`.
+///
+/// The relative directory is kept because 26 .conf stems occur more than once
+/// in the tree; a flat layout would make them overwrite each other, the same
+/// reason `<mod>_libdefs.h` is placed per module.
+///
+/// Both the plain and the `rel` flavour are written. The reference generates
+/// them from the same config with `is_rel` toggled, and a module built into a
+/// relative-library archive needs the second set.
+fn generate_linklib_sources(module: &ConfModule, root: &Path) -> std::io::Result<usize> {
+    // A module with no public functions has nothing to stub, and one that
+    // exports no headers has no proto/ header for the stubs to include.
+    if !exports_public_headers(module) {
+        return Ok(0);
+    }
+
+    let suffix = match module.mod_type.as_str() {
+        // config.c:305 and :315 -- both of these are named "<x>.class".
+        "usbclass" | "btclass" => "class",
+        other => other,
+    };
+    let facts = linklib::ModuleFacts {
+        name: &module.name,
+        include_name: &module.include_name,
+        lib_base: &module.lib_base,
+        lib_base_type_extern: &extern_base_type(module),
+        basename: &default_basename(&module.name),
+        suffix,
+        no_includes: module.no_includes,
+        cdef_private: &module.cdef_private,
+        major_version: module.major_version,
+        force_bases: &module.force_bases,
+        startup_lines: &module.startup_lines,
+    };
+
+    let dir = root.join(&module.rel_dir).join(&module.name);
+    fs::create_dir_all(&dir)?;
+    let mut written = 0usize;
+    for is_rel in [false, true] {
+        for (name, body) in linklib::sources(&facts, &module.functions, is_rel) {
+            write_if_changed(dir.join(name), &body)?;
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 #[cfg(test)]
