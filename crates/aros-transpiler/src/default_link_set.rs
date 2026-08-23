@@ -189,8 +189,8 @@ pub fn read_default_link_set(
     // compiler/autoinit installs next to the target libraries.
     let auto_path = source_dir.join("compiler/autoinit/auto");
     let expanded = if lib.contains("%(autolib)") {
-        let auto = read_source(&auto_path)
-            .map_err(|error| format!("{}: {error}", auto_path.display()))?;
+        let auto =
+            read_source(&auto_path).map_err(|error| format!("{}: {error}", auto_path.display()))?;
         let autolib = spec_section(&auto, "autolib")
             .ok_or_else(|| format!("{}: no *autolib: section", auto_path.display()))?;
         lib.replace("%(autolib)", &autolib)
@@ -208,7 +208,10 @@ pub fn read_default_link_set(
     parse_spec_expression(&expanded, &[], &[], &mut items)
         .map_err(|error| format!("{}: {error}", spec.display()))?;
     if items.is_empty() {
-        return Err(format!("{}: *lib: expanded to no libraries", spec.display()));
+        return Err(format!(
+            "{}: *lib: expanded to no libraries",
+            spec.display()
+        ));
     }
     Ok(DefaultLinkSet { items })
 }

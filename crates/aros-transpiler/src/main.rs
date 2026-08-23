@@ -2,9 +2,8 @@ use aros_common::Result;
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, default_link_set_available, generate_cmake,
-    generated_header, parse_mmakefile_with_dirs,
-    parse_mmakefile_with_dirs_and_context_and_fetches, read_default_link_set, DependencyGraph,
-    TargetContext,
+    generated_header, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
+    read_default_link_set, DependencyGraph, TargetContext,
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -273,8 +272,9 @@ fn main() -> Result<()> {
             }
         }
     } else {
-        unresolved_default_link_set
-            .push("compiler/autoinit/auto is absent, so no default link set was applied".to_owned());
+        unresolved_default_link_set.push(
+            "compiler/autoinit/auto is absent, so no default link set was applied".to_owned(),
+        );
     }
     let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a

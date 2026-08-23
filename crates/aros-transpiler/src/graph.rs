@@ -4,8 +4,8 @@ use crate::ast::{
     GrubBuildDecl, MetaTargetRule, ModuleType, PythonOutputsDecl, TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
-use crate::default_link_set::DefaultLinkSet;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
+use crate::default_link_set::DefaultLinkSet;
 use crate::fetch::FetchDecl;
 use crate::flexcat::FlexCatSourceDecl;
 use crate::icons::{IconSet, IconTarget};

@@ -379,12 +379,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn resolve_variable(&self, name: &str) -> Result<String, MakeExprError> {
-        if let Some((_, value)) = self
-            .loop_vars
-            .iter()
-            .rev()
-            .find(|(bound, _)| bound == name)
-        {
+        if let Some((_, value)) = self.loop_vars.iter().rev().find(|(bound, _)| bound == name) {
             return Ok(value.clone());
         }
         if let Some(value) = self.context_value(name) {

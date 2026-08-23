@@ -2281,8 +2281,14 @@ mod tests {
             "{header}"
         );
         // The target-selecting arguments, an empty one shown as such.
-        assert!(header.contains(&format!("{:<13}x86_64", "--cpu")), "{header}");
-        assert!(header.contains(&format!("{:<13}\"\"", "--family")), "{header}");
+        assert!(
+            header.contains(&format!("{:<13}x86_64", "--cpu")),
+            "{header}"
+        );
+        assert!(
+            header.contains(&format!("{:<13}\"\"", "--family")),
+            "{header}"
+        );
         // Arguments that were not given are not invented.
         assert!(!header.contains("--variant"), "{header}");
         assert!(!header.contains("--float-abi"), "{header}");

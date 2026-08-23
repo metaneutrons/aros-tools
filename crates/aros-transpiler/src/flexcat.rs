@@ -36,11 +36,11 @@ pub struct FlexCatSourceDecl {
     pub source: String,
     /// Generated C header name, relative to `declaring_dir`.
     pub header: String,
-    /// Concrete source-tree path to the FlexCat catalog description.
+    /// FlexCat catalog description, as `${CMAKE_SOURCE_DIR}/<relative>`.
     pub description: String,
-    /// Concrete source-tree path to the header source-description template.
+    /// Header source-description template, in the same form.
     pub header_template: String,
-    /// Concrete source-tree path to the C source-description template.
+    /// C source-description template, in the same form.
     pub source_template: String,
     /// Base build-tree directory for translated `.catalog` resources.  Empty
     /// only if the rule did not have the canonical PO catalog companion.
@@ -183,15 +183,27 @@ pub fn collect_flexcat_source_rules(
         )
         .unwrap_or((None, None, None, Vec::new()));
 
+        let rendered = cmake_source_path(&description, root).zip(
+            cmake_source_path(&header_template, root)
+                .zip(cmake_source_path(&source_template, root)),
+        );
+        let Some((description, (header_template, source_template))) = rendered else {
+            scan.skipped.push(format!(
+                "{}:{}: FlexCat {} has a description or template outside the source tree",
+                declaring_dir, rule.line, source
+            ));
+            continue;
+        };
+
         scan.declarations.push(FlexCatSourceDecl {
             owner: owners[0].clone(),
             declaring_dir: declaring_dir.clone(),
             line: rule.line,
             source: source.to_owned(),
             header,
-            description: cmake_source_path(&description),
-            header_template: cmake_source_path(&header_template),
-            source_template: cmake_source_path(&source_template),
+            description,
+            header_template,
+            source_template,
             catalog_destination,
             catalog_name,
             catalog_source_dir,
@@ -408,8 +420,23 @@ fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn cmake_source_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+/// Renders a source-tree path in the form the generated CMake uses everywhere
+/// else, so the emitted file does not depend on where the tree is checked out.
+///
+/// It used to normalise separators and nothing more, which left the absolute
+/// host path of every FlexCat description and template in
+/// generated_targets.cmake: twelve lines that made the file unusable anywhere
+/// but the machine that wrote it.
+///
+/// `None` if the path is not below `root`, which cannot happen for a path this
+/// module built, and must be reported rather than emitted if it ever does.
+fn cmake_source_path(path: &Path, root: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    if relative.is_empty() {
+        return None;
+    }
+    Some(format!("${{CMAKE_SOURCE_DIR}}/{relative}"))
 }
 
 #[cfg(test)]

@@ -2,12 +2,12 @@ pub mod arch_sources;
 pub mod ast;
 pub mod catalogs;
 pub mod copy_includes;
+pub mod default_link_set;
 pub mod dirs;
 pub mod fetch;
 pub mod flags;
 pub mod flexcat;
 pub mod generator;
-pub mod default_link_set;
 pub mod genmodule_linklibs;
 pub mod graph;
 pub mod icons;
@@ -26,13 +26,13 @@ pub use ast::{
 };
 pub use catalogs::CatalogDecl;
 pub use copy_includes::CopyIncludesDecl;
+pub use default_link_set::{
+    default_link_set_available, read_default_link_set, DefaultLinkItem, DefaultLinkSet,
+};
 pub use fetch::FetchDecl;
 pub use flags::FlagSet;
 pub use flexcat::FlexCatSourceDecl;
 pub use generator::{generate_cmake, generated_header};
-pub use default_link_set::{
-    default_link_set_available, read_default_link_set, DefaultLinkItem, DefaultLinkSet,
-};
 pub use genmodule_linklibs::{resolve_generated_linklib_sources, GeneratedLinklibSources};
 pub use graph::DependencyGraph;
 pub use icons::{IconSet, IconTarget};
