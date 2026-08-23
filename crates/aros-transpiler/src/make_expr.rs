@@ -223,6 +223,10 @@ struct Evaluator<'a> {
     lookup: Option<&'a MakeVariableLookup<'a>>,
     guard: Option<&'a MakeVariableGuard<'a>>,
     expansion_chain: Vec<String>,
+    /// Innermost-last bindings of `$(foreach var,...)` loop variables. Make
+    /// gives the loop variable a temporary value that shadows any global of
+    /// the same name, so this is consulted before every other source.
+    loop_vars: Vec<(String, String)>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -249,6 +253,7 @@ impl<'a> Evaluator<'a> {
             lookup: context.lookup,
             guard: context.guard,
             expansion_chain: Vec::new(),
+            loop_vars: Vec::new(),
         })
     }
 
@@ -363,6 +368,14 @@ impl<'a> Evaluator<'a> {
     }
 
     fn resolve_variable(&self, name: &str) -> Result<String, MakeExprError> {
+        if let Some((_, value)) = self
+            .loop_vars
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
+        {
+            return Ok(value.clone());
+        }
         if let Some(value) = self.context_value(name) {
             return Ok(value);
         }
@@ -455,6 +468,34 @@ impl<'a> Evaluator<'a> {
         depth: usize,
     ) -> Result<String, MakeExprError> {
         match name {
+            // $(foreach var,list,text): bind var to each word of list in turn
+            // and expand text, joining the results with a single space. The
+            // binding is temporary and shadows a global of the same name.
+            //
+            // rom/dos needs this for its image loaders,
+            // `$(foreach img, aos elf, internalloadseg_$(img))`, without which
+            // dos.library is built with no ELF loader at all. muimaster needs
+            // it for its 44 classes.
+            "foreach" => {
+                let args = function_arguments(name, raw_args, 3)?;
+                let variable = self.expand_text(args[0].trim(), depth)?;
+                let variable = variable.trim().to_owned();
+                if variable.is_empty() {
+                    return Err(MakeExprError::InvalidSyntax {
+                        expression: raw_args.to_owned(),
+                        detail: "foreach has an empty loop variable name".to_owned(),
+                    });
+                }
+                let list = make_words(&self.expand_text(args[1].trim(), depth)?);
+                let mut output: Vec<String> = Vec::with_capacity(list.len());
+                for word in list {
+                    self.loop_vars.push((variable.clone(), word));
+                    let expanded = self.expand_text(args[2], depth);
+                    self.loop_vars.pop();
+                    output.push(expanded?);
+                }
+                Ok(join_words(&make_words(&output.join(" "))))
+            }
             "addprefix" | "addsuffix" | "filter" | "filter-out" => {
                 let args = function_arguments(name, raw_args, 2)?;
                 let first = self.expand_text(args[0].trim(), depth)?;
@@ -1301,5 +1342,26 @@ mod tests {
             modules.first().map(String::as_str),
             Some("${AROS_BUILD_DIR}/SYS/Locale/Languages/albanian.language")
         );
+    }
+
+    #[test]
+    fn foreach_binds_its_loop_variable_and_shadows_a_global() {
+        // rom/dos:42 verbatim: without this, dos.library has no ELF loader.
+        assert_eq!(
+            evaluate("", "$(foreach img, aos elf, internalloadseg_$(img))").unwrap(),
+            "internalloadseg_aos internalloadseg_elf"
+        );
+        // The binding is temporary: a global of the same name is shadowed
+        // inside the body and intact outside it.
+        assert_eq!(
+            evaluate("f := global\n", "$(foreach f,one two,classes/$(f)) $(f)").unwrap(),
+            "classes/one classes/two global"
+        );
+        // Nesting, and an empty list yielding nothing.
+        assert_eq!(
+            evaluate("", "$(foreach a,x y,$(foreach b,1 2,$(a)$(b)))").unwrap(),
+            "x1 x2 y1 y2"
+        );
+        assert_eq!(evaluate("", "[$(foreach a,,body)]").unwrap(), "[]");
     }
 }
