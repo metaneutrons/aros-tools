@@ -6,7 +6,7 @@ use crate::ast::{
 };
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
-use crate::flags::{collect_flags, collect_flags_at};
+use crate::flags::{collect_flags, collect_flags_at, FlagSet};
 use crate::flexcat::collect_flexcat_source_rules;
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
 use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
@@ -563,6 +563,35 @@ struct GenmoduleConfigFacts {
     forces_client_archive: bool,
 }
 
+/// The flag state one declaration sees.
+///
+/// With a target selected the flags are re-collected positionally from the
+/// mmakefile's own scope, because Make evaluates a declaration's arguments
+/// where the declaration stands. Link options contributed by an architecture
+/// `make.opts` are not in that scope, so they are merged in here, once per
+/// declaration, exactly as the make.opts defines are.
+fn declaration_flags_at(
+    scope: &VarScope,
+    line: usize,
+    target: Option<&TargetContext>,
+    file_flags: &FlagSet,
+    opts_link_options: &[String],
+    opts_spec_switches: &[String],
+) -> FlagSet {
+    let mut flags = target.map_or_else(|| file_flags.clone(), |_| collect_flags_at(scope, line));
+    for option in opts_link_options {
+        if !flags.link_options.contains(option) {
+            flags.link_options.push(option.clone());
+        }
+    }
+    for switch in opts_spec_switches {
+        if !flags.spec_switches.contains(switch) {
+            flags.spec_switches.push(switch.clone());
+        }
+    }
+    flags
+}
+
 fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<GenmoduleConfigFacts> {
     let content = fs::read_to_string(directory.join(format!("{module}.conf"))).ok()?;
     let mut in_config = false;
@@ -771,6 +800,13 @@ pub struct TargetContext {
 }
 
 impl TargetContext {
+    /// The value of one target parameter, for callers outside this module that
+    /// have to decide a Make conditional on it.
+    #[must_use]
+    pub fn value_of(&self, name: &str) -> Option<String> {
+        self.value(name)
+    }
+
     fn value(&self, name: &str) -> Option<String> {
         match name {
             "AROS_TARGET_CPU" | "CPU" => self.cpu.clone(),
@@ -7203,7 +7239,7 @@ fn parse_mmakefile_impl(
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
     let (packages, skipped_packages) = crate::packages::collect_packages(&content, &rel_dir);
-    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir);
+    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&content, &rel_dir, target);
     // A %build_archspecific file contributes to a target defined elsewhere, so
     // its own USER_INCLUDES and flags have to travel with the declaration.
     for d in &mut arch_sources {
@@ -7214,7 +7250,19 @@ fn parse_mmakefile_impl(
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
-    let (opts_files, skipped_make_opts) = collect_make_opts(&content, &rel_dir, root);
+    let (opts_files, mut skipped_make_opts) = collect_make_opts(&content, &rel_dir, root);
+    let active_tags = crate::make_opts::active_arch_tags(
+        target.and_then(|target| target.platform.as_deref()),
+        target.and_then(|target| target.cpu.as_deref()),
+    );
+    let mut undecidable_arch_link_options: Vec<String> = Vec::new();
+    // Merged into every declaration's flags below rather than into `flag_set`:
+    // with a target selected, declaration flags are re-collected positionally
+    // from the mmakefile's own scope (collect_flags_at), so anything added to
+    // `flag_set` here would be discarded. This is the same arrangement the
+    // make.opts defines already use.
+    let mut opts_link_options: Vec<String> = Vec::new();
+    let mut opts_spec_switches: Vec<String> = Vec::new();
     let skipped_conditions = flag_set.skipped_conditions.clone();
     // Flags guarded by an `ifeq` on the CPU or platform are already tagged by
     // the flag collector; the make.opts contents are appended below.
@@ -7241,11 +7289,40 @@ fn parse_mmakefile_impl(
                 for d in opts_incs.dirs {
                     opts_arch_includes.push((tag.clone(), d));
                 }
+                // USER_LDFLAGS in a make.opts was read and then dropped, with
+                // no report. arch/all-pc/kernel/make.opts:1 is
+                //
+                //   USER_LDFLAGS := -L$(GENDIR)/lib -lbootconsole -lacpica
+                //
+                // and without it kernel.resource leaves con_Putc, scr_Width,
+                // the whole boot console and every Acpi* undefined. The
+                // bootstrap loader forgives exactly one undefined symbol,
+                // SysBase (bootstrap/elfloader.c:157), so that image cannot
+                // load.
+                //
+                // Folded in rather than carried as a tagged lane, because the
+                // graph has to see the `-L` to authorise a private archive:
+                // libbootconsole.a lives in $(GENDIR)/lib, and
+                // has_matching_private_link_archive compares that directory
+                // against the consumer's own link options.
+                if opts_flags.link_options.is_empty() {
+                } else if active_tags.iter().any(|active| active == tag) {
+                    opts_link_options.extend(opts_flags.link_options);
+                    opts_spec_switches.extend(opts_flags.spec_switches);
+                } else if target.is_none() {
+                    undecidable_arch_link_options.push(format!(
+                        "{}: link options tagged {tag} cannot be decided without a target: {}",
+                        f.path,
+                        opts_flags.link_options.join(" ")
+                    ));
+                }
             }
             None => {
                 // A local make.opts always applies.
                 flag_set.defines.extend(opts_flags.defines);
                 flag_set.compile_options.extend(opts_flags.compile_options);
+                opts_link_options.extend(opts_flags.link_options);
+                opts_spec_switches.extend(opts_flags.spec_switches);
                 opts_include_dirs.extend(opts_incs.dirs);
             }
         }
@@ -7255,6 +7332,8 @@ fn parse_mmakefile_impl(
     // the variable state is positional. Both scans read the same
     // continuation-joined text, which is what makes their line numbers
     // comparable.
+    skipped_make_opts.extend(undecidable_arch_link_options);
+
     let icon_scan = crate::icons::collect_icons_all(&joined, dirs, &rel_dir);
     let catalog_scan = crate::catalogs::collect_catalogs_with_line_states(
         &joined,
@@ -7384,8 +7463,14 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let declaration_flags =
-            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let declaration_flags = declaration_flags_at(
+            &scope,
+            inv.line,
+            target,
+            &flag_set,
+            &opts_link_options,
+            &opts_spec_switches,
+        );
         let declaration_includes = target.map_or_else(
             || include_set.clone(),
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
@@ -7750,8 +7835,14 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let declaration_flags =
-            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let declaration_flags = declaration_flags_at(
+            &scope,
+            inv.line,
+            target,
+            &flag_set,
+            &opts_link_options,
+            &opts_spec_switches,
+        );
         let declaration_includes = target.map_or_else(
             || include_set.clone(),
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
@@ -7899,8 +7990,14 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
-        let mut declaration_flags =
-            target.map_or_else(|| flag_set.clone(), |_| collect_flags_at(&scope, inv.line));
+        let mut declaration_flags = declaration_flags_at(
+            &scope,
+            inv.line,
+            target,
+            &flag_set,
+            &opts_link_options,
+            &opts_spec_switches,
+        );
         let mut declaration_includes = target.map_or_else(
             || include_set.clone(),
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),

@@ -37,6 +37,27 @@ pub struct MakeOptsFile {
     pub path: String,
 }
 
+/// The architecture tags that apply to one target, most specific first.
+///
+/// Mirrors `AROS_ARCH_INCLUDE_TAGS` in cmake/AROS.cmake:1204, which is the
+/// authority; the two must agree or a tagged flag applies on one side only.
+#[must_use]
+pub fn active_arch_tags(platform: Option<&str>, cpu: Option<&str>) -> Vec<String> {
+    let mut tags = Vec::new();
+    if let (Some(platform), Some(cpu)) = (platform, cpu) {
+        if !platform.is_empty() && !cpu.is_empty() {
+            tags.push(format!("{platform}-{cpu}"));
+        }
+    }
+    for value in [platform, cpu].into_iter().flatten() {
+        if !value.is_empty() {
+            tags.push(value.to_owned());
+        }
+    }
+    tags.push("native".to_owned());
+    tags
+}
+
 /// Derives the architecture tag from an `arch/<a>-<b>` directory name.
 ///
 /// Matches the tag forms used by `%set_archincludes`: a wildcard half drops out,
@@ -232,5 +253,22 @@ mod tests {
         );
         assert!(files.is_empty());
         assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn active_tags_match_the_cmake_list_and_the_directory_tags() {
+        // cmake/AROS.cmake:1204 builds exactly this order.
+        assert_eq!(
+            active_arch_tags(Some("pc"), Some("x86_64")),
+            ["pc-x86_64", "pc", "x86_64", "native"]
+        );
+        // arch/all-pc/kernel/make.opts is tagged from its directory, and that
+        // tag has to be in the list or its USER_LDFLAGS never applies.
+        let tag = tag_from_arch_dir("all-pc").expect("all-pc");
+        assert!(active_arch_tags(Some("pc"), Some("x86_64")).contains(&tag));
+        // An absent half drops out rather than producing an empty tag.
+        assert_eq!(active_arch_tags(Some("pc"), None), ["pc", "native"]);
+        assert_eq!(active_arch_tags(None, None), ["native"]);
+        assert_eq!(active_arch_tags(Some(""), Some("")), ["native"]);
     }
 }
