@@ -29,7 +29,7 @@ pub use copy_includes::CopyIncludesDecl;
 pub use fetch::FetchDecl;
 pub use flags::FlagSet;
 pub use flexcat::FlexCatSourceDecl;
-pub use generator::generate_cmake;
+pub use generator::{generate_cmake, generated_header};
 pub use default_link_set::{
     default_link_set_available, read_default_link_set, DefaultLinkItem, DefaultLinkSet,
 };

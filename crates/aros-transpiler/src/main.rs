@@ -2,8 +2,9 @@ use aros_common::Result;
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, default_link_set_available, generate_cmake,
-    parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
-    read_default_link_set, DependencyGraph, TargetContext,
+    generated_header, parse_mmakefile_with_dirs,
+    parse_mmakefile_with_dirs_and_context_and_fetches, read_default_link_set, DependencyGraph,
+    TargetContext,
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -520,7 +521,11 @@ fn main() -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let cmake_content = generate_cmake(&graph);
+    let cmake_content = format!(
+        "{}{}",
+        generated_header(target.as_ref()),
+        generate_cmake(&graph)
+    );
     fs::write(&args.output, cmake_content)?;
 
     // The default link set is applied by CMake, which needs to know which
