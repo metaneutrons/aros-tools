@@ -687,8 +687,16 @@ fn generate_sdk_headers(
         write_if_changed(clib_dir.join(format!("{include_name}_protos.h")), protos)?;
     }
 
-    // 3. defines/<mod>.h, including the varargs convenience stubs.
-    let defines = varargs::render_defines(include_name, &module.lib_base, &module.functions);
+    // 3. defines/<mod>.h: the library-call defines and the varargs stubs.
+    let defines_cx = varargs::DefinesContext {
+        include_name,
+        lib_base: &module.lib_base,
+        lib_base_type_extern: &extern_base_type(module),
+        basename: &default_basename(&module.name),
+        first_lvo: varargs::first_lvo(&module.mod_type, module.no_resident),
+        major_version: module.major_version,
+    };
+    let defines = varargs::render_defines(&defines_cx, &module.functions);
     if public {
         write_if_changed(defines_dir.join(format!("{include_name}.h")), &defines.text)?;
         // Function LVOs, a separate header in the reference too.

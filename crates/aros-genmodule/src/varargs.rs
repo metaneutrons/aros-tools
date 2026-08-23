@@ -401,9 +401,191 @@ pub struct DefinesOutput {
     pub unsupported: Vec<String>,
 }
 
-/// Renders `defines/<module>.h` including the tag-list varargs stubs.
+/// What the register-call defines need beyond the function list.
+pub struct DefinesContext<'a> {
+    pub include_name: &'a str,
+    pub lib_base: &'a str,
+    /// `libbasetypeptrextern`, e.g. `struct ExecBase *`.
+    pub lib_base_type_extern: &'a str,
+    /// `basename`, the last AROS_LC argument, e.g. `Exec`.
+    pub basename: &'a str,
+    /// Vectors below this are the module skeleton's own.
+    pub first_lvo: u32,
+    /// Default `.version` when no function declares one.
+    pub major_version: u32,
+}
+
+/// The per-function library-call defines, per `writeincdefines.c:235`.
+///
+/// This is what makes `AllocMem(a, b)` compile to a direct call through the
+/// library base instead of a reference to an external symbol. Without it every
+/// consumer emits a real call and leaves it undefined, and because every link
+/// here is `ld.lld -r` nothing complains: `ninja symbol-audit` measured 25006
+/// such references, and the commonest -- CloseLibrary, OpenLibrary, AllocVec,
+/// FreeVec, FindTask -- are exec functions that arrive exactly this way.
+///
+/// exec declares no `linklibname`, so it has no link library and no stubs. For
+/// it, these defines are the only mechanism.
+///
+/// Emitted for a function that is not private, not stack-call, and at or above
+/// the module's first LVO, which is the reference's filter at
+/// writeincdefines.c:117.
+fn render_register_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> String {
+    let upper = cx.include_name.to_uppercase();
+    // config.c:415-432: one declared version makes 0 the default for the rest.
+    let any_declared = functions.iter().any(|f| f.declared_version.is_some());
+    let mut out = String::new();
+
+    for f in functions {
+        if f.private {
+            continue;
+        }
+        let _ = writeln!(out, "#define LVO{}          {}", f.name, f.lvo);
+    }
+
+    for f in functions {
+        if f.private || f.stack_call || f.lvo < cx.first_lvo {
+            continue;
+        }
+        let version = f.declared_version.unwrap_or(if any_declared {
+            0
+        } else {
+            cx.major_version
+        });
+        let ret = f.ret_type.trim();
+        let is_void = matches!(ret, "void" | "VOID");
+
+        let _ = write!(
+            out,
+            "\n#if !defined(__{upper}_LIBAPI__) || ({version} <= __{upper}_LIBAPI__)\n"
+        );
+
+        // The write-back form takes the base as its first argument, so the
+        // plain define below can pass the module's configured libbase while a
+        // caller with its own base can use __<name>_WB directly.
+        let _ = write!(out, "\n#define __{}_WB(__{}", f.name, cx.lib_base);
+        for i in 1..=f.args.len() {
+            let _ = write!(out, ", __arg{i}");
+        }
+        out.push_str(") ({\\\n");
+        let _ = writeln!(out, "        AROS_LIBREQ({},{version})\\", cx.lib_base);
+        let _ = writeln!(
+            out,
+            "        AROS_LC{}{}({}, {},\\",
+            lc_suffix(f),
+            if is_void { "NR" } else { "" },
+            ret,
+            f.name
+        );
+        for (i, a) in f.args.iter().enumerate() {
+            let n = i + 1;
+            let ty = a.ty.trim();
+            let reg = a.reg.as_deref().unwrap_or("");
+            if let Some((first, second)) = reg.split_once('/') {
+                let first = if first.len() > 2 { &first[..2] } else { first };
+                let _ = writeln!(
+                    out,
+                    "         AROS_LCA2({ty}, (__arg{n}), {first}, {second}), \\"
+                );
+            } else {
+                let reg = if reg.len() > 2 { &reg[..2] } else { reg };
+                let _ = writeln!(out, "         AROS_LCA({ty}, (__arg{n}), {reg}), \\");
+            }
+        }
+        let _ = write!(
+            out,
+            "        {}, (__{}), {}, {});\\\n}})\n\n",
+            cx.lib_base_type_extern, cx.lib_base, f.lvo, cx.basename
+        );
+
+        let _ = write!(out, "#define {}(", f.name);
+        for i in 1..=f.args.len() {
+            if i > 1 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "arg{i}");
+        }
+        let _ = write!(out, ") \\\n    __{}_WB(__{upper}_LIBBASE", f.name);
+        for i in 1..=f.args.len() {
+            let _ = write!(out, ", (arg{i})");
+        }
+        out.push_str(")\n");
+
+        for alias in &f.aliases {
+            let _ = writeln!(out, "#define {alias} {}", f.name);
+        }
+
+        let _ = write!(
+            out,
+            "\n#endif /* !defined(__{upper}_LIBAPI__) || ({version} <= __{upper}_LIBAPI__) */\n"
+        );
+    }
+    out
+}
+
+/// The `AROS_LC` variant suffix for one argument list.
+///
+/// `writeutils.c:3`: runs of like arguments become `<n>`, `QUAD<n>` or
+/// `DOUBLE<n>`, concatenated, so a pair followed by two plain arguments gives
+/// `QUAD12`. The kind comes from the register spec: a pair means the value
+/// occupies two registers, and `double` separates DOUBLE from QUAD.
+fn lc_suffix(f: &Function) -> String {
+    if f.args.is_empty() {
+        return "0".to_owned();
+    }
+    #[derive(PartialEq, Clone, Copy)]
+    enum Kind {
+        Normal,
+        Quad,
+        Double,
+    }
+    let kinds: Vec<Kind> = f
+        .args
+        .iter()
+        .map(|a| {
+            if a.reg.as_deref().is_some_and(|r| r.contains('/')) {
+                if a.ty.trim() == "double" {
+                    Kind::Double
+                } else {
+                    Kind::Quad
+                }
+            } else {
+                Kind::Normal
+            }
+        })
+        .collect();
+    let mut out = String::new();
+    let mut current = kinds[0];
+    let mut run = 0usize;
+    let mut flush = |kind: Kind, run: usize, out: &mut String| match kind {
+        Kind::Double => {
+            let _ = write!(out, "DOUBLE{run}");
+        }
+        Kind::Quad => {
+            let _ = write!(out, "QUAD{run}");
+        }
+        Kind::Normal => {
+            let _ = write!(out, "{run}");
+        }
+    };
+    for k in kinds {
+        if k == current {
+            run += 1;
+        } else {
+            flush(current, run, &mut out);
+            current = k;
+            run = 1;
+        }
+    }
+    flush(current, run, &mut out);
+    out
+}
+
+/// Renders `defines/<module>.h`: the library-call defines and the varargs stubs.
 #[must_use]
-pub fn render_defines(include_name: &str, lib_base: &str, functions: &[Function]) -> DefinesOutput {
+pub fn render_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> DefinesOutput {
+    let include_name = cx.include_name;
+    let lib_base = cx.lib_base;
     let upper = include_name.to_uppercase();
     let mut out = DefinesOutput::default();
     let t = &mut out.text;
@@ -425,6 +607,8 @@ pub fn render_defines(include_name: &str, lib_base: &str, functions: &[Function]
          \n\
          __BEGIN_DECLS\n"
     );
+
+    t.push_str(&render_register_defines(cx, functions));
 
     for f in functions {
         let Some((vararg_name, kind)) = vararg_form(f) else {
@@ -448,6 +632,18 @@ pub fn render_defines(include_name: &str, lib_base: &str, functions: &[Function]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A context for the tests that only exercise the varargs half.
+    fn cx<'a>(include_name: &'a str, lib_base: &'a str) -> DefinesContext<'a> {
+        DefinesContext {
+            include_name,
+            lib_base,
+            lib_base_type_extern: "struct Library *",
+            basename: "Test",
+            first_lvo: 5,
+            major_version: 1,
+        }
+    }
 
     fn arg(decl: &str, ty: &str, name: &str) -> Arg {
         Arg {
@@ -612,7 +808,7 @@ mod tests {
             "NewCreateTaskA",
             vec![arg("struct TagItem *tags", "struct TagItem *", "tags")],
         );
-        let out = render_defines("exec", "SysBase", std::slice::from_ref(&f));
+        let out = render_defines(&cx("exec", "SysBase"), std::slice::from_ref(&f));
         let t = &out.text;
 
         assert!(t.contains("#include <aros/preprocessor/variadic/cast2iptr.hpp>"));
@@ -636,7 +832,7 @@ mod tests {
                 arg("struct TagItem *tags", "struct TagItem *", "tags"),
             ],
         );
-        let out = render_defines("intuition", "IntuitionBase", std::slice::from_ref(&f));
+        let out = render_defines(&cx("intuition", "IntuitionBase"), std::slice::from_ref(&f));
         assert!(out.text.contains("#define OpenWindowTags(arg1, ...) \\"));
         assert!(out.text.contains(
             "    OpenWindowTagList((arg1), (struct TagItem *)(OpenWindowTagList_args)); \\"
@@ -653,7 +849,7 @@ mod tests {
                 arg("va_list ap", "va_list", "ap"),
             ],
         );
-        let out = render_defines("dos", "DOSBase", std::slice::from_ref(&f));
+        let out = render_defines(&cx("dos", "DOSBase"), std::slice::from_ref(&f));
         assert!(!out.text.contains("#define FPrintf"));
         assert_eq!(out.unsupported.len(), 1);
         assert!(out.unsupported[0].contains("VFPrintf"));
