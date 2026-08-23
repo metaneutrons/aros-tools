@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::elf::{Binding, Home, Symbol};
+use aros_common::elf::{Binding, Home, Symbol};
 
 const PREFIX: &str = "__aros_libreq_";
 
@@ -62,7 +62,7 @@ fn eligible(symbol: &Symbol) -> bool {
     match symbol.home {
         Home::Absolute => symbol.binding != Binding::Local,
         Home::Undefined => symbol.binding == Binding::Weak,
-        Home::Section => false,
+        Home::Section(_) => false,
     }
 }
 
@@ -139,6 +139,8 @@ mod tests {
     fn absolute(name: &str) -> Symbol {
         Symbol {
             name: name.to_owned(),
+            value: 0,
+            size: 0,
             home: Home::Absolute,
             binding: Binding::Weak,
         }
@@ -177,6 +179,8 @@ mod tests {
     fn a_bare_weak_reference_asks_for_version_zero() {
         let symbol = Symbol {
             name: "__aros_libreq_GfxBase".to_owned(),
+            value: 0,
+            size: 0,
             home: Home::Undefined,
             binding: Binding::Weak,
         };

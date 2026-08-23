@@ -1,6 +1,7 @@
 //! Common abstractions, architectures, and data structures for AROS-NG tooling.
 
 pub mod arch;
+pub mod elf;
 pub mod error;
 pub mod target;
 pub mod text;

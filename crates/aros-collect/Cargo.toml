@@ -13,5 +13,6 @@ name = "aros-collect"
 path = "src/main.rs"
 
 [dependencies]
+aros-common.workspace = true
 anyhow.workspace = true
 clap.workspace = true

@@ -26,7 +26,6 @@
 //! undefined `pthread_*`. That one changes the *inputs* of a link rather than
 //! its layout, so it is its own step.
 
-mod elf;
 mod libreq;
 mod sets;
 
@@ -144,9 +143,10 @@ fn collect(cli: &Cli) -> Result<bool> {
 
     let bytes = std::fs::read(&staged)
         .with_context(|| format!("the linker wrote no {}", staged.display()))?;
-    let object = elf::read(&bytes)
+    let object = aros_common::elf::read(&bytes)
         .with_context(|| format!("could not read the sections of {}", staged.display()))?;
-    let (found, mut skipped) = sets::discover(&object.sections);
+    let section_names = object.section_names();
+    let (found, mut skipped) = sets::discover(&section_names);
     let (requirements, libreq_skipped) = libreq::discover(&object.symbols);
     skipped.extend(libreq_skipped);
     // Printed as well as written: a report file nobody aggregates is easy to

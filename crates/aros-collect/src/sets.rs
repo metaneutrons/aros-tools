@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::elf::Class;
+use aros_common::elf::Class;
 
 /// A section-name prefix that denotes a set, and where the set's name starts
 /// inside it.
