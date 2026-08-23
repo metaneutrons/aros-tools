@@ -267,7 +267,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
 // do not matter, ordinary comments are omitted, while #MM dependency lines
 // remain because they are executable MetaMake graph input.
 const LLVM_PROVISIONING_MMAKE_SHA256: &str =
-    "2a44782069731ab3f4d582ad77e405f656c3403177288dc7d05f6a3cdaa14719";
+    "451406c625d28b16889ae746f725ff28cb368356ee7d18061d257f59966019cb";
 const LLVM_PROVISIONING_CONFIG_SHA256: &str =
     "00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0";
 const CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256: &str =
@@ -1757,6 +1757,14 @@ mod tests {
     #[test]
     fn current_architecture_denominators_are_pinned() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        // AROS keeps its translations in submodules, and 71 of the tree's
+        // mmakefiles live there. A checkout without them yields a smaller
+        // inventory than the one pinned below, so say so rather than compare
+        // against a different tree.
+        assert!(
+            root.join("rom/dos/catalogs/mmakefile.src").exists(),
+            "the translation submodules are not checked out"
+        );
         let files = find_mmakefiles(&root);
         let context = detect_toolchain_provisioning_context(&root);
         assert!(
@@ -1816,14 +1824,21 @@ mod tests {
         // Retiring Gallivm removes one false obligation; preserving
         // dummytest_auto and separating the formerly colliding 2View, HDTool
         // and target Zopfli declarations restores four real declarations.
-        assert_eq!(global.len(), 1123);
-        assert_eq!(ids(&x86, true).len(), 1004);
-        assert_eq!(ids(&arm, true).len(), 996);
-        assert_eq!(ids(&aarch64, true).len(), 996);
-        assert_eq!(global_target.len(), 1119);
-        assert_eq!(target_ids(&x86).len(), 1000);
-        assert_eq!(target_ids(&arm).len(), 993);
-        assert_eq!(target_ids(&aarch64).len(), 993);
+        //
+        // The counts include the 71 mmakefiles that live in the translation
+        // submodules, which is the tree the transpiler reads as well. Their
+        // presence is asserted above, because without them every count here is
+        // 71 or 72 lower and the denominator would silently mean something
+        // else -- which is what it did mean while this test was masked by the
+        // provisioning assertion.
+        assert_eq!(global.len(), 1195);
+        assert_eq!(ids(&x86, true).len(), 1076);
+        assert_eq!(ids(&arm, true).len(), 1067);
+        assert_eq!(ids(&aarch64, true).len(), 1067);
+        assert_eq!(global_target.len(), 1191);
+        assert_eq!(target_ids(&x86).len(), 1072);
+        assert_eq!(target_ids(&arm).len(), 1064);
+        assert_eq!(target_ids(&aarch64).len(), 1064);
         let common_provisioning = BTreeSet::from([
             "crosstools-compiler-rt".to_owned(),
             "crosstools-libunwind".to_owned(),
@@ -1854,6 +1869,9 @@ mod tests {
             arm_removed,
             BTreeSet::from([
                 "crosstools-compiler-rt32".to_owned(),
+                // The release producer of the same runtime, declared beside it
+                // and gated the same way.
+                "crosstools-compiler-rt32-release".to_owned(),
                 "linklibs-amiga32".to_owned(),
                 "linklibs-arossupport32".to_owned(),
                 "linklibs-autoinit32".to_owned(),
