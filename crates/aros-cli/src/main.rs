@@ -6,6 +6,7 @@ use std::process::Command;
 use std::time::Instant;
 
 mod artifact;
+mod boot;
 mod build;
 mod host_tools;
 mod hosttools;
@@ -118,23 +119,36 @@ enum Commands {
         preset: Option<String>,
     },
 
-    /// Run automated or interactive QEMU boot test for a target
+    /// Boot the target in QEMU and report how far it got
+    ///
+    /// The verdict comes from the serial log and the QEMU exception trace, so
+    /// this fails when the boot fails. There is no interactive mode: a run
+    /// nobody reads cannot assert anything, and scripts/boot/qemu-pc-x86_64.sh
+    /// is there for watching one by hand.
     Test {
         /// Target preset to test
         #[arg(short, long, default_value = "pc-x86_64")]
         preset: String,
 
-        /// Run in headless mode (no GUI window, default)
-        #[arg(long)]
-        headless: bool,
-
-        /// Open graphical QEMU window (interactive mode)
-        #[arg(short, long)]
-        gui: bool,
-
-        /// Timeout duration in seconds (0 = run indefinitely until window closed)
-        #[arg(short, long, default_value_t = 10)]
+        /// Seconds to let the guest run before stopping it
+        #[arg(short, long, default_value_t = 20)]
         timeout: u64,
+
+        /// Also pass every built package as a multiboot module
+        #[arg(long)]
+        packages: bool,
+
+        /// Pass this file as a multiboot module; repeatable
+        #[arg(long = "module")]
+        modules: Vec<PathBuf>,
+
+        /// Where to keep the run's evidence
+        #[arg(long)]
+        evidence: Option<PathBuf>,
+
+        /// Guest memory in MiB
+        #[arg(long, default_value_t = 512)]
+        memory: u32,
     },
 
     /// Manage and inspect compiler cache (`ccache` / `sccache`)
@@ -735,102 +749,76 @@ async fn main() -> Result<()> {
 
         Commands::Test {
             preset,
-            headless,
-            gui,
             timeout,
+            packages,
+            modules,
+            evidence,
+            memory,
         } => {
-            // Headless is the default; --gui is what switches it off. The
-            // --headless flag stays accepted so it can be passed explicitly.
-            let _ = headless;
-            let is_headless = !gui;
+            let build_dir = PathBuf::from(format!("build/{preset}"));
+            if !build_dir.is_dir() {
+                miette::bail!(
+                    "no build directory at {} -- configure and build the preset first",
+                    build_dir.display()
+                );
+            }
 
-            println!(
-                "🧪 Running QEMU test suite for [{}] (mode: {})...",
-                style(&preset).yellow().bold(),
-                if is_headless {
-                    style("headless").cyan()
-                } else {
-                    style("interactive GUI").magenta().bold()
-                }
-            );
-
-            let iso_path = format!("build/{preset}/aros-x86_64-pc.iso");
-            if !std::path::Path::new(&iso_path).exists() {
-                println!("{HAMMER} ISO image not found. Building target 'boot-iso'...");
-                let status = Command::new("cmake")
-                    .args([
-                        "--build",
-                        &format!("build/{preset}"),
-                        "--target",
-                        "boot-iso",
-                    ])
-                    .status()
-                    .map_err(|e| miette::miette!("Failed to build boot-iso: {e}"))?;
-                if !status.success() {
-                    miette::bail!("Failed to generate bootable ISO for '{preset}'");
+            // Every package the build produced, discovered rather than listed,
+            // so a new one is included without editing this.
+            let mut module_list = modules;
+            let mut missing_packages = Vec::new();
+            if packages {
+                for dir in ["SYS/boot", "SYS/boot/pc"] {
+                    let Ok(entries) = std::fs::read_dir(build_dir.join(dir)) else {
+                        missing_packages.push(dir.to_owned());
+                        continue;
+                    };
+                    let mut found: Vec<PathBuf> = entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension().is_some_and(|extension| extension == "pkg")
+                        })
+                        .collect();
+                    found.sort();
+                    module_list.extend(found);
                 }
             }
 
-            let qemu_bin = if preset.contains("x86_64") {
-                "qemu-system-x86_64"
-            } else if preset.contains("aarch64") {
-                "qemu-system-aarch64"
-            } else if preset.contains("arm") {
-                "qemu-system-arm"
-            } else {
-                "qemu-system-x86_64"
+            let evidence = evidence.unwrap_or_else(|| build_dir.join("boot-check"));
+            let request = boot::BootRequest {
+                build_dir,
+                modules: module_list,
+                seconds: timeout,
+                evidence,
+                memory_mb: memory,
             };
-
-            if which::which(qemu_bin).is_err() {
-                miette::bail!("Emulator binary '{qemu_bin}' not found in PATH.");
-            }
-
             println!(
-                "🚀 Launching {} with [{}]...",
-                style(qemu_bin).green().bold(),
-                style(&iso_path).yellow()
+                "Booting [{}] with {} multiboot module(s) for {}s...",
+                style(&preset).yellow().bold(),
+                request.modules.len() + 1,
+                timeout
             );
 
-            let mut qemu_cmd = Command::new(qemu_bin);
-            let bootstrap_path = format!("build/{preset}/bootstrap");
-            if std::path::Path::new(&bootstrap_path).exists() {
-                qemu_cmd.args(["-kernel", &bootstrap_path]);
-                let exec_lib = format!("build/{preset}/SYS/Libs/kernel-exec.library");
-                if std::path::Path::new(&exec_lib).exists() {
-                    qemu_cmd.args(["-initrd", &exec_lib]);
-                }
+            let mut report = boot::check(&request)?;
+            for dir in missing_packages {
+                report
+                    .untested
+                    .push(format!("{dir} holds no packages in this build"));
             }
-            qemu_cmd.args([
-                "-cdrom", &iso_path, "-m", "512M", "-smp", "2", "-serial", "stdio", "-boot",
-                "order=c",
-            ]);
-
-            if is_headless {
-                qemu_cmd.args(["-display", "none"]);
-            } else {
-                qemu_cmd.args(["-vga", "std"]);
-            }
-
-            let mut child = qemu_cmd
-                .spawn()
-                .map_err(|e| miette::miette!("Failed to start QEMU: {e}"))?;
-
-            if timeout > 0 {
+            print!("{}", boot::render(&report));
+            if report.is_success() {
                 println!(
-                    "⏱️  Executing test run for {timeout}s (use --timeout 0 for indefinite run)..."
-                );
-                std::thread::sleep(std::time::Duration::from_secs(timeout));
-                let _ = child.kill();
-                let _ = child.wait();
-                println!(
-                    "{CHECK} {}QEMU boot execution finished cleanly without crashes!",
-                    style("VERIFIED: ").green().bold()
+                    "{CHECK} {}the boot produced no failure and no exception.",
+                    style("PASS: ").green().bold()
                 );
             } else {
                 println!(
-                    "🎮 QEMU is running interactively. Close the window or press Ctrl+C to exit."
+                    "{}the boot did not come up clean; every finding above is read \
+                     out of the logs, not inferred.",
+                    style("FAIL: ").red().bold()
                 );
-                let _ = child.wait();
+                std::process::exit(1);
             }
         }
 
