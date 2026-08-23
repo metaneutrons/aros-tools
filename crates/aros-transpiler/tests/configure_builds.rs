@@ -97,10 +97,7 @@ fn configure_contracts_are_exact_for_every_current_architecture() {
     let wireless = &declarations[2];
     assert_eq!(wireless.mode, "wirelessmanager");
     assert_eq!(wireless.private_products.len(), 3);
-    assert_eq!(
-        wireless.dependency_products,
-        ["${AROS_BUILD_DIR}/liblinklibs-mui.a"]
-    );
+    assert_eq!(wireless.dependency_targets, ["linklibs-mui"]);
     assert_eq!(
         wireless.install_products,
         ["${AROS_BUILD_DIR}/SYS/C/WirelessManager"]
@@ -124,7 +121,10 @@ fn configure_contracts_generate_real_products_and_a_link_provider() {
     assert!(cmake.contains("    PROVIDED_LIBRARY \"adf\""));
     assert!(cmake
         .contains("    MMAKE_ID workbench-network-wirelessmanager\n    MODE \"wirelessmanager\""));
-    assert!(cmake.contains("    DEPENDENCY_PRODUCTS \"${AROS_BUILD_DIR}/liblinklibs-mui.a\""));
+    // The archive path is not spelled here: CMake asks linklibs-mui where it
+    // writes, because a link library moves once a consumer names it.
+    assert!(cmake.contains("    DEPENDENCY_TARGETS \"linklibs-mui\""));
+    assert!(!cmake.contains("liblinklibs-mui.a"));
     assert!(cmake.contains(
         "\"${AROS_BUILD_DIR}/gen/configure/workbench/network/WirelessManager/source/wpa_supplicant/wpa_cli\""
     ));

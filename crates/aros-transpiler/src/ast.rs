@@ -347,9 +347,10 @@ pub struct ConfigureBuildDecl {
     pub private_products: Vec<String>,
     /// Complete installed product contract.
     pub install_products: Vec<String>,
-    /// Existing build products needed by the private build command.
+    /// Link-library targets whose archives the private build command links.
+    /// CMake asks each target where it writes.
     #[serde(default)]
-    pub dependency_products: Vec<String>,
+    pub dependency_targets: Vec<String>,
     /// Optional `uselibs=` spelling published by an installed archive.
     #[serde(default)]
     pub provided_library: Option<String>,

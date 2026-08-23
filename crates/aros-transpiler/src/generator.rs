@@ -141,6 +141,93 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
     out
 }
 
+/// Writes one `aros_build_configure` block.
+///
+/// Called twice from `generate_cmake` with disjoint halves of the same list: a
+/// declaration that publishes an archive interface has to precede its
+/// consumers, and one that links an in-tree link library has to follow that
+/// library's target. No declaration needs both today. If one ever does, the
+/// generated file says so where it cannot be missed, because this generator has
+/// no way to satisfy both orderings at once.
+fn emit_configure_builds(
+    out: &mut String,
+    declarations: Vec<&crate::ast::ConfigureBuildDecl>,
+    heading: &str,
+) {
+    if declarations.is_empty() {
+        return;
+    }
+    writeln!(
+        out,
+        "# =============================================================================\n\
+         # {heading}\n\
+         # ============================================================================="
+    )
+    .unwrap();
+    let mut declarations = declarations;
+    declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
+    for declaration in declarations {
+        if declaration.provided_library.is_some() && !declaration.dependency_targets.is_empty() {
+            writeln!(
+                out,
+                "message(FATAL_ERROR\n    \"{}: a configure build cannot both publish an archive \\\n\
+                 interface and consume a link-library target; the transpiler has no \\\n\
+                 declaration order that satisfies both\")",
+                declaration.mmake_name
+            )
+            .unwrap();
+            continue;
+        }
+        writeln!(out, "aros_build_configure(").unwrap();
+        writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+        writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
+        writeln!(out, "    SOURCE_DIR {}", cmake_arg(&declaration.source_dir)).unwrap();
+        writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
+        writeln!(
+            out,
+            "    INSTALL_PREFIX {}",
+            cmake_arg(&declaration.install_prefix)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    INPUT_MANIFEST {}",
+            cmake_arg(&declaration.input_manifest)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    INPUT_MANIFEST_SHA256 {}",
+            cmake_arg(&declaration.input_manifest_sha256)
+        )
+        .unwrap();
+        let private_products = declaration
+            .private_products
+            .iter()
+            .map(|product| cmake_arg(product))
+            .collect::<Vec<_>>();
+        writeln!(out, "    PRIVATE_PRODUCTS {}", private_products.join(" ")).unwrap();
+        let install_products = declaration
+            .install_products
+            .iter()
+            .map(|product| cmake_arg(product))
+            .collect::<Vec<_>>();
+        writeln!(out, "    INSTALL_PRODUCTS {}", install_products.join(" ")).unwrap();
+        if !declaration.dependency_targets.is_empty() {
+            let targets = declaration
+                .dependency_targets
+                .iter()
+                .map(|target| cmake_arg(target))
+                .collect::<Vec<_>>();
+            writeln!(out, "    DEPENDENCY_TARGETS {}", targets.join(" ")).unwrap();
+        }
+        if let Some(library) = &declaration.provided_library {
+            writeln!(out, "    PROVIDED_LIBRARY {}", cmake_arg(library)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+}
+
 /// Generates modern CMake code from the parsed dependency graph.
 #[must_use]
 pub fn generate_cmake(graph: &DependencyGraph) -> String {
@@ -459,66 +546,19 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
     // runner contract rather than arbitrary shell text.  Declarations precede
     // ordinary consumers so a published archive interface can bind exactly
     // like an in-tree link library.
-    if !graph.configure_builds.is_empty() {
-        writeln!(
-            out,
-            "# =============================================================================\n\
-             # Capability-checked configure-style builds\n\
-             # ============================================================================="
-        )
-        .unwrap();
-        let mut declarations: Vec<_> = graph.configure_builds.iter().collect();
-        declarations.sort_by(|left, right| left.mmake_name.cmp(&right.mmake_name));
-        for declaration in declarations {
-            writeln!(out, "aros_build_configure(").unwrap();
-            writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
-            writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
-            writeln!(out, "    SOURCE_DIR {}", cmake_arg(&declaration.source_dir)).unwrap();
-            writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
-            writeln!(
-                out,
-                "    INSTALL_PREFIX {}",
-                cmake_arg(&declaration.install_prefix)
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    INPUT_MANIFEST {}",
-                cmake_arg(&declaration.input_manifest)
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    INPUT_MANIFEST_SHA256 {}",
-                cmake_arg(&declaration.input_manifest_sha256)
-            )
-            .unwrap();
-            let private_products = declaration
-                .private_products
-                .iter()
-                .map(|product| cmake_arg(product))
-                .collect::<Vec<_>>();
-            writeln!(out, "    PRIVATE_PRODUCTS {}", private_products.join(" ")).unwrap();
-            let install_products = declaration
-                .install_products
-                .iter()
-                .map(|product| cmake_arg(product))
-                .collect::<Vec<_>>();
-            writeln!(out, "    INSTALL_PRODUCTS {}", install_products.join(" ")).unwrap();
-            if !declaration.dependency_products.is_empty() {
-                let products = declaration
-                    .dependency_products
-                    .iter()
-                    .map(|product| cmake_arg(product))
-                    .collect::<Vec<_>>();
-                writeln!(out, "    DEPENDENCY_PRODUCTS {}", products.join(" ")).unwrap();
-            }
-            if let Some(library) = &declaration.provided_library {
-                writeln!(out, "    PROVIDED_LIBRARY {}", cmake_arg(library)).unwrap();
-            }
-            writeln!(out, ")\n").unwrap();
-        }
-    }
+    //
+    // A declaration that consumes a link library cannot stand here, because
+    // aros_build_configure asks that target where its archive is: see the
+    // second block after the concrete targets.
+    emit_configure_builds(
+        &mut out,
+        graph
+            .configure_builds
+            .iter()
+            .filter(|declaration| declaration.dependency_targets.is_empty())
+            .collect(),
+        "Capability-checked configure-style builds",
+    );
 
     // GRUB2's legacy configure declarations are host-tool lanes with a
     // substantially narrower contract than the local-source helper above.
@@ -1197,6 +1237,23 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, ")\n").unwrap();
         }
     }
+
+    // A configure-style build that links an in-tree link library has to be
+    // declared after that library's target exists, for the same reason the AHI
+    // block below does: aros_build_configure asks the target where its archive
+    // is. WirelessManager's wpa_supplicant links libmui, which was spelled as
+    // `<build root>/liblinklibs-mui.a` until linklibs-mui became canonical;
+    // after that the declaration only kept working because a file from an
+    // earlier configuration was still lying in the build root (OPEN-POINTS 44).
+    emit_configure_builds(
+        &mut out,
+        graph
+            .configure_builds
+            .iter()
+            .filter(|declaration| !declaration.dependency_targets.is_empty())
+            .collect(),
+        "Configure-style builds that consume a link library",
+    );
 
     // Emitted after every concrete target, not with the other
     // capability-checked builds: aros_build_ahi asks the three link-library
