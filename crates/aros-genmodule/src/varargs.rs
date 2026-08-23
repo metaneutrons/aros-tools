@@ -51,6 +51,22 @@ pub struct Function {
     /// first LVO; a blank line or `.skip n` advances the counter without
     /// producing an entry.
     pub lvo: u32,
+    /// True when the declaration carries no register specification.
+    ///
+    /// `tools/genmodule/config.c:2047` gives a function with registers the
+    /// section's default calling convention and leaves one without them at the
+    /// initial STACK. writestubs.c then emits a separate object file per
+    /// stack-call function and one shared file for the rest, so this decides
+    /// which of the two a function belongs to.
+    pub stack_call: bool,
+    /// `.version n` if the declaration carries one.
+    ///
+    /// Resolved to a concrete number later: if any function in the list states
+    /// a version the default for the others is 0, otherwise it is the module's
+    /// major version (config.c:415-432).
+    pub declared_version: Option<u32>,
+    /// `.alias name` entries, in declaration order.
+    pub aliases: Vec<String>,
 }
 
 /// The first library vector offset for a module type.
@@ -302,6 +318,10 @@ pub fn parse_function_line(line: &str) -> Option<Function> {
         }
     }
 
+    // A register specification is a second parenthesised group after the
+    // argument list. Its absence is what makes the function stack-call.
+    let stack_call = !after[close + 1..].trim_start().starts_with('(');
+
     Some(Function {
         name,
         ret_type,
@@ -310,6 +330,9 @@ pub fn parse_function_line(line: &str) -> Option<Function> {
         novararg: false,
         // Assigned by the caller, which tracks the running counter.
         lvo: 0,
+        stack_call,
+        declared_version: None,
+        aliases: Vec::new(),
     })
 }
 
@@ -417,6 +440,9 @@ mod tests {
             private: false,
             novararg: false,
             lvo: 0,
+            stack_call: true,
+            declared_version: None,
+            aliases: Vec::new(),
         }
     }
 

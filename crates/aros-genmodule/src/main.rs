@@ -1,4 +1,5 @@
 mod interfaces;
+mod linklib;
 mod varargs;
 
 use aros_common::read_source;
@@ -112,6 +113,14 @@ struct ConfModule {
     /// Directory of the .conf, relative to the scan root. Used to give the
     /// module-private headers a unique location.
     rel_dir: PathBuf,
+    /// `options noincludes`: the stubs must not include <proto/<mod>.h> and
+    /// declare __aros_getbase_ themselves instead.
+    no_includes: bool,
+    /// `forcebase` entries. The autoinit file imports __aros_getbase_ for each,
+    /// which is what makes a parent open those libraries.
+    force_bases: Vec<String>,
+    /// `##begin startup` lines, written verbatim ahead of the autoinit banner.
+    startup_lines: String,
 }
 
 /// Whether a `.conf` below `arch/` applies to the configured target.
@@ -375,6 +384,8 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
     // entering the function list, because the config section that may override
     // the starting point with `options noresident` is read first.
     let mut lvo = 0u32;
+    // Running `.version` value; see the branch below.
+    let mut pending_version: Option<u32> = None;
     let mut lvo_ready = false;
     let mut section = "";
     // `##begin interface` and `##begin class` nest their own config and
@@ -403,6 +414,12 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
             section = "cdef";
         } else if trimmed == "##end cdef" {
             section = "";
+        } else if trimmed == "##begin startup" {
+            section = "startup";
+            continue;
+        } else if trimmed == "##end startup" {
+            section = "";
+            continue;
         } else if trimmed == "##begin cdefprivate" {
             section = "cdefprivate";
         } else if trimmed == "##end cdefprivate" {
@@ -420,6 +437,9 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 continue;
             };
             match key {
+                "forcebase" => module
+                    .force_bases
+                    .extend(val.split_whitespace().map(str::to_owned)),
                 "basename" => module.lib_base = format!("{val}Base"),
                 "libbase" => module.lib_base = val.to_string(),
                 "libbasetypeextern" => {
@@ -448,6 +468,7 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                         match opt.trim() {
                             "autoinit" => module.auto_init = true,
                             "noresident" => module.no_resident = true,
+                            "noincludes" => module.no_includes = true,
                             _ => {}
                         }
                     }
@@ -460,6 +481,9 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
         } else if section == "cdef" {
             module.cdef.push_str(line);
             module.cdef.push('\n');
+        } else if section == "startup" {
+            module.startup_lines.push_str(line);
+            module.startup_lines.push('\n');
         } else if section == "cdefprivate" {
             module.cdef_private.push_str(line);
             module.cdef_private.push('\n');
@@ -490,12 +514,28 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 if let Some(f) = module.functions.last_mut() {
                     f.novararg = true;
                 }
+            } else if let Some(rest) = code_line.strip_prefix(".version") {
+                // Marks the version a caller of the *following* functions has
+                // to open, not of the preceding one: config.c:1811 says so and
+                // :1919 applies the running value to each new declaration.
+                // writestubs.c turns it into AROS_LIBREQ.
+                if let Ok(v) = rest.trim().parse::<u32>() {
+                    pending_version = Some(v);
+                }
+            } else if let Some(rest) = code_line.strip_prefix(".alias") {
+                let alias = rest.trim();
+                if !alias.is_empty() {
+                    if let Some(f) = module.functions.last_mut() {
+                        f.aliases.push(alias.to_owned());
+                    }
+                }
             } else if !code_line.is_empty()
                 && !code_line.starts_with('.')
                 && !code_line.starts_with('#')
             {
                 if let Some(mut f) = varargs::parse_function_line(code_line) {
                     f.lvo = lvo;
+                    f.declared_version = pending_version;
                     lvo = lvo.saturating_add(1);
                     // The four standard library vectors are supplied by the
                     // module skeleton, not declared in the public header.
@@ -967,6 +1007,9 @@ mod tests {
                     private: false,
                     novararg: false,
                     lvo: 0,
+                    stack_call: true,
+                    declared_version: None,
+                    aliases: Vec::new(),
                 })
                 .collect(),
             ..ConfModule::default()
