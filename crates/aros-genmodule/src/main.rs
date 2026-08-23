@@ -92,11 +92,24 @@ struct Args {
 #[derive(Debug, Default)]
 struct ConfModule {
     name: String,
+    /// `basename` from the config, or the module name with its first letter
+    /// capitalised (tools/genmodule/config.c:1333).
+    ///
+    /// This, not the module name, is what every generated symbol is named
+    /// after: `GM_UNIQUENAME` expands to `<basename>_ ## n`
+    /// (tools/genmodule/writeinclibdefs.c:82), so `kernel_init.c` referring to
+    /// GM_UNIQUENAME(FuncTable) means Kernel_FuncTable. Using the module name
+    /// here produced `kernel_FuncTable`, which was self-consistent only as long
+    /// as nothing else generated the definition.
+    base_name: String,
     lib_base: String,
     lib_base_type: String,
     /// `libbasetypeextern` if the config states one; the type is otherwise
     /// derived from the module type by extern_base_type().
     explicit_base_type_extern: Option<String>,
+    /// True once a `libbase` line has been seen, so a later `basename` does not
+    /// overwrite it.
+    explicit_lib_base: bool,
     cdef: String,
     /// Contents of `##begin cdefprivate`. The reference generator writes these
     /// lines verbatim into `<mod>_libdefs.h`; they are how a module pulls in the
@@ -387,6 +400,7 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
 
     let mut module = ConfModule {
         name: module_name.clone(),
+        base_name: default_basename(&module_name),
         lib_base: format!("{}Base", default_basename(&module_name)),
         // Left empty on purpose: the default depends on libbasetypeextern,
         // which may be read later in the config section. Resolved below.
@@ -461,8 +475,19 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 "forcebase" => module
                     .force_bases
                     .extend(val.split_whitespace().map(str::to_owned)),
-                "basename" => module.lib_base = format!("{val}Base"),
-                "libbase" => module.lib_base = val.to_string(),
+                // The reference derives libbase from basename and lets an
+                // explicit `libbase` line override it, in either order
+                // (tools/genmodule/config.c:1336).
+                "basename" => {
+                    module.base_name = val.to_string();
+                    if !module.explicit_lib_base {
+                        module.lib_base = format!("{val}Base");
+                    }
+                }
+                "libbase" => {
+                    module.lib_base = val.to_string();
+                    module.explicit_lib_base = true;
+                }
                 "libbasetypeextern" => {
                     module.explicit_base_type_extern = Some(val.to_string());
                 }
@@ -703,7 +728,7 @@ fn generate_sdk_headers(
         include_name,
         lib_base: &module.lib_base,
         lib_base_type_extern: &extern_base_type(module),
-        basename: &default_basename(&module.name),
+        basename: &module.base_name,
         first_lvo: varargs::first_lvo(&module.mod_type, module.no_resident),
         major_version: module.major_version,
     };
@@ -730,7 +755,7 @@ fn generate_sdk_headers(
         "#include <exec/types.h>".to_owned(),
         "#include <exec/libraries.h>".to_owned(),
         String::new(),
-        format!("#define GM_UNIQUENAME(n) {}_ ## n", module.name),
+        format!("#define GM_UNIQUENAME(n) {}_ ## n", module.base_name),
         format!("#define LIBBASE          {}", module.lib_base),
         format!("#define LIBBASETYPE      {}", module.lib_base_type),
         format!("#define LIBBASETYPEPTR   {} *", module.lib_base_type),
@@ -1057,7 +1082,7 @@ fn generate_linklib_sources(module: &ConfModule, root: &Path) -> std::io::Result
         include_name: &module.include_name,
         lib_base: &module.lib_base,
         lib_base_type_extern: &extern_base_type(module),
-        basename: &default_basename(&module.name),
+        basename: &module.base_name,
         suffix,
         no_includes: module.no_includes,
         cdef_private: &module.cdef_private,
@@ -1337,5 +1362,49 @@ mod tests {
         let collisions = colliding_public_include_names(&[library, mui]);
         assert_eq!(collisions.len(), 1);
         assert!(collisions.contains("icon"));
+    }
+
+    #[test]
+    fn gm_uniquename_is_the_basename_not_the_module_name() {
+        let root =
+            std::env::temp_dir().join(format!("aros-genmodule-basename-{}", std::process::id()));
+        let dir = root.join("rom/kernel");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&dir).expect("module dir");
+        std::fs::write(
+            dir.join("kernel.conf"),
+            "##begin config\nlibbase KernelBase\nlibbasetype struct KernelBase\n##end config\n",
+        )
+        .expect("write conf");
+        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+
+        // tools/genmodule/config.c:1333 capitalises the module name when the
+        // config states no basename, and writeinclibdefs.c:82 names every
+        // generated symbol after it. rom/kernel/kernel_init.c:62 declares
+        // GM_UNIQUENAME(FuncTable), so that has to be Kernel_FuncTable.
+        assert_eq!(module.base_name, "Kernel");
+        assert_eq!(module.lib_base, "KernelBase");
+
+        // An explicit basename wins, and does not overwrite an explicit libbase.
+        std::fs::write(
+            dir.join("kernel.conf"),
+            "##begin config\nlibbase KernelBase\nbasename Kern\n##end config\n",
+        )
+        .expect("write conf");
+        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+        assert_eq!(module.base_name, "Kern");
+        assert_eq!(module.lib_base, "KernelBase");
+
+        // Without an explicit libbase, basename derives it.
+        std::fs::write(
+            dir.join("kernel.conf"),
+            "##begin config\nbasename Kern\n##end config\n",
+        )
+        .expect("write conf");
+        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+        assert_eq!(module.base_name, "Kern");
+        assert_eq!(module.lib_base, "KernBase");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

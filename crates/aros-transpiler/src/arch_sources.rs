@@ -292,7 +292,9 @@ pub fn collect_arch_sources(
     let mut out = Vec::new();
     let mut skipped: Vec<String> = undecided
         .into_iter()
-        .map(|line| format!("{dir}/mmakefile.src:{line}: condition not decided, neither branch applied"))
+        .map(|line| {
+            format!("{dir}/mmakefile.src:{line}: condition not decided, neither branch applied")
+        })
         .collect();
 
     for body in crate::includes::directive_bodies_pub(content, "%build_archspecific") {
@@ -391,7 +393,8 @@ AFILES := \
 
     #[test]
     fn stackswap_is_present_so_the_generic_stub_can_be_dropped() {
-        let (decls, _) = collect_arch_sources(EXEC_X86_64, &PathBuf::from("arch/x86_64-all/exec"), None);
+        let (decls, _) =
+            collect_arch_sources(EXEC_X86_64, &PathBuf::from("arch/x86_64-all/exec"), None);
         assert!(decls[0].files.contains(&"stackswap".to_owned()));
     }
 

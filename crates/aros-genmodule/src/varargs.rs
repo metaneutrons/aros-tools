@@ -322,7 +322,12 @@ pub fn parse_function_line(line: &str) -> Option<Function> {
         for decl in split_args(arg_text) {
             // A parameter may be unnamed; keep it, it just cannot be referenced.
             let (ty, nm) = split_decl(&decl).unwrap_or_else(|| (decl.clone(), String::new()));
-            args.push(Arg { decl, ty, name: nm, reg: None });
+            args.push(Arg {
+                decl,
+                ty,
+                name: nm,
+                reg: None,
+            });
         }
     }
 
@@ -447,11 +452,9 @@ fn render_register_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> S
         if f.private || f.stack_call || f.lvo < cx.first_lvo {
             continue;
         }
-        let version = f.declared_version.unwrap_or(if any_declared {
-            0
-        } else {
-            cx.major_version
-        });
+        let version = f
+            .declared_version
+            .unwrap_or(if any_declared { 0 } else { cx.major_version });
         let ret = f.ret_type.trim();
         let is_void = matches!(ret, "void" | "VOID");
 

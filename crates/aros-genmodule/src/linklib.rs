@@ -411,10 +411,7 @@ pub fn sources(m: &ModuleFacts<'_>, funcs: &[Function], is_rel: bool) -> Vec<(St
             regcall_stubs(m, funcs, is_rel),
         ));
     }
-    out.push((
-        format!("{}_{rel}autoinit.c", m.name),
-        autoinit(m, is_rel),
-    ));
+    out.push((format!("{}_{rel}autoinit.c", m.name), autoinit(m, is_rel)));
     out.push((
         format!("{}_{rel}getlibbase.c", m.name),
         getlibbase(m, is_rel),
@@ -462,8 +459,14 @@ mod tests {
         let m = facts();
         let f = func("AllocMem", 33);
         let s = stack_stub(&m, std::slice::from_ref(&f), &f, false);
-        assert!(s.contains("AROS_GM_LIBFUNCSTUB(AllocMem, SysBase, 33)"), "{s}");
-        assert!(s.contains("void __AllocMem_SysBase_libreq(){ AROS_LIBREQ(SysBase,41); }"), "{s}");
+        assert!(
+            s.contains("AROS_GM_LIBFUNCSTUB(AllocMem, SysBase, 33)"),
+            "{s}"
+        );
+        assert!(
+            s.contains("void __AllocMem_SysBase_libreq(){ AROS_LIBREQ(SysBase,41); }"),
+            "{s}"
+        );
         assert!(s.contains("#include <proto/exec.h>"), "{s}");
         // The non-rel header must undefine the nolibbase guards, or the stub
         // compiles without a library base and calls through nothing.
@@ -475,7 +478,10 @@ mod tests {
         let m = facts();
         let f = func("AllocMem", 33);
         let s = stack_stub(&m, std::slice::from_ref(&f), &f, true);
-        assert!(s.contains("AROS_GM_RELLIBFUNCSTUB(AllocMem, SysBase, 33)"), "{s}");
+        assert!(
+            s.contains("AROS_GM_RELLIBFUNCSTUB(AllocMem, SysBase, 33)"),
+            "{s}"
+        );
         assert!(s.contains("char *__aros_getoffsettable(void);"), "{s}");
         assert!(s.contains("#define __EXEC_NOLIBBASE__"), "{s}");
     }
@@ -486,7 +492,10 @@ mod tests {
         let mut f = func("AllocMem", 33);
         f.aliases = vec!["AllocMemAlias".to_owned()];
         let s = stack_stub(&m, std::slice::from_ref(&f), &f, false);
-        assert!(s.contains("AROS_GM_LIBFUNCALIAS(AllocMem, AllocMemAlias)"), "{s}");
+        assert!(
+            s.contains("AROS_GM_LIBFUNCALIAS(AllocMem, AllocMemAlias)"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -510,23 +519,38 @@ mod tests {
     #[test]
     fn autoinit_names_the_library_and_its_type() {
         let s = autoinit(&facts(), false);
-        assert!(s.contains("AROS_LIBSET(\"exec.library\", struct ExecBase *, SysBase)"), "{s}");
-        assert!(s.contains("AROS_IMPORT_ASM_SYM(int, dummy, __includelibrarieshandling);"), "{s}");
+        assert!(
+            s.contains("AROS_LIBSET(\"exec.library\", struct ExecBase *, SysBase)"),
+            "{s}"
+        );
+        assert!(
+            s.contains("AROS_IMPORT_ASM_SYM(int, dummy, __includelibrarieshandling);"),
+            "{s}"
+        );
     }
 
     #[test]
     fn autoinit_forces_the_bases_a_parent_must_open() {
         let bases = vec!["DOSBase".to_owned()];
-        let m = ModuleFacts { force_bases: &bases, ..facts() };
+        let m = ModuleFacts {
+            force_bases: &bases,
+            ..facts()
+        };
         let s = autoinit(&m, false);
-        assert!(s.contains("AROS_IMPORT_ASM_SYM(void *, __dummy_DOSBase, __aros_getbase_DOSBase);"), "{s}");
+        assert!(
+            s.contains("AROS_IMPORT_ASM_SYM(void *, __dummy_DOSBase, __aros_getbase_DOSBase);"),
+            "{s}"
+        );
     }
 
     #[test]
     fn getlibbase_returns_the_base_directly_and_via_the_table() {
         let m = facts();
         let plain = getlibbase(&m, false);
-        assert!(plain.contains("extern struct ExecBase *SysBase;"), "{plain}");
+        assert!(
+            plain.contains("extern struct ExecBase *SysBase;"),
+            "{plain}"
+        );
         assert!(plain.contains("return SysBase;"), "{plain}");
         let rel = getlibbase(&m, true);
         assert!(rel.contains("__aros_rellib_offset_SysBase"), "{rel}");
@@ -559,12 +583,23 @@ mod tests {
     fn a_register_call_stub_matches_the_reference_shape() {
         // exec's AllocMem: two normal arguments in D0 and D1.
         let m = facts();
-        let f = reg_func("AllocMem", 33, "APTR", &[("IPTR", "byteSize", "D0"), ("ULONG", "requirements", "D1")]);
+        let f = reg_func(
+            "AllocMem",
+            33,
+            "APTR",
+            &[("IPTR", "byteSize", "D0"), ("ULONG", "requirements", "D1")],
+        );
         let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
-        assert!(s.contains("APTR AllocMem(IPTR byteSize, ULONG requirements)"), "{s}");
+        assert!(
+            s.contains("APTR AllocMem(IPTR byteSize, ULONG requirements)"),
+            "{s}"
+        );
         assert!(s.contains("return AROS_LC2(APTR, AllocMem,"), "{s}");
         assert!(s.contains("AROS_LCA(IPTR, byteSize, D0), \\"), "{s}");
-        assert!(s.contains("struct ExecBase *, __aros_getbase_SysBase(), 33, Exec);"), "{s}");
+        assert!(
+            s.contains("struct ExecBase *, __aros_getbase_SysBase(), 33, Exec);"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -585,7 +620,11 @@ mod tests {
             "Seek64",
             40,
             "LONG",
-            &[("QUAD", "pos", "D0/D1"), ("LONG", "mode", "D2"), ("LONG", "flags", "D3")],
+            &[
+                ("QUAD", "pos", "D0/D1"),
+                ("LONG", "mode", "D2"),
+                ("LONG", "flags", "D3"),
+            ],
         );
         let s = super::regcall_stubs(&m, std::slice::from_ref(&f), false);
         assert!(s.contains("AROS_LCQUAD12(LONG, Seek64,"), "{s}");
@@ -607,8 +646,14 @@ mod tests {
             reg_func("AllocMem", 33, "APTR", &[("IPTR", "n", "D0")]),
             reg_func("FreeMem", 34, "void", &[("APTR", "p", "A1")]),
         ];
-        let files: Vec<String> = sources(&m, &funcs, false).into_iter().map(|(n, _)| n).collect();
-        assert!(files.contains(&"exec_regcall_stubs.c".to_owned()), "{files:?}");
+        let files: Vec<String> = sources(&m, &funcs, false)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(
+            files.contains(&"exec_regcall_stubs.c".to_owned()),
+            "{files:?}"
+        );
         // No per-function file for a register-call entry.
         assert!(!files.iter().any(|f| f.contains("AllocMem")), "{files:?}");
         assert_eq!(files.len(), 3);
@@ -622,9 +667,18 @@ mod tests {
         let mut priv_fn = func("Hidden", 41);
         priv_fn.private = true;
         let funcs = vec![func("AllocMem", 33), func("FreeMem", 34), reg, priv_fn];
-        let files: Vec<String> = sources(&m, &funcs, false).into_iter().map(|(n, _)| n).collect();
-        assert!(files.contains(&"exec_AllocMem_stub.c".to_owned()), "{files:?}");
-        assert!(files.contains(&"exec_FreeMem_stub.c".to_owned()), "{files:?}");
+        let files: Vec<String> = sources(&m, &funcs, false)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert!(
+            files.contains(&"exec_AllocMem_stub.c".to_owned()),
+            "{files:?}"
+        );
+        assert!(
+            files.contains(&"exec_FreeMem_stub.c".to_owned()),
+            "{files:?}"
+        );
         assert!(files.contains(&"exec_autoinit.c".to_owned()), "{files:?}");
         assert!(files.contains(&"exec_getlibbase.c".to_owned()), "{files:?}");
         // A register-call function gets no separate file, and a private one no
@@ -632,7 +686,10 @@ mod tests {
         assert!(!files.iter().any(|f| f.contains("RegOnly")), "{files:?}");
         assert!(!files.iter().any(|f| f.contains("Hidden")), "{files:?}");
         // The register-call entry lands in the one shared file instead.
-        assert!(files.contains(&"exec_regcall_stubs.c".to_owned()), "{files:?}");
+        assert!(
+            files.contains(&"exec_regcall_stubs.c".to_owned()),
+            "{files:?}"
+        );
         assert_eq!(files.len(), 5);
     }
 }
