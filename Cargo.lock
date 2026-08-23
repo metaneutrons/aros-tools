@@ -117,6 +117,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aros-collect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "aros-common"
 version = "0.1.0"
 dependencies = [

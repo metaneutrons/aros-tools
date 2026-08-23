@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aros-common",
+    "crates/aros-collect",
     "crates/aros-transpiler",
     "crates/aros-genmodule",
     "crates/aros-romtool",
@@ -39,6 +40,7 @@ doc_markdown = "allow"
 
 [workspace.dependencies]
 aros-common = { path = "crates/aros-common" }
+aros-collect = { path = "crates/aros-collect" }
 aros-transpiler = { path = "crates/aros-transpiler" }
 aros-genmodule = { path = "crates/aros-genmodule" }
 aros-romtool = { path = "crates/aros-romtool" }
