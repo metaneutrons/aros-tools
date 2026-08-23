@@ -191,7 +191,7 @@ pub fn discover(sections: &[String]) -> (Vec<SymbolSet>, Vec<String>) {
 /// `.rodata` here would refold every `.rodata.*` input as a side effect. A
 /// section of its own is allocatable and read-only just the same, and the ELF
 /// loader treats it like any other.
-pub fn script(sets: &[SymbolSet], class: Class) -> String {
+pub fn script(sets: &[SymbolSet], class: Class, libreq: &str) -> String {
     let word = class.pointer_directive();
     let width = class.pointer_bytes();
     let mut out = String::new();
@@ -222,6 +222,9 @@ pub fn script(sets: &[SymbolSet], class: Class) -> String {
         let _ = writeln!(out, "    {word}(0)");
         let _ = writeln!(out, "    __{name}_END__ = .;");
     }
+    // The version markers follow the sets inside the same output section, which
+    // is the order collect-aros.c:390 emits them in.
+    out.push_str(libreq);
     out.push_str("  }\n}\n");
     out
 }
@@ -294,7 +297,7 @@ mod tests {
     #[test]
     fn the_script_states_the_count_and_the_terminator() {
         let (sets, _) = discover(&names(&[".aros.set.INITLIB.10", ".aros.set.INITLIB.-1"]));
-        let text = script(&sets, Class::Elf64);
+        let text = script(&sets, Class::Elf64, "");
         assert!(text.contains("EXTERN(__INITLIB__symbol_set_handler_missing)"));
         assert!(text.contains("__INITLIB_LIST__ = .;"));
         assert!(text.contains("QUAD((__INITLIB_END__ - __INITLIB_LIST__) / 8 - 2)"));
@@ -309,7 +312,7 @@ mod tests {
     #[test]
     fn a_32_bit_object_gets_32_bit_entries() {
         let (sets, _) = discover(&names(&[".aros.set.INITLIB.0"]));
-        let text = script(&sets, Class::Elf32);
+        let text = script(&sets, Class::Elf32, "");
         assert!(text.contains("LONG((__INITLIB_END__ - __INITLIB_LIST__) / 4 - 2)"));
     }
 }

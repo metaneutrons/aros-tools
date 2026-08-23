@@ -16,20 +16,18 @@
 //! (`cmake/AROS.cmake:244`), which is exactly the one mode that skips the
 //! collection, so every symbol set in this build was the empty weak stub.
 //!
-//! Not ported here, and reported instead:
+//! Two of collect-aros's jobs live here: the symbol sets (`sets`) and the
+//! library-version markers (`libreq`). Both are emitted into one generated
+//! script and one second pass, as `collect-aros.c:390` does.
 //!
-//!   * `collect_libs`/`emit_libs` (`backend-generic.c:64`,
-//!     `gensets.c:167`), which turns each `__aros_libreq_<base>.<version>`
-//!     weak absolute into `PROVIDE(__aros_libreq_<base> = .); LONG(<version>)`
-//!     -- the version marker becomes readable data rather than a bare symbol.
-//!   * `collect_extra` (`backend-generic.c:117`), which adds
-//!     `OBJLIBDIR`-relative inputs to the second pass when the first leaves a
-//!     weak `__cxa_pure_virtual` or an undefined `pthread_*`.
-//!
-//! Both are separate mechanisms with their own consequences, so they are their
-//! own step rather than a silent addition to this one.
+//! Not ported, and reported instead: `collect_extra`
+//! (`backend-generic.c:117`), which adds `OBJLIBDIR`-relative inputs to the
+//! second pass when the first leaves a weak `__cxa_pure_virtual` or an
+//! undefined `pthread_*`. That one changes the *inputs* of a link rather than
+//! its layout, so it is its own step.
 
 mod elf;
+mod libreq;
 mod sets;
 
 use std::ffi::OsString;
@@ -148,16 +146,19 @@ fn collect(cli: &Cli) -> Result<bool> {
         .with_context(|| format!("the linker wrote no {}", staged.display()))?;
     let object = elf::read(&bytes)
         .with_context(|| format!("could not read the sections of {}", staged.display()))?;
-    let (found, skipped) = sets::discover(&object.sections);
+    let (found, mut skipped) = sets::discover(&object.sections);
+    let (requirements, libreq_skipped) = libreq::discover(&object.symbols);
+    skipped.extend(libreq_skipped);
     // Printed as well as written: a report file nobody aggregates is easy to
-    // miss, and a section that looks like a set and is not laid out changes
-    // what the module does at runtime.
+    // miss, and a section that looks like a set and is not laid out, or a
+    // version requirement that is dropped, changes what the module does at
+    // runtime.
     for line in &skipped {
         eprintln!("aros-collect: {}: {line}", output.display());
     }
     write_report(cli.report.as_ref(), &skipped)?;
 
-    if found.is_empty() {
+    if found.is_empty() && requirements.is_empty() {
         // Nothing to lay out, so the first pass is already the answer. The
         // reference runs its second pass regardless; skipping it here saves one
         // linker invocation on the majority of targets and cannot change the
@@ -177,7 +178,7 @@ fn collect(cli: &Cli) -> Result<bool> {
         path.push(".collect-sets.ld");
         PathBuf::from(path)
     });
-    let script = sets::script(&found, object.class);
+    let script = sets::script(&found, object.class, &libreq::script(&requirements));
     std::fs::write(&script_path, &script)
         .with_context(|| format!("could not write {}", script_path.display()))?;
 
