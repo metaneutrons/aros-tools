@@ -4,6 +4,7 @@ use crate::ast::{
     GrubBuildDecl, MetaTargetRule, ModuleType, PythonOutputsDecl, TargetDefinition,
 };
 use crate::catalogs::CatalogDecl;
+use crate::default_link_set::DefaultLinkSet;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
 use crate::flexcat::FlexCatSourceDecl;
@@ -18,6 +19,9 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
     pub targets: HashMap<String, TargetDefinition>,
+    /// The compiler spec's default link set, resolved to concrete archive
+    /// targets in spec order. Empty until `resolve_default_link_set` runs.
+    pub default_link_set: Vec<ResolvedDefaultLinkItem>,
     /// Strictly capability-checked third-party CMake builds. Each contributes
     /// both a real mmake workflow endpoint and a distinct link interface.
     pub external_cmake: Vec<ExternalCMakeDecl>,
@@ -305,6 +309,19 @@ fn needs_canonical_link_archive(provider: &TargetDefinition) -> bool {
     provider.module_type == ModuleType::LinkLib
         && provider.linklib_output_dir.is_none()
         && provider.canonical_linklib_eligible
+}
+
+/// One default-link-set item bound to the target that builds its archive.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedDefaultLinkItem {
+    /// Archive base name from the spec, without `-l`.
+    pub name: String,
+    /// CMake target producing `lib<name>.a`.
+    pub archive: String,
+    /// Driver switches that must be absent for this item to apply.
+    pub require_absent: Vec<String>,
+    /// Driver switches that must be present for this item to apply.
+    pub require_present: Vec<String>,
 }
 
 impl DependencyGraph {
@@ -1167,6 +1184,87 @@ impl DependencyGraph {
         unresolved
     }
 
+    /// Binds each `-l<name>` of the compiler spec's default link set to the
+    /// declaration that publishes `lib<name>.a`, and promotes an ordinary link
+    /// library to its canonical SDK archive name when it does.
+    ///
+    /// Without this the spec's consumers are invisible to the graph: nothing in
+    /// the mmakefile tree links `-lamiga` or `-ldos`, so `linklibs-amiga` kept
+    /// the target-name-derived archive `liblinklibs-amiga.a` and no `libdos.a`
+    /// was requested at all.
+    ///
+    /// The archive base name is `target_name` for both kinds of provider: an
+    /// ordinary `%build_linklib libname=` and a module's client archive both
+    /// name their output after it.
+    ///
+    /// Returns what could not be bound, one line per spec item.
+    pub fn resolve_default_link_set(&mut self, set: &DefaultLinkSet) -> Vec<String> {
+        let mut unresolved = Vec::new();
+        let mut promote_canonical: Vec<String> = Vec::new();
+        let mut resolved: Vec<ResolvedDefaultLinkItem> = Vec::new();
+
+        for item in &set.items {
+            let mut candidates: Vec<(&String, &TargetDefinition)> = self
+                .targets
+                .iter()
+                .filter(|(_, target)| {
+                    target.target_name == item.name
+                        && target.linklib_output_dir.is_none()
+                        && has_public_link_archive(target)
+                })
+                .collect();
+            if candidates.is_empty() {
+                unresolved.push(format!(
+                    "-l{} has no declaration publishing lib{}.a",
+                    item.name, item.name
+                ));
+                continue;
+            }
+            if candidates.len() > 1 {
+                // The usual duplicate is the 32-bit bootstrap flavour of the
+                // same archive; the spec means the native one.
+                candidates.retain(|(_, target)| !target.variant_32bit);
+            }
+            if candidates.len() != 1 {
+                let mut declarations: Vec<&str> =
+                    candidates.iter().map(|(mmake, _)| mmake.as_str()).collect();
+                declarations.sort_unstable();
+                unresolved.push(format!(
+                    "-l{} is ambiguous ({})",
+                    item.name,
+                    declarations.join(", ")
+                ));
+                continue;
+            }
+            let (mmake, provider) = candidates[0];
+            let mmake = mmake.clone();
+            if needs_canonical_link_archive(provider) && !promote_canonical.contains(&mmake) {
+                promote_canonical.push(mmake.clone());
+            }
+            let archive = match provider.module_type {
+                // A module publishes its client archive as a separate target.
+                ModuleType::Library | ModuleType::Abi => format!("{mmake}-linklib"),
+                _ => mmake.clone(),
+            };
+            resolved.push(ResolvedDefaultLinkItem {
+                name: item.name.clone(),
+                archive,
+                require_absent: item.require_absent.clone(),
+                require_present: item.require_present.clone(),
+            });
+        }
+
+        for mmake in promote_canonical {
+            if let Some(target) = self.targets.get_mut(&mmake) {
+                if target.canonical_linklib_eligible {
+                    target.canonical_linklib_output = true;
+                }
+            }
+        }
+        self.default_link_set = resolved;
+        unresolved
+    }
+
     pub fn resolve_packages(&mut self) -> Vec<String> {
         // Indexed by the exact basename each target installs. A name-only
         // lookup is unsafe: `hid` is both `hid.class` and `hid.hidd`, while a
@@ -1961,6 +2059,71 @@ mod tests {
                 .enabled
         );
         assert!(graph.targets["linklibs-pthread"].canonical_linklib_output);
+    }
+
+    #[test]
+    fn the_default_link_set_binds_archives_and_promotes_canonical_names() {
+        let root = root();
+        let dirs = DirVars::load(&root);
+        let context = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            family: Some("x86_64".to_owned()),
+            variant: Some(String::new()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some("hard".to_owned()),
+        };
+        let mut graph = DependencyGraph::new();
+        for relative in ["compiler/alib/mmakefile.src", "rom/dos/mmakefile.src"] {
+            let parsed =
+                parse_mmakefile_with_dirs_and_context(&root.join(relative), &root, &dirs, &context)
+                    .unwrap();
+            for target in parsed.targets {
+                graph.add_target(target);
+            }
+        }
+
+        let set = crate::default_link_set::DefaultLinkSet {
+            items: vec![
+                crate::default_link_set::DefaultLinkItem {
+                    name: "amiga".to_owned(),
+                    require_absent: Vec::new(),
+                    require_present: Vec::new(),
+                },
+                crate::default_link_set::DefaultLinkItem {
+                    name: "dos".to_owned(),
+                    require_absent: Vec::new(),
+                    require_present: Vec::new(),
+                },
+                crate::default_link_set::DefaultLinkItem {
+                    name: "nothing-builds-this".to_owned(),
+                    require_absent: vec!["nosysbase".to_owned()],
+                    require_present: Vec::new(),
+                },
+            ],
+        };
+        let unresolved = graph.resolve_default_link_set(&set);
+
+        // %build_linklib libname=amiga must publish libamiga.a. Nothing in the
+        // mmakefile tree links -lamiga, so only the spec makes it canonical.
+        assert!(
+            graph.targets["linklibs-amiga"].canonical_linklib_output,
+            "the spec is linklibs-amiga's only consumer"
+        );
+        let bound: Vec<(&str, &str)> = graph
+            .default_link_set
+            .iter()
+            .map(|item| (item.name.as_str(), item.archive.as_str()))
+            .collect();
+        assert_eq!(
+            bound,
+            [("amiga", "linklibs-amiga"), ("dos", "kernel-dos-linklib")],
+            "a module publishes its client archive as a separate target"
+        );
+        assert_eq!(unresolved.len(), 1, "{unresolved:?}");
+        assert!(unresolved[0].contains("libnothing-builds-this.a"));
     }
 
     #[test]

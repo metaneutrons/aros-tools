@@ -45,6 +45,11 @@ pub struct FlagSet {
     /// Driver-level link options from `USER_LDFLAGS`.
     #[serde(default)]
     pub link_options: Vec<String>,
+    /// Compiler-spec switches from `USER_LDFLAGS` which suppress part of the
+    /// default link set in `config/elf-specs.in:19`. They are driver switches,
+    /// so they must never reach ld.lld; they are carried as facts instead.
+    #[serde(default)]
+    pub spec_switches: Vec<String>,
     /// Flag tokens that were not propagated, for reporting.
     pub skipped: Vec<String>,
     /// True when the file reassigns the flags and also builds more than one
@@ -653,6 +658,7 @@ pub fn collect_flags(content: &str) -> FlagSet {
     set.undefines.dedup();
     set.compile_options.dedup();
     set.link_options.dedup();
+    set.spec_switches.dedup();
     set.skipped.dedup();
     set
 }
@@ -697,6 +703,7 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
     set.undefines.dedup();
     set.compile_options.dedup();
     set.link_options.dedup();
+    set.spec_switches.dedup();
     set.skipped.dedup();
     set
 }
@@ -830,6 +837,25 @@ fn classify(tok: &str, set: &mut FlagSet) {
 }
 
 fn classify_link(tok: &str, set: &mut FlagSet) {
+    // The default link set is assembled by the compiler driver from
+    // `*lib:` in config/elf-specs.in:19:
+    //
+    //   %(autolib) %{!nostdc:%{!noposixc:-lposixc} -lstdcio -lstdc}
+    //   %{!nosysbase:-lexec} %{nostdc:-lstdc.static}
+    //
+    // A declaration that suppresses part of it does so with one of these
+    // switches, and every one of them exists because the declaration would
+    // otherwise link against itself: compiler/crt/posixc passes -noposixc,
+    // compiler/crt/stdc passes -nostdc -noposixc, and rom/filesys/pfs3/fs
+    // passes -nosysbase because it defines SysBase with --defsym. Recording
+    // them keeps that decision in the source rather than in a CMake list.
+    if matches!(tok, "-nostdc" | "-noposixc" | "-nosysbase") {
+        push_unique(
+            &mut set.spec_switches,
+            tok.trim_start_matches('-').to_owned(),
+        );
+        return;
+    }
     let valid_library = tok.strip_prefix("-l").is_some_and(|name| {
         !name.is_empty()
             && name.chars().all(|character| {

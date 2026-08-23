@@ -1337,6 +1337,31 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out).unwrap();
     }
 
+    // The compiler spec's default link set, in spec order. Declared here and
+    // applied by CMakeLists.txt once every target exists, because the archives
+    // and their consumers are created by this same file.
+    //
+    // Each item is `<name>|<archive target>|<switches that must be absent>|
+    // <switches that must be present>`, the switch lists comma-separated.
+    if !graph.default_link_set.is_empty() {
+        writeln!(out, "aros_set_default_link_set(").unwrap();
+        for item in &graph.default_link_set {
+            writeln!(
+                out,
+                "    {}",
+                cmake_arg(&format!(
+                    "{}|{}|{}|{}",
+                    item.name,
+                    item.archive,
+                    item.require_absent.join(","),
+                    item.require_present.join(",")
+                ))
+            )
+            .unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
     out
 }
 

@@ -168,6 +168,9 @@ pub struct TargetDefinition {
     /// for example, is retained together with its `linklibs-pthread` edge.
     #[serde(default)]
     pub link_options: Vec<String>,
+    /// Compiler-spec switches which suppress part of the default link set.
+    #[serde(default)]
+    pub spec_switches: Vec<String>,
     /// Architecture-specific source overrides, as `(arch_tag, dir, files)`.
     /// A file listed here replaces the same-named generic source.
     pub arch_sources: Vec<(String, String, Vec<String>)>,

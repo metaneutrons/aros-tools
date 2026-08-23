@@ -1,8 +1,9 @@
 use aros_common::Result;
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
-    collect_mmakefile_fetches_with_context, generate_cmake, parse_mmakefile_with_dirs,
-    parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, TargetContext,
+    collect_mmakefile_fetches_with_context, default_link_set_available, generate_cmake,
+    parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
+    read_default_link_set, DependencyGraph, TargetContext,
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -248,6 +249,32 @@ fn main() -> Result<()> {
     // uselibs names a link library by its libname, which only resolves once
     // every %build_linklib in the tree has been seen.
     let unresolved_libs = graph.resolve_use_libs();
+
+    // The compiler spec's default link set. configure.in:3044 selects
+    // config/<object-format>-specs.in and falls back to config/elf-specs.in;
+    // only the ELF template exists in the tree, and every target this build
+    // supports is ELF, so the format is not a transpiler argument yet. A new
+    // object format would need one, and read_default_link_set would then pick
+    // its template up automatically.
+    let mut unresolved_default_link_set: Vec<String> = Vec::new();
+    if default_link_set_available(&args.source_dir) {
+        match read_default_link_set(&args.source_dir, "elf") {
+            Ok(set) => {
+                unresolved_default_link_set = graph.resolve_default_link_set(&set);
+            }
+            // A spec we cannot represent must stop the build rather than
+            // quietly produce links without the default set.
+            Err(error) => {
+                return Err(aros_common::ArosError::TranspilerSyntax {
+                    file: "config/elf-specs.in".to_owned(),
+                    message: format!("default link set: {error}"),
+                });
+            }
+        }
+    } else {
+        unresolved_default_link_set
+            .push("compiler/autoinit/auto is absent, so no default link set was applied".to_owned());
+    }
     let unresolved_generated_headers = graph.resolve_define_headers();
     // Architecture source overrides are declared in arch/ but belong to a
     // target defined elsewhere, so they too need the full parse first.
@@ -274,6 +301,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "unresolved-default-link-set.txt",
+        unresolved_default_link_set,
+        "compiler-spec default link set item(s) have no archive in this configuration",
+    );
     write_report(
         &args.output,
         "skipped-client-archives.txt",
@@ -483,6 +516,31 @@ fn main() -> Result<()> {
 
     let cmake_content = generate_cmake(&graph);
     fs::write(&args.output, cmake_content)?;
+
+    // The default link set is applied by CMake, which needs to know which
+    // declarations suppress part of it. These are driver switches and must not
+    // reach ld.lld, so they travel as a manifest rather than as link items.
+    let mut spec_switch_lines: Vec<String> = graph
+        .targets
+        .iter()
+        .filter(|(_, target)| !target.spec_switches.is_empty())
+        .map(|(mmake, target)| format!("{mmake}\t{}", target.spec_switches.join("\t")))
+        .collect();
+    spec_switch_lines.sort();
+    let spec_switch_path = args.output.with_extension("spec-switches.txt");
+    if spec_switch_lines.is_empty() {
+        let _ = fs::remove_file(&spec_switch_path);
+    } else {
+        fs::write(
+            &spec_switch_path,
+            format!("{}\n", spec_switch_lines.join("\n")),
+        )?;
+        println!(
+            "🔒 {} declaration(s) suppress part of the default link set -> {}",
+            spec_switch_lines.len(),
+            spec_switch_path.display()
+        );
+    }
 
     println!(
         "✅ Successfully generated {} concrete targets, {} external CMake targets, {} configure-style targets, {} GRUB2 host-tool lanes, {} AHI subsystem builds, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets in {}!",
