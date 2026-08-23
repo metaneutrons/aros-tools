@@ -515,6 +515,10 @@ pub struct ParsedMmakefile {
     /// Source lanes omitted from an otherwise retained legacy target because
     /// their Make expression cannot yet be evaluated faithfully.
     pub partial_source_lists: Vec<String>,
+    /// Modules whose genmodule config demands a client archive that the target
+    /// model does not build yet, because the archive's generated sources are
+    /// only derived for `modtype=library`.
+    pub skipped_client_archives: Vec<String>,
     /// Explicit program output directories which could not be resolved.
     pub unresolved_output_paths: Vec<String>,
     /// `%make_package` and `%link_kickstart` declarations.

@@ -172,6 +172,7 @@ fn main() -> Result<()> {
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
     let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
@@ -216,6 +217,7 @@ fn main() -> Result<()> {
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
         partial_source_lists.extend(parsed.partial_source_lists);
+        skipped_client_archives.extend(parsed.skipped_client_archives);
         unresolved_output_paths.extend(parsed.unresolved_output_paths);
         graph.add_packages(parsed.packages);
         skipped_packages.extend(parsed.skipped_packages);
@@ -272,6 +274,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "skipped-client-archives.txt",
+        skipped_client_archives,
+        "module(s) need a genmodule client archive that only modtype=library builds",
+    );
     write_report(
         &args.output,
         "skipped-make-opts.txt",

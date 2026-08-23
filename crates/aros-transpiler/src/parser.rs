@@ -553,10 +553,21 @@ fn map_linklib_object_sources(
     Ok(mapped)
 }
 
-fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<(bool, Vec<String>)> {
+/// The subset of a genmodule config that decides the client archive.
+struct GenmoduleConfigFacts {
+    has_relative: bool,
+    relative_libraries: Vec<String>,
+    /// `options stubs` or `options autoinit` stated in the config. Either one
+    /// puts a generated source into `<mod>_LINKLIBFILES` regardless of the
+    /// module type, so either one makes the archive exist.
+    forces_client_archive: bool,
+}
+
+fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<GenmoduleConfigFacts> {
     let content = fs::read_to_string(directory.join(format!("{module}.conf"))).ok()?;
     let mut in_config = false;
     let mut has_relative = false;
+    let mut forces_client_archive = false;
     let mut relative_libraries = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -575,9 +586,15 @@ fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<(bool
             continue;
         }
         if let Some(options) = trimmed.strip_prefix("options ") {
-            has_relative = options
-                .split([',', ' ', '\t'])
-                .any(|option| option == "rellinklib");
+            let mut stated = options.split([',', ' ', '\t']);
+            // `options` may appear on several lines; each one contributes.
+            for option in stated.by_ref() {
+                match option {
+                    "rellinklib" => has_relative = true,
+                    "stubs" | "autoinit" => forces_client_archive = true,
+                    _ => {}
+                }
+            }
         } else if let Some(library) = trimmed.strip_prefix("rellib ") {
             let library = library.split_whitespace().next().unwrap_or_default();
             if !library.is_empty() && !relative_libraries.iter().any(|value| value == library) {
@@ -585,7 +602,11 @@ fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<(bool
             }
         }
     }
-    Some((has_relative, relative_libraries))
+    Some(GenmoduleConfigFacts {
+        has_relative,
+        relative_libraries,
+        forces_client_archive,
+    })
 }
 
 /// Resolves a single output name through the bounded Make evaluator.
@@ -7342,6 +7363,7 @@ fn parse_mmakefile_impl(
         }
     }
     let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
 
@@ -7526,9 +7548,53 @@ fn parse_mmakefile_impl(
         let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
             .then(|| mod_type_owned.clone());
 
+        // Upstream creates the client archive when `<mod>_LINKLIB` is
+        // non-empty, and make.tmpl derives that from the file set, not from
+        // `linklibname=`:
+        //
+        //   config/make.tmpl:2270  _LINKLIB is empty exactly when
+        //                          _LINKLIBFILES, _LINKLIBAFILES,
+        //                          linklibfiles= and _ARCHNLIBFILES are all
+        //                          empty; linklibname= only renames it
+        //   tools/genmodule/writemakefile.c:78
+        //                          _LINKLIBFILES gets <mod>_getlibbase for
+        //                          every LIBRARY, <mod>_autoinit under
+        //                          OPTION_AUTOINIT and the stubs under
+        //                          OPTION_STUBS
+        //   tools/genmodule/config.c:797
+        //                          a LIBRARY defaults to OPTION_AUTOINIT,
+        //                          every other module type to NOAUTOINIT
+        //
+        // So every modtype=library module has a client archive, and so does
+        // any other module whose config states `options stubs` or
+        // `options autoinit` (rom/timer is the one such case in the tree).
+        // Keying it on linklibname= left 100 library archives unbuilt, which
+        // is what the symbol audit sees as undefined DOSBase, UtilityBase and
+        // the rest: the base is defined by AROS_LIBSET in <mod>_autoinit.c
+        // (compiler/include/aros/symbolsets.h:118), and that object lives in
+        // exactly this archive.
+        if module_type != ModuleType::Library {
+            if let Some(facts) = read_genmodule_linklib_config(parent_dir, &mod_name) {
+                if facts.forces_client_archive {
+                    skipped_client_archives.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} modtype={mod_type_owned}: \
+                         config states `options stubs` or `options autoinit`, so upstream builds \
+                         lib{mod_name}.a; the generated client sources are only derived for \
+                         modtype=library",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                }
+            }
+        }
         let genmodule_linklibs = if module_type == ModuleType::Library {
             read_genmodule_linklib_config(parent_dir, &mod_name).map(
-                |(has_relative, relative_libraries)| {
+                |GenmoduleConfigFacts {
+                     has_relative,
+                     relative_libraries,
+                     forces_client_archive,
+                 }| {
                     let mut inputs_exact = true;
                     let source_files = match evaluate_linklib_list(
                         rest,
@@ -7579,7 +7645,11 @@ fn parse_mmakefile_impl(
                         }
                     };
                     GenmoduleLinklibs {
-                        enabled: linklib_name.is_some(),
+                        enabled: linklib_name.is_some()
+                            || forces_client_archive
+                            || module_type == ModuleType::Library
+                            || !source_files.is_empty()
+                            || !object_sources.is_empty(),
                         has_relative,
                         relative_libraries,
                         source_files,
@@ -8438,6 +8508,7 @@ fn parse_mmakefile_impl(
         skipped_conditions,
         skipped_programs,
         partial_source_lists,
+        skipped_client_archives,
         unresolved_output_paths,
         packages,
         skipped_packages,
@@ -9740,7 +9811,7 @@ mod tests {
         .unwrap();
 
         assert!(parsed.skipped_copy_directories.is_empty(), "{parsed:#?}");
-        assert_eq!(parsed.copy_directories.len(), 2);
+        assert_eq!(parsed.copy_directories.len(), 4);
         let geninc = parsed
             .copy_directories
             .iter()
@@ -11698,6 +11769,81 @@ FILES := gdbstop
             outputs["tools-mkamikeymap"],
             Some("${AROS_BUILD_DIR}/SYS/Extras/Developer/Build")
         );
+    }
+
+    #[test]
+    fn every_library_module_materialises_its_client_archive() {
+        let tree = TempTree::new();
+        let module = tree.0.join("rom/thing");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("thing.c"), "").unwrap();
+        fs::write(
+            module.join("thing.conf"),
+            "##begin config\n\
+             basename Thing\n\
+             libbasetype struct ThingBase\n\
+             ##end config\n",
+        )
+        .unwrap();
+        let file = module.join("mmakefile.src");
+        fs::write(
+            &file,
+            "%build_module mmake=kernel-thing modname=thing modtype=library files=thing\n",
+        )
+        .unwrap();
+        let dirs = DirVars::load(&tree.0);
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &file,
+            &tree.0,
+            &dirs,
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+
+        // No linklibname=, no linklibfiles=: upstream still archives
+        // thing_getlibbase and thing_autoinit into libthing.a, because the
+        // module type alone puts them into <mod>_LINKLIBFILES.
+        let genmodule = parsed.targets[0]
+            .genmodule_linklibs
+            .as_ref()
+            .expect("library client-archive metadata");
+        assert!(genmodule.enabled);
+        assert!(genmodule.source_files.is_empty());
+        assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
+    }
+
+    #[test]
+    fn non_library_module_needing_a_client_archive_is_reported() {
+        let tree = TempTree::new();
+        let module = tree.0.join("rom/clock");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("clock.c"), "").unwrap();
+        fs::write(
+            module.join("clock.conf"),
+            "##begin config\n\
+             basename Clock\n\
+             options autoinit\n\
+             ##end config\n",
+        )
+        .unwrap();
+        let file = module.join("mmakefile.src");
+        fs::write(
+            &file,
+            "%build_module mmake=kernel-clock modname=clock modtype=device files=clock\n",
+        )
+        .unwrap();
+        let dirs = DirVars::load(&tree.0);
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &file,
+            &tree.0,
+            &dirs,
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+
+        assert!(parsed.targets[0].genmodule_linklibs.is_none());
+        assert_eq!(parsed.skipped_client_archives.len(), 1, "{parsed:#?}");
+        assert!(parsed.skipped_client_archives[0].contains("libclock.a"));
     }
 
     #[test]
