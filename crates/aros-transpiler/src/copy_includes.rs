@@ -102,6 +102,35 @@ pub struct CopyIncludesScan {
     /// missing one of these surfaces as a link or packaging failure rather
     /// than a missing include.
     pub generated_files: Vec<String>,
+    /// Rules whose recipe runs an in-tree Python script to produce a file under
+    /// `$(GENDIR)`.
+    pub script_outputs: Vec<ScriptOutputDecl>,
+    /// Rules that look like one and are not representable.
+    pub skipped_script_outputs: Vec<String>,
+}
+
+/// A rule whose recipe runs an in-tree Python script to produce files under
+/// `$(GENDIR)`.
+///
+/// `arch/all-pc/udis86/mmakefile.src:26` is the case that matters, and the only
+/// one of the 21 rules in the generated-file report with this shape: the other
+/// twenty are windres compiles for mingw32, the m68k-amiga ROM link chain, two
+/// plain compiles into `$(GENDIR)`, the stdc Unicode tables and two copies. One
+/// modelled form would not have covered them, so this one is deliberately
+/// narrow and everything else stays reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptOutputDecl {
+    /// Directory of the declaring mmakefile, relative to the source root.
+    pub directory: String,
+    /// The file the rule declares, as a CMake path.
+    pub output: String,
+    /// The script the recipe runs, as a CMake path.
+    pub script: String,
+    /// Literal arguments after the script, as CMake paths or plain words.
+    pub arguments: Vec<String>,
+    /// The rule's prerequisites, as CMake paths. Order-only ones are dropped:
+    /// they are directories, which CMake creates itself.
+    pub depends: Vec<String>,
 }
 
 /// One resolved `%copy_includes` declaration.
@@ -436,6 +465,8 @@ fn collect_copy_includes_with_lookup(
     let mut adhoc = Vec::new();
     let mut transforms = Vec::new();
     let mut generated_files = Vec::new();
+    let mut script_outputs: Vec<ScriptOutputDecl> = Vec::new();
+    let mut skipped_script_outputs: Vec<String> = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let output_owners = collect_header_output_owners(&lines);
@@ -491,6 +522,22 @@ fn collect_copy_includes_with_lookup(
             continue;
         }
 
+        // A rule whose recipe runs an in-tree Python script. Tried before the
+        // generic shape so a modelled rule is not also reported as unmodelled.
+        match parse_script_output(&lines, i, &base, &vars, external) {
+            Some(Ok(decl)) => {
+                script_outputs.push(decl);
+                i += 1;
+                continue;
+            }
+            Some(Err(reason)) => {
+                skipped_script_outputs.push(reason);
+                i += 1;
+                continue;
+            }
+            None => {}
+        }
+
         // A hand-written rule writing into an include root, e.g.
         //   $(AROS_INCLUDES)/hidd/pci.h: include/pci_hidd.h
         match parse_adhoc_rule(payload, &mmakefile, line_no) {
@@ -540,6 +587,8 @@ fn collect_copy_includes_with_lookup(
         adhoc,
         transforms,
         generated_files,
+        script_outputs,
+        skipped_script_outputs,
     }
 }
 
@@ -839,6 +888,106 @@ fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<Parse
     Some(ParsedRule::Other(format!(
         "{root}{dest} <- {prereqs}  ({mmakefile}:{line_no})"
     )))
+}
+
+/// A rule of the shape `$(GENDIR)/... : <inputs>` whose single recipe line is
+/// `$(PYTHON) <script> <args>`.
+///
+/// Returns `None` when the rule is not that shape, so the caller falls back to
+/// reporting it, and `Err` when it is that shape and still cannot be used.
+fn parse_script_output(
+    lines: &[&str],
+    index: usize,
+    base: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> Option<Result<ScriptOutputDecl, String>> {
+    // The rule line continues while it ends in a backslash; the recipe starts
+    // after the last continuation. The general scan does not join these, unlike
+    // the %copy_includes branch, so it has to be done here.
+    let mut joined = String::new();
+    let mut cursor = index;
+    loop {
+        let line = lines.get(cursor)?;
+        let trimmed = line.trim_end();
+        joined.push_str(trimmed.trim_end_matches('\\').trim_end());
+        cursor += 1;
+        if !trimmed.ends_with('\\') {
+            break;
+        }
+        joined.push(' ');
+    }
+
+    let (target, prereqs) = joined.split_once(':')?;
+    let target = target.trim();
+    if !target.starts_with("$(GENDIR)/") {
+        return None;
+    }
+
+    let recipe: Vec<&str> = lines[cursor..]
+        .iter()
+        .take_while(|line| line.starts_with('\t'))
+        .map(|line| line.trim())
+        .collect();
+    // `$(PYTHON)` before substitution, so the shape is what the reference
+    // states rather than whatever a variable happens to expand to.
+    if recipe.len() != 1 || !recipe[0].starts_with("$(PYTHON)") {
+        return None;
+    }
+
+    let resolve = |raw: &str| -> Result<String, String> {
+        let value = substitute(raw, vars, external, 8);
+        if value.contains("$(") {
+            return Err(format!("`{raw}` does not resolve"));
+        }
+        if value.contains([';', '&', '|', '>', '<', '`', '"', '\'']) {
+            return Err(format!("`{value}` is not a plain word"));
+        }
+        Ok(value)
+    };
+
+    let output = match resolve(target) {
+        Ok(value) => value,
+        Err(reason) => return Some(Err(format!("{base}: target {reason}"))),
+    };
+
+    // The order-only half of the prerequisites is a directory, which CMake
+    // creates itself.
+    let ordered = prereqs.split('|').next().unwrap_or_default();
+    let mut depends = Vec::new();
+    for raw in ordered.split_whitespace() {
+        match resolve(raw) {
+            Ok(value) => depends.push(value),
+            Err(reason) => return Some(Err(format!("{base}: prerequisite {reason}"))),
+        }
+    }
+
+    let mut words = recipe[0]
+        .strip_prefix("$(PYTHON)")
+        .unwrap_or_default()
+        .split_whitespace();
+    let Some(raw_script) = words.next() else {
+        return Some(Err(format!("{base}: {output} has no script to run")));
+    };
+    let script = match resolve(raw_script) {
+        Ok(value) => value,
+        Err(reason) => return Some(Err(format!("{base}: script {reason}"))),
+    };
+    let mut arguments = Vec::new();
+    for raw in words {
+        match resolve(raw) {
+            Ok(value) => arguments.push(value),
+            Err(reason) => return Some(Err(format!("{base}: argument {reason}"))),
+        }
+    }
+
+    Some(Ok(ScriptOutputDecl {
+        directory: base.to_owned(),
+        output,
+        script,
+        arguments,
+        depends,
+    }))
 }
 
 /// Resolves one `%copy_includes` directive against the current variable state.
@@ -1310,5 +1459,32 @@ $(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
         assert_eq!(adhoc[0].root, "$(AROS_INCLUDES)/");
         assert_eq!(adhoc[0].dest, "%");
         assert!(adhoc[0].prereqs.contains("DEST_INCLUDES"));
+    }
+
+    #[test]
+    fn the_udis86_itab_rule_is_modelled_not_reported() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let rel = "arch/all-pc/udis86";
+        let content =
+            aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
+        let scan = collect_copy_includes(&content, std::path::Path::new(rel));
+
+        assert_eq!(scan.skipped_script_outputs.len(), 0, "{:?}", scan.skipped_script_outputs);
+        assert_eq!(scan.script_outputs.len(), 1, "{:?}", scan.script_outputs);
+        let decl = &scan.script_outputs[0];
+        assert_eq!(
+            decl.output,
+            "${CMAKE_BINARY_DIR}/gen/arch/all-pc/udis86/libudis86/itab.c"
+        );
+        assert!(decl.script.ends_with("scripts/ud_itab.py"), "{}", decl.script);
+        assert_eq!(decl.arguments.len(), 2, "{:?}", decl.arguments);
+        assert!(decl.arguments[0].ends_with("docs/x86/optable.xml"));
+        assert!(decl.arguments[1].ends_with("gen/arch/all-pc/udis86/libudis86"));
+        // The rule stays out of the unmodelled report now that it is modelled.
+        assert!(
+            !scan.generated_files.iter().any(|note| note.contains("itab.c")),
+            "{:?}",
+            scan.generated_files
+        );
     }
 }

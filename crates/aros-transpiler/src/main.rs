@@ -177,6 +177,7 @@ fn main() -> Result<()> {
     let mut skipped_binary_objects: Vec<String> = Vec::new();
     let mut skipped_host_generated_headers: Vec<String> = Vec::new();
     let mut skipped_hidd_stubs: Vec<String> = Vec::new();
+    let mut skipped_script_outputs: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
@@ -215,6 +216,8 @@ fn main() -> Result<()> {
         graph.add_host_generated_headers(parsed.host_generated_headers);
         graph.add_hidd_stubs(parsed.hidd_stubs);
         skipped_hidd_stubs.extend(parsed.skipped_hidd_stubs);
+        graph.add_script_outputs(parsed.script_outputs);
+        skipped_script_outputs.extend(parsed.skipped_script_outputs);
         skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
         graph.add_binary_objects(parsed.binary_objects);
         skipped_binary_objects.extend(parsed.skipped_binary_objects);
@@ -261,6 +264,10 @@ fn main() -> Result<()> {
     // declarations name `uselibs=hiddstubs`, and until %make_hidd_stubs was
     // modelled every one of them was reported as having no link library.
     skipped_hidd_stubs.extend(graph.resolve_hidd_stubs());
+
+    // Before uselibs, because a generated source has to be registered before
+    // the target that names it is emitted.
+    skipped_script_outputs.extend(graph.resolve_script_outputs());
 
     let unresolved_libs = graph.resolve_use_libs();
 
@@ -357,6 +364,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "skipped-script-outputs.txt",
+        skipped_script_outputs,
+        "script-generated file rule(s) could not be bound",
+    );
     write_report(
         &args.output,
         "skipped-hidd-stubs.txt",

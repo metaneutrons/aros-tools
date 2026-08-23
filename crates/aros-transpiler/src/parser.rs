@@ -8695,6 +8695,8 @@ fn parse_mmakefile_impl(
         header_transforms: copy_scan.transforms,
         define_headers,
         generated_file_rules: copy_scan.generated_files,
+        script_outputs: copy_scan.script_outputs,
+        skipped_script_outputs: copy_scan.skipped_script_outputs,
         flags: flag_set,
         arch_sources,
         skipped_arch_sources,
