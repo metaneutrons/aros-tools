@@ -24,6 +24,8 @@ pub struct DependencyGraph {
     pub default_link_set: Vec<ResolvedDefaultLinkItem>,
     /// `%rule_link_binary` declarations, in declaration order.
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
+    /// Public headers a host tool writes.
+    pub host_generated_headers: Vec<crate::host_generated_headers::HostGeneratedHeader>,
     /// Strictly capability-checked third-party CMake builds. Each contributes
     /// both a real mmake workflow endpoint and a distinct link interface.
     pub external_cmake: Vec<ExternalCMakeDecl>,
@@ -821,6 +823,13 @@ impl DependencyGraph {
 
         self.copy_directories = resolved;
         unresolved.into_iter().collect()
+    }
+
+    pub fn add_host_generated_headers(
+        &mut self,
+        decls: Vec<crate::host_generated_headers::HostGeneratedHeader>,
+    ) {
+        self.host_generated_headers.extend(decls);
     }
 
     pub fn add_binary_objects(&mut self, decls: Vec<crate::binary_objects::BinaryObjectDecl>) {

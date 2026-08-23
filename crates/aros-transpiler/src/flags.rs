@@ -50,6 +50,7 @@ pub struct FlagSet {
     /// so they must never reach ld.lld; they are carried as facts instead.
     #[serde(default)]
     pub spec_switches: Vec<String>,
+
     /// Flag tokens that were not propagated, for reporting.
     pub skipped: Vec<String>,
     /// True when the file reassigns the flags and also builds more than one
@@ -875,8 +876,39 @@ fn classify_link(tok: &str, set: &mut FlagSet) {
             None => push_unique(&mut set.skipped, tok.to_owned()),
         }
     } else if !tok.is_empty() {
+        // Driver options land here too, and rightly: for every declaration but
+        // a standalone-executable link they are dropped. The parser collects
+        // them separately for that one path, where they are reproduced, and it
+        // is the parser rather than this collector because only it can render
+        // the path a `-Wl,-T,` or `-Wl,-Map,` carries.
         push_unique(&mut set.skipped, tok.to_owned());
     }
+}
+
+/// Whether a token is a driver-level link option this build can reproduce.
+///
+/// Deliberately an allowlist. Anything outside it stays in the skipped report,
+/// because a standalone link that silently loses a switch produces an image
+/// that looks built and is not loadable.
+pub(crate) fn is_driver_link_option(tok: &str) -> bool {
+    if tok.starts_with("-Wl,") {
+        // A comma list reaching the linker verbatim. `${...}` is the rendered
+        // CMake form of a resolved path and is expected; an unresolved Make
+        // `$(...)`, a shell substitution or a quote is not.
+        return !tok.contains("$(") && !tok.contains([';', '`', '"', '\'']) && !tok.contains("$'");
+    }
+    matches!(
+        tok,
+        "-m32"
+            | "-m64"
+            | "-nostdlib"
+            | "-nostartfiles"
+            | "-static"
+            | "-static-libgcc"
+            | "-static-libstdc++"
+    ) || tok.starts_with("--target=")
+        || tok.starts_with("-march=")
+        || tok.starts_with("-mtune=")
 }
 
 /// Resolves one private link search path and proves it stays below the build
@@ -942,8 +974,22 @@ mod tests {
     #[test]
     fn direct_linker_options_reject_compiler_driver_switches() {
         let flags = collect_flags("USER_LDFLAGS := -lpthread -pthread -Wl,-dead_strip\n");
+        // Only a real linker library reaches the ld.lld module rule.
         assert_eq!(flags.link_options, ["-lpthread"]);
+        // `-pthread` is a driver switch nothing here can reproduce, so it stays
+        // in the report. `-Wl,` is a driver switch a standalone-executable link
+        // *can* reproduce, so it no longer counts as discarded; the parser
+        // collects it, because only there can the path such an option carries be
+        // rendered. is_driver_link_option is the shared predicate.
         assert_eq!(flags.skipped, ["-pthread", "-Wl,-dead_strip"]);
+        assert!(is_driver_link_option("-Wl,-dead_strip"));
+        assert!(is_driver_link_option("-m32"));
+        assert!(!is_driver_link_option("-pthread"));
+        // An unresolved Make expression or shell syntax is refused.
+        assert!(!is_driver_link_option("-Wl,-T,$(SRCDIR)/x.lds"));
+        assert!(!is_driver_link_option("-Wl,-Map,`date`"));
+        // The rendered CMake form is expected and accepted.
+        assert!(is_driver_link_option("-Wl,-T,${CMAKE_SOURCE_DIR}/x.lds"));
     }
 
     #[test]

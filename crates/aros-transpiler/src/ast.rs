@@ -171,6 +171,17 @@ pub struct TargetDefinition {
     /// Compiler-spec switches which suppress part of the default link set.
     #[serde(default)]
     pub spec_switches: Vec<String>,
+    /// Driver-level link options, for a declaration that links a standalone
+    /// executable through the compiler driver rather than as an AROS module.
+    #[serde(default)]
+    pub driver_link_options: Vec<String>,
+    /// `TARGET_ISA_LDFLAGS` as this declaration sets it. The PC bootstrap uses
+    /// it to link for a different architecture than the rest of the tree
+    /// (`--target=i386-pc-linux-gnu -march=i486`), and it is an assignment to a
+    /// global rather than to a `USER_*` variable, so the flag collector cannot
+    /// see it.
+    #[serde(default)]
+    pub isa_link_options: Vec<String>,
     /// Architecture-specific source overrides, as `(arch_tag, dir, files)`.
     /// A file listed here replaces the same-named generic source.
     pub arch_sources: Vec<(String, String, Vec<String>)>,
@@ -534,6 +545,10 @@ pub struct ParsedMmakefile {
     pub arch_sources: Vec<ArchSourceDecl>,
     /// `%rule_link_binary`: flat binaries wrapped as relocatable objects.
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
+    /// Public headers a host tool writes.
+    pub host_generated_headers: Vec<crate::host_generated_headers::HostGeneratedHeader>,
+    /// Rules of that shape this could not represent, for reporting.
+    pub skipped_host_generated_headers: Vec<String>,
     /// The ones that could not be resolved, for reporting.
     pub skipped_binary_objects: Vec<String>,
     /// Declarations whose file list could not be resolved, for reporting.

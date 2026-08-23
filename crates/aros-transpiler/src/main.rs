@@ -175,6 +175,7 @@ fn main() -> Result<()> {
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut skipped_binary_objects: Vec<String> = Vec::new();
+    let mut skipped_host_generated_headers: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let mut skipped_packages: Vec<String> = Vec::new();
     let mut skipped_icons: Vec<String> = Vec::new();
@@ -210,6 +211,8 @@ fn main() -> Result<()> {
         graph.add_catalogs(parsed.catalogs);
         skipped_catalogs.extend(parsed.skipped_catalogs);
         skipped_meta_rules.extend(parsed.skipped_meta_rules);
+        graph.add_host_generated_headers(parsed.host_generated_headers);
+        skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
         graph.add_binary_objects(parsed.binary_objects);
         skipped_binary_objects.extend(parsed.skipped_binary_objects);
         graph.add_arch_decls(parsed.arch_decls);
@@ -305,6 +308,12 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    write_report(
+        &args.output,
+        "skipped-host-generated-headers.txt",
+        skipped_host_generated_headers,
+        "host-tool header rule(s) could not be represented",
+    );
     write_report(
         &args.output,
         "skipped-binary-objects.txt",

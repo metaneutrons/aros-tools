@@ -920,6 +920,16 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if target.empty_archive {
             writeln!(out, "    EMPTY_ARCHIVE").unwrap();
         }
+        // The 32-bit flavour of an archive, which the declaration states by
+        // pointing libdir/objdir at a 32-bit location and setting
+        // `ISA_FLAGS := $(ISA_32_FLAGS)`. That value is an Autoconf one with no
+        // counterpart here, so CMake substitutes the 32-bit form of the triple
+        // it already chooses per CPU (cmake/AROS.cmake:301). Without it
+        // gen/lib32 holds 64-bit objects, and the 32-bit PC bootstrap cannot
+        // link against them.
+        if target.variant_32bit {
+            writeln!(out, "    VARIANT_32BIT").unwrap();
+        }
         if let Some(linklib_name) = &target.linklib_name {
             writeln!(out, "    LINKLIB_NAME {}", cmake_arg(linklib_name)).unwrap();
         }
@@ -1060,6 +1070,28 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "    COMPILE_OPTIONS {}", quoted.join(" ")).unwrap();
         }
 
+        // Only a standalone-executable link uses these, and only a program can
+        // be one. Emitted for anything else they corrupt the call: a keyword a
+        // builder does not accept is read as one more value of the preceding
+        // multi-value argument, and `DEFINES ... DRIVER_LINK_OPTIONS -static`
+        // duly reached the compiler as `-DDRIVER_LINK_OPTIONS -D-static`.
+        let standalone_capable = target.module_type == ModuleType::Program;
+        if standalone_capable && !target.driver_link_options.is_empty() {
+            let options: Vec<String> = target
+                .driver_link_options
+                .iter()
+                .map(|option| cmake_arg(option))
+                .collect();
+            writeln!(out, "    DRIVER_LINK_OPTIONS {}", options.join(" ")).unwrap();
+        }
+        if standalone_capable && !target.isa_link_options.is_empty() {
+            let options: Vec<String> = target
+                .isa_link_options
+                .iter()
+                .map(|option| cmake_arg(option))
+                .collect();
+            writeln!(out, "    ISA_LINK_OPTIONS {}", options.join(" ")).unwrap();
+        }
         if !target.link_options.is_empty() {
             let quoted: Vec<String> = target
                 .link_options
@@ -1437,6 +1469,29 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "    endforeach()").unwrap();
         writeln!(out, "endif()\n").unwrap();
     }
+    // Public headers a host tool writes. Emitted before everything that
+    // compiles, because a source may include one.
+    if !graph.host_generated_headers.is_empty() {
+        writeln!(out, "# ---- Headers written by a host tool ----").unwrap();
+        for header in &graph.host_generated_headers {
+            writeln!(out, "aros_host_generated_header(").unwrap();
+            writeln!(out, "    TOOL {}", cmake_arg(&header.tool)).unwrap();
+            writeln!(
+                out,
+                "    SOURCE \"${{CMAKE_SOURCE_DIR}}/{}\"",
+                header.source
+            )
+            .unwrap();
+            writeln!(out, "    HEADER {}", cmake_arg(&header.header)).unwrap();
+            if !header.arguments.is_empty() {
+                let args: Vec<String> = header.arguments.iter().map(|a| cmake_arg(a)).collect();
+                writeln!(out, "    ARGUMENTS {}", args.join(" ")).unwrap();
+            }
+            writeln!(out, ")").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+
     // A flat binary wrapped as a relocatable object, and the target that links
     // it. config/make.tmpl:1552.
     if !graph.binary_objects.is_empty() {

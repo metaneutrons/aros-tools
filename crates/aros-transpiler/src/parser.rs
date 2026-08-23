@@ -570,6 +570,37 @@ struct GenmoduleConfigFacts {
 /// where the declaration stands. Link options contributed by an architecture
 /// `make.opts` are not in that scope, so they are merged in here, once per
 /// declaration, exactly as the make.opts defines are.
+/// The driver-level link options one declaration states in a global variable.
+///
+/// A declaration that links for a different architecture than the rest of the
+/// tree states it by assigning this global, not a `USER_*` variable, so the
+/// flag collector never sees it. `arch/all-pc/bootstrap/mmakefile.src:32` is
+/// the case: `--target=i386-pc-linux-gnu -march=i486`, without which the
+/// 32-bit multiboot bootstrap is compiled and linked 64-bit.
+fn declaration_global_link_options(
+    name: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    rel_dir: &Path,
+    line: usize,
+) -> Vec<String> {
+    let Some(raw) = scope.raw_at(name, line) else {
+        return Vec::new();
+    };
+    // Evaluated here rather than in the flag collector, which has no directory
+    // and so cannot render the path a `-Wl,-T,` or `-Wl,-Map,` carries.
+    let context = MakeExprContext::new(scope, dirs, line, root, rel_dir);
+    let Ok(value) = evaluate_make_expr(&raw, &context) else {
+        return Vec::new();
+    };
+    value
+        .split_whitespace()
+        .filter(|token| crate::flags::is_driver_link_option(token))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn declaration_flags_at(
     scope: &VarScope,
     line: usize,
@@ -7463,6 +7494,16 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let isa_link_options = declaration_global_link_options(
+            "TARGET_ISA_LDFLAGS",
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            inv.line,
+        );
+        let driver_link_options =
+            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
         let declaration_flags = declaration_flags_at(
             &scope,
             inv.line,
@@ -7813,6 +7854,8 @@ fn parse_mmakefile_impl(
             compile_options: declaration_flags.compile_options,
             link_options: declaration_flags.link_options,
             spec_switches: declaration_flags.spec_switches.clone(),
+            driver_link_options: driver_link_options.clone(),
+            isa_link_options: isa_link_options.clone(),
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -7835,6 +7878,16 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let isa_link_options = declaration_global_link_options(
+            "TARGET_ISA_LDFLAGS",
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            inv.line,
+        );
+        let driver_link_options =
+            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
         let declaration_flags = declaration_flags_at(
             &scope,
             inv.line,
@@ -7965,6 +8018,8 @@ fn parse_mmakefile_impl(
             compile_options: declaration_flags.compile_options,
             link_options: declaration_flags.link_options,
             spec_switches: declaration_flags.spec_switches.clone(),
+            driver_link_options: driver_link_options.clone(),
+            isa_link_options: isa_link_options.clone(),
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -7990,6 +8045,16 @@ fn parse_mmakefile_impl(
         };
         let vars = scope.snapshot(inv.line);
         let expression_context = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+        let isa_link_options = declaration_global_link_options(
+            "TARGET_ISA_LDFLAGS",
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            inv.line,
+        );
+        let driver_link_options =
+            declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
         let mut declaration_flags = declaration_flags_at(
             &scope,
             inv.line,
@@ -8410,6 +8475,8 @@ fn parse_mmakefile_impl(
             compile_options: declaration_flags.compile_options,
             link_options: declaration_flags.link_options,
             spec_switches: declaration_flags.spec_switches.clone(),
+            driver_link_options: driver_link_options.clone(),
+            isa_link_options: isa_link_options.clone(),
             arch_sources: Vec::new(),
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
@@ -8588,6 +8655,8 @@ fn parse_mmakefile_impl(
             ))
         })
         .collect();
+    let (host_generated_headers, skipped_host_generated_headers) =
+        crate::host_generated_headers::collect_host_generated_headers(&content, &rel_dir);
     let (binary_objects, skipped_binary_objects) = crate::binary_objects::collect_binary_objects(
         &content,
         &scope,
@@ -8629,6 +8698,8 @@ fn parse_mmakefile_impl(
         skipped_arch_sources,
         binary_objects,
         skipped_binary_objects,
+        host_generated_headers,
+        skipped_host_generated_headers,
         fetches,
         skipped_fetches,
         skipped_make_opts,
