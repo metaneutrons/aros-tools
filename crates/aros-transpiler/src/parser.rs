@@ -9755,6 +9755,26 @@ mod tests {
             .expect("SDK staging declaration");
         assert_eq!(sdk.source, geninc.source);
         assert_eq!(sdk.destination, "${AROS_SDK_INCLUDE_DIR}/boost");
+
+        // The in-tree subset stages the same two destinations from
+        // compiler/boost/include, for the release closure that must not fetch.
+        let subset_geninc = parsed
+            .copy_directories
+            .iter()
+            .find(|declaration| declaration.name == "compiler-boost-subset-geninc-copy")
+            .expect("subset GENINCDIR staging declaration");
+        assert_eq!(
+            subset_geninc.source,
+            "${CMAKE_SOURCE_DIR}/compiler/boost/include/boost"
+        );
+        assert_eq!(subset_geninc.destination, geninc.destination);
+        let subset_sdk = parsed
+            .copy_directories
+            .iter()
+            .find(|declaration| declaration.name == "compiler-boost-subset-includes-copy")
+            .expect("subset SDK staging declaration");
+        assert_eq!(subset_sdk.source, subset_geninc.source);
+        assert_eq!(subset_sdk.destination, sdk.destination);
     }
 
     #[test]
