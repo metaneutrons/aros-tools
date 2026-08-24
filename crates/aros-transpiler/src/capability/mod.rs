@@ -21,7 +21,8 @@ pub mod mesa;
 pub mod nouveau;
 
 use crate::parser::{
-    collect_vars, join_continuations, macro_arg, macro_argument_names, Invocation,
+    collect_vars, join_continuations, macro_arg, macro_argument_names, strip_make_comment,
+    Invocation,
 };
 use aros_common::read_source;
 use sha2::{Digest, Sha256};
@@ -119,4 +120,34 @@ pub(crate) fn manifest_inventory(
         ));
     }
     Ok(values)
+}
+
+/// Canonicalises one audited Make capability block for exact comparison.
+///
+/// Continuation layout and comments have no GNU Make semantics, so they may
+/// vary without changing the capability. Every remaining logical line,
+/// conditional and assignment is retained in order with whitespace collapsed.
+pub(crate) fn normalized_make_capability_block(
+    content: &str,
+    first_line_prefix: &str,
+    end_line_prefix: &str,
+) -> Option<String> {
+    let joined = join_continuations(content);
+    let mut active = false;
+    let mut lines = Vec::new();
+    for raw_line in joined.lines() {
+        let semantic = strip_make_comment(raw_line).trim();
+        if !active {
+            if !semantic.starts_with(first_line_prefix) {
+                continue;
+            }
+            active = true;
+        } else if semantic.starts_with(end_line_prefix) {
+            return Some(lines.join("\n"));
+        }
+        if !semantic.is_empty() {
+            lines.push(semantic.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    None
 }

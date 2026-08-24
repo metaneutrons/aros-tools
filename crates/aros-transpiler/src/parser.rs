@@ -4,11 +4,12 @@ use crate::ast::{
     ModuleType, ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl,
     TargetDefinition,
 };
-use crate::capability::file_has_sha256;
+use crate::capability::mesa::sse41;
 use crate::capability::mesa::{
     compile_contract, current_profile, remaining_linklib_sources, BUILD_ROOT, CXX_COMPAT_NEW,
     PRIVATE_LIBDIR, SOURCE_ROOT,
 };
+use crate::capability::{file_has_sha256, normalized_make_capability_block};
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at, FlagSet};
@@ -33,7 +34,7 @@ use std::sync::LazyLock;
 /// One non-empty #MM rule. Horizontal whitespace is intentional: `\s*` also
 /// consumes a newline, so an empty `#MM setup-ppc :` used to steal the next
 /// ordinary Make rule and manufacture `setup-ppc -> setup-ppc` self-cycles.
-static META_RULE_RE: LazyLock<Regex> =
+pub(crate) static META_RULE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^#MM-?[ \t]+([^ \t\r\n:]+)[ \t]*:[ \t]*([^\r\n]+)").unwrap());
 static CONTINUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\\[ \t]*\r?\n[ \t]*").unwrap());
@@ -761,7 +762,7 @@ fn wildcard_c_sources(dir: &Path) -> Vec<String> {
 /// backslash, and the rest as separate rules with no colon at all. 2223 of the
 /// tree's 5089 `#MM` lines are continuations, which is 44% of all metatarget
 /// dependencies.
-fn join_mm_continuations(content: &str) -> String {
+pub(crate) fn join_mm_continuations(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut pending = false;
 
@@ -1020,7 +1021,7 @@ fn variable_assignment(line: &str) -> Option<(&str, &str, AssignmentKind)> {
 /// A `#` starts a comment even when it is attached to the preceding word.
 /// Keeping it in an assignment made `FILES := a b #disabled` compile a bogus
 /// source named `#disabled`. An odd run of backslashes escapes the marker.
-fn strip_make_comment(line: &str) -> &str {
+pub(crate) fn strip_make_comment(line: &str) -> &str {
     for (at, character) in line.char_indices() {
         if character != '#' {
             continue;
@@ -2179,36 +2180,6 @@ fn collect_copy_directories(
     (declarations, skipped)
 }
 
-/// Canonicalises one audited Make capability block for exact comparison.
-///
-/// Continuation layout and comments have no GNU Make semantics, so they may
-/// vary without changing the capability. Every remaining logical line,
-/// conditional and assignment is retained in order with whitespace collapsed.
-fn normalized_make_capability_block(
-    content: &str,
-    first_line_prefix: &str,
-    end_line_prefix: &str,
-) -> Option<String> {
-    let joined = join_continuations(content);
-    let mut active = false;
-    let mut lines = Vec::new();
-    for raw_line in joined.lines() {
-        let semantic = strip_make_comment(raw_line).trim();
-        if !active {
-            if !semantic.starts_with(first_line_prefix) {
-                continue;
-            }
-            active = true;
-        } else if semantic.starts_with(end_line_prefix) {
-            return Some(lines.join("\n"));
-        }
-        if !semantic.is_empty() {
-            lines.push(semantic.split_whitespace().collect::<Vec<_>>().join(" "));
-        }
-    }
-    None
-}
-
 const AOM_DECLARED_CAPABILITY: &str = "\
 LIBAOM_CMAKEOPTIONS := -DBUILD_SHARED_LIBS=OFF -DENABLE_NASM=ON -DENABLE_EXAMPLES=OFF -DENABLE_TESTS=OFF -DENABLE_TOOLS=OFF -DCONFIG_AV1_ENCODER=0 -DCONFIG_AV1_DECODER=1 -DCONFIG_MULTITHREAD=0\n\
 ifneq (,$(findstring x86_64,$(AROS_TARGET_CPU)))\n\
@@ -2689,281 +2660,6 @@ fn parse_external_cmake_invocation(
         ],
         dir_path: relative_dir.to_path_buf(),
     })
-}
-
-const MESA_SSE41_DIR: &str = "workbench/libs/mesa/libmesa";
-const MESA_SSE41_MMAKE: &str = "mesa3d-linklib-mesa-sse41";
-const MESA_SSE41_INCLUDES: &[&str] = &[
-    "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-    "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
-    "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa",
-    "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa/main",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
-    "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/compiler/glsl",
-    "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main",
-    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
-];
-
-fn mesa_sse41_sources(x86_64: bool) -> Vec<String> {
-    if x86_64 {
-        vec![
-            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main/streaming-load-memcpy".to_owned(),
-            "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main/sse_minmax".to_owned(),
-        ]
-    } else {
-        Vec::new()
-    }
-}
-
-fn mesa_sse41_defines(x86_64: bool) -> Vec<String> {
-    let mut defines = [
-        "__STDC_CONSTANT_MACROS",
-        "__STDC_FORMAT_MACROS",
-        "__STDC_LIMIT_MACROS",
-        "_GNU_SOURCE",
-        "HAVE_PTHREAD",
-        "HAVE_TIMESPEC_GET",
-        "POSIXC_SLOWSTACK_VAARGS",
-        "USE_GCC_ATOMIC_BUILTINS",
-        "HAVE_ZLIB",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    if x86_64 {
-        defines.extend(["USE_X86_64_ASM".to_owned(), "USE_SSE41".to_owned()]);
-    }
-    defines.extend(["MAPI_MODE_GLAPI".to_owned(), "MAPI_MODE_UTIL".to_owned()]);
-    defines
-}
-
-fn mesa_sse41_compile_options(x86_64: bool) -> Vec<String> {
-    let mut options = vec!["-std=gnu11".to_owned(), "-fno-strict-aliasing".to_owned()];
-    if x86_64 {
-        options.push("-msse4.1".to_owned());
-    }
-    options
-}
-
-/// Classifies the three target profiles covered by the audited Mesa 20.0.8
-/// SSE4.1 declaration. The boolean is true only for the profile which has
-/// actual SSE sources; the two Raspberry Pi profiles intentionally archive no
-/// objects but still publish the library required by the common link line.
-fn mesa_sse41_profile(
-    relative_dir: &Path,
-    target: Option<&TargetContext>,
-) -> std::result::Result<Option<bool>, String> {
-    if relative_dir != Path::new(MESA_SSE41_DIR) {
-        return Ok(None);
-    }
-    let Some(profile) = target else {
-        return Err("Mesa SSE4.1 capability requires a concrete target profile".to_owned());
-    };
-    let key = (
-        profile.cpu.as_deref(),
-        profile.platform.as_deref(),
-        profile.toolchain.as_deref(),
-        profile.cpu32.as_deref(),
-        profile.use_mmu.as_deref(),
-        profile.float_abi.as_deref(),
-    );
-    match key {
-        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => {
-            Ok(Some(true))
-        }
-        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard"))
-        | (
-            Some("aarch64"),
-            Some("raspi"),
-            Some("llvm"),
-            Some(""),
-            Some("1"),
-            Some(""),
-        ) => Ok(Some(false)),
-        _ => Err(format!(
-            "Mesa SSE4.1 capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
-            profile.cpu.as_deref().unwrap_or("<unset>"),
-            profile.platform.as_deref().unwrap_or("<unset>"),
-            profile.toolchain.as_deref().unwrap_or("<unset>"),
-            profile.cpu32.as_deref().unwrap_or("<unset>"),
-            profile.use_mmu.as_deref().unwrap_or("<unset>"),
-            profile.float_abi.as_deref().unwrap_or("<unset>")
-        )),
-    }
-}
-
-fn mesa_sse41_fetch_edge_is_pinned(make_source: &str) -> bool {
-    let joined = join_mm_continuations(make_source);
-    let matching = META_RULE_RE
-        .captures_iter(&joined)
-        .filter(|capture| &capture[1] == MESA_SSE41_MMAKE)
-        .collect::<Vec<_>>();
-    let [edge] = matching.as_slice() else {
-        return false;
-    };
-    !edge[0].starts_with("#MM-") && edge[2].split_whitespace().eq(["mesa3d-fetch"])
-}
-
-fn mesa_sse41_static_contract_is_pinned(root: &Path, make_source: &str) -> bool {
-    let Some(block) = normalized_make_capability_block(
-        make_source,
-        "MESA3D_GALLIUM_SSE41_SOURCES :=",
-        "%build_linklib mmake=mesa3d-linklib-mesa-sse41",
-    ) else {
-        return false;
-    };
-    let Some(local_context) = normalized_make_capability_block(
-        make_source,
-        "include $(SRCDIR)/config/aros.cfg",
-        "%common",
-    ) else {
-        return false;
-    };
-    let Ok(mesa_config) = fs::read_to_string(root.join("workbench/libs/mesa/mesa.cfg")) else {
-        return false;
-    };
-    let Some(config_context) = normalized_make_capability_block(
-        &mesa_config,
-        "aros_mesadir :=",
-        "MESA3DGL_GALLIUMCORE :=",
-    ) else {
-        return false;
-    };
-    let block_digest = format!("{:x}", Sha256::digest(block.as_bytes()));
-    let local_context_digest = format!("{:x}", Sha256::digest(local_context.as_bytes()));
-    let config_context_digest = format!("{:x}", Sha256::digest(config_context.as_bytes()));
-    block_digest == pin("mesa-sse41-capability")
-        && local_context_digest == pin("mesa-sse41-local-context")
-        && config_context_digest == pin("mesa-sse41-config-context")
-        && mesa_sse41_fetch_edge_is_pinned(make_source)
-        && file_has_sha256(
-            root,
-            "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-            pin("mesa-sse41-manifest"),
-        )
-        && file_has_sha256(
-            root,
-            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            pin("mesa-local-patch"),
-        )
-}
-
-fn validate_mesa_sse41_capability(
-    root: &Path,
-    relative_dir: &Path,
-    target: Option<&TargetContext>,
-    make_source: &str,
-    targets: &[TargetDefinition],
-    fetches: &[FetchDecl],
-) -> std::result::Result<(), String> {
-    let Some(x86_64) = mesa_sse41_profile(relative_dir, target)? else {
-        return Ok(());
-    };
-    if !mesa_sse41_static_contract_is_pinned(root, make_source) {
-        return Err("Mesa SSE4.1 recipe, configuration context, source manifest or local patch differs from the audited capability".to_owned());
-    }
-
-    let matching_targets = targets
-        .iter()
-        .filter(|candidate| candidate.mmake_name == MESA_SSE41_MMAKE)
-        .collect::<Vec<_>>();
-    let [sse41] = matching_targets.as_slice() else {
-        return Err(format!(
-            "requires exactly one {MESA_SSE41_MMAKE} declaration, found {}",
-            matching_targets.len()
-        ));
-    };
-    let expected_sources = mesa_sse41_sources(x86_64);
-    let expected_defines = mesa_sse41_defines(x86_64);
-    let expected_options = mesa_sse41_compile_options(x86_64);
-    let target_contract_ok = sse41.target_name == "mesa-sse41"
-        && sse41.module_type == ModuleType::LinkLib
-        && !sse41.genmodule_only
-        && sse41.empty_archive != x86_64
-        && sse41.source_files == expected_sources
-        && sse41.cxx_source_files.is_empty()
-        && sse41.objc_source_files.is_empty()
-        && sse41.asm_source_files.is_empty()
-        && sse41.use_libs.is_empty()
-        && sse41.dependencies.is_empty()
-        && sse41.dir_path == relative_dir
-        && sse41.target_dir.is_none()
-        && !sse41.variant_32bit
-        && sse41.link_libs.is_empty()
-        && sse41.declared_mod_type.is_none()
-        && sse41.mod_suffix.is_none()
-        && sse41.linklib_name.is_none()
-        && sse41.genmodule_linklibs.is_none()
-        && sse41.linklib_output_dir.as_deref() == Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8")
-        && !sse41.canonical_linklib_output
-        && !sse41.canonical_linklib_eligible
-        && sse41.compiler_flags.is_empty()
-        && sse41.arch_modules.is_empty()
-        && sse41.arch_includes.is_empty()
-        && sse41.undefines.is_empty()
-        && sse41.link_options.is_empty()
-        && sse41.arch_sources.is_empty()
-        && sse41.arch_defines.is_empty()
-        && sse41.arch_compile_options.is_empty()
-        && sse41
-            .defines
-            .iter()
-            .map(String::as_str)
-            .eq(expected_defines.iter().map(String::as_str))
-        && sse41
-            .include_dirs
-            .iter()
-            .map(String::as_str)
-            .eq(MESA_SSE41_INCLUDES.iter().copied())
-        && sse41
-            .compile_options
-            .iter()
-            .map(String::as_str)
-            .eq(expected_options.iter().map(String::as_str));
-    if !target_contract_ok {
-        return Err("Mesa SSE4.1 source, empty-archive, flag, include or output contract differs from the audited capability".to_owned());
-    }
-
-    let matching_fetches = fetches
-        .iter()
-        .filter(|fetch| fetch.name == "mesa3d-fetch")
-        .collect::<Vec<_>>();
-    let [fetch] = matching_fetches.as_slice() else {
-        return Err(format!(
-            "requires exactly one %fetch mmake=mesa3d-fetch declaration, found {}",
-            matching_fetches.len()
-        ));
-    };
-    let origin_words = fetch.origins.split_whitespace().collect::<Vec<_>>();
-    if fetch.archive != "mesa-20.0.8"
-        || fetch.suffixes != "tar.xz tar.gz"
-        || origin_words
-            != [
-                "cache://",
-                "https://archive.mesa3d.org/",
-                "https://archive.mesa3d.org/older-versions/20.x",
-            ]
-        || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
-        || fetch.destination != "${AROS_PORTS_DIR}/mesa"
-        || !fetch.base.is_empty()
-        || fetch.patch_origins != "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
-        || fetch.patches != "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
-        || fetch.dir != "workbench/libs/mesa"
-    {
-        return Err(
-            "central Mesa 20.0.8 fetch declaration differs from the audited SSE4.1 capability"
-                .to_owned(),
-        );
-    }
-    Ok(())
 }
 
 /// Admits the one hand-written Python generator family needed by Mesa 20.0.8
@@ -6743,9 +6439,9 @@ fn parse_mmakefile_impl(
                 continue;
             }
         }
-        let mesa_sse41_profile = (mmake_name == MESA_SSE41_MMAKE
-            && mesa_sse41_static_contract_is_pinned(root, &content))
-        .then(|| mesa_sse41_profile(&rel_dir, target).ok().flatten())
+        let mesa_sse41_profile = (mmake_name == sse41::MMAKE
+            && sse41::static_contract_is_pinned(root, &content))
+        .then(|| sse41::profile(&rel_dir, target).ok().flatten())
         .flatten();
         let empty_archive = mesa_sse41_profile == Some(false);
         if let Some(x86_64) = mesa_sse41_profile {
@@ -6754,11 +6450,11 @@ fn parse_mmakefile_impl(
             // still depends on the not-yet-fetched upstream inventory. Admit
             // the exact declaration-local view only together with the pinned
             // source, patch and profile contract validated below.
-            declaration_flags.defines = mesa_sse41_defines(x86_64);
+            declaration_flags.defines = sse41::defines(x86_64);
             declaration_flags.undefines.clear();
-            declaration_flags.compile_options = mesa_sse41_compile_options(x86_64);
+            declaration_flags.compile_options = sse41::compile_options(x86_64);
             declaration_flags.link_options.clear();
-            declaration_includes.dirs = MESA_SSE41_INCLUDES
+            declaration_includes.dirs = sse41::INCLUDES
                 .iter()
                 .map(|include| (*include).to_owned())
                 .collect();
@@ -6817,7 +6513,7 @@ fn parse_mmakefile_impl(
         } else {
             None
         };
-        let capability_files = mesa_sse41_profile.map(mesa_sse41_sources);
+        let capability_files = mesa_sse41_profile.map(sse41::sources);
         let mut sources = if let Some(sources) = mesa20_capability_sources {
             sources
         } else if let Some(sources) = nouveau_drm_capability_sources {
@@ -7070,7 +6766,7 @@ fn parse_mmakefile_impl(
         }
     }
 
-    if let Err(reason) = validate_mesa_sse41_capability(
+    if let Err(reason) = sse41::validate(
         root,
         &rel_dir,
         target,
@@ -7081,7 +6777,7 @@ fn parse_mmakefile_impl(
         // The ordinary parser may have resolved part of this declaration, but
         // executable empty-archive support and the target-only ISA flag are
         // admitted as one atomic capability. Any drift removes the target.
-        targets.retain(|candidate| candidate.mmake_name != MESA_SSE41_MMAKE);
+        targets.retain(|candidate| candidate.mmake_name != sse41::MMAKE);
         skipped_programs.push(format!(
             "{}: Mesa SSE4.1 link library skipped: {reason}",
             rel_dir.display()
@@ -7304,11 +7000,10 @@ mod tests {
         collect_vars, collect_vars_impl, collect_vars_with_context, compile_contract,
         evaluate_macro_sources, implicit_module_meta_rules, is_explicit_genmodule_only,
         join_continuations, join_mm_continuations, macro_arg, macro_argument_names,
-        macro_invocations, mesa_sse41_static_contract_is_pinned, parse_external_cmake_invocation,
-        parse_glapi_python_outputs, parse_mesautil_python_outputs, remaining_linklib_sources,
-        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
-        select_target_invocations, validate_mesa_sse41_capability, MakeExprContext, TargetContext,
-        MESA_SSE41_MMAKE, META_RULE_RE,
+        macro_invocations, parse_external_cmake_invocation, parse_glapi_python_outputs,
+        parse_mesautil_python_outputs, remaining_linklib_sources, render_meta_token,
+        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
@@ -8111,155 +7806,6 @@ mod tests {
             &changed_profile
         )
         .contains("does not support target profile"));
-    }
-
-    #[test]
-    fn mesa_sse41_capability_rejects_recipe_target_fetch_and_profile_drift() {
-        let root = root();
-        let relative_dir = Path::new("workbench/libs/mesa/libmesa");
-        let profile = target_context("x86_64", "pc", "");
-        let central_fetches = super::collect_mmakefile_fetches_with_context(
-            &root.join("workbench/libs/mesa/mmakefile.src"),
-            &root,
-            &profile,
-        )
-        .unwrap();
-        let parsed = super::parse_mmakefile_with_dirs_and_context_and_fetches(
-            &root.join(relative_dir).join("mmakefile.src"),
-            &root,
-            &dirs(),
-            &profile,
-            &central_fetches,
-        )
-        .unwrap();
-        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
-        let validate = |content: &str,
-                        targets: &[crate::ast::TargetDefinition],
-                        fetches: &[crate::fetch::FetchDecl],
-                        profile: &TargetContext| {
-            validate_mesa_sse41_capability(
-                &root,
-                relative_dir,
-                Some(profile),
-                content,
-                targets,
-                fetches,
-            )
-            .unwrap_err()
-        };
-
-        let changed_content = content.replace(
-            "TARGET_ISA_CFLAGS += -msse4.1",
-            "TARGET_ISA_CFLAGS += -msse4.2",
-        );
-        assert!(validate(
-            &changed_content,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
-
-        let changed_local_context = content.replace(
-            "-iquote $(top_builddir)/$(CUR_MESADIR)/main",
-            "-iquote $(top_builddir)/$(CUR_MESADIR)/unreviewed-main",
-        );
-        assert!(validate(
-            &changed_local_context,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
-
-        let changed_manifest_include = content.replace(
-            "include $(SRCDIR)/$(CURDIR)/mesa-sse41-20.0.8.sources",
-            "include $(SRCDIR)/$(CURDIR)/mesa-sse41-unreviewed.sources",
-        );
-        assert!(validate(
-            &changed_manifest_include,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
-
-        let changed_intervening_context = content.replace(
-            "MESA3D_GALLIUM_SSE41_SOURCES :=",
-            "USER_CFLAGS += -funreviewed\n\nMESA3D_GALLIUM_SSE41_SOURCES :=",
-        );
-        assert!(validate(
-            &changed_intervening_context,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
-
-        let disabled_fetch_edge = content.replace(
-            "#MM mesa3d-linklib-mesa-sse41 : mesa3d-fetch",
-            "#MM- mesa3d-linklib-mesa-sse41 : mesa3d-fetch",
-        );
-        assert!(validate(
-            &disabled_fetch_edge,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
-
-        let mut changed_targets = parsed.targets.clone();
-        let sse41 = changed_targets
-            .iter_mut()
-            .find(|target| target.mmake_name == MESA_SSE41_MMAKE)
-            .unwrap();
-        sse41.source_files.pop();
-        assert!(
-            validate(&content, &changed_targets, &central_fetches, &profile)
-                .contains("source, empty-archive, flag, include or output contract")
-        );
-
-        let mut changed_fetches = central_fetches.clone();
-        changed_fetches[0].patches = "mesa-20.0.8-unreviewed.diff:mesa-20.0.8:-p1".to_owned();
-        assert!(
-            validate(&content, &parsed.targets, &changed_fetches, &profile)
-                .contains("fetch declaration differs")
-        );
-
-        let mut changed_profile = profile;
-        changed_profile.toolchain = Some("gnu".to_owned());
-        assert!(validate(
-            &content,
-            &parsed.targets,
-            &central_fetches,
-            &changed_profile
-        )
-        .contains("does not support target profile"));
-
-        let pinned_tree = TempTree::new();
-        for relative in [
-            "workbench/libs/mesa/mesa.cfg",
-            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-        ] {
-            let destination = pinned_tree.0.join(relative);
-            fs::create_dir_all(destination.parent().unwrap()).unwrap();
-            fs::copy(root.join(relative), destination).unwrap();
-        }
-        assert!(mesa_sse41_static_contract_is_pinned(
-            &pinned_tree.0,
-            &content
-        ));
-        let config_path = pinned_tree.0.join("workbench/libs/mesa/mesa.cfg");
-        let changed_config = read_source(&config_path).unwrap().replace(
-            "aros_mesadir := workbench/libs/mesa",
-            "aros_mesadir := workbench/libs/mesa-unreviewed",
-        );
-        fs::write(config_path, changed_config).unwrap();
-        assert!(!mesa_sse41_static_contract_is_pinned(
-            &pinned_tree.0,
-            &content
-        ));
     }
 
     #[test]

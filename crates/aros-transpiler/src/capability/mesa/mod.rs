@@ -12,6 +12,8 @@
 //! inside a module called `mesa` it only stuttered.
 
 use super::manifest_inventory;
+
+pub mod sse41;
 use crate::parser::{EvaluatedSources, TargetContext};
 use std::collections::HashSet;
 use std::path::Path;
