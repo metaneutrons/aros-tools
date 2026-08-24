@@ -22,6 +22,7 @@ pub mod make_deps;
 pub mod make_expr;
 pub mod make_opts;
 pub mod make_vars;
+pub mod module_paths;
 pub mod packages;
 pub mod parser;
 pub mod pins;
