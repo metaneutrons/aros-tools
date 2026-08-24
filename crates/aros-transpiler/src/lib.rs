@@ -20,6 +20,7 @@ pub mod make_expr;
 pub mod make_opts;
 pub mod packages;
 pub mod parser;
+pub mod pins;
 
 pub use arch_sources::ArchSourceDecl;
 pub use ast::{

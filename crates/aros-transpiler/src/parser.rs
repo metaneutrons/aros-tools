@@ -16,6 +16,7 @@ use crate::local_make_includes::{
 };
 use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
 use crate::make_opts::collect_make_opts;
+use crate::pins::pin;
 use aros_common::{read_source, Result};
 use regex::Regex;
 use sha2::{Digest, Sha256};
@@ -2503,7 +2504,6 @@ fn parse_external_cmake_invocation(
     const CUNIT_PREFIX: &str = "${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras";
     const CUNIT_FETCH: &str = "cunit-fetch";
     const CUNIT_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/cunit-3.5.5.tar.bz2";
-    const CUNIT_SHA256: &str = "a0a49b37c731303168481f387bb551b8381422d1b447d32f9e558293ceea9a10";
     const DECLARED_OPTIONS: &[&str] = &[
         "-DCUNIT_DISABLE_EXAMPLES=yes",
         "-DCUNIT_DISABLE_TESTS=yes",
@@ -2637,7 +2637,7 @@ fn parse_external_cmake_invocation(
         install_prefix: install_prefix.clone(),
         fetch_target: CUNIT_FETCH.to_owned(),
         source_archive: CUNIT_ARCHIVE.to_owned(),
-        source_sha256: CUNIT_SHA256.to_owned(),
+        source_sha256: pin("cunit-archive").to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff".to_owned()
         ],
@@ -2688,24 +2688,12 @@ fn parse_external_cmake_invocation(
 
 const ADFLIB_CONFIGURE_DIR: &str = "tools/ADFlib";
 const ADFLIB_CONFIGURE_MANIFEST: &str = "tools/ADFlib/adflib-configure.inputs";
-const ADFLIB_CONFIGURE_MANIFEST_SHA256: &str =
-    "a63a7498752d68175093b94dba873cc8a343d75179feec5cd6a6020e56e779a5";
 const WIRELESS_CONFIGURE_DIR: &str = "workbench/network/WirelessManager/wpa_supplicant";
 const WIRELESS_CONFIGURE_SOURCE_ROOT: &str = "workbench/network/WirelessManager";
 const WIRELESS_CONFIGURE_MANIFEST: &str =
     "workbench/network/WirelessManager/wirelessmanager-configure.inputs";
-const WIRELESS_CONFIGURE_MANIFEST_SHA256: &str =
-    "27e629e694f6cbc8dd036f7b188604fd03ed901d181962db143a0789512af760";
 const AHI_CONFIGURE_DIR: &str = "workbench/devs/AHI";
-const AHI_CONFIGURE_MMAKE_SHA256: &str =
-    "c1a539d23bf935cce2b0c097b83faeb89d2597970e6380bb6c0c39d3abff1385";
 const GRUB2_HOST_DIR: &str = "arch/all-pc/boot/grub2-host";
-const GRUB2_HOST_MMAKE_SHA256: &str =
-    "66c464606f16a8ce594aac96875498beb9429836c3036095193a3e135e5b85f8";
-const GRUB2_AROS_MMAKE_SHA256: &str =
-    "74cf4a179dd75163c40f6931bab1521d9cfe251a09552d76abac8e98eb640f83";
-const GRUB2_VERSION_FILE_SHA256: &str =
-    "f487eb5226f64295c10fa7fcd3aba777dd763d2a0d2e58d9e2e43cf5f3023d0c";
 
 const ADFLIB_PUBLIC_HEADERS: &[&str] = &[
     "adf_defs.h",
@@ -2924,7 +2912,7 @@ fn parse_configure_build_invocation(
             root,
             ADFLIB_CONFIGURE_DIR,
             ADFLIB_CONFIGURE_MANIFEST,
-            ADFLIB_CONFIGURE_MANIFEST_SHA256,
+            pin("adflib-configure-manifest"),
         )?;
         let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/host".to_owned();
         let install_prefix = "${AROS_BUILD_DIR}/hosttools".to_owned();
@@ -2942,7 +2930,7 @@ fn parse_configure_build_invocation(
             binary_dir: binary_dir.clone(),
             install_prefix,
             input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
-            input_manifest_sha256: ADFLIB_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            input_manifest_sha256: pin("adflib-configure-manifest").to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -2969,7 +2957,7 @@ fn parse_configure_build_invocation(
             root,
             ADFLIB_CONFIGURE_DIR,
             ADFLIB_CONFIGURE_MANIFEST,
-            ADFLIB_CONFIGURE_MANIFEST_SHA256,
+            pin("adflib-configure-manifest"),
         )?;
         let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/target".to_owned();
         let install_prefix = "${AROS_BUILD_DIR}/SYS/Developer".to_owned();
@@ -2987,7 +2975,7 @@ fn parse_configure_build_invocation(
             binary_dir: binary_dir.clone(),
             install_prefix,
             input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
-            input_manifest_sha256: ADFLIB_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            input_manifest_sha256: pin("adflib-configure-manifest").to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -3012,7 +3000,7 @@ fn parse_configure_build_invocation(
             root,
             WIRELESS_CONFIGURE_SOURCE_ROOT,
             WIRELESS_CONFIGURE_MANIFEST,
-            WIRELESS_CONFIGURE_MANIFEST_SHA256,
+            pin("wireless-configure-manifest"),
         )?;
         let binary_dir =
             "${AROS_BUILD_DIR}/gen/configure/workbench/network/WirelessManager".to_owned();
@@ -3025,7 +3013,7 @@ fn parse_configure_build_invocation(
             binary_dir,
             install_prefix: "${AROS_BUILD_DIR}/SYS".to_owned(),
             input_manifest: "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager/wirelessmanager-configure.inputs".to_owned(),
-            input_manifest_sha256: WIRELESS_CONFIGURE_MANIFEST_SHA256.to_owned(),
+            input_manifest_sha256: pin("wireless-configure-manifest").to_owned(),
             private_products: ["wpa_supplicant", "wpa_passphrase", "wpa_cli"]
                 .into_iter()
                 .map(|product| format!("{private_root}/{product}"))
@@ -3067,7 +3055,7 @@ fn parse_ahi_build_invocation(
     if !file_has_sha256(
         root,
         "workbench/devs/AHI/mmakefile.src",
-        AHI_CONFIGURE_MMAKE_SHA256,
+        pin("ahi-mmakefile"),
     ) {
         return Err("AHI subsystem mmakefile differs from the audited capability".to_owned());
     }
@@ -3184,15 +3172,15 @@ fn parse_grub2_build_invocation(
     if !file_has_sha256(
         root,
         "arch/all-pc/boot/grub2-host/mmakefile.src",
-        GRUB2_HOST_MMAKE_SHA256,
+        pin("grub2-host-mmakefile"),
     ) || !file_has_sha256(
         root,
         "arch/all-pc/boot/grub2-aros/mmakefile.src",
-        GRUB2_AROS_MMAKE_SHA256,
+        pin("grub2-aros-mmakefile"),
     ) || !file_has_sha256(
         root,
         "arch/all-pc/boot/grub2_def",
-        GRUB2_VERSION_FILE_SHA256,
+        pin("grub2-version-file"),
     ) {
         return Err(
             "GRUB2 host, fetch-owner or version declaration differs from the audited 2.12 capability"
@@ -3267,8 +3255,6 @@ const MESA20_SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
 const MESA20_BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
 const MESA20_PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
 const MESA20_CXX_COMPAT_NEW: &str = "workbench/libs/mesa/libcompiler/cxx-compat/new";
-const MESA20_CXX_COMPAT_NEW_SHA256: &str =
-    "a1163dd966449e85f08deeb4775716a34c69b68831e1ac5fc75ea121814bf0ba";
 
 /// Exact, version-pinned source lanes for the remaining Mesa 20.0.8 private
 /// archives.  The adjacent manifests contain only literal upstream-relative
@@ -3715,10 +3701,6 @@ const NOUVEAU_DRM_DIR: &str = "workbench/hidds/nouveau";
 const NOUVEAU_DRM_MMAKE: &str = "hidd-nouveau-drm";
 const NOUVEAU_DRM_MMAKEFILE: &str = "workbench/hidds/nouveau/mmakefile.src";
 const NOUVEAU_DRM_SOURCE_MANIFEST: &str = "workbench/hidds/nouveau/sources.drm.mak";
-const NOUVEAU_DRM_MMAKE_SHA256: &str =
-    "4c0fd8b41d3590b4303c84be7c670220567b8b86e7e29fd6d05c4a36c7d4ee56";
-const NOUVEAU_DRM_SOURCE_MANIFEST_SHA256: &str =
-    "f51d30d4b9f182aca412e535b32dab35b9bbcadffc4a480b3bacf55ab8afc28a";
 const NOUVEAU_DRM_CORE_SOURCE_COUNT: usize = 67;
 const NOUVEAU_DRM_NVIDIA_SOURCE_COUNT: usize = 758;
 const NOUVEAU_DRM_TOTAL_SOURCE_COUNT: usize =
@@ -3727,8 +3709,6 @@ const NOUVEAU_DRM_SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nou
 const NOUVEAU_GALLIUM_MMAKE: &str = "hidd-nouveau-gallium";
 const NOUVEAU_GALLIUM_SOURCE_MANIFEST: &str =
     "workbench/hidds/nouveau/nouveau-gallium-20.0.8.sources";
-const NOUVEAU_GALLIUM_SOURCE_MANIFEST_SHA256: &str =
-    "86ffb0c1e959615833b9d7b937dfcaf237c5f25da8d5706d8354ba5314acc15f";
 const NOUVEAU_GALLIUM_C_SOURCE_COUNT: usize = 81;
 const NOUVEAU_GALLIUM_CXX_SOURCE_COUNT: usize = 24;
 const NOUVEAU_GALLIUM_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
@@ -3897,11 +3877,11 @@ fn validate_nouveau_drm_capability(
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
         return Ok(());
     }
-    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, NOUVEAU_DRM_MMAKE_SHA256)
+    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, pin("nouveau-drm-mmakefile"))
         || !file_has_sha256(
             root,
             NOUVEAU_DRM_SOURCE_MANIFEST,
-            NOUVEAU_DRM_SOURCE_MANIFEST_SHA256,
+            pin("nouveau-drm-source-manifest"),
         )
     {
         return Err(
@@ -4076,11 +4056,11 @@ fn validate_nouveau_gallium_capability(
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
         return Ok(());
     }
-    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, NOUVEAU_DRM_MMAKE_SHA256)
+    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, pin("nouveau-drm-mmakefile"))
         || !file_has_sha256(
             root,
             NOUVEAU_GALLIUM_SOURCE_MANIFEST,
-            NOUVEAU_GALLIUM_SOURCE_MANIFEST_SHA256,
+            pin("nouveau-gallium-source-manifest"),
         )
     {
         return Err(
@@ -4147,15 +4127,6 @@ fn validate_nouveau_gallium_capability(
 
 const MESA_SSE41_DIR: &str = "workbench/libs/mesa/libmesa";
 const MESA_SSE41_MMAKE: &str = "mesa3d-linklib-mesa-sse41";
-const MESA_SSE41_CAPABILITY_SHA256: &str =
-    "70cd3cc7603b73fba1f5048621cd95bfcde8632d1425664fa9982c6aab4e0fac";
-const MESA_SSE41_LOCAL_CONTEXT_SHA256: &str =
-    "c954ef928824194f9b91208946e00482d9d1d83cc9496f137cf3a9d92e93b320";
-const MESA_SSE41_CONFIG_CONTEXT_SHA256: &str =
-    "2614a0d07eaf97b18de5a120a61b124c40375b0bedaeac9af2fd1660797e2176";
-const MESA_SSE41_MANIFEST_SHA256: &str =
-    "4cf786a7beef96b541213b992adf4df84e866afb8f8b2ef855b119f097538497";
-const MESA_PATCH_SHA256: &str = "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e";
 const MESA_SSE41_INCLUDES: &[&str] = &[
     "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
@@ -4309,19 +4280,19 @@ fn mesa_sse41_static_contract_is_pinned(root: &Path, make_source: &str) -> bool 
     let block_digest = format!("{:x}", Sha256::digest(block.as_bytes()));
     let local_context_digest = format!("{:x}", Sha256::digest(local_context.as_bytes()));
     let config_context_digest = format!("{:x}", Sha256::digest(config_context.as_bytes()));
-    block_digest == MESA_SSE41_CAPABILITY_SHA256
-        && local_context_digest == MESA_SSE41_LOCAL_CONTEXT_SHA256
-        && config_context_digest == MESA_SSE41_CONFIG_CONTEXT_SHA256
+    block_digest == pin("mesa-sse41-capability")
+        && local_context_digest == pin("mesa-sse41-local-context")
+        && config_context_digest == pin("mesa-sse41-config-context")
         && mesa_sse41_fetch_edge_is_pinned(make_source)
         && file_has_sha256(
             root,
             "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-            MESA_SSE41_MANIFEST_SHA256,
+            pin("mesa-sse41-manifest"),
         )
         && file_has_sha256(
             root,
             "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            MESA_PATCH_SHA256,
+            pin("mesa-local-patch"),
         )
 }
 
@@ -4435,11 +4406,6 @@ fn validate_mesa_sse41_capability(
     Ok(())
 }
 
-const GLAPI_GENERATOR_CAPABILITY_SHA256: &str =
-    "c42d77ef950bf439e04c36df203309c24a3a931b0c294edce875ae969d8143e5";
-const MESAUTIL_GENERATOR_CAPABILITY_SHA256: &str =
-    "9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed29425eb7d7d3fd908";
-
 /// Admits the one hand-written Python generator family needed by Mesa 20.0.8
 /// libglapi.
 ///
@@ -4459,7 +4425,6 @@ fn parse_glapi_python_outputs(
     const GLAPI_FETCH: &str = "mesa3d-fetch";
     const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
     const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
-    const SOURCE_SHA256: &str = "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c";
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
 
@@ -4583,7 +4548,7 @@ fn parse_glapi_python_outputs(
     )
     .ok_or_else(|| "Mesa glapi generator recipe block is missing".to_owned())?;
     let generator_digest = format!("{:x}", Sha256::digest(generator_block.as_bytes()));
-    if generator_digest != GLAPI_GENERATOR_CAPABILITY_SHA256 {
+    if generator_digest != pin("glapi-generator-capability") {
         return Err(format!(
             "Mesa glapi generator recipe block differs from the audited capability ({generator_digest})"
         ));
@@ -4652,7 +4617,7 @@ fn parse_glapi_python_outputs(
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: GLAPI_FETCH.to_owned(),
         source_archive: SOURCE_ARCHIVE.to_owned(),
-        source_sha256: SOURCE_SHA256.to_owned(),
+        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs: vec!["src/mapi/glapi/gen/gl_and_es_API.xml".to_owned()],
         jobs,
         driver_script: None,
@@ -4687,7 +4652,6 @@ fn parse_mesautil_python_outputs(
     const MESA_FETCH: &str = "mesa3d-fetch";
     const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
     const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
-    const SOURCE_SHA256: &str = "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c";
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const CSV: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/util/format/u_format.csv";
     const STATIC_SOURCES: &[&str] = &[
@@ -4874,7 +4838,7 @@ fn parse_mesautil_python_outputs(
     )
     .ok_or_else(|| "Mesa utility generator recipe block is missing".to_owned())?;
     let generator_digest = format!("{:x}", Sha256::digest(generator_block.as_bytes()));
-    if generator_digest != MESAUTIL_GENERATOR_CAPABILITY_SHA256 {
+    if generator_digest != pin("mesautil-generator-capability") {
         return Err(format!(
             "Mesa utility generator recipe block differs from the audited capability ({generator_digest})"
         ));
@@ -4918,7 +4882,7 @@ fn parse_mesautil_python_outputs(
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: MESA_FETCH.to_owned(),
         source_archive: SOURCE_ARCHIVE.to_owned(),
-        source_sha256: SOURCE_SHA256.to_owned(),
+        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs: vec![
             "src/util/format/u_format.csv".to_owned(),
             "src/util/format/u_format_pack.py".to_owned(),
@@ -4952,18 +4916,7 @@ fn parse_mesautil_python_outputs(
 }
 
 const MESA20_SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
-const MESA20_SOURCE_SHA256: &str =
-    "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c";
 const MESA20_DRIVER: &str = "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py";
-const MESA20_DRIVER_SHA256: &str =
-    "773b7c856a83be11bdc205f2e43a1bfaeab1533d658fcb854b16207970ee4599";
-const MESA20_MAIN_MMAKE_SHA256: &str =
-    "9b3842c1d004b0b761b451b967e4c6e804a7e47fa19d9d0bb0b57aefa20aaac1";
-const MESA20_CONFIG_SHA256: &str =
-    "db45d23fc15d771df7811341af9834c720f552dabcd87db58876018a5142987c";
-const MESA20_MAKO_SHA256: &str = "99579a6f39583fa7e5630a28c3c1f440e4e97a414b80372649c0ce338da2ea28";
-const MESA20_MARKUPSAFE_SHA256: &str =
-    "ee55d3edf80167e48ea11a923c7386f4669df67d7994554387f84e7d8b0a2bf0";
 
 fn mesa20_generator_job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
     PythonGeneratorJob {
@@ -4982,14 +4935,14 @@ fn mesa20_python_packages() -> Vec<PythonPackageDecl> {
             fetch_target: "mesa3d-mako-fetch".to_owned(),
             source_root: "${AROS_PORTS_DIR}/mesa-python/mako-1.3.10".to_owned(),
             source_archive: "${AROS_PORTS_SOURCE_DIR}/mako-1.3.10.tar.gz".to_owned(),
-            source_sha256: MESA20_MAKO_SHA256.to_owned(),
+            source_sha256: pin("mako-archive").to_owned(),
             python_path: ".".to_owned(),
         },
         PythonPackageDecl {
             fetch_target: "mesa3d-markupsafe-fetch".to_owned(),
             source_root: "${AROS_PORTS_DIR}/mesa-python/markupsafe-3.0.2".to_owned(),
             source_archive: "${AROS_PORTS_SOURCE_DIR}/markupsafe-3.0.2.tar.gz".to_owned(),
-            source_sha256: MESA20_MARKUPSAFE_SHA256.to_owned(),
+            source_sha256: pin("markupsafe-archive").to_owned(),
             python_path: "src".to_owned(),
         },
     ]
@@ -5495,21 +5448,21 @@ fn parse_mesa20_remaining_python_outputs(
         || !file_has_sha256(
             root,
             "workbench/libs/mesa/mesa20_generate.py",
-            MESA20_DRIVER_SHA256,
+            pin("mesa20-driver-script"),
         )
         || !file_has_sha256(
             root,
             "workbench/libs/mesa/mmakefile.src",
-            MESA20_MAIN_MMAKE_SHA256,
+            pin("mesa20-main-mmakefile"),
         )
-        || !file_has_sha256(root, "workbench/libs/mesa/mesa.cfg", MESA20_CONFIG_SHA256)
+        || !file_has_sha256(root, "workbench/libs/mesa/mesa.cfg", pin("mesa20-config"))
         || !file_has_sha256(
             root,
             "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            MESA_PATCH_SHA256,
+            pin("mesa-local-patch"),
         )
         || (matches!(mmake, "mesa3d-linklib-compiler" | "mesa3d-linklib-mesa")
-            && !file_has_sha256(root, MESA20_CXX_COMPAT_NEW, MESA20_CXX_COMPAT_NEW_SHA256))
+            && !file_has_sha256(root, MESA20_CXX_COMPAT_NEW, pin("mesa20-cxx-compat-new")))
     {
         return Err(format!(
             "{mmake} declaration, inventory, driver, central Mesa context or patch differs from the audited capability"
@@ -5524,17 +5477,17 @@ fn parse_mesa20_remaining_python_outputs(
         build_root: MESA20_BUILD_ROOT.to_owned(),
         fetch_target: "mesa3d-fetch".to_owned(),
         source_archive: MESA20_SOURCE_ARCHIVE.to_owned(),
-        source_sha256: MESA20_SOURCE_SHA256.to_owned(),
+        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs,
         jobs,
         driver_script: Some(MESA20_DRIVER.to_owned()),
-        driver_sha256: Some(MESA20_DRIVER_SHA256.to_owned()),
+        driver_sha256: Some(pin("mesa20-driver-script").to_owned()),
         python_packages: packages,
         audited_source_dir: MESA20_SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
-        local_patch_sha256: vec![MESA_PATCH_SHA256.to_owned()],
+        local_patch_sha256: vec![pin("mesa-local-patch").to_owned()],
         consumers: vec![mmake.to_owned()],
         dir_path: relative_dir.to_path_buf(),
     }))
@@ -8789,10 +8742,11 @@ mod tests {
         parse_external_cmake_invocation, parse_glapi_python_outputs, parse_mesautil_python_outputs,
         render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
         select_target_invocations, validate_mesa_sse41_capability, MakeExprContext, TargetContext,
-        MESA_PATCH_SHA256, MESA_SSE41_MMAKE, META_RULE_RE,
+        MESA_SSE41_MMAKE, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
+    use crate::pins::pin;
     use aros_common::read_source;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -9912,7 +9866,7 @@ mod tests {
         assert!(super::file_has_sha256(
             &root,
             patch_relative,
-            MESA_PATCH_SHA256
+            pin("mesa-local-patch")
         ));
         let patch = read_source(&root.join(patch_relative)).unwrap();
         for required in [
