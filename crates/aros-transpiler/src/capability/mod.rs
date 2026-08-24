@@ -15,6 +15,7 @@
 //! family needs.
 
 pub mod ahi;
+pub mod configure;
 pub mod grub2;
 
 use crate::parser::{macro_arg, macro_argument_names, Invocation};
