@@ -18,6 +18,7 @@ pub mod ahi;
 pub mod configure;
 pub mod external_cmake;
 pub mod grub2;
+pub mod literal_defines;
 pub mod mesa;
 pub mod nouveau;
 
