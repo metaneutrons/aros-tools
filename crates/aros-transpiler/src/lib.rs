@@ -3,6 +3,7 @@ pub mod ast;
 pub mod binary_objects;
 pub mod capability;
 pub mod catalogs;
+pub mod copy_directories;
 pub mod copy_includes;
 pub mod default_link_set;
 pub mod dirs;
