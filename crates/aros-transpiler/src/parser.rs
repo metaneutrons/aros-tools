@@ -1,9 +1,10 @@
 use crate::arch_sources::collect_arch_sources;
 use crate::ast::{
-    AhiBuildDecl, ConfigureBuildDecl, CopyDirectoryDecl, DefineHeaderDecl, ExternalCMakeDecl,
-    GenmoduleLinklibs, GrubBuildDecl, MetaTargetRule, ModuleType, ParsedMmakefile,
-    PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
+    ConfigureBuildDecl, CopyDirectoryDecl, DefineHeaderDecl, ExternalCMakeDecl, GenmoduleLinklibs,
+    MetaTargetRule, ModuleType, ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl,
+    PythonPackageDecl, TargetDefinition,
 };
+use crate::capability::{file_has_sha256, require_exact_macro_arguments};
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at, FlagSet};
@@ -794,10 +795,10 @@ fn join_mm_continuations(content: &str) -> String {
 ///
 /// The line is what makes positional variable lookup possible; see `VarScope`.
 #[derive(Clone, Debug)]
-struct Invocation {
-    name: String,
-    args: String,
-    line: usize,
+pub(crate) struct Invocation {
+    pub(crate) name: String,
+    pub(crate) args: String,
+    pub(crate) line: usize,
 }
 
 /// Joins Make continuation lines, so an assignment or a declaration occupies
@@ -1452,7 +1453,7 @@ pub fn collect_vars_with_context(joined: &str, context: &TargetContext) -> VarSc
     collect_vars_impl(joined, Some(context)).0
 }
 
-fn collect_vars_impl(
+pub(crate) fn collect_vars_impl(
     joined: &str,
     context: Option<&TargetContext>,
 ) -> (VarScope, Vec<ConditionalTruth>) {
@@ -1699,7 +1700,7 @@ fn is_concrete_build_invocation(name: &str) -> bool {
     )
 }
 
-fn select_target_invocations(
+pub(crate) fn select_target_invocations(
     joined: &str,
     line_states: Option<&[ConditionalTruth]>,
     relative_dir: &Path,
@@ -1742,7 +1743,7 @@ fn select_target_invocations(
 ///
 /// The key must sit at a word boundary, or `files=` also matches the tail of
 /// `linklibfiles=` and returns the wrong argument.
-fn macro_arg(args: &str, key: &str) -> Option<String> {
+pub(crate) fn macro_arg(args: &str, key: &str) -> Option<String> {
     let mut from = 0usize;
     loop {
         let hit = args[from..].find(key)? + from;
@@ -1774,7 +1775,7 @@ fn macro_arg(args: &str, key: &str) -> Option<String> {
 /// Values may contain quoted whitespace or nested Make functions. Neither may
 /// manufacture another macro argument: only an identifier beginning at a
 /// top-level word boundary and followed immediately by `=` is retained.
-fn macro_argument_names(args: &str) -> Vec<String> {
+pub(crate) fn macro_argument_names(args: &str) -> Vec<String> {
     let bytes = args.as_bytes();
     let mut names = Vec::new();
     let mut cursor = 0usize;
@@ -2692,8 +2693,6 @@ const WIRELESS_CONFIGURE_DIR: &str = "workbench/network/WirelessManager/wpa_supp
 const WIRELESS_CONFIGURE_SOURCE_ROOT: &str = "workbench/network/WirelessManager";
 const WIRELESS_CONFIGURE_MANIFEST: &str =
     "workbench/network/WirelessManager/wirelessmanager-configure.inputs";
-const AHI_CONFIGURE_DIR: &str = "workbench/devs/AHI";
-const GRUB2_HOST_DIR: &str = "arch/all-pc/boot/grub2-host";
 
 const ADFLIB_PUBLIC_HEADERS: &[&str] = &[
     "adf_defs.h",
@@ -2835,54 +2834,6 @@ fn configure_profile_is_supported(
             profile.float_abi.as_deref().unwrap_or("<unset>")
         )),
     }
-}
-
-fn require_exact_macro_arguments(
-    invocation: &Invocation,
-    expected: &[(&str, &str)],
-) -> std::result::Result<(), String> {
-    let names = macro_argument_names(&invocation.args);
-    let mut unique = names.clone();
-    unique.sort();
-    unique.dedup();
-    if unique.len() != names.len() {
-        return Err("duplicate macro argument".to_owned());
-    }
-    let mut expected_names = expected
-        .iter()
-        .map(|(name, _)| (*name).to_owned())
-        .collect::<Vec<_>>();
-    expected_names.sort();
-    if unique != expected_names {
-        return Err(format!(
-            "argument set [{}] does not match audited capability [{}]",
-            unique.join(", "),
-            expected_names.join(", ")
-        ));
-    }
-    for (name, expected_value) in expected {
-        // MetaMake accepts a literal empty `key=` argument. `macro_arg`
-        // intentionally returns None for it, because ordinary consumers use
-        // absence and emptiness equivalently. Closed capabilities sometimes
-        // need to distinguish it, however: the name-set check above proves
-        // the key exists, and this branch proves it has no value.
-        if expected_value.is_empty() {
-            if let Some(actual) = macro_arg(&invocation.args, name) {
-                return Err(format!(
-                    "{name} uses `{actual}`, expected an audited empty argument"
-                ));
-            }
-            continue;
-        }
-        let actual = macro_arg(&invocation.args, name)
-            .ok_or_else(|| format!("missing required {name}= argument"))?;
-        if actual != *expected_value {
-            return Err(format!(
-                "{name} uses `{actual}`, expected audited form `{expected_value}`"
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Parses the deliberately small, local-source subset of
@@ -3027,228 +2978,6 @@ fn parse_configure_build_invocation(
     }
 
     Err("unsupported configure-style capability (modelled: tools/ADFlib mmake=host-adflib,linklib-adflib; workbench/network/WirelessManager/wpa_supplicant mmake=workbench-network-wirelessmanager)".to_owned())
-}
-
-/// Parses the one current AHI subsystem declaration without turning the
-/// legacy `%build_with_configure` macro into a general command runner.
-///
-/// The AHI helper owns its fixed local source closure, complete products and
-/// tool contract.  The transpiler only accepts the exact audited mmakefile
-/// and macro shape, selects a supported target profile, and passes the two
-/// already-established host-tool variables by name.
-fn parse_ahi_build_invocation(
-    root: &Path,
-    invocation: &Invocation,
-    relative_dir: &Path,
-    target: Option<&TargetContext>,
-) -> std::result::Result<Option<AhiBuildDecl>, String> {
-    if relative_dir != Path::new(AHI_CONFIGURE_DIR) {
-        return Ok(None);
-    }
-    let Some(mmake) = macro_arg(&invocation.args, "mmake") else {
-        return Ok(None);
-    };
-    if mmake != "workbench-devs-AHI-subsystem" {
-        return Ok(None);
-    }
-
-    if !file_has_sha256(
-        root,
-        "workbench/devs/AHI/mmakefile.src",
-        pin("ahi-mmakefile"),
-    ) {
-        return Err("AHI subsystem mmakefile differs from the audited capability".to_owned());
-    }
-
-    let Some(profile) = target else {
-        return Err("AHI subsystem capability requires a concrete target profile".to_owned());
-    };
-    let profile_key = (
-        profile.cpu.as_deref(),
-        profile.platform.as_deref(),
-        profile.toolchain.as_deref(),
-        profile.cpu32.as_deref(),
-        profile.use_mmu.as_deref(),
-        profile.float_abi.as_deref(),
-    );
-    let mode = match profile_key {
-        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => "x86_64",
-        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => "arm",
-        (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => "aarch64",
-        _ => {
-            return Err(format!(
-                "AHI subsystem capability only supports x86_64-pc, arm-raspi and aarch64-raspi LLVM profiles (cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={})",
-                profile.cpu.as_deref().unwrap_or("<unset>"),
-                profile.platform.as_deref().unwrap_or("<unset>"),
-                profile.toolchain.as_deref().unwrap_or("<unset>"),
-                profile.cpu32.as_deref().unwrap_or("<unset>"),
-                profile.use_mmu.as_deref().unwrap_or("<unset>"),
-                profile.float_abi.as_deref().unwrap_or("<unset>")
-            ));
-        }
-    };
-
-    require_exact_macro_arguments(
-        invocation,
-        &[
-            ("mmake", "workbench-devs-AHI-subsystem"),
-            ("prefix", "$(EXEDIR)"),
-            ("extraoptions", "$(AHI_OPTIONS)"),
-            ("usecppflags", "no"),
-            ("gnuflags", "no"),
-            (
-                "config_env_extra",
-                "OBJCOPY=$(OBJCOPY) STRIP=$(STRIP_PLAIN)",
-            ),
-        ],
-    )?;
-
-    Ok(Some(AhiBuildDecl {
-        mmake_name: mmake,
-        mode: mode.to_owned(),
-        binary_dir: format!("${{AROS_BUILD_DIR}}/gen/configure/workbench/devs/AHI/{mode}"),
-        install_prefix: "${AROS_BUILD_DIR}/SYS".to_owned(),
-        host_sfdc: "${AROS_HOST_SFDC}".to_owned(),
-        host_perl: "${AROS_HOST_PERL}".to_owned(),
-        dir_path: relative_dir.to_path_buf(),
-    }))
-}
-
-/// Parses the three x86 GRUB 2.12 host-tool lanes without admitting the
-/// legacy macro's open-ended configure environment.  The downstream helper
-/// owns the source URL, patch, cross targets, host dependencies and complete
-/// product manifests; this parser verifies that the legacy declaration is the
-/// exact audited input before selecting its fixed lane roots.
-fn parse_grub2_build_invocation(
-    root: &Path,
-    invocation: &Invocation,
-    relative_dir: &Path,
-    target: Option<&TargetContext>,
-) -> std::result::Result<Option<GrubBuildDecl>, String> {
-    if relative_dir != Path::new(GRUB2_HOST_DIR) {
-        return Ok(None);
-    }
-    let Some(mmake) = macro_arg(&invocation.args, "mmake") else {
-        return Ok(None);
-    };
-    if !matches!(
-        mmake.as_str(),
-        "grub2-host" | "grub2-efi-host" | "grub2-efi32-host"
-    ) {
-        return Ok(None);
-    }
-
-    let Some(profile) = target else {
-        return Err("GRUB2 host-tool capability requires a concrete target profile".to_owned());
-    };
-    let profile_key = (
-        profile.cpu.as_deref(),
-        profile.platform.as_deref(),
-        profile.toolchain.as_deref(),
-        profile.cpu32.as_deref(),
-        profile.use_mmu.as_deref(),
-        profile.float_abi.as_deref(),
-    );
-    if profile_key
-        != (
-            Some("x86_64"),
-            Some("pc"),
-            Some("llvm"),
-            Some("i386"),
-            Some("1"),
-            Some(""),
-        )
-    {
-        return Err(format!(
-            "GRUB2 host-tool capability only supports x86_64-pc LLVM with the i386 companion (cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={})",
-            profile.cpu.as_deref().unwrap_or("<unset>"),
-            profile.platform.as_deref().unwrap_or("<unset>"),
-            profile.toolchain.as_deref().unwrap_or("<unset>"),
-            profile.cpu32.as_deref().unwrap_or("<unset>"),
-            profile.use_mmu.as_deref().unwrap_or("<unset>"),
-            profile.float_abi.as_deref().unwrap_or("<unset>")
-        ));
-    }
-    if !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2-host/mmakefile.src",
-        pin("grub2-host-mmakefile"),
-    ) || !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2-aros/mmakefile.src",
-        pin("grub2-aros-mmakefile"),
-    ) || !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2_def",
-        pin("grub2-version-file"),
-    ) {
-        return Err(
-            "GRUB2 host, fetch-owner or version declaration differs from the audited 2.12 capability"
-                .to_owned(),
-        );
-    }
-
-    let (mode, lane) = match mmake.as_str() {
-        "grub2-host" => {
-            require_exact_macro_arguments(
-                invocation,
-                &[
-                    ("mmake", "grub2-host"),
-                    ("compiler", "host"),
-                    ("prefix", "$(DESTDIR)"),
-                    ("srcdir", "$(GRUBSRCDIR)"),
-                    ("package", "pc"),
-                    ("extraoptions", "$(GRUB2_HOST_OPTS) --with-platform=pc"),
-                    ("targetisaflags", ""),
-                    ("config_env_extra", "$(GRUB2_HOST_ENV)"),
-                ],
-            )?;
-            ("pc", "pc")
-        }
-        "grub2-efi-host" => {
-            require_exact_macro_arguments(
-                invocation,
-                &[
-                    ("mmake", "grub2-efi-host"),
-                    ("compiler", "host"),
-                    ("prefix", "$(DESTDIR)"),
-                    ("srcdir", "$(GRUBSRCDIR)"),
-                    ("touch", "no"),
-                    ("package", "efi-$(AROS_TARGET_CPU)"),
-                    ("extraoptions", "$(GRUB2_HOST_OPTS) --with-platform=efi"),
-                    ("targetisaflags", ""),
-                    ("config_env_extra", "$(GRUB2_EFI_ENV)"),
-                ],
-            )?;
-            ("efi64", "efi-x86_64")
-        }
-        "grub2-efi32-host" => {
-            require_exact_macro_arguments(
-                invocation,
-                &[
-                    ("mmake", "grub2-efi32-host"),
-                    ("compiler", "host"),
-                    ("prefix", "$(DESTDIR)"),
-                    ("srcdir", "$(GRUBSRCDIR)"),
-                    ("touch", "no"),
-                    ("package", "efi-$(AROS_TARGET_CPU32)"),
-                    ("extraoptions", "$(GRUB2_EFI32_OPTS) --with-platform=efi"),
-                    ("targetisaflags", ""),
-                    ("config_env_extra", "$(GRUB2_EFI32_ENV)"),
-                ],
-            )?;
-            ("efi32", "efi-i386")
-        }
-        _ => unreachable!("the GRUB2 identity was checked above"),
-    };
-
-    Ok(Some(GrubBuildDecl {
-        mmake_name: mmake,
-        mode: mode.to_owned(),
-        binary_dir: format!("${{AROS_BUILD_DIR}}/gen/configure/arch/all-pc/boot/grub2-host/{lane}"),
-        install_prefix: format!("${{AROS_BUILD_DIR}}/hosttools/grub2/{lane}"),
-        dir_path: relative_dir.to_path_buf(),
-    }))
 }
 
 const MESA20_SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
@@ -4232,12 +3961,6 @@ fn mesa_sse41_profile(
             profile.float_abi.as_deref().unwrap_or("<unset>")
         )),
     }
-}
-
-fn file_has_sha256(root: &Path, relative: &str, expected: &str) -> bool {
-    fs::read(root.join(relative))
-        .ok()
-        .is_some_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == expected)
 }
 
 fn mesa_sse41_fetch_edge_is_pinned(make_source: &str) -> bool {
@@ -7398,9 +7121,9 @@ fn parse_mmakefile_impl(
         .iter()
         .filter(|invocation| invocation.name == "build_with_configure")
     {
-        match parse_ahi_build_invocation(root, invocation, &rel_dir, target) {
+        match crate::capability::ahi::parse(root, invocation, &rel_dir, target) {
             Ok(Some(declaration)) => ahi_builds.push(declaration),
-            Ok(None) => match parse_grub2_build_invocation(root, invocation, &rel_dir, target) {
+            Ok(None) => match crate::capability::grub2::parse(root, invocation, &rel_dir, target) {
                 Ok(Some(declaration)) => grub_builds.push(declaration),
                 Ok(None) => {
                     match parse_configure_build_invocation(root, invocation, &rel_dir, target) {
@@ -8738,9 +8461,9 @@ mod tests {
         implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
         join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
         mesa20_compile_contract, mesa20_remaining_linklib_sources,
-        mesa_sse41_static_contract_is_pinned, parse_ahi_build_invocation,
-        parse_external_cmake_invocation, parse_glapi_python_outputs, parse_mesautil_python_outputs,
-        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        mesa_sse41_static_contract_is_pinned, parse_external_cmake_invocation,
+        parse_glapi_python_outputs, parse_mesautil_python_outputs, render_meta_token,
+        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
         select_target_invocations, validate_mesa_sse41_capability, MakeExprContext, TargetContext,
         MESA_SSE41_MMAKE, META_RULE_RE,
     };
@@ -9082,69 +8805,6 @@ mod tests {
             crate::fetch::collect_fetches_with_scope(&content, relative_dir, &scope);
         assert!(skipped_fetches.is_empty(), "{skipped_fetches:#?}");
         (invocation, scope, fetches)
-    }
-
-    fn parsed_ahi_capability() -> (super::Invocation, String) {
-        let root = root();
-        let relative_dir = Path::new("workbench/devs/AHI");
-        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
-        let joined = join_continuations(&content);
-        let profile = target_context("x86_64", "pc", "");
-        let (_, states) = collect_vars_impl(&joined, Some(&profile));
-        let mut skipped = Vec::new();
-        let invocation =
-            select_target_invocations(&joined, Some(&states), relative_dir, &mut skipped)
-                .into_iter()
-                .find(|invocation| {
-                    invocation.name == "build_with_configure"
-                        && macro_arg(&invocation.args, "mmake").as_deref()
-                            == Some("workbench-devs-AHI-subsystem")
-                })
-                .unwrap();
-        assert!(skipped.is_empty(), "{skipped:#?}");
-        (invocation, content)
-    }
-
-    #[test]
-    fn ahi_capability_rejects_macro_profile_and_mmakefile_drift() {
-        let root = root();
-        let relative_dir = Path::new("workbench/devs/AHI");
-        let profile = target_context("x86_64", "pc", "");
-        let (invocation, content) = parsed_ahi_capability();
-
-        assert!(
-            parse_ahi_build_invocation(&root, &invocation, relative_dir, Some(&profile))
-                .unwrap()
-                .is_some()
-        );
-
-        let mut changed = invocation.clone();
-        changed.args = changed.args.replace("gnuflags=no", "gnuflags=yes");
-        assert!(
-            parse_ahi_build_invocation(&root, &changed, relative_dir, Some(&profile))
-                .unwrap_err()
-                .contains("gnuflags uses")
-        );
-
-        let unsupported_profile = target_context("arm", "raspi", "soft");
-        assert!(parse_ahi_build_invocation(
-            &root,
-            &invocation,
-            relative_dir,
-            Some(&unsupported_profile)
-        )
-        .unwrap_err()
-        .contains("AHI subsystem capability only supports"));
-
-        let tree = TempTree::new();
-        let drifted = tree.0.join(relative_dir).join("mmakefile.src");
-        fs::create_dir_all(drifted.parent().unwrap()).unwrap();
-        fs::write(&drifted, format!("{content}\n# audited-input drift\n")).unwrap();
-        assert!(
-            parse_ahi_build_invocation(&tree.0, &invocation, relative_dir, Some(&profile))
-                .unwrap_err()
-                .contains("AHI subsystem mmakefile differs")
-        );
     }
 
     #[test]
