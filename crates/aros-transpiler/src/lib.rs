@@ -55,3 +55,6 @@ pub use parser::{
     parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context,
     parse_mmakefile_with_dirs_and_context_and_fetches, TargetContext,
 };
+
+#[cfg(test)]
+pub mod testing;

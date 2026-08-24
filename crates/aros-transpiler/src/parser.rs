@@ -8747,55 +8747,12 @@ mod tests {
     use crate::ast::ModuleType;
     use crate::dirs::DirVars;
     use crate::pins::pin;
+    use crate::testing::{dirs, root, target_context, TempTree};
     use aros_common::read_source;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::path::Path;
     use walkdir::WalkDir;
-
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new() -> Self {
-            let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "aros-parser-include-{}-{serial}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn root() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
-    }
-
-    fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
-        TargetContext {
-            cpu: Some(cpu.to_owned()),
-            platform: Some(platform.to_owned()),
-            family: Some(String::new()),
-            variant: Some(String::new()),
-            toolchain: Some("llvm".to_owned()),
-            cpu32: Some(if cpu == "x86_64" { "i386" } else { "" }.to_owned()),
-            use_mmu: Some("1".to_owned()),
-            float_abi: Some(float_abi.to_owned()),
-        }
-    }
-
-    fn dirs() -> DirVars {
-        DirVars::load(&root())
-    }
 
     #[test]
     fn recursive_collector_includes_keep_original_curdir_and_make_root() {
