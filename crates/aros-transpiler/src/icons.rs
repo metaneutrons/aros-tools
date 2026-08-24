@@ -6,7 +6,7 @@
 //! resolved. An [`IconSet`] is one concrete output rule attached to it.
 
 use crate::dirs::DirVars;
-use crate::parser::{collect_vars, VarScope};
+use crate::make_vars::{collect_vars, VarScope};
 use std::path::Path;
 
 const MAX_EXPANSION_DEPTH: usize = 32;
@@ -808,7 +808,8 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 mod tests {
     use super::{arg, collect_icons, collect_icons_all, infer_iconset};
     use crate::dirs::DirVars;
-    use crate::parser::{collect_vars, join_continuations};
+    use crate::make_vars::collect_vars;
+    use crate::parser::join_continuations;
     use aros_common::read_source;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};

@@ -419,7 +419,7 @@ AFILES := \
         let rel = PathBuf::from("arch/i386-all/hidd/gfx");
         let content = aros_common::read_source(&root.join(&rel).join("mmakefile.src")).unwrap();
         let joined = crate::parser::join_continuations(&content);
-        let scope = crate::parser::collect_vars(&joined);
+        let scope = crate::make_vars::collect_vars(&joined);
         let (decls, _) = collect_arch_sources(&joined, &rel, None);
 
         let mut seen: Vec<(String, Vec<String>, Vec<String>)> = decls

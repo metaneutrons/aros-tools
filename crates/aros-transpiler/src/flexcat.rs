@@ -20,7 +20,7 @@
 //! stay outside the executable graph rather than being guessed at.
 
 use crate::dirs::DirVars;
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -461,7 +461,8 @@ fn cmake_source_path(path: &Path, root: &Path) -> Option<String> {
 mod tests {
     use super::collect_flexcat_source_rules;
     use crate::dirs::DirVars;
-    use crate::parser::{collect_vars, join_continuations};
+    use crate::make_vars::collect_vars;
+    use crate::parser::join_continuations;
     use aros_common::read_source;
     use std::path::Path;
 

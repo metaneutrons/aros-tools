@@ -14,7 +14,7 @@
 //! The generated CMake target is never part of `all`. Fetching reaches out to
 //! the network, so it stays an explicit step (`ninja fetch-ports`).
 
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -403,9 +403,8 @@ fn last_arg_value(body: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{
-        collect_vars, collect_vars_with_context, join_continuations, TargetContext,
-    };
+    use crate::make_vars::{collect_vars, collect_vars_with_context};
+    use crate::parser::{join_continuations, TargetContext};
     use std::path::PathBuf;
 
     const ACPICA: &str = r#"

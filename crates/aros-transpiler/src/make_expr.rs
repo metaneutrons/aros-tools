@@ -15,7 +15,7 @@
 //! paths remain strings, but are rejected if used as filesystem glob patterns.
 
 use crate::dirs::DirVars;
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 use glob::{glob_with, MatchOptions, Pattern};
 use std::cell::RefCell;
 use std::fmt;
@@ -1000,7 +1000,8 @@ fn reject_unsupported_references(raw: &str) -> Result<(), MakeExprError> {
 mod tests {
     use super::{evaluate_make_expr, evaluate_make_list, MakeExprContext, MakeExprError};
     use crate::dirs::DirVars;
-    use crate::parser::{collect_vars, join_continuations};
+    use crate::make_vars::collect_vars;
+    use crate::parser::join_continuations;
     use aros_common::read_source;
     use std::fs;
     use std::path::{Path, PathBuf};

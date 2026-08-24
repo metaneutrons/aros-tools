@@ -17,7 +17,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::make_expr::{evaluate_make_expr, MakeExprContext};
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 
 /// One resolved `%rule_link_binary`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +237,8 @@ pub fn collect_binary_objects(
 mod tests {
     use super::*;
     use crate::dirs::DirVars;
-    use crate::parser::{collect_vars, join_continuations};
+    use crate::make_vars::collect_vars;
+    use crate::parser::join_continuations;
     use std::path::PathBuf;
 
     fn root() -> PathBuf {

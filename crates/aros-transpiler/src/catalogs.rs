@@ -7,7 +7,7 @@
 //! without inventing configure-time outputs.
 
 use crate::dirs::DirVars;
-use crate::parser::{ConditionalTruth, VarScope};
+use crate::make_vars::{ConditionalTruth, VarScope};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -540,7 +540,7 @@ fn slash_path(path: &Path) -> String {
 mod tests {
     use super::collect_catalogs;
     use crate::dirs::DirVars;
-    use crate::parser::collect_vars;
+    use crate::make_vars::collect_vars;
     use std::fs;
     use std::path::{Path, PathBuf};
 

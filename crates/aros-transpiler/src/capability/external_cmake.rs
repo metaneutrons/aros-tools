@@ -502,8 +502,9 @@ pub(crate) fn parse_aom(
 mod tests {
     use super::{parse, Invocation};
     use crate::make_expr::MakeExprContext;
-    use crate::parser::VarScope;
-    use crate::parser::{collect_vars_impl, join_continuations, select_target_invocations};
+    use crate::make_vars::collect_vars_impl;
+    use crate::make_vars::VarScope;
+    use crate::parser::{join_continuations, select_target_invocations};
     use crate::testing::{dirs, root, target_context};
     use aros_common::read_source;
     use std::path::Path;

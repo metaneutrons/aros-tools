@@ -101,9 +101,8 @@ pub(crate) fn parse(
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use crate::parser::{
-        collect_vars_impl, join_continuations, macro_arg, select_target_invocations, Invocation,
-    };
+    use crate::make_vars::collect_vars_impl;
+    use crate::parser::{join_continuations, macro_arg, select_target_invocations, Invocation};
     use crate::testing::{root, target_context, TempTree};
     use aros_common::read_source;
     use std::fs;

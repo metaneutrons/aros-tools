@@ -21,10 +21,8 @@ pub mod grub2;
 pub mod mesa;
 pub mod nouveau;
 
-use crate::parser::{
-    collect_vars, join_continuations, macro_arg, macro_argument_names, strip_make_comment,
-    Invocation,
-};
+use crate::make_vars::{collect_vars, strip_make_comment};
+use crate::parser::{join_continuations, macro_arg, macro_argument_names, Invocation};
 use aros_common::read_source;
 use sha2::{Digest, Sha256};
 use std::fs;

@@ -24,7 +24,7 @@
 //! than guessed at, so an unresolved path shows up as a missing include instead
 //! of a wrong one.
 
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -752,7 +752,7 @@ USER_CFLAGS := -I $(SRCDIR)/c -isystem $(SRCDIR)/system\n";
 USER_CFLAGS := -I$(SRCDIR)/first\n\
 %build_module mmake=first modname=first modtype=library files=first\n\
 USER_CFLAGS := -I$(SRCDIR)/later\n";
-        let scope = crate::parser::collect_vars(src);
+        let scope = crate::make_vars::collect_vars(src);
         let set = collect_includes_at(src, &scope, 1, &dir("x"));
         assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/first"]);
     }

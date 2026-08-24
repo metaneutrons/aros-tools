@@ -29,7 +29,7 @@
 //! flags are set once above the `%build_module` line. A file that reassigns the
 //! flags *and* builds several modules could disagree, so those are reported.
 
-use crate::parser::VarScope;
+use crate::make_vars::VarScope;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -999,7 +999,8 @@ fn push_unique(v: &mut Vec<String>, s: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{collect_vars_with_context, join_continuations, TargetContext};
+    use crate::make_vars::collect_vars_with_context;
+    use crate::parser::{join_continuations, TargetContext};
 
     fn collect_target_flags(content: &str) -> FlagSet {
         let joined = join_continuations(content);

@@ -19,6 +19,7 @@ pub mod includes;
 pub mod local_make_includes;
 pub mod make_expr;
 pub mod make_opts;
+pub mod make_vars;
 pub mod packages;
 pub mod parser;
 pub mod pins;
