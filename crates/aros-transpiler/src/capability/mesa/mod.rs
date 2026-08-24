@@ -13,6 +13,7 @@
 
 use super::manifest_inventory;
 
+pub mod generators;
 pub mod sse41;
 use crate::parser::{EvaluatedSources, TargetContext};
 use std::collections::HashSet;
