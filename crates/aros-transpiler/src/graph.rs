@@ -1506,10 +1506,19 @@ impl DependencyGraph {
                             if raw_link {
                                 rejected_link_options.push((mmake.clone(), name.clone()));
                             }
-                            let declarations: Vec<_> = candidates
+                            // Sorted, because `by_name` is filled while
+                            // iterating a HashMap and this list is the only
+                            // place that order reaches a report. Two runs of
+                            // the transpiler produced the same bytes and the
+                            // same lines here in a different order, which is
+                            // how `aros golden capture` found it: a baseline
+                            // from a producer that varies would report noise as
+                            // regression forever. OPEN-POINTS 13.
+                            let mut declarations: Vec<_> = candidates
                                 .iter()
                                 .map(|(declaration, _)| declaration.as_str())
                                 .collect();
+                            declarations.sort_unstable();
                             let request = if raw_link {
                                 format!("link option -l{name}")
                             } else {

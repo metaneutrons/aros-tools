@@ -282,9 +282,12 @@ fn external_and_ordinary_providers_with_the_same_name_are_ambiguous() {
     graph.add_target(ordinary);
     graph.add_target(consumer);
     let unresolved = graph.resolve_use_libs();
+    // Sorted, not declaration order: the candidate list is built while
+    // iterating a HashMap, so the order it used to be asserted in here was
+    // whatever that iteration happened to produce.
     assert!(
         unresolved.iter().any(|diagnostic| diagnostic
-            .contains("uselibs=cunit is ambiguous (ordinary-cunit-provider, linklibs-yes-cunit)")),
+            .contains("uselibs=cunit is ambiguous (linklibs-yes-cunit, ordinary-cunit-provider)")),
         "{unresolved:#?}"
     );
     assert!(graph.targets["test-locale-formatstring-yes-cunit"]
