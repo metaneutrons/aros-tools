@@ -132,10 +132,15 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
     .unwrap();
     writeln!(
         out,
-        "# reproduce it, reconfigure the preset that built it; the invocation is in"
+        "# reproduce it, reconfigure the preset that built it, or replay the full"
     )
     .unwrap();
-    writeln!(out, "# CMakeLists.txt, next to AROS_TRANSPILER_BIN.").unwrap();
+    writeln!(
+        out,
+        "# argv that CMake recorded in generated_targets.cmake.invocation beside"
+    )
+    .unwrap();
+    writeln!(out, "# this file -- which is what `aros golden` does.").unwrap();
     writeln!(out, "{rule}").unwrap();
     writeln!(out).unwrap();
     out

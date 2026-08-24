@@ -8,6 +8,7 @@ use std::time::Instant;
 mod artifact;
 mod boot;
 mod build;
+mod golden;
 mod host_tools;
 mod hosttools;
 mod pi;
@@ -169,8 +170,35 @@ enum Commands {
         transpile: bool,
     },
 
+    /// Capture or check a baseline of the transpiler's generated output
+    Golden {
+        #[command(subcommand)]
+        action: GoldenAction,
+    },
+
     /// Print system and toolchain information
     Info,
+}
+
+#[derive(Subcommand)]
+enum GoldenAction {
+    /// Run the transpiler twice and store its output as the baseline
+    Capture {
+        /// Preset to capture; repeatable. Default: every configured preset
+        #[arg(long = "preset")]
+        presets: Vec<String>,
+    },
+
+    /// Run the transpiler and compare its output against the baseline
+    Verify {
+        /// Preset to check; repeatable. Default: every configured preset
+        #[arg(long = "preset")]
+        presets: Vec<String>,
+
+        /// Replace the baseline with this run instead of reporting differences
+        #[arg(long)]
+        update: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -850,6 +878,88 @@ async fn main() -> Result<()> {
             if transpile {
                 println!("⚡ Regenerating dynamic CMake target tree...");
                 println!("{CHECK} Sync and target regeneration complete!");
+            }
+        }
+
+        Commands::Golden { action } => {
+            // The transpiler this checks is the one the build uses, so a
+            // refactor is measured on the binary that would ship, not on a
+            // debug build with different inlining. It has to be built first;
+            // saying so beats replaying a stale binary against a new baseline.
+            let transpiler = PathBuf::from("tools/aros-tools/target/release/aros-transpiler");
+            if !transpiler.is_file() {
+                miette::bail!(
+                    "no {} -- build it with `cargo build --release -p aros-transpiler` \
+                     in tools/aros-tools",
+                    transpiler.display()
+                );
+            }
+            let build_root = PathBuf::from("build");
+            let snapshot_root = build_root.join("golden");
+            match action {
+                GoldenAction::Capture { presets } => {
+                    let subjects = golden::subjects(&build_root, &presets)?;
+                    for subject in &subjects {
+                        let capture = golden::capture(&transpiler, subject, &snapshot_root)?;
+                        println!(
+                            "{CHECK} {}: {} products captured to {}",
+                            subject.name,
+                            capture.products,
+                            capture.destination.display()
+                        );
+                        match capture.reproduces_build_tree {
+                            Some(true) => {
+                                println!("  the recorded invocation reproduces the build tree's own output");
+                            }
+                            Some(false) => {
+                                println!(
+                                    "  note: it does not reproduce {} -- that tree may predate a \
+                                     source change; the baseline itself is fine",
+                                    subject.build_output.display()
+                                );
+                            }
+                            None => println!(
+                                "  note: {} is absent, so the record was not cross-checked",
+                                subject.build_output.display()
+                            ),
+                        }
+                    }
+                }
+                GoldenAction::Verify { presets, update } => {
+                    let subjects = golden::subjects(&build_root, &presets)?;
+                    let mut differing = Vec::new();
+                    for subject in &subjects {
+                        if update {
+                            let capture = golden::capture(&transpiler, subject, &snapshot_root)?;
+                            println!(
+                                "{CHECK} {}: baseline replaced, {} products",
+                                subject.name, capture.products
+                            );
+                            continue;
+                        }
+                        let (comparison, baseline) =
+                            golden::verify(&transpiler, subject, &snapshot_root)?;
+                        if comparison.is_clean() {
+                            println!(
+                                "{CHECK} {}: identical to {} ({} products)",
+                                subject.name,
+                                baseline.display(),
+                                comparison.identical
+                            );
+                        } else {
+                            println!("❌ {}: differs from {}", subject.name, baseline.display());
+                            print!("{}", golden::render(&comparison));
+                            differing.push(subject.name.clone());
+                        }
+                    }
+                    if !differing.is_empty() {
+                        miette::bail!(
+                            "the generated output changed for {}. If that was the point, \
+                             re-capture with `aros golden verify --update`",
+                            differing.join(", ")
+                        );
+                    }
+                }
             }
         }
 
