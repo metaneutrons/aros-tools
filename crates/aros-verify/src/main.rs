@@ -263,15 +263,42 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
 ];
 
-// Filled from a canonical semantic projection: continuations and whitespace
-// do not matter, ordinary comments are omitted, while #MM dependency lines
-// remain because they are executable MetaMake graph input.
-const LLVM_PROVISIONING_MMAKE_SHA256: &str =
-    "451406c625d28b16889ae746f725ff28cb368356ee7d18061d257f59966019cb";
-const LLVM_PROVISIONING_CONFIG_SHA256: &str =
-    "00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0";
-const CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256: &str =
-    "5c2d0de107d41bd90635868517f4577df229d0afda3208c572df9b37d50025f9";
+// The audited fingerprints are data, and they live in a data file.
+//
+// They are semantic digests of three files in the tree, so every deliberate
+// change to one of them has to be re-pinned. While the values sat in this
+// source file, re-pinning was a code edit, which is the coupling OPEN-POINTS 7
+// records as blocking the refactor. The file is embedded, so cargo rebuilds
+// this crate when it changes and the binary and the tests read the same bytes.
+const TOOLCHAIN_PROVISIONING_PINS: &str = include_str!("../toolchain-provisioning.pins");
+
+/// Reads one pin by name.
+///
+/// A missing or malformed entry is an error in our own data file, not a
+/// property of the tree being verified, so it stops the run. Returning
+/// something plausible instead would silently reclassify declarations, which
+/// is the failure this gate exists to prevent.
+fn provisioning_pin(name: &str) -> &'static str {
+    for line in TOOLCHAIN_PROVISIONING_PINS.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            panic!("toolchain-provisioning.pins: malformed line {line:?}");
+        };
+        if key.trim() != name {
+            continue;
+        }
+        let value = value.trim();
+        assert!(
+            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "toolchain-provisioning.pins: {name} is not a sha256: {value:?}"
+        );
+        return value;
+    }
+    panic!("toolchain-provisioning.pins: no pin named {name}");
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ToolchainProvisioningContext {
@@ -354,11 +381,11 @@ fn llvm_provisioning_context_matches_sources(
         return false;
     };
 
-    sha256_hex(&canonical_make_semantics(llvm_mmake)) == LLVM_PROVISIONING_MMAKE_SHA256
-        && sha256_hex(&canonical_make_semantics(llvm_config)) == LLVM_PROVISIONING_CONFIG_SHA256
+    sha256_hex(&canonical_make_semantics(llvm_mmake)) == provisioning_pin("llvm-mmakefile")
+        && sha256_hex(&canonical_make_semantics(llvm_config)) == provisioning_pin("llvm-config")
         && crosstools_placeholders == ["CROSSTOOLSDIR := @AROS_CROSSTOOLSDIR@"]
         && !cmake_lists.contains("CROSSTOOLSDIR")
-        && sha256_hex(&cmake_preamble) == CMAKE_TOOLCHAIN_INPUT_PREAMBLE_SHA256
+        && sha256_hex(&cmake_preamble) == provisioning_pin("cmake-toolchain-input")
 }
 
 fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningContext {
@@ -1754,112 +1781,79 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    #[test]
-    fn current_architecture_denominators_are_pinned() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        // AROS keeps its translations in submodules, and 71 of the tree's
-        // mmakefiles live there. A checkout without them yields a smaller
-        // inventory than the one pinned below, so say so rather than compare
-        // against a different tree.
+    /// AROS keeps its translations in submodules, and 71 of the tree's
+    /// mmakefiles live there. A checkout without them yields a smaller
+    /// inventory than the counts below, so say that rather than compare against
+    /// a different tree.
+    fn require_translation_submodules(root: &Path) {
         assert!(
             root.join("rom/dos/catalogs/mmakefile.src").exists(),
             "the translation submodules are not checked out"
         );
+    }
+
+    fn eligible_declarations(
+        root: &Path,
+        files: &[PathBuf],
+        scope: &ArchitectureScope,
+        conditional: bool,
+    ) -> Vec<Declaration> {
+        let declarations = if conditional {
+            collect_declarations_for_profile(root, files, scope)
+        } else {
+            collect_declarations(root, files)
+        };
+        declarations
+            .into_iter()
+            .filter(|declaration| scope.declaration_is_eligible(declaration))
+            .collect()
+    }
+
+    fn eligible_ids(
+        root: &Path,
+        files: &[PathBuf],
+        scope: &ArchitectureScope,
+        conditional: bool,
+    ) -> BTreeSet<String> {
+        eligible_declarations(root, files, scope, conditional)
+            .into_iter()
+            .map(|declaration| declaration.mmake)
+            .collect()
+    }
+
+    // The inventory counts and the provisioning split used to be one test, with
+    // the provisioning fingerprint asserted first. That made the fingerprint a
+    // gate in front of a gate: while it was stale the eight counts behind it
+    // were never evaluated, and they had been wrong by 71 or 72 the whole time
+    // without anything saying so. These counts do not depend on the
+    // classification, so they are their own test now, and a stale pin costs the
+    // two tests that really depend on it. OPEN-POINTS 7.
+    #[test]
+    fn current_architecture_denominators_are_pinned() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        require_translation_submodules(&root);
         let files = find_mmakefiles(&root);
-        let context = detect_toolchain_provisioning_context(&root);
-        assert!(
-            context.llvm,
-            "the audited LLVM provisioning context drifted"
-        );
-        let declarations = |scope: &ArchitectureScope, conditional: bool| {
-            let declarations = if conditional {
-                collect_declarations_for_profile(&root, &files, scope)
-            } else {
-                collect_declarations(&root, &files)
-            };
-            declarations
-                .into_iter()
-                .filter(|declaration| scope.declaration_is_eligible(declaration))
-                .collect::<Vec<_>>()
-        };
         let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
-            declarations(scope, conditional)
-                .into_iter()
-                .map(|declaration| declaration.mmake)
-                .collect()
-        };
-        let target_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
-            declarations(scope, true)
-                .into_iter()
-                .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
-                .map(|declaration| declaration.mmake)
-                .collect()
-        };
-        let provisioning_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
-            declarations(scope, true)
-                .into_iter()
-                .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
-                .map(|declaration| declaration.mmake)
-                .collect()
+            eligible_ids(&root, &files, scope, conditional)
         };
 
         let x86 = ArchitectureScope::new("x86_64", "pc");
         let arm = ArchitectureScope::new("arm", "raspi");
         let aarch64 = ArchitectureScope::new("aarch64", "raspi");
-        let global_declarations = collect_declarations(&root, &files);
-        let global: BTreeSet<String> = global_declarations
-            .iter()
-            .map(|declaration| declaration.mmake.clone())
+        let global: BTreeSet<String> = collect_declarations(&root, &files)
+            .into_iter()
+            .map(|declaration| declaration.mmake)
             .collect();
-        let global_target: BTreeSet<String> = global_declarations
-            .iter()
-            .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
-            .map(|declaration| declaration.mmake.clone())
-            .collect();
-        let global_provisioning: BTreeSet<String> = global_declarations
-            .iter()
-            .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
-            .map(|declaration| declaration.mmake.clone())
-            .collect();
+
         // Retiring Gallivm removes one false obligation; preserving
         // dummytest_auto and separating the formerly colliding 2View, HDTool
         // and target Zopfli declarations restores four real declarations.
-        //
-        // The counts include the 71 mmakefiles that live in the translation
-        // submodules, which is the tree the transpiler reads as well. Their
-        // presence is asserted above, because without them every count here is
-        // 71 or 72 lower and the denominator would silently mean something
-        // else -- which is what it did mean while this test was masked by the
-        // provisioning assertion.
         assert_eq!(global.len(), 1195);
         assert_eq!(ids(&x86, true).len(), 1076);
         assert_eq!(ids(&arm, true).len(), 1067);
         assert_eq!(ids(&aarch64, true).len(), 1067);
-        assert_eq!(global_target.len(), 1191);
-        assert_eq!(target_ids(&x86).len(), 1072);
-        assert_eq!(target_ids(&arm).len(), 1064);
-        assert_eq!(target_ids(&aarch64).len(), 1064);
-        let common_provisioning = BTreeSet::from([
-            "crosstools-compiler-rt".to_owned(),
-            "crosstools-libunwind".to_owned(),
-            "crosstools-llvm-toolchain".to_owned(),
-        ]);
-        let mut x86_provisioning = common_provisioning.clone();
-        x86_provisioning.insert("crosstools-compiler-rt32".to_owned());
-        assert_eq!(global_provisioning, x86_provisioning);
-        assert_eq!(provisioning_ids(&x86), x86_provisioning);
-        assert_eq!(provisioning_ids(&arm), common_provisioning);
-        assert_eq!(provisioning_ids(&aarch64), common_provisioning);
         assert!(global.contains("test-library-dummytest_auto"));
         assert!(!global.contains("mesa3d-linklib-galliumvm"));
-        // GCC libatomic is a target-compiled runtime, not a host-compiler
-        // CROSSTOOLSDIR declaration.  Keep it in the normal target gate.
-        assert!(global_target.contains("tools-crosstools-gcc-libatomic"));
-        for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
-            assert!(inventory.contains("test-library-dummytest_auto"));
-            assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
-            assert!(inventory.contains("tools-crosstools-gcc-libatomic"));
-        }
 
         let arm_removed: BTreeSet<String> = ids(&arm, false)
             .difference(&ids(&arm, true))
@@ -1882,6 +1876,78 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(aarch64_removed, arm_removed);
+    }
+
+    // The other half: what the provisioning classification takes out of the
+    // target obligations. This one does depend on the audited fingerprints, so
+    // it says so in its own failure rather than taking other assertions down
+    // with it.
+    #[test]
+    fn toolchain_provisioning_splits_the_target_obligations() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        require_translation_submodules(&root);
+        let files = find_mmakefiles(&root);
+        let context = detect_toolchain_provisioning_context(&root);
+        assert!(
+            context.llvm,
+            "the audited LLVM provisioning context drifted; \
+             re-pin crates/aros-verify/toolchain-provisioning.pins from the \
+             digests that llvm_provisioning_context_is_semantically_fingerprinted \
+             prints"
+        );
+        let target_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
+            eligible_declarations(&root, &files, scope, true)
+                .into_iter()
+                .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+        let provisioning_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
+            eligible_declarations(&root, &files, scope, true)
+                .into_iter()
+                .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
+                .map(|declaration| declaration.mmake)
+                .collect()
+        };
+
+        let x86 = ArchitectureScope::new("x86_64", "pc");
+        let arm = ArchitectureScope::new("arm", "raspi");
+        let aarch64 = ArchitectureScope::new("aarch64", "raspi");
+        let global_declarations = collect_declarations(&root, &files);
+        let global_target: BTreeSet<String> = global_declarations
+            .iter()
+            .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
+            .map(|declaration| declaration.mmake.clone())
+            .collect();
+        let global_provisioning: BTreeSet<String> = global_declarations
+            .iter()
+            .filter(|declaration| is_toolchain_provisioning_declaration(declaration, context))
+            .map(|declaration| declaration.mmake.clone())
+            .collect();
+
+        assert_eq!(global_target.len(), 1191);
+        assert_eq!(target_ids(&x86).len(), 1072);
+        assert_eq!(target_ids(&arm).len(), 1064);
+        assert_eq!(target_ids(&aarch64).len(), 1064);
+        let common_provisioning = BTreeSet::from([
+            "crosstools-compiler-rt".to_owned(),
+            "crosstools-libunwind".to_owned(),
+            "crosstools-llvm-toolchain".to_owned(),
+        ]);
+        let mut x86_provisioning = common_provisioning.clone();
+        x86_provisioning.insert("crosstools-compiler-rt32".to_owned());
+        assert_eq!(global_provisioning, x86_provisioning);
+        assert_eq!(provisioning_ids(&x86), x86_provisioning);
+        assert_eq!(provisioning_ids(&arm), common_provisioning);
+        assert_eq!(provisioning_ids(&aarch64), common_provisioning);
+        // GCC libatomic is a target-compiled runtime, not a host-compiler
+        // CROSSTOOLSDIR declaration.  Keep it in the normal target gate.
+        assert!(global_target.contains("tools-crosstools-gcc-libatomic"));
+        for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
+            assert!(inventory.contains("test-library-dummytest_auto"));
+            assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
+            assert!(inventory.contains("tools-crosstools-gcc-libatomic"));
+        }
     }
 
     #[test]
