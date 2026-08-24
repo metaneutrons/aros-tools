@@ -16,7 +16,8 @@ use super::manifest_inventory;
 pub mod generators;
 pub mod mesa20;
 pub mod sse41;
-use crate::parser::{EvaluatedSources, TargetContext};
+use crate::parser::TargetContext;
+use crate::sources::EvaluatedSources;
 use std::collections::HashSet;
 use std::path::Path;
 

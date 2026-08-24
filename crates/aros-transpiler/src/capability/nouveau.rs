@@ -13,8 +13,9 @@ use crate::ast::{ModuleType, TargetDefinition};
 // it now reads as one capability using another rather than as two families
 // sharing a file.
 use super::mesa::{base_defines, CompileContract};
-use crate::parser::{EvaluatedSources, TargetContext};
+use crate::parser::TargetContext;
 use crate::pins::pin;
+use crate::sources::EvaluatedSources;
 use std::path::Path;
 
 const NOUVEAU_DRM_DIR: &str = "workbench/hidds/nouveau";

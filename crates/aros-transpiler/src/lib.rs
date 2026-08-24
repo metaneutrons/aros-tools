@@ -23,6 +23,7 @@ pub mod make_vars;
 pub mod packages;
 pub mod parser;
 pub mod pins;
+pub mod sources;
 
 pub use arch_sources::ArchSourceDecl;
 pub use ast::{
