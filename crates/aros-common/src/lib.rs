@@ -3,6 +3,7 @@
 pub mod arch;
 pub mod elf;
 pub mod error;
+pub mod pins;
 pub mod target;
 pub mod text;
 pub mod toolchain;

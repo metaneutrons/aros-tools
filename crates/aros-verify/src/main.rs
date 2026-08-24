@@ -272,32 +272,17 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
 // this crate when it changes and the binary and the tests read the same bytes.
 const TOOLCHAIN_PROVISIONING_PINS: &str = include_str!("../toolchain-provisioning.pins");
 
-/// Reads one pin by name.
+/// Reads one pin by name, over the shared reader.
 ///
-/// A missing or malformed entry is an error in our own data file, not a
-/// property of the tree being verified, so it stops the run. Returning
-/// something plausible instead would silently reclassify declarations, which
-/// is the failure this gate exists to prevent.
+/// The lookup used to be a copy of it here. `aros-transpiler` needed the same
+/// thing for its own 26 pins (OPEN-POINTS 46), and two copies of a parser for
+/// one file format is one too many.
 fn provisioning_pin(name: &str) -> &'static str {
-    for line in TOOLCHAIN_PROVISIONING_PINS.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            panic!("toolchain-provisioning.pins: malformed line {line:?}");
-        };
-        if key.trim() != name {
-            continue;
-        }
-        let value = value.trim();
-        assert!(
-            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "toolchain-provisioning.pins: {name} is not a sha256: {value:?}"
-        );
-        return value;
-    }
-    panic!("toolchain-provisioning.pins: no pin named {name}");
+    aros_common::pins::pin(
+        TOOLCHAIN_PROVISIONING_PINS,
+        "aros-verify/toolchain-provisioning.pins",
+        name,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
