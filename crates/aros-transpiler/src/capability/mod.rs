@@ -17,8 +17,12 @@
 pub mod ahi;
 pub mod configure;
 pub mod grub2;
+pub mod nouveau;
 
-use crate::parser::{macro_arg, macro_argument_names, Invocation};
+use crate::parser::{
+    collect_vars, join_continuations, macro_arg, macro_argument_names, Invocation,
+};
+use aros_common::read_source;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -75,4 +79,43 @@ pub(crate) fn require_exact_macro_arguments(
         }
     }
     Ok(())
+}
+
+/// One inventory variable of a Make manifest, as a safe list of file names.
+///
+/// Named for Mesa while it sat in parser.rs, but four of its seven call sites
+/// are Nouveau: a capability whose sources are a manifest reads them with this
+/// rather than globbing, and the checks are the same wherever it is used --
+/// non-empty, no unexpanded variable, no absolute path, no `..`.
+/// Exact, version-pinned source lanes for the remaining Mesa 20.0.8 private
+/// archives.  The adjacent manifests contain only literal upstream-relative
+/// inventories; generated products are kept in separate variables so they can
+/// acquire real build owners before CMake resolves the source lanes.
+pub(crate) fn manifest_inventory(
+    root: &Path,
+    relative: &str,
+    variable: &str,
+) -> std::result::Result<Vec<String>, String> {
+    let path = root.join(relative);
+    let content =
+        read_source(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let joined = join_continuations(&content);
+    let scope = collect_vars(&joined);
+    let values = scope
+        .snapshot(usize::MAX)
+        .remove(variable)
+        .ok_or_else(|| format!("{relative} does not define {variable}"))?;
+    if values.is_empty()
+        || values.iter().any(|value| {
+            value.contains("$(")
+                || value.contains("${")
+                || value.starts_with('/')
+                || value.split('/').any(|part| part == "..")
+        })
+    {
+        return Err(format!(
+            "{relative} contains an empty or unsafe {variable} inventory"
+        ));
+    }
+    Ok(values)
 }
