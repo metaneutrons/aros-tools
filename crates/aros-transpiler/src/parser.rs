@@ -4,7 +4,11 @@ use crate::ast::{
     ModuleType, ParsedMmakefile, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl,
     TargetDefinition,
 };
-use crate::capability::{file_has_sha256, manifest_inventory};
+use crate::capability::file_has_sha256;
+use crate::capability::mesa::{
+    compile_contract, current_profile, remaining_linklib_sources, BUILD_ROOT, CXX_COMPAT_NEW,
+    PRIVATE_LIBDIR, SOURCE_ROOT,
+};
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at, FlagSet};
@@ -2687,419 +2691,6 @@ fn parse_external_cmake_invocation(
     })
 }
 
-const MESA20_SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
-const MESA20_BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
-const MESA20_PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
-const MESA20_CXX_COMPAT_NEW: &str = "workbench/libs/mesa/libcompiler/cxx-compat/new";
-
-fn mesa20_inventory_stems(
-    root: &Path,
-    relative: &str,
-    variable: &str,
-    suffix: &str,
-    prefix: &str,
-) -> std::result::Result<Vec<String>, String> {
-    manifest_inventory(root, relative, variable)?
-        .into_iter()
-        .map(|source| {
-            source
-                .strip_suffix(suffix)
-                .map(|stem| format!("{prefix}/{stem}"))
-                .ok_or_else(|| format!("{relative} {variable} entry lacks {suffix}: {source}"))
-        })
-        .collect()
-}
-
-fn mesa20_inventory_paths(
-    root: &Path,
-    relative: &str,
-    variable: &str,
-    suffix: &str,
-    prefix: &str,
-) -> std::result::Result<Vec<String>, String> {
-    manifest_inventory(root, relative, variable)?
-        .into_iter()
-        .map(|source| {
-            if source.ends_with(suffix) {
-                Ok(format!("{prefix}/{source}"))
-            } else {
-                Err(format!(
-                    "{relative} {variable} entry lacks {suffix}: {source}"
-                ))
-            }
-        })
-        .collect()
-}
-
-fn mesa20_current_profile(
-    target: Option<&TargetContext>,
-) -> std::result::Result<&'static str, String> {
-    let Some(profile) = target else {
-        return Err("Mesa 20.0.8 archive capability requires a concrete target profile".to_owned());
-    };
-    match (
-        profile.cpu.as_deref(),
-        profile.platform.as_deref(),
-        profile.toolchain.as_deref(),
-        profile.cpu32.as_deref(),
-        profile.use_mmu.as_deref(),
-        profile.float_abi.as_deref(),
-    ) {
-        (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => {
-            Ok("x86_64")
-        }
-        (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard")) => {
-            Ok("arm")
-        }
-        (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
-            Ok("aarch64")
-        }
-        _ => Err(format!(
-            "Mesa 20.0.8 archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
-            profile.cpu.as_deref().unwrap_or("<unset>"),
-            profile.platform.as_deref().unwrap_or("<unset>"),
-            profile.toolchain.as_deref().unwrap_or("<unset>"),
-            profile.cpu32.as_deref().unwrap_or("<unset>"),
-            profile.use_mmu.as_deref().unwrap_or("<unset>"),
-            profile.float_abi.as_deref().unwrap_or("<unset>")
-        )),
-    }
-}
-
-pub(crate) struct Mesa20CompileContract {
-    pub(crate) defines: Vec<String>,
-    pub(crate) includes: Vec<String>,
-    pub(crate) options: Vec<String>,
-}
-
-pub(crate) fn mesa20_base_defines(profile: &str) -> Vec<String> {
-    let mut defines = [
-        "__STDC_CONSTANT_MACROS",
-        "__STDC_FORMAT_MACROS",
-        "__STDC_LIMIT_MACROS",
-        "_GNU_SOURCE",
-        "HAVE_PTHREAD",
-        "HAVE_TIMESPEC_GET",
-        "POSIXC_SLOWSTACK_VAARGS",
-        "USE_GCC_ATOMIC_BUILTINS",
-        "HAVE_ZLIB",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    if profile == "x86_64" {
-        defines.extend(["USE_X86_64_ASM".to_owned(), "USE_SSE41".to_owned()]);
-    }
-    defines.extend(["MAPI_MODE_GLAPI".to_owned(), "MAPI_MODE_UTIL".to_owned()]);
-    defines
-}
-
-fn mesa20_compile_contract(
-    relative_dir: &Path,
-    mmake: &str,
-    target: Option<&TargetContext>,
-) -> std::result::Result<Option<Mesa20CompileContract>, String> {
-    let supported = matches!(
-        (relative_dir.to_str(), mmake),
-        (
-            Some("workbench/libs/mesa/libcompiler"),
-            "mesa3d-linklib-compiler"
-        ) | (
-            Some("workbench/libs/mesa/libgalliumaux"),
-            "mesa3d-linklib-galliumauxiliary"
-        ) | (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa")
-            | (
-                Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
-                "linklibs-gallium_vc4"
-            )
-    );
-    if !supported {
-        return Ok(None);
-    }
-    let profile = mesa20_current_profile(target)?;
-    let base = [
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
-        "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
-        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include",
-        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/GL",
-        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src",
-    ];
-    let (mut defines, includes, options) = match (relative_dir.to_str(), mmake) {
-        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => (
-            mesa20_base_defines(profile),
-            base.into_iter()
-                .chain([
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl/glcpp",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/spirv",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl/glcpp",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/spirv",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
-                ])
-                .map(str::to_owned)
-                .collect(),
-            vec![
-                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
-                "-fno-strict-aliasing".to_owned(),
-            ],
-        ),
-        (
-            Some("workbench/libs/mesa/libgalliumaux"),
-            "mesa3d-linklib-galliumauxiliary",
-        ) => (
-            mesa20_base_defines(profile),
-            base.into_iter()
-                .chain([
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary/util",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary/indices",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-                ])
-                .map(str::to_owned)
-                .collect(),
-            vec![
-                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
-                "-fno-strict-aliasing".to_owned(),
-            ],
-        ),
-        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => (
-            mesa20_base_defines(profile),
-            base.into_iter()
-                .chain([
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/mesa/main",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/glsl",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/glsl",
-                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa/main",
-                    "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
-                ])
-                .map(str::to_owned)
-                .collect(),
-            vec![
-                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
-                "-fno-strict-aliasing".to_owned(),
-            ],
-        ),
-        (
-            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
-            "linklibs-gallium_vc4",
-        ) if profile != "x86_64" => {
-            let mut defines = mesa20_base_defines(profile);
-            defines.extend(
-                [
-                    "GALLIUM_VC4",
-                    "HAVE_STRUCT_TIMESPEC",
-                    "USE_ARM_ASM",
-                    "GCA_CONSUMER_MODULE",
-                ]
-                .into_iter()
-                .map(str::to_owned),
-            );
-            (
-                defines,
-                base.into_iter()
-                    .chain([
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/drm_compat",
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/vc4",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
-                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom",
-                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/broadcom",
-                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
-                        "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
-                    ])
-                    .map(str::to_owned)
-                    .collect(),
-                vec!["-std=gnu99".to_owned(), "-fno-strict-aliasing".to_owned()],
-            )
-        }
-        _ => return Ok(None),
-    };
-    if mmake == "mesa3d-linklib-mesa" {
-        defines.extend([
-            "PACKAGE_VERSION=\"20.0.8\"".to_owned(),
-            "PACKAGE_BUGREPORT=\"https://bugs.freedesktop.org/enter_bug.cgi?product=Mesa\""
-                .to_owned(),
-        ]);
-    }
-    // Keep declarations deterministic even when a legacy include repeats one
-    // of the common paths.
-    let mut seen = HashSet::new();
-    defines.retain(|define| seen.insert(define.clone()));
-    Ok(Some(Mesa20CompileContract {
-        defines,
-        includes,
-        options,
-    }))
-}
-
-fn mesa20_remaining_linklib_sources(
-    root: &Path,
-    relative_dir: &Path,
-    mmake: &str,
-    target: Option<&TargetContext>,
-) -> std::result::Result<Option<EvaluatedSources>, String> {
-    let supported_declaration = matches!(
-        (relative_dir.to_str(), mmake),
-        (
-            Some("workbench/libs/mesa/libcompiler"),
-            "mesa3d-linklib-compiler"
-        ) | (
-            Some("workbench/libs/mesa/libgalliumaux"),
-            "mesa3d-linklib-galliumauxiliary"
-        ) | (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa")
-            | (
-                Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
-                "linklibs-gallium_vc4"
-            )
-    );
-    if !supported_declaration {
-        return Ok(None);
-    }
-    let profile = mesa20_current_profile(target)?;
-    let mut sources = EvaluatedSources {
-        declared: true,
-        ..EvaluatedSources::default()
-    };
-    match (relative_dir.to_str(), mmake) {
-        (Some("workbench/libs/mesa/libcompiler"), "mesa3d-linklib-compiler") => {
-            const MANIFEST: &str = "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources";
-            sources.c = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_COMPILER_STATIC_C_SOURCES",
-                ".c",
-                &format!("{MESA20_SOURCE_ROOT}/src/compiler"),
-            )?;
-            sources.c.extend(mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_COMPILER_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{MESA20_BUILD_ROOT}/src/compiler"),
-            )?);
-            sources.cxx = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_COMPILER_STATIC_CXX_SOURCES",
-                ".cpp",
-                &format!("{MESA20_SOURCE_ROOT}/src/compiler"),
-            )?;
-            sources.cxx.extend(mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_COMPILER_GENERATED_CXX_SOURCES",
-                ".cpp",
-                &format!("{MESA20_BUILD_ROOT}/src/compiler"),
-            )?);
-        }
-        (Some("workbench/libs/mesa/libgalliumaux"), "mesa3d-linklib-galliumauxiliary") => {
-            const MANIFEST: &str = "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources";
-            sources.c = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_GALLIUMAUX_STATIC_C_SOURCES",
-                ".c",
-                &format!("{MESA20_SOURCE_ROOT}/src/gallium/auxiliary"),
-            )?;
-            sources.c.extend(mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_GALLIUMAUX_GENERATED_C_SOURCES",
-                ".c",
-                &format!("{MESA20_BUILD_ROOT}/src/gallium/auxiliary"),
-            )?);
-        }
-        (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa") => {
-            const MANIFEST: &str = "workbench/libs/mesa/libmesa/mesa-20.0.8.sources";
-            sources.c = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_CORE_C_SOURCES",
-                ".c",
-                &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
-            )?;
-            for generated in [
-                "main/api_exec.c",
-                "main/enums.c",
-                "main/format_pack.c",
-                "main/format_unpack.c",
-                "main/format_fallback.c",
-                "main/marshal_generated.c",
-                "program/program_parse.tab.c",
-                "program/lex.yy.c",
-            ] {
-                sources.c.push(format!(
-                    "{MESA20_BUILD_ROOT}/src/mesa/{}",
-                    generated.trim_end_matches(".c")
-                ));
-            }
-            sources.cxx = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA20_CORE_CXX_SOURCES",
-                ".cpp",
-                &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
-            )?;
-            if profile == "x86_64" {
-                sources.c.extend(mesa20_inventory_stems(
-                    root,
-                    MANIFEST,
-                    "MESA20_CORE_X86_64_C_SOURCES",
-                    ".c",
-                    &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
-                )?);
-                sources.asm = mesa20_inventory_paths(
-                    root,
-                    MANIFEST,
-                    "MESA20_CORE_X86_64_ASM_SOURCES",
-                    ".S",
-                    &format!("{MESA20_SOURCE_ROOT}/src/mesa"),
-                )?;
-            }
-        }
-        (Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"), "linklibs-gallium_vc4")
-            if profile != "x86_64" =>
-        {
-            const MANIFEST: &str =
-                "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources";
-            sources.c = mesa20_inventory_stems(
-                root,
-                MANIFEST,
-                "MESA3D_VC4_C_SOURCES",
-                ".c",
-                &format!("{MESA20_SOURCE_ROOT}/src/gallium/drivers/vc4"),
-            )?;
-        }
-        _ => return Ok(None),
-    }
-    Ok(Some(sources))
-}
-
 const MESA_SSE41_DIR: &str = "workbench/libs/mesa/libmesa";
 const MESA_SSE41_MMAKE: &str = "mesa3d-linklib-mesa-sse41";
 const MESA_SSE41_INCLUDES: &[&str] = &[
@@ -3994,9 +3585,9 @@ fn mesa20_target_contract_is_exact(
     target: Option<&TargetContext>,
     targets: &[TargetDefinition],
 ) -> std::result::Result<(), String> {
-    let expected_sources = mesa20_remaining_linklib_sources(root, relative_dir, mmake, target)?
+    let expected_sources = remaining_linklib_sources(root, relative_dir, mmake, target)?
         .ok_or_else(|| format!("missing source capability for {mmake}"))?;
-    let expected_flags = mesa20_compile_contract(relative_dir, mmake, target)?
+    let expected_flags = compile_contract(relative_dir, mmake, target)?
         .ok_or_else(|| format!("missing compile capability for {mmake}"))?;
     let matching = targets
         .iter()
@@ -4033,7 +3624,7 @@ fn mesa20_target_contract_is_exact(
         && declaration.mod_suffix.is_none()
         && declaration.linklib_name.is_none()
         && declaration.genmodule_linklibs.is_none()
-        && declaration.linklib_output_dir.as_deref() == Some(MESA20_PRIVATE_LIBDIR)
+        && declaration.linklib_output_dir.as_deref() == Some(PRIVATE_LIBDIR)
         && !declaration.canonical_linklib_output
         && !declaration.canonical_linklib_eligible
         && declaration.compiler_flags.is_empty()
@@ -4352,7 +3943,7 @@ fn parse_mesa20_remaining_python_outputs(
     ) {
         return Ok(None);
     }
-    let profile = mesa20_current_profile(target)?;
+    let profile = current_profile(target)?;
     let (mmake, owner, mmake_sha256, manifest, manifest_sha256, source_inputs, jobs, packages) =
         match relative_dir.to_str() {
             Some("workbench/libs/mesa/libcompiler") => {
@@ -4431,7 +4022,7 @@ fn parse_mesa20_remaining_python_outputs(
             pin("mesa-local-patch"),
         )
         || (matches!(mmake, "mesa3d-linklib-compiler" | "mesa3d-linklib-mesa")
-            && !file_has_sha256(root, MESA20_CXX_COMPAT_NEW, pin("mesa20-cxx-compat-new")))
+            && !file_has_sha256(root, CXX_COMPAT_NEW, pin("mesa20-cxx-compat-new")))
     {
         return Err(format!(
             "{mmake} declaration, inventory, driver, central Mesa context or patch differs from the audited capability"
@@ -4442,8 +4033,8 @@ fn parse_mesa20_remaining_python_outputs(
 
     Ok(Some(PythonOutputsDecl {
         owner: owner.to_owned(),
-        source_root: MESA20_SOURCE_ROOT.to_owned(),
-        build_root: MESA20_BUILD_ROOT.to_owned(),
+        source_root: SOURCE_ROOT.to_owned(),
+        build_root: BUILD_ROOT.to_owned(),
         fetch_target: "mesa3d-fetch".to_owned(),
         source_archive: MESA20_SOURCE_ARCHIVE.to_owned(),
         source_sha256: pin("mesa20-archive").to_owned(),
@@ -4452,7 +4043,7 @@ fn parse_mesa20_remaining_python_outputs(
         driver_script: Some(MESA20_DRIVER.to_owned()),
         driver_sha256: Some(pin("mesa20-driver-script").to_owned()),
         python_packages: packages,
-        audited_source_dir: MESA20_SOURCE_ROOT.to_owned(),
+        audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
@@ -7047,7 +6638,7 @@ fn parse_mmakefile_impl(
         );
         let mmake_name = sanitize_ident(&mmake_raw);
         let mesa20_capability_sources =
-            match mesa20_remaining_linklib_sources(root, &rel_dir, &mmake_name, target) {
+            match remaining_linklib_sources(root, &rel_dir, &mmake_name, target) {
                 Ok(sources) => sources,
                 Err(reason) => {
                     skipped_programs.push(format!(
@@ -7092,7 +6683,7 @@ fn parse_mmakefile_impl(
             }
         };
         let nouveau_gallium_capability_active = nouveau_gallium_capability_sources.is_some();
-        match mesa20_compile_contract(&rel_dir, &mmake_name, target) {
+        match compile_contract(&rel_dir, &mmake_name, target) {
             Ok(Some(contract)) => {
                 declaration_flags.defines = contract.defines;
                 declaration_flags.undefines.clear();
@@ -7385,7 +6976,7 @@ fn parse_mmakefile_impl(
                 || nouveau_drm_capability_active
                 || nouveau_gallium_capability_active);
         let linklib_output_dir = if mesa_sse41_profile.is_some() || mesa20_capability_active {
-            Some(MESA20_PRIVATE_LIBDIR.to_owned())
+            Some(PRIVATE_LIBDIR.to_owned())
         } else if matches!(module_type, ModuleType::LinkLib) {
             macro_arg(&inv.args, "libdir").and_then(|raw| {
                 match evaluate_make_expr(&raw, &expression_context) {
@@ -7560,7 +7151,7 @@ fn parse_mmakefile_impl(
         Some("workbench/libs/mesa/libgalliumaux") => Some("mesa3d-linklib-galliumauxiliary"),
         Some("workbench/libs/mesa/libmesa") => Some("mesa3d-linklib-mesa"),
         Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
-            if mesa20_current_profile(target).ok() != Some("x86_64") =>
+            if current_profile(target).ok() != Some("x86_64") =>
         {
             Some("linklibs-gallium_vc4")
         }
@@ -7710,13 +7301,12 @@ fn parse_mmakefile_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_vars, collect_vars_impl, collect_vars_with_context, evaluate_macro_sources,
-        implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
-        join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
-        mesa20_compile_contract, mesa20_remaining_linklib_sources,
-        mesa_sse41_static_contract_is_pinned, parse_external_cmake_invocation,
-        parse_glapi_python_outputs, parse_mesautil_python_outputs, render_meta_token,
-        resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        collect_vars, collect_vars_impl, collect_vars_with_context, compile_contract,
+        evaluate_macro_sources, implicit_module_meta_rules, is_explicit_genmodule_only,
+        join_continuations, join_mm_continuations, macro_arg, macro_argument_names,
+        macro_invocations, mesa_sse41_static_contract_is_pinned, parse_external_cmake_invocation,
+        parse_glapi_python_outputs, parse_mesautil_python_outputs, remaining_linklib_sources,
+        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
         select_target_invocations, validate_mesa_sse41_capability, MakeExprContext, TargetContext,
         MESA_SSE41_MMAKE, META_RULE_RE,
     };
@@ -8689,7 +8279,7 @@ mod tests {
             ),
             ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa", true),
         ] {
-            let contract = mesa20_compile_contract(Path::new(relative_dir), mmake, Some(&profile))
+            let contract = compile_contract(Path::new(relative_dir), mmake, Some(&profile))
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -8708,7 +8298,7 @@ mod tests {
 
         for cpu in ["arm", "aarch64"] {
             let profile = target_context(cpu, "raspi", if cpu == "arm" { "hard" } else { "" });
-            let contract = mesa20_compile_contract(
+            let contract = compile_contract(
                 Path::new("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4",
                 Some(&profile),
@@ -8775,7 +8365,7 @@ mod tests {
             ("aarch64", "raspi", "", (238, 11, 0)),
         ] {
             let profile = target_context(cpu, platform, float_abi);
-            let sources = mesa20_remaining_linklib_sources(
+            let sources = remaining_linklib_sources(
                 &root,
                 Path::new("workbench/libs/mesa/libmesa"),
                 "mesa3d-linklib-mesa",
@@ -8809,10 +8399,9 @@ mod tests {
                 (176, 0, 0),
             ),
         ] {
-            let sources =
-                mesa20_remaining_linklib_sources(&root, Path::new(relative), mmake, Some(&x86))
-                    .unwrap()
-                    .unwrap();
+            let sources = remaining_linklib_sources(&root, Path::new(relative), mmake, Some(&x86))
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 (sources.c.len(), sources.cxx.len(), sources.asm.len()),
                 expected,
@@ -8822,7 +8411,7 @@ mod tests {
 
         for (cpu, float_abi) in [("arm", "hard"), ("aarch64", "")] {
             let profile = target_context(cpu, "raspi", float_abi);
-            let sources = mesa20_remaining_linklib_sources(
+            let sources = remaining_linklib_sources(
                 &root,
                 Path::new("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4",

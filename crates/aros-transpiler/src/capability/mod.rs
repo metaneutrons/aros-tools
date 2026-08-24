@@ -17,6 +17,7 @@
 pub mod ahi;
 pub mod configure;
 pub mod grub2;
+pub mod mesa;
 pub mod nouveau;
 
 use crate::parser::{

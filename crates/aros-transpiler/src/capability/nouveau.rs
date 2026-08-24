@@ -8,10 +8,12 @@
 
 use super::{file_has_sha256, manifest_inventory};
 use crate::ast::{ModuleType, TargetDefinition};
-// Nouveau Gallium compiles Mesa sources, so it shares Mesa20's compile
-// contract and base defines. The coupling is real rather than accidental; the
-// import says so, and it disappears when the Mesa family moves out too.
-use crate::parser::{mesa20_base_defines, EvaluatedSources, Mesa20CompileContract, TargetContext};
+// Nouveau Gallium compiles Mesa sources, so it shares the Mesa compile
+// contract and base defines. The coupling is real rather than accidental, and
+// it now reads as one capability using another rather than as two families
+// sharing a file.
+use super::mesa::{base_defines, CompileContract};
+use crate::parser::{EvaluatedSources, TargetContext};
 use crate::pins::pin;
 use std::path::Path;
 
@@ -327,13 +329,13 @@ pub(crate) fn gallium_compile_contract(
     relative_dir: &Path,
     mmake: &str,
     target: Option<&TargetContext>,
-) -> std::result::Result<Option<Mesa20CompileContract>, String> {
+) -> std::result::Result<Option<CompileContract>, String> {
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) || mmake != GALLIUM_MMAKE {
         return Ok(None);
     }
     let profile = nouveau_current_profile(target)?;
-    Ok(Some(Mesa20CompileContract {
-        defines: mesa20_base_defines(profile),
+    Ok(Some(CompileContract {
+        defines: base_defines(profile),
         includes: [
             "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
             "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
