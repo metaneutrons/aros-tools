@@ -3131,7 +3131,7 @@ FILES := gdbstop
     }
 
     #[test]
-    fn usbromstartup_nostdc_is_scoped_to_the_simple_module() {
+    fn poseidon_static_runtime_applies_to_the_simple_module() {
         let root = root();
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &root.join("rom/usb/poseidon/mmakefile.src"),
@@ -3148,8 +3148,8 @@ FILES := gdbstop
         let poseidon = targets.get("kernel-usb-poseidon").unwrap();
         let usbromstartup = targets.get("kernel-usb-usbromstartup").unwrap();
 
-        assert!(!poseidon.spec_switches.iter().any(|value| value == "nostdc"));
-        assert_eq!(usbromstartup.spec_switches, ["nostdc"]);
+        assert_eq!(poseidon.spec_switches, ["static"]);
+        assert_eq!(usbromstartup.spec_switches, ["static"]);
     }
 
     #[test]
@@ -4076,7 +4076,11 @@ FILES := gdbstop
             assert_eq!(static_lib.module_type, ModuleType::LinkLib);
             assert_eq!(static_lib.target_name, "zstd-static");
             assert!(static_lib.canonical_linklib_output);
-            assert!(parsed.flags.skipped.iter().any(|flag| flag == "-static"));
+            assert!(parsed
+                .flags
+                .spec_switches
+                .iter()
+                .any(|flag| flag == "static"));
 
             let copy = parsed
                 .copy_includes

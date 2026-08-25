@@ -45,9 +45,9 @@ pub struct FlagSet {
     /// Driver-level link options from `USER_LDFLAGS`.
     #[serde(default)]
     pub link_options: Vec<String>,
-    /// Compiler-spec switches from `USER_LDFLAGS` which suppress part of the
-    /// default link set in `config/elf-specs.in:19`. They are driver switches,
-    /// so they must never reach ld.lld; they are carried as facts instead.
+    /// Compiler-spec switches from `USER_LDFLAGS` which select or suppress part
+    /// of the default link set. They are driver switches, so they must never
+    /// reach ld.lld; they are carried as facts instead.
     #[serde(default)]
     pub spec_switches: Vec<String>,
 
@@ -900,19 +900,18 @@ fn classify(tok: &str, set: &mut FlagSet) {
 }
 
 fn classify_link(tok: &str, set: &mut FlagSet) {
-    // The default link set is assembled by the compiler driver from
-    // `*lib:` in config/elf-specs.in:19:
+    // The default link set is assembled by the compiler driver. The external
+    // wrapper expresses it in `config/elf-specs.in:19`:
     //
     //   %(autolib) %{!nostdc:%{!noposixc:-lposixc} -lstdcio -lstdc}
     //   %{!nosysbase:-lexec} %{nostdc:-lstdc.static}
     //
-    // A declaration that suppresses part of it does so with one of these
-    // switches, and every one of them exists because the declaration would
-    // otherwise link against itself: compiler/crt/posixc passes -noposixc,
-    // compiler/crt/stdc passes -nostdc -noposixc, and rom/filesys/pfs3/fs
-    // passes -nosysbase because it defines SysBase with --defsym. Recording
-    // them keeps that decision in the source rather than in a CMake list.
-    if matches!(tok, "-nostdc" | "-noposixc" | "-nosysbase") {
+    // AROS' native GCC and Clang drivers additionally make -static select
+    // libstdc.static while suppressing posixc/stdcio/stdc (see their AROS
+    // patches under tools/crosstools). A declaration that suppresses part of
+    // the set does so with the other three switches. Recording all four keeps
+    // the compiler-driver decision in the source rather than a target list.
+    if matches!(tok, "-static" | "-nostdc" | "-noposixc" | "-nosysbase") {
         push_unique(
             &mut set.spec_switches,
             tok.trim_start_matches('-').to_owned(),
@@ -1053,6 +1052,14 @@ mod tests {
         assert!(!is_driver_link_option("-Wl,-Map,`date`"));
         // The rendered CMake form is expected and accepted.
         assert!(is_driver_link_option("-Wl,-T,${CMAKE_SOURCE_DIR}/x.lds"));
+    }
+
+    #[test]
+    fn static_is_a_default_link_set_switch() {
+        let flags = collect_flags("USER_LDFLAGS := -static -nosysbase\n");
+        assert_eq!(flags.spec_switches, ["static", "nosysbase"]);
+        assert!(flags.link_options.is_empty());
+        assert!(flags.skipped.is_empty());
     }
 
     #[test]
