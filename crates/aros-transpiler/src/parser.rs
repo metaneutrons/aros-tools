@@ -176,6 +176,25 @@ fn declaration_flags_at(
     flags
 }
 
+fn apply_mesa_compile_contract(
+    rel_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+    flags: &mut FlagSet,
+    includes: &mut crate::includes::IncludeSet,
+) -> std::result::Result<bool, String> {
+    let Some(contract) = compile_contract(rel_dir, mmake, target)? else {
+        return Ok(false);
+    };
+    flags.defines = contract.defines;
+    flags.undefines.clear();
+    flags.compile_options = contract.options;
+    flags.link_options.clear();
+    includes.dirs = contract.includes;
+    includes.arch_modules.clear();
+    Ok(true)
+}
+
 fn merge_named_link_flags(flags: &mut FlagSet, scope: &VarScope, line: usize, variable: &str) {
     let local = collect_named_link_flags_at(scope, line, variable);
     for option in local.link_options {
@@ -1122,7 +1141,7 @@ fn parse_mmakefile_impl(
         );
         let driver_link_options =
             declaration_global_link_options("USER_LDFLAGS", &scope, dirs, root, &rel_dir, inv.line);
-        let declaration_flags = declaration_flags_at(
+        let mut declaration_flags = declaration_flags_at(
             &scope,
             inv.line,
             target,
@@ -1130,11 +1149,26 @@ fn parse_mmakefile_impl(
             &opts_link_options,
             &opts_spec_switches,
         );
-        let declaration_includes = target.map_or_else(
+        let mut declaration_includes = target.map_or_else(
             || include_set.clone(),
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
         );
         let mmake_name = sanitize_ident(&mmake_raw);
+        if let Err(reason) = apply_mesa_compile_contract(
+            &rel_dir,
+            &mmake_name,
+            target,
+            &mut declaration_flags,
+            &mut declaration_includes,
+        ) {
+            skipped_programs.push(format!(
+                "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
+                rel_dir.display(),
+                inv.line + 1,
+                inv.name
+            ));
+            continue;
+        }
         let mod_name = sanitize_ident(&mod_raw);
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
         let mod_type_str = mod_type_owned.as_str();
@@ -1778,25 +1812,20 @@ fn parse_mmakefile_impl(
             }
         };
         let nouveau_gallium_capability_active = nouveau_gallium_capability_sources.is_some();
-        match compile_contract(&rel_dir, &mmake_name, target) {
-            Ok(Some(contract)) => {
-                declaration_flags.defines = contract.defines;
-                declaration_flags.undefines.clear();
-                declaration_flags.compile_options = contract.options;
-                declaration_flags.link_options.clear();
-                declaration_includes.dirs = contract.includes;
-                declaration_includes.arch_modules.clear();
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                skipped_programs.push(format!(
-                    "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
-                    rel_dir.display(),
-                    inv.line + 1,
-                    inv.name
-                ));
-                continue;
-            }
+        if let Err(reason) = apply_mesa_compile_contract(
+            &rel_dir,
+            &mmake_name,
+            target,
+            &mut declaration_flags,
+            &mut declaration_includes,
+        ) {
+            skipped_programs.push(format!(
+                "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
+                rel_dir.display(),
+                inv.line + 1,
+                inv.name
+            ));
+            continue;
         }
         match crate::capability::nouveau::drm_compile_contract(&rel_dir, &mmake_name, target) {
             Ok(Some(contract)) => {
@@ -3510,6 +3539,40 @@ FILES := gdbstop
         assert!(sources.cxx.is_empty());
         assert_eq!(sources.diagnostics.len(), 1, "{:#?}", sources.diagnostics);
         assert!(sources.diagnostics[0].contains("UNKNOWN_CXX"));
+    }
+
+    #[test]
+    fn module_declarations_receive_the_pinned_mesa_contract() {
+        let root = root();
+        for (mmakefile, mmake) in [
+            ("workbench/hidds/gallium/mmakefile.src", "hidd-gallium"),
+            (
+                "workbench/libs/gallium/mmakefile.src",
+                "workbench-libs-gallium",
+            ),
+        ] {
+            let parsed = super::parse_mmakefile_with_dirs_and_context(
+                &root.join(mmakefile),
+                &root,
+                &dirs(),
+                &target_context("arm", "raspi", "hard"),
+            )
+            .unwrap();
+            let target = parsed
+                .targets
+                .iter()
+                .find(|target| target.mmake_name == mmake)
+                .expect("Gallium module target");
+            assert!(target
+                .include_dirs
+                .contains(&"${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include".to_owned()));
+            assert!(target
+                .defines
+                .contains(&"USE_GCC_ATOMIC_BUILTINS".to_owned()));
+            assert!(target
+                .compile_options
+                .contains(&"-fno-strict-aliasing".to_owned()));
+        }
     }
 
     #[test]

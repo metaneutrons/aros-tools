@@ -142,6 +142,8 @@ pub(crate) fn compile_contract(
             Some("workbench/libs/mesa/libgalliumaux"),
             "mesa3d-linklib-galliumauxiliary"
         ) | (Some("workbench/libs/mesa/libmesa"), "mesa3d-linklib-mesa")
+            | (Some("workbench/hidds/gallium"), "hidd-gallium")
+            | (Some("workbench/libs/gallium"), "workbench-libs-gallium")
             | (
                 Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4"
@@ -231,6 +233,18 @@ pub(crate) fn compile_contract(
                 "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
                 "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
                 "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
+                "-fno-strict-aliasing".to_owned(),
+            ],
+        ),
+        (Some("workbench/hidds/gallium"), "hidd-gallium")
+        | (Some("workbench/libs/gallium"), "workbench-libs-gallium") => (
+            base_defines(profile),
+            base.into_iter()
+                .chain(["${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include"])
+                .map(str::to_owned)
+                .collect(),
+            vec![
+                "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
                 "-fno-strict-aliasing".to_owned(),
             ],
         ),
@@ -432,4 +446,44 @@ pub(crate) fn remaining_linklib_sources(
         _ => return Ok(None),
     }
     Ok(Some(sources))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::target_context;
+
+    #[test]
+    fn in_tree_gallium_consumers_inherit_the_pinned_mesa_contract() {
+        let arm = target_context("arm", "raspi", "hard");
+        for (directory, mmake) in [
+            ("workbench/hidds/gallium", "hidd-gallium"),
+            ("workbench/libs/gallium", "workbench-libs-gallium"),
+        ] {
+            let contract = compile_contract(Path::new(directory), mmake, Some(&arm))
+                .expect("supported target profile")
+                .expect("Gallium consumer contract");
+            assert!(contract
+                .includes
+                .contains(&"${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include".to_owned()));
+            assert!(contract
+                .defines
+                .contains(&"USE_GCC_ATOMIC_BUILTINS".to_owned()));
+            assert!(contract
+                .options
+                .contains(&"-fno-strict-aliasing".to_owned()));
+        }
+    }
+
+    #[test]
+    fn gallium_consumer_contract_is_exactly_scoped() {
+        let arm = target_context("arm", "raspi", "hard");
+        assert!(compile_contract(
+            Path::new("workbench/hidds/gallium"),
+            "some-other-target",
+            Some(&arm)
+        )
+        .expect("unsupported declaration is not an error")
+        .is_none());
+    }
 }
