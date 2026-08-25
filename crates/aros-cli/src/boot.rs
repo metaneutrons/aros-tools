@@ -579,6 +579,149 @@ fn place_readonly(images: &[Image]) -> (Vec<Placement>, Vec<u8>) {
     (placed, packed)
 }
 
+/// Every traced instruction, by address.
+///
+/// The trace prints one instruction per line, so consecutive entries can be
+/// stitched back into a run of bytes long enough to be unique in the image.
+fn traced_instructions(asm: &str) -> BTreeMap<u64, Vec<u8>> {
+    let mut found = BTreeMap::new();
+    for line in asm.lines() {
+        if let Some((address, bytes)) = traced_block(line) {
+            if !bytes.is_empty() {
+                found.entry(address).or_insert(bytes);
+            }
+        }
+    }
+    found
+}
+
+/// A run of at least `want` bytes starting at `address`, stitched from
+/// consecutive traced instructions.
+fn stitched_from(traced: &BTreeMap<u64, Vec<u8>>, address: u64, want: usize) -> Option<Vec<u8>> {
+    let mut at = address;
+    let mut run = Vec::new();
+    while run.len() < want {
+        let bytes = traced.get(&at)?;
+        run.extend_from_slice(bytes);
+        at += bytes.len() as u64;
+    }
+    Some(run)
+}
+
+/// A run of traced bytes that *ends* with the instruction at `ip`, and the
+/// distance from the run's start to `ip`.
+///
+/// Needed because the faulting instruction is usually the last one traced --
+/// nothing after it executed -- so a forward run from the fault has only those
+/// few bytes to be unique with. Runs are tried shortest first: the packed image
+/// holds unrelocated bytes, so a longer run is more likely to reach back into an
+/// instruction carrying an absolute address that the loader filled in later, and
+/// such a run cannot match at all.
+fn runs_ending_at(traced: &BTreeMap<u64, Vec<u8>>, ip: u64) -> Vec<(Vec<u8>, u64)> {
+    let Some(at_fault) = traced.get(&ip) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut start = ip;
+    let mut prefix: Vec<u8> = Vec::new();
+    // Walk back over instructions that abut, newest first.
+    for (&address, bytes) in traced.range(..ip).rev().take(8) {
+        if address + bytes.len() as u64 != start {
+            break;
+        }
+        let mut run = bytes.clone();
+        run.extend_from_slice(&prefix);
+        run.extend_from_slice(at_fault);
+        prefix = {
+            let mut carried = bytes.clone();
+            carried.extend_from_slice(&prefix);
+            carried
+        };
+        start = address;
+        out.push((run, ip - address));
+    }
+    out
+}
+
+/// The offset the arithmetic gives, corrected by the fault's own bytes.
+///
+/// The arithmetic models the loader's packing, and the model can be off: the
+/// first version of it put this fault 0x50 past the truth and named a
+/// neighbouring function without hesitating. A global byte search cannot always
+/// settle it either, because the packed image holds *unrelocated* bytes -- the
+/// unique part of a library-base stub is the absolute address the loader fills
+/// in later, and what remains (`movq (%r11), %r11; jmpq *-<lvo>(%r11)`) occurs
+/// once per module that calls into the same library.
+///
+/// So: start from the arithmetic, then look for the faulting instruction near
+/// it. One match in the window is the answer, and the distance from the computed
+/// offset is reported, because a non-zero distance is a defect in the model
+/// rather than a detail.
+fn corrected_offset(
+    packed: &[u8],
+    traced: &BTreeMap<u64, Vec<u8>>,
+    ip: u64,
+    computed: u64,
+) -> (u64, Option<i64>) {
+    const WINDOW: u64 = 1 << 16;
+    let Some(bytes) = traced.get(&ip) else {
+        return (computed, None);
+    };
+    if bytes.len() < 4 {
+        return (computed, None);
+    }
+    let low = computed.saturating_sub(WINDOW) as usize;
+    let high = ((computed + WINDOW) as usize).min(packed.len());
+    if low >= high {
+        return (computed, None);
+    }
+    let window = &packed[low..high];
+    let mut hits = Vec::new();
+    let mut at = 0usize;
+    while let Some(index) = find_subslice(&window[at..], bytes) {
+        hits.push(at + index);
+        at += index + 1;
+        if hits.len() > 1 {
+            break;
+        }
+    }
+    if hits.len() != 1 {
+        return (computed, None);
+    }
+    let found = low as u64 + hits[0] as u64;
+    let delta = found as i64 - computed as i64;
+    (found, Some(delta))
+}
+
+/// Where a faulting address really is, found by its own bytes.
+///
+/// The address arithmetic below models the loader's packing, and a model can be
+/// wrong: the first version of it put this fault 0x50 past the truth and named a
+/// neighbouring function with complete confidence. The bytes cannot be wrong in
+/// that way. When the instruction run at the fault occurs exactly once in the
+/// packed image, its offset is the answer and no arithmetic is involved.
+fn located_by_bytes(packed: &[u8], traced: &BTreeMap<u64, Vec<u8>>, ip: u64) -> Option<u64> {
+    // Forward first, for a fault that was executed past.
+    for want in [24usize, 16, 12, 8] {
+        let Some(run) = stitched_from(traced, ip, want) else {
+            continue;
+        };
+        if count_occurrences(packed, &run) == 1 {
+            return find_subslice(packed, &run).map(|offset| offset as u64);
+        }
+    }
+    // Then runs ending at the fault, which is the usual case.
+    for (run, lead) in runs_ending_at(traced, ip) {
+        if run.len() < 8 {
+            continue;
+        }
+        if count_occurrences(packed, &run) == 1 {
+            return find_subslice(packed, &run).map(|offset| offset as u64 + lead);
+        }
+    }
+    None
+}
+
 /// Turns each fault's address into `<module> <section>+<offset> = <symbol>+<offset>`.
 ///
 /// The load base is derived from the instruction trace rather than assumed: for
@@ -618,21 +761,54 @@ fn locate(
         return Err(miette!("no traced block matched the image"));
     };
 
+    let traced = traced_instructions(asm);
     let mut out = vec![format!(
         "read-only block loaded at {base:#x} ({agree} traced blocks agree, \
          {} images modelled)",
         images.len()
     )];
     for fault in faults {
-        out.push(describe(fault, base, &placed, &images));
+        out.push(describe(fault, base, &placed, &images, &packed, &traced));
     }
     Ok(out)
 }
 
-fn describe(fault: &Fault, base: u64, placed: &[Placement], images: &[Image]) -> String {
+fn describe(
+    fault: &Fault,
+    base: u64,
+    placed: &[Placement],
+    images: &[Image],
+    packed: &[u8],
+    traced: &BTreeMap<u64, Vec<u8>>,
+) -> String {
+    // The bytes first, the arithmetic only as a fallback: a wrong layout model
+    // names a neighbouring function without hesitating, and this one did.
+    let (found, how) = match located_by_bytes(packed, traced, fault.ip) {
+        Some(offset) => (Some(offset), "by its bytes".to_owned()),
+        None => match fault.ip.checked_sub(base) {
+            None => (None, String::new()),
+            Some(computed) => {
+                let (offset, delta) = corrected_offset(packed, traced, fault.ip, computed);
+                let how = match delta {
+                    None => "by arithmetic alone; its bytes are not unique nearby".to_owned(),
+                    Some(0) => "by arithmetic, confirmed by its bytes".to_owned(),
+                    Some(delta) => {
+                        format!("by its bytes, {delta:+#x} from where the load model computed it")
+                    }
+                };
+                (Some(offset), how)
+            }
+        },
+    };
+    let Some(offset_in_block) = found else {
+        return format!(
+            "v={:02x} cpl={} IP={:#x}: below the load base, so not in the read-only block",
+            fault.vector, fault.cpl, fault.ip
+        );
+    };
     let Some(place) = placed
         .iter()
-        .find(|place| fault.ip >= base + place.start && fault.ip < base + place.start + place.size)
+        .find(|place| offset_in_block >= place.start && offset_in_block < place.start + place.size)
     else {
         // Every image the loader was given is modelled, so an address outside
         // all of them is in a writable block -- which this does not model,
@@ -644,7 +820,7 @@ fn describe(fault: &Fault, base: u64, placed: &[Placement], images: &[Image]) ->
         );
     };
     let image = &images[place.image];
-    let offset = fault.ip - base - place.start;
+    let offset = offset_in_block - place.start;
     let symbol = image
         .object
         .symbols
@@ -653,7 +829,7 @@ fn describe(fault: &Fault, base: u64, placed: &[Placement], images: &[Image]) ->
         .filter(|symbol| symbol.value <= offset && offset < symbol.value + symbol.size.max(1))
         .min_by_key(|symbol| symbol.size);
     let mut text = format!(
-        "v={:02x} cpl={} IP={:#x} = {} {}+{offset:#x}",
+        "v={:02x} cpl={} IP={:#x} = {} {}+{offset:#x} ({how})",
         fault.vector, fault.cpl, fault.ip, image.name, place.section
     );
     if let Some(symbol) = symbol {
