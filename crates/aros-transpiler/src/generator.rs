@@ -233,6 +233,20 @@ fn emit_configure_builds(
     }
 }
 
+/// Whether a public header deliberately lives below a foreign architecture
+/// directory but is part of the architecture-independent SDK API.
+///
+/// `hidd/unixio.h` is consumed by the native PC and Sam440 serial/parallel
+/// drivers as well as hosted targets. Keep this exception exact so unrelated
+/// foreign CPU and ASM headers retain the collision protection in AROS.cmake.
+fn copy_includes_allows_foreign_arch(decl: &crate::copy_includes::CopyIncludesDecl) -> bool {
+    decl.source_dir == "arch/all-unix/hidd/unixio/include"
+        && decl.dest == "hidd"
+        && decl.patterns == ["*.h"]
+        && decl.excludes.is_empty()
+        && decl.flatten
+}
+
 /// Generates modern CMake code from the parsed dependency graph.
 #[must_use]
 pub fn generate_cmake(graph: &DependencyGraph) -> String {
@@ -818,7 +832,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             let excludes: Vec<String> = decl.excludes.iter().map(|p| cmake_arg(p)).collect();
             writeln!(
                 out,
-                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{}{})",
+                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{}{}{})",
                 decl.name,
                 decl.dest,
                 decl.source_dir,
@@ -828,7 +842,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 } else {
                     format!(" EXCLUDES {}", excludes.join(" "))
                 },
-                if decl.flatten { " FLATTEN" } else { "" }
+                if decl.flatten { " FLATTEN" } else { "" },
+                if copy_includes_allows_foreign_arch(decl) {
+                    " ALLOW_FOREIGN_ARCH"
+                } else {
+                    ""
+                }
             )
             .unwrap();
         }
@@ -1800,6 +1819,7 @@ mod tests {
     use super::{generate_cmake, generated_header};
     use crate::ast::{CopyDirectoryDecl, MetaTargetRule};
     use crate::catalogs::CatalogDecl;
+    use crate::copy_includes::CopyIncludesDecl;
     use crate::dirs::DirVars;
     use crate::fetch::FetchDecl;
     use crate::graph::DependencyGraph;
@@ -1817,6 +1837,24 @@ mod tests {
             mmake: name.to_owned(),
             directory: "images/icons".to_owned(),
         }
+    }
+
+    #[test]
+    fn unixio_public_header_is_the_exact_foreign_arch_exception() {
+        let mut graph = DependencyGraph::new();
+        graph.add_copy_includes(vec![CopyIncludesDecl {
+            name: "includes-copy".to_owned(),
+            dest: "hidd".to_owned(),
+            source_dir: "arch/all-unix/hidd/unixio/include".to_owned(),
+            patterns: vec!["*.h".to_owned()],
+            excludes: Vec::new(),
+            flatten: true,
+        }]);
+
+        let cmake = generate_cmake(&graph);
+        assert!(cmake.contains(
+            "SOURCE \"arch/all-unix/hidd/unixio/include\" PATTERNS \"*.h\" FLATTEN ALLOW_FOREIGN_ARCH"
+        ));
     }
 
     #[test]

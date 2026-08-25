@@ -166,6 +166,14 @@ fn arch_dir_applies(rel: &Path, arch_dirs: &[String]) -> bool {
     if arch_dirs.is_empty() {
         return true;
     }
+    // The UnixIO HIDD is hosted-only code, but its public interface is also
+    // included by the native PC and Sam440 serial/parallel drivers. MetaMake's
+    // universal includes-generate target publishes it for every architecture;
+    // retain that exact API config without admitting unrelated foreign module
+    // namespaces that could overwrite the active architecture's headers.
+    if rel.starts_with("arch/all-unix/hidd/unixio") {
+        return true;
+    }
     let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
     if parts.next().as_deref() != Some("arch") {
         return true;
@@ -395,9 +403,14 @@ fn resident_flags(module: &ConfModule) -> String {
 /// the maximum is the same value there and does not depend on that ordering.
 /// An empty list falls back to `firstlvo - 1`, as the reference does.
 fn functions_count(module: &ConfModule) -> u32 {
-    module.functions.iter().map(|f| f.lvo).max().unwrap_or_else(|| {
-        varargs::first_lvo(&module.mod_type, module.no_resident).saturating_sub(1)
-    })
+    module
+        .functions
+        .iter()
+        .map(|f| f.lvo)
+        .max()
+        .unwrap_or_else(|| {
+            varargs::first_lvo(&module.mod_type, module.no_resident).saturating_sub(1)
+        })
 }
 
 /// The reference's default basename: the module name with its first letter
@@ -1278,6 +1291,10 @@ mod tests {
         assert!(arch_dir_applies(Path::new("arch/all-pc/exec"), &dirs));
         assert!(arch_dir_applies(Path::new("arch/x86_64-all/kernel"), &dirs));
         assert!(arch_dir_applies(Path::new("arch/all-native/acpica"), &dirs));
+        assert!(arch_dir_applies(
+            Path::new("arch/all-unix/hidd/unixio"),
+            &dirs
+        ));
         // Foreign architectures are skipped; this is what stops
         // arch/m68k-amiga/devs/audio from clobbering workbench/devs/audio.
         assert!(!arch_dir_applies(
