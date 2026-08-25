@@ -168,7 +168,13 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
         let asm = request.evidence.join("instructions.log");
         run_qemu(request, &bootstrap, &modules, &serial, &asm, true)?;
         let asm_text = read_lossy(&asm);
-        match locate(&kickstart, &request.modules, &asm_text, &report.faults) {
+        match locate(
+            &kickstart,
+            &bootstrap,
+            &request.modules,
+            &asm_text,
+            &report.faults,
+        ) {
             Ok(lines) => report.resolved = lines,
             Err(error) => report.untested.push(format!(
                 "the faulting address could not be resolved: {error}"
@@ -379,6 +385,14 @@ fn read_faults(trace: &str) -> Vec<Fault> {
         .collect()
 }
 
+/// `sizeof(void *)` in the bootstrap that will do the loading.
+///
+/// Read from the bootstrap's own ELF class rather than assumed, because the two
+/// widths differ on PC: 32-bit loader code, 64-bit structures.
+fn bootstrap_pointer_width(bootstrap: &Path) -> u64 {
+    std::fs::read(bootstrap).map_or(8, |bytes| if bytes.get(4) == Some(&1) { 4 } else { 8 })
+}
+
 /// One image the loader places: the kickstart, or one member of a package.
 struct Image {
     name: String,
@@ -496,9 +510,15 @@ fn images(kickstart: &Path, modules: &[PathBuf]) -> Result<Vec<Image>> {
 /// that this moves an already-aligned pointer on by a full word -- then writes
 /// the module descriptor, the ELF header, the section header table and the name
 /// with its terminator, none of which are aligned individually.
-fn descriptor_bytes(image: &Image) -> (u64, u64) {
+fn descriptor_bytes(image: &Image, bootstrap_word: u64) -> (u64, u64) {
     let sixty_four = matches!(image.object.class, aros_common::elf::Class::Elf64);
-    let word: u64 = if sixty_four { 8 } else { 4 };
+    // The alignment step is `sizeof(void *)` in the *bootstrap*, not in the
+    // module: on PC the bootstrap is 32-bit code building 64-bit structures
+    // (it links gen/lib32/libbootstrap.a), so it advances by 4 while the
+    // descriptor it writes is the 64-bit one. Assuming the module's own width
+    // here put every module after the first out by 4, growing to 80 bytes by
+    // the fortieth -- see OPEN-POINTS 49 for how that was measured.
+    let word: u64 = bootstrap_word;
     // struct ELF_ModuleInfo_t: Next, Name, Type, Pad0, [Pad1], eh, sh.
     let descriptor: u64 = if sixty_four { 40 } else { 20 };
     let header: u64 = if sixty_four { 64 } else { 52 };
@@ -532,7 +552,7 @@ fn section_header_shape(bytes: &[u8], sixty_four: bool) -> (u16, u16) {
 /// The bytes matter as well as the offsets: the load base is derived by finding
 /// traced instruction bytes in this image, so the descriptor gaps are filled
 /// with zeroes rather than skipped.
-fn place_readonly(images: &[Image]) -> (Vec<Placement>, Vec<u8>) {
+fn place_readonly(images: &[Image], bootstrap_word: u64) -> (Vec<Placement>, Vec<u8>) {
     let mut packed: Vec<u8> = Vec::new();
     let mut placed = Vec::new();
     for (index, image) in images.iter().enumerate() {
@@ -568,7 +588,7 @@ fn place_readonly(images: &[Image]) -> (Vec<Placement>, Vec<u8>) {
                 size: section.size,
             });
         }
-        let (word, descriptor) = descriptor_bytes(image);
+        let (word, descriptor) = descriptor_bytes(image, bootstrap_word);
         let aligned = (packed.len() as u64 + word) & !(word - 1);
         packed.extend(std::iter::repeat_n(
             0u8,
@@ -731,12 +751,14 @@ fn located_by_bytes(packed: &[u8], traced: &BTreeMap<u64, Vec<u8>>, ip: u64) -> 
 /// the wrong function with complete confidence.
 fn locate(
     kickstart: &Path,
+    bootstrap: &Path,
     modules: &[PathBuf],
     asm: &str,
     faults: &[Fault],
 ) -> Result<Vec<String>> {
     let images = images(kickstart, modules)?;
-    let (placed, packed) = place_readonly(&images);
+    let bootstrap_word = bootstrap_pointer_width(bootstrap);
+    let (placed, packed) = place_readonly(&images, bootstrap_word);
 
     let mut votes: BTreeMap<u64, usize> = BTreeMap::new();
     for line in asm.lines() {
@@ -909,6 +931,27 @@ pub fn render(report: &BootReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The alignment step before each descriptor uses the *bootstrap's*
+    /// pointer width. On PC that is 4 while the descriptor it writes is the
+    /// 64-bit one, and taking the module's width instead put every module after
+    /// the first out by 4 bytes, growing to 80 by the fortieth.
+    #[test]
+    fn the_bootstrap_pointer_width_comes_from_the_bootstrap() {
+        let scratch = tempfile::tempdir().unwrap();
+        let elf32 = scratch.path().join("boot32");
+        let elf64 = scratch.path().join("boot64");
+        let mut header = vec![0x7f, b'E', b'L', b'F', 1];
+        header.resize(64, 0);
+        std::fs::write(&elf32, &header).unwrap();
+        header[4] = 2;
+        std::fs::write(&elf64, &header).unwrap();
+        assert_eq!(bootstrap_pointer_width(&elf32), 4);
+        assert_eq!(bootstrap_pointer_width(&elf64), 8);
+        // A bootstrap that cannot be read must not silently pick the narrow
+        // width: that would shift every module and look plausible.
+        assert_eq!(bootstrap_pointer_width(&scratch.path().join("absent")), 8);
+    }
+
     /// The package format, including the part that is easy to get wrong: the
     /// declared name length is a field width and may or may not count the
     /// terminator, while the name itself ends at the first NUL.
