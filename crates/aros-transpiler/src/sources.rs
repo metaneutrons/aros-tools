@@ -164,6 +164,10 @@ pub(crate) struct EvaluatedSources {
     pub(crate) asm: Vec<String>,
     pub(crate) declared: bool,
     pub(crate) diagnostics: Vec<String>,
+    /// Wildcards rooted in a fetched build tree whose source inventory is not
+    /// present during this configure pass. The generated graph uses their
+    /// owning fetches to force one ordered reconfigure.
+    pub(crate) deferred_wildcards: Vec<String>,
 }
 
 impl EvaluatedSources {
@@ -372,6 +376,11 @@ pub(crate) fn evaluate_macro_sources_with_files(
                     return Err(format!("{key}={raw} cannot be evaluated: {error}"));
                 }
                 Err(error) => {
+                    if let MakeExprError::DeferredWildcard { pattern } = &error {
+                        if !sources.deferred_wildcards.contains(pattern) {
+                            sources.deferred_wildcards.push(pattern.clone());
+                        }
+                    }
                     let old_values = if contains_make_function(&fragment) {
                         Vec::new()
                     } else {

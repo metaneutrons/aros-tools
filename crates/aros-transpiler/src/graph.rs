@@ -96,6 +96,10 @@ pub struct DependencyGraph {
     pub arch_sources: HashMap<String, Vec<ArchSourceDecl>>,
     /// `%fetch` declarations for third-party sources.
     pub fetches: Vec<FetchDecl>,
+    /// Fetch targets whose unpacked trees are required to determine source
+    /// lists. They are emitted as configure dependencies only while the
+    /// corresponding wildcard inventory is absent.
+    pub source_inventory_fetches: Vec<String>,
     /// `%make_package` and `%link_kickstart` declarations.
     pub packages: Vec<crate::packages::PackageDecl>,
 }
@@ -541,6 +545,33 @@ impl DependencyGraph {
                 self.fetches.push(d);
             }
         }
+    }
+
+    /// Binds deferred `${AROS_PORTS_DIR}` wildcard patterns to their most
+    /// specific `%fetch` owner.
+    pub fn resolve_source_inventory_fetches(&mut self, patterns: &[String]) -> Vec<String> {
+        let mut unresolved = Vec::new();
+        for pattern in patterns {
+            let owner = self
+                .fetches
+                .iter()
+                .filter(|fetch| {
+                    pattern == &fetch.destination
+                        || pattern
+                            .strip_prefix(&fetch.destination)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .max_by_key(|fetch| fetch.destination.len());
+            if let Some(fetch) = owner {
+                if !self.source_inventory_fetches.contains(&fetch.name) {
+                    self.source_inventory_fetches.push(fetch.name.clone());
+                }
+            } else {
+                unresolved.push(pattern.clone());
+            }
+        }
+        self.source_inventory_fetches.sort();
+        unresolved
     }
 
     pub fn add_header_transforms(&mut self, decls: Vec<HeaderTransformDecl>) {

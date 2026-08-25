@@ -8,6 +8,7 @@ use aros_transpiler::{
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -23,6 +24,10 @@ struct Args {
     /// Output path for generated CMake targets file
     #[arg(short, long, default_value = "build/generated_targets.cmake")]
     output: PathBuf,
+
+    /// Physical configure-time path behind `${AROS_PORTS_DIR}`
+    #[arg(long)]
+    ports_dir: Option<PathBuf>,
 
     /// Target instruction set (for example x86_64, arm, or aarch64)
     #[arg(long)]
@@ -106,7 +111,10 @@ fn main() -> Result<()> {
             .unwrap(),
     );
 
-    let dirs = DirVars::load(&args.source_dir);
+    let mut dirs = DirVars::load(&args.source_dir);
+    if let Some(ports_dir) = &args.ports_dir {
+        dirs.set_materialized_path("AROS_PORTS_DIR", ports_dir.clone());
+    }
     let target = [
         &args.cpu,
         &args.platform,
@@ -173,6 +181,7 @@ fn main() -> Result<()> {
     let mut generated_file_rules: Vec<String> = Vec::new();
     let mut skipped_programs: Vec<String> = Vec::new();
     let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut source_inventory_patterns: Vec<String> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut skipped_binary_objects: Vec<String> = Vec::new();
     let mut skipped_host_generated_headers: Vec<String> = Vec::new();
@@ -230,6 +239,7 @@ fn main() -> Result<()> {
         generated_file_rules.extend(parsed.generated_file_rules);
         skipped_programs.extend(parsed.skipped_programs);
         partial_source_lists.extend(parsed.partial_source_lists);
+        source_inventory_patterns.extend(parsed.source_inventory_patterns);
         skipped_client_archives.extend(parsed.skipped_client_archives);
         unresolved_output_paths.extend(parsed.unresolved_output_paths);
         graph.add_packages(parsed.packages);
@@ -249,6 +259,19 @@ fn main() -> Result<()> {
             ambiguous_flags += 1;
         }
     }
+
+    source_inventory_patterns.sort();
+    source_inventory_patterns.dedup();
+    partial_source_lists.extend(
+        graph
+            .resolve_source_inventory_fetches(&source_inventory_patterns)
+            .into_iter()
+            .map(|pattern| {
+                format!(
+                    "fetched-tree source wildcard has no owning %fetch declaration: `{pattern}`"
+                )
+            }),
+    );
 
     // Architecture includes are declared in the arch/ tree but consumed in
     // rom/, so they can only be joined once every file has been parsed.
@@ -625,6 +648,7 @@ fn main() -> Result<()> {
         generate_cmake(&graph)
     );
     fs::write(&args.output, cmake_content)?;
+    write_source_inventory_manifest(&args.output, &graph)?;
 
     // The default link set is applied by CMake, which needs to know which
     // declarations suppress part of it. These are driver switches and must not
@@ -664,6 +688,43 @@ fn main() -> Result<()> {
         graph.meta_targets.len(),
         args.output.display()
     );
+    Ok(())
+}
+
+fn cmake_quoted_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn write_source_inventory_manifest(output: &Path, graph: &DependencyGraph) -> Result<()> {
+    let mut fetches: Vec<_> = graph
+        .source_inventory_fetches
+        .iter()
+        .filter_map(|name| graph.fetches.iter().find(|fetch| &fetch.name == name))
+        .collect();
+    fetches.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut body = format!("set(AROS_SOURCE_INVENTORY_FETCH_COUNT {})\n", fetches.len());
+    for (index, fetch) in fetches.into_iter().enumerate() {
+        let fields = [
+            ("NAME", fetch.name.as_str()),
+            ("ARCHIVE", fetch.archive.as_str()),
+            ("SUFFIXES", fetch.suffixes.as_str()),
+            ("ORIGINS", fetch.origins.as_str()),
+            ("LOCATION", fetch.location.as_str()),
+            ("DESTINATION", fetch.destination.as_str()),
+            ("BASE", fetch.base.as_str()),
+            ("PATCH_ORIGINS", fetch.patch_origins.as_str()),
+            ("PATCHES", fetch.patches.as_str()),
+        ];
+        for (field, value) in fields {
+            let _ = writeln!(
+                body,
+                "set(AROS_SOURCE_INVENTORY_FETCH_{index}_{field} \"{}\")",
+                cmake_quoted_value(value)
+            );
+        }
+    }
+    fs::write(output.with_extension("source-inventory.cmake"), body)?;
     Ok(())
 }
 

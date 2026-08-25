@@ -1936,9 +1936,13 @@ mod tests {
             name: "consumer".to_owned(),
             dependencies: vec!["example-fetch".to_owned()],
         });
+        assert!(graph
+            .resolve_source_inventory_fetches(&["${AROS_PORTS_DIR}/example-1.0/src/*.c".to_owned()])
+            .is_empty());
 
         let cmake = generate_cmake(&graph);
         assert!(cmake.contains("aros_fetch_archive(NAME \"example-fetch\""));
+        assert_eq!(graph.source_inventory_fetches, ["example-fetch"]);
         assert!(cmake.contains("aros_add_target_dependency(\"consumer\" \"${dep}\")"));
         assert!(!cmake.contains("add_custom_target(\"example-fetch\")"));
     }

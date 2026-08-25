@@ -281,11 +281,17 @@ fn evaluate_output_directory(
 
 fn record_partial_source_lists(
     output: &mut Vec<String>,
+    source_inventory_patterns: &mut Vec<String>,
     sources: &EvaluatedSources,
     relative_dir: &Path,
     invocation: &Invocation,
     mmake: &str,
 ) {
+    for pattern in &sources.deferred_wildcards {
+        if !source_inventory_patterns.contains(pattern) {
+            source_inventory_patterns.push(pattern.clone());
+        }
+    }
     output.extend(sources.diagnostics.iter().map(|diagnostic| {
         format!(
             "{}:{}: %{} mmake={mmake} {diagnostic}",
@@ -1084,6 +1090,7 @@ fn parse_mmakefile_impl(
         }
     }
     let mut partial_source_lists: Vec<String> = Vec::new();
+    let mut source_inventory_patterns: Vec<String> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
@@ -1248,6 +1255,7 @@ fn parse_mmakefile_impl(
             };
             record_partial_source_lists(
                 &mut partial_source_lists,
+                &mut source_inventory_patterns,
                 &sources,
                 &rel_dir,
                 inv,
@@ -1589,6 +1597,7 @@ fn parse_mmakefile_impl(
         };
         record_partial_source_lists(
             &mut partial_source_lists,
+            &mut source_inventory_patterns,
             &sources,
             &rel_dir,
             inv,
@@ -1944,6 +1953,7 @@ fn parse_mmakefile_impl(
         };
         record_partial_source_lists(
             &mut partial_source_lists,
+            &mut source_inventory_patterns,
             &sources,
             &rel_dir,
             inv,
@@ -2388,6 +2398,7 @@ fn parse_mmakefile_impl(
         skipped_conditions,
         skipped_programs,
         partial_source_lists,
+        source_inventory_patterns,
         skipped_client_archives,
         unresolved_output_paths,
         packages,
@@ -3532,6 +3543,9 @@ FILES := gdbstop
         assert!(parsed.partial_source_lists.iter().any(|diagnostic| {
             diagnostic.contains("workbench-libs-freetype-linklib")
                 && diagnostic.contains("omitted unresolved source fragment")
+        }));
+        assert!(parsed.source_inventory_patterns.iter().any(|pattern| {
+            pattern == "${AROS_PORTS_DIR}/freetype2/freetype-2.14.3/builds/aros/src/base/*.c"
         }));
     }
 

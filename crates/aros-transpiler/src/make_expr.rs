@@ -618,7 +618,7 @@ impl<'a> Evaluator<'a> {
         let mut output = Vec::new();
 
         for original_pattern in expanded_patterns.split_whitespace() {
-            let (materialized_pattern, glob_pattern, source_backed) =
+            let (materialized_pattern, glob_pattern, backing) =
                 if let Some(suffix) = original_pattern.strip_prefix("${CMAKE_SOURCE_DIR}") {
                     if suffix.contains("${") {
                         return Err(MakeExprError::DeferredWildcard {
@@ -628,7 +628,25 @@ impl<'a> Evaluator<'a> {
                     (
                         concatenate_path_prefix(&self.source_text, suffix),
                         concatenate_path_prefix(&escaped_source, suffix),
-                        true,
+                        Some((self.source_text.clone(), "${CMAKE_SOURCE_DIR}".to_owned())),
+                    )
+                } else if let Some(suffix) = original_pattern.strip_prefix("${AROS_PORTS_DIR}") {
+                    if suffix.contains("${") {
+                        return Err(MakeExprError::DeferredWildcard {
+                            pattern: original_pattern.to_owned(),
+                        });
+                    }
+                    let Some(ports_root) = self.dirs.materialized_path("AROS_PORTS_DIR") else {
+                        return Err(MakeExprError::DeferredWildcard {
+                            pattern: original_pattern.to_owned(),
+                        });
+                    };
+                    let ports_text = path_text(ports_root, "Ports directory")?;
+                    let escaped_ports = Pattern::escape(&ports_text);
+                    (
+                        concatenate_path_prefix(&ports_text, suffix),
+                        concatenate_path_prefix(&escaped_ports, suffix),
+                        Some((ports_text, "${AROS_PORTS_DIR}".to_owned())),
                     )
                 } else {
                     if original_pattern.contains("${") {
@@ -642,7 +660,7 @@ impl<'a> Evaluator<'a> {
                     } else {
                         concatenate_path_prefix(&escaped_root, original_pattern)
                     };
-                    (original_pattern.to_owned(), glob_pattern, false)
+                    (original_pattern.to_owned(), glob_pattern, None)
                 };
             if materialized_pattern.contains("${") {
                 return Err(MakeExprError::DeferredWildcard {
@@ -664,21 +682,21 @@ impl<'a> Evaluator<'a> {
                 if regular_files_only && !path.is_file() {
                     continue;
                 }
-                if source_backed {
-                    let relative =
-                        path.strip_prefix(Path::new(&self.source_text))
-                            .map_err(|_| MakeExprError::Wildcard {
-                                pattern: original_pattern.to_owned(),
-                                detail: format!(
-                                    "match `{}` escaped the source directory",
-                                    path.display()
-                                ),
-                            })?;
-                    let relative = path_text(relative, "source-relative wildcard result")?;
+                if let Some((physical_root, logical_root)) = &backing {
+                    let relative = path.strip_prefix(Path::new(physical_root)).map_err(|_| {
+                        MakeExprError::Wildcard {
+                            pattern: original_pattern.to_owned(),
+                            detail: format!(
+                                "match `{}` escaped the materialized directory `{physical_root}`",
+                                path.display()
+                            ),
+                        }
+                    })?;
+                    let relative = path_text(relative, "materialized wildcard result")?;
                     matches.push(if relative.is_empty() {
-                        "${CMAKE_SOURCE_DIR}".to_owned()
+                        logical_root.clone()
                     } else {
-                        format!("${{CMAKE_SOURCE_DIR}}/{relative}")
+                        format!("{logical_root}/{relative}")
                     });
                     continue;
                 }
@@ -691,6 +709,20 @@ impl<'a> Evaluator<'a> {
                 matches.push(path_text(shown, "wildcard result")?);
             }
             matches.sort();
+            // An empty source-tree wildcard is ordinary Make behaviour. An
+            // empty wildcard below a fetched Ports root, however, means the
+            // configure-time source inventory is not present yet. Preserve
+            // that distinction so the graph can order the fetch and rerun
+            // CMake instead of silently linking a partial module.
+            if matches.is_empty()
+                && backing
+                    .as_ref()
+                    .is_some_and(|(_, logical)| logical == "${AROS_PORTS_DIR}")
+            {
+                return Err(MakeExprError::DeferredWildcard {
+                    pattern: original_pattern.to_owned(),
+                });
+            }
             output.extend(matches);
         }
         Ok(output)
@@ -1325,6 +1357,46 @@ mod tests {
             evaluate("FILES := $(wildcard $(GENDIR)/*.c)\n", "$(FILES)"),
             Err(MakeExprError::DeferredWildcard { pattern })
                 if pattern == "${AROS_BUILD_DIR}/gen/*.c"
+        ));
+    }
+
+    #[test]
+    fn fetched_port_wildcards_use_physical_files_but_keep_logical_paths() {
+        let tree = TempTree::new();
+        let components = tree.0.join("acpica/source/components/executer");
+        fs::create_dir_all(&components).unwrap();
+        fs::write(components.join("second.c"), "").unwrap();
+        fs::write(components.join("first.c"), "").unwrap();
+
+        let scope = collect_vars("");
+        let mut dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
+        dirs.set_materialized_path("AROS_PORTS_DIR", tree.0.clone());
+        let context = MakeExprContext::new(
+            &scope,
+            &dirs,
+            usize::MAX,
+            Path::new("."),
+            Path::new("fixture"),
+        );
+        assert_eq!(
+            evaluate_make_list(
+                "$(wildcard ${AROS_PORTS_DIR}/acpica/source/components/executer/*.c)",
+                &context
+            )
+            .unwrap(),
+            vec![
+                "${AROS_PORTS_DIR}/acpica/source/components/executer/first.c",
+                "${AROS_PORTS_DIR}/acpica/source/components/executer/second.c",
+            ]
+        );
+
+        assert!(matches!(
+            evaluate_make_expr(
+                "$(wildcard ${AROS_PORTS_DIR}/missing/components/*.c)",
+                &context
+            ),
+            Err(MakeExprError::DeferredWildcard { pattern })
+                if pattern == "${AROS_PORTS_DIR}/missing/components/*.c"
         ));
     }
 

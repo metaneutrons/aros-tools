@@ -17,7 +17,7 @@
 
 use aros_common::read_source;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How deep a `$(VAR)` chain may nest before it is treated as unresolvable.
 ///
@@ -70,6 +70,11 @@ const SEEDS: &[(&str, &str)] = &[
 /// Directory variables resolved to CMake expressions.
 pub struct DirVars {
     resolved: HashMap<String, String>,
+    /// Physical configure-time counterparts for selected deferred CMake
+    /// roots.  Values written to generated CMake remain the symbolic entries
+    /// in `resolved`; this map exists only so filesystem-dependent Make
+    /// functions can inspect an already fetched build tree.
+    materialized: HashMap<String, PathBuf>,
     /// Assignments that could not be resolved, and why. Retained for callers'
     /// diagnostics rather than inserted as misleading literal paths.
     pub unresolved: Vec<String>,
@@ -91,6 +96,7 @@ impl DirVars {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
+            materialized: HashMap::new(),
             unresolved: Vec::new(),
             undecided_conditions: Vec::new(),
         };
@@ -100,6 +106,21 @@ impl DirVars {
         };
         me.absorb(&text);
         me
+    }
+
+    /// Supplies the physical path behind one deferred CMake directory.
+    ///
+    /// The logical value is deliberately not replaced: emitted paths must
+    /// continue to use `${AROS_PORTS_DIR}` rather than capture one build
+    /// directory in a portable generated graph.
+    pub fn set_materialized_path(&mut self, name: &str, path: PathBuf) {
+        self.materialized.insert(name.to_owned(), path);
+    }
+
+    /// Returns the configure-time filesystem path for a deferred root.
+    #[must_use]
+    pub fn materialized_path(&self, name: &str) -> Option<&Path> {
+        self.materialized.get(name).map(PathBuf::as_path)
     }
 
     /// Reads the assignments of one Make fragment in file order.
@@ -374,6 +395,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
+            materialized: std::collections::HashMap::new(),
             unresolved: Vec::new(),
             undecided_conditions: Vec::new(),
         };

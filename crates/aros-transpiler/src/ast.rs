@@ -546,6 +546,9 @@ pub struct ParsedMmakefile {
     /// Source lanes omitted from an otherwise retained legacy target because
     /// their Make expression cannot yet be evaluated faithfully.
     pub partial_source_lists: Vec<String>,
+    /// Fetched-tree wildcard patterns that need their owning fetch to finish
+    /// before a second configure can obtain the complete source inventory.
+    pub source_inventory_patterns: Vec<String>,
     /// Modules whose genmodule config demands a client archive that the target
     /// model does not build yet, because the archive's generated sources are
     /// only derived for `modtype=library`.
