@@ -363,12 +363,21 @@ fn read_failures(serial: &str, trace: &str) -> Vec<String> {
 /// Exception records, collapsed by (vector, address).
 ///
 /// `i=1` marks a *software* interrupt, and AROS uses one as its supervisor entry:
-/// `int 0xfe` from KrnSchedule, KrnSwitch and Supervisor. Counting those as
-/// faults reported the system-call mechanism as a defect, five times per run.
+/// `int 0xfe` from KrnSchedule, KrnSwitch and Supervisor. QEMU prefixes a
+/// hardware interrupt record with `Servicing hardware INT=...`. Neither is a
+/// CPU fault; counting them reports a working interrupt path as a defect.
 fn read_faults(trace: &str) -> Vec<Fault> {
     let mut seen: BTreeMap<(u8, u8, u64), usize> = BTreeMap::new();
+    let mut next_record_is_hardware = false;
     for line in trace.lines() {
+        if line.trim_start().starts_with("Servicing hardware INT=") {
+            next_record_is_hardware = true;
+            continue;
+        }
         let Some(at) = line.find(" v=") else { continue };
+        if std::mem::take(&mut next_record_is_hardware) {
+            continue;
+        }
         let rest = &line[at + 3..];
         let Some(vector) = rest.get(..2).and_then(|v| u8::from_str_radix(v, 16).ok()) else {
             continue;
@@ -1076,6 +1085,13 @@ mod tests {
         // AROS enters supervisor mode with int 0xfe; that is the mechanism
         // working, not a defect.
         let trace = "     0: v=fe e=0000 i=1 cpl=3 IP=002b:00000000013a26a9 pc=x\n";
+        assert!(read_faults(trace).is_empty());
+    }
+
+    #[test]
+    fn a_hardware_interrupt_is_not_a_fault() {
+        let trace = "Servicing hardware INT=0xf6\n\
+                         43: v=f6 e=0000 i=0 cpl=3 IP=002b:0000000001ab7820 pc=x\n";
         assert!(read_faults(trace).is_empty());
     }
 
