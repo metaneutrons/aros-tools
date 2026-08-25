@@ -93,7 +93,10 @@ pub const fn first_lvo(mod_type: &str, noresident: bool) -> u32 {
     }
     match mod_type.as_bytes() {
         b"handler" | b"resource" => 1,
-        b"datatype" | b"mui" | b"mcp" => 6,
+        // MCC belongs with MUI and MCP (config.c:521). Leaving it out put 20
+        // Zune classes, all declared `modtype=mcc`, on the library fallback of 5
+        // instead of 6, so their bases were sized one vector short.
+        b"datatype" | b"mcc" | b"mui" | b"mcp" => 6,
         b"device" => 7,
         // library, usbclass, btclass, hidd, class, gadget, image
         _ => 5,
@@ -925,6 +928,9 @@ mod tests {
         assert_eq!(first_lvo("library", false), 5);
         assert_eq!(first_lvo("hidd", false), 5);
         assert_eq!(first_lvo("datatype", false), 6);
+        assert_eq!(first_lvo("mcc", false), 6);
+        assert_eq!(first_lvo("mcp", false), 6);
+        assert_eq!(first_lvo("mui", false), 6);
         assert_eq!(first_lvo("device", false), 7);
         // An undescribed module gets the library form.
         assert_eq!(first_lvo("", false), 5);
