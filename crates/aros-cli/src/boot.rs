@@ -206,6 +206,7 @@ fn run_qemu(
 ) -> Result<()> {
     let qemu = which::which("qemu-system-x86_64")
         .map_err(|_| miette!("qemu-system-x86_64 is not on PATH"))?;
+    let ram = request.evidence.join("guest-ram.bin");
     let list = modules
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -216,7 +217,20 @@ fn run_qemu(
     command
         // Fixed machine, so two runs are comparable. -no-reboot turns a triple
         // fault into an exit instead of an endless loop.
-        .args(["-machine", "q35"])
+        // The guest's RAM is backed by a file in the evidence directory, so a
+        // fault can be read rather than guessed at. Point 27g stalled on
+        // exactly this: `FindMem` walks SysBase->MemList and dereferences a
+        // successor holding x86 code, and saying which node and where it came
+        // from needs the memory, not the trace.
+        .args([
+            "-object",
+            &format!(
+                "memory-backend-file,id=guest-ram,size={}M,mem-path={},share=on",
+                request.memory_mb,
+                ram.display()
+            ),
+        ])
+        .args(["-machine", "q35,memory-backend=guest-ram"])
         .args(["-cpu", "qemu64,+avx2"])
         .args(["-smp", "1"])
         .args(["-m", &request.memory_mb.to_string()])
