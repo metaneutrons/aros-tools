@@ -372,6 +372,34 @@ fn resident_flags(module: &ConfModule) -> String {
     }
 }
 
+/// The number of jump-table vectors a module's base needs, following
+/// `tools/genmodule/writeinclibdefs.c:20`.
+///
+/// This is the *highest LVO*, not the number of functions. A `.skip N` line in
+/// the function list reserves N vectors without declaring a function, so a list
+/// of 59 functions with 12 reserved LVOs occupies 71 slots. `FUNCTIONS_COUNT` is
+/// what sizes the allocation -- the generated start code computes
+/// `vecsize = FUNCTIONS_COUNT * LIB_VECTSIZE` (`writestart.c:1055`), and a
+/// hand-written base allocator does the same -- while `MakeFunctions` walks the
+/// function table to its `-1` terminator, which covers every reserved LVO.
+/// Counting functions therefore under-allocates by exactly the reserved vectors,
+/// and `MakeFunctions` writes below the allocation.
+///
+/// That was not hypothetical: kernel.resource has 59 functions and 12 reserved
+/// LVOs, so its base was allocated 0x60 bytes short, and `MakeFunctions` wrote
+/// its lowest 12 vectors over the ROM MemHeader that `krnCreateROMHeader` had
+/// just linked into `SysBase->MemList`. `FindMem` then walked into the wreckage.
+/// OPEN-POINTS 27g. 48 conf files in the tree use `.skip`.
+///
+/// The reference takes the last entry of a list it built in LVO order; taking
+/// the maximum is the same value there and does not depend on that ordering.
+/// An empty list falls back to `firstlvo - 1`, as the reference does.
+fn functions_count(module: &ConfModule) -> u32 {
+    module.functions.iter().map(|f| f.lvo).max().unwrap_or_else(|| {
+        varargs::first_lvo(&module.mod_type, module.no_resident).saturating_sub(1)
+    })
+}
+
 /// The reference's default basename: the module name with its first letter
 /// capitalised (`tools/genmodule/config.c:1334`).
 ///
@@ -779,7 +807,7 @@ fn generate_sdk_headers(
         "#define LIBFUNCTABLE     GM_UNIQUENAME(FuncTable)".to_owned(),
         format!("#define RESIDENTPRI      {}", module.resident_pri),
         format!("#define RESIDENTFLAGS    {flags}"),
-        format!("#define FUNCTIONS_COUNT  {}", module.functions.len()),
+        format!("#define FUNCTIONS_COUNT  {}", functions_count(module)),
     ] {
         libdefs.push_str(&line);
         libdefs.push('\n');
@@ -1130,6 +1158,11 @@ mod tests {
     }
 
     fn module(mod_type: &str, funcs: usize, cdef: &str) -> ConfModule {
+        // LVOs run consecutively from the module type's first, which is what a
+        // conf without `.skip` produces. A fixture that left them at 0 would
+        // hide the difference between counting functions and taking the
+        // highest LVO.
+        let first = varargs::first_lvo(mod_type, false);
         ConfModule {
             name: "x".to_owned(),
             mod_type: mod_type.to_owned(),
@@ -1141,7 +1174,7 @@ mod tests {
                     args: Vec::new(),
                     private: false,
                     novararg: false,
-                    lvo: 0,
+                    lvo: first + u32::try_from(i).expect("fixture function count fits u32"),
                     stack_call: true,
                     declared_version: None,
                     aliases: Vec::new(),
@@ -1149,6 +1182,37 @@ mod tests {
                 .collect(),
             ..ConfModule::default()
         }
+    }
+
+    /// `.skip` reserves vectors without declaring a function, so the vector
+    /// count is the highest LVO and not the function count. kernel.resource is
+    /// the measured case: 59 functions, 12 reserved LVOs, 71 slots. Sizing the
+    /// base from 59 let MakeFunctions write 0x60 bytes below the allocation,
+    /// over the ROM MemHeader. OPEN-POINTS 27g.
+    #[test]
+    fn functions_count_is_the_highest_lvo_not_the_function_count() {
+        // A resource starts at LVO 1, so consecutive LVOs make the two equal.
+        let dense = module("resource", 59, "");
+        assert_eq!(functions_count(&dense), 59);
+
+        // Reserving 12 LVOs across the list leaves 59 functions on 71 slots.
+        let mut sparse = module("resource", 59, "");
+        sparse.functions[58].lvo = 71;
+        assert_eq!(functions_count(&sparse), 71);
+        assert_eq!(sparse.functions.len(), 59);
+
+        // A library's own vectors start at 5, so even a dense list is offset.
+        let library = module("library", 3, "");
+        assert_eq!(functions_count(&library), 7);
+    }
+
+    /// An empty function list still reserves the module type's own vectors:
+    /// `firstlvo - 1`, as `writeinclibdefs.c:21` has it.
+    #[test]
+    fn functions_count_without_functions_reserves_the_type_vectors() {
+        assert_eq!(functions_count(&module("library", 0, "")), 4);
+        assert_eq!(functions_count(&module("device", 0, "")), 6);
+        assert_eq!(functions_count(&module("resource", 0, "")), 0);
     }
 
     #[test]
