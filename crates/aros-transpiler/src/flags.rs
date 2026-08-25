@@ -691,18 +691,37 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
         }
     }
 
-    if conditionally_replaced_before(scope, "USER_LDFLAGS", line) {
-        set.skipped.push("$(USER_LDFLAGS)".to_owned());
-    } else if let Some(raw) = scope.raw_at("USER_LDFLAGS", line) {
-        let expanded = expand_scoped(&raw, scope, line, "USER_LDFLAGS", 8);
-        for tok in split_flags(&expanded) {
-            classify_link(tok, &mut set);
-        }
-    }
+    let link_flags = collect_named_link_flags_at(scope, line, "USER_LDFLAGS");
+    set.link_options.extend(link_flags.link_options);
+    set.spec_switches.extend(link_flags.spec_switches);
+    set.skipped.extend(link_flags.skipped);
 
     set.defines.dedup();
     set.undefines.dedup();
     set.compile_options.dedup();
+    set.link_options.dedup();
+    set.spec_switches.dedup();
+    set.skipped.dedup();
+    set
+}
+
+/// Collects the linker flags stored in one named Make variable at a build
+/// declaration.
+///
+/// Module templates add `<modname>_LDFLAGS` after their ordinary global link
+/// flags. That is the native way for a file containing several declarations
+/// to alter only one link; reading only `USER_LDFLAGS` loses that distinction.
+#[must_use]
+pub(crate) fn collect_named_link_flags_at(scope: &VarScope, line: usize, name: &str) -> FlagSet {
+    let mut set = FlagSet::default();
+    if conditionally_replaced_before(scope, name, line) {
+        set.skipped.push(format!("$({name})"));
+    } else if let Some(raw) = scope.raw_at(name, line) {
+        let expanded = expand_scoped(&raw, scope, line, name, 8);
+        for tok in split_flags(&expanded) {
+            classify_link(tok, &mut set);
+        }
+    }
     set.link_options.dedup();
     set.spec_switches.dedup();
     set.skipped.dedup();

@@ -15,7 +15,7 @@ use crate::collector::{
 use crate::copy_directories;
 use crate::copy_includes::collect_copy_includes_with_scope;
 use crate::fetch::{collect_fetches_with_scope, FetchDecl};
-use crate::flags::{collect_flags, collect_flags_at, FlagSet};
+use crate::flags::{collect_flags, collect_flags_at, collect_named_link_flags_at, FlagSet};
 use crate::flexcat::collect_flexcat_source_rules;
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
 use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
@@ -174,6 +174,25 @@ fn declaration_flags_at(
         }
     }
     flags
+}
+
+fn merge_named_link_flags(flags: &mut FlagSet, scope: &VarScope, line: usize, variable: &str) {
+    let local = collect_named_link_flags_at(scope, line, variable);
+    for option in local.link_options {
+        if !flags.link_options.contains(&option) {
+            flags.link_options.push(option);
+        }
+    }
+    for switch in local.spec_switches {
+        if !flags.spec_switches.contains(&switch) {
+            flags.spec_switches.push(switch);
+        }
+    }
+    for skipped in local.skipped {
+        if !flags.skipped.contains(&skipped) {
+            flags.skipped.push(skipped);
+        }
+    }
 }
 
 fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<GenmoduleConfigFacts> {
@@ -1859,6 +1878,17 @@ fn parse_mmakefile_impl(
                 }
             }
         };
+        if matches!(module_type, ModuleType::SimpleModule) {
+            // config/make.tmpl appends `<modname>_LDFLAGS` only to this bare
+            // module's link. Preserve that scope instead of forcing a
+            // file-global USER_LDFLAGS change onto neighbouring modules.
+            merge_named_link_flags(
+                &mut declaration_flags,
+                &scope,
+                inv.line,
+                &format!("{target_name}_LDFLAGS"),
+            );
+        }
 
         let resolved_generated_files = if module_type == ModuleType::LinkLib {
             match macro_arg(&inv.args, "files") {
@@ -3087,6 +3117,28 @@ FILES := gdbstop
             ]
         );
         assert_eq!(scope.raw_at("ICONS", inv.line).as_deref(), Some("A B C D"));
+    }
+
+    #[test]
+    fn usbromstartup_nostdc_is_scoped_to_the_simple_module() {
+        let root = root();
+        let parsed = super::parse_mmakefile_with_dirs_and_context(
+            &root.join("rom/usb/poseidon/mmakefile.src"),
+            &root,
+            &dirs(),
+            &target_context("x86_64", "pc", ""),
+        )
+        .unwrap();
+        let targets: BTreeMap<_, _> = parsed
+            .targets
+            .iter()
+            .map(|target| (target.mmake_name.as_str(), target))
+            .collect();
+        let poseidon = targets.get("kernel-usb-poseidon").unwrap();
+        let usbromstartup = targets.get("kernel-usb-usbromstartup").unwrap();
+
+        assert!(!poseidon.spec_switches.iter().any(|value| value == "nostdc"));
+        assert_eq!(usbromstartup.spec_switches, ["nostdc"]);
     }
 
     #[test]
