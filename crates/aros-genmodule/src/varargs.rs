@@ -401,6 +401,76 @@ fn render_taglist_stub(f: &Function, vararg_name: &str, mod_upper: &str) -> Stri
     out
 }
 
+/// Renders the reference's RAWARG formatting wrapper.
+///
+/// The public variadic form receives the format string inside `__VA_ARGS__`.
+/// Its inline helper names that string as the final fixed parameter so
+/// `AROS_SLOWSTACKFORMAT_*` can turn the following C varargs into the target's
+/// RAWARG data stream before calling the register ABI entry point.
+fn render_rawarg_stub(
+    f: &Function,
+    vararg_name: &str,
+    cx: &DefinesContext<'_>,
+    mod_upper: &str,
+) -> Option<String> {
+    let fixed = f.args.get(..f.args.len().checked_sub(1)?)?;
+    if fixed.is_empty() {
+        return None;
+    }
+    let format_index = fixed.len();
+    let ret = f.ret_type.trim();
+    let is_void = matches!(ret, "void" | "VOID");
+    let mut out = String::with_capacity(1024);
+    let _ = writeln!(
+        out,
+        "\n#if !defined(NO_INLINE_STDARG) && !defined({mod_upper}_NO_INLINE_STDARG)"
+    );
+    let _ = write!(
+        out,
+        "static inline {ret} __inline_{}_{}({} __{}",
+        cx.basename, vararg_name, cx.lib_base_type_extern, cx.lib_base
+    );
+    for (index, arg) in fixed.iter().enumerate() {
+        let _ = write!(out, ", {} __arg{}", arg.ty.trim(), index + 1);
+    }
+    out.push_str(", ...)\n{\n");
+    if !is_void {
+        let _ = writeln!(out, "    {ret} retval;\n");
+    }
+    let _ = writeln!(out, "    AROS_SLOWSTACKFORMAT_PRE(__arg{format_index});");
+    let _ = write!(
+        out,
+        "    {}__{}_WB(__{}",
+        if is_void { "" } else { "retval = " },
+        f.name,
+        cx.lib_base
+    );
+    for index in 1..=fixed.len() {
+        let _ = write!(out, ", __arg{index}");
+    }
+    let _ = writeln!(out, ", AROS_SLOWSTACKFORMAT_ARG(__arg{format_index}));");
+    let _ = writeln!(out, "    AROS_SLOWSTACKFORMAT_POST(__arg{format_index});");
+    let _ = writeln!(out, "    return{};", if is_void { "" } else { " retval" });
+    out.push_str("}\n\n");
+
+    let named_macro_args = fixed.len().saturating_sub(1);
+    let params = (1..=named_macro_args)
+        .map(|index| format!("arg{index}, "))
+        .collect::<String>();
+    let _ = writeln!(out, "#define {vararg_name}({params}...) \\");
+    let _ = write!(
+        out,
+        "    __inline_{}_{}(({})__{}_LIBBASE, ",
+        cx.basename, vararg_name, cx.lib_base_type_extern, mod_upper
+    );
+    for index in 1..=named_macro_args {
+        let _ = write!(out, "(arg{index}), ");
+    }
+    out.push_str("__VA_ARGS__)\n");
+    let _ = writeln!(out, "#endif /* !NO_INLINE_STDARG */");
+    Some(out)
+}
+
 /// Result of rendering a module's `defines/<mod>.h`.
 #[derive(Debug, Default)]
 pub struct DefinesOutput {
@@ -452,7 +522,7 @@ fn render_register_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> S
     }
 
     for f in functions {
-        if f.private || f.stack_call || f.lvo < cx.first_lvo {
+        if f.private || f.stack_call || (f.lvo < cx.first_lvo) {
             continue;
         }
         let version = f
@@ -563,7 +633,7 @@ fn lc_suffix(f: &Function) -> String {
     let mut out = String::new();
     let mut current = kinds[0];
     let mut run = 0usize;
-    let mut flush = |kind: Kind, run: usize, out: &mut String| match kind {
+    let flush = |kind: Kind, run: usize, out: &mut String| match kind {
         Kind::Double => {
             let _ = write!(out, "DOUBLE{run}");
         }
@@ -623,6 +693,14 @@ pub fn render_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> Define
         match kind {
             VarargKind::TagList => {
                 t.push_str(&render_taglist_stub(f, &vararg_name, &upper));
+            }
+            VarargKind::RawArg if !f.stack_call && f.lvo >= cx.first_lvo => {
+                if let Some(stub) = render_rawarg_stub(f, &vararg_name, cx, &upper) {
+                    t.push_str(&stub);
+                } else {
+                    out.unsupported
+                        .push(format!("{include_name}: {} ({kind:?})", f.name));
+                }
             }
             VarargKind::VaList | VarargKind::RawArg => {
                 out.unsupported
@@ -842,6 +920,35 @@ mod tests {
         assert!(out.text.contains("#define OpenWindowTags(arg1, ...) \\"));
         assert!(out.text.contains(
             "    OpenWindowTagList((arg1), (struct TagItem *)(OpenWindowTagList_args)); \\"
+        ));
+    }
+
+    #[test]
+    fn rawarg_format_wrapper_matches_the_reference_shape() {
+        let mut f = func(
+            "APTR",
+            "logAddEntryA",
+            vec![
+                arg("ULONG flags", "ULONG", "flags"),
+                arg("APTR handle", "APTR", "handle"),
+                arg("CONST_STRPTR fmt", "CONST_STRPTR", "fmt"),
+                arg("RAWARG data", "RAWARG", "data"),
+            ],
+        );
+        f.stack_call = false;
+        f.lvo = 10;
+        let out = render_defines(&cx("log", "LogResBase"), std::slice::from_ref(&f));
+        assert!(out.unsupported.is_empty());
+        assert!(out.text.contains(
+            "static inline APTR __inline_Test_logAddEntry(struct Library * __LogResBase, ULONG __arg1, APTR __arg2, CONST_STRPTR __arg3, ...)"
+        ));
+        assert!(out.text.contains("    AROS_SLOWSTACKFORMAT_PRE(__arg3);"));
+        assert!(out.text.contains(
+            "    retval = __logAddEntryA_WB(__LogResBase, __arg1, __arg2, __arg3, AROS_SLOWSTACKFORMAT_ARG(__arg3));"
+        ));
+        assert!(out.text.contains("#define logAddEntry(arg1, arg2, ...) \\"));
+        assert!(out.text.contains(
+            "    __inline_Test_logAddEntry((struct Library *)__LOG_LIBBASE, (arg1), (arg2), __VA_ARGS__)"
         ));
     }
 
