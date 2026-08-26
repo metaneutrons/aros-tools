@@ -23,6 +23,9 @@ pub struct ToolchainPaths {
     pub clangxx: PathBuf,
     pub lld: PathBuf,
     pub llvm_ar: PathBuf,
+    pub aros_collect: PathBuf,
+    pub collect_aros: PathBuf,
+    pub collect_aros32: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +72,9 @@ pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
         clangxx: root.join("bin/clang++"),
         lld: root.join("bin/ld.lld"),
         llvm_ar: root.join("bin/llvm-ar"),
+        aros_collect: root.join("bin/aros-collect"),
+        collect_aros: root.join("bin/collect-aros"),
+        collect_aros32: root.join("bin/collect-aros32"),
     }
 }
 
@@ -420,7 +426,17 @@ fn is_legacy_aros_prefix(root: &Path, preset: &str) -> bool {
 }
 
 fn smoke_host_tools(paths: &ToolchainPaths) -> Result<()> {
-    for (name, path) in [("clang", &paths.clang), ("llvm-ar", &paths.llvm_ar)] {
+    let mut tools = vec![("clang", &paths.clang), ("llvm-ar", &paths.llvm_ar)];
+    if paths.aros_collect.is_file() {
+        tools.push(("aros-collect", &paths.aros_collect));
+    }
+    if paths.collect_aros.is_file() {
+        tools.push(("collect-aros", &paths.collect_aros));
+    }
+    if paths.collect_aros32.is_file() {
+        tools.push(("collect-aros32", &paths.collect_aros32));
+    }
+    for (name, path) in tools {
         let status = Command::new(path)
             .arg("--version")
             .status()
