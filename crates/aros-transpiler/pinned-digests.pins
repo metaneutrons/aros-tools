@@ -31,7 +31,7 @@
 adflib-configure-manifest = a63a7498752d68175093b94dba873cc8a343d75179feec5cd6a6020e56e779a5
 
 # workbench/network/WirelessManager/wirelessmanager-configure.inputs
-wireless-configure-manifest = 27e629e694f6cbc8dd036f7b188604fd03ed901d181962db143a0789512af760
+wireless-configure-manifest = f52d9ca592aadbef6da3104dead4321af8e1f4e5c6cf396f27df079a3f727268
 
 # workbench/devs/AHI/mmakefile.src
 ahi-mmakefile = c1a539d23bf935cce2b0c097b83faeb89d2597970e6380bb6c0c39d3abff1385

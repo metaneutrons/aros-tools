@@ -5360,8 +5360,8 @@ FILES := gdbstop
         }
 
         assert!(output_errors.is_empty(), "{output_errors:#?}");
-        assert_eq!(install_dirs.len(), 61);
-        assert_eq!(suffixes.len(), 44);
+        assert_eq!(install_dirs.len(), 60);
+        assert_eq!(suffixes.len(), 46);
         assert_eq!(
             install_dirs
                 .iter()

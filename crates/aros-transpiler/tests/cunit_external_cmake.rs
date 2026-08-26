@@ -333,6 +333,8 @@ fn every_llvm_external_cmake_declaration_stays_explicitly_skipped() {
         let mut expected = BTreeSet::from([
             "crosstools-libunwind",
             "crosstools-libunwind-release",
+            "crosstools-llvm-runtimes",
+            "crosstools-llvm-runtimes-release",
             "crosstools-compiler-rt",
             "crosstools-compiler-rt-release",
             "crosstools-llvm-toolchain",

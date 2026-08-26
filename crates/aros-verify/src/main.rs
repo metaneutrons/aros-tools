@@ -250,6 +250,10 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
         "mmake=crosstools-libunwind package=libunwind srcdir=$(LIBUNWIND_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_LIBUNWIND_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
+        "crosstools-llvm-runtimes",
+        "mmake=crosstools-llvm-runtimes package=runtimes srcdir=$(MONOTREE_BUILDBASE)/runtimes prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_RUNTIMES_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
         "crosstools-compiler-rt",
         "mmake=crosstools-compiler-rt package=compiler-rt srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
@@ -1830,13 +1834,13 @@ mod tests {
             .map(|declaration| declaration.mmake)
             .collect();
 
-        // Retiring Gallivm removes one false obligation; preserving
-        // dummytest_auto and separating the formerly colliding 2View, HDTool
-        // and target Zopfli declarations restores four real declarations.
-        assert_eq!(global.len(), 1195);
-        assert_eq!(ids(&x86, true).len(), 1076);
-        assert_eq!(ids(&arm, true).len(), 1067);
-        assert_eq!(ids(&aarch64, true).len(), 1067);
+        // The August 2026 upstream sync adds the LLVM runtimes umbrella and
+        // new Bluetooth, Raspberry Pi and driver declarations while replacing
+        // the split rtl8168/rtl8169 lanes with rtl816x.
+        assert_eq!(global.len(), 1211);
+        assert_eq!(ids(&x86, true).len(), 1088);
+        assert_eq!(ids(&arm, true).len(), 1082);
+        assert_eq!(ids(&aarch64, true).len(), 1082);
         assert!(global.contains("test-library-dummytest_auto"));
         assert!(!global.contains("mesa3d-linklib-galliumvm"));
 
@@ -1910,13 +1914,14 @@ mod tests {
             .map(|declaration| declaration.mmake.clone())
             .collect();
 
-        assert_eq!(global_target.len(), 1191);
-        assert_eq!(target_ids(&x86).len(), 1072);
-        assert_eq!(target_ids(&arm).len(), 1064);
-        assert_eq!(target_ids(&aarch64).len(), 1064);
+        assert_eq!(global_target.len(), 1206);
+        assert_eq!(target_ids(&x86).len(), 1083);
+        assert_eq!(target_ids(&arm).len(), 1078);
+        assert_eq!(target_ids(&aarch64).len(), 1078);
         let common_provisioning = BTreeSet::from([
             "crosstools-compiler-rt".to_owned(),
             "crosstools-libunwind".to_owned(),
+            "crosstools-llvm-runtimes".to_owned(),
             "crosstools-llvm-toolchain".to_owned(),
         ]);
         let mut x86_provisioning = common_provisioning.clone();

@@ -1,6 +1,6 @@
 # Semantic fingerprints of the audited LLVM toolchain-provisioning contract.
 #
-# aros-verify classifies four `crosstools-*` declarations as toolchain
+# aros-verify classifies five `crosstools-*` declarations as toolchain
 # provisioning rather than target obligations. That classification is only
 # sound for the contract that was actually read, so it is gated on these
 # digests: recognise exactly the audited files, and fail closed on anything
@@ -22,10 +22,10 @@
 # to be free to change. See OPEN-POINTS 7.
 
 # tools/crosstools/llvm/mmakefile.src
-llvm-mmakefile = 451406c625d28b16889ae746f725ff28cb368356ee7d18061d257f59966019cb
+llvm-mmakefile = dbac4ea25529edd3a9d8fc2b7db88959b21f4f9850dc3463652c5bce6a11dc25
 
 # tools/crosstools/llvm.cfg
-llvm-config = 00554cab8dc4319473490233574700530eb6ae463fe4c97a2ddfd87cf02ad7a0
+llvm-config = 9949658494d928b8a5485725954c4d7684d81b468088b33938e53a9fb64932b9
 
 # The toolchain-input preamble of the top-level CMakeLists.txt
 cmake-toolchain-input = 5c2d0de107d41bd90635868517f4577df229d0afda3208c572df9b37d50025f9
