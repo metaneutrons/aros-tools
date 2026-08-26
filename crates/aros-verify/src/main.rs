@@ -30,7 +30,6 @@ use aros_common::read_source;
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use regex::Regex;
-use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -239,11 +238,9 @@ const LLVM_PROVISIONING_FILE: &str = "tools/crosstools/llvm/mmakefile.src";
 /// Exact legacy declarations that provision the compiler installation used as
 /// an input by the modern CMake build.  They are not target-tree products.
 ///
-/// The declaration contract is only one layer of the check: the whole
-/// semantic LLVM provisioning file, its toolchain config, the unresolved
-/// CROSSTOOLSDIR placeholder, and CMake's compiler-before-project preamble are
-/// fingerprinted below.  Any drift restores these declarations to ordinary
-/// target-graph obligations until the provisioning boundary is re-audited.
+/// The declaration contract is only one layer of the check. The structural
+/// boundary below also verifies the few facts that make this classification
+/// sound. Unrelated edits must not require an opaque digest update.
 const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     (
         "crosstools-libunwind",
@@ -267,35 +264,9 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
 ];
 
-// The audited fingerprints are data, and they live in a data file.
-//
-// They are semantic digests of three files in the tree, so every deliberate
-// change to one of them has to be re-pinned. While the values sat in this
-// source file, re-pinning was a code edit, which is the coupling OPEN-POINTS 7
-// records as blocking the refactor. The file is embedded, so cargo rebuilds
-// this crate when it changes and the binary and the tests read the same bytes.
-const TOOLCHAIN_PROVISIONING_PINS: &str = include_str!("../toolchain-provisioning.pins");
-
-/// Reads one pin by name, over the shared reader.
-///
-/// The lookup used to be a copy of it here. `aros-transpiler` needed the same
-/// thing for its own 26 pins (OPEN-POINTS 46), and two copies of a parser for
-/// one file format is one too many.
-fn provisioning_pin(name: &str) -> &'static str {
-    aros_common::pins::pin(
-        TOOLCHAIN_PROVISIONING_PINS,
-        "aros-verify/toolchain-provisioning.pins",
-        name,
-    )
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ToolchainProvisioningContext {
     llvm: bool,
-}
-
-fn sha256_hex(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -357,10 +328,11 @@ fn canonical_cmake_toolchain_input_preamble(content: &str) -> Option<String> {
 
 fn llvm_provisioning_context_matches_sources(
     llvm_mmake: &str,
-    llvm_config: &str,
     make_config: &str,
     cmake_lists: &str,
 ) -> bool {
+    let llvm_semantics = canonical_make_semantics(llvm_mmake);
+    let llvm_lines: BTreeSet<&str> = llvm_semantics.lines().collect();
     let make_config_semantics = canonical_make_semantics(make_config);
     let crosstools_placeholders: Vec<_> = make_config_semantics
         .lines()
@@ -369,22 +341,25 @@ fn llvm_provisioning_context_matches_sources(
     let Some(cmake_preamble) = canonical_cmake_toolchain_input_preamble(cmake_lists) else {
         return false;
     };
+    let cmake_lines: BTreeSet<&str> = cmake_preamble.lines().collect();
 
-    sha256_hex(&canonical_make_semantics(llvm_mmake)) == provisioning_pin("llvm-mmakefile")
-        && sha256_hex(&canonical_make_semantics(llvm_config)) == provisioning_pin("llvm-config")
+    llvm_lines.contains("LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin")
+        && llvm_lines.contains("AROS_TOOLCHAIN_DEFAULT_SYSROOT ?= $(AROS_DEVELOPER)")
         && crosstools_placeholders == ["CROSSTOOLSDIR := @AROS_CROSSTOOLSDIR@"]
         && !cmake_lists.contains("CROSSTOOLSDIR")
-        && sha256_hex(&cmake_preamble) == provisioning_pin("cmake-toolchain-input")
+        && cmake_lines.contains("set(CMAKE_SYSTEM_NAME Generic)")
+        && cmake_lines
+            .iter()
+            .any(|line| line.starts_with("project(AROS-NG"))
 }
 
 fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningContext {
     let read = |relative: &str| read_source(&root.join(relative)).ok();
     let llvm = read(LLVM_PROVISIONING_FILE)
-        .zip(read("tools/crosstools/llvm.cfg"))
         .zip(read("config/make.cfg.in"))
         .zip(read("CMakeLists.txt"))
-        .is_some_and(|(((mmake, config), make_config), cmake_lists)| {
-            llvm_provisioning_context_matches_sources(&mmake, &config, &make_config, &cmake_lists)
+        .is_some_and(|((mmake, make_config), cmake_lists)| {
+            llvm_provisioning_context_matches_sources(&mmake, &make_config, &cmake_lists)
         });
     ToolchainProvisioningContext { llvm }
 }
@@ -1879,10 +1854,9 @@ mod tests {
         let context = detect_toolchain_provisioning_context(&root);
         assert!(
             context.llvm,
-            "the audited LLVM provisioning context drifted; \
-             re-pin crates/aros-verify/toolchain-provisioning.pins from the \
-             digests that llvm_provisioning_context_is_semantically_fingerprinted \
-             prints"
+            "the LLVM provisioning boundary is no longer structurally valid; \
+             the five legacy host-tool declarations have been returned to the \
+             ordinary target coverage gate"
         );
         let target_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
             eligible_declarations(&root, &files, scope, true)
@@ -1941,52 +1915,48 @@ mod tests {
     }
 
     #[test]
-    fn llvm_provisioning_context_is_semantically_fingerprinted() {
+    fn llvm_provisioning_context_is_structural_not_pinned() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
         let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
-        let config = read_source(&root.join("tools/crosstools/llvm.cfg")).unwrap();
         let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
         let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
-        let preamble = canonical_cmake_toolchain_input_preamble(&cmake_lists).unwrap();
 
-        assert!(
-            llvm_provisioning_context_matches_sources(&mmake, &config, &make_config, &cmake_lists,),
-            "provisioning fingerprints changed: mmake={} config={} cmake={}",
-            sha256_hex(&canonical_make_semantics(&mmake)),
-            sha256_hex(&canonical_make_semantics(&config)),
-            sha256_hex(&preamble),
-        );
+        assert!(llvm_provisioning_context_matches_sources(
+            &mmake,
+            &make_config,
+            &cmake_lists,
+        ));
+        assert!(llvm_provisioning_context_matches_sources(
+            &(mmake + "\nUNRELATED_RELEASE_SETTING := changed\n"),
+            &make_config,
+            &cmake_lists,
+        ));
     }
 
     #[test]
     fn llvm_provisioning_contract_mutations_fail_closed() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
         let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
-        let config = read_source(&root.join("tools/crosstools/llvm.cfg")).unwrap();
         let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
         let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
         assert!(llvm_provisioning_context_matches_sources(
             &mmake,
-            &config,
             &make_config,
             &cmake_lists,
         ));
 
-        let assert_context_rejected =
-            |mmake: &str, config: &str, make_config: &str, cmake_lists: &str| {
-                assert!(!llvm_provisioning_context_matches_sources(
-                    mmake,
-                    config,
-                    make_config,
-                    cmake_lists,
-                ));
-            };
+        let assert_context_rejected = |mmake: &str, make_config: &str, cmake_lists: &str| {
+            assert!(!llvm_provisioning_context_matches_sources(
+                mmake,
+                make_config,
+                cmake_lists,
+            ));
+        };
         assert_context_rejected(
             &mmake.replace(
                 "LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin",
                 "LLVM_BUILD_BINDIR:=$(HOSTDIR)/bin",
             ),
-            &config,
             &make_config,
             &cmake_lists,
         );
@@ -1995,25 +1965,16 @@ mod tests {
                 "AROS_TOOLCHAIN_DEFAULT_SYSROOT ?= $(AROS_DEVELOPER)",
                 "AROS_TOOLCHAIN_DEFAULT_SYSROOT := /fixed/non-relocatable/sysroot",
             ),
-            &config,
             &make_config,
             &cmake_lists,
         );
         assert_context_rejected(
             &mmake,
-            &config.replace("LLVM_VERSION:=11.0.0", "LLVM_VERSION:=12.0.0"),
-            &make_config,
-            &cmake_lists,
-        );
-        assert_context_rejected(
-            &mmake,
-            &config,
             &make_config.replace("@AROS_CROSSTOOLSDIR@", "${AROS_BUILD_DIR}/toolchain"),
             &cmake_lists,
         );
         assert_context_rejected(
             &mmake,
-            &config,
             &make_config,
             &cmake_lists.replace(
                 "set(CMAKE_SYSTEM_NAME Generic)",

@@ -18,4 +18,3 @@ clap.workspace = true
 anyhow.workspace = true
 regex.workspace = true
 rayon.workspace = true
-sha2.workspace = true
