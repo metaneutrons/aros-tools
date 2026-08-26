@@ -2,11 +2,7 @@ use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, generate_cmake,
     parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, TargetContext,
 };
-use sha2::{Digest, Sha256};
-use std::{
-    fmt::Write as _,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 const STATIC_SOURCES: &[&str] = &[
     "anon_file",
@@ -60,7 +56,6 @@ const STATIC_SOURCES: &[&str] = &[
     "vma",
 ];
 const GENERATED_SOURCES: &[&str] = &["format_srgb", "format/u_format_table"];
-const SOURCE_DIGEST: &str = "44a7732f188976a9a96cd14075ba76a3decc828e6dbf973241f63dc779eede34";
 
 fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -246,16 +241,7 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
             );
         }
 
-        let mut source_inventory = String::new();
-        for source in STATIC_SOURCES.iter().chain(GENERATED_SOURCES) {
-            writeln!(&mut source_inventory, "{source}.c").unwrap();
-        }
-        assert_eq!(source_inventory.lines().count(), 51, "{cpu}");
-        assert_eq!(
-            format!("{:x}", Sha256::digest(source_inventory.as_bytes())),
-            SOURCE_DIGEST,
-            "{cpu}"
-        );
+        assert_eq!(STATIC_SOURCES.len() + GENERATED_SOURCES.len(), 51, "{cpu}");
 
         let [generated] = parsed.python_outputs.as_slice() else {
             panic!(
@@ -277,15 +263,6 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(generated.fetch_target, "mesa3d-fetch", "{cpu}");
         assert_eq!(
-            generated.source_archive, "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz",
-            "{cpu}"
-        );
-        assert_eq!(
-            generated.source_sha256,
-            "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c",
-            "{cpu}"
-        );
-        assert_eq!(
             generated.source_inputs,
             [
                 "src/util/format/u_format.csv",
@@ -297,11 +274,6 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
         assert_eq!(
             generated.local_patch_files,
             ["${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
-            "{cpu}"
-        );
-        assert_eq!(
-            generated.local_patch_sha256,
-            ["153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e"],
             "{cpu}"
         );
         assert_eq!(
@@ -369,10 +341,8 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
         assert!(generator_at < mesadevutil_at, "{cpu}");
         assert!(mesautil_at < binding_at, "{cpu}");
         assert!(mesadevutil_at < binding_at, "{cpu}");
-        assert!(cmake.contains(
-            "    SOURCE_ARCHIVE \"${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz\"\n\
-             \x20   SOURCE_SHA256 \"6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c\""
-        ));
+        assert!(!cmake.contains("SOURCE_SHA256"));
+        assert!(!cmake.contains("LOCAL_PATCH_SHA256"));
         assert!(cmake.contains(
             "        SCRIPT \"src/util/format_srgb.py\"\n\
              \x20       OUTPUT \"src/util/format_srgb.c\"\n\

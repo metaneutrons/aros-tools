@@ -7,7 +7,7 @@
 //! together: the provider's variable manifest, its product closure, and the
 //! consumer's marked header.
 //!
-//! Named for the mechanism rather than for its one current user. The pinned
+//! Named for the mechanism rather than for its one current user. The checked
 //! variable list is Atheros HAL's, but nothing here is about wireless.
 //!
 //! This was the last family to move, and the reason is worth keeping: it runs

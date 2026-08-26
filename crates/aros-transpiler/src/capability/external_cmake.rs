@@ -11,7 +11,6 @@ use crate::ast::ExternalCMakeDecl;
 use crate::fetch::FetchDecl;
 use crate::make_expr::{evaluate_make_expr, evaluate_make_list, MakeExprContext};
 use crate::parser::{evaluate_name, macro_arg, macro_argument_names, Invocation, TargetContext};
-use crate::pins::pin;
 use std::path::Path;
 
 pub(crate) const AOM_DECLARED_CAPABILITY: &str = "\
@@ -134,7 +133,6 @@ pub(crate) fn parse(
     const CUNIT_SOURCE: &str = "${AROS_PORTS_DIR}/cunit/cunit-3.5.5";
     const CUNIT_PREFIX: &str = "${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras";
     const CUNIT_FETCH: &str = "cunit-fetch";
-    const CUNIT_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/cunit-3.5.5.tar.bz2";
     const DECLARED_OPTIONS: &[&str] = &[
         "-DCUNIT_DISABLE_EXAMPLES=yes",
         "-DCUNIT_DISABLE_TESTS=yes",
@@ -267,13 +265,8 @@ pub(crate) fn parse(
         binary_dir: "${AROS_BUILD_DIR}/gen/external-cmake/compiler/cunit".to_owned(),
         install_prefix: install_prefix.clone(),
         fetch_target: CUNIT_FETCH.to_owned(),
-        source_archive: CUNIT_ARCHIVE.to_owned(),
-        source_sha256: pin("cunit-archive").to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff".to_owned()
-        ],
-        local_patch_sha256: vec![
-            "481b9d4544e7fae9f47dc821f343cbb5f417ea8abc76c1a8f9f9177ab7420197".to_owned(),
         ],
         provided_library: "cunit".to_owned(),
         provider_target: "linklibs-yes-cunit-external-cunit".to_owned(),
@@ -466,15 +459,9 @@ pub(crate) fn parse_aom(
             .to_owned(),
         install_prefix: install_prefix.clone(),
         fetch_target: AOM_FETCH.to_owned(),
-        source_archive: "${AROS_PORTS_SOURCE_DIR}/libaom-3.12.1.tar.gz".to_owned(),
-        source_sha256: "9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e"
-            .to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"
                 .to_owned(),
-        ],
-        local_patch_sha256: vec![
-            "c3caf62de4cd3524ddcf7c1b0111909c6d0f44081200324ab12090fcd8fb48ce".to_owned(),
         ],
         provided_library: "aom".to_owned(),
         provider_target: "datatypes-heic-linklibs-aom-external-aom".to_owned(),

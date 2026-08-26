@@ -2,27 +2,24 @@
 //!
 //! Mesa generates C from XML and CSV with Python scripts, and the legacy
 //! recipes that do it are shell text. They are not treated as a command
-//! language: the complete semantic block of each recipe is pinned, as are the
-//! source profile, the central fetch declaration and the local patch. On any
-//! drift the ordinary target stays visible and no Python command is emitted,
-//! which is the difference between a missing generated file and a build that
-//! runs something nobody audited.
+//! language: the complete semantic block of each recipe is fingerprinted,
+//! while source profiles and fetch declarations are checked semantically. On
+//! drift the transpiler fails with an update-required diagnostic.
 
-use super::super::normalized_make_capability_block;
+use super::super::{normalized_make_capability_block, require_text_fingerprint};
 use crate::ast::{ModuleType, PythonGeneratorJob, PythonOutputsDecl, TargetDefinition};
 use crate::fetch::FetchDecl;
+use crate::fingerprints::fingerprint;
 use crate::parser::TargetContext;
-use crate::pins::pin;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Admits the one hand-written Python generator family needed by Mesa 20.0.8
 /// libglapi.
 ///
 /// The legacy recipes are not treated as a general command language.  Their
-/// complete semantic block is pinned, as are the selected source/flag profile,
-/// central fetch declaration and local patch.  Any drift leaves the ordinary
-/// target visible but does not emit executable Python commands.
+/// complete semantic block is fingerprinted because it expands into fixed
+/// Python jobs. The selected source/flag profile and central fetch declaration
+/// are checked semantically.
 pub(crate) fn parse_glapi(
     relative_dir: &Path,
     target: Option<&TargetContext>,
@@ -34,7 +31,6 @@ pub(crate) fn parse_glapi(
     const GLAPI_MMAKE: &str = "mesa3d-linklib-glapi";
     const GLAPI_FETCH: &str = "mesa3d-fetch";
     const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
-    const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
 
@@ -157,12 +153,12 @@ pub(crate) fn parse_glapi(
         "%build_linklib",
     )
     .ok_or_else(|| "Mesa glapi generator recipe block is missing".to_owned())?;
-    let generator_digest = format!("{:x}", Sha256::digest(generator_block.as_bytes()));
-    if generator_digest != pin("glapi-generator-capability") {
-        return Err(format!(
-            "Mesa glapi generator recipe block differs from the audited capability ({generator_digest})"
-        ));
-    }
+    require_text_fingerprint(
+        "workbench/libs/mesa/libglapi/mmakefile.src generator block",
+        &generator_block,
+        fingerprint("glapi-generator-capability"),
+        "Mesa glapi generator",
+    )?;
 
     let matching_fetches = fetches
         .iter()
@@ -226,19 +222,13 @@ pub(crate) fn parse_glapi(
         source_root: SOURCE_ROOT.to_owned(),
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: GLAPI_FETCH.to_owned(),
-        source_archive: SOURCE_ARCHIVE.to_owned(),
-        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs: vec!["src/mapi/glapi/gen/gl_and_es_API.xml".to_owned()],
         jobs,
         driver_script: None,
-        driver_sha256: None,
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
-        ],
-        local_patch_sha256: vec![
-            "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e".to_owned(),
         ],
         consumers: vec![GLAPI_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -247,7 +237,7 @@ pub(crate) fn parse_glapi(
 
 /// Admits the two Mesa 20.0.8 utility archives and their two live generated C
 /// sources. The dead `u_format_pack.h` rule is intentionally outside the
-/// pinned block: it is absent from `MESA_UTIL_GENERATED_FILES` and is not a
+/// supported block: it is absent from `MESA_UTIL_GENERATED_FILES` and is not a
 /// prerequisite of either archive.
 pub(crate) fn parse_mesautil(
     relative_dir: &Path,
@@ -261,7 +251,6 @@ pub(crate) fn parse_mesautil(
     const MESADEVUTIL_MMAKE: &str = "mesa3d-linklib-mesadevutil";
     const MESA_FETCH: &str = "mesa3d-fetch";
     const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
-    const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const CSV: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/util/format/u_format.csv";
     const STATIC_SOURCES: &[&str] = &[
@@ -447,12 +436,12 @@ pub(crate) fn parse_mesautil(
         "%common",
     )
     .ok_or_else(|| "Mesa utility generator recipe block is missing".to_owned())?;
-    let generator_digest = format!("{:x}", Sha256::digest(generator_block.as_bytes()));
-    if generator_digest != pin("mesautil-generator-capability") {
-        return Err(format!(
-            "Mesa utility generator recipe block differs from the audited capability ({generator_digest})"
-        ));
-    }
+    require_text_fingerprint(
+        "workbench/libs/mesa/libmesautil/mmakefile.src generator block",
+        &generator_block,
+        fingerprint("mesautil-generator-capability"),
+        "Mesa utility generator",
+    )?;
 
     let matching_fetches = fetches
         .iter()
@@ -491,8 +480,6 @@ pub(crate) fn parse_mesautil(
         source_root: SOURCE_ROOT.to_owned(),
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: MESA_FETCH.to_owned(),
-        source_archive: SOURCE_ARCHIVE.to_owned(),
-        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs: vec![
             "src/util/format/u_format.csv".to_owned(),
             "src/util/format/u_format_pack.py".to_owned(),
@@ -511,14 +498,10 @@ pub(crate) fn parse_mesautil(
             },
         ],
         driver_script: None,
-        driver_sha256: None,
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
-        ],
-        local_patch_sha256: vec![
-            "153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e".to_owned(),
         ],
         consumers: vec![MESAUTIL_MMAKE.to_owned(), MESADEVUTIL_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -570,7 +553,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe block differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let mut changed_targets = parsed.targets.clone();
         let glapi = changed_targets
@@ -643,7 +626,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe block differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let mut changed_targets = parsed.targets.clone();
         let mesautil = changed_targets

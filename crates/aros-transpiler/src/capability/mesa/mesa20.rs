@@ -6,25 +6,26 @@
 //! is a precondition for emitting any of it.
 //!
 //! The job groups are lists rather than logic on purpose. They were derived
-//! once from the recipes and are pinned by the driver script's digest, so a
-//! changed driver stops the capability instead of generating from a script that
-//! no longer matches these lists.
+//! once from the recipes. The opaque recipe blocks and their source inventories
+//! are fingerprinted, while the repository driver and patches are direct build
+//! dependencies. Recipe drift therefore requests a transpiler update without
+//! turning ordinary file changes into pins.
 
-use super::super::file_has_sha256;
+use super::super::{
+    normalized_make_capability_block, require_file_fingerprint, require_text_fingerprint,
+};
 use super::{
-    compile_contract, current_profile, remaining_linklib_sources, BUILD_ROOT, CXX_COMPAT_NEW,
-    PRIVATE_LIBDIR, SOURCE_ROOT,
+    compile_contract, current_profile, remaining_linklib_sources, BUILD_ROOT, PRIVATE_LIBDIR,
+    SOURCE_ROOT,
 };
 use crate::ast::{
     ModuleType, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
 };
 use crate::fetch::FetchDecl;
+use crate::fingerprints::fingerprint;
 use crate::parser::TargetContext;
-use crate::pins::pin;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
-pub(crate) const SOURCE_ARCHIVE: &str = "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz";
 pub(crate) const DRIVER: &str = "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py";
 
 pub(crate) fn generator_job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
@@ -43,15 +44,11 @@ pub(crate) fn python_packages() -> Vec<PythonPackageDecl> {
         PythonPackageDecl {
             fetch_target: "mesa3d-mako-fetch".to_owned(),
             source_root: "${AROS_PORTS_DIR}/mesa-python/mako-1.3.10".to_owned(),
-            source_archive: "${AROS_PORTS_SOURCE_DIR}/mako-1.3.10.tar.gz".to_owned(),
-            source_sha256: pin("mako-archive").to_owned(),
             python_path: ".".to_owned(),
         },
         PythonPackageDecl {
             fetch_target: "mesa3d-markupsafe-fetch".to_owned(),
             source_root: "${AROS_PORTS_DIR}/mesa-python/markupsafe-3.0.2".to_owned(),
-            source_archive: "${AROS_PORTS_SOURCE_DIR}/markupsafe-3.0.2.tar.gz".to_owned(),
-            source_sha256: pin("markupsafe-archive").to_owned(),
             python_path: "src".to_owned(),
         },
     ]
@@ -493,90 +490,121 @@ pub(crate) fn parse_remaining(
         return Ok(None);
     }
     let profile = current_profile(target)?;
-    let (mmake, owner, mmake_sha256, manifest, manifest_sha256, source_inputs, jobs, packages) =
-        match relative_dir.to_str() {
-            Some("workbench/libs/mesa/libcompiler") => {
-                let (inputs, jobs) = compiler_jobs();
-                (
-                    "mesa3d-linklib-compiler",
-                    "mesa3d-linklib-compiler-generated",
-                    "77af02d75be9c1c4e35c64dfe5e084b9735a2acd2636a8641b420295e7f91f15",
-                    "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources",
-                    "88cdeedf3091fadf1678af939ed582329523081b748f2b0abd39ae3e6f5f2481",
-                    inputs,
-                    jobs,
-                    python_packages(),
-                )
-            }
-            Some("workbench/libs/mesa/libgalliumaux") => {
-                let (inputs, jobs) = galliumaux_jobs();
-                (
-                    "mesa3d-linklib-galliumauxiliary",
-                    "mesa3d-linklib-galliumauxiliary-generated",
-                    "20f6eb054f0aa4313a33ae6e2bf5cfa1fcf132bfabe5cf64085039e7ecf4f1a4",
-                    "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources",
-                    "eebe8fe19dd4cc1531d93a72ac8ca8e38408a7ecad3799f3f896663a2f996705",
-                    inputs,
-                    jobs,
-                    Vec::new(),
-                )
-            }
-            Some("workbench/libs/mesa/libmesa") => {
-                let (inputs, jobs) = mesa_jobs();
-                (
-                    "mesa3d-linklib-mesa",
-                    "mesa3d-linklib-mesa-generated",
-                    "899ffe50dd00f767f33acdee91f01083d79461f17dd27194c6dae07919d47c40",
-                    "workbench/libs/mesa/libmesa/mesa-20.0.8.sources",
-                    "61c034fdbd34bf963c73cf1d89765dbc10ad45865c0d42f4d6f8c60dd0bbbfcc",
-                    inputs,
-                    jobs,
-                    python_packages(),
-                )
-            }
-            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") if profile != "x86_64" => {
-                let (inputs, jobs) = vc4_jobs();
-                (
-                    "linklibs-gallium_vc4",
-                    "linklibs-gallium_vc4-gen-cle",
-                    "a6482a1b4758ff74b76b479ea226e2ffab17b7f50095687a252facf96530be20",
-                    "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
-                    "27067482f43902b58872ae0c2e92a9e4f6bc51328b6b035e79d75357ec002a72",
-                    inputs,
-                    jobs,
-                    Vec::new(),
-                )
-            }
-            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") => return Ok(None),
-            _ => return Ok(None),
-        };
+    let (
+        mmake,
+        owner,
+        recipe_fingerprint,
+        manifest,
+        manifest_fingerprint,
+        source_inputs,
+        jobs,
+        packages,
+    ) = match relative_dir.to_str() {
+        Some("workbench/libs/mesa/libcompiler") => {
+            let (inputs, jobs) = compiler_jobs();
+            (
+                "mesa3d-linklib-compiler",
+                "mesa3d-linklib-compiler-generated",
+                fingerprint("mesa20-compiler-recipe"),
+                "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources",
+                fingerprint("mesa20-compiler-manifest"),
+                inputs,
+                jobs,
+                python_packages(),
+            )
+        }
+        Some("workbench/libs/mesa/libgalliumaux") => {
+            let (inputs, jobs) = galliumaux_jobs();
+            (
+                "mesa3d-linklib-galliumauxiliary",
+                "mesa3d-linklib-galliumauxiliary-generated",
+                fingerprint("mesa20-galliumaux-recipe"),
+                "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources",
+                fingerprint("mesa20-galliumaux-manifest"),
+                inputs,
+                jobs,
+                Vec::new(),
+            )
+        }
+        Some("workbench/libs/mesa/libmesa") => {
+            let (inputs, jobs) = mesa_jobs();
+            (
+                "mesa3d-linklib-mesa",
+                "mesa3d-linklib-mesa-generated",
+                fingerprint("mesa20-core-recipe"),
+                "workbench/libs/mesa/libmesa/mesa-20.0.8.sources",
+                fingerprint("mesa20-core-manifest"),
+                inputs,
+                jobs,
+                python_packages(),
+            )
+        }
+        Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") if profile != "x86_64" => {
+            let (inputs, jobs) = vc4_jobs();
+            (
+                "linklibs-gallium_vc4",
+                "linklibs-gallium_vc4-gen-cle",
+                fingerprint("mesa20-vc4-recipe"),
+                "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
+                fingerprint("mesa20-vc4-manifest"),
+                inputs,
+                jobs,
+                Vec::new(),
+            )
+        }
+        Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") => return Ok(None),
+        _ => return Ok(None),
+    };
 
-    let make_digest = format!("{:x}", Sha256::digest(make_source.as_bytes()));
-    if make_digest != mmake_sha256
-        || !file_has_sha256(root, manifest, manifest_sha256)
-        || !file_has_sha256(
-            root,
-            "workbench/libs/mesa/mesa20_generate.py",
-            pin("mesa20-driver-script"),
+    let (recipe_start, recipe_end) = match mmake {
+        "mesa3d-linklib-compiler" => (
+            "define local-l-or-ll-to-c-or-cpp",
+            "%build_linklib mmake=mesa3d-linklib-compiler",
+        ),
+        "mesa3d-linklib-galliumauxiliary" => (
+            "$(top_builddir)/$(CUR_MESADIR)/util/u_format_table.c:",
+            "%build_linklib mmake=mesa3d-linklib-galliumauxiliary",
+        ),
+        "mesa3d-linklib-mesa" => ("define es-gen", "%build_linklib mmake=mesa3d-linklib-mesa"),
+        "linklibs-gallium_vc4" => ("CLE_SRCDIR :=", "%build_linklib mmake=linklibs-gallium_vc4"),
+        _ => unreachable!("all remaining Mesa generator lanes are enumerated"),
+    };
+    let recipe_block = normalized_make_capability_block(make_source, recipe_start, recipe_end)
+        .ok_or_else(|| {
+            format!(
+                "{mmake}: generator recipe block is missing; the transpiler capability must be reviewed and updated"
+            )
+        })?;
+    require_text_fingerprint(
+        &format!("{}/mmakefile.src", relative_dir.display()),
+        &recipe_block,
+        recipe_fingerprint,
+        mmake,
+    )?;
+    require_file_fingerprint(root, manifest, manifest_fingerprint, mmake)?;
+    let mesa_config_path = root.join("workbench/libs/mesa/mesa.cfg");
+    let mesa_config = std::fs::read_to_string(&mesa_config_path).map_err(|error| {
+        format!(
+            "{mmake}: cannot read {}: {error}",
+            mesa_config_path.display()
         )
-        || !file_has_sha256(
-            root,
-            "workbench/libs/mesa/mmakefile.src",
-            pin("mesa20-main-mmakefile"),
+    })?;
+    let config_context = normalized_make_capability_block(
+        &mesa_config,
+        "aros_mesadir :=",
+        "MESA3DGL_GALLIUMCORE :=",
+    )
+    .ok_or_else(|| {
+        format!(
+            "{mmake}: Mesa compile configuration block is missing; the transpiler capability must be reviewed and updated"
         )
-        || !file_has_sha256(root, "workbench/libs/mesa/mesa.cfg", pin("mesa20-config"))
-        || !file_has_sha256(
-            root,
-            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            pin("mesa-local-patch"),
-        )
-        || (matches!(mmake, "mesa3d-linklib-compiler" | "mesa3d-linklib-mesa")
-            && !file_has_sha256(root, CXX_COMPAT_NEW, pin("mesa20-cxx-compat-new")))
-    {
-        return Err(format!(
-            "{mmake} declaration, inventory, driver, central Mesa context or patch differs from the audited capability"
-        ));
-    }
+    })?;
+    require_text_fingerprint(
+        "workbench/libs/mesa/mesa.cfg compile context",
+        &config_context,
+        fingerprint("mesa-sse41-config-context"),
+        mmake,
+    )?;
     require_fetches(fetches)?;
     target_contract_is_exact(root, relative_dir, mmake, target, targets)?;
 
@@ -585,18 +613,14 @@ pub(crate) fn parse_remaining(
         source_root: SOURCE_ROOT.to_owned(),
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: "mesa3d-fetch".to_owned(),
-        source_archive: SOURCE_ARCHIVE.to_owned(),
-        source_sha256: pin("mesa20-archive").to_owned(),
         source_inputs,
         jobs,
         driver_script: Some(DRIVER.to_owned()),
-        driver_sha256: Some(pin("mesa20-driver-script").to_owned()),
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
-        local_patch_sha256: vec![pin("mesa-local-patch").to_owned()],
         consumers: vec![mmake.to_owned()],
         dir_path: relative_dir.to_path_buf(),
     }))
@@ -670,11 +694,6 @@ mod tests {
     fn mesa20_release_patch_and_archive_inventories_are_exact() {
         let root = root();
         let patch_relative = "workbench/libs/mesa/mesa-20.0.8-aros.diff";
-        assert!(super::file_has_sha256(
-            &root,
-            patch_relative,
-            pin("mesa-local-patch")
-        ));
         let patch = read_source(&root.join(patch_relative)).unwrap();
         for required in [
             "-#include <algorithm>",

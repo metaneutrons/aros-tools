@@ -1,0 +1,36 @@
+# Exact capability fingerprints
+#
+# These are not package or download pins. The transpiler has no embedded
+# checksum for Mesa, Mako, MarkupSafe, CUnit, libaom, or any other fetched
+# archive. Ordinary repository files and local patches are tracked directly.
+#
+# A fingerprint is allowed here only when the transpiler expands an opaque
+# legacy recipe or a versioned source inventory into a hard-coded executable
+# job graph. If those bytes change, continuing would execute stale assumptions.
+# The transpiler therefore exits with the affected path, expected and observed
+# fingerprints, and an explicit request to review and update the capability.
+# Never re-pin one of these merely to make a build pass.
+
+# Mesa SSE4.1: opaque recipe/configuration fragments and the exact inventory
+# consumed by the hard-coded lane.
+mesa-sse41-capability = 70cd3cc7603b73fba1f5048621cd95bfcde8632d1425664fa9982c6aab4e0fac
+mesa-sse41-local-context = c954ef928824194f9b91208946e00482d9d1d83cc9496f137cf3a9d92e93b320
+mesa-sse41-config-context = 2614a0d07eaf97b18de5a120a61b124c40375b0bedaeac9af2fd1660797e2176
+mesa-sse41-manifest = 4cf786a7beef96b541213b992adf4df84e866afb8f8b2ef855b119f097538497
+
+# Opaque hand-written generator recipe blocks whose jobs are materialised by
+# the transpiler rather than executed as arbitrary shell.
+glapi-generator-capability = c42d77ef950bf439e04c36df203309c24a3a931b0c294edce875ae969d8143e5
+mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed29425eb7d7d3fd908
+
+# Remaining Mesa generator lanes. Each recipe fingerprint is paired with the
+# versioned inventory from which its hard-coded generator output closure was
+# reviewed.
+mesa20-compiler-recipe = 3103a5586624c6a92b2201838fbb8c1731c9bb140a40e917385031f699f106f1
+mesa20-compiler-manifest = 88cdeedf3091fadf1678af939ed582329523081b748f2b0abd39ae3e6f5f2481
+mesa20-galliumaux-recipe = d551dd76dab655bb1d1cc14b4364cba7d4f5827fc78fb537847963b8850f7e53
+mesa20-galliumaux-manifest = eebe8fe19dd4cc1531d93a72ac8ca8e38408a7ecad3799f3f896663a2f996705
+mesa20-core-recipe = bef0c54aea29752d2b5cc3b70fd7f991d34c29ba294adb75d458fb5fda8d1bc1
+mesa20-core-manifest = 61c034fdbd34bf963c73cf1d89765dbc10ad45865c0d42f4d6f8c60dd0bbbfcc
+mesa20-vc4-recipe = 04f2d449ef30ebb4b9dc9fa1fea55865303d9335c4873c7845cfb16eadf1484c
+mesa20-vc4-manifest = 27067482f43902b58872ae0c2e92a9e4f6bc51328b6b035e79d75357ec002a72

@@ -2,14 +2,10 @@ use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, generate_cmake,
     parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, ModuleType, TargetContext,
 };
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
 const MESA_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
-const MMAKE_SHA256: &str = "4c0fd8b41d3590b4303c84be7c670220567b8b86e7e29fd6d05c4a36c7d4ee56";
-const SOURCE_MANIFEST_SHA256: &str =
-    "86ffb0c1e959615833b9d7b937dfcaf237c5f25da8d5706d8354ba5314acc15f";
 
 fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -31,26 +27,12 @@ fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
     }
 }
 
-fn sha256(path: &Path) -> String {
-    format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
-}
-
 #[test]
 fn production_nouveau_gallium_is_closed_and_canonical_for_all_current_architectures() {
     let root = source_root();
     let dirs = DirVars::load(&root);
     let mmakefile = root.join(NOUVEAU_DIR).join("mmakefile.src");
     let mesa_mmakefile = root.join("workbench/libs/mesa/mmakefile.src");
-
-    assert_eq!(sha256(&mmakefile), MMAKE_SHA256);
-    assert_eq!(
-        sha256(
-            &root
-                .join(NOUVEAU_DIR)
-                .join("nouveau-gallium-20.0.8.sources")
-        ),
-        SOURCE_MANIFEST_SHA256
-    );
 
     let expected_includes = [
         "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",

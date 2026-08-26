@@ -1,4 +1,4 @@
-use aros_common::Result;
+use aros_common::{ArosError, Result};
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, default_link_set_available, generate_cmake,
@@ -75,7 +75,8 @@ fn main() -> Result<()> {
     // directories, mmakefile.src included, so scanning build/ would parse those
     // copies a second time and attribute their rules to the wrong location.
     let skip_dirs = ["build", "target", ".git"];
-    let mut files: Vec<PathBuf> = WalkDir::new(&args.source_dir)
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(&args.source_dir)
         .into_iter()
         .filter_entry(|e| {
             !e.file_type().is_dir()
@@ -84,14 +85,22 @@ fn main() -> Result<()> {
                     .iter()
                     .any(|d| e.file_name().to_string_lossy() == *d)
         })
-        .filter_map(std::result::Result::ok)
+    {
+        let entry = entry.map_err(|error| ArosError::TranspilerSyntax {
+            file: args.source_dir.display().to_string(),
+            message: format!("cannot walk MetaMake source tree: {error}"),
+        })?;
         // MetaMake reads both generated-template inputs (`mmakefile.src`) and
         // direct make fragments (`mmakefile`).  The latter include the
         // top-level AROS/AROS-complete roots and 32 further dependency files;
         // omitting them leaves an apparently valid but disconnected graph.
-        .filter(|e| matches!(e.file_name().to_str(), Some("mmakefile.src" | "mmakefile")))
-        .map(walkdir::DirEntry::into_path)
-        .collect();
+        if matches!(
+            entry.file_name().to_str(),
+            Some("mmakefile.src" | "mmakefile")
+        ) {
+            files.push(entry.into_path());
+        }
+    }
     // Stable source order matters for duplicate-output semantics: GNU Make's
     // first satisfiable icon rule wins, and the CMake output registry mirrors
     // that choice while reporting conflicting later claims.
@@ -137,18 +146,34 @@ fn main() -> Result<()> {
         use_mmu: args.use_mmu.clone(),
         float_abi: args.float_abi.clone(),
     });
-    let known_fetches = target.as_ref().map_or_else(Vec::new, |target| {
-        files
+    let known_fetches = if let Some(target) = target.as_ref() {
+        let results: Vec<_> = files
             .par_iter()
-            .filter_map(|path| {
-                collect_mmakefile_fetches_with_context(path, &args.source_dir, target).ok()
+            .map(|path| {
+                (
+                    path,
+                    collect_mmakefile_fetches_with_context(path, &args.source_dir, target),
+                )
             })
-            .flatten()
-            .collect()
-    });
+            .collect();
+        let mut fetches = Vec::new();
+        let mut errors = Vec::new();
+        for (path, result) in results {
+            match result {
+                Ok(found) => fetches.extend(found),
+                Err(error) => errors.push(format!("{}: {error}", path.display())),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(diagnostics_error("fetch discovery", errors));
+        }
+        fetches
+    } else {
+        Vec::new()
+    };
     let parsed_results: Vec<_> = files
         .par_iter()
-        .filter_map(|path| {
+        .map(|path| {
             let res = match &target {
                 Some(target) => parse_mmakefile_with_dirs_and_context_and_fetches(
                     path,
@@ -158,16 +183,28 @@ fn main() -> Result<()> {
                     &known_fetches,
                 ),
                 None => parse_mmakefile_with_dirs(path, &args.source_dir, &dirs),
-            }
-            .ok();
+            };
             pb.inc(1);
-            res
+            (path, res)
         })
         .collect();
 
     pb.finish_with_message("Parsing complete");
 
+    let mut parse_errors = Vec::new();
+    let mut parsed_files = Vec::new();
+    for (path, result) in parsed_results {
+        match result {
+            Ok(parsed) => parsed_files.push(parsed),
+            Err(error) => parse_errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    if !parse_errors.is_empty() {
+        return Err(diagnostics_error("parsing", parse_errors));
+    }
+
     let mut graph = DependencyGraph::new();
+    let mut capability_errors: Vec<String> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut skipped_headers: Vec<String> = Vec::new();
     let mut skipped_copy_directories: Vec<String> = Vec::new();
@@ -193,7 +230,8 @@ fn main() -> Result<()> {
     let mut skipped_catalogs: Vec<String> = Vec::new();
     let mut skipped_flexcat_sources: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
-    for parsed in parsed_results {
+    for parsed in parsed_files {
+        capability_errors.extend(parsed.capability_errors);
         for target in parsed.targets {
             graph.add_target(target);
         }
@@ -258,6 +296,13 @@ fn main() -> Result<()> {
         if parsed.flags.ambiguous {
             ambiguous_flags += 1;
         }
+    }
+
+    if !capability_errors.is_empty() {
+        return Err(diagnostics_error(
+            "capability validation",
+            capability_errors,
+        ));
     }
 
     source_inventory_patterns.sort();
@@ -693,6 +738,21 @@ fn main() -> Result<()> {
 
 fn cmake_quoted_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn diagnostics_error(stage: &str, mut diagnostics: Vec<String>) -> ArosError {
+    diagnostics.sort();
+    diagnostics.dedup();
+    let count = diagnostics.len();
+    ArosError::TranspilerDiagnostics {
+        stage: stage.to_owned(),
+        count,
+        details: diagnostics
+            .into_iter()
+            .map(|diagnostic| format!("  - {diagnostic}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 fn write_source_inventory_manifest(output: &Path, graph: &DependencyGraph) -> Result<()> {

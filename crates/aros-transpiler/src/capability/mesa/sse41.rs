@@ -6,12 +6,13 @@
 //! central fetch edge and the local patch are all the audited inputs, and which
 //! of the two supported profiles applies.
 
-use super::super::{file_has_sha256, normalized_make_capability_block};
+use super::super::{
+    normalized_make_capability_block, require_file_fingerprint, require_text_fingerprint,
+};
 use crate::ast::{ModuleType, TargetDefinition};
 use crate::fetch::FetchDecl;
+use crate::fingerprints::fingerprint;
 use crate::parser::{join_mm_continuations, TargetContext, META_RULE_RE};
-use crate::pins::pin;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
@@ -124,7 +125,7 @@ pub(crate) fn profile(
     }
 }
 
-pub(crate) fn fetch_edge_is_pinned(make_source: &str) -> bool {
+pub(crate) fn fetch_edge_is_supported(make_source: &str) -> bool {
     let joined = join_mm_continuations(make_source);
     let matching = META_RULE_RE
         .captures_iter(&joined)
@@ -136,48 +137,62 @@ pub(crate) fn fetch_edge_is_pinned(make_source: &str) -> bool {
     !edge[0].starts_with("#MM-") && edge[2].split_whitespace().eq(["mesa3d-fetch"])
 }
 
-pub(crate) fn static_contract_is_pinned(root: &Path, make_source: &str) -> bool {
+pub(crate) fn validate_static_contract(
+    root: &Path,
+    make_source: &str,
+) -> std::result::Result<(), String> {
     let Some(block) = normalized_make_capability_block(
         make_source,
         "MESA3D_GALLIUM_SSE41_SOURCES :=",
         "%build_linklib mmake=mesa3d-linklib-mesa-sse41",
     ) else {
-        return false;
+        return Err("Mesa SSE4.1 recipe block is missing; the transpiler capability must be reviewed and updated".to_owned());
     };
     let Some(local_context) = normalized_make_capability_block(
         make_source,
         "include $(SRCDIR)/config/aros.cfg",
         "%common",
     ) else {
-        return false;
+        return Err("Mesa SSE4.1 local Make context is missing; the transpiler capability must be reviewed and updated".to_owned());
     };
     let Ok(mesa_config) = fs::read_to_string(root.join("workbench/libs/mesa/mesa.cfg")) else {
-        return false;
+        return Err("Mesa SSE4.1 cannot read workbench/libs/mesa/mesa.cfg; the transpiler capability must be reviewed and updated".to_owned());
     };
     let Some(config_context) = normalized_make_capability_block(
         &mesa_config,
         "aros_mesadir :=",
         "MESA3DGL_GALLIUMCORE :=",
     ) else {
-        return false;
+        return Err("Mesa SSE4.1 configuration context is missing; the transpiler capability must be reviewed and updated".to_owned());
     };
-    let block_digest = format!("{:x}", Sha256::digest(block.as_bytes()));
-    let local_context_digest = format!("{:x}", Sha256::digest(local_context.as_bytes()));
-    let config_context_digest = format!("{:x}", Sha256::digest(config_context.as_bytes()));
-    block_digest == pin("mesa-sse41-capability")
-        && local_context_digest == pin("mesa-sse41-local-context")
-        && config_context_digest == pin("mesa-sse41-config-context")
-        && fetch_edge_is_pinned(make_source)
-        && file_has_sha256(
-            root,
-            "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-            pin("mesa-sse41-manifest"),
-        )
-        && file_has_sha256(
-            root,
-            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            pin("mesa-local-patch"),
-        )
+    require_text_fingerprint(
+        "workbench/libs/mesa/libmesa/mmakefile.src SSE4.1 block",
+        &block,
+        fingerprint("mesa-sse41-capability"),
+        "Mesa SSE4.1",
+    )?;
+    require_text_fingerprint(
+        "workbench/libs/mesa/libmesa/mmakefile.src local context",
+        &local_context,
+        fingerprint("mesa-sse41-local-context"),
+        "Mesa SSE4.1",
+    )?;
+    require_text_fingerprint(
+        "workbench/libs/mesa/mesa.cfg compile context",
+        &config_context,
+        fingerprint("mesa-sse41-config-context"),
+        "Mesa SSE4.1",
+    )?;
+    if !fetch_edge_is_supported(make_source) {
+        return Err("Mesa SSE4.1 fetch edge differs from the supported shape; the transpiler capability must be reviewed and updated".to_owned());
+    }
+    require_file_fingerprint(
+        root,
+        "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
+        fingerprint("mesa-sse41-manifest"),
+        "Mesa SSE4.1",
+    )?;
+    Ok(())
 }
 
 pub(crate) fn validate(
@@ -191,9 +206,7 @@ pub(crate) fn validate(
     let Some(x86_64) = profile(relative_dir, target)? else {
         return Ok(());
     };
-    if !static_contract_is_pinned(root, make_source) {
-        return Err("Mesa SSE4.1 recipe, configuration context, source manifest or local patch differs from the audited capability".to_owned());
-    }
+    validate_static_contract(root, make_source)?;
 
     let matching_targets = targets
         .iter()
@@ -345,7 +358,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let changed_local_context = content.replace(
             "-iquote $(top_builddir)/$(CUR_MESADIR)/main",
@@ -357,7 +370,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let changed_manifest_include = content.replace(
             "include $(SRCDIR)/$(CURDIR)/mesa-sse41-20.0.8.sources",
@@ -369,7 +382,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let changed_intervening_context = content.replace(
             "MESA3D_GALLIUM_SSE41_SOURCES :=",
@@ -381,7 +394,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
+        .contains("unsupported upstream recipe drift"));
 
         let disabled_fetch_edge = content.replace(
             "#MM mesa3d-linklib-mesa-sse41 : mesa3d-fetch",
@@ -393,7 +406,7 @@ mod tests {
             &central_fetches,
             &profile
         )
-        .contains("recipe, configuration context, source manifest or local patch differs"));
+        .contains("fetch edge differs from the supported shape"));
 
         let mut changed_targets = parsed.targets.clone();
         let sse41 = changed_targets
@@ -423,23 +436,23 @@ mod tests {
         )
         .contains("does not support target profile"));
 
-        let pinned_tree = TempTree::new();
+        let fixture_tree = TempTree::new();
         for relative in [
             "workbench/libs/mesa/mesa.cfg",
             "workbench/libs/mesa/mesa-20.0.8-aros.diff",
             "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
         ] {
-            let destination = pinned_tree.0.join(relative);
+            let destination = fixture_tree.0.join(relative);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
             fs::copy(root.join(relative), destination).unwrap();
         }
-        assert!(static_contract_is_pinned(&pinned_tree.0, &content));
-        let config_path = pinned_tree.0.join("workbench/libs/mesa/mesa.cfg");
+        assert!(validate_static_contract(&fixture_tree.0, &content).is_ok());
+        let config_path = fixture_tree.0.join("workbench/libs/mesa/mesa.cfg");
         let changed_config = read_source(&config_path).unwrap().replace(
             "aros_mesadir := workbench/libs/mesa",
             "aros_mesadir := workbench/libs/mesa-unreviewed",
         );
         fs::write(config_path, changed_config).unwrap();
-        assert!(!static_contract_is_pinned(&pinned_tree.0, &content));
+        assert!(validate_static_contract(&fixture_tree.0, &content).is_err());
     }
 }

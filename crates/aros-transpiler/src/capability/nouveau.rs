@@ -2,11 +2,10 @@
 //!
 //! Two `%build_module` declarations whose source lists are Make manifests of
 //! 825 and 105 files, read rather than globbed, plus a compile contract whose
-//! flags and includes the mmakefile decides. Both are pinned on the manifests
-//! and the mmakefile, and both count their sources: a manifest that grows a
-//! file silently would otherwise pass.
+//! flags and includes the mmakefile decides. Both inventories are parsed and
+//! checked semantically, including their source counts and materializability.
 
-use super::{file_has_sha256, manifest_inventory};
+use super::manifest_inventory;
 use crate::ast::{ModuleType, TargetDefinition};
 // Nouveau Gallium compiles Mesa sources, so it shares the Mesa compile
 // contract and base defines. The coupling is real rather than accidental, and
@@ -14,13 +13,11 @@ use crate::ast::{ModuleType, TargetDefinition};
 // sharing a file.
 use super::mesa::{base_defines, CompileContract};
 use crate::parser::TargetContext;
-use crate::pins::pin;
 use crate::sources::EvaluatedSources;
 use std::path::Path;
 
 const NOUVEAU_DRM_DIR: &str = "workbench/hidds/nouveau";
 pub(crate) const DRM_MMAKE: &str = "hidd-nouveau-drm";
-const NOUVEAU_DRM_MMAKEFILE: &str = "workbench/hidds/nouveau/mmakefile.src";
 const NOUVEAU_DRM_SOURCE_MANIFEST: &str = "workbench/hidds/nouveau/sources.drm.mak";
 const NOUVEAU_DRM_CORE_SOURCE_COUNT: usize = 67;
 const NOUVEAU_DRM_NVIDIA_SOURCE_COUNT: usize = 758;
@@ -75,7 +72,7 @@ fn nouveau_current_profile(
 
 /// Loads the two literal source inventories kept with the Nouveau DRM port.
 /// This deliberately does not broaden the local-Make include parser: the
-/// capability owns this exact, SHA-pinned fragment and nothing else in the
+/// capability owns these named, literal inventories and nothing else in the
 /// surrounding mixed DRM/Gallium makefile.
 pub(crate) fn drm_sources(
     root: &Path,
@@ -197,18 +194,6 @@ pub(crate) fn validate_drm(
 ) -> std::result::Result<(), String> {
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
         return Ok(());
-    }
-    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, pin("nouveau-drm-mmakefile"))
-        || !file_has_sha256(
-            root,
-            NOUVEAU_DRM_SOURCE_MANIFEST,
-            pin("nouveau-drm-source-manifest"),
-        )
-    {
-        return Err(
-            "mmakefile or sources.drm.mak differs from the audited Nouveau DRM capability"
-                .to_owned(),
-        );
     }
     let expected_sources = drm_sources(root, relative_dir, DRM_MMAKE, target)?
         .ok_or_else(|| format!("missing source capability for {DRM_MMAKE}"))?;
@@ -376,18 +361,6 @@ pub(crate) fn validate_gallium(
 ) -> std::result::Result<(), String> {
     if relative_dir != Path::new(NOUVEAU_DRM_DIR) {
         return Ok(());
-    }
-    if !file_has_sha256(root, NOUVEAU_DRM_MMAKEFILE, pin("nouveau-drm-mmakefile"))
-        || !file_has_sha256(
-            root,
-            NOUVEAU_GALLIUM_SOURCE_MANIFEST,
-            pin("nouveau-gallium-source-manifest"),
-        )
-    {
-        return Err(
-            "mmakefile or Nouveau Gallium source manifest differs from the audited capability"
-                .to_owned(),
-        );
     }
     let expected_sources = gallium_sources(root, relative_dir, GALLIUM_MMAKE, target)?
         .ok_or_else(|| format!("missing source capability for {GALLIUM_MMAKE}"))?;

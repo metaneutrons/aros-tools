@@ -6,9 +6,9 @@
 //! source manifest, and reproducing them means reproducing decisions that live
 //! in the mmakefile rather than in the macro. Each of those is modelled here,
 //! and each is gated on a digest of the inputs that were audited, so a changed
-//! input means the capability is not recognised and the declaration lands in
-//! the unmodelled report rather than being guessed at. The digests are data:
-//! `pinned-digests.pins`, read through `crate::pins`.
+//! input means the capability is rejected with an update-required diagnostic.
+//! The few remaining digests are documented capability fingerprints, not
+//! package pins: `capability-fingerprints.pins`.
 //!
 //! One module per capability family. They were all in `parser.rs`, which is
 //! what the decomposition is taking apart; this module holds what more than one
@@ -26,13 +26,47 @@ use crate::make_vars::{collect_vars, strip_make_comment};
 use crate::parser::{join_continuations, macro_arg, macro_argument_names, Invocation};
 use aros_common::read_source;
 use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::Path;
 
-pub(crate) fn file_has_sha256(root: &Path, relative: &str, expected: &str) -> bool {
-    fs::read(root.join(relative))
-        .ok()
-        .is_some_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == expected)
+/// Verifies an input whose exact bytes are inseparable from a hard-coded
+/// capability implementation.
+///
+/// This is deliberately reserved for recipe fragments and source inventories
+/// which the transpiler expands into explicit jobs. It must not be used for
+/// downloaded archives, ordinary repository files, or local patches. A
+/// mismatch is an actionable software-compatibility error, never an invitation
+/// to blindly re-pin the value.
+pub(crate) fn require_file_fingerprint(
+    root: &Path,
+    relative: &str,
+    expected: &str,
+    capability: &str,
+) -> std::result::Result<(), String> {
+    let path = root.join(relative);
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("{capability}: cannot read {}: {error}", path.display()))?;
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{capability}: unsupported upstream recipe drift in {relative} (expected fingerprint {expected}, found {actual}); the transpiler capability must be reviewed and updated"
+    ))
+}
+
+pub(crate) fn require_text_fingerprint(
+    label: &str,
+    text: &str,
+    expected: &str,
+    capability: &str,
+) -> std::result::Result<(), String> {
+    let actual = format!("{:x}", Sha256::digest(text.as_bytes()));
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{capability}: unsupported upstream recipe drift in {label} (expected fingerprint {expected}, found {actual}); the transpiler capability must be reviewed and updated"
+    ))
 }
 
 pub(crate) fn require_exact_macro_arguments(
@@ -89,7 +123,7 @@ pub(crate) fn require_exact_macro_arguments(
 /// are Nouveau: a capability whose sources are a manifest reads them with this
 /// rather than globbing, and the checks are the same wherever it is used --
 /// non-empty, no unexpanded variable, no absolute path, no `..`.
-/// Exact, version-pinned source lanes for the remaining Mesa 20.0.8 private
+/// Exact, version-specific source lanes for the remaining Mesa 20.0.8 private
 /// archives.  The adjacent manifests contain only literal upstream-relative
 /// inventories; generated products are kept in separate variables so they can
 /// acquire real build owners before CMake resolves the source lanes.
@@ -150,4 +184,24 @@ pub(crate) fn normalized_make_capability_block(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::require_text_fingerprint;
+
+    #[test]
+    fn drift_diagnostic_explains_that_the_transpiler_needs_an_update() {
+        let error = require_text_fingerprint(
+            "fixture recipe",
+            "changed",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "Fixture capability",
+        )
+        .unwrap_err();
+        assert!(error.contains("unsupported upstream recipe drift"));
+        assert!(error.contains("expected fingerprint"));
+        assert!(error.contains("found"));
+        assert!(error.contains("transpiler capability must be reviewed and updated"));
+    }
 }

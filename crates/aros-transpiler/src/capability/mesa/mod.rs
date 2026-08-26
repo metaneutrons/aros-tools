@@ -24,7 +24,6 @@ use std::path::Path;
 pub(crate) const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
 pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
 pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
-pub(crate) const CXX_COMPAT_NEW: &str = "workbench/libs/mesa/libcompiler/cxx-compat/new";
 
 pub(crate) fn inventory_stems(
     root: &Path,
@@ -454,7 +453,7 @@ mod tests {
     use crate::testing::target_context;
 
     #[test]
-    fn in_tree_gallium_consumers_inherit_the_pinned_mesa_contract() {
+    fn in_tree_gallium_consumers_inherit_the_checked_mesa_contract() {
         let arm = target_context("arm", "raspi", "hard");
         for (directory, mmake) in [
             ("workbench/hidds/gallium", "hidd-gallium"),

@@ -1011,6 +1011,7 @@ fn parse_mmakefile_impl(
         conditional_line_states.as_deref(),
     );
     let mut skipped_programs: Vec<String> = Vec::new();
+    let mut capability_errors: Vec<String> = Vec::new();
     let invocations = select_target_invocations(
         &joined,
         conditional_line_states.as_deref(),
@@ -1868,7 +1869,7 @@ fn parse_mmakefile_impl(
             }
         }
         let mesa_sse41_profile = (mmake_name == sse41::MMAKE
-            && sse41::static_contract_is_pinned(root, &content))
+            && sse41::validate_static_contract(root, &content).is_ok())
         .then(|| sse41::profile(&rel_dir, target).ok().flatten())
         .flatten();
         let empty_archive = mesa_sse41_profile == Some(false);
@@ -1876,8 +1877,8 @@ fn parse_mmakefile_impl(
             // The ordinary local-include scanner cannot adopt mesa.cfg for
             // this file on a cold tree: the neighbouring full libmesa target
             // still depends on the not-yet-fetched upstream inventory. Admit
-            // the exact declaration-local view only together with the pinned
-            // source, patch and profile contract validated below.
+            // the exact declaration-local view only together with the
+            // capability and profile contract validated below.
             declaration_flags.defines = sse41::defines(x86_64);
             declaration_flags.undefines.clear();
             declaration_flags.compile_options = sse41::compile_options(x86_64);
@@ -2252,7 +2253,7 @@ fn parse_mmakefile_impl(
             crate::capability::nouveau::validate_gallium(root, &rel_dir, target, &targets)
         {
             // The fetched Mesa lane contains a C++ source inventory. Keep it
-            // atomic with its pinned source and flag contract rather than
+            // atomic with its checked source and flag contract rather than
             // leaving an inferred C-only or private-output approximation in
             // the graph.
             targets.retain(|candidate| {
@@ -2383,7 +2384,41 @@ fn parse_mmakefile_impl(
         &arch_object_roots,
     );
 
+    // Coverage gaps remain reports, but a declaration already owned by one of
+    // the closed capabilities must never silently fall back to a partial
+    // target. Those errors mean the executable model is stale and requires a
+    // reviewed transpiler update.
+    capability_errors.extend(skipped_programs.iter().filter_map(|diagnostic| {
+        // A capability can be deliberately absent from another supported
+        // architecture. That is not recipe drift and must not make an ARM
+        // translation fail merely because an x86-only declaration exists in
+        // the shared source tree.
+        let expected_profile_exclusion = diagnostic.contains("does not support target profile")
+            || diagnostic.contains("only supports x86_64-pc LLVM");
+        let recognised_closed_capability =
+            (diagnostic.contains("Mesa ") && diagnostic.contains("capability skipped"))
+                || diagnostic.contains("Mesa SSE4.1 link library skipped")
+                || diagnostic.contains("Mesa glapi Python generator skipped")
+                || diagnostic.contains("Mesa utility Python generator skipped")
+                || diagnostic.contains("Nouveau DRM link library skipped")
+                || diagnostic.contains("Nouveau Gallium link library skipped")
+                || diagnostic.starts_with("compiler/cunit:")
+                || diagnostic.starts_with("workbench/classes/datatypes/heic:")
+                || diagnostic.starts_with("tools/ADFlib:")
+                || diagnostic.starts_with(
+                    "workbench/network/WirelessManager/wpa_supplicant:",
+                )
+                || diagnostic.starts_with("workbench/devs/AHI:")
+                || diagnostic.starts_with("arch/all-pc/boot/grub2-host:");
+        (recognised_closed_capability && !expected_profile_exclusion).then(|| {
+            format!(
+                "{diagnostic}; refusing a partial translation: review the upstream change and update the transpiler capability"
+            )
+        })
+    }));
+
     Ok(ParsedMmakefile {
+        capability_errors,
         targets,
         external_cmake,
         configure_builds,
@@ -3542,7 +3577,7 @@ FILES := gdbstop
     }
 
     #[test]
-    fn module_declarations_receive_the_pinned_mesa_contract() {
+    fn module_declarations_receive_the_checked_mesa_contract() {
         let root = root();
         for (mmakefile, mmake) in [
             ("workbench/hidds/gallium/mmakefile.src", "hidd-gallium"),

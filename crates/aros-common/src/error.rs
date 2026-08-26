@@ -14,6 +14,13 @@ pub enum ArosError {
     #[error("Transpiler syntax error in '{file}': {message}")]
     TranspilerSyntax { file: String, message: String },
 
+    #[error("Transpiler {stage} failed with {count} error(s):\n{details}")]
+    TranspilerDiagnostics {
+        stage: String,
+        count: usize,
+        details: String,
+    },
+
     #[error("Dependency cycle detected in module: {target}")]
     DependencyCycle { target: String },
 

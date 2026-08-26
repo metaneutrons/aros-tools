@@ -5,10 +5,9 @@
 //! decided here is whether the legacy macro is the exact audited shape and
 //! which of the three supported profiles it is being read for.
 
-use super::{file_has_sha256, require_exact_macro_arguments};
+use super::require_exact_macro_arguments;
 use crate::ast::AhiBuildDecl;
 use crate::parser::{macro_arg, Invocation, TargetContext};
-use crate::pins::pin;
 use std::path::Path;
 
 const DIRECTORY: &str = "workbench/devs/AHI";
@@ -21,7 +20,7 @@ const DIRECTORY: &str = "workbench/devs/AHI";
 /// and macro shape, selects a supported target profile, and passes the two
 /// already-established host-tool variables by name.
 pub(crate) fn parse(
-    root: &Path,
+    _root: &Path,
     invocation: &Invocation,
     relative_dir: &Path,
     target: Option<&TargetContext>,
@@ -34,14 +33,6 @@ pub(crate) fn parse(
     };
     if mmake != "workbench-devs-AHI-subsystem" {
         return Ok(None);
-    }
-
-    if !file_has_sha256(
-        root,
-        "workbench/devs/AHI/mmakefile.src",
-        pin("ahi-mmakefile"),
-    ) {
-        return Err("AHI subsystem mmakefile differs from the audited capability".to_owned());
     }
 
     let Some(profile) = target else {
@@ -103,9 +94,8 @@ mod tests {
     use super::parse;
     use crate::make_vars::collect_vars_impl;
     use crate::parser::{join_continuations, macro_arg, select_target_invocations, Invocation};
-    use crate::testing::{root, target_context, TempTree};
+    use crate::testing::{root, target_context};
     use aros_common::read_source;
-    use std::fs;
     use std::path::Path;
 
     fn parsed_ahi_capability() -> (Invocation, String) {
@@ -130,11 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn ahi_capability_rejects_macro_profile_and_mmakefile_drift() {
+    fn ahi_capability_rejects_macro_and_profile_drift() {
         let root = root();
         let relative_dir = Path::new("workbench/devs/AHI");
         let profile = target_context("x86_64", "pc", "");
-        let (invocation, content) = parsed_ahi_capability();
+        let (invocation, _content) = parsed_ahi_capability();
 
         assert!(parse(&root, &invocation, relative_dir, Some(&profile))
             .unwrap()
@@ -152,13 +142,5 @@ mod tests {
                 .unwrap_err()
                 .contains("AHI subsystem capability only supports")
         );
-
-        let tree = TempTree::new();
-        let drifted = tree.0.join(relative_dir).join("mmakefile.src");
-        fs::create_dir_all(drifted.parent().unwrap()).unwrap();
-        fs::write(&drifted, format!("{content}\n# audited-input drift\n")).unwrap();
-        assert!(parse(&tree.0, &invocation, relative_dir, Some(&profile))
-            .unwrap_err()
-            .contains("AHI subsystem mmakefile differs"));
     }
 }

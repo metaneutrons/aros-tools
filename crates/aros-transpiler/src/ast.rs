@@ -285,16 +285,12 @@ pub struct ExternalCMakeDecl {
     pub install_prefix: String,
     /// Proven `%fetch` target which materialises `source_dir`.
     pub fetch_target: String,
-    /// Exact archive whose digest is checked before configuration.
-    pub source_archive: String,
-    pub source_sha256: String,
-    /// Local patches admitted by the capability, paired positionally with
-    /// their exact digests. The fetch helper uses both lists to invalidate a
-    /// previously materialised source tree when a patch input changes.
+    /// Local patches admitted by the capability. The fetch helper tracks the
+    /// files directly and invalidates the private unpacked tree when one
+    /// changes; their contents are repository state, not hidden transpiler
+    /// pins.
     #[serde(default)]
     pub local_patch_files: Vec<String>,
-    #[serde(default)]
-    pub local_patch_sha256: Vec<String>,
     /// Legacy `uselibs=` spelling published by this build.
     pub provided_library: String,
     /// Linkable interface target created by the external-build helper. This is
@@ -339,10 +335,9 @@ pub struct ConfigureBuildDecl {
     pub binary_dir: String,
     /// Build-tree prefix receiving the public products.
     pub install_prefix: String,
-    /// SHA-256/path manifest which is both the source allowlist and the exact
-    /// content fingerprint used by the runner.
+    /// Path-only source allowlist. CMake snapshots live content hashes into
+    /// the runner contract without fixing them in the repository.
     pub input_manifest: String,
-    pub input_manifest_sha256: String,
     /// Outputs retained below the private build root.
     pub private_products: Vec<String>,
     /// Complete installed product contract.
@@ -421,7 +416,7 @@ pub struct PythonGeneratorJob {
     pub arguments: Vec<String>,
 }
 
-/// One pinned pure-Python package made available to a generator group.
+/// One fetched pure-Python package made available to a generator group.
 ///
 /// Packages are fetched like any other port, but are never installed into the
 /// host interpreter.  Their audited import roots are passed through a private
@@ -431,8 +426,6 @@ pub struct PythonGeneratorJob {
 pub struct PythonPackageDecl {
     pub fetch_target: String,
     pub source_root: String,
-    pub source_archive: String,
-    pub source_sha256: String,
     pub python_path: String,
 }
 
@@ -440,7 +433,7 @@ pub struct PythonPackageDecl {
 ///
 /// This is deliberately not a representation of arbitrary Make recipes.
 /// Each instance is constructed by a target-specific parser capability which
-/// pins the scripts, arguments, products, fetch owner and local patch.  The
+/// validates the scripts, arguments, products, fetch owner and local patch. The
 /// generated CMake then gives all products one real MetaMake owner target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonOutputsDecl {
@@ -452,27 +445,21 @@ pub struct PythonOutputsDecl {
     pub build_root: String,
     /// Fetch target whose completion stamp orders and invalidates the jobs.
     pub fetch_target: String,
-    /// Exact downloaded archive whose digest is verified before Python runs.
-    pub source_archive: String,
-    pub source_sha256: String,
     /// Fetched, source-root-relative inputs shared by the jobs.
     pub source_inputs: Vec<String>,
     pub jobs: Vec<PythonGeneratorJob>,
-    /// Optional repository-owned, content-pinned adapter for generators which
+    /// Optional repository-owned adapter for generators which
     /// write named files or need host Flex/Bison rather than stdout-only
     /// Python.  Absence retains the original direct-Python contract.
     #[serde(default)]
     pub driver_script: Option<String>,
-    #[serde(default)]
-    pub driver_sha256: Option<String>,
     /// Pure-Python packages exposed only to this owner.
     #[serde(default)]
     pub python_packages: Vec<PythonPackageDecl>,
     /// Exact unpacked source directory refreshed when the local patch changes.
     pub audited_source_dir: String,
-    /// Source-tree patches paired positionally with their pinned SHA-256.
+    /// Source-tree patches tracked directly as build inputs.
     pub local_patch_files: Vec<String>,
-    pub local_patch_sha256: Vec<String>,
     /// Concrete compile targets which consume the generated products.
     pub consumers: Vec<String>,
     /// Source-root-relative directory of the declaring mmakefile.
@@ -482,6 +469,10 @@ pub struct PythonOutputsDecl {
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
+    /// Drift in a recognised closed capability. Unlike general coverage gaps,
+    /// these are fatal: continuing would execute stale target-specific
+    /// assumptions.
+    pub capability_errors: Vec<String>,
     pub targets: Vec<TargetDefinition>,
     /// Strictly modelled `%build_with_cmake` declarations.
     pub external_cmake: Vec<ExternalCMakeDecl>,

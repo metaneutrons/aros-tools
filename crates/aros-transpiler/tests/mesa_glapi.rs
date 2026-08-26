@@ -2,11 +2,7 @@ use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, generate_cmake,
     parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, TargetContext,
 };
-use sha2::{Digest, Sha256};
-use std::{
-    fmt::Write as _,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 const GLAPI_SOURCES: &[&str] = &[
     "glapi/glapi_dispatch",
@@ -17,8 +13,6 @@ const GLAPI_SOURCES: &[&str] = &[
     "u_current",
     "u_execmem",
 ];
-const GLAPI_SOURCE_DIGEST: &str =
-    "a152f711efe0d563a2efa6daa4a0011ea893a3069131ed6c8807bc0576032423";
 
 fn source_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -111,16 +105,6 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
                 .collect::<Vec<_>>(),
             "{cpu}"
         );
-        let mut source_inventory = String::new();
-        for source in GLAPI_SOURCES {
-            writeln!(&mut source_inventory, "{source}.c").unwrap();
-        }
-        assert_eq!(
-            format!("{:x}", Sha256::digest(source_inventory.as_bytes())),
-            GLAPI_SOURCE_DIGEST,
-            "{cpu}"
-        );
-
         let expected_asm = if cpu == "x86_64" {
             vec![
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/mapi/glapi/glapi_x86-64"
@@ -171,15 +155,6 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(generated.fetch_target, "mesa3d-fetch", "{cpu}");
         assert_eq!(
-            generated.source_archive, "${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz",
-            "{cpu}"
-        );
-        assert_eq!(
-            generated.source_sha256,
-            "6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c",
-            "{cpu}"
-        );
-        assert_eq!(
             generated.source_inputs,
             ["src/mapi/glapi/gen/gl_and_es_API.xml"],
             "{cpu}"
@@ -187,11 +162,6 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         assert_eq!(
             generated.local_patch_files,
             ["${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
-            "{cpu}"
-        );
-        assert_eq!(
-            generated.local_patch_sha256,
-            ["153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e"],
             "{cpu}"
         );
         assert_eq!(generated.consumers, ["mesa3d-linklib-glapi"], "{cpu}");
@@ -241,14 +211,11 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         assert!(generator_at < target_at, "{cpu}");
         assert!(target_at < binding_at, "{cpu}");
         assert!(cmake.contains(
-            "    SOURCE_ARCHIVE \"${AROS_PORTS_SOURCE_DIR}/mesa-20.0.8.tar.xz\"\n\
-             \x20   SOURCE_SHA256 \"6cf0c010df89680f9b2bc6432ff01400031795e39bceda7535fa00af06740b6c\""
-        ));
-        assert!(cmake.contains(
             "    SOURCE_DIR \"${AROS_PORTS_DIR}/mesa/mesa-20.0.8\"\n\
-             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff\"\n\
-             \x20   LOCAL_PATCH_SHA256 \"153e644bc854ff1a29bb04271c1e7effccbcd7e6989b2c0333c88626dc62f53e\""
+             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff\""
         ));
+        assert!(!cmake.contains("SOURCE_SHA256"));
+        assert!(!cmake.contains("LOCAL_PATCH_SHA256"));
         assert!(cmake.contains(
             "        SCRIPT \"src/mapi/glapi/gen/gl_apitemp.py\"\n\
              \x20       OUTPUT \"src/mapi/glapi/glapitemp.h\"\n\

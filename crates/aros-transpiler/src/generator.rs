@@ -200,12 +200,6 @@ fn emit_configure_builds(
             cmake_arg(&declaration.input_manifest)
         )
         .unwrap();
-        writeln!(
-            out,
-            "    INPUT_MANIFEST_SHA256 {}",
-            cmake_arg(&declaration.input_manifest_sha256)
-        )
-        .unwrap();
         let private_products = declaration
             .private_products
             .iter()
@@ -428,7 +422,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     (
                         declaration.source_dir.as_str(),
                         declaration.local_patch_files.as_slice(),
-                        declaration.local_patch_sha256.as_slice(),
                     )
                 });
             let python_audit = graph
@@ -439,12 +432,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     (
                         declaration.audited_source_dir.as_str(),
                         declaration.local_patch_files.as_slice(),
-                        declaration.local_patch_sha256.as_slice(),
                     )
                 });
-            if let Some((source_dir, local_patch_files, local_patch_sha256)) =
-                external_audit.or(python_audit)
-            {
+            if let Some((source_dir, local_patch_files)) = external_audit.or(python_audit) {
                 if local_patch_files.is_empty() {
                     writeln!(out, ")").unwrap();
                     continue;
@@ -453,16 +443,11 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .iter()
                     .map(|path| cmake_arg(path))
                     .collect();
-                let patch_sha256: Vec<_> = local_patch_sha256
-                    .iter()
-                    .map(|digest| cmake_arg(digest))
-                    .collect();
                 write!(
                     out,
-                    "\n    SOURCE_DIR {}\n    LOCAL_PATCH_FILES {}\n    LOCAL_PATCH_SHA256 {}",
+                    "\n    SOURCE_DIR {}\n    LOCAL_PATCH_FILES {}",
                     cmake_arg(source_dir),
-                    patch_files.join(" "),
-                    patch_sha256.join(" ")
+                    patch_files.join(" ")
                 )
                 .unwrap();
             }
@@ -505,18 +490,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 out,
                 "    FETCH_TARGET {}",
                 cmake_arg(&declaration.fetch_target)
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    SOURCE_ARCHIVE {}",
-                cmake_arg(&declaration.source_archive)
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    SOURCE_SHA256 {}",
-                cmake_arg(&declaration.source_sha256)
             )
             .unwrap();
             writeln!(
@@ -730,24 +703,8 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 cmake_arg(&declaration.fetch_target)
             )
             .unwrap();
-            writeln!(
-                out,
-                "    SOURCE_ARCHIVE {}",
-                cmake_arg(&declaration.source_archive)
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "    SOURCE_SHA256 {}",
-                cmake_arg(&declaration.source_sha256)
-            )
-            .unwrap();
-            if let (Some(driver), Some(digest)) = (
-                declaration.driver_script.as_ref(),
-                declaration.driver_sha256.as_ref(),
-            ) {
+            if let Some(driver) = declaration.driver_script.as_ref() {
                 writeln!(out, "    DRIVER_SCRIPT {}", cmake_arg(driver)).unwrap();
-                writeln!(out, "    DRIVER_SHA256 {}", cmake_arg(digest)).unwrap();
             }
             if !declaration.python_packages.is_empty() {
                 let fetch_targets = declaration
@@ -760,16 +717,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .iter()
                     .map(|package| cmake_arg(&package.source_root))
                     .collect::<Vec<_>>();
-                let source_archives = declaration
-                    .python_packages
-                    .iter()
-                    .map(|package| cmake_arg(&package.source_archive))
-                    .collect::<Vec<_>>();
-                let source_sha256 = declaration
-                    .python_packages
-                    .iter()
-                    .map(|package| cmake_arg(&package.source_sha256))
-                    .collect::<Vec<_>>();
                 let python_paths = declaration
                     .python_packages
                     .iter()
@@ -777,13 +724,6 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .collect::<Vec<_>>();
                 writeln!(out, "    PACKAGE_FETCH_TARGETS {}", fetch_targets.join(" ")).unwrap();
                 writeln!(out, "    PACKAGE_SOURCE_ROOTS {}", source_roots.join(" ")).unwrap();
-                writeln!(
-                    out,
-                    "    PACKAGE_SOURCE_ARCHIVES {}",
-                    source_archives.join(" ")
-                )
-                .unwrap();
-                writeln!(out, "    PACKAGE_SOURCE_SHA256 {}", source_sha256.join(" ")).unwrap();
                 writeln!(out, "    PACKAGE_PYTHON_PATHS {}", python_paths.join(" ")).unwrap();
             }
             if !declaration.source_inputs.is_empty() {

@@ -65,24 +65,12 @@ fn cunit_external_contract_is_exact_for_every_current_architecture() {
         "linklibs-yes-cunit-external-cunit"
     );
     assert_eq!(
-        declaration.source_archive,
-        "${AROS_PORTS_SOURCE_DIR}/cunit-3.5.5.tar.bz2"
-    );
-    assert_eq!(
         declaration.binary_dir,
         "${AROS_BUILD_DIR}/gen/external-cmake/compiler/cunit"
     );
     assert_eq!(
-        declaration.source_sha256,
-        "a0a49b37c731303168481f387bb551b8381422d1b447d32f9e558293ceea9a10"
-    );
-    assert_eq!(
         declaration.local_patch_files,
         ["${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff"]
-    );
-    assert_eq!(
-        declaration.local_patch_sha256,
-        ["481b9d4544e7fae9f47dc821f343cbb5f417ea8abc76c1a8f9f9177ab7420197"]
     );
     assert_eq!(declaration.header_products.len(), 19);
     assert!(declaration.auxiliary_products.is_empty());
@@ -145,13 +133,11 @@ fn cunit_uselib_resolves_to_link_interface_and_generator_emits_it_first() {
     assert!(cmake.contains("    MMAKE_ID linklibs-yes-cunit"));
     assert!(cmake.contains("    LIBS \"linklibs-yes-cunit-external-cunit\""));
     assert!(cmake.contains(
-        "    SOURCE_SHA256 \"a0a49b37c731303168481f387bb551b8381422d1b447d32f9e558293ceea9a10\""
-    ));
-    assert!(cmake.contains(
         "    SOURCE_DIR \"${AROS_PORTS_DIR}/cunit/cunit-3.5.5\"\n\
-         \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff\"\n\
-         \x20   LOCAL_PATCH_SHA256 \"481b9d4544e7fae9f47dc821f343cbb5f417ea8abc76c1a8f9f9177ab7420197\""
+         \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff\""
     ));
+    assert!(!cmake.contains("SOURCE_SHA256"));
+    assert!(!cmake.contains("LOCAL_PATCH_SHA256"));
     assert!(
         cmake.contains("\"${AROS_BUILD_DIR}/SYS/Developer/SDK/Extras/include/CUnit/Automated.h\"")
     );
@@ -202,10 +188,6 @@ fn aom_external_contract_and_fetch_patch_are_profile_exact() {
             declaration.local_patch_files,
             ["${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"]
         );
-        assert_eq!(
-            declaration.local_patch_sha256,
-            ["c3caf62de4cd3524ddcf7c1b0111909c6d0f44081200324ab12090fcd8fb48ce"]
-        );
         assert!(declaration.options.starts_with(&[
             "-DBUILD_SHARED_LIBS=OFF".to_owned(),
             "-DENABLE_NASM=ON".to_owned(),
@@ -228,9 +210,10 @@ fn aom_external_contract_and_fetch_patch_are_profile_exact() {
         let cmake = generate_cmake(&graph);
         assert!(cmake.contains(
             "    SOURCE_DIR \"${AROS_PORTS_DIR}/libaom/libaom-3.12.1\"\n\
-             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff\"\n\
-             \x20   LOCAL_PATCH_SHA256 \"c3caf62de4cd3524ddcf7c1b0111909c6d0f44081200324ab12090fcd8fb48ce\""
+             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff\""
         ));
+        assert!(!cmake.contains("SOURCE_SHA256"));
+        assert!(!cmake.contains("LOCAL_PATCH_SHA256"));
     }
 }
 

@@ -127,5 +127,10 @@ fn grub2_contract_fails_closed_outside_the_x86_profile() {
             diagnostic.contains("%build_with_configure")
                 && diagnostic.contains("GRUB2 host-tool capability only supports")
         }));
+        assert!(
+            parsed.capability_errors.is_empty(),
+            "{cpu}: an intentional profile exclusion was classified as drift: {:#?}",
+            parsed.capability_errors
+        );
     }
 }

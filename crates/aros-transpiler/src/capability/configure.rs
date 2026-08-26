@@ -10,8 +10,6 @@
 use super::require_exact_macro_arguments;
 use crate::ast::ConfigureBuildDecl;
 use crate::parser::{macro_arg, Invocation, TargetContext};
-use crate::pins::pin;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path};
@@ -47,44 +45,27 @@ const ADFLIB_PUBLIC_HEADERS: &[&str] = &[
     "adf_nativ.h",
 ];
 
-/// Verifies the complete source allowlist and every content digest before a
-/// configure-style capability is admitted.  The same manifest is checked and
-/// staged by CMake at build time; doing it here too ensures source drift turns
-/// the declaration back into an explicit skip on the next configure.
-fn configure_input_manifest_is_pinned(
+/// Verifies the complete source allowlist before a configure-style capability
+/// is admitted. Content is deliberately not pinned: CMake snapshots live
+/// hashes into the runner contract and watches every listed file for changes.
+fn validate_configure_input_manifest(
     root: &Path,
     source_dir: &str,
     manifest: &str,
-    expected_manifest_sha256: &str,
 ) -> std::result::Result<(), String> {
     let manifest_path = root.join(manifest);
     let bytes = fs::read(&manifest_path)
         .map_err(|reason| format!("cannot read input manifest {manifest}: {reason}"))?;
-    let actual_manifest_sha256 = format!("{:x}", Sha256::digest(&bytes));
-    if actual_manifest_sha256 != expected_manifest_sha256 {
-        return Err(format!(
-            "input manifest digest is {actual_manifest_sha256}, expected {expected_manifest_sha256}"
-        ));
-    }
     let body = std::str::from_utf8(&bytes)
         .map_err(|_| format!("input manifest {manifest} is not UTF-8"))?;
     let source_root = root.join(source_dir);
     let mut paths = HashSet::new();
     let mut count = 0usize;
     for (index, line) in body.lines().enumerate() {
-        let (digest, relative) = line.split_once("  ").ok_or_else(|| {
-            format!(
-                "input manifest {manifest}:{} is not `<sha256>  <relative-path>`",
-                index + 1
-            )
-        })?;
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
+        let relative = line.trim();
+        if relative != line || relative.is_empty() {
             return Err(format!(
-                "input manifest {manifest}:{} has an invalid SHA-256",
+                "input manifest {manifest}:{} is not one canonical relative path",
                 index + 1
             ));
         }
@@ -107,16 +88,15 @@ fn configure_input_manifest_is_pinned(
             ));
         }
         let input = source_root.join(path);
-        let input_bytes = fs::read(&input).map_err(|reason| {
+        let metadata = fs::metadata(&input).map_err(|reason| {
             format!(
                 "input manifest {manifest}:{} cannot read {relative}: {reason}",
                 index + 1
             )
         })?;
-        let actual = format!("{:x}", Sha256::digest(&input_bytes));
-        if actual != digest {
+        if !metadata.is_file() {
             return Err(format!(
-                "input manifest {manifest}:{} digest for {relative} is {actual}, expected {digest}",
+                "input manifest {manifest}:{} does not name a regular file: {relative}",
                 index + 1
             ));
         }
@@ -188,12 +168,7 @@ pub(crate) fn parse(
                 ("prefix", "$(CROSSTOOLSDIR)"),
             ],
         )?;
-        configure_input_manifest_is_pinned(
-            root,
-            ADFLIB_CONFIGURE_DIR,
-            ADFLIB_CONFIGURE_MANIFEST,
-            pin("adflib-configure-manifest"),
-        )?;
+        validate_configure_input_manifest(root, ADFLIB_CONFIGURE_DIR, ADFLIB_CONFIGURE_MANIFEST)?;
         let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/host".to_owned();
         let install_prefix = "${AROS_BUILD_DIR}/hosttools".to_owned();
         let mut install_products = vec![format!("{install_prefix}/lib/libadf.a")];
@@ -210,7 +185,6 @@ pub(crate) fn parse(
             binary_dir: binary_dir.clone(),
             install_prefix,
             input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
-            input_manifest_sha256: pin("adflib-configure-manifest").to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -233,12 +207,7 @@ pub(crate) fn parse(
                 ("xflag", "no"),
             ],
         )?;
-        configure_input_manifest_is_pinned(
-            root,
-            ADFLIB_CONFIGURE_DIR,
-            ADFLIB_CONFIGURE_MANIFEST,
-            pin("adflib-configure-manifest"),
-        )?;
+        validate_configure_input_manifest(root, ADFLIB_CONFIGURE_DIR, ADFLIB_CONFIGURE_MANIFEST)?;
         let binary_dir = "${AROS_BUILD_DIR}/gen/configure/tools/ADFlib/target".to_owned();
         let install_prefix = "${AROS_BUILD_DIR}/SYS/Developer".to_owned();
         let mut install_products = vec![format!("{install_prefix}/lib/libadf.a")];
@@ -255,7 +224,6 @@ pub(crate) fn parse(
             binary_dir: binary_dir.clone(),
             install_prefix,
             input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
-            input_manifest_sha256: pin("adflib-configure-manifest").to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -276,11 +244,10 @@ pub(crate) fn parse(
                 ("use_build_env", "yes"),
             ],
         )?;
-        configure_input_manifest_is_pinned(
+        validate_configure_input_manifest(
             root,
             WIRELESS_CONFIGURE_SOURCE_ROOT,
             WIRELESS_CONFIGURE_MANIFEST,
-            pin("wireless-configure-manifest"),
         )?;
         let binary_dir =
             "${AROS_BUILD_DIR}/gen/configure/workbench/network/WirelessManager".to_owned();
@@ -293,7 +260,6 @@ pub(crate) fn parse(
             binary_dir,
             install_prefix: "${AROS_BUILD_DIR}/SYS".to_owned(),
             input_manifest: "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager/wirelessmanager-configure.inputs".to_owned(),
-            input_manifest_sha256: pin("wireless-configure-manifest").to_owned(),
             private_products: ["wpa_supplicant", "wpa_passphrase", "wpa_cli"]
                 .into_iter()
                 .map(|product| format!("{private_root}/{product}"))

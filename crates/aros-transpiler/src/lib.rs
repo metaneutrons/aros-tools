@@ -9,6 +9,7 @@ pub mod copy_includes;
 pub mod default_link_set;
 pub mod dirs;
 pub mod fetch;
+pub mod fingerprints;
 pub mod flags;
 pub mod flexcat;
 pub mod generator;
@@ -26,7 +27,6 @@ pub mod make_vars;
 pub mod module_paths;
 pub mod packages;
 pub mod parser;
-pub mod pins;
 pub mod sources;
 
 pub use arch_sources::ArchSourceDecl;

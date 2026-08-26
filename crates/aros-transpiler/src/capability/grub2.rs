@@ -5,10 +5,10 @@
 //! dependencies and the product manifests. What is decided here is whether the
 //! declaration is the exact audited input, and which fixed lane it selects.
 
-use super::{file_has_sha256, require_exact_macro_arguments};
+use super::require_exact_macro_arguments;
 use crate::ast::GrubBuildDecl;
 use crate::parser::{macro_arg, Invocation, TargetContext};
-use crate::pins::pin;
+use aros_common::read_source;
 use std::path::Path;
 
 const HOST_DIRECTORY: &str = "arch/all-pc/boot/grub2-host";
@@ -68,25 +68,15 @@ pub(crate) fn parse(
             profile.float_abi.as_deref().unwrap_or("<unset>")
         ));
     }
-    if !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2-host/mmakefile.src",
-        pin("grub2-host-mmakefile"),
-    ) || !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2-aros/mmakefile.src",
-        pin("grub2-aros-mmakefile"),
-    ) || !file_has_sha256(
-        root,
-        "arch/all-pc/boot/grub2_def",
-        pin("grub2-version-file"),
-    ) {
-        return Err(
-            "GRUB2 host, fetch-owner or version declaration differs from the audited 2.12 capability"
-                .to_owned(),
-        );
+    let version_path = root.join("arch/all-pc/boot/grub2_def");
+    let version = read_source(&version_path)
+        .map_err(|error| format!("cannot read {}: {error}", version_path.display()))?;
+    if version.trim() != "2.12" {
+        return Err(format!(
+            "GRUB2 host-tool capability supports version 2.12, but arch/all-pc/boot/grub2_def declares {:?}; update the transpiler and its closed GRUB build contract",
+            version.trim()
+        ));
     }
-
     let (mode, lane) = match mmake.as_str() {
         "grub2-host" => {
             require_exact_macro_arguments(

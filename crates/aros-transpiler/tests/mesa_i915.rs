@@ -2,12 +2,8 @@ use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars,
     parse_mmakefile_with_dirs_and_context_and_fetches, TargetContext,
 };
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-const I915_BASENAME_DIGEST: &str =
-    "bee7eef93c1df90d4356d8610fe0157288a9a09d9ec0846bf096506a18fa8d69";
 
 const I915_BASENAMES: &[&str] = &[
     "i915_blit.c",
@@ -36,9 +32,6 @@ const I915_BASENAMES: &[&str] = &[
     "i915_state_static.c",
     "i915_surface.c",
 ];
-
-const SOFTPIPE_BASENAME_DIGEST: &str =
-    "588a62fb5c38aeff71cb45f320bf5400ec66a784823e7dde3f4580fb6fe8d30b";
 
 const SOFTPIPE_BASENAMES: &[&str] = &[
     "sp_buffer.c",
@@ -94,15 +87,6 @@ fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
     }
-}
-
-fn basename_digest(basenames: &[String]) -> String {
-    let mut hasher = Sha256::new();
-    for basename in basenames {
-        hasher.update(basename.as_bytes());
-        hasher.update(b"\n");
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 #[test]
@@ -174,7 +158,6 @@ fn production_i915_is_exact_for_all_current_architectures() {
                 .collect::<Vec<_>>(),
             "{cpu}"
         );
-        assert_eq!(basename_digest(&basenames), I915_BASENAME_DIGEST, "{cpu}");
         assert!(
             target.source_files.iter().all(|source| source
                 .starts_with("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/i915/")),
@@ -337,11 +320,6 @@ fn production_softpipe_is_exact_for_all_current_architectures() {
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>(),
-            "{cpu}"
-        );
-        assert_eq!(
-            basename_digest(&basenames),
-            SOFTPIPE_BASENAME_DIGEST,
             "{cpu}"
         );
         assert!(
