@@ -123,6 +123,7 @@ dependencies = [
  "anyhow",
  "aros-common",
  "clap",
+ "tempfile",
 ]
 
 [[package]]

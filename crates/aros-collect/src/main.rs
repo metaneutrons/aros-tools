@@ -20,12 +20,13 @@
 //! library-version markers (`libreq`). Both are emitted into one generated
 //! script and one second pass, as `collect-aros.c:390` does.
 //!
-//! Not ported, and reported instead: `collect_extra`
-//! (`backend-generic.c:117`), which adds `OBJLIBDIR`-relative inputs to the
-//! second pass when the first leaves a weak `__cxa_pure_virtual` or an
-//! undefined `pthread_*`. That one changes the *inputs* of a link rather than
-//! its layout, so it is its own step.
+//! The released `collect-aros` aliases additionally implement `collect_extra`
+//! (`backend-generic.c:117`). They obtain `static-cxx-cxa-pure-virtual.o` and
+//! `libpthread.a` from an explicit Developer sysroot instead of embedding the
+//! build machine's `OBJLIBDIR`.
 
+mod driver;
+mod extra;
 mod libreq;
 mod sets;
 
@@ -105,6 +106,9 @@ fn write_report(path: Option<&PathBuf>, lines: &[String]) -> Result<()> {
 }
 
 fn main() -> ExitCode {
+    if driver::is_driver_invocation(std::env::args_os().next().as_deref()) {
+        return driver::main(std::env::args_os());
+    }
     let cli = Cli::parse();
     match collect(&cli) {
         Ok(true) => ExitCode::SUCCESS,

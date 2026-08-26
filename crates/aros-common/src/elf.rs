@@ -22,6 +22,7 @@ pub enum Class {
 
 impl Class {
     /// Bytes per pointer.
+    #[must_use]
     pub const fn pointer_bytes(self) -> u64 {
         match self {
             Self::Elf32 => 4,
@@ -30,6 +31,7 @@ impl Class {
     }
 
     /// The linker-script data command that emits one pointer-sized word.
+    #[must_use]
     pub const fn pointer_directive(self) -> &'static str {
         match self {
             Self::Elf32 => "LONG",
@@ -73,14 +75,17 @@ pub struct Section {
 }
 
 impl Section {
+    #[must_use]
     pub const fn is_alloc(&self) -> bool {
         self.flags & SHF_ALLOC != 0
     }
 
+    #[must_use]
     pub const fn is_write(&self) -> bool {
         self.flags & SHF_WRITE != 0
     }
 
+    #[must_use]
     pub const fn is_nobits(&self) -> bool {
         self.kind == SHT_NOBITS
     }
