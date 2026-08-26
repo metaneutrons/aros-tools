@@ -31,7 +31,7 @@ struct Driver {
     strip: PathBuf,
     args: Vec<OsString>,
     output: PathBuf,
-    sysroot: PathBuf,
+    sysroot: Option<PathBuf>,
     mode: LinkMode,
     strip_output: bool,
     ignore_undefined: bool,
@@ -153,22 +153,21 @@ fn parse(name: String, linker: PathBuf, strip: PathBuf, mut args: Vec<OsString>)
     }
 
     let output = output.context("linker command line has no -o FILE")?;
-    let sysroot = sysroot.context(
-        "linker command line has no --sysroot; update the AROS Clang driver or pass an AROS Developer sysroot explicitly",
-    )?;
-    if !sysroot.is_absolute() {
-        bail!("--sysroot must be absolute, got {}", sysroot.display());
-    }
-    let library_dir = sysroot.join(if name == "collect-aros32" {
-        "lib32"
-    } else {
-        "lib"
-    });
-    if !library_dir.is_dir() {
-        bail!(
-            "AROS sysroot library directory is missing: {}",
-            library_dir.display()
-        );
+    if let Some(root) = &sysroot {
+        if !root.is_absolute() {
+            bail!("--sysroot must be absolute, got {}", root.display());
+        }
+        let library_dir = root.join(if name == "collect-aros32" {
+            "lib32"
+        } else {
+            "lib"
+        });
+        if !library_dir.is_dir() {
+            bail!(
+                "AROS sysroot library directory is missing: {}",
+                library_dir.display()
+            );
+        }
     }
 
     Ok(Driver {
@@ -219,11 +218,6 @@ fn run(driver: &Driver) -> Result<bool> {
     fs::write(&script, script_body)
         .with_context(|| format!("cannot write collector script {}", script.display()))?;
 
-    let library_dir = driver.sysroot.join(if driver.name == "collect-aros32" {
-        "lib32"
-    } else {
-        "lib"
-    });
     let extras = extra::discover(&object.symbols);
     let mut second = vec![
         OsString::from("-r"),
@@ -232,11 +226,12 @@ fn run(driver: &Driver) -> Result<bool> {
         staged.into_os_string(),
     ];
     if extras.cxx_pure_virtual {
-        second
-            .push(require_library(&library_dir, "static-cxx-cxa-pure-virtual.o")?.into_os_string());
+        second.push(
+            require_sysroot_library(driver, "static-cxx-cxa-pure-virtual.o")?.into_os_string(),
+        );
     }
     if extras.pthread {
-        second.push(require_library(&library_dir, "libpthread.a")?.into_os_string());
+        second.push(require_sysroot_library(driver, "libpthread.a")?.into_os_string());
     }
     if has_undefined(&object) {
         second.extend(resupplied_libraries(&driver.args));
@@ -330,6 +325,20 @@ fn require_library(directory: &Path, name: &str) -> Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+fn require_sysroot_library(driver: &Driver, name: &str) -> Result<PathBuf> {
+    let root = driver.sysroot.as_ref().with_context(|| {
+        format!(
+            "the first link requires {name}, but the linker command line has no --sysroot; pass an absolute AROS Developer sysroot"
+        )
+    })?;
+    let directory = root.join(if driver.name == "collect-aros32" {
+        "lib32"
+    } else {
+        "lib"
+    });
+    require_library(&directory, name)
 }
 
 fn has_undefined(object: &Object) -> bool {
@@ -614,6 +623,37 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn a_library_free_compiler_probe_does_not_require_a_sysroot() {
+        let driver = parse(
+            "collect-aros".into(),
+            "ld.lld".into(),
+            "llvm-strip".into(),
+            strings(&["-Llib", "probe.o", "-o", "conftest"]),
+        )
+        .unwrap();
+
+        assert!(driver.sysroot.is_none());
+    }
+
+    #[test]
+    fn a_discovered_target_input_still_requires_a_sysroot() {
+        let driver = Driver {
+            name: "collect-aros".into(),
+            linker: "ld.lld".into(),
+            strip: "llvm-strip".into(),
+            args: Vec::new(),
+            output: "output.o".into(),
+            sysroot: None,
+            mode: LinkMode::Final,
+            strip_output: false,
+            ignore_undefined: false,
+        };
+
+        let error = require_sysroot_library(&driver, "libpthread.a").unwrap_err();
+        assert!(format!("{error:#}").contains("pass an absolute AROS Developer sysroot"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_bad_first_link_never_replaces_the_existing_output() {
@@ -640,7 +680,7 @@ mod tests {
                 output.clone().into_os_string(),
             ],
             output: output.clone(),
-            sysroot,
+            sysroot: Some(sysroot),
             mode: LinkMode::Final,
             strip_output: false,
             ignore_undefined: false,
