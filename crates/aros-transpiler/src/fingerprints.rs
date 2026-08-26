@@ -11,13 +11,42 @@ const FILE: &str = "aros-transpiler/capability-fingerprints.pins";
 
 /// Returns one embedded capability fingerprint by name.
 ///
-/// # Panics
+/// # Errors
 ///
-/// If the name is absent or malformed. This is an internal build-time data
-/// error, not unsupported input from the tree being transpiled.
-#[must_use]
-pub fn fingerprint(name: &str) -> &'static str {
-    aros_common::pins::pin(FINGERPRINTS, FILE, name)
+/// Returns an error if the embedded capability data is malformed or the name
+/// is absent.
+pub fn fingerprint(name: &str) -> Result<&'static str, String> {
+    aros_common::pins::try_pin(FINGERPRINTS, FILE, name)
+}
+
+/// Validates the complete embedded fingerprint registry at process startup.
+///
+/// # Errors
+///
+/// Returns an error for malformed values, duplicate names, missing names, or
+/// entries which are not used by this binary.
+pub fn validate() -> Result<(), String> {
+    let entries = aros_common::pins::try_entries(FINGERPRINTS, FILE)?;
+    let mut names = std::collections::BTreeSet::new();
+    for (name, value) in &entries {
+        if !names.insert(*name) {
+            return Err(format!("{FILE}: duplicate fingerprint name {name}"));
+        }
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("{FILE}: {name} is not a sha256: {value:?}"));
+        }
+    }
+    for name in NAMES {
+        let _ = fingerprint(name)?;
+    }
+    if names.len() != NAMES.len() {
+        return Err(format!(
+            "{FILE}: contains {} entries but this binary declares {} names",
+            names.len(),
+            NAMES.len()
+        ));
+    }
+    Ok(())
 }
 
 /// Every fingerprint this crate looks up.
@@ -67,7 +96,12 @@ mod tests {
     #[test]
     fn every_name_the_crate_uses_resolves() {
         for name in super::NAMES {
-            let _ = super::fingerprint(name);
+            let _ = super::fingerprint(name).unwrap();
         }
+    }
+
+    #[test]
+    fn complete_registry_passes_non_panicking_validation() {
+        super::validate().unwrap();
     }
 }

@@ -37,6 +37,7 @@ use crate::sources::{
     expand_file_list, map_linklib_object_sources, EvaluatedSources,
 };
 use aros_common::{read_source, Result};
+use aros_common::{Diagnostic, DiagnosticCode, DiagnosticStage, SourceLocation};
 use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
@@ -761,6 +762,56 @@ pub fn collect_mmakefile_fetches_with_context(
     Ok(collect_fetches_with_scope(&content, &rel_dir, &scope).0)
 }
 
+fn capability_diagnostic(
+    relative_path: &Path,
+    line: Option<usize>,
+    message: impl Into<String>,
+) -> Diagnostic {
+    let location = line.map_or_else(
+        || SourceLocation::new(relative_path.display().to_string()),
+        |line| SourceLocation::new(relative_path.display().to_string()).at(line, None),
+    );
+    Diagnostic::error(
+        DiagnosticCode::CapabilityDrift,
+        DiagnosticStage::CapabilityValidation,
+        message,
+    )
+    .with_location(location)
+    .with_hint(
+        "refusing a partial translation; review the upstream change and update the transpiler capability",
+    )
+}
+
+fn expected_grub_profile_exclusion(target: Option<&TargetContext>) -> bool {
+    target.is_some_and(|target| {
+        matches!(
+            (
+                target.cpu.as_deref(),
+                target.platform.as_deref(),
+                target.toolchain.as_deref(),
+                target.cpu32.as_deref(),
+                target.use_mmu.as_deref(),
+                target.float_abi.as_deref(),
+            ),
+            (
+                Some("arm"),
+                Some("raspi"),
+                Some("llvm"),
+                Some(""),
+                Some("1"),
+                Some("hard")
+            ) | (
+                Some("aarch64"),
+                Some("raspi"),
+                Some("llvm"),
+                Some(""),
+                Some("1"),
+                Some("")
+            )
+        )
+    })
+}
+
 fn parse_mmakefile_impl(
     path: &Path,
     root: &Path,
@@ -1011,7 +1062,7 @@ fn parse_mmakefile_impl(
         conditional_line_states.as_deref(),
     );
     let mut skipped_programs: Vec<String> = Vec::new();
-    let mut capability_errors: Vec<String> = Vec::new();
+    let mut capability_errors: Vec<Diagnostic> = Vec::new();
     let invocations = select_target_invocations(
         &joined,
         conditional_line_states.as_deref(),
@@ -1055,6 +1106,16 @@ fn parse_mmakefile_impl(
             Err(reason) => {
                 let mmake = macro_arg(&invocation.args, "mmake")
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
+                if matches!(
+                    rel_dir.to_str(),
+                    Some("compiler/cunit" | "workbench/classes/datatypes/heic")
+                ) {
+                    capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(invocation.line + 1),
+                        format!("%build_with_cmake{mmake} no longer matches its closed capability: {reason}"),
+                    ));
+                }
                 skipped_programs.push(format!(
                     "{}:{}: %build_with_cmake{mmake} skipped: {reason}",
                     rel_dir.display(),
@@ -1080,6 +1141,19 @@ fn parse_mmakefile_impl(
                         Err(reason) => {
                             let mmake = macro_arg(&invocation.args, "mmake")
                                 .map_or_else(String::new, |name| format!(" mmake={name}"));
+                            if matches!(
+                                rel_dir.to_str(),
+                                Some(
+                                    "tools/ADFlib"
+                                        | "workbench/network/WirelessManager/wpa_supplicant"
+                                )
+                            ) {
+                                capability_errors.push(capability_diagnostic(
+                                    &relative_path,
+                                    Some(invocation.line + 1),
+                                    format!("%build_with_configure{mmake} no longer matches its closed capability: {reason}"),
+                                ));
+                            }
                             skipped_programs.push(format!(
                                 "{}:{}: %build_with_configure{mmake} skipped: {reason}",
                                 rel_dir.display(),
@@ -1091,6 +1165,13 @@ fn parse_mmakefile_impl(
                 Err(reason) => {
                     let mmake = macro_arg(&invocation.args, "mmake")
                         .map_or_else(String::new, |name| format!(" mmake={name}"));
+                    if !expected_grub_profile_exclusion(target) {
+                        capability_errors.push(capability_diagnostic(
+                            &relative_path,
+                            Some(invocation.line + 1),
+                            format!("%build_with_configure{mmake} no longer matches the closed GRUB2 capability: {reason}"),
+                        ));
+                    }
                     skipped_programs.push(format!(
                         "{}:{}: %build_with_configure{mmake} skipped: {reason}",
                         rel_dir.display(),
@@ -1101,6 +1182,11 @@ fn parse_mmakefile_impl(
             Err(reason) => {
                 let mmake = macro_arg(&invocation.args, "mmake")
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(invocation.line + 1),
+                    format!("%build_with_configure{mmake} no longer matches the closed AHI capability: {reason}"),
+                ));
                 skipped_programs.push(format!(
                     "{}:{}: %build_with_configure{mmake} skipped: {reason}",
                     rel_dir.display(),
@@ -1162,6 +1248,14 @@ fn parse_mmakefile_impl(
             &mut declaration_flags,
             &mut declaration_includes,
         ) {
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                Some(inv.line + 1),
+                format!(
+                    "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
+                    inv.name
+                ),
+            ));
             skipped_programs.push(format!(
                 "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
                 rel_dir.display(),
@@ -1767,33 +1861,57 @@ fn parse_mmakefile_impl(
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
         );
         let mmake_name = sanitize_ident(&mmake_raw);
-        let mesa20_capability_sources =
-            match remaining_linklib_sources(root, &rel_dir, &mmake_name, target) {
-                Ok(sources) => sources,
-                Err(reason) => {
-                    skipped_programs.push(format!(
+        let mesa20_capability_sources = match remaining_linklib_sources(
+            root,
+            &rel_dir,
+            &mmake_name,
+            target,
+        ) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(inv.line + 1),
+                        format!(
+                            "%{} mmake={mmake_raw} no longer matches the Mesa archive capability: {reason}",
+                            inv.name
+                        ),
+                    ));
+                skipped_programs.push(format!(
                     "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 archive capability skipped: {reason}",
                     rel_dir.display(),
                     inv.line + 1,
                     inv.name
                 ));
-                    continue;
-                }
-            };
+                continue;
+            }
+        };
         let mesa20_capability_active = mesa20_capability_sources.is_some();
-        let nouveau_drm_capability_sources =
-            match crate::capability::nouveau::drm_sources(root, &rel_dir, &mmake_name, target) {
-                Ok(sources) => sources,
-                Err(reason) => {
-                    skipped_programs.push(format!(
+        let nouveau_drm_capability_sources = match crate::capability::nouveau::drm_sources(
+            root,
+            &rel_dir,
+            &mmake_name,
+            target,
+        ) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(inv.line + 1),
+                        format!(
+                            "%{} mmake={mmake_raw} no longer matches the Nouveau DRM archive capability: {reason}",
+                            inv.name
+                        ),
+                    ));
+                skipped_programs.push(format!(
                     "{}:{}: %{} mmake={mmake_raw} Nouveau DRM archive capability skipped: {reason}",
                     rel_dir.display(),
                     inv.line + 1,
                     inv.name
                 ));
-                    continue;
-                }
-            };
+                continue;
+            }
+        };
         let nouveau_drm_capability_active = nouveau_drm_capability_sources.is_some();
         let nouveau_gallium_capability_sources = match crate::capability::nouveau::gallium_sources(
             root,
@@ -1803,6 +1921,14 @@ fn parse_mmakefile_impl(
         ) {
             Ok(sources) => sources,
             Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(inv.line + 1),
+                    format!(
+                        "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium archive capability: {reason}",
+                        inv.name
+                    ),
+                ));
                 skipped_programs.push(format!(
                         "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium archive capability skipped: {reason}",
                         rel_dir.display(),
@@ -1820,6 +1946,14 @@ fn parse_mmakefile_impl(
             &mut declaration_flags,
             &mut declaration_includes,
         ) {
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                Some(inv.line + 1),
+                format!(
+                    "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
+                    inv.name
+                ),
+            ));
             skipped_programs.push(format!(
                 "{}:{}: %{} mmake={mmake_raw} Mesa 20.0.8 compile contract skipped: {reason}",
                 rel_dir.display(),
@@ -1839,6 +1973,14 @@ fn parse_mmakefile_impl(
             }
             Ok(None) => {}
             Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(inv.line + 1),
+                    format!(
+                        "%{} mmake={mmake_raw} no longer matches the Nouveau DRM compile capability: {reason}",
+                        inv.name
+                    ),
+                ));
                 skipped_programs.push(format!(
                     "{}:{}: %{} mmake={mmake_raw} Nouveau DRM compile contract skipped: {reason}",
                     rel_dir.display(),
@@ -1859,6 +2001,14 @@ fn parse_mmakefile_impl(
             }
             Ok(None) => {}
             Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(inv.line + 1),
+                    format!(
+                        "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium compile capability: {reason}",
+                        inv.name
+                    ),
+                ));
                 skipped_programs.push(format!(
                     "{}:{}: %{} mmake={mmake_raw} Nouveau Gallium compile contract skipped: {reason}",
                     rel_dir.display(),
@@ -2219,6 +2369,11 @@ fn parse_mmakefile_impl(
         // executable empty-archive support and the target-only ISA flag are
         // admitted as one atomic capability. Any drift removes the target.
         targets.retain(|candidate| candidate.mmake_name != sse41::MMAKE);
+        capability_errors.push(capability_diagnostic(
+            &relative_path,
+            None,
+            format!("Mesa SSE4.1 link library no longer matches its closed capability: {reason}"),
+        ));
         skipped_programs.push(format!(
             "{}: Mesa SSE4.1 link library skipped: {reason}",
             rel_dir.display()
@@ -2238,6 +2393,13 @@ fn parse_mmakefile_impl(
             // has drifted.
             targets
                 .retain(|candidate| candidate.mmake_name != crate::capability::nouveau::DRM_MMAKE);
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!(
+                    "Nouveau DRM link library no longer matches its closed capability: {reason}"
+                ),
+            ));
             skipped_programs.push(format!(
                 "{}: Nouveau DRM link library skipped: {reason}",
                 rel_dir.display()
@@ -2259,6 +2421,13 @@ fn parse_mmakefile_impl(
             targets.retain(|candidate| {
                 candidate.mmake_name != crate::capability::nouveau::GALLIUM_MMAKE
             });
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!(
+                    "Nouveau Gallium link library no longer matches its closed capability: {reason}"
+                ),
+            ));
             skipped_programs.push(format!(
                 "{}: Nouveau Gallium link library skipped: {reason}",
                 rel_dir.display()
@@ -2270,18 +2439,32 @@ fn parse_mmakefile_impl(
     match generators::parse_glapi(&rel_dir, target, &content, &targets, &ownership_fetches) {
         Ok(Some(declaration)) => python_outputs.push(declaration),
         Ok(None) => {}
-        Err(reason) => skipped_programs.push(format!(
-            "{}: Mesa glapi Python generator skipped: {reason}",
-            rel_dir.display()
-        )),
+        Err(reason) => {
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!("Mesa glapi generator no longer matches its closed capability: {reason}"),
+            ));
+            skipped_programs.push(format!(
+                "{}: Mesa glapi Python generator skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
     }
     match generators::parse_mesautil(&rel_dir, target, &content, &targets, &ownership_fetches) {
         Ok(Some(declaration)) => python_outputs.push(declaration),
         Ok(None) => {}
-        Err(reason) => skipped_programs.push(format!(
-            "{}: Mesa utility Python generator skipped: {reason}",
-            rel_dir.display()
-        )),
+        Err(reason) => {
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!("Mesa utility generator no longer matches its closed capability: {reason}"),
+            ));
+            skipped_programs.push(format!(
+                "{}: Mesa utility Python generator skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
     }
     let mesa20_required_target = match rel_dir.to_str() {
         Some("workbench/libs/mesa/libcompiler") => Some("mesa3d-linklib-compiler"),
@@ -2311,6 +2494,13 @@ fn parse_mmakefile_impl(
                 // translation units is never an executable fallback.
                 targets.retain(|candidate| candidate.mmake_name != mmake);
             }
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!(
+                    "Mesa 20.0.8 archive/generator no longer matches its closed capability: {reason}"
+                ),
+            ));
             skipped_programs.push(format!(
                 "{}: Mesa 20.0.8 archive/generator capability skipped: {reason}",
                 rel_dir.display()
@@ -2384,39 +2574,6 @@ fn parse_mmakefile_impl(
         &arch_object_roots,
     );
 
-    // Coverage gaps remain reports, but a declaration already owned by one of
-    // the closed capabilities must never silently fall back to a partial
-    // target. Those errors mean the executable model is stale and requires a
-    // reviewed transpiler update.
-    capability_errors.extend(skipped_programs.iter().filter_map(|diagnostic| {
-        // A capability can be deliberately absent from another supported
-        // architecture. That is not recipe drift and must not make an ARM
-        // translation fail merely because an x86-only declaration exists in
-        // the shared source tree.
-        let expected_profile_exclusion = diagnostic.contains("does not support target profile")
-            || diagnostic.contains("only supports x86_64-pc LLVM");
-        let recognised_closed_capability =
-            (diagnostic.contains("Mesa ") && diagnostic.contains("capability skipped"))
-                || diagnostic.contains("Mesa SSE4.1 link library skipped")
-                || diagnostic.contains("Mesa glapi Python generator skipped")
-                || diagnostic.contains("Mesa utility Python generator skipped")
-                || diagnostic.contains("Nouveau DRM link library skipped")
-                || diagnostic.contains("Nouveau Gallium link library skipped")
-                || diagnostic.starts_with("compiler/cunit:")
-                || diagnostic.starts_with("workbench/classes/datatypes/heic:")
-                || diagnostic.starts_with("tools/ADFlib:")
-                || diagnostic.starts_with(
-                    "workbench/network/WirelessManager/wpa_supplicant:",
-                )
-                || diagnostic.starts_with("workbench/devs/AHI:")
-                || diagnostic.starts_with("arch/all-pc/boot/grub2-host:");
-        (recognised_closed_capability && !expected_profile_exclusion).then(|| {
-            format!(
-                "{diagnostic}; refusing a partial translation: review the upstream change and update the transpiler capability"
-            )
-        })
-    }));
-
     Ok(ParsedMmakefile {
         capability_errors,
         targets,
@@ -2473,22 +2630,36 @@ fn parse_mmakefile_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_vars, collect_vars_impl, evaluate_macro_sources, implicit_module_meta_rules,
-        is_explicit_genmodule_only, join_continuations, join_mm_continuations, macro_arg,
-        macro_argument_names, macro_invocations, render_meta_token, resolve_module_suffix,
-        resolve_module_target_dir, sanitize_ident, select_target_invocations, MakeExprContext,
-        TargetContext, META_RULE_RE,
+        capability_diagnostic, collect_vars, collect_vars_impl, evaluate_macro_sources,
+        implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
+        join_mm_continuations, macro_arg, macro_argument_names, macro_invocations,
+        render_meta_token, resolve_module_suffix, resolve_module_target_dir, sanitize_ident,
+        select_target_invocations, MakeExprContext, TargetContext, META_RULE_RE,
     };
     use crate::ast::ModuleType;
     use crate::capability::external_cmake::{self, AOM_COMMON_OPTIONS};
     use crate::dirs::DirVars;
     use crate::make_vars::collect_vars_with_context;
     use crate::testing::{dirs, root, target_context, TempTree};
-    use aros_common::read_source;
+    use aros_common::{read_source, DiagnosticCode, DiagnosticStage};
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;
     use walkdir::WalkDir;
+
+    #[test]
+    fn capability_drift_is_typed_without_inspecting_failure_text() {
+        let diagnostic = capability_diagnostic(
+            Path::new("workbench/example/mmakefile.src"),
+            Some(17),
+            "opaque upstream failure",
+        );
+        assert_eq!(diagnostic.code, DiagnosticCode::CapabilityDrift);
+        assert_eq!(diagnostic.stage, DiagnosticStage::CapabilityValidation);
+        let location = diagnostic.location.unwrap();
+        assert_eq!(location.path, "workbench/example/mmakefile.src");
+        assert_eq!(location.line, Some(17));
+    }
 
     #[test]
     fn recursive_collector_includes_keep_original_curdir_and_make_root() {

@@ -505,9 +505,9 @@ pub(crate) fn parse_remaining(
             (
                 "mesa3d-linklib-compiler",
                 "mesa3d-linklib-compiler-generated",
-                fingerprint("mesa20-compiler-recipe"),
+                fingerprint("mesa20-compiler-recipe")?,
                 "workbench/libs/mesa/libcompiler/compiler-20.0.8.sources",
-                fingerprint("mesa20-compiler-manifest"),
+                fingerprint("mesa20-compiler-manifest")?,
                 inputs,
                 jobs,
                 python_packages(),
@@ -518,9 +518,9 @@ pub(crate) fn parse_remaining(
             (
                 "mesa3d-linklib-galliumauxiliary",
                 "mesa3d-linklib-galliumauxiliary-generated",
-                fingerprint("mesa20-galliumaux-recipe"),
+                fingerprint("mesa20-galliumaux-recipe")?,
                 "workbench/libs/mesa/libgalliumaux/galliumaux-20.0.8.sources",
-                fingerprint("mesa20-galliumaux-manifest"),
+                fingerprint("mesa20-galliumaux-manifest")?,
                 inputs,
                 jobs,
                 Vec::new(),
@@ -531,9 +531,9 @@ pub(crate) fn parse_remaining(
             (
                 "mesa3d-linklib-mesa",
                 "mesa3d-linklib-mesa-generated",
-                fingerprint("mesa20-core-recipe"),
+                fingerprint("mesa20-core-recipe")?,
                 "workbench/libs/mesa/libmesa/mesa-20.0.8.sources",
-                fingerprint("mesa20-core-manifest"),
+                fingerprint("mesa20-core-manifest")?,
                 inputs,
                 jobs,
                 python_packages(),
@@ -544,9 +544,9 @@ pub(crate) fn parse_remaining(
             (
                 "linklibs-gallium_vc4",
                 "linklibs-gallium_vc4-gen-cle",
-                fingerprint("mesa20-vc4-recipe"),
+                fingerprint("mesa20-vc4-recipe")?,
                 "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
-                fingerprint("mesa20-vc4-manifest"),
+                fingerprint("mesa20-vc4-manifest")?,
                 inputs,
                 jobs,
                 Vec::new(),
@@ -567,7 +567,11 @@ pub(crate) fn parse_remaining(
         ),
         "mesa3d-linklib-mesa" => ("define es-gen", "%build_linklib mmake=mesa3d-linklib-mesa"),
         "linklibs-gallium_vc4" => ("CLE_SRCDIR :=", "%build_linklib mmake=linklibs-gallium_vc4"),
-        _ => unreachable!("all remaining Mesa generator lanes are enumerated"),
+        _ => {
+            return Err(format!(
+                "{mmake}: internal Mesa generator lane has no recipe boundary"
+            ));
+        }
     };
     let recipe_block = normalized_make_capability_block(make_source, recipe_start, recipe_end)
         .ok_or_else(|| {
@@ -602,7 +606,7 @@ pub(crate) fn parse_remaining(
     require_text_fingerprint(
         "workbench/libs/mesa/mesa.cfg compile context",
         &config_context,
-        fingerprint("mesa-sse41-config-context"),
+        fingerprint("mesa-sse41-config-context")?,
         mmake,
     )?;
     require_fetches(fetches)?;

@@ -1,18 +1,25 @@
-use aros_common::{ArosError, Result};
+use aros_common::{
+    ArosError, Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticStage,
+    Result, SourceLocation,
+};
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, default_link_set_available, generate_cmake,
     generated_header, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
     read_default_link_set, DependencyGraph, TargetContext,
 };
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use tracing::info;
 use walkdir::WalkDir;
+
+mod publication;
+
+use publication::Publication;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "AROS-NG Parallel mmakefile Transpiler")]
@@ -60,12 +67,49 @@ struct Args {
     /// Historic GCC_CONFIG_FLOAT_ABI value
     #[arg(long)]
     float_abi: Option<String>,
+
+    /// Diagnostic renderer used for failures
+    #[arg(long, value_enum, default_value_t = DiagnosticFormat::Human)]
+    diagnostic_format: DiagnosticFormat,
 }
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    let args = Args::parse();
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiagnosticFormat {
+    Human,
+    Json,
+}
 
+fn main() -> ExitCode {
+    let args = Args::parse();
+    if matches!(args.diagnostic_format, DiagnosticFormat::Json) {
+        tracing_subscriber::fmt().with_writer(std::io::sink).init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            render_diagnostics(&error_to_diagnostics(error), args.diagnostic_format);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(args: &Args) -> Result<()> {
+    if let Err(error) = aros_transpiler::fingerprints::validate() {
+        return Err(diagnostics_error(vec![Diagnostic::error(
+            DiagnosticCode::InternalInvariant,
+            DiagnosticStage::Internal,
+            error,
+        )
+        .with_location(SourceLocation::new(
+            "tools/aros-tools/crates/aros-transpiler/capability-fingerprints.pins",
+        ))
+        .with_hint(
+            "repair the embedded registry and rebuild the transpiler binary",
+        )]));
+    }
     println!(
         "⚡ AROS-NG Transpiler v0.1.0 — Scanning MetaMake inputs in {}...",
         args.source_dir.display()
@@ -86,9 +130,13 @@ fn main() -> Result<()> {
                     .any(|d| e.file_name().to_string_lossy() == *d)
         })
     {
-        let entry = entry.map_err(|error| ArosError::TranspilerSyntax {
-            file: args.source_dir.display().to_string(),
-            message: format!("cannot walk MetaMake source tree: {error}"),
+        let entry = entry.map_err(|error| {
+            diagnostics_error(vec![Diagnostic::error(
+                DiagnosticCode::SourceWalk,
+                DiagnosticStage::SourceWalk,
+                format!("cannot walk MetaMake source tree: {error}"),
+            )
+            .with_location(SourceLocation::new("."))])
         })?;
         // MetaMake reads both generated-template inputs (`mmakefile.src`) and
         // direct make fragments (`mmakefile`).  The latter include the
@@ -111,7 +159,11 @@ fn main() -> Result<()> {
         files.len()
     );
 
-    let pb = ProgressBar::new(files.len() as u64);
+    let pb = if matches!(args.diagnostic_format, DiagnosticFormat::Json) {
+        ProgressBar::hidden()
+    } else {
+        ProgressBar::new(files.len() as u64)
+    };
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -161,11 +213,18 @@ fn main() -> Result<()> {
         for (path, result) in results {
             match result {
                 Ok(found) => fetches.extend(found),
-                Err(error) => errors.push(format!("{}: {error}", path.display())),
+                Err(error) => errors.push(
+                    Diagnostic::error(
+                        DiagnosticCode::FetchDiscovery,
+                        DiagnosticStage::FetchDiscovery,
+                        error.to_string(),
+                    )
+                    .with_location(source_location(path, &args.source_dir)),
+                ),
             }
         }
         if !errors.is_empty() {
-            return Err(diagnostics_error("fetch discovery", errors));
+            return Err(diagnostics_error(errors));
         }
         fetches
     } else {
@@ -196,15 +255,22 @@ fn main() -> Result<()> {
     for (path, result) in parsed_results {
         match result {
             Ok(parsed) => parsed_files.push(parsed),
-            Err(error) => parse_errors.push(format!("{}: {error}", path.display())),
+            Err(error) => parse_errors.push(
+                Diagnostic::error(
+                    DiagnosticCode::SourceParse,
+                    DiagnosticStage::Parsing,
+                    error.to_string(),
+                )
+                .with_location(source_location(path, &args.source_dir)),
+            ),
         }
     }
     if !parse_errors.is_empty() {
-        return Err(diagnostics_error("parsing", parse_errors));
+        return Err(diagnostics_error(parse_errors));
     }
 
     let mut graph = DependencyGraph::new();
-    let mut capability_errors: Vec<String> = Vec::new();
+    let mut capability_errors: Vec<Diagnostic> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut skipped_headers: Vec<String> = Vec::new();
     let mut skipped_copy_directories: Vec<String> = Vec::new();
@@ -299,10 +365,7 @@ fn main() -> Result<()> {
     }
 
     if !capability_errors.is_empty() {
-        return Err(diagnostics_error(
-            "capability validation",
-            capability_errors,
-        ));
+        return Err(diagnostics_error(capability_errors));
     }
 
     source_inventory_patterns.sort();
@@ -354,10 +417,15 @@ fn main() -> Result<()> {
             // A spec we cannot represent must stop the build rather than
             // quietly produce links without the default set.
             Err(error) => {
-                return Err(aros_common::ArosError::TranspilerSyntax {
-                    file: "config/elf-specs.in".to_owned(),
-                    message: format!("default link set: {error}"),
-                });
+                return Err(diagnostics_error(vec![Diagnostic::error(
+                    DiagnosticCode::SourceParse,
+                    DiagnosticStage::Parsing,
+                    format!("cannot read the compiler default link set: {error}"),
+                )
+                .with_location(SourceLocation::new("config/elf-specs.in"))
+                .with_hint(
+                    "update the default-link-set parser before generating an incomplete link graph",
+                )]));
             }
         }
     } else {
@@ -432,67 +500,79 @@ fn main() -> Result<()> {
         graph.fetches.len()
     );
 
+    let mut publication = Publication::default();
     write_report(
+        &mut publication,
         &args.output,
         "skipped-script-outputs.txt",
         skipped_script_outputs,
         "script-generated file rule(s) could not be bound",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-hidd-stubs.txt",
         skipped_hidd_stubs,
         "%make_hidd_stubs declaration(s) could not be used",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-host-generated-headers.txt",
         skipped_host_generated_headers,
         "host-tool header rule(s) could not be represented",
     );
     write_report(
+        &mut publication,
         &args.output,
         "kickstart-kobj-ldscript.txt",
         unresolved_kobj_ldscript,
         "kickstart section-ordering script issue(s)",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-binary-objects.txt",
         skipped_binary_objects,
         "%rule_link_binary declaration(s) could not be resolved",
     );
     write_report(
+        &mut publication,
         &args.output,
         "arch-lane-attachments.txt",
         arch_lane_attachments,
         "architecture lane(s) attached to another lane by a #MM edge",
     );
     write_report(
+        &mut publication,
         &args.output,
         "inherited-arch-sources.txt",
         inherited_arch_sources,
         "declaration(s) inherit architecture sources through a shared arch object root",
     );
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-default-link-set.txt",
         unresolved_default_link_set,
         "compiler-spec default link set item(s) have no archive in this configuration",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-client-archives.txt",
         skipped_client_archives,
         "module(s) need a genmodule client archive that only modtype=library builds",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-make-opts.txt",
         skipped_make_opts,
         "make.opts file(s) not applied (Make conditionals or an unmapped path)",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-local-make-includes.txt",
         skipped_local_make_includes,
@@ -500,54 +580,63 @@ fn main() -> Result<()> {
     );
     // A skipped fetch means a third-party dependency the build cannot obtain.
     write_report(
+        &mut publication,
         &args.output,
         "skipped-fetches.txt",
         skipped_fetches,
         "%fetch declaration(s) reference unmapped Make variables",
     );
     write_report(
+        &mut publication,
         &args.output,
         "unowned-port-sources.txt",
         unowned_port_sources,
         "port source(s) have no matching %fetch destination owner",
     );
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-generated-headers.txt",
         unresolved_generated_headers,
         "generated literal header(s) have no concrete provider target",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-arch-sources.txt",
         skipped_arch_sources,
         "%build_archspecific declaration(s) had no resolvable file list",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-icons.txt",
         skipped_icons,
         "%build_icons declaration(s) or target variant(s) could not be resolved",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-catalogs.txt",
         skipped_catalogs,
         "%build_catalogs declaration(s) could not be resolved",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-flexcat-sources.txt",
         skipped_flexcat_sources,
         "hand-written FlexCat source/header rule(s) could not be resolved",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-meta-rules.txt",
         skipped_meta_rules,
         "#MM target/dependency token(s) reference unmapped Make variables",
     );
     write_report(
+        &mut publication,
         &args.output,
         "meta-cycles.txt",
         flattened_meta_cycles,
@@ -561,6 +650,7 @@ fn main() -> Result<()> {
     // A skipped declaration means a header never reaches the SDK, and that has
     // to be inspectable.
     write_report(
+        &mut publication,
         &args.output,
         "skipped-header-staging.txt",
         skipped_headers,
@@ -571,6 +661,7 @@ fn main() -> Result<()> {
         graph.copy_directories.len()
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-directory-staging.txt",
         skipped_copy_directories,
@@ -578,6 +669,7 @@ fn main() -> Result<()> {
     );
 
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-uselibs.txt",
         unresolved_libs,
@@ -586,6 +678,7 @@ fn main() -> Result<()> {
     // A package missing a member still builds. The gap only shows up as a
     // system that does not boot, so it has to be visible here.
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-package-members.txt",
         skipped_packages,
@@ -602,18 +695,21 @@ fn main() -> Result<()> {
     // These are build declarations, not flags or headers: each one is a target
     // the historic build produces and this one does not.
     write_report(
+        &mut publication,
         &args.output,
         "unmodelled-declarations.txt",
         skipped_programs,
         "build declaration(s) of a kind the target model does not express",
     );
     write_report(
+        &mut publication,
         &args.output,
         "partial-source-lists.txt",
         partial_source_lists,
         "source lane(s) omitted from otherwise retained targets",
     );
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-output-paths.txt",
         unresolved_output_paths,
@@ -622,32 +718,42 @@ fn main() -> Result<()> {
     // Not headers, so these do not break a compile; they break a link or a
     // package step, which is harder to trace back. Listed for that reason.
     write_report(
+        &mut publication,
         &args.output,
         "generated-file-rules.txt",
         generated_file_rules,
         "hand-written $(GENDIR) rule(s) build something other than a header",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-flags.txt",
         skipped_flags,
         "compiler flag(s) not propagated (not a simple -D, or an unmapped variable)",
     );
     write_report(
+        &mut publication,
         &args.output,
         "skipped-conditions.txt",
         skipped_conditions,
         "Make conditional(s) guard flags in a way that is not an architecture test",
     );
     if ambiguous_flags > 0 {
-        println!(
-            "⚠️  {ambiguous_flags} mmakefile(s) reassign USER_CPPFLAGS/USER_CFLAGS and build several modules; \
-             flags are read file-globally there and may differ from Make"
-        );
+        publication.notice(format!(
+            "⚠️  [AT1032] {ambiguous_flags} mmakefile(s) reassign USER_CPPFLAGS/USER_CFLAGS and build several modules; flags are read file-globally there and may differ from Make"
+        ));
     }
+    publication.record_coverage(
+        "AT1032",
+        DiagnosticSeverity::Warning,
+        None,
+        ambiguous_flags,
+        "mmakefiles reassign flags while declaring several modules",
+    );
     // The full list is long and dominated by third-party ports, so it goes next
     // to the generated CMake file rather than into the build log.
     write_report(
+        &mut publication,
         &args.output,
         "unresolved-includes.txt",
         unresolved,
@@ -683,17 +789,18 @@ fn main() -> Result<()> {
         "📝 Generating CMake target definitions -> {}...",
         args.output.display()
     );
-    if let Some(parent) = args.output.parent() {
-        fs::create_dir_all(parent)?;
-    }
 
     let cmake_content = format!(
         "{}{}",
         generated_header(target.as_ref()),
         generate_cmake(&graph)
     );
-    fs::write(&args.output, cmake_content)?;
-    write_source_inventory_manifest(&args.output, &graph)?;
+    let coverage_json = publication.coverage_json()?;
+    publication.present(args.output.with_extension("coverage.json"), coverage_json);
+    publication.present(
+        args.output.with_extension("source-inventory.cmake"),
+        render_source_inventory_manifest(&graph),
+    );
 
     // The default link set is applied by CMake, which needs to know which
     // declarations suppress part of it. These are driver switches and must not
@@ -707,18 +814,33 @@ fn main() -> Result<()> {
     spec_switch_lines.sort();
     let spec_switch_path = args.output.with_extension("spec-switches.txt");
     if spec_switch_lines.is_empty() {
-        let _ = fs::remove_file(&spec_switch_path);
+        publication.absent(spec_switch_path);
     } else {
-        fs::write(
-            &spec_switch_path,
+        publication.present(
+            spec_switch_path.clone(),
             format!("{}\n", spec_switch_lines.join("\n")),
-        )?;
-        println!(
+        );
+        publication.notice(format!(
             "🔒 {} declaration(s) suppress part of the default link set -> {}",
             spec_switch_lines.len(),
             spec_switch_path.display()
-        );
+        ));
     }
+
+    // The graph is the commit marker consumed by CMake and is deliberately
+    // replaced after every sidecar and report in the same transaction.
+    publication.present(args.output.clone(), cmake_content);
+    publication.publish().map_err(|error| {
+        diagnostics_error(vec![Diagnostic::error(
+            DiagnosticCode::OutputIo,
+            DiagnosticStage::OutputPublication,
+            format!("cannot publish the generated output set: {error}"),
+        )
+        .with_location(source_location(&args.output, &args.source_dir))
+        .with_hint(
+            "the previous complete generation was retained whenever rollback succeeded",
+        )])
+    })?;
 
     println!(
         "✅ Successfully generated {} concrete targets, {} external CMake targets, {} configure-style targets, {} GRUB2 host-tool lanes, {} AHI subsystem builds, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets in {}!",
@@ -740,22 +862,75 @@ fn cmake_quoted_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn diagnostics_error(stage: &str, mut diagnostics: Vec<String>) -> ArosError {
-    diagnostics.sort();
-    diagnostics.dedup();
-    let count = diagnostics.len();
-    ArosError::TranspilerDiagnostics {
-        stage: stage.to_owned(),
-        count,
-        details: diagnostics
-            .into_iter()
-            .map(|diagnostic| format!("  - {diagnostic}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+fn diagnostics_error(diagnostics: Vec<Diagnostic>) -> ArosError {
+    ArosError::Diagnostics(DiagnosticSet::new(diagnostics))
+}
+
+fn source_location(path: &Path, root: &Path) -> SourceLocation {
+    SourceLocation::new(
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string(),
+    )
+}
+
+fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
+    match error {
+        ArosError::Diagnostics(diagnostics) => diagnostics,
+        ArosError::TranspilerSyntax { file, message } => DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::SourceParse,
+                DiagnosticStage::Parsing,
+                message,
+            )
+            .with_location(SourceLocation::new(file)),
+        ),
+        ArosError::DependencyCycle { target } => DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::GraphValidation,
+                DiagnosticStage::GraphValidation,
+                format!("dependency cycle detected in module: {target}"),
+            )
+            .with_hint("break or explicitly model the cycle before publishing the graph"),
+        ),
+        ArosError::Io(error) => DiagnosticSet::single(Diagnostic::error(
+            DiagnosticCode::OutputIo,
+            DiagnosticStage::OutputPublication,
+            error.to_string(),
+        )),
+        ArosError::Json(error) => DiagnosticSet::single(Diagnostic::error(
+            DiagnosticCode::InternalInvariant,
+            DiagnosticStage::Internal,
+            format!("diagnostic serialization failed: {error}"),
+        )),
+        ArosError::ToolchainNotFound { binary } => DiagnosticSet::single(Diagnostic::error(
+            DiagnosticCode::InternalInvariant,
+            DiagnosticStage::Internal,
+            format!("unexpected toolchain lookup for `{binary}`"),
+        )),
+        ArosError::CommandFailed { cmd } => DiagnosticSet::single(Diagnostic::error(
+            DiagnosticCode::InternalInvariant,
+            DiagnosticStage::Internal,
+            format!("unexpected command failure: {cmd}"),
+        )),
     }
 }
 
-fn write_source_inventory_manifest(output: &Path, graph: &DependencyGraph) -> Result<()> {
+fn render_diagnostics(diagnostics: &DiagnosticSet, format: DiagnosticFormat) {
+    match format {
+        DiagnosticFormat::Human => eprint!("{diagnostics}"),
+        DiagnosticFormat::Json => match serde_json::to_string_pretty(&diagnostics) {
+            Ok(json) => eprintln!("{json}"),
+            Err(_) => eprintln!(
+                "{{\"schema\":\"{}\",\"diagnostics\":[{{\"code\":\"AT0007\",\"severity\":\"error\",\"stage\":\"internal\",\"message\":\"diagnostic serialization failed\"}}]}}",
+                DiagnosticSet::SCHEMA
+            ),
+        },
+    }
+}
+
+fn render_source_inventory_manifest(graph: &DependencyGraph) -> String {
     let mut fetches: Vec<_> = graph
         .source_inventory_fetches
         .iter()
@@ -784,8 +959,7 @@ fn write_source_inventory_manifest(output: &Path, graph: &DependencyGraph) -> Re
             );
         }
     }
-    fs::write(output.with_extension("source-inventory.cmake"), body)?;
-    Ok(())
+    body
 }
 
 /// Writes one skip report next to the generated CMake file.
@@ -795,24 +969,75 @@ fn write_source_inventory_manifest(output: &Path, graph: &DependencyGraph) -> Re
 /// emptied it and went on naming declarations that were no longer skipped. That
 /// is worse than no report: the numbers are what the next step is chosen from.
 ///
-/// A write failure is announced rather than swallowed. The count is printed
-/// either way, so a read-only build directory costs the detail, not the signal.
-fn write_report(output: &Path, extension: &str, mut lines: Vec<String>, what: &str) {
+/// Reports are part of the same publication transaction as the generated
+/// graph. A stale report is removed only when the replacement generation
+/// commits successfully.
+fn write_report(
+    publication: &mut Publication,
+    output: &Path,
+    extension: &str,
+    mut lines: Vec<String>,
+    what: &str,
+) {
     let report = output.with_extension(extension);
-    if lines.is_empty() {
-        let _ = fs::remove_file(&report);
-        return;
-    }
     lines.sort_unstable();
     lines.dedup();
     let n = lines.len();
+    let (code, severity) = report_metadata(extension);
+    publication.record_coverage(code, severity, Some(&report), n, what);
+    if lines.is_empty() {
+        publication.absent(report);
+        return;
+    }
     let body = lines.join("\n");
-    if fs::write(&report, format!("{body}\n")).is_ok() {
-        println!("⚠️  {n} {what} -> {}", report.display());
+    publication.present(report.clone(), format!("{body}\n"));
+    let marker = if severity == DiagnosticSeverity::Info {
+        "ℹ️ "
     } else {
-        println!(
-            "⚠️  {n} {what} (report could not be written to {})",
-            report.display()
-        );
+        "⚠️ "
+    };
+    publication.notice(format!(
+        "{marker} [{code}] {n} {what} -> {}",
+        report.display()
+    ));
+}
+
+fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
+    use DiagnosticSeverity::{Error, Info, Warning};
+    match extension {
+        "skipped-script-outputs.txt" => ("AT1001", Warning),
+        "skipped-hidd-stubs.txt" => ("AT1002", Warning),
+        "skipped-host-generated-headers.txt" => ("AT1003", Warning),
+        "kickstart-kobj-ldscript.txt" => ("AT1004", Warning),
+        "skipped-binary-objects.txt" => ("AT1005", Warning),
+        "arch-lane-attachments.txt" => ("AT1006", Info),
+        "inherited-arch-sources.txt" => ("AT1007", Info),
+        "unresolved-default-link-set.txt" => ("AT1008", Warning),
+        "skipped-client-archives.txt" => ("AT1009", Warning),
+        "skipped-make-opts.txt" => ("AT1010", Warning),
+        "skipped-local-make-includes.txt" => ("AT1011", Warning),
+        "skipped-fetches.txt" => ("AT1012", Warning),
+        "unowned-port-sources.txt" => ("AT1013", Warning),
+        "unresolved-generated-headers.txt" => ("AT1014", Warning),
+        "skipped-arch-sources.txt" => ("AT1015", Warning),
+        "skipped-icons.txt" => ("AT1016", Warning),
+        "skipped-catalogs.txt" => ("AT1017", Warning),
+        "skipped-flexcat-sources.txt" => ("AT1018", Warning),
+        "skipped-meta-rules.txt" => ("AT1019", Warning),
+        "meta-cycles.txt" => ("AT1020", Info),
+        "skipped-header-staging.txt" => ("AT1021", Warning),
+        "skipped-directory-staging.txt" => ("AT1022", Warning),
+        "unresolved-uselibs.txt" => ("AT1023", Warning),
+        "unresolved-package-members.txt" => ("AT1024", Warning),
+        "unmodelled-declarations.txt" => ("AT1025", Warning),
+        "partial-source-lists.txt" => ("AT1026", Warning),
+        "unresolved-output-paths.txt" => ("AT1027", Warning),
+        "generated-file-rules.txt" => ("AT1028", Warning),
+        "skipped-flags.txt" => ("AT1029", Warning),
+        "skipped-conditions.txt" => ("AT1030", Warning),
+        "unresolved-includes.txt" => ("AT1031", Warning),
+        // Adding a report without assigning a stable code is an internal
+        // contract error. Publication rejects Error-severity coverage entries.
+        _ => ("AT1099", Error),
     }
 }

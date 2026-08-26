@@ -168,19 +168,19 @@ pub(crate) fn validate_static_contract(
     require_text_fingerprint(
         "workbench/libs/mesa/libmesa/mmakefile.src SSE4.1 block",
         &block,
-        fingerprint("mesa-sse41-capability"),
+        fingerprint("mesa-sse41-capability")?,
         "Mesa SSE4.1",
     )?;
     require_text_fingerprint(
         "workbench/libs/mesa/libmesa/mmakefile.src local context",
         &local_context,
-        fingerprint("mesa-sse41-local-context"),
+        fingerprint("mesa-sse41-local-context")?,
         "Mesa SSE4.1",
     )?;
     require_text_fingerprint(
         "workbench/libs/mesa/mesa.cfg compile context",
         &config_context,
-        fingerprint("mesa-sse41-config-context"),
+        fingerprint("mesa-sse41-config-context")?,
         "Mesa SSE4.1",
     )?;
     if !fetch_edge_is_supported(make_source) {
@@ -189,7 +189,7 @@ pub(crate) fn validate_static_contract(
     require_file_fingerprint(
         root,
         "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-        fingerprint("mesa-sse41-manifest"),
+        fingerprint("mesa-sse41-manifest")?,
         "Mesa SSE4.1",
     )?;
     Ok(())

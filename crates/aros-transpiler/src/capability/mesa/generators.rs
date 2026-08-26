@@ -156,7 +156,7 @@ pub(crate) fn parse_glapi(
     require_text_fingerprint(
         "workbench/libs/mesa/libglapi/mmakefile.src generator block",
         &generator_block,
-        fingerprint("glapi-generator-capability"),
+        fingerprint("glapi-generator-capability")?,
         "Mesa glapi generator",
     )?;
 
@@ -439,7 +439,7 @@ pub(crate) fn parse_mesautil(
     require_text_fingerprint(
         "workbench/libs/mesa/libmesautil/mmakefile.src generator block",
         &generator_block,
-        fingerprint("mesautil-generator-capability"),
+        fingerprint("mesautil-generator-capability")?,
         "Mesa utility generator",
     )?;
 

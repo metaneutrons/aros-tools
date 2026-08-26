@@ -25,25 +25,34 @@
 /// pins exist to prevent.
 #[must_use]
 pub fn pin<'a>(source: &'a str, file: &str, name: &str) -> &'a str {
+    try_pin(source, file, name).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Reads one pin without panicking on malformed embedded data.
+///
+/// # Errors
+///
+/// Returns a descriptive error when a line is malformed, the requested name
+/// is absent, or its value is not a SHA-256 digest.
+pub fn try_pin<'a>(source: &'a str, file: &str, name: &str) -> Result<&'a str, String> {
     for line in source.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            panic!("{file}: malformed line {line:?}");
+            return Err(format!("{file}: malformed line {line:?}"));
         };
         if key.trim() != name {
             continue;
         }
         let value = value.trim();
-        assert!(
-            is_sha256(value),
-            "{file}: {name} is not a sha256: {value:?}"
-        );
-        return value;
+        if !is_sha256(value) {
+            return Err(format!("{file}: {name} is not a sha256: {value:?}"));
+        }
+        return Ok(value);
     }
-    panic!("{file}: no pin named {name}");
+    Err(format!("{file}: no pin named {name}"))
 }
 
 /// Every `name = value` pair in a pin file, in file order.
@@ -57,6 +66,15 @@ pub fn pin<'a>(source: &'a str, file: &str, name: &str) -> &'a str {
 /// On a line that is neither blank, a comment, nor a `name = value` pair.
 #[must_use]
 pub fn entries<'a>(source: &'a str, file: &str) -> Vec<(&'a str, &'a str)> {
+    try_entries(source, file).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Parses every pin entry without panicking on malformed embedded data.
+///
+/// # Errors
+///
+/// Returns a descriptive error when a non-comment line has no `=` separator.
+pub fn try_entries<'a>(source: &'a str, file: &str) -> Result<Vec<(&'a str, &'a str)>, String> {
     let mut found = Vec::new();
     for line in source.lines() {
         let line = line.trim();
@@ -64,11 +82,11 @@ pub fn entries<'a>(source: &'a str, file: &str) -> Vec<(&'a str, &'a str)> {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            panic!("{file}: malformed line {line:?}");
+            return Err(format!("{file}: malformed line {line:?}"));
         };
         found.push((key.trim(), value.trim()));
     }
-    found
+    Ok(found)
 }
 
 fn is_sha256(value: &str) -> bool {

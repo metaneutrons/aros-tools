@@ -39,16 +39,27 @@ target profiles.
 
 Filesystem traversal, fetch discovery, MetaMake parsing and recognised
 capability drift are fatal. Parallel failures are collected, sorted and
-deduplicated so one invocation reports the complete deterministic set. A
-capability deliberately excluded from another supported architecture is not
-drift; an owned declaration whose recipe no longer matches is.
+deduplicated so one invocation reports the complete deterministic set. Fatal
+diagnostics carry stable `AT0001`–`AT0007` codes, a typed stage and severity,
+an optional source location and an actionable hint. `--diagnostic-format json`
+emits the versioned `aros-tool-diagnostics-v1` document on stderr; progress and
+tracing cannot contaminate that stream. A capability deliberately excluded
+from another supported architecture is not drift; an owned declaration whose
+recipe no longer matches is. Ownership is decided by typed parser paths, never
+by searching rendered diagnostic text.
 
 Coverage gaps outside a recognised capability remain reports beside the
-generated CMake graph. They must remain visible until they are either modelled
-or promoted to a release gate.
+generated CMake graph. `generated_targets.coverage.json` indexes every report,
+including zero-count reports, under stable `AT1001`–`AT1032` codes and explicit
+`info` or `warning` severity. This is deliberately not a hidden baseline:
+counts are current observations, not accepted-count pins. Gaps must remain
+visible until they are either modelled or promoted to a release gate.
 
-The error handling is improved but not yet enterprise-complete. Remaining
-work includes typed diagnostic codes and source spans, atomic publication of
-the generated graph plus all sidecars, fatal report-write failures, a
-machine-readable diagnostic mode, and removal of internal panic-based
-invariants at embedded-data boundaries. `OPEN-POINTS.md` tracks this work.
+The CMake graph, source inventory, spec-switch manifest, coverage index and all
+reports are rendered and fsynced into sibling staging files before any current
+artifact is replaced. Replacement is one rollback-capable transaction and the
+CMake graph is its last commit marker. A staging, replacement, report-removal
+or directory-sync error is fatal and restores the previous generation when
+rollback succeeds. Tests inject both a staging failure and a mid-commit
+failure. The embedded fingerprint registry also has a non-panicking startup
+validation gate before any source scanning begins.

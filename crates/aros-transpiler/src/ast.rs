@@ -4,6 +4,7 @@ use crate::fetch::FetchDecl;
 use crate::flags::FlagSet;
 use crate::flexcat::FlexCatSourceDecl;
 use crate::includes::ArchIncludeDecl;
+use aros_common::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -472,7 +473,7 @@ pub struct ParsedMmakefile {
     /// Drift in a recognised closed capability. Unlike general coverage gaps,
     /// these are fatal: continuing would execute stale target-specific
     /// assumptions.
-    pub capability_errors: Vec<String>,
+    pub capability_errors: Vec<Diagnostic>,
     pub targets: Vec<TargetDefinition>,
     /// Strictly modelled `%build_with_cmake` declarations.
     pub external_cmake: Vec<ExternalCMakeDecl>,
