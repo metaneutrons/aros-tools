@@ -12,7 +12,8 @@ pub mod toolchain_manifest;
 
 pub use arch::Architecture;
 pub use diagnostic::{
-    Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticStage, SourceLocation,
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticSeverity,
+    DiagnosticStage, SourceLocation,
 };
 pub use error::{ArosError, Result};
 pub use target::TargetProfile;

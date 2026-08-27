@@ -23,6 +23,36 @@ pub enum DiagnosticCode {
     GraphValidation,
     #[serde(rename = "AT0007")]
     InternalInvariant,
+    #[serde(rename = "AC0001")]
+    CollectorInvocation,
+    #[serde(rename = "AC0002")]
+    CollectorObservability,
+    #[serde(rename = "AC0101")]
+    CollectorToolResolution,
+    #[serde(rename = "AC0102")]
+    CollectorSysroot,
+    #[serde(rename = "AC0201")]
+    CollectorResponseFile,
+    #[serde(rename = "AC0301")]
+    CollectorFirstLink,
+    #[serde(rename = "AC0302")]
+    CollectorSecondLink,
+    #[serde(rename = "AC0401")]
+    CollectorObjectInspection,
+    #[serde(rename = "AC0501")]
+    CollectorSetCollection,
+    #[serde(rename = "AC0502")]
+    CollectorRequiredInput,
+    #[serde(rename = "AC0601")]
+    CollectorUndefinedSymbols,
+    #[serde(rename = "AC0701")]
+    CollectorAbi,
+    #[serde(rename = "AC0702")]
+    CollectorStrip,
+    #[serde(rename = "AC0801")]
+    CollectorPublication,
+    #[serde(rename = "AC0901")]
+    CollectorInternal,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -35,6 +65,21 @@ impl fmt::Display for DiagnosticCode {
             Self::OutputIo => "AT0005",
             Self::GraphValidation => "AT0006",
             Self::InternalInvariant => "AT0007",
+            Self::CollectorInvocation => "AC0001",
+            Self::CollectorObservability => "AC0002",
+            Self::CollectorToolResolution => "AC0101",
+            Self::CollectorSysroot => "AC0102",
+            Self::CollectorResponseFile => "AC0201",
+            Self::CollectorFirstLink => "AC0301",
+            Self::CollectorSecondLink => "AC0302",
+            Self::CollectorObjectInspection => "AC0401",
+            Self::CollectorSetCollection => "AC0501",
+            Self::CollectorRequiredInput => "AC0502",
+            Self::CollectorUndefinedSymbols => "AC0601",
+            Self::CollectorAbi => "AC0701",
+            Self::CollectorStrip => "AC0702",
+            Self::CollectorPublication => "AC0801",
+            Self::CollectorInternal => "AC0901",
         };
         formatter.write_str(value)
     }
@@ -68,6 +113,20 @@ pub enum DiagnosticStage {
     GraphValidation,
     OutputPublication,
     Internal,
+    Invocation,
+    Observability,
+    ToolResolution,
+    SysrootValidation,
+    ResponseExpansion,
+    FirstLink,
+    ObjectInspection,
+    SetCollection,
+    RequiredInput,
+    SecondLink,
+    UndefinedAudit,
+    AbiMarking,
+    Strip,
+    Publication,
 }
 
 impl fmt::Display for DiagnosticStage {
@@ -78,9 +137,53 @@ impl fmt::Display for DiagnosticStage {
             Self::Parsing => "parsing",
             Self::CapabilityValidation => "capability validation",
             Self::GraphValidation => "graph validation",
-            Self::OutputPublication => "output publication",
+            Self::OutputPublication | Self::Publication => "output publication",
             Self::Internal => "internal invariant",
+            Self::Invocation => "collector invocation",
+            Self::Observability => "collector observability",
+            Self::ToolResolution => "tool resolution",
+            Self::SysrootValidation => "sysroot validation",
+            Self::ResponseExpansion => "response-file expansion",
+            Self::FirstLink => "first link",
+            Self::ObjectInspection => "object inspection",
+            Self::SetCollection => "set collection",
+            Self::RequiredInput => "required collector input",
+            Self::SecondLink => "second link",
+            Self::UndefinedAudit => "undefined-symbol audit",
+            Self::AbiMarking => "AROS ABI marking",
+            Self::Strip => "output stripping",
         })
+    }
+}
+
+/// Optional machine-readable context attached to a diagnostic.
+///
+/// These fields deliberately exclude timestamps, host names, and environment
+/// snapshots so a diagnostic emitted by a deterministic build remains stable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct DiagnosticContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+}
+
+impl DiagnosticContext {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -121,6 +224,8 @@ pub struct Diagnostic {
     pub location: Option<SourceLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<DiagnosticContext>,
 }
 
 impl Diagnostic {
@@ -133,6 +238,37 @@ impl Diagnostic {
             message: message.into(),
             location: None,
             hint: None,
+            context: None,
+        }
+    }
+
+    #[must_use]
+    pub fn warning(
+        code: DiagnosticCode,
+        stage: DiagnosticStage,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            severity: DiagnosticSeverity::Warning,
+            stage,
+            message: message.into(),
+            location: None,
+            hint: None,
+            context: None,
+        }
+    }
+
+    #[must_use]
+    pub fn info(code: DiagnosticCode, stage: DiagnosticStage, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            severity: DiagnosticSeverity::Info,
+            stage,
+            message: message.into(),
+            location: None,
+            hint: None,
+            context: None,
         }
     }
 
@@ -145,6 +281,14 @@ impl Diagnostic {
     #[must_use]
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: DiagnosticContext) -> Self {
+        if !context.is_empty() {
+            self.context = Some(context);
+        }
         self
     }
 }
@@ -206,6 +350,34 @@ impl fmt::Display for DiagnosticSet {
             if let Some(hint) = &diagnostic.hint {
                 writeln!(formatter, "  help: {hint}")?;
             }
+            if let Some(context) = &diagnostic.context {
+                write!(formatter, "  context:")?;
+                if let Some(value) = &context.tool {
+                    write!(formatter, " tool={value}")?;
+                }
+                if let Some(value) = &context.mode {
+                    write!(formatter, " mode={value}")?;
+                }
+                if let Some(value) = &context.target {
+                    write!(formatter, " target={value}")?;
+                }
+                if let Some(value) = &context.output {
+                    write!(formatter, " output={value}")?;
+                }
+                if let Some(value) = context.argument_index {
+                    write!(formatter, " argument_index={value}")?;
+                }
+                if let Some(value) = context.exit_code {
+                    write!(formatter, " exit_code={value}")?;
+                }
+                if let Some(value) = context.signal {
+                    write!(formatter, " signal={value}")?;
+                }
+                if let Some(value) = &context.log_path {
+                    write!(formatter, " log_path={value}")?;
+                }
+                writeln!(formatter)?;
+            }
         }
         Ok(())
     }
@@ -248,5 +420,32 @@ mod tests {
         let set = DiagnosticSet::new(vec![diagnostic.clone(), diagnostic]);
         assert_eq!(set.diagnostics.len(), 1);
         assert!(set.has_errors());
+    }
+
+    #[test]
+    fn collector_context_is_stable_in_human_and_json_output() {
+        let context = DiagnosticContext {
+            tool: Some("ld.lld".into()),
+            mode: Some("final".into()),
+            output: Some("work/output.o".into()),
+            exit_code: Some(1),
+            ..DiagnosticContext::default()
+        };
+        let set = DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::CollectorFirstLink,
+                DiagnosticStage::FirstLink,
+                "the linker failed",
+            )
+            .with_context(context),
+        );
+
+        let human = set.to_string();
+        assert!(human.contains("error[AC0301]"));
+        assert!(human.contains("tool=ld.lld mode=final output=work/output.o exit_code=1"));
+
+        let json = serde_json::to_value(set).unwrap();
+        assert_eq!(json["diagnostics"][0]["code"], "AC0301");
+        assert_eq!(json["diagnostics"][0]["context"]["exit_code"], 1);
     }
 }
