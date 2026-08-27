@@ -1,4 +1,4 @@
-//! Clang-compatible, relocatable `collect-aros` driver mode.
+//! Shared collection engine for direct links and compiler-driver aliases.
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -26,17 +26,36 @@ enum LinkMode {
     CollectRelocatable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frontend {
+    Direct,
+    Driver,
+}
+
+impl Frontend {
+    const fn is_driver(self) -> bool {
+        matches!(self, Self::Driver)
+    }
+
+    const fn skips_empty_second_pass(self) -> bool {
+        matches!(self, Self::Direct)
+    }
+}
+
 #[derive(Debug)]
-struct Driver {
+struct EngineRequest {
     name: String,
     linker: PathBuf,
-    strip: PathBuf,
+    strip: Option<PathBuf>,
     args: Vec<OsString>,
     output: PathBuf,
     sysroot: Option<PathBuf>,
     mode: LinkMode,
     strip_output: bool,
     ignore_undefined: bool,
+    report: Option<PathBuf>,
+    keep_script: Option<PathBuf>,
+    frontend: Frontend,
 }
 
 #[must_use]
@@ -144,7 +163,7 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
-    let driver = parse(name, linker, strip, args).map_err(|error| {
+    let request = parse(name, linker, strip, args).map_err(|error| {
         failure(
             DiagnosticCode::CollectorInvocation,
             DiagnosticStage::Invocation,
@@ -152,15 +171,41 @@ pub fn run_entry(
             DiagnosticContext::default(),
         )
     })?;
-    validate_sysroot(&driver).map_err(|error| {
+    validate_sysroot(&request).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSysroot,
             DiagnosticStage::SysrootValidation,
             format!("{error:#}"),
-            driver_context(&driver),
+            request_context(&request),
         )
     })?;
-    run(&driver, logger, diagnostics)
+    run(&request, logger, diagnostics)
+}
+
+pub fn run_direct(
+    linker: PathBuf,
+    args: Vec<OsString>,
+    output: PathBuf,
+    report: Option<PathBuf>,
+    keep_script: Option<PathBuf>,
+    logger: &Logger,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CollectorResult<()> {
+    let request = EngineRequest {
+        name: "aros-collect".into(),
+        linker,
+        strip: None,
+        args,
+        output,
+        sysroot: None,
+        mode: LinkMode::CollectRelocatable,
+        strip_output: false,
+        ignore_undefined: true,
+        report,
+        keep_script,
+        frontend: Frontend::Direct,
+    };
+    run(&request, logger, diagnostics)
 }
 
 fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
@@ -174,7 +219,12 @@ fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn parse(name: String, linker: PathBuf, strip: PathBuf, mut args: Vec<OsString>) -> Result<Driver> {
+fn parse(
+    name: String,
+    linker: PathBuf,
+    strip: PathBuf,
+    mut args: Vec<OsString>,
+) -> Result<EngineRequest> {
     let mut output = None;
     let mut sysroot = None;
     let mut mode = LinkMode::Final;
@@ -225,25 +275,28 @@ fn parse(name: String, linker: PathBuf, strip: PathBuf, mut args: Vec<OsString>)
     }
 
     let output = output.context("linker command line has no -o FILE")?;
-    Ok(Driver {
+    Ok(EngineRequest {
         name,
         linker,
-        strip,
+        strip: Some(strip),
         args,
         output,
         sysroot,
         mode,
         strip_output,
         ignore_undefined,
+        report: None,
+        keep_script: None,
+        frontend: Frontend::Driver,
     })
 }
 
-fn validate_sysroot(driver: &Driver) -> Result<()> {
-    if let Some(root) = &driver.sysroot {
+fn validate_sysroot(request: &EngineRequest) -> Result<()> {
+    if let Some(root) = &request.sysroot {
         if !root.is_absolute() {
             bail!("--sysroot must be absolute, got {}", root.display());
         }
-        let library_dir = root.join(if driver.name == "collect-aros32" {
+        let library_dir = root.join(if request.name == "collect-aros32" {
             "lib32"
         } else {
             "lib"
@@ -258,45 +311,66 @@ fn validate_sysroot(driver: &Driver) -> Result<()> {
     Ok(())
 }
 
-fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> CollectorResult<()> {
-    let staged = adjacent(&driver.output, ".collect-pre");
-    let final_staged = adjacent(&driver.output, ".collect-final");
-    let script = adjacent(&driver.output, ".collect-sets.ld");
-    for path in [&staged, &final_staged, &script] {
+fn run(
+    request: &EngineRequest,
+    logger: &Logger,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CollectorResult<()> {
+    let staged = adjacent(&request.output, ".collect-pre");
+    let final_staged = adjacent(&request.output, ".collect-final");
+    let script = request
+        .keep_script
+        .clone()
+        .unwrap_or_else(|| adjacent(&request.output, ".collect-sets.ld"));
+    for path in [&staged, &final_staged] {
         remove_if_exists(path).map_err(|error| {
             failure(
                 DiagnosticCode::CollectorPublication,
                 DiagnosticStage::Publication,
                 format!("{error:#}"),
-                driver_context(driver),
+                request_context(request),
             )
         })?;
     }
-    let cleanup = Cleanup::new([staged.clone(), final_staged.clone(), script.clone()]);
+    if request.keep_script.is_none() {
+        remove_if_exists(&script).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!("{error:#}"),
+                request_context(request),
+            )
+        })?;
+    }
+    let mut cleanup_paths = vec![staged.clone(), final_staged.clone()];
+    if request.keep_script.is_none() {
+        cleanup_paths.push(script.clone());
+    }
+    let cleanup = Cleanup::new(cleanup_paths);
 
-    let mut first = replace_output(&driver.args, &staged).map_err(|error| {
+    let mut first = replace_output(&request.args, &staged).map_err(|error| {
         failure(
             DiagnosticCode::CollectorInvocation,
             DiagnosticStage::Invocation,
             format!("{error:#}"),
-            driver_context(driver),
+            request_context(request),
         )
     })?;
-    if !first.iter().any(|argument| argument == "-r") {
+    if request.frontend.is_driver() && !first.iter().any(|argument| argument == "-r") {
         first.insert(0, OsString::from("-r"));
     }
     logger.event(
         LogLevel::Debug,
         "link.first.start",
         "starting first relocatable link",
-        &driver_context(driver),
+        &request_context(request),
     )?;
-    let status = run_tool(&driver.linker, &first).map_err(|error| {
+    let status = run_tool(&request.linker, &first).map_err(|error| {
         failure(
             DiagnosticCode::CollectorFirstLink,
             DiagnosticStage::FirstLink,
             format!("{error:#}"),
-            driver_context(driver),
+            request_context(request),
         )
     })?;
     if !status.success() {
@@ -305,24 +379,26 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
             DiagnosticStage::FirstLink,
             "the first relocatable link failed",
             status,
-            driver_context(driver),
+            request_context(request),
         ));
     }
-    if driver.mode == LinkMode::Incremental {
-        set_aros_abi(&staged).map_err(|error| {
-            failure(
-                DiagnosticCode::CollectorAbi,
-                DiagnosticStage::AbiMarking,
-                format!("{error:#}"),
-                driver_context(driver),
-            )
-        })?;
-        publish(&staged, &driver.output).map_err(|error| {
+    if request.mode == LinkMode::Incremental {
+        if request.frontend.is_driver() {
+            set_aros_abi(&staged).map_err(|error| {
+                failure(
+                    DiagnosticCode::CollectorAbi,
+                    DiagnosticStage::AbiMarking,
+                    format!("{error:#}"),
+                    request_context(request),
+                )
+            })?;
+        }
+        publish(&staged, &request.output).map_err(|error| {
             failure(
                 DiagnosticCode::CollectorPublication,
                 DiagnosticStage::Publication,
                 format!("{error:#}"),
-                driver_context(driver),
+                request_context(request),
             )
         })?;
         return Ok(());
@@ -335,7 +411,7 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
             format!("{error:#}"),
             DiagnosticContext {
                 output: Some(staged.display().to_string()),
-                ..driver_context(driver)
+                ..request_context(request)
             },
         )
     })?;
@@ -350,7 +426,7 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                 DiagnosticStage::SetCollection,
                 line.clone(),
             )
-            .with_context(driver_context(driver));
+            .with_context(request_context(request));
             logger.diagnostic(&diagnostic)?;
             diagnostics.push(diagnostic);
         }
@@ -361,8 +437,34 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                 "{} set or library requirement entries were skipped",
                 reported.len()
             ),
-            &driver_context(driver),
+            &request_context(request),
         )?;
+    }
+    write_report(request.report.as_deref(), &reported).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSetCollection,
+            DiagnosticStage::SetCollection,
+            format!("{error:#}"),
+            DiagnosticContext {
+                output: request
+                    .report
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                ..request_context(request)
+            },
+        )
+    })?;
+
+    if request.frontend.skips_empty_second_pass() && found.is_empty() && requirements.is_empty() {
+        publish(&staged, &request.output).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!("{error:#}"),
+                request_context(request),
+            )
+        })?;
+        return Ok(());
     }
 
     let script_body = sets::script(&found, object.class, &libreq::script(&requirements));
@@ -374,33 +476,39 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                 "cannot write collector script {}: {error}",
                 script.display()
             ),
-            driver_context(driver),
+            request_context(request),
         )
     })?;
 
-    let extras = extra::discover(&object.symbols);
+    let extras = request
+        .frontend
+        .is_driver()
+        .then(|| extra::discover(&object.symbols));
     let mut second = vec![
         OsString::from("-r"),
         OsString::from("-o"),
         final_staged.clone().into_os_string(),
         staged.into_os_string(),
     ];
-    if extras.cxx_pure_virtual {
+    if extras
+        .as_ref()
+        .is_some_and(|extras| extras.cxx_pure_virtual)
+    {
         second.push(
-            require_sysroot_library(driver, "static-cxx-cxa-pure-virtual.o")
-                .map_err(|error| required_input_failure(driver, &error))?
+            require_sysroot_library(request, "static-cxx-cxa-pure-virtual.o")
+                .map_err(|error| required_input_failure(request, &error))?
                 .into_os_string(),
         );
     }
-    if extras.pthread {
+    if extras.as_ref().is_some_and(|extras| extras.pthread) {
         second.push(
-            require_sysroot_library(driver, "libpthread.a")
-                .map_err(|error| required_input_failure(driver, &error))?
+            require_sysroot_library(request, "libpthread.a")
+                .map_err(|error| required_input_failure(request, &error))?
                 .into_os_string(),
         );
     }
-    if has_undefined(&object) {
-        second.extend(resupplied_libraries(&driver.args));
+    if request.frontend.is_driver() && has_undefined(&object) {
+        second.extend(resupplied_libraries(&request.args));
     }
     second.push(OsString::from("-T"));
     second.push(script.into_os_string());
@@ -408,14 +516,14 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
         LogLevel::Debug,
         "link.second.start",
         "starting set-collection link",
-        &driver_context(driver),
+        &request_context(request),
     )?;
-    let status = run_tool(&driver.linker, &second).map_err(|error| {
+    let status = run_tool(&request.linker, &second).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSecondLink,
             DiagnosticStage::SecondLink,
             format!("{error:#}"),
-            driver_context(driver),
+            request_context(request),
         )
     })?;
     if !status.success() {
@@ -424,17 +532,18 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
             DiagnosticStage::SecondLink,
             "the set-collection link failed",
             status,
-            driver_context(driver),
+            request_context(request),
         ));
     }
 
-    if driver.mode == LinkMode::Final && !driver.ignore_undefined {
+    if request.frontend.is_driver() && request.mode == LinkMode::Final && !request.ignore_undefined
+    {
         let output = read_object(&final_staged).map_err(|error| {
             failure(
                 DiagnosticCode::CollectorObjectInspection,
                 DiagnosticStage::ObjectInspection,
                 format!("{error:#}"),
-                driver_context(driver),
+                request_context(request),
             )
         })?;
         let undefined = undefined_names(&output);
@@ -446,13 +555,21 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                     "undefined symbols remain after the final link: {}",
                     undefined.into_iter().collect::<Vec<_>>().join(", ")
                 ),
-                driver_context(driver),
+                request_context(request),
             ));
         }
     }
-    if driver.strip_output {
+    if request.strip_output {
+        let strip = request.strip.as_ref().ok_or_else(|| {
+            failure(
+                DiagnosticCode::CollectorToolResolution,
+                DiagnosticStage::ToolResolution,
+                "output stripping was requested without a configured strip tool",
+                request_context(request),
+            )
+        })?;
         let status = run_tool(
-            &driver.strip,
+            strip,
             &[
                 OsString::from("--strip-unneeded"),
                 final_staged.clone().into_os_string(),
@@ -464,8 +581,8 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                 DiagnosticStage::Strip,
                 format!("{error:#}"),
                 DiagnosticContext {
-                    tool: Some(driver.strip.display().to_string()),
-                    ..driver_context(driver)
+                    tool: Some(strip.display().to_string()),
+                    ..request_context(request)
                 },
             )
         })?;
@@ -476,38 +593,42 @@ fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> C
                 "stripping the linked object failed",
                 status,
                 DiagnosticContext {
-                    tool: Some(driver.strip.display().to_string()),
-                    ..driver_context(driver)
+                    tool: Some(strip.display().to_string()),
+                    ..request_context(request)
                 },
             ));
         }
     }
-    set_aros_abi(&final_staged).map_err(|error| {
-        failure(
-            DiagnosticCode::CollectorAbi,
-            DiagnosticStage::AbiMarking,
-            format!("{error:#}"),
-            driver_context(driver),
-        )
-    })?;
+    if request.frontend.is_driver() {
+        set_aros_abi(&final_staged).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorAbi,
+                DiagnosticStage::AbiMarking,
+                format!("{error:#}"),
+                request_context(request),
+            )
+        })?;
+    }
     #[cfg(unix)]
-    fs::set_permissions(&final_staged, fs::Permissions::from_mode(0o766)).map_err(|error| {
-        failure(
-            DiagnosticCode::CollectorPublication,
-            DiagnosticStage::Publication,
-            format!(
-                "cannot set permissions on {}: {error}",
-                final_staged.display()
-            ),
-            driver_context(driver),
-        )
-    })?;
-    publish(&final_staged, &driver.output).map_err(|error| {
+    if request.frontend.is_driver() {
+        fs::set_permissions(&final_staged, fs::Permissions::from_mode(0o766)).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!(
+                    "cannot set permissions on {}: {error}",
+                    final_staged.display()
+                ),
+                request_context(request),
+            )
+        })?;
+    }
+    publish(&final_staged, &request.output).map_err(|error| {
         failure(
             DiagnosticCode::CollectorPublication,
             DiagnosticStage::Publication,
             format!("{error:#}"),
-            driver_context(driver),
+            request_context(request),
         )
     })?;
     drop(cleanup);
@@ -551,18 +672,21 @@ fn run_tool(tool: &Path, args: &[OsString]) -> Result<ExitStatus> {
         .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
 }
 
-fn driver_context(driver: &Driver) -> DiagnosticContext {
+fn request_context(request: &EngineRequest) -> DiagnosticContext {
     DiagnosticContext {
-        tool: Some(driver.linker.display().to_string()),
+        tool: Some(request.linker.display().to_string()),
         mode: Some(
-            match driver.mode {
-                LinkMode::Final => "final",
-                LinkMode::Incremental => "incremental",
-                LinkMode::CollectRelocatable => "collect_relocatable",
+            match request.frontend {
+                Frontend::Direct => "direct",
+                Frontend::Driver => match request.mode {
+                    LinkMode::Final => "final",
+                    LinkMode::Incremental => "incremental",
+                    LinkMode::CollectRelocatable => "collect_relocatable",
+                },
             }
             .into(),
         ),
-        output: Some(driver.output.display().to_string()),
+        output: Some(request.output.display().to_string()),
         ..DiagnosticContext::default()
     }
 }
@@ -583,12 +707,12 @@ fn process_failure(
     failure(code, stage, message, context)
 }
 
-fn required_input_failure(driver: &Driver, error: &anyhow::Error) -> CollectorFailure {
+fn required_input_failure(request: &EngineRequest, error: &anyhow::Error) -> CollectorFailure {
     failure(
         DiagnosticCode::CollectorRequiredInput,
         DiagnosticStage::RequiredInput,
         format!("{error:#}"),
-        driver_context(driver),
+        request_context(request),
     )
 }
 
@@ -603,18 +727,35 @@ fn require_library(directory: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn require_sysroot_library(driver: &Driver, name: &str) -> Result<PathBuf> {
-    let root = driver.sysroot.as_ref().with_context(|| {
+fn require_sysroot_library(request: &EngineRequest, name: &str) -> Result<PathBuf> {
+    let root = request.sysroot.as_ref().with_context(|| {
         format!(
             "the first link requires {name}, but the linker command line has no --sysroot; pass an absolute AROS Developer sysroot"
         )
     })?;
-    let directory = root.join(if driver.name == "collect-aros32" {
+    let directory = root.join(if request.name == "collect-aros32" {
         "lib32"
     } else {
         "lib"
     });
     require_library(&directory, name)
+}
+
+fn write_report(path: Option<&Path>, lines: &[String]) -> Result<()> {
+    let Some(path) = path else { return Ok(()) };
+    if lines.is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot remove {}", path.display()));
+            }
+        }
+        return Ok(());
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    fs::write(path, body).with_context(|| format!("cannot write {}", path.display()))
 }
 
 fn has_undefined(object: &Object) -> bool {
@@ -802,6 +943,79 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Small ELF64 fixture containing only a section-name table and one named
+    /// section. That is sufficient to exercise the real collection engine.
+    fn elf64_with_section(section: &str) -> Vec<u8> {
+        let mut names = b"\0.shstrtab\0".to_vec();
+        let section_name_offset = u32::try_from(names.len()).unwrap();
+        names.extend_from_slice(section.as_bytes());
+        names.push(0);
+
+        let names_offset = 0x40;
+        let section_table_offset = 0x80;
+        let mut bytes = vec![0_u8; section_table_offset + 3 * 0x40];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        put_u64(&mut bytes, 0x28, section_table_offset as u64);
+        put_u16(&mut bytes, 0x3a, 0x40);
+        put_u16(&mut bytes, 0x3c, 3);
+        put_u16(&mut bytes, 0x3e, 1);
+        bytes[names_offset..names_offset + names.len()].copy_from_slice(&names);
+
+        let names_header = section_table_offset + 0x40;
+        put_u32(&mut bytes, names_header, 1);
+        put_u32(&mut bytes, names_header + 4, 3);
+        put_u64(&mut bytes, names_header + 0x18, names_offset as u64);
+        put_u64(&mut bytes, names_header + 0x20, names.len() as u64);
+        put_u64(&mut bytes, names_header + 0x30, 1);
+
+        let section_header = section_table_offset + 2 * 0x40;
+        put_u32(&mut bytes, section_header, section_name_offset);
+        put_u32(&mut bytes, section_header + 4, 1);
+        put_u64(&mut bytes, section_header + 0x30, 1);
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn write_linker_that_fails_second_pass(linker: &Path, fixture: &Path, counter: &Path) {
+        let body = format!(
+            "#!/bin/sh\n\
+             count=0\n\
+             if [ -f \"{counter}\" ]; then count=$(sed -n '1p' \"{counter}\"); fi\n\
+             count=$((count + 1))\n\
+             printf '%s\\n' \"$count\" > \"{counter}\"\n\
+             out=\n\
+             while [ $# -gt 0 ]; do\n\
+               case $1 in\n\
+                 -o) shift; out=$1 ;;\n\
+                 -o*) out=${{1#-o}} ;;\n\
+               esac\n\
+               shift\n\
+             done\n\
+             if [ \"$count\" -eq 1 ]; then cp \"{fixture}\" \"$out\"; exit 0; fi\n\
+             printf 'incomplete second pass' > \"$out\"\n\
+             exit 23\n",
+            counter = counter.display(),
+            fixture = fixture.display(),
+        );
+        fs::write(linker, body).unwrap();
+        fs::set_permissions(linker, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn only_expected_aliases_select_driver_mode() {
         assert!(is_driver_invocation(Some(OsStr::new("/tmp/collect-aros"))));
@@ -903,7 +1117,7 @@ mod tests {
 
     #[test]
     fn a_library_free_compiler_probe_does_not_require_a_sysroot() {
-        let driver = parse(
+        let request = parse(
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
@@ -911,24 +1125,20 @@ mod tests {
         )
         .unwrap();
 
-        assert!(driver.sysroot.is_none());
+        assert!(request.sysroot.is_none());
     }
 
     #[test]
     fn a_discovered_target_input_still_requires_a_sysroot() {
-        let driver = Driver {
-            name: "collect-aros".into(),
-            linker: "ld.lld".into(),
-            strip: "llvm-strip".into(),
-            args: Vec::new(),
-            output: "output.o".into(),
-            sysroot: None,
-            mode: LinkMode::Final,
-            strip_output: false,
-            ignore_undefined: false,
-        };
+        let request = parse(
+            "collect-aros".into(),
+            "ld.lld".into(),
+            "llvm-strip".into(),
+            strings(&["-o", "output.o"]),
+        )
+        .unwrap();
 
-        let error = require_sysroot_library(&driver, "libpthread.a").unwrap_err();
+        let error = require_sysroot_library(&request, "libpthread.a").unwrap_err();
         assert!(format!("{error:#}").contains("pass an absolute AROS Developer sysroot"));
     }
 
@@ -947,29 +1157,113 @@ mod tests {
         fs::create_dir_all(sysroot.join("lib")).unwrap();
         let output = directory.path().join("output.o");
         fs::write(&output, b"previous good output").unwrap();
-        let driver = Driver {
-            name: "collect-aros".into(),
-            linker: linker.clone(),
-            strip: linker,
-            args: vec![
+        let request = parse(
+            "collect-aros".into(),
+            linker.clone(),
+            linker,
+            vec![
                 OsString::from("--sysroot"),
-                sysroot.clone().into_os_string(),
+                sysroot.into_os_string(),
                 OsString::from("-o"),
                 output.clone().into_os_string(),
             ],
-            output: output.clone(),
-            sysroot: Some(sysroot),
-            mode: LinkMode::Final,
-            strip_output: false,
-            ignore_undefined: false,
-        };
+        )
+        .unwrap();
 
         let logger = Logger::open(
             &crate::observability::RuntimeOptions::default(),
             "collect-aros",
         )
         .unwrap();
-        assert!(run(&driver, &logger, &mut Vec::new()).is_err());
+        assert!(run(&request, &logger, &mut Vec::new()).is_err());
         assert_eq!(fs::read(output).unwrap(), b"previous good output");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_frontend_skips_an_empty_second_pass() {
+        let directory = tempfile::tempdir().unwrap();
+        let linker = directory.path().join("ld.lld");
+        let fixture = directory.path().join("fixture.o");
+        let counter = directory.path().join("calls");
+        let output = directory.path().join("output.o");
+        fs::write(&fixture, elf64_with_section(".text")).unwrap();
+        fs::write(&output, b"previous output").unwrap();
+        write_linker_that_fails_second_pass(&linker, &fixture, &counter);
+        let logger = Logger::open(
+            &crate::observability::RuntimeOptions::default(),
+            "aros-collect",
+        )
+        .unwrap();
+
+        run_direct(
+            linker,
+            vec![
+                OsString::from("-r"),
+                OsString::from("-o"),
+                output.clone().into_os_string(),
+                OsString::from("input.o"),
+            ],
+            output.clone(),
+            None,
+            None,
+            &logger,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), fs::read(&fixture).unwrap());
+        assert_eq!(fs::read_to_string(counter).unwrap().trim(), "1");
+        assert!(!adjacent(&output, ".collect-pre").exists());
+        assert!(!adjacent(&output, ".collect-final").exists());
+        assert!(!adjacent(&output, ".collect-sets.ld").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_second_pass_failure_is_atomic_and_keeps_an_explicit_script() {
+        let directory = tempfile::tempdir().unwrap();
+        let linker = directory.path().join("ld.lld");
+        let fixture = directory.path().join("fixture.o");
+        let counter = directory.path().join("calls");
+        let output = directory.path().join("output.o");
+        let script = directory.path().join("sets.ld");
+        fs::write(&fixture, elf64_with_section(".aros.set.INITLIB.10")).unwrap();
+        fs::write(&output, b"previous good output").unwrap();
+        write_linker_that_fails_second_pass(&linker, &fixture, &counter);
+        let logger = Logger::open(
+            &crate::observability::RuntimeOptions::default(),
+            "aros-collect",
+        )
+        .unwrap();
+
+        let error = run_direct(
+            linker,
+            vec![
+                OsString::from("-r"),
+                OsString::from("-o"),
+                output.clone().into_os_string(),
+                OsString::from("input.o"),
+            ],
+            output.clone(),
+            None,
+            Some(script.clone()),
+            &logger,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.diagnostic().code, DiagnosticCode::CollectorSecondLink);
+        assert_eq!(
+            error.diagnostic().context.as_ref().unwrap().exit_code,
+            Some(23)
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"previous good output");
+        assert_eq!(fs::read_to_string(counter).unwrap().trim(), "2");
+        assert!(fs::read_to_string(script)
+            .unwrap()
+            .contains("__INITLIB_LIST__"));
+        assert!(!adjacent(&output, ".collect-pre").exists());
+        assert!(!adjacent(&output, ".collect-final").exists());
     }
 }
