@@ -169,8 +169,9 @@ pub struct LocalMakeIncludeScan {
 /// Expands safe sibling fragments referenced by one mmakefile.
 ///
 /// `mmake_relative_path` must name the declaring mmakefile below
-/// `source_root`. Only include arguments rooted in both `$(SRCDIR)` and
-/// `$(CURDIR)` are candidates. Other include families remain owned by the
+/// `source_root`. Include arguments rooted in both `$(SRCDIR)` and `$(CURDIR)`
+/// are candidates, as are literal source-root `.cfg` fragments outside the
+/// global `config/` directory. Other include families remain owned by the
 /// existing architecture, generated-file and fetched-port collectors.
 #[must_use]
 pub fn inline_local_make_includes(
@@ -1070,7 +1071,16 @@ fn is_plain_source_list(value: &str) -> bool {
 }
 
 fn parse_include_directive(line: &str) -> Option<IncludeDirective<'_>> {
-    let line = strip_make_comment(line).trim();
+    let line = strip_make_comment(line);
+    // A continued compiler flag such as
+    // `    -include $(SRCDIR)/$(CURDIR)/override.h` is not a Make include
+    // directive. All real source-tree include directives are at column zero;
+    // retaining that boundary prevents a C header from being parsed as a safe
+    // variable fragment.
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let line = line.trim_end();
     let (optional, tail) = if let Some(tail) = directive_tail(line, "-include") {
         (true, tail)
     } else if let Some(tail) = directive_tail(line, "include") {
@@ -1100,7 +1110,28 @@ fn is_local_candidate(path: &str) -> bool {
     // propagates their flags and include directories. Treating them as source
     // inventory would duplicate that ownership and manufacture skip noise.
     let owned_make_opts = path.trim().ends_with("/make.opts");
-    has_source && has_curdir && !owned_make_opts
+    if has_source && has_curdir && !owned_make_opts {
+        return true;
+    }
+
+    // Shared, literal configuration fragments such as Mesa's mesa.cfg are
+    // just as local and bounded as a CURDIR-relative inventory. Admit only a
+    // single source-root path with no remaining Make expansion. The global
+    // config/aros.cfg is deliberately left to DirVars and the existing
+    // collectors; attempting to inline it in every mmakefile would duplicate
+    // the build-wide configuration scope.
+    let trimmed = path.trim();
+    let relative = trimmed
+        .strip_prefix("$(SRCDIR)/")
+        .or_else(|| trimmed.strip_prefix("${SRCDIR}/"));
+    relative.is_some_and(|relative| {
+        Path::new(relative)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cfg"))
+            && !relative.starts_with("config/")
+            && !relative.contains('$')
+            && !relative.contains(char::is_whitespace)
+    })
 }
 
 fn unsafe_make_function(line: &str) -> Option<&'static str> {
@@ -1176,5 +1207,31 @@ fn issue(
         kind,
         subject: subject.into(),
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_local_candidate, parse_include_directive};
+
+    #[test]
+    fn literal_source_root_cfg_is_local_but_global_and_dynamic_scopes_are_not() {
+        assert!(is_local_candidate("$(SRCDIR)/workbench/libs/mesa/mesa.cfg"));
+        assert!(is_local_candidate("$(SRCDIR)/$(CURDIR)/sources.inc"));
+        assert!(!is_local_candidate("$(SRCDIR)/config/aros.cfg"));
+        assert!(!is_local_candidate(
+            "$(SRCDIR)/tools/crosstools/$(AROS_TOOLCHAIN).cfg"
+        ));
+    }
+
+    #[test]
+    fn an_indented_compiler_include_option_is_not_a_make_include_directive() {
+        assert!(
+            parse_include_directive("include $(SRCDIR)/workbench/libs/mesa/mesa.cfg").is_some()
+        );
+        assert!(
+            parse_include_directive("    -include $(SRCDIR)/$(CURDIR)/v3d_aros_override.h")
+                .is_none()
+        );
     }
 }
