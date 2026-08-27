@@ -53,6 +53,30 @@ pub enum DiagnosticCode {
     CollectorPublication,
     #[serde(rename = "AC0901")]
     CollectorInternal,
+    #[serde(rename = "AH0001")]
+    AhiInvocation,
+    #[serde(rename = "AH0002")]
+    AhiObservability,
+    #[serde(rename = "AH0101")]
+    AhiContractSyntax,
+    #[serde(rename = "AH0102")]
+    AhiContractIdentity,
+    #[serde(rename = "AH0103")]
+    AhiContractPath,
+    #[serde(rename = "AH0201")]
+    AhiInputIntegrity,
+    #[serde(rename = "AH0301")]
+    AhiStaging,
+    #[serde(rename = "AH0401")]
+    AhiConfigure,
+    #[serde(rename = "AH0501")]
+    AhiBuild,
+    #[serde(rename = "AH0601")]
+    AhiProductValidation,
+    #[serde(rename = "AH0701")]
+    AhiSourceAudit,
+    #[serde(rename = "AH0901")]
+    AhiInternal,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -80,6 +104,18 @@ impl fmt::Display for DiagnosticCode {
             Self::CollectorStrip => "AC0702",
             Self::CollectorPublication => "AC0801",
             Self::CollectorInternal => "AC0901",
+            Self::AhiInvocation => "AH0001",
+            Self::AhiObservability => "AH0002",
+            Self::AhiContractSyntax => "AH0101",
+            Self::AhiContractIdentity => "AH0102",
+            Self::AhiContractPath => "AH0103",
+            Self::AhiInputIntegrity => "AH0201",
+            Self::AhiStaging => "AH0301",
+            Self::AhiConfigure => "AH0401",
+            Self::AhiBuild => "AH0501",
+            Self::AhiProductValidation => "AH0601",
+            Self::AhiSourceAudit => "AH0701",
+            Self::AhiInternal => "AH0901",
         };
         formatter.write_str(value)
     }
@@ -127,6 +163,16 @@ pub enum DiagnosticStage {
     AbiMarking,
     Strip,
     Publication,
+    AhiInvocation,
+    AhiObservability,
+    AhiContractParsing,
+    AhiContractValidation,
+    AhiInputValidation,
+    AhiStaging,
+    AhiConfigure,
+    AhiBuild,
+    AhiProductValidation,
+    AhiSourceAudit,
 }
 
 impl fmt::Display for DiagnosticStage {
@@ -152,6 +198,16 @@ impl fmt::Display for DiagnosticStage {
             Self::UndefinedAudit => "undefined-symbol audit",
             Self::AbiMarking => "AROS ABI marking",
             Self::Strip => "output stripping",
+            Self::AhiInvocation => "AHI invocation",
+            Self::AhiObservability => "AHI observability",
+            Self::AhiContractParsing => "AHI contract parsing",
+            Self::AhiContractValidation => "AHI contract validation",
+            Self::AhiInputValidation => "AHI input validation",
+            Self::AhiStaging => "AHI staging",
+            Self::AhiConfigure => "AHI configure",
+            Self::AhiBuild => "AHI build",
+            Self::AhiProductValidation => "AHI product validation",
+            Self::AhiSourceAudit => "AHI source audit",
         })
     }
 }

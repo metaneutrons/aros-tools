@@ -4,15 +4,16 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// aros-collect belongs here even though it runs during the build rather than at
-// configure time: cmake/AROS.cmake makes it the linker for every AROS target,
-// and refuses to configure without it, because a link that skips it produces
-// modules whose symbol sets are all empty.
+// aros-collect and aros-ahi-runner belong here even though they run during the
+// build rather than at configure time. Generated build rules require these
+// exact checkout-local executables; omitting either one makes a fresh checkout
+// configure successfully only to fail later or bypass required AROS semantics.
 const REQUIRED_HOST_TOOLS: &[&str] = &[
     "aros-transpiler",
     "aros-genmodule",
     "aros-romtool",
     "aros-collect",
+    "aros-ahi-runner",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
