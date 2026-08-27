@@ -62,6 +62,14 @@ struct Args {
     #[arg(long, value_parser = parse_arch_component, requires = "cpu")]
     platform: Option<String>,
 
+    /// Configured target toolchain family (for example llvm or gnu).
+    #[arg(long, value_parser = parse_arch_component, requires_all = ["cpu", "platform"])]
+    toolchain: Option<String>,
+
+    /// Configured upstream bootloader lane; an empty value means no bootloader.
+    #[arg(long, requires_all = ["cpu", "platform"])]
+    bootloader: Option<String>,
+
     /// Coverage profile. Only architecture eligibility is currently
     /// evidence-backed; core/distribution reachability needs verified roots.
     #[arg(long, value_enum, requires_all = ["cpu", "platform"])]
@@ -95,12 +103,20 @@ impl Profile {
 struct ArchitectureScope {
     cpu: String,
     platform: String,
+    toolchain: String,
+    bootloader: String,
     source_dirs: BTreeSet<String>,
     package_dirs: BTreeSet<String>,
 }
 
 impl ArchitectureScope {
+    #[cfg(test)]
     fn new(cpu: &str, platform: &str) -> Self {
+        let bootloader = if platform == "pc" { "grub2gfx" } else { "" };
+        Self::with_configuration(cpu, platform, "llvm", bootloader)
+    }
+
+    fn with_configuration(cpu: &str, platform: &str, toolchain: &str, bootloader: &str) -> Self {
         let compatible_cpus: &[&str] = match cpu {
             "x86_64" => &["i386", "x86_64"],
             "aarch64" => &["arm", "aarch64"],
@@ -132,6 +148,8 @@ impl ArchitectureScope {
         Self {
             cpu: cpu.to_owned(),
             platform: platform.to_owned(),
+            toolchain: toolchain.to_owned(),
+            bootloader: bootloader.to_owned(),
             source_dirs,
             package_dirs,
         }
@@ -141,7 +159,18 @@ impl ArchitectureScope {
         args.cpu
             .as_deref()
             .zip(args.platform.as_deref())
-            .map(|(cpu, platform)| Self::new(cpu, platform))
+            .map(|(cpu, platform)| {
+                Self::with_configuration(
+                    cpu,
+                    platform,
+                    args.toolchain
+                        .as_deref()
+                        .expect("validated architecture toolchain"),
+                    args.bootloader
+                        .as_deref()
+                        .expect("validated architecture bootloader"),
+                )
+            })
     }
 
     fn key(&self) -> String {
@@ -160,6 +189,8 @@ impl ArchitectureScope {
             "AROS_TARGET_CPU" | "CPU" => Some(self.cpu.clone()),
             "AROS_TARGET_ARCH" | "ARCH" => Some(self.platform.clone()),
             "AROS_TARGET_PLATFORM" => Some(format!("{}-{}", self.platform, self.cpu)),
+            "AROS_TOOLCHAIN" => Some(self.toolchain.clone()),
+            "AROS_TARGET_BOOTLOADER" => Some(self.bootloader.clone()),
             // CMake currently configures an i386 companion only for x86_64.
             // For every other CPU this is a known empty Make variable, not an
             // unknown value inherited from some unavailable configuration.
@@ -209,6 +240,15 @@ fn parse_arch_component(value: &str) -> std::result::Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn validate_profile_arguments(args: &Args) -> Result<()> {
+    if args.cpu.is_some() && (args.toolchain.is_none() || args.bootloader.is_none()) {
+        anyhow::bail!(
+            "architecture verification requires explicit --toolchain and --bootloader values"
+        );
+    }
+    Ok(())
+}
+
 fn is_under_arch(file: &str) -> bool {
     file.split(['/', '\\']).next() == Some("arch")
 }
@@ -234,6 +274,10 @@ struct Declaration {
 }
 
 const LLVM_PROVISIONING_FILE: &str = "tools/crosstools/llvm/mmakefile.src";
+const GCC_PROVISIONING_FILE: &str = "tools/crosstools/gnu/mmakefile.src";
+const GCC_LIBATOMIC_ARGUMENTS: &str = "mmake=tools-crosstools-gcc-libatomic srcdir=\"$(LIBATOMIC_SRCDIR)\" basedir= gendir=\"$(LIBATOMIC_OBJDIR)\" extraoptions=\"$(LIBATOMIC_OPTS)\" install_env=\"$(LIBATOMIC_ENV)\"";
+const LEGACY_GRUB_FILE: &str = "arch/all-pc/boot/grub/mmakefile.src";
+const LEGACY_GRUB_ARGUMENTS: &str = "mmake=grub compiler=kernel install_target= srcdir=$(ARCHSRCDIR) extraoptions=\"$(GRUBOPTS)\" extracflags=\"$(GRUBCFLAGS)\"";
 
 /// Exact legacy declarations that provision the compiler installation used as
 /// an input by the modern CMake build.  They are not target-tree products.
@@ -247,16 +291,32 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
         "mmake=crosstools-libunwind package=libunwind srcdir=$(LIBUNWIND_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_LIBUNWIND_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
+        "crosstools-libunwind-release",
+        "mmake=crosstools-libunwind-release package=libunwind-release srcdir=$(LIBUNWIND_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_LIBUNWIND_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
+    ),
+    (
         "crosstools-llvm-runtimes",
         "mmake=crosstools-llvm-runtimes package=runtimes srcdir=$(MONOTREE_BUILDBASE)/runtimes prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_RUNTIMES_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
+        "crosstools-llvm-runtimes-release",
+        "mmake=crosstools-llvm-runtimes-release package=runtimes-release srcdir=$(MONOTREE_BUILDBASE)/runtimes prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_RUNTIMES_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
     ),
     (
         "crosstools-compiler-rt",
         "mmake=crosstools-compiler-rt package=compiler-rt srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
+        "crosstools-compiler-rt-release",
+        "mmake=crosstools-compiler-rt-release package=compiler-rt-release srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
+    ),
+    (
         "crosstools-compiler-rt32",
         "mmake=crosstools-compiler-rt32 package=compiler-rt32 srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+    ),
+    (
+        "crosstools-compiler-rt32-release",
+        "mmake=crosstools-compiler-rt32-release package=compiler-rt32-release srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no metadeps=\"setup sdk-includes-1\"",
     ),
     (
         "crosstools-llvm-toolchain",
@@ -267,6 +327,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ToolchainProvisioningContext {
     llvm: bool,
+    gcc_libatomic: bool,
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -361,21 +422,40 @@ fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningCo
         .is_some_and(|((mmake, make_config), cmake_lists)| {
             llvm_provisioning_context_matches_sources(&mmake, &make_config, &cmake_lists)
         });
-    ToolchainProvisioningContext { llvm }
+    let gcc_libatomic = read(GCC_PROVISIONING_FILE).is_some_and(|gnu_mmake| {
+        let semantics = canonical_make_semantics(&gnu_mmake);
+        let lines: BTreeSet<&str> = semantics.lines().collect();
+        lines.contains(
+            "LIBATOMIC_OBJDIR := $(HOSTGENDIR)/$(CURDIR)/gcc/$(AROS_TARGET_CPU)-aros/libatomic",
+        ) && lines.contains(
+            "LIBATOMIC_SRCDIR := $(HOSTDIR)/Ports/host/gcc/gcc-$(GCC_VERSION)/libatomic",
+        ) && lines.contains(
+            "#MM tools-crosstools-gcc-libatomic : crosstools-gcc--fetch tools-crosstools-autolibs linklibs-$(AROS_TARGET_CPU)",
+        )
+    });
+    ToolchainProvisioningContext {
+        llvm,
+        gcc_libatomic,
+    }
 }
 
 fn is_toolchain_provisioning_declaration(
     declaration: &Declaration,
     context: ToolchainProvisioningContext,
 ) -> bool {
-    context.llvm
+    (context.llvm
         && declaration.file == LLVM_PROVISIONING_FILE
         && declaration.macro_name == "build_with_cmake"
         && LLVM_PROVISIONING_DECLARATIONS
             .iter()
             .any(|(mmake, arguments)| {
                 declaration.mmake == *mmake && declaration.arguments == *arguments
-            })
+            }))
+        || (context.gcc_libatomic
+            && declaration.file == GCC_PROVISIONING_FILE
+            && declaration.macro_name == "build_with_configure"
+            && declaration.mmake == "tools-crosstools-gcc-libatomic"
+            && declaration.arguments == GCC_LIBATOMIC_ARGUMENTS)
 }
 
 fn split_toolchain_provisioning<'a>(
@@ -386,6 +466,62 @@ fn split_toolchain_provisioning<'a>(
         .iter()
         .copied()
         .partition(|declaration| is_toolchain_provisioning_declaration(declaration, context))
+}
+
+fn is_inactive_profile_declaration(
+    declaration: &Declaration,
+    scope: Option<&ArchitectureScope>,
+) -> bool {
+    scope.is_some_and(|scope| {
+        scope.bootloader != "grub"
+            && declaration.file == LEGACY_GRUB_FILE
+            && declaration.macro_name == "build_with_configure"
+            && declaration.mmake == "grub"
+            && declaration.arguments == LEGACY_GRUB_ARGUMENTS
+    })
+}
+
+fn split_inactive_profile<'a>(
+    declarations: &[&'a Declaration],
+    scope: Option<&ArchitectureScope>,
+) -> (Vec<&'a Declaration>, Vec<&'a Declaration>) {
+    declarations
+        .iter()
+        .copied()
+        .partition(|declaration| is_inactive_profile_declaration(declaration, scope))
+}
+
+fn collect_manual_aggregate_declarations(root: &Path) -> Vec<Declaration> {
+    const FILE: &str = "compiler/libhiddstubs/mmakefile.src";
+    let Ok(content) = read_source(&root.join(FILE)) else {
+        return Vec::new();
+    };
+    let semantics = canonical_make_semantics(&content);
+    let lines: BTreeSet<&str> = semantics.lines().collect();
+    let required = [
+        "#MM- linklibs : linklibs-hiddstubs",
+        "#MM- linklibs-hiddstubs: linklibs-hidd-stubs",
+        "HIDD_LIB := $(AROS_LIB)/libhiddstubs.a",
+        "HIDD_STUBS_OBJ := $(strip $(call WILDCARD, $(GENDIR)/lib/hidd/*.o))",
+        "linklibs-hiddstubs: $(HIDD_LIB)",
+        "$(HIDD_LIB) : $(HIDD_STUBS_OBJ)",
+        "%mklib_q from=$^",
+    ];
+    if !required.into_iter().all(|line| lines.contains(line))
+        || semantics
+            .lines()
+            .filter(|line| line.starts_with("linklibs-hiddstubs:"))
+            .count()
+            != 1
+    {
+        return Vec::new();
+    }
+    vec![Declaration {
+        mmake: "linklibs-hiddstubs".to_owned(),
+        macro_name: "manual_archive".to_owned(),
+        file: FILE.to_owned(),
+        arguments: required.join(" | "),
+    }]
 }
 
 /// What the reference expansion says about one target.
@@ -411,6 +547,7 @@ struct ExpansionFailure {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    validate_profile_arguments(&args)?;
     let architecture = ArchitectureScope::from_args(&args);
     let root = args
         .source
@@ -436,15 +573,19 @@ fn main() -> Result<()> {
     // 1. What the tree declares. Read straight from the mmakefiles, with line
     //    continuations joined, so this measure does not depend on the
     //    transpiler's own parser being right.
-    let declarations = collect_declarations(&root, &mmakefiles);
+    let mut declarations = collect_declarations(&root, &mmakefiles);
+    let manual_aggregates = collect_manual_aggregate_declarations(&root);
+    declarations.extend(manual_aggregates.iter().cloned());
     // The global report deliberately remains a raw tree inventory.  A
     // concrete architecture report additionally evaluates Make conditionals
     // with the target values CMake supplied.  Directory filtering alone is
     // insufficient: several shared mmakefiles declare 32-bit companions only
     // when AROS_TARGET_CPU32 is non-empty.
-    let conditional_declarations = architecture
-        .as_ref()
-        .map(|scope| collect_declarations_for_profile(&root, &mmakefiles, scope));
+    let conditional_declarations = architecture.as_ref().map(|scope| {
+        let mut declarations = collect_declarations_for_profile(&root, &mmakefiles, scope);
+        declarations.extend(manual_aggregates.iter().cloned());
+        declarations
+    });
     let declaration_candidates = conditional_declarations
         .as_deref()
         .unwrap_or(declarations.as_slice());
@@ -457,8 +598,10 @@ fn main() -> Result<()> {
         })
         .collect();
     let provisioning_context = detect_toolchain_provisioning_context(&root);
-    let (toolchain_provisioning, scoped_declarations) =
+    let (toolchain_provisioning, target_candidates) =
         split_toolchain_provisioning(&scoped_inventory, provisioning_context);
+    let (inactive_profile, scoped_declarations) =
+        split_inactive_profile(&target_candidates, architecture.as_ref());
 
     // 2. What the historic build makes of it.
     let expansion = expand_all(&root, &cache, &mmakefiles, args.refresh);
@@ -622,9 +765,15 @@ fn main() -> Result<()> {
         declared.len()
     );
     println!(
-        "   provisioning  {} legacy toolchain target(s) tracked outside the target graph",
+        "   provisioning  {} upstream toolchain target(s) tracked outside the target graph",
         toolchain_provisioning.len()
     );
+    if !inactive_profile.is_empty() {
+        println!(
+            "   inactive      {} declaration(s) excluded by explicit target configuration",
+            inactive_profile.len()
+        );
+    }
     let reference_count = if architecture.is_some() {
         shapes
             .keys()
@@ -658,11 +807,30 @@ fn main() -> Result<()> {
             .iter()
             .map(|declaration| {
                 format!(
-                    "{:32} %{:22} {}  compiler=host prefix=$(CROSSTOOLSDIR)",
+                    "{:32} %{:22} {}",
                     declaration.mmake, declaration.macro_name, declaration.file
                 )
             })
             .collect(),
+    )?;
+
+    write_named_inventory_report(
+        &report_dir.join("inactive-profile-targets.txt"),
+        inactive_profile
+            .iter()
+            .map(|declaration| {
+                format!(
+                    "{:32} %{:22} {}  AROS_TARGET_BOOTLOADER={}",
+                    declaration.mmake,
+                    declaration.macro_name,
+                    declaration.file,
+                    architecture
+                        .as_ref()
+                        .map_or("<unset>", |scope| scope.bootloader.as_str())
+                )
+            })
+            .collect(),
+        "inactive target-profile inventory",
     )?;
 
     write_report(
@@ -751,7 +919,11 @@ fn write_failure_report(path: &Path, mut lines: Vec<String>, headline: &str) -> 
 /// Writes an intentional non-gating inventory.  Unlike a failure report it is
 /// expected to remain present: it prevents excluded provisioning work from
 /// disappearing behind a denominator adjustment.
-fn write_inventory_report(path: &Path, mut lines: Vec<String>) -> Result<()> {
+fn write_inventory_report(path: &Path, lines: Vec<String>) -> Result<()> {
+    write_named_inventory_report(path, lines, "external toolchain provisioning inventory")
+}
+
+fn write_named_inventory_report(path: &Path, mut lines: Vec<String>, label: &str) -> Result<()> {
     if lines.is_empty() {
         let _ = fs::remove_file(path);
         return Ok(());
@@ -759,10 +931,7 @@ fn write_inventory_report(path: &Path, mut lines: Vec<String>) -> Result<()> {
     lines.sort_unstable();
     lines.dedup();
     fs::write(path, lines.join("\n") + "\n")?;
-    println!(
-        "   ℹ️  external toolchain provisioning inventory -> {}",
-        path.display()
-    );
+    println!("   ℹ️  {label} -> {}", path.display());
     Ok(())
 }
 
@@ -1642,10 +1811,15 @@ mod tests {
             "x86_64",
             "--platform",
             "pc",
+            "--toolchain",
+            "llvm",
+            "--bootloader",
+            "grub2gfx",
             "--profile",
             "architecture",
         ])
         .unwrap();
+        validate_profile_arguments(&ok).unwrap();
         assert_eq!(ok.cpu.as_deref(), Some("x86_64"));
         assert_eq!(ok.platform.as_deref(), Some("pc"));
         assert_eq!(ok.profile, Some(Profile::Architecture));
@@ -1660,6 +1834,19 @@ mod tests {
             "x86_64",
         ])
         .is_err());
+        let incomplete_profile = Args::try_parse_from([
+            "aros-verify",
+            "--generated",
+            "generated.cmake",
+            "--work",
+            "verify",
+            "--cpu",
+            "x86_64",
+            "--platform",
+            "pc",
+        ])
+        .unwrap();
+        assert!(validate_profile_arguments(&incomplete_profile).is_err());
         assert!(Args::try_parse_from([
             "aros-verify",
             "--generated",
@@ -1682,6 +1869,52 @@ mod tests {
         assert_eq!(scope.key(), "architecture-x86_64-pc");
         assert!(parse_arch_component("../pc").is_err());
         assert!(parse_arch_component("aarch64").is_ok());
+    }
+
+    #[test]
+    fn legacy_grub_is_inactive_only_for_an_explicit_non_grub_profile() {
+        let declaration = Declaration {
+            mmake: "grub".to_owned(),
+            macro_name: "build_with_configure".to_owned(),
+            file: LEGACY_GRUB_FILE.to_owned(),
+            arguments: LEGACY_GRUB_ARGUMENTS.to_owned(),
+        };
+        let grub2 = ArchitectureScope::with_configuration("x86_64", "pc", "llvm", "grub2gfx");
+        let grub = ArchitectureScope::with_configuration("x86_64", "pc", "llvm", "grub");
+        assert!(is_inactive_profile_declaration(&declaration, Some(&grub2)));
+        assert!(!is_inactive_profile_declaration(&declaration, Some(&grub)));
+
+        let mut drifted = declaration;
+        drifted.arguments.push_str(" unexpected=yes");
+        assert!(!is_inactive_profile_declaration(&drifted, Some(&grub2)));
+    }
+
+    #[test]
+    fn manual_hiddstubs_contract_is_admitted_and_drift_fails_closed() {
+        let dir =
+            std::env::temp_dir().join(format!("aros-verify-test-hiddstubs-{}", std::process::id()));
+        let compiler = dir.join("compiler/libhiddstubs");
+        fs::create_dir_all(&compiler).unwrap();
+        let source = "#MM- linklibs : linklibs-hiddstubs\n\
+                      #MM- linklibs-hiddstubs: linklibs-hidd-stubs\n\
+                      HIDD_LIB := $(AROS_LIB)/libhiddstubs.a\n\
+                      HIDD_STUBS_OBJ := $(strip $(call WILDCARD, $(GENDIR)/lib/hidd/*.o))\n\
+                      #MM\n\
+                      linklibs-hiddstubs: $(HIDD_LIB)\n\
+                      $(HIDD_LIB) : $(HIDD_STUBS_OBJ)\n\
+                      \t%mklib_q from=$^\n";
+        fs::write(compiler.join("mmakefile.src"), source).unwrap();
+        let declarations = collect_manual_aggregate_declarations(&dir);
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].mmake, "linklibs-hiddstubs");
+
+        fs::write(
+            compiler.join("mmakefile.src"),
+            source.replace("%mklib_q from=$^", "%mklib_q from=$^ extra=yes"),
+        )
+        .unwrap();
+        assert!(collect_manual_aggregate_declarations(&dir).is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1855,8 +2088,12 @@ mod tests {
         assert!(
             context.llvm,
             "the LLVM provisioning boundary is no longer structurally valid; \
-             the five legacy host-tool declarations have been returned to the \
+             the nine host-tool declarations have been returned to the \
              ordinary target coverage gate"
+        );
+        assert!(
+            context.gcc_libatomic,
+            "the GCC libatomic provisioning boundary is no longer structurally valid"
         );
         let target_ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
             eligible_declarations(&root, &files, scope, true)
@@ -1888,29 +2125,35 @@ mod tests {
             .map(|declaration| declaration.mmake.clone())
             .collect();
 
-        assert_eq!(global_target.len(), 1206);
-        assert_eq!(target_ids(&x86).len(), 1083);
-        assert_eq!(target_ids(&arm).len(), 1078);
-        assert_eq!(target_ids(&aarch64).len(), 1078);
+        assert_eq!(global_target.len(), 1201);
+        assert_eq!(target_ids(&x86).len(), 1078);
+        assert_eq!(target_ids(&arm).len(), 1074);
+        assert_eq!(target_ids(&aarch64).len(), 1074);
         let common_provisioning = BTreeSet::from([
             "crosstools-compiler-rt".to_owned(),
+            "crosstools-compiler-rt-release".to_owned(),
             "crosstools-libunwind".to_owned(),
+            "crosstools-libunwind-release".to_owned(),
             "crosstools-llvm-runtimes".to_owned(),
+            "crosstools-llvm-runtimes-release".to_owned(),
             "crosstools-llvm-toolchain".to_owned(),
+            "tools-crosstools-gcc-libatomic".to_owned(),
         ]);
         let mut x86_provisioning = common_provisioning.clone();
         x86_provisioning.insert("crosstools-compiler-rt32".to_owned());
+        x86_provisioning.insert("crosstools-compiler-rt32-release".to_owned());
         assert_eq!(global_provisioning, x86_provisioning);
         assert_eq!(provisioning_ids(&x86), x86_provisioning);
         assert_eq!(provisioning_ids(&arm), common_provisioning);
         assert_eq!(provisioning_ids(&aarch64), common_provisioning);
-        // GCC libatomic is a target-compiled runtime, not a host-compiler
-        // CROSSTOOLSDIR declaration.  Keep it in the normal target gate.
-        assert!(global_target.contains("tools-crosstools-gcc-libatomic"));
+        // GCC builds libatomic with the target compiler, but does so below the
+        // host-side compiler work tree and installs it into the compiler
+        // provisioning lane. It is not a target-tree product.
+        assert!(!global_target.contains("tools-crosstools-gcc-libatomic"));
         for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
             assert!(inventory.contains("test-library-dummytest_auto"));
             assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
-            assert!(inventory.contains("tools-crosstools-gcc-libatomic"));
+            assert!(!inventory.contains("tools-crosstools-gcc-libatomic"));
         }
     }
 
@@ -1986,7 +2229,10 @@ mod tests {
             &root,
             std::slice::from_ref(&root.join(LLVM_PROVISIONING_FILE)),
         );
-        let context = ToolchainProvisioningContext { llvm: true };
+        let context = ToolchainProvisioningContext {
+            llvm: true,
+            gcc_libatomic: true,
+        };
         for (needle, replacement) in [
             ("compiler=host", "compiler=target"),
             (
@@ -2012,6 +2258,19 @@ mod tests {
             assert!(provisioning.is_empty());
             assert_eq!(target_graph[0].mmake, "crosstools-compiler-rt");
         }
+
+        let gnu_declarations = collect_declarations(
+            &root,
+            std::slice::from_ref(&root.join(GCC_PROVISIONING_FILE)),
+        );
+        let libatomic = gnu_declarations
+            .iter()
+            .find(|declaration| declaration.mmake == "tools-crosstools-gcc-libatomic")
+            .unwrap();
+        assert!(is_toolchain_provisioning_declaration(libatomic, context));
+        let mut drifted = libatomic.clone();
+        drifted.arguments = drifted.arguments.replace("basedir=", "basedir=$(GENDIR)");
+        assert!(!is_toolchain_provisioning_declaration(&drifted, context));
     }
 
     #[test]
