@@ -256,10 +256,14 @@ fn conf_key_value(line: &str) -> Option<(&str, &str)> {
 /// general be reconstructed from the config file stem: Wanderer's private
 /// `icon.conf`, for example, is invoked as `Icon mui`, whereas icon.library is
 /// invoked as `icon library`.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ModuleDeclaration {
     name: String,
     mod_type: String,
+    /// A `confoverride=` declaration reads its API from another config and
+    /// applies this file afterwards. The broad scanner has to model the same
+    /// pair or it emits a source-local libdefs header with no function list.
+    base_config: Option<PathBuf>,
 }
 
 fn module_macro_value(block: &str, key: &str) -> Option<String> {
@@ -269,17 +273,41 @@ fn module_macro_value(block: &str, key: &str) -> Option<String> {
         .map(|value| value.trim_matches(['"', '\'']).to_owned())
 }
 
-/// Reads the genmodule invocation associated with a `.conf` from its sibling
-/// mmakefile.src. The module type and default include name both come from that
-/// invocation, not from the config file name.
-fn read_module_declaration(conf_path: &Path, stem: &str) -> Option<ModuleDeclaration> {
-    let mmakefile = conf_path.parent()?.join("mmakefile.src");
-    let content = read_source(&mmakefile).ok()?;
+fn resolve_make_config_path(value: &str, mmake_dir: &Path, root: &Path) -> Option<PathBuf> {
+    let value = value.trim_matches(['"', '\'']);
+    if let Some(relative) = value.strip_prefix("$(SRCDIR)/") {
+        return Some(root.join(relative));
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    (!value.contains("$(")).then(|| mmake_dir.join(path))
+}
+
+/// Reads every genmodule invocation associated with one `.conf` from its
+/// sibling mmakefile.src.
+///
+/// A config is not necessarily a one-to-one module identity. Network drivers
+/// use one config for normal and debug modules, while HPET names this file as a
+/// `confoverride=` over the shared clocksource config. Returning one preferred
+/// declaration silently left the other private header stale.
+fn read_module_declarations(conf_path: &Path, stem: &str, root: &Path) -> Vec<ModuleDeclaration> {
+    let Some(mmake_dir) = conf_path.parent() else {
+        return Vec::new();
+    };
+    let mmakefile = mmake_dir.join("mmakefile.src");
+    let Ok(content) = read_source(&mmakefile) else {
+        return Vec::new();
+    };
     // Directives span continuation lines, so flatten before matching.
     let flat = content.replace("\\\n", " ");
-    let config_name = conf_path.file_name()?.to_string_lossy();
+    let Some(config_name) = conf_path.file_name() else {
+        return Vec::new();
+    };
+    let config_name = config_name.to_string_lossy();
     let mut fallback_type: Option<String> = None;
-    let mut default_declaration: Option<ModuleDeclaration> = None;
+    let mut declarations = Vec::new();
     for block in flat.split("%build_module").skip(1) {
         // The next macro begins with '%'; values of interest are all in this
         // one declaration, so never let a later build_module donate its args.
@@ -287,6 +315,7 @@ fn read_module_declaration(conf_path: &Path, stem: &str) -> Option<ModuleDeclara
         let name = module_macro_value(head, "modname=");
         let mod_type = module_macro_value(head, "modtype=");
         let conffile = module_macro_value(head, "conffile=");
+        let confoverride = module_macro_value(head, "confoverride=");
         if fallback_type.is_none() {
             fallback_type.clone_from(&mod_type);
         }
@@ -300,31 +329,42 @@ fn read_module_declaration(conf_path: &Path, stem: &str) -> Option<ModuleDeclara
             && name
                 .as_deref()
                 .is_some_and(|module_name| module_name == stem);
-        // An explicit `conffile=` binds this config even if an earlier
-        // declaration would select it by the default `<modname>.conf` rule.
-        // Wanderer's `Icon mui conffile=icon.conf` is the important real
-        // example: it must not inherit icon.library's declaration merely
-        // because that one appears first in the same make fragment.
-        if matches_explicit_config {
-            if let (Some(name), Some(mod_type)) = (name.as_ref(), mod_type.as_ref()) {
-                return Some(ModuleDeclaration {
-                    name: name.clone(),
-                    mod_type: mod_type.clone(),
+        let matches_override = confoverride.as_deref().is_some_and(|config| {
+            Path::new(config)
+                .file_name()
+                .is_some_and(|file| file == config_name.as_ref())
+        });
+        if matches_explicit_config || matches_default_config || matches_override {
+            if let (Some(name), Some(mod_type)) = (name, mod_type) {
+                let base_config = matches_override
+                    .then_some(conffile.as_deref())
+                    .flatten()
+                    .and_then(|value| resolve_make_config_path(value, mmake_dir, root));
+                declarations.push(ModuleDeclaration {
+                    name,
+                    mod_type,
+                    base_config,
                 });
             }
         }
-        if matches_default_config && default_declaration.is_none() {
-            if let (Some(name), Some(mod_type)) = (name, mod_type) {
-                default_declaration = Some(ModuleDeclaration { name, mod_type });
-            }
+    }
+    if declarations.is_empty() {
+        if let Some(mod_type) = fallback_type {
+            declarations.push(ModuleDeclaration {
+                name: stem.to_owned(),
+                mod_type,
+                base_config: None,
+            });
         }
     }
-    default_declaration.or_else(|| {
-        fallback_type.map(|mod_type| ModuleDeclaration {
-            name: stem.to_owned(),
-            mod_type,
-        })
-    })
+    declarations.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.mod_type.cmp(&right.mod_type))
+            .then_with(|| left.base_config.cmp(&right.base_config))
+    });
+    declarations.dedup();
+    declarations
 }
 
 /// Suffix and separator used to build the module's run-time name.
@@ -442,13 +482,24 @@ fn default_basename(module_name: &str) -> String {
     })
 }
 
-fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
-    let content = read_source(path).ok()?;
+fn parse_conf_variant(
+    path: &Path,
+    root: &Path,
+    declaration: Option<&ModuleDeclaration>,
+) -> Option<ConfModule> {
+    let override_content = read_source(path).ok()?;
+    let content =
+        if let Some(base_config) = declaration.and_then(|value| value.base_config.as_ref()) {
+            let mut base = read_source(base_config).ok()?;
+            base.push('\n');
+            base.push_str(&override_content);
+            base
+        } else {
+            override_content
+        };
     let stem = path.file_stem()?.to_string_lossy().to_string();
-    let declaration = read_module_declaration(path, &stem);
-    let module_name = declaration
-        .as_ref()
-        .map_or_else(|| stem.clone(), |declaration| declaration.name.clone());
+    let module_name =
+        declaration.map_or_else(|| stem.clone(), |declaration| declaration.name.clone());
 
     let mut module = ConfModule {
         name: module_name.clone(),
@@ -457,7 +508,7 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
         // Left empty on purpose: the default depends on libbasetypeextern,
         // which may be read later in the config section. Resolved below.
         lib_base_type: String::new(),
-        mod_type: declaration.map_or_else(String::new, |declaration| declaration.mod_type),
+        mod_type: declaration.map_or_else(String::new, |declaration| declaration.mod_type.clone()),
         rel_dir: path
             .parent()
             .and_then(|d| d.strip_prefix(root).ok())
@@ -481,11 +532,16 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
     let mut nesting = 0usize;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("##begin interface") || trimmed.starts_with("##begin class") {
+        let directive = trimmed.strip_prefix("##").map(str::trim);
+        if directive.is_some_and(|value| {
+            value.starts_with("begin interface") || value.starts_with("begin class")
+        }) {
             nesting += 1;
             continue;
         }
-        if trimmed.starts_with("##end interface") || trimmed.starts_with("##end class") {
+        if directive.is_some_and(|value| {
+            value.starts_with("end interface") || value.starts_with("end class")
+        }) {
             nesting = nesting.saturating_sub(1);
             continue;
         }
@@ -493,23 +549,26 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
             // Interfaces are parsed separately by the interfaces module.
             continue;
         }
-        if trimmed == "##begin config" {
+        if directive == Some("begin config") {
             section = "config";
-        } else if trimmed == "##end config" {
+        } else if directive == Some("end config") {
             section = "";
-        } else if trimmed == "##begin cdef" {
+        } else if directive == Some("begin cdef") {
             section = "cdef";
-        } else if trimmed == "##end cdef" {
+        } else if directive == Some("end cdef") {
             section = "";
-        } else if trimmed == "##begin startup" {
+        } else if directive == Some("begin startup") {
             section = "startup";
-        } else if trimmed == "##end startup" {
+        } else if directive == Some("end startup") {
             section = "";
-        } else if trimmed == "##begin cdefprivate" {
+        } else if directive == Some("begin cdefprivate") {
             section = "cdefprivate";
-        } else if trimmed == "##end cdefprivate" {
+        } else if directive == Some("end cdefprivate") {
             section = "";
-        } else if trimmed == "##begin functionlist" {
+        } else if matches!(
+            directive,
+            Some("begin functionlist" | "begin cfunctionlist")
+        ) {
             section = "functions";
             if !lvo_ready {
                 lvo = varargs::first_lvo(
@@ -518,7 +577,7 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 );
                 lvo_ready = true;
             }
-        } else if trimmed == "##end functionlist" {
+        } else if matches!(directive, Some("end functionlist" | "end cfunctionlist")) {
             section = "";
         } else if section == "config" {
             let Some((key, val)) = conf_key_value(trimmed) else {
@@ -683,6 +742,20 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
     }
 
     Some(module)
+}
+
+fn parse_conf_variants(path: &Path, root: &Path) -> Vec<ConfModule> {
+    let Some(stem) = path.file_stem().map(|value| value.to_string_lossy()) else {
+        return Vec::new();
+    };
+    let declarations = read_module_declarations(path, &stem, root);
+    if declarations.is_empty() {
+        return parse_conf_variant(path, root, None).into_iter().collect();
+    }
+    declarations
+        .iter()
+        .filter_map(|declaration| parse_conf_variant(path, root, Some(declaration)))
+        .collect()
 }
 
 fn generate_sdk_headers(
@@ -969,6 +1042,47 @@ fn remove_colliding_public_headers(module: &ConfModule, out_inc: &Path) -> std::
     Ok(())
 }
 
+fn private_libdefs_path(root: &Path, module: &ConfModule) -> PathBuf {
+    root.join(&module.rel_dir)
+        .join(format!("{}_libdefs.h", module.name))
+}
+
+/// Removes module-private headers that no current config/declaration owns.
+///
+/// The scanner runs in an existing build tree on every configure. Without a
+/// publication cleanup, renamed modules and architecture changes leave valid-
+/// looking libdefs behind indefinitely; the former audit then compared those
+/// stale files as if they described current declarations.
+fn prune_stale_private_libdefs(root: &Path, modules: &[ConfModule]) -> std::io::Result<usize> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    let expected: std::collections::HashSet<PathBuf> = modules
+        .iter()
+        .map(|module| private_libdefs_path(root, module))
+        .collect();
+    let mut stale = Vec::new();
+    for entry in WalkDir::new(root) {
+        let entry = entry.map_err(std::io::Error::other)?;
+        let path = entry.path();
+        let is_libdefs = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("_libdefs.h"));
+        if is_libdefs
+            && (entry.file_type().is_file() || entry.file_type().is_symlink())
+            && !expected.contains(path)
+        {
+            stale.push(path.to_path_buf());
+        }
+    }
+    stale.sort();
+    for path in &stale {
+        fs::remove_file(path)?;
+    }
+    Ok(stale.len())
+}
+
 fn main() {
     let args = Args::parse();
     // Build trees are skipped: SDK header staging copies source directories
@@ -997,13 +1111,30 @@ fn main() {
     // actually claim an SDK namespace, and that follows from the parsed config.
     let mut modules: Vec<ConfModule> = conf_files
         .par_iter()
-        .filter_map(|p| parse_conf(p, &args.scan_dir))
+        .flat_map(|path| parse_conf_variants(path, &args.scan_dir))
         .collect();
     modules.sort_by(|left, right| {
         left.rel_dir
             .cmp(&right.rel_dir)
             .then_with(|| left.name.cmp(&right.name))
     });
+
+    if let Some(root) = args.output_gen.as_deref() {
+        match prune_stale_private_libdefs(root, &modules) {
+            Ok(0) => {}
+            Ok(count) => println!(
+                "🧹 aros-genmodule: removed {count} stale private libdefs header(s) from {}",
+                root.display()
+            ),
+            Err(error) => {
+                eprintln!(
+                    "aros-genmodule: failed to prune stale private libdefs under {}: {error}",
+                    root.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 
     let colliding_names = colliding_public_include_names(&modules);
 
@@ -1381,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_conffile_invocation_beats_the_default_module_name_match() {
+    fn shared_config_keeps_default_and_explicit_module_identities() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock after Unix epoch")
@@ -1400,11 +1531,110 @@ mod tests {
         )
         .expect("write make fragment");
 
-        let declaration = read_module_declaration(&conf, "icon").expect("read declaration");
-        assert_eq!(declaration.name, "Icon");
-        assert_eq!(declaration.mod_type, "mui");
+        let declarations = read_module_declarations(&conf, "icon", &dir);
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].name, "Icon");
+        assert_eq!(declarations[0].mod_type, "mui");
+        assert_eq!(declarations[1].name, "icon");
+        assert_eq!(declarations[1].mod_type, "library");
+        let variants = parse_conf_variants(&conf, &dir);
+        assert_eq!(variants.len(), 2);
+        assert_eq!(functions_count(&variants[0]), 5);
+        assert_eq!(functions_count(&variants[1]), 4);
 
         fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn cfunctionlist_and_spaced_section_markers_are_parsed() {
+        let root = std::env::temp_dir().join(format!(
+            "aros-genmodule-cfunctionlist-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test directory");
+        let conf = root.join("probe.conf");
+        fs::write(
+            &conf,
+            "## begin cfunctionlist\nLONG Probe(LONG value) (D0)\n## end cfunctionlist\n",
+        )
+        .expect("write config");
+
+        let module = parse_conf_variant(&conf, &root, None).expect("parse config");
+        assert_eq!(module.functions.len(), 1);
+        assert_eq!(functions_count(&module), 5);
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn confoverride_keeps_the_base_function_list() {
+        let root = std::env::temp_dir().join(format!(
+            "aros-genmodule-confoverride-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let base_dir = root.join("rom/kernel");
+        let override_dir = root.join("arch/all-pc/hpet");
+        fs::create_dir_all(&base_dir).expect("create base directory");
+        fs::create_dir_all(&override_dir).expect("create override directory");
+        fs::write(
+            base_dir.join("clocksource.conf"),
+            "##begin config\nlibbase CSBase\n##end config\n\
+             ##begin functionlist\nLONG First() ()\nLONG Second() ()\n##end functionlist\n",
+        )
+        .expect("write base config");
+        let override_conf = override_dir.join("hpet.conf");
+        fs::write(
+            &override_conf,
+            "##begin config\nlibbase HPETBase\n##end config\n",
+        )
+        .expect("write override config");
+        fs::write(
+            override_dir.join("mmakefile.src"),
+            "%build_module mmake=kernel-pc-hpet modname=hpet modtype=resource \\\n+             conffile=$(SRCDIR)/rom/kernel/clocksource.conf confoverride=hpet.conf\n",
+        )
+        .expect("write make fragment");
+
+        let modules = parse_conf_variants(&override_conf, &root);
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "hpet");
+        assert_eq!(modules[0].lib_base, "HPETBase");
+        assert_eq!(functions_count(&modules[0]), 2);
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn stale_private_libdefs_are_removed_without_touching_current_outputs() {
+        let root = std::env::temp_dir().join(format!(
+            "aros-genmodule-prune-libdefs-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let module_dir = root.join("rom/test");
+        fs::create_dir_all(&module_dir).expect("create module directory");
+        let current = module_dir.join("current_libdefs.h");
+        let stale = module_dir.join("stale_libdefs.h");
+        let unrelated = module_dir.join("generated.h");
+        fs::write(&current, "current\n").expect("write current output");
+        fs::write(&stale, "stale\n").expect("write stale output");
+        fs::write(&unrelated, "unrelated\n").expect("write unrelated output");
+        let module = ConfModule {
+            name: "current".to_owned(),
+            rel_dir: PathBuf::from("rom/test"),
+            ..ConfModule::default()
+        };
+
+        assert_eq!(
+            prune_stale_private_libdefs(&root, &[module]).expect("prune outputs"),
+            1
+        );
+        assert!(current.exists());
+        assert!(!stale.exists());
+        assert!(unrelated.exists());
+
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
@@ -1479,7 +1709,7 @@ mod tests {
             "##begin config\nlibbase KernelBase\nlibbasetype struct KernelBase\n##end config\n",
         )
         .expect("write conf");
-        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+        let module = parse_conf_variant(&dir.join("kernel.conf"), &root, None).expect("parse");
 
         // tools/genmodule/config.c:1333 capitalises the module name when the
         // config states no basename, and writeinclibdefs.c:82 names every
@@ -1494,7 +1724,7 @@ mod tests {
             "##begin config\nlibbase KernelBase\nbasename Kern\n##end config\n",
         )
         .expect("write conf");
-        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+        let module = parse_conf_variant(&dir.join("kernel.conf"), &root, None).expect("parse");
         assert_eq!(module.base_name, "Kern");
         assert_eq!(module.lib_base, "KernelBase");
 
@@ -1504,7 +1734,7 @@ mod tests {
             "##begin config\nbasename Kern\n##end config\n",
         )
         .expect("write conf");
-        let module = parse_conf(&dir.join("kernel.conf"), &root).expect("parse");
+        let module = parse_conf_variant(&dir.join("kernel.conf"), &root, None).expect("parse");
         assert_eq!(module.base_name, "Kern");
         assert_eq!(module.lib_base, "KernBase");
 
