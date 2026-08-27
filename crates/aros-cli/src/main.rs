@@ -1,8 +1,13 @@
-use clap::{Args, Parser, Subcommand};
+use aros_common::{
+    render_diagnostics, requested_diagnostic_format, DiagnosticCode, DiagnosticContext,
+    DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
+};
+use clap::{error::ErrorKind, Args, Parser, Subcommand};
 use console::{style, Emoji};
 use miette::Result;
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 mod artifact;
@@ -11,6 +16,7 @@ mod build;
 mod golden;
 mod host_tools;
 mod hosttools;
+mod observability;
 mod pi;
 mod repo;
 mod toolchain;
@@ -26,11 +32,44 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
     author = "AROS Development Team & Fabian Schmieder (@metaneutrons)",
     version = "0.1.0",
     about = "AROS Tools v0.1: Next-Generation Build System & Tooling Engine",
-    long_about = "Modern, ultra-fast, multi-platform build orchestrator and upstream sync pipeline for AROS."
+    long_about = "Modern, ultra-fast, multi-platform build orchestrator and upstream sync pipeline for AROS.",
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default and is written\nonly to an explicitly selected local file."
 )]
 struct Cli {
+    #[command(flatten)]
+    observability: ObservabilityArgs,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Args, Clone)]
+struct ObservabilityArgs {
+    /// Stable diagnostic renderer used for errors
+    #[arg(long, global = true, value_enum, default_value_t = DiagnosticFormat::Human, env = "AROS_DIAGNOSTIC_FORMAT")]
+    diagnostic_format: DiagnosticFormat,
+
+    /// Opt-in local log level; requires --log-file
+    #[arg(long, global = true, value_enum, default_value_t = LogLevel::Off, env = "AROS_LOG_LEVEL")]
+    log_level: LogLevel,
+
+    /// Local log representation
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Human, env = "AROS_LOG_FORMAT")]
+    log_format: LogFormat,
+
+    /// Explicit local log destination
+    #[arg(long, global = true, value_name = "PATH", env = "AROS_LOG_FILE")]
+    log_file: Option<PathBuf>,
+}
+
+impl ObservabilityArgs {
+    fn effective_log_level(&self) -> LogLevel {
+        if self.log_file.is_some() && self.log_level == LogLevel::Off {
+            LogLevel::Info
+        } else {
+            self.log_level
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -459,18 +498,284 @@ struct BoardSelection {
     config: Option<PathBuf>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
-    let repo_root = repo::find_root()?;
-    std::env::set_current_dir(&repo_root).map_err(|error| {
-        miette::miette!(
-            "Could not enter AROS-NG checkout '{}': {error}",
-            repo_root.display()
-        )
-    })?;
+fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, DiagnosticContext) {
+    let (code, stage, mode, target, hint) = match command {
+        Commands::Setup { preset, .. } => (
+            DiagnosticCode::CliToolchain,
+            DiagnosticStage::ToolResolution,
+            "setup",
+            preset.clone(),
+            "verify the selected profile, toolchain lock, network policy, and local cache",
+        ),
+        Commands::HostTools { .. } => (
+            DiagnosticCode::CliToolResolution,
+            DiagnosticStage::ToolResolution,
+            "host-tools",
+            None,
+            "install the pinned host tools or verify the configured offline cache",
+        ),
+        Commands::Hosttools { .. } => (
+            DiagnosticCode::CliToolResolution,
+            DiagnosticStage::ToolResolution,
+            "hosttools",
+            None,
+            "inspect the reported helper and Cargo failure, then rebuild the required host tools",
+        ),
+        Commands::Toolchain { command } => {
+            let target = match command {
+                ToolchainCommands::Install { preset, .. }
+                | ToolchainCommands::Verify { preset, .. }
+                | ToolchainCommands::Path { preset, .. } => Some(preset.clone()),
+                ToolchainCommands::List => None,
+            };
+            (
+                DiagnosticCode::CliToolchain,
+                DiagnosticStage::ToolResolution,
+                "toolchain",
+                target,
+                "verify the toolchain lock, selected host/profile artifact, cache, and installation prefix",
+            )
+        }
+        Commands::Pi { command } => match command {
+            PiCommand::Build { board, .. } => (
+                DiagnosticCode::CliBuild,
+                DiagnosticStage::BuildExecution,
+                "pi.build",
+                Some(board.board.clone()),
+                "inspect the board profile and the reported configure or build failure",
+            ),
+            PiCommand::Deploy { board, .. } => (
+                DiagnosticCode::CliPublication,
+                DiagnosticStage::Publication,
+                "pi.deploy",
+                Some(board.board.clone()),
+                "validate the board profile, build artifact, and deployment destination before retrying",
+            ),
+            PiCommand::Sd { command } => {
+                let target = match command {
+                    SdCommand::Image { board, .. } | SdCommand::Write { board, .. } => {
+                        Some(board.board.clone())
+                    }
+                    SdCommand::Scan { .. } | SdCommand::Unmount { .. } => None,
+                };
+                (
+                    DiagnosticCode::CliMediaSafety,
+                    DiagnosticStage::MediaSafety,
+                    "pi.sd",
+                    target,
+                    "re-run the non-mutating scan or dry run and satisfy every reported media-safety check",
+                )
+            }
+            PiCommand::Init { board, .. } => (
+                DiagnosticCode::CliPi,
+                DiagnosticStage::PiOperation,
+                "pi.init",
+                Some(board.clone()),
+                "check the board name, configuration destination, and explicit apply mode",
+            ),
+            PiCommand::Doctor(selection)
+            | PiCommand::Serve {
+                board: selection, ..
+            }
+            | PiCommand::Console {
+                board: selection, ..
+            } => (
+                DiagnosticCode::CliPi,
+                DiagnosticStage::PiOperation,
+                "pi",
+                Some(selection.board.clone()),
+                "inspect the board profile and the failed local prerequisite reported above",
+            ),
+            PiCommand::Scan => (
+                DiagnosticCode::CliPi,
+                DiagnosticStage::PiOperation,
+                "pi.scan",
+                None,
+                "verify the local USB network interface and platform discovery tools",
+            ),
+        },
+        Commands::Build { preset, .. } => (
+            DiagnosticCode::CliBuild,
+            DiagnosticStage::BuildExecution,
+            "build",
+            Some(preset.clone()),
+            "inspect the preserved configure/build output and retry the exact reported target",
+        ),
+        Commands::Clean { preset } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "clean",
+            preset.clone(),
+            "verify that the selected build directory belongs to the intended AROS preset",
+        ),
+        Commands::Test { preset, .. } => (
+            DiagnosticCode::CliBoot,
+            DiagnosticStage::BootValidation,
+            "test",
+            Some(preset.clone()),
+            "inspect the retained boot evidence and the first reported serial or QEMU failure",
+        ),
+        Commands::Ccache { .. } => (
+            DiagnosticCode::CliToolResolution,
+            DiagnosticStage::ToolResolution,
+            "ccache",
+            None,
+            "install ccache or sccache and verify that the selected executable can be started",
+        ),
+        Commands::Sync { .. } => (
+            DiagnosticCode::CliNetwork,
+            DiagnosticStage::NetworkTransfer,
+            "sync",
+            None,
+            "inspect the upstream Git failure and verify repository and network state",
+        ),
+        Commands::Golden { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "golden",
+            None,
+            "inspect the named profile and generated product; update only after reviewing an intentional change",
+        ),
+        Commands::Info => (
+            DiagnosticCode::CliConfiguration,
+            DiagnosticStage::Configuration,
+            "info",
+            None,
+            "repair the reported workspace or toolchain configuration",
+        ),
+    };
+    (
+        observability::ErrorBoundary { code, stage, hint },
+        DiagnosticContext {
+            mode: Some(mode.into()),
+            target,
+            ..DiagnosticContext::default()
+        },
+    )
+}
 
+#[tokio::main]
+async fn main() -> ExitCode {
+    let arguments: Vec<OsString> = std::env::args_os().collect();
+    let requested_format = requested_diagnostic_format(&arguments, "AROS_DIAGNOSTIC_FORMAT");
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{error}");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(observability::clap_diagnostic(&error)),
+                requested_format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let format = cli.observability.diagnostic_format;
+    let logger = match Logger::open(
+        cli.observability.effective_log_level(),
+        cli.observability.log_format,
+        cli.observability.log_file.clone(),
+        "aros",
+        observability::POLICY,
+    ) {
+        Ok(logger) => logger,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(error.into_diagnostic()),
+                format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let logger = observability::install_runtime(logger, format);
+    let (boundary, context) = command_boundary(&cli.command);
+    if let Err(error) = logger.event(
+        LogLevel::Info,
+        "invocation.start",
+        "aros command started",
+        &context,
+    ) {
+        render_diagnostics(
+            &DiagnosticSet::single(error.into_diagnostic()),
+            format,
+            observability::POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let repo_root = match repo::find_root().and_then(|repo_root| {
+        std::env::set_current_dir(&repo_root).map_err(|error| {
+            miette::miette!(
+                "Could not enter AROS-NG checkout '{}': {error}",
+                repo_root.display()
+            )
+        })?;
+        Ok(repo_root)
+    }) {
+        Ok(repo_root) => repo_root,
+        Err(error) => {
+            let diagnostic = observability::report_diagnostic(
+                &error,
+                observability::ErrorBoundary::REPOSITORY,
+                context,
+            );
+            let mut diagnostics = vec![diagnostic.clone()];
+            if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                diagnostics.push(log_error.into_diagnostic());
+            }
+            render_diagnostics(
+                &observability::set(diagnostics),
+                format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = run(cli, repo_root).await;
+    match result {
+        Ok(()) => match logger.event(
+            LogLevel::Info,
+            "invocation.complete",
+            "aros command completed",
+            &context,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                render_diagnostics(
+                    &DiagnosticSet::single(error.into_diagnostic()),
+                    format,
+                    observability::POLICY,
+                );
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            let diagnostic = observability::report_diagnostic(&error, boundary, context);
+            let mut diagnostics = vec![diagnostic.clone()];
+            if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                diagnostics.push(log_error.into_diagnostic());
+            }
+            render_diagnostics(
+                &observability::set(diagnostics),
+                format,
+                observability::POLICY,
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli, repo_root: PathBuf) -> Result<()> {
     match cli.command {
         Commands::Setup {
             force,
@@ -486,22 +791,22 @@ async fn main() -> Result<()> {
                 let profiles = aros_common::TargetProfile::load_from_file(std::path::Path::new(
                     "aros-targets.toml",
                 ))
-                .map_err(|error| miette::miette!("{error}"))?;
+                .map_err(|error| miette::miette!("{error:#}"))?;
                 for profile in profiles {
                     toolchain::install(&profile.name, offline, force, None)
                         .await
-                        .map_err(|error| miette::miette!("{error}"))?;
+                        .map_err(|error| miette::miette!("{error:#}"))?;
                 }
             } else if let Some(preset) = preset {
                 toolchain::install(&preset, offline, force, local.as_deref())
                     .await
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
             } else if local.is_some() {
                 miette::bail!("--local requires --preset");
             } else {
                 host_tools::install(force, offline)
                     .await
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
             }
         }
 
@@ -509,7 +814,7 @@ async fn main() -> Result<()> {
             HostToolsCommands::Install { force, offline } => {
                 host_tools::install(force, offline)
                     .await
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
             }
         },
 
@@ -531,18 +836,18 @@ async fn main() -> Result<()> {
             } => {
                 toolchain::install(&preset, offline, force, local.as_deref())
                     .await
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
             }
             ToolchainCommands::List => {
-                toolchain::list().map_err(|error| miette::miette!("{error}"))?;
+                toolchain::list().map_err(|error| miette::miette!("{error:#}"))?;
             }
             ToolchainCommands::Verify { preset, local } => {
                 toolchain::verify(&preset, local.as_deref())
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
             }
             ToolchainCommands::Path { preset, local } => {
                 let resolved = toolchain::path(&preset, local.as_deref())
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(|error| miette::miette!("{error:#}"))?;
                 println!("{}", resolved.paths.root.display());
             }
         },
@@ -666,10 +971,10 @@ async fn main() -> Result<()> {
             toolchain_dir,
         } => {
             let profile =
-                toolchain::target_profile(&preset).map_err(|error| miette::miette!("{error}"))?;
+                toolchain::target_profile(&preset).map_err(|error| miette::miette!("{error:#}"))?;
             let resolved = toolchain::resolve_for_build(&preset, toolchain_dir.as_deref(), offline)
                 .await
-                .map_err(|error| miette::miette!("{error}"))?;
+                .map_err(|error| miette::miette!("{error:#}"))?;
 
             println!(
                 "{ROCKET} {}Building AROS for target preset [{}]...",
@@ -736,12 +1041,15 @@ async fn main() -> Result<()> {
             if verbose {
                 cfg_cmd.arg("--log-level=VERBOSE");
             }
-            let status = cfg_cmd
-                .status()
-                .map_err(|e| miette::miette!("Failed to execute cmake configure: {e}"))?;
-            if !status.success() {
-                miette::bail!("CMake configure failed for preset '{preset}'");
-            }
+            observability::run_command_at(
+                &mut cfg_cmd,
+                &format!("CMake configure for preset '{preset}'"),
+                observability::ErrorBoundary {
+                    code: DiagnosticCode::CliConfigure,
+                    stage: DiagnosticStage::BuildConfiguration,
+                    hint: "inspect the bounded CMake output and repair the selected preset or configure contract",
+                },
+            )?;
 
             // Run CMake Build with Ninja
             println!("{HAMMER} Compiling AROS modules with Ninja...");
@@ -753,12 +1061,16 @@ async fn main() -> Result<()> {
             if let Some(j) = jobs {
                 build_cmd.args(["-j", &j.to_string()]);
             }
-            let build_status = build_cmd
-                .status()
-                .map_err(|e| miette::miette!("Failed to execute cmake build: {e}"))?;
-            if !build_status.success() {
-                miette::bail!("Build failed for preset '{preset}'");
-            }
+            observability::run_command_at(
+                &mut build_cmd,
+                &format!("CMake build for preset '{preset}'"),
+                observability::ErrorBoundary {
+                    code: DiagnosticCode::CliBuild,
+                    stage: DiagnosticStage::BuildExecution,
+                    hint:
+                        "inspect the bounded CMake output and retry the exact reported build target",
+                },
+            )?;
 
             let elapsed = start.elapsed();
             println!(
@@ -769,9 +1081,19 @@ async fn main() -> Result<()> {
         }
 
         Commands::Clean { preset } => {
-            let target_dir = preset.map_or_else(|| "build".into(), |p| format!("build/{p}"));
-            println!("🧹 Removing directory {target_dir}...");
-            let _ = std::fs::remove_dir_all(&target_dir);
+            let target_dir = match preset {
+                Some(preset) => build::build_dir(&repo_root, &preset)?,
+                None => repo_root.join("build"),
+            };
+            println!("🧹 Removing directory {}...", target_dir.display());
+            if target_dir.exists() {
+                std::fs::remove_dir_all(&target_dir).map_err(|error| {
+                    miette::miette!(
+                        "Could not remove build directory '{}': {error}",
+                        target_dir.display()
+                    )
+                })?;
+            }
             println!("{CHECK} Clean complete.");
         }
 
@@ -839,41 +1161,56 @@ async fn main() -> Result<()> {
                     style("PASS: ").green().bold()
                 );
             } else {
-                println!(
-                    "{}the boot did not come up clean; every finding above is read \
-                     out of the logs, not inferred.",
-                    style("FAIL: ").red().bold()
+                miette::bail!(
+                    "the boot did not come up clean; every finding above is read from the retained logs, not inferred"
                 );
-                std::process::exit(1);
             }
         }
 
         Commands::Ccache { stats, clear } => {
             if clear {
                 if which::which("sccache").is_ok() {
-                    let _ = Command::new("sccache").arg("-z").status();
+                    observability::run_command(
+                        Command::new("sccache").arg("-z"),
+                        "sccache statistics reset",
+                    )?;
                 } else if which::which("ccache").is_ok() {
-                    let _ = Command::new("ccache").arg("-C").status();
+                    observability::run_command(
+                        Command::new("ccache").arg("-C"),
+                        "ccache cache clear",
+                    )?;
+                } else {
+                    miette::bail!("neither sccache nor ccache is available on PATH");
                 }
                 println!("{CHECK} Compiler cache cleared.");
             }
             if stats {
                 if which::which("sccache").is_ok() {
-                    let _ = Command::new("sccache").arg("-s").status();
+                    observability::run_command(
+                        Command::new("sccache").arg("-s"),
+                        "sccache statistics query",
+                    )?;
                 } else if which::which("ccache").is_ok() {
-                    let _ = Command::new("ccache").arg("-s").status();
+                    observability::run_command(
+                        Command::new("ccache").arg("-s"),
+                        "ccache statistics query",
+                    )?;
+                } else {
+                    miette::bail!("neither sccache nor ccache is available on PATH");
                 }
             }
         }
 
         Commands::Sync { transpile } => {
             println!("🔄 Fetching latest commits from upstream (aros-development-team/AROS)...");
-            let _ = Command::new("git")
-                .args(["fetch", "upstream", "master"])
-                .status();
-            let _ = Command::new("git")
-                .args(["merge", "upstream/master", "--no-edit"])
-                .status();
+            observability::run_command(
+                Command::new("git").args(["fetch", "upstream", "master"]),
+                "Git fetch from upstream/master",
+            )?;
+            observability::run_command(
+                Command::new("git").args(["merge", "upstream/master", "--no-edit"]),
+                "Git merge of upstream/master",
+            )?;
 
             if transpile {
                 println!("⚡ Regenerating dynamic CMake target tree...");

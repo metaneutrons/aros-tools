@@ -4,6 +4,7 @@ pub mod arch;
 pub mod diagnostic;
 pub mod elf;
 pub mod error;
+pub mod observability;
 pub mod pins;
 pub mod target;
 pub mod text;
@@ -16,6 +17,10 @@ pub use diagnostic::{
     DiagnosticStage, SourceLocation,
 };
 pub use error::{ArosError, Result};
+pub use observability::{
+    render_diagnostics, requested_diagnostic_format, DiagnosticFailure, DiagnosticFormat,
+    LogFormat, LogLevel, Logger, ObservabilityPolicy,
+};
 pub use target::TargetProfile;
 pub use text::read_source;
 pub use toolchain::Toolchain;

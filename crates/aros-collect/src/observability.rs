@@ -1,57 +1,26 @@
-//! Stable diagnostics and opt-in local logging for both collector front ends.
+//! Collector-specific option parsing over shared AROS tool observability.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::fmt::Write as _;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
 
 use aros_common::{
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticSeverity,
-    DiagnosticStage,
+    render_diagnostics, requested_diagnostic_format as shared_requested_diagnostic_format,
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticFailure, DiagnosticSet,
+    DiagnosticStage, Logger as SharedLogger, ObservabilityPolicy,
 };
-use serde::Serialize;
+pub use aros_common::{DiagnosticFormat, LogFormat, LogLevel};
 
-const LOG_SCHEMA: &str = "aros-collect-log-v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnosticFormat {
-    Human,
-    Json,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogLevel {
-    Off,
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
-}
-
-impl fmt::Display for LogLevel {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Off => "off",
-            Self::Error => "error",
-            Self::Warn => "warn",
-            Self::Info => "info",
-            Self::Debug => "debug",
-            Self::Trace => "trace",
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogFormat {
-    Human,
-    Jsonl,
-}
+const POLICY: ObservabilityPolicy = ObservabilityPolicy {
+    log_schema: "aros-collect-log-v1",
+    component: "collector",
+    include_invocation: true,
+    observability_code: DiagnosticCode::CollectorObservability,
+    observability_stage: DiagnosticStage::Observability,
+    internal_code: DiagnosticCode::CollectorInternal,
+    internal_stage: DiagnosticStage::Internal,
+    hint: "pass --log-file PATH or set AROS_COLLECT_LOG_FILE, or disable logging",
+};
 
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
@@ -74,40 +43,7 @@ impl Default for RuntimeOptions {
 
 #[must_use]
 pub fn requested_diagnostic_format(arguments: &[OsString]) -> DiagnosticFormat {
-    let mut format = match env::var_os("AROS_COLLECT_DIAGNOSTIC_FORMAT").as_deref() {
-        Some(value) if value == "json" => DiagnosticFormat::Json,
-        _ => DiagnosticFormat::Human,
-    };
-    let mut index = 1;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if argument == "--" {
-            break;
-        }
-        let text = argument.to_string_lossy();
-        if let Some(value) = text
-            .strip_prefix("--diagnostic-format=")
-            .or_else(|| text.strip_prefix("--aros-diagnostic-format="))
-        {
-            format = if value == "json" {
-                DiagnosticFormat::Json
-            } else {
-                DiagnosticFormat::Human
-            };
-        } else if text == "--diagnostic-format" || text == "--aros-diagnostic-format" {
-            format = if arguments
-                .get(index + 1)
-                .is_some_and(|value| value == "json")
-            {
-                DiagnosticFormat::Json
-            } else {
-                DiagnosticFormat::Human
-            };
-            index += 1;
-        }
-        index += 1;
-    }
-    format
+    shared_requested_diagnostic_format(arguments, "AROS_COLLECT_DIAGNOSTIC_FORMAT")
 }
 
 impl RuntimeOptions {
@@ -290,38 +226,7 @@ fn parse_log_format(value: &OsStr, index: usize) -> CollectorResult<LogFormat> {
     }
 }
 
-#[derive(Debug)]
-pub struct CollectorFailure {
-    diagnostic: Box<Diagnostic>,
-}
-
-impl CollectorFailure {
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(diagnostic: Diagnostic) -> Self {
-        Self {
-            diagnostic: Box::new(diagnostic),
-        }
-    }
-
-    #[must_use]
-    pub const fn diagnostic(&self) -> &Diagnostic {
-        &self.diagnostic
-    }
-
-    #[must_use]
-    pub fn into_diagnostic(self) -> Diagnostic {
-        *self.diagnostic
-    }
-}
-
-impl fmt::Display for CollectorFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.diagnostic.message.fmt(formatter)
-    }
-}
-
-impl std::error::Error for CollectorFailure {}
+pub type CollectorFailure = DiagnosticFailure;
 
 pub type CollectorResult<T> = Result<T, CollectorFailure>;
 
@@ -336,65 +241,23 @@ pub fn failure(
 }
 
 pub fn render(diagnostics: &DiagnosticSet, format: DiagnosticFormat) {
-    match format {
-        DiagnosticFormat::Human => eprint!("{diagnostics}"),
-        DiagnosticFormat::Json => match serde_json::to_string(&diagnostics) {
-            Ok(json) => eprintln!("{json}"),
-            Err(error) => eprintln!(
-                "error[AC0901] during internal invariant: cannot serialize diagnostics: {error}"
-            ),
-        },
-    }
-}
-
-#[derive(Serialize)]
-struct LogRecord<'a> {
-    schema: &'static str,
-    level: LogLevel,
-    event: &'a str,
-    message: &'a str,
-    invocation: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostic_code: Option<DiagnosticCode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostic_stage: Option<DiagnosticStage>,
+    render_diagnostics(diagnostics, format, POLICY);
 }
 
 pub struct Logger {
-    level: LogLevel,
-    format: LogFormat,
-    path: Option<PathBuf>,
-    file: Option<Mutex<File>>,
-    invocation: String,
+    inner: SharedLogger,
 }
 
 impl Logger {
     pub fn open(options: &RuntimeOptions, invocation: impl Into<String>) -> CollectorResult<Self> {
-        let file = if options.log_level == LogLevel::Off {
-            None
-        } else {
-            let path = options.log_file.as_deref().expect("validated log path");
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|error| {
-                    log_failure(path, format!("cannot open collector log: {error}"))
-                })?;
-            Some(Mutex::new(file))
-        };
         Ok(Self {
-            level: options.log_level,
-            format: options.log_format,
-            path: options.log_file.clone(),
-            file,
-            invocation: invocation.into(),
+            inner: SharedLogger::open(
+                options.log_level,
+                options.log_format,
+                options.log_file.clone(),
+                invocation,
+                POLICY,
+            )?,
         })
     }
 
@@ -405,110 +268,12 @@ impl Logger {
         message: &str,
         context: &DiagnosticContext,
     ) -> CollectorResult<()> {
-        self.write_event(level, event, message, context, None)
+        self.inner.event(level, event, message, context)
     }
 
     pub fn diagnostic(&self, diagnostic: &Diagnostic) -> CollectorResult<()> {
-        let level = match diagnostic.severity {
-            DiagnosticSeverity::Error => LogLevel::Error,
-            DiagnosticSeverity::Warning => LogLevel::Warn,
-            DiagnosticSeverity::Info => LogLevel::Info,
-        };
-        let empty_context = DiagnosticContext::default();
-        self.write_event(
-            level,
-            "diagnostic",
-            &diagnostic.message,
-            diagnostic.context.as_ref().unwrap_or(&empty_context),
-            Some((diagnostic.code, diagnostic.stage)),
-        )
+        self.inner.diagnostic(diagnostic)
     }
-
-    fn write_event(
-        &self,
-        level: LogLevel,
-        event: &str,
-        message: &str,
-        context: &DiagnosticContext,
-        diagnostic: Option<(DiagnosticCode, DiagnosticStage)>,
-    ) -> CollectorResult<()> {
-        if self.level == LogLevel::Off || level > self.level {
-            return Ok(());
-        }
-        let Some(file) = &self.file else {
-            return Ok(());
-        };
-        let mut line = match self.format {
-            LogFormat::Human => {
-                let mut line = format!(
-                    "[{level}] {event}: {message} invocation={}",
-                    self.invocation
-                );
-                if let Some(value) = &context.tool {
-                    let _ = write!(line, " tool={value}");
-                }
-                if let Some(value) = &context.mode {
-                    let _ = write!(line, " mode={value}");
-                }
-                if let Some(value) = &context.output {
-                    let _ = write!(line, " output={value}");
-                }
-                if let Some((code, stage)) = diagnostic {
-                    let _ = write!(line, " code={code} stage={stage}");
-                }
-                line
-            }
-            LogFormat::Jsonl => serde_json::to_string(&LogRecord {
-                schema: LOG_SCHEMA,
-                level,
-                event,
-                message,
-                invocation: &self.invocation,
-                tool: context.tool.as_deref(),
-                mode: context.mode.as_deref(),
-                output: context.output.as_deref(),
-                diagnostic_code: diagnostic.map(|(code, _)| code),
-                diagnostic_stage: diagnostic.map(|(_, stage)| stage),
-            })
-            .map_err(|error| {
-                log_failure(
-                    self.path.as_deref().expect("enabled log path"),
-                    format!("cannot serialize collector log event: {error}"),
-                )
-            })?,
-        };
-        line.push('\n');
-        let mut file = file.lock().map_err(|_| {
-            log_failure(
-                self.path.as_deref().expect("enabled log path"),
-                "collector log lock is poisoned",
-            )
-        })?;
-        file.write_all(line.as_bytes()).map_err(|error| {
-            log_failure(
-                self.path.as_deref().expect("enabled log path"),
-                format!("cannot write collector log: {error}"),
-            )
-        })?;
-        file.flush().map_err(|error| {
-            log_failure(
-                self.path.as_deref().expect("enabled log path"),
-                format!("cannot flush collector log: {error}"),
-            )
-        })
-    }
-}
-
-fn log_failure(path: &Path, message: impl Into<String>) -> CollectorFailure {
-    failure(
-        DiagnosticCode::CollectorObservability,
-        DiagnosticStage::Observability,
-        message,
-        DiagnosticContext {
-            log_path: Some(path.display().to_string()),
-            ..DiagnosticContext::default()
-        },
-    )
 }
 
 #[cfg(test)]
@@ -600,7 +365,7 @@ mod tests {
 
         let line = std::fs::read_to_string(path).unwrap();
         let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(value["schema"], LOG_SCHEMA);
+        assert_eq!(value["schema"], POLICY.log_schema);
         assert_eq!(value["event"], "invocation.start");
         assert_eq!(value["mode"], "driver");
         assert!(value.get("timestamp").is_none());

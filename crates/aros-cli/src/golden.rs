@@ -193,20 +193,16 @@ fn run_into(transpiler: &Path, invocation: &Path, directory: &Path) -> Result<()
     fs::create_dir_all(directory).into_diagnostic()?;
     let output = directory.join("generated_targets.cmake");
     let arguments = replayed_arguments(invocation, &output)?;
-    let status = Command::new(transpiler)
-        .args(&arguments)
-        .stdout(std::process::Stdio::null())
-        .status()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("running {}", transpiler.display()))?;
-    if !status.success() {
-        miette::bail!(
-            "{} exited with {} while replaying {}",
+    crate::observability::run_quiet_command(
+        Command::new(transpiler)
+            .args(&arguments)
+            .stdout(std::process::Stdio::null()),
+        &format!(
+            "{} while replaying {}",
             transpiler.display(),
-            status.code().unwrap_or(-1),
             invocation.display()
-        );
-    }
+        ),
+    )?;
     if !output.is_file() {
         miette::bail!("{} produced no {}", transpiler.display(), output.display());
     }

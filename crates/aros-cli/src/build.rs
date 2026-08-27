@@ -34,14 +34,14 @@ pub struct CmakeDefinition {
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let build_dir = build_dir(repo_root, &options.preset)?;
     let profile = toolchain::target_profile(&options.toolchain_preset)
-        .map_err(|error| miette::miette!("{error}"))?;
+        .map_err(|error| miette::miette!("{error:#}"))?;
     let resolved = toolchain::resolve_for_build(
         &options.toolchain_preset,
         options.toolchain_dir.as_deref(),
         options.offline,
     )
     .await
-    .map_err(|error| miette::miette!("{error}"))?;
+    .map_err(|error| miette::miette!("{error:#}"))?;
     hosttools::ensure(repo_root)?;
 
     println!(
@@ -112,9 +112,14 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if options.verbose {
         configure.arg("--log-level=VERBOSE");
     }
-    run_command(
+    crate::observability::run_command_at(
         &mut configure,
         &format!("CMake configure for preset '{}'", options.preset),
+        crate::observability::ErrorBoundary {
+            code: aros_common::DiagnosticCode::CliConfigure,
+            stage: aros_common::DiagnosticStage::BuildConfiguration,
+            hint: "inspect the bounded CMake output and repair the selected preset or configure contract",
+        },
     )?;
 
     println!("{HAMMER} Compiling AROS modules with Ninja...");
@@ -127,9 +132,14 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     if let Some(jobs) = options.jobs {
         build.args(["-j", &jobs.to_string()]);
     }
-    run_command(
+    crate::observability::run_command_at(
         &mut build,
         &format!("CMake build for preset '{}'", options.preset),
+        crate::observability::ErrorBoundary {
+            code: aros_common::DiagnosticCode::CliBuild,
+            stage: aros_common::DiagnosticStage::BuildExecution,
+            hint: "inspect the bounded CMake output and retry the exact reported build target",
+        },
     )?;
 
     println!(
@@ -188,16 +198,6 @@ fn compiler_cache_launcher() -> &'static str {
     } else {
         "none"
     }
-}
-
-fn run_command(command: &mut Command, description: &str) -> Result<()> {
-    let status = command
-        .status()
-        .map_err(|error| miette::miette!("Could not start {description}: {error}"))?;
-    if !status.success() {
-        miette::bail!("{description} failed.");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

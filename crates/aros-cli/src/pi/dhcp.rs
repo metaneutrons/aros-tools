@@ -13,6 +13,7 @@
 //! wildcard listener from accidentally escaping the selected USB/RJ45 link.
 
 use anyhow::{bail, Context, Result};
+use aros_common::{DiagnosticContext, LogLevel};
 use if_addrs::{get_if_addrs, IfAddr};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::BTreeSet;
@@ -211,13 +212,18 @@ async fn serve_with_interface(
         .set_broadcast(true)
         .context("could not enable directed DHCP broadcasts")?;
 
-    tracing::info!(
-        bind = %bind_address,
-        interface = interface.name(),
-        interface_index = interface.index().get(),
-        target = %config.target_address,
-        "started restricted Pi lab DHCPv4 service"
-    );
+    crate::observability::log_event(
+        LogLevel::Info,
+        "pi.dhcp.started",
+        "started restricted Pi lab DHCPv4 service",
+        &DiagnosticContext {
+            tool: Some("dhcpv4".into()),
+            mode: Some(interface.name().into()),
+            target: Some(config.target_address.to_string()),
+            output: Some(bind_address.to_string()),
+            ..DiagnosticContext::default()
+        },
+    )?;
 
     if *shutdown.borrow() {
         return Ok(());
@@ -247,12 +253,18 @@ async fn serve_with_interface(
                 };
 
                 if let Err(error) = socket.send_to(&response, destination).await {
-                    tracing::warn!(
-                        bind = %bind_address,
-                        destination = %destination,
-                        %error,
-                        "could not send restricted DHCP response"
-                    );
+                    crate::observability::log_event(
+                        LogLevel::Warn,
+                        "pi.dhcp.response_failed",
+                        &format!("could not send restricted DHCP response: {error}"),
+                        &DiagnosticContext {
+                            tool: Some("dhcpv4".into()),
+                            mode: Some(interface.name().into()),
+                            target: Some(destination.to_string()),
+                            output: Some(bind_address.to_string()),
+                            ..DiagnosticContext::default()
+                        },
+                    )?;
                 }
             }
         }

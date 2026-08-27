@@ -437,13 +437,10 @@ fn smoke_host_tools(paths: &ToolchainPaths) -> Result<()> {
         tools.push(("collect-aros32", &paths.collect_aros32));
     }
     for (name, path) in tools {
-        let status = Command::new(path)
-            .arg("--version")
-            .status()
-            .with_context(|| format!("failed to execute {name} at '{}'", path.display()))?;
-        if !status.success() {
-            bail!("{name} --version failed with {status}");
-        }
+        crate::observability::run_command(
+            Command::new(path).arg("--version"),
+            &format!("{name} --version at '{}'", path.display()),
+        )?;
     }
     Ok(())
 }

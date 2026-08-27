@@ -73,19 +73,13 @@ pub fn build(repo_root: &Path) -> Result<HostToolsCheck> {
         style(target_dir.display()).cyan()
     );
 
-    let status = Command::new(cargo_program())
-        .args(&args)
-        .current_dir(&workspace)
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .status()
-        .map_err(|error| {
-            miette::miette!(
-                "Could not start Cargo while building AROS host tools: {error}. Install Rust/Cargo and retry."
-            )
-        })?;
-    if !status.success() {
-        miette::bail!("Cargo failed while building the required AROS host tools.");
-    }
+    crate::observability::run_command(
+        Command::new(cargo_program())
+            .args(&args)
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target_dir),
+        "Cargo while building the required AROS host tools",
+    )?;
 
     let result = check(repo_root);
     if !result.is_complete() {

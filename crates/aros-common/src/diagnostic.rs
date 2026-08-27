@@ -77,6 +77,34 @@ pub enum DiagnosticCode {
     AhiSourceAudit,
     #[serde(rename = "AH0901")]
     AhiInternal,
+    #[serde(rename = "AR0001")]
+    CliInvocation,
+    #[serde(rename = "AR0002")]
+    CliObservability,
+    #[serde(rename = "AR0101")]
+    CliRepository,
+    #[serde(rename = "AR0201")]
+    CliConfiguration,
+    #[serde(rename = "AR0301")]
+    CliToolResolution,
+    #[serde(rename = "AR0401")]
+    CliToolchain,
+    #[serde(rename = "AR0501")]
+    CliNetwork,
+    #[serde(rename = "AR0601")]
+    CliConfigure,
+    #[serde(rename = "AR0602")]
+    CliBuild,
+    #[serde(rename = "AR0701")]
+    CliBoot,
+    #[serde(rename = "AR0801")]
+    CliPi,
+    #[serde(rename = "AR0802")]
+    CliMediaSafety,
+    #[serde(rename = "AR0901")]
+    CliPublication,
+    #[serde(rename = "AR0999")]
+    CliInternal,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -116,6 +144,20 @@ impl fmt::Display for DiagnosticCode {
             Self::AhiProductValidation => "AH0601",
             Self::AhiSourceAudit => "AH0701",
             Self::AhiInternal => "AH0901",
+            Self::CliInvocation => "AR0001",
+            Self::CliObservability => "AR0002",
+            Self::CliRepository => "AR0101",
+            Self::CliConfiguration => "AR0201",
+            Self::CliToolResolution => "AR0301",
+            Self::CliToolchain => "AR0401",
+            Self::CliNetwork => "AR0501",
+            Self::CliConfigure => "AR0601",
+            Self::CliBuild => "AR0602",
+            Self::CliBoot => "AR0701",
+            Self::CliPi => "AR0801",
+            Self::CliMediaSafety => "AR0802",
+            Self::CliPublication => "AR0901",
+            Self::CliInternal => "AR0999",
         };
         formatter.write_str(value)
     }
@@ -173,6 +215,14 @@ pub enum DiagnosticStage {
     AhiBuild,
     AhiProductValidation,
     AhiSourceAudit,
+    RepositoryDiscovery,
+    Configuration,
+    NetworkTransfer,
+    BuildConfiguration,
+    BuildExecution,
+    BootValidation,
+    PiOperation,
+    MediaSafety,
 }
 
 impl fmt::Display for DiagnosticStage {
@@ -185,8 +235,8 @@ impl fmt::Display for DiagnosticStage {
             Self::GraphValidation => "graph validation",
             Self::OutputPublication | Self::Publication => "output publication",
             Self::Internal => "internal invariant",
-            Self::Invocation => "collector invocation",
-            Self::Observability => "collector observability",
+            Self::Invocation => "invocation",
+            Self::Observability => "observability",
             Self::ToolResolution => "tool resolution",
             Self::SysrootValidation => "sysroot validation",
             Self::ResponseExpansion => "response-file expansion",
@@ -208,6 +258,14 @@ impl fmt::Display for DiagnosticStage {
             Self::AhiBuild => "AHI build",
             Self::AhiProductValidation => "AHI product validation",
             Self::AhiSourceAudit => "AHI source audit",
+            Self::RepositoryDiscovery => "repository discovery",
+            Self::Configuration => "configuration",
+            Self::NetworkTransfer => "network transfer",
+            Self::BuildConfiguration => "build configuration",
+            Self::BuildExecution => "build execution",
+            Self::BootValidation => "boot validation",
+            Self::PiOperation => "Raspberry Pi operation",
+            Self::MediaSafety => "removable-media safety",
         })
     }
 }

@@ -24,7 +24,7 @@ pub async fn serve_read_only(
             artifact_dir.display()
         );
     }
-    server::validate_bind_addr(bind_addr).map_err(|error| miette::miette!("{error}"))?;
+    server::validate_bind_addr(bind_addr).map_err(|error| miette::miette!("{error:#}"))?;
     server::run_on_interface(
         bind_addr,
         interface_name,

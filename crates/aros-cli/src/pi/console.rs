@@ -75,22 +75,10 @@ pub fn plan(requested: ConsoleProgram, device: &Path, baud: u32) -> Result<Conso
 }
 
 pub fn run(plan: &ConsolePlan) -> Result<()> {
-    let status = Command::new(&plan.program)
-        .args(&plan.args)
-        .status()
-        .map_err(|error| {
-            miette::miette!(
-                "Could not start serial terminal '{}': {error}",
-                plan.program
-            )
-        })?;
-    if !status.success() {
-        miette::bail!(
-            "Serial terminal '{}' exited with status {status}.",
-            plan.program
-        );
-    }
-    Ok(())
+    Ok(crate::observability::run_interactive_command(
+        Command::new(&plan.program).args(&plan.args),
+        &format!("serial terminal '{}'", plan.program),
+    )?)
 }
 
 pub fn detect_available_program() -> Option<ConsoleProgram> {

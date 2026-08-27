@@ -119,10 +119,9 @@ dependencies = [
  "tar",
  "tempfile",
  "tftp-rs",
+ "thiserror",
  "tokio",
  "toml",
- "tracing",
- "tracing-subscriber",
  "walkdir",
  "which",
  "xz2",
@@ -145,6 +144,7 @@ name = "aros-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "serde",
  "serde_json",
  "sha2",
