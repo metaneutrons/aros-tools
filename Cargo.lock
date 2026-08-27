@@ -123,6 +123,8 @@ dependencies = [
  "anyhow",
  "aros-common",
  "clap",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

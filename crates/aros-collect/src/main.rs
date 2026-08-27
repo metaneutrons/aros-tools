@@ -28,21 +28,29 @@
 mod driver;
 mod extra;
 mod libreq;
+mod observability;
 mod sets;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage};
+use clap::{error::ErrorKind, Parser};
+
+use observability::{
+    failure, requested_diagnostic_format, CollectorFailure, CollectorResult, LogLevel, Logger,
+    RuntimeOptions,
+};
 
 #[derive(Parser, Debug)]
 #[command(
     author,
     version,
     about = "Link an AROS relocatable object and collect its symbol sets",
-    propagate_version = true
+    propagate_version = true,
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_COLLECT_DIAGNOSTIC_FORMAT,\nAROS_COLLECT_LOG_LEVEL, AROS_COLLECT_LOG_FORMAT, and AROS_COLLECT_LOG_FILE.\nLogging is off by default and is written only to an explicitly selected local file."
 )]
 struct Cli {
     /// The real linker to drive.
@@ -85,12 +93,11 @@ fn output_argument(args: &[OsString]) -> Result<(usize, bool, PathBuf)> {
     bail!("the linker command line has no -o <output>");
 }
 
-fn run(ld: &Path, args: &[OsString]) -> Result<bool> {
-    let status = Command::new(ld)
+fn run(ld: &Path, args: &[OsString]) -> Result<ExitStatus> {
+    Command::new(ld)
         .args(args)
         .status()
-        .with_context(|| format!("could not run {}", ld.display()))?;
-    Ok(status.success())
+        .with_context(|| format!("could not run {}", ld.display()))
 }
 
 fn write_report(path: Option<&PathBuf>, lines: &[String]) -> Result<()> {
@@ -106,25 +113,142 @@ fn write_report(path: Option<&PathBuf>, lines: &[String]) -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    if driver::is_driver_invocation(std::env::args_os().next().as_deref()) {
-        return driver::main(std::env::args_os());
-    }
-    let cli = Cli::parse();
-    match collect(&cli) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+    let raw: Vec<OsString> = std::env::args_os().collect();
+    let requested_format = requested_diagnostic_format(&raw);
+    let (options, arguments) = match RuntimeOptions::extract(raw) {
+        Ok(value) => value,
         Err(error) => {
-            eprintln!("aros-collect: {error:#}");
+            observability::render(
+                &DiagnosticSet::single(error.into_diagnostic()),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let driver_mode = driver::is_driver_invocation(arguments.first().map(OsString::as_os_str));
+    let invocation = arguments
+        .first()
+        .and_then(|value| Path::new(value).file_stem())
+        .and_then(|value| value.to_str())
+        .unwrap_or("aros-collect");
+    let logger = match Logger::open(&options, invocation) {
+        Ok(logger) => logger,
+        Err(error) => {
+            observability::render(
+                &DiagnosticSet::single(error.into_diagnostic()),
+                options.diagnostic_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let invocation_context = DiagnosticContext {
+        mode: Some(if driver_mode { "driver" } else { "direct" }.into()),
+        ..DiagnosticContext::default()
+    };
+    if let Err(error) = logger.event(
+        LogLevel::Info,
+        "invocation.start",
+        "collector invocation started",
+        &invocation_context,
+    ) {
+        observability::render(
+            &DiagnosticSet::single(error.into_diagnostic()),
+            options.diagnostic_format,
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let mut diagnostics = Vec::new();
+    let result = if driver_mode {
+        driver::run_entry(arguments, &logger, &mut diagnostics)
+    } else {
+        run_direct(arguments, &logger, &mut diagnostics)
+    };
+    match result {
+        Ok(()) => match logger.event(
+            LogLevel::Info,
+            "invocation.complete",
+            "collector invocation completed",
+            &invocation_context,
+        ) {
+            Ok(()) => {
+                if !diagnostics.is_empty() {
+                    observability::render(
+                        &DiagnosticSet::new(diagnostics),
+                        options.diagnostic_format,
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                diagnostics.push(error.into_diagnostic());
+                observability::render(&DiagnosticSet::new(diagnostics), options.diagnostic_format);
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            let log_result = logger.diagnostic(error.diagnostic());
+            diagnostics.push(error.into_diagnostic());
+            if let Err(log_error) = log_result {
+                diagnostics.push(log_error.into_diagnostic());
+            }
+            observability::render(&DiagnosticSet::new(diagnostics), options.diagnostic_format);
             ExitCode::FAILURE
         }
     }
 }
 
-fn collect(cli: &Cli) -> Result<bool> {
+fn run_direct(
+    arguments: Vec<OsString>,
+    logger: &Logger,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CollectorResult<()> {
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{error}");
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(failure(
+                DiagnosticCode::CollectorInvocation,
+                DiagnosticStage::Invocation,
+                error.to_string().trim().to_owned(),
+                DiagnosticContext::default(),
+            ));
+        }
+    };
+    collect(&cli, logger, diagnostics)
+}
+
+fn collect(cli: &Cli, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> CollectorResult<()> {
     if cli.args.is_empty() {
-        bail!("no linker command line was given");
+        return Err(failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            "no linker command line was given",
+            DiagnosticContext::default(),
+        ));
     }
-    let (index, joined, output) = output_argument(&cli.args)?;
+    let (index, joined, output) = output_argument(&cli.args).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            format!("{error:#}"),
+            DiagnosticContext::default(),
+        )
+    })?;
+    let link_context = DiagnosticContext {
+        tool: Some(cli.ld.display().to_string()),
+        mode: Some("direct".into()),
+        output: Some(output.display().to_string()),
+        ..DiagnosticContext::default()
+    };
 
     // The first pass writes beside the real output, so it lands on the same
     // filesystem and a failed link leaves the evidence next to the target it
@@ -141,14 +265,51 @@ fn collect(cli: &Cli) -> Result<bool> {
     } else {
         staged.clone().into_os_string()
     };
-    if !run(&cli.ld, &first)? {
-        return Ok(false);
+    logger.event(
+        LogLevel::Debug,
+        "link.first.start",
+        "starting first relocatable link",
+        &link_context,
+    )?;
+    let status = run(&cli.ld, &first).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorFirstLink,
+            DiagnosticStage::FirstLink,
+            format!("{error:#}"),
+            link_context.clone(),
+        )
+    })?;
+    if !status.success() {
+        return Err(process_failure(
+            DiagnosticCode::CollectorFirstLink,
+            DiagnosticStage::FirstLink,
+            "the first relocatable link failed",
+            status,
+            link_context,
+        ));
     }
 
-    let bytes = std::fs::read(&staged)
-        .with_context(|| format!("the linker wrote no {}", staged.display()))?;
-    let object = aros_common::elf::read(&bytes)
-        .with_context(|| format!("could not read the sections of {}", staged.display()))?;
+    let object_context = DiagnosticContext {
+        mode: Some("direct".into()),
+        output: Some(staged.display().to_string()),
+        ..DiagnosticContext::default()
+    };
+    let bytes = std::fs::read(&staged).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorObjectInspection,
+            DiagnosticStage::ObjectInspection,
+            format!("the linker wrote no readable {}: {error}", staged.display()),
+            object_context.clone(),
+        )
+    })?;
+    let object = aros_common::elf::read(&bytes).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorObjectInspection,
+            DiagnosticStage::ObjectInspection,
+            format!("could not inspect {}: {error:#}", staged.display()),
+            object_context,
+        )
+    })?;
     let section_names = object.section_names();
     let (found, mut skipped) = sets::discover(&section_names);
     let (requirements, libreq_skipped) = libreq::discover(&object.symbols);
@@ -157,24 +318,69 @@ fn collect(cli: &Cli) -> Result<bool> {
     // miss, and a section that looks like a set and is not laid out, or a
     // version requirement that is dropped, changes what the module does at
     // runtime.
-    for line in &skipped {
-        eprintln!("aros-collect: {}: {line}", output.display());
+    if !skipped.is_empty() {
+        for line in &skipped {
+            let diagnostic = Diagnostic::warning(
+                DiagnosticCode::CollectorSetCollection,
+                DiagnosticStage::SetCollection,
+                line.clone(),
+            )
+            .with_context(DiagnosticContext {
+                mode: Some("direct".into()),
+                output: Some(output.display().to_string()),
+                ..DiagnosticContext::default()
+            });
+            logger.diagnostic(&diagnostic)?;
+            diagnostics.push(diagnostic);
+        }
+        logger.event(
+            LogLevel::Warn,
+            "collection.skipped",
+            &format!(
+                "{} set or library requirement entries were skipped",
+                skipped.len()
+            ),
+            &DiagnosticContext {
+                mode: Some("direct".into()),
+                output: Some(output.display().to_string()),
+                ..DiagnosticContext::default()
+            },
+        )?;
     }
-    write_report(cli.report.as_ref(), &skipped)?;
+    write_report(cli.report.as_ref(), &skipped).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSetCollection,
+            DiagnosticStage::SetCollection,
+            format!("{error:#}"),
+            DiagnosticContext {
+                output: cli.report.as_ref().map(|path| path.display().to_string()),
+                ..DiagnosticContext::default()
+            },
+        )
+    })?;
 
     if found.is_empty() && requirements.is_empty() {
         // Nothing to lay out, so the first pass is already the answer. The
         // reference runs its second pass regardless; skipping it here saves one
         // linker invocation on the majority of targets and cannot change the
         // result, because an empty script contributes nothing.
-        std::fs::rename(&staged, &output).with_context(|| {
-            format!(
-                "could not move {} to {}",
-                staged.display(),
-                output.display()
+        std::fs::rename(&staged, &output).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!(
+                    "could not move {} to {}: {error}",
+                    staged.display(),
+                    output.display()
+                ),
+                DiagnosticContext {
+                    mode: Some("direct".into()),
+                    output: Some(output.display().to_string()),
+                    ..DiagnosticContext::default()
+                },
             )
         })?;
-        return Ok(true);
+        return Ok(());
     }
 
     let script_path = cli.keep_script.clone().unwrap_or_else(|| {
@@ -183,8 +389,17 @@ fn collect(cli: &Cli) -> Result<bool> {
         PathBuf::from(path)
     });
     let script = sets::script(&found, object.class, &libreq::script(&requirements));
-    std::fs::write(&script_path, &script)
-        .with_context(|| format!("could not write {}", script_path.display()))?;
+    std::fs::write(&script_path, &script).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSetCollection,
+            DiagnosticStage::SetCollection,
+            format!("could not write {}: {error}", script_path.display()),
+            DiagnosticContext {
+                output: Some(script_path.display().to_string()),
+                ..DiagnosticContext::default()
+            },
+        )
+    })?;
 
     // `ld -r -o <output> <first pass> -T <script>`, as collect-aros.c:676
     // builds it. No other flag from the first pass is repeated -- the machine
@@ -198,15 +413,52 @@ fn collect(cli: &Cli) -> Result<bool> {
         OsString::from("-T"),
         script_path.clone().into_os_string(),
     ];
-    let ok = run(&cli.ld, &second)?;
+    logger.event(
+        LogLevel::Debug,
+        "link.second.start",
+        "starting set-collection link",
+        &link_context,
+    )?;
+    let status = run(&cli.ld, &second).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSecondLink,
+            DiagnosticStage::SecondLink,
+            format!("{error:#}"),
+            link_context.clone(),
+        )
+    })?;
 
     if cli.keep_script.is_none() {
         let _ = std::fs::remove_file(&script_path);
     }
-    if ok {
+    if status.success() {
         let _ = std::fs::remove_file(&staged);
+        Ok(())
+    } else {
+        Err(process_failure(
+            DiagnosticCode::CollectorSecondLink,
+            DiagnosticStage::SecondLink,
+            "the set-collection link failed",
+            status,
+            link_context,
+        ))
     }
-    Ok(ok)
+}
+
+fn process_failure(
+    code: DiagnosticCode,
+    stage: DiagnosticStage,
+    message: impl Into<String>,
+    status: ExitStatus,
+    mut context: DiagnosticContext,
+) -> CollectorFailure {
+    context.exit_code = status.code();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        context.signal = status.signal();
+    }
+    failure(code, stage, message, context)
 }
 
 #[cfg(test)]

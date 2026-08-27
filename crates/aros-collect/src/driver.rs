@@ -7,11 +7,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitStatus};
 
 use anyhow::{bail, Context, Result};
 use aros_common::elf::{Binding, Home, Object};
+use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage};
 
+use crate::observability::{failure, CollectorFailure, CollectorResult, LogLevel, Logger};
 use crate::{extra, libreq, sets};
 
 const DRIVER_NAMES: &[&str] = &["collect-aros", "collect-aros32"];
@@ -45,24 +47,31 @@ pub fn is_driver_invocation(argument_zero: Option<&OsStr>) -> bool {
         .is_some_and(|name| DRIVER_NAMES.contains(&name))
 }
 
-pub fn main(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
-    match run_entry(arguments) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(error) => {
-            eprintln!("collect-aros: {error:#}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run_entry(arguments: impl IntoIterator<Item = OsString>) -> Result<bool> {
+pub fn run_entry(
+    arguments: impl IntoIterator<Item = OsString>,
+    logger: &Logger,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CollectorResult<()> {
     let mut arguments = arguments.into_iter();
-    let argument_zero = arguments.next().context("missing collector program name")?;
+    let argument_zero = arguments.next().ok_or_else(|| {
+        failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            "missing collector program name",
+            DiagnosticContext::default(),
+        )
+    })?;
     let name = Path::new(&argument_zero)
         .file_stem()
         .and_then(OsStr::to_str)
-        .context("collector program name is not valid UTF-8")?
+        .ok_or_else(|| {
+            failure(
+                DiagnosticCode::CollectorInvocation,
+                DiagnosticStage::Invocation,
+                "collector program name is not valid UTF-8",
+                DiagnosticContext::default(),
+            )
+        })?
         .to_owned();
     let raw: Vec<OsString> = arguments.collect();
     if raw
@@ -71,24 +80,87 @@ fn run_entry(arguments: impl IntoIterator<Item = OsString>) -> Result<bool> {
     {
         println!(
             "{name}: AROS linker collector\n\
-             usage: {name} [linker arguments including --sysroot=DIR and -o FILE]"
+             usage: {name} [collector observability options] \
+             [linker arguments including --sysroot=DIR and -o FILE]\n\
+             observability:\n  \
+             --diagnostic-format human|json\n  \
+             --log-level off|error|warn|info|debug|trace\n  \
+             --log-format human|jsonl\n  \
+             --log-file PATH\n\
+             environment: AROS_COLLECT_DIAGNOSTIC_FORMAT, AROS_COLLECT_LOG_LEVEL, \
+             AROS_COLLECT_LOG_FORMAT, AROS_COLLECT_LOG_FILE\n\
+             logging is off by default and writes only to the selected local file"
         );
-        return Ok(true);
+        return Ok(());
     }
     if raw.iter().any(|argument| argument == "--version") {
         println!("{name} {}", env!("CARGO_PKG_VERSION"));
-        return Ok(true);
+        return Ok(());
     }
 
-    let executable = std::env::current_exe().context("cannot locate the running collector")?;
-    let bin = executable
-        .parent()
-        .context("the collector executable has no parent directory")?;
-    let linker = require_sibling(bin, "ld.lld")?;
-    let strip = require_sibling(bin, "llvm-strip")?;
-    let args = expand_response_files(&raw, 0)?;
-    let driver = parse(name, linker, strip, args)?;
-    run(&driver)
+    let executable = std::env::current_exe().map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorToolResolution,
+            DiagnosticStage::ToolResolution,
+            format!("cannot locate the running collector: {error}"),
+            DiagnosticContext::default(),
+        )
+    })?;
+    let bin = executable.parent().ok_or_else(|| {
+        failure(
+            DiagnosticCode::CollectorToolResolution,
+            DiagnosticStage::ToolResolution,
+            "the collector executable has no parent directory",
+            DiagnosticContext::default(),
+        )
+    })?;
+    let linker = require_sibling(bin, "ld.lld").map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorToolResolution,
+            DiagnosticStage::ToolResolution,
+            format!("{error:#}"),
+            DiagnosticContext {
+                tool: Some(bin.join("ld.lld").display().to_string()),
+                ..DiagnosticContext::default()
+            },
+        )
+    })?;
+    let strip = require_sibling(bin, "llvm-strip").map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorToolResolution,
+            DiagnosticStage::ToolResolution,
+            format!("{error:#}"),
+            DiagnosticContext {
+                tool: Some(bin.join("llvm-strip").display().to_string()),
+                ..DiagnosticContext::default()
+            },
+        )
+    })?;
+    let args = expand_response_files(&raw, 0).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorResponseFile,
+            DiagnosticStage::ResponseExpansion,
+            format!("{error:#}"),
+            DiagnosticContext::default(),
+        )
+    })?;
+    let driver = parse(name, linker, strip, args).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            format!("{error:#}"),
+            DiagnosticContext::default(),
+        )
+    })?;
+    validate_sysroot(&driver).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSysroot,
+            DiagnosticStage::SysrootValidation,
+            format!("{error:#}"),
+            driver_context(&driver),
+        )
+    })?;
+    run(&driver, logger, diagnostics)
 }
 
 fn require_sibling(bin: &Path, name: &str) -> Result<PathBuf> {
@@ -153,23 +225,6 @@ fn parse(name: String, linker: PathBuf, strip: PathBuf, mut args: Vec<OsString>)
     }
 
     let output = output.context("linker command line has no -o FILE")?;
-    if let Some(root) = &sysroot {
-        if !root.is_absolute() {
-            bail!("--sysroot must be absolute, got {}", root.display());
-        }
-        let library_dir = root.join(if name == "collect-aros32" {
-            "lib32"
-        } else {
-            "lib"
-        });
-        if !library_dir.is_dir() {
-            bail!(
-                "AROS sysroot library directory is missing: {}",
-                library_dir.display()
-            );
-        }
-    }
-
     Ok(Driver {
         name,
         linker,
@@ -183,40 +238,145 @@ fn parse(name: String, linker: PathBuf, strip: PathBuf, mut args: Vec<OsString>)
     })
 }
 
-fn run(driver: &Driver) -> Result<bool> {
+fn validate_sysroot(driver: &Driver) -> Result<()> {
+    if let Some(root) = &driver.sysroot {
+        if !root.is_absolute() {
+            bail!("--sysroot must be absolute, got {}", root.display());
+        }
+        let library_dir = root.join(if driver.name == "collect-aros32" {
+            "lib32"
+        } else {
+            "lib"
+        });
+        if !library_dir.is_dir() {
+            bail!(
+                "AROS sysroot library directory is missing: {}",
+                library_dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run(driver: &Driver, logger: &Logger, diagnostics: &mut Vec<Diagnostic>) -> CollectorResult<()> {
     let staged = adjacent(&driver.output, ".collect-pre");
     let final_staged = adjacent(&driver.output, ".collect-final");
     let script = adjacent(&driver.output, ".collect-sets.ld");
-    remove_if_exists(&staged)?;
-    remove_if_exists(&final_staged)?;
-    remove_if_exists(&script)?;
+    for path in [&staged, &final_staged, &script] {
+        remove_if_exists(path).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!("{error:#}"),
+                driver_context(driver),
+            )
+        })?;
+    }
     let cleanup = Cleanup::new([staged.clone(), final_staged.clone(), script.clone()]);
 
-    let mut first = replace_output(&driver.args, &staged)?;
+    let mut first = replace_output(&driver.args, &staged).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorInvocation,
+            DiagnosticStage::Invocation,
+            format!("{error:#}"),
+            driver_context(driver),
+        )
+    })?;
     if !first.iter().any(|argument| argument == "-r") {
         first.insert(0, OsString::from("-r"));
     }
-    if !run_tool(&driver.linker, &first)? {
-        return Ok(false);
+    logger.event(
+        LogLevel::Debug,
+        "link.first.start",
+        "starting first relocatable link",
+        &driver_context(driver),
+    )?;
+    let status = run_tool(&driver.linker, &first).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorFirstLink,
+            DiagnosticStage::FirstLink,
+            format!("{error:#}"),
+            driver_context(driver),
+        )
+    })?;
+    if !status.success() {
+        return Err(process_failure(
+            DiagnosticCode::CollectorFirstLink,
+            DiagnosticStage::FirstLink,
+            "the first relocatable link failed",
+            status,
+            driver_context(driver),
+        ));
     }
     if driver.mode == LinkMode::Incremental {
-        set_aros_abi(&staged)?;
-        publish(&staged, &driver.output)?;
-        return Ok(true);
+        set_aros_abi(&staged).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorAbi,
+                DiagnosticStage::AbiMarking,
+                format!("{error:#}"),
+                driver_context(driver),
+            )
+        })?;
+        publish(&staged, &driver.output).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!("{error:#}"),
+                driver_context(driver),
+            )
+        })?;
+        return Ok(());
     }
 
-    let object = read_object(&staged)?;
+    let object = read_object(&staged).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorObjectInspection,
+            DiagnosticStage::ObjectInspection,
+            format!("{error:#}"),
+            DiagnosticContext {
+                output: Some(staged.display().to_string()),
+                ..driver_context(driver)
+            },
+        )
+    })?;
     let section_names = object.section_names();
     let (found, mut reported) = sets::discover(&section_names);
     let (requirements, libreq_reported) = libreq::discover(&object.symbols);
     reported.extend(libreq_reported);
-    for line in reported {
-        eprintln!("{}: {}: {line}", driver.name, driver.output.display());
+    if !reported.is_empty() {
+        for line in &reported {
+            let diagnostic = Diagnostic::warning(
+                DiagnosticCode::CollectorSetCollection,
+                DiagnosticStage::SetCollection,
+                line.clone(),
+            )
+            .with_context(driver_context(driver));
+            logger.diagnostic(&diagnostic)?;
+            diagnostics.push(diagnostic);
+        }
+        logger.event(
+            LogLevel::Warn,
+            "collection.skipped",
+            &format!(
+                "{} set or library requirement entries were skipped",
+                reported.len()
+            ),
+            &driver_context(driver),
+        )?;
     }
 
     let script_body = sets::script(&found, object.class, &libreq::script(&requirements));
-    fs::write(&script, script_body)
-        .with_context(|| format!("cannot write collector script {}", script.display()))?;
+    fs::write(&script, script_body).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSetCollection,
+            DiagnosticStage::SetCollection,
+            format!(
+                "cannot write collector script {}: {error}",
+                script.display()
+            ),
+            driver_context(driver),
+        )
+    })?;
 
     let extras = extra::discover(&object.symbols);
     let mut second = vec![
@@ -227,50 +387,131 @@ fn run(driver: &Driver) -> Result<bool> {
     ];
     if extras.cxx_pure_virtual {
         second.push(
-            require_sysroot_library(driver, "static-cxx-cxa-pure-virtual.o")?.into_os_string(),
+            require_sysroot_library(driver, "static-cxx-cxa-pure-virtual.o")
+                .map_err(|error| required_input_failure(driver, &error))?
+                .into_os_string(),
         );
     }
     if extras.pthread {
-        second.push(require_sysroot_library(driver, "libpthread.a")?.into_os_string());
+        second.push(
+            require_sysroot_library(driver, "libpthread.a")
+                .map_err(|error| required_input_failure(driver, &error))?
+                .into_os_string(),
+        );
     }
     if has_undefined(&object) {
         second.extend(resupplied_libraries(&driver.args));
     }
     second.push(OsString::from("-T"));
     second.push(script.into_os_string());
-    let ok = run_tool(&driver.linker, &second)?;
-    if !ok {
-        return Ok(false);
+    logger.event(
+        LogLevel::Debug,
+        "link.second.start",
+        "starting set-collection link",
+        &driver_context(driver),
+    )?;
+    let status = run_tool(&driver.linker, &second).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorSecondLink,
+            DiagnosticStage::SecondLink,
+            format!("{error:#}"),
+            driver_context(driver),
+        )
+    })?;
+    if !status.success() {
+        return Err(process_failure(
+            DiagnosticCode::CollectorSecondLink,
+            DiagnosticStage::SecondLink,
+            "the set-collection link failed",
+            status,
+            driver_context(driver),
+        ));
     }
 
     if driver.mode == LinkMode::Final && !driver.ignore_undefined {
-        let output = read_object(&final_staged)?;
+        let output = read_object(&final_staged).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorObjectInspection,
+                DiagnosticStage::ObjectInspection,
+                format!("{error:#}"),
+                driver_context(driver),
+            )
+        })?;
         let undefined = undefined_names(&output);
         if !undefined.is_empty() {
-            bail!(
-                "undefined symbols remain after the final link: {}",
-                undefined.into_iter().collect::<Vec<_>>().join(", ")
-            );
+            return Err(failure(
+                DiagnosticCode::CollectorUndefinedSymbols,
+                DiagnosticStage::UndefinedAudit,
+                format!(
+                    "undefined symbols remain after the final link: {}",
+                    undefined.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+                driver_context(driver),
+            ));
         }
     }
-    if driver.strip_output
-        && !run_tool(
+    if driver.strip_output {
+        let status = run_tool(
             &driver.strip,
             &[
                 OsString::from("--strip-unneeded"),
                 final_staged.clone().into_os_string(),
             ],
-        )?
-    {
-        return Ok(false);
+        )
+        .map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorStrip,
+                DiagnosticStage::Strip,
+                format!("{error:#}"),
+                DiagnosticContext {
+                    tool: Some(driver.strip.display().to_string()),
+                    ..driver_context(driver)
+                },
+            )
+        })?;
+        if !status.success() {
+            return Err(process_failure(
+                DiagnosticCode::CollectorStrip,
+                DiagnosticStage::Strip,
+                "stripping the linked object failed",
+                status,
+                DiagnosticContext {
+                    tool: Some(driver.strip.display().to_string()),
+                    ..driver_context(driver)
+                },
+            ));
+        }
     }
-    set_aros_abi(&final_staged)?;
+    set_aros_abi(&final_staged).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorAbi,
+            DiagnosticStage::AbiMarking,
+            format!("{error:#}"),
+            driver_context(driver),
+        )
+    })?;
     #[cfg(unix)]
-    fs::set_permissions(&final_staged, fs::Permissions::from_mode(0o766))
-        .with_context(|| format!("cannot set permissions on {}", final_staged.display()))?;
-    publish(&final_staged, &driver.output)?;
+    fs::set_permissions(&final_staged, fs::Permissions::from_mode(0o766)).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorPublication,
+            DiagnosticStage::Publication,
+            format!(
+                "cannot set permissions on {}: {error}",
+                final_staged.display()
+            ),
+            driver_context(driver),
+        )
+    })?;
+    publish(&final_staged, &driver.output).map_err(|error| {
+        failure(
+            DiagnosticCode::CollectorPublication,
+            DiagnosticStage::Publication,
+            format!("{error:#}"),
+            driver_context(driver),
+        )
+    })?;
     drop(cleanup);
-    Ok(true)
+    Ok(())
 }
 
 struct Cleanup {
@@ -290,11 +531,6 @@ impl Cleanup {
 impl Drop for Cleanup {
     fn drop(&mut self) {
         if self.keep {
-            for path in &self.paths {
-                if path.exists() {
-                    eprintln!("collect-aros: keeping intermediate {}", path.display());
-                }
-            }
             return;
         }
         for path in &self.paths {
@@ -308,12 +544,52 @@ fn read_object(path: &Path) -> Result<Object> {
     aros_common::elf::read(&bytes).with_context(|| format!("cannot parse {}", path.display()))
 }
 
-fn run_tool(tool: &Path, args: &[OsString]) -> Result<bool> {
-    let status = Command::new(tool)
+fn run_tool(tool: &Path, args: &[OsString]) -> Result<ExitStatus> {
+    Command::new(tool)
         .args(args)
         .status()
-        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))?;
-    Ok(status.success())
+        .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
+}
+
+fn driver_context(driver: &Driver) -> DiagnosticContext {
+    DiagnosticContext {
+        tool: Some(driver.linker.display().to_string()),
+        mode: Some(
+            match driver.mode {
+                LinkMode::Final => "final",
+                LinkMode::Incremental => "incremental",
+                LinkMode::CollectRelocatable => "collect_relocatable",
+            }
+            .into(),
+        ),
+        output: Some(driver.output.display().to_string()),
+        ..DiagnosticContext::default()
+    }
+}
+
+fn process_failure(
+    code: DiagnosticCode,
+    stage: DiagnosticStage,
+    message: impl Into<String>,
+    status: ExitStatus,
+    mut context: DiagnosticContext,
+) -> CollectorFailure {
+    context.exit_code = status.code();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        context.signal = status.signal();
+    }
+    failure(code, stage, message, context)
+}
+
+fn required_input_failure(driver: &Driver, error: &anyhow::Error) -> CollectorFailure {
+    failure(
+        DiagnosticCode::CollectorRequiredInput,
+        DiagnosticStage::RequiredInput,
+        format!("{error:#}"),
+        driver_context(driver),
+    )
 }
 
 fn require_library(directory: &Path, name: &str) -> Result<PathBuf> {
@@ -607,20 +883,22 @@ mod tests {
             "-o",
             "output.o",
         ]);
-        assert!(parse(
+        let multilib = parse(
             "collect-aros32".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
-            args.clone()
+            args.clone(),
         )
-        .is_ok());
-        assert!(parse(
+        .unwrap();
+        assert!(validate_sysroot(&multilib).is_ok());
+        let native = parse(
             "collect-aros".into(),
             "ld.lld".into(),
             "llvm-strip".into(),
-            args
+            args,
         )
-        .is_err());
+        .unwrap();
+        assert!(validate_sysroot(&native).is_err());
     }
 
     #[test]
@@ -686,7 +964,12 @@ mod tests {
             ignore_undefined: false,
         };
 
-        assert!(run(&driver).is_err());
+        let logger = Logger::open(
+            &crate::observability::RuntimeOptions::default(),
+            "collect-aros",
+        )
+        .unwrap();
+        assert!(run(&driver, &logger, &mut Vec::new()).is_err());
         assert_eq!(fs::read(output).unwrap(), b"previous good output");
     }
 }
