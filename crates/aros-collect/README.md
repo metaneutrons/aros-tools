@@ -4,6 +4,27 @@
 sets and library-version requirements. The same executable also provides the
 released `collect-aros` and `collect-aros32` compiler-driver aliases.
 
+## One collection engine
+
+Both invocation forms are parsed into one engine request and use the same
+staging, ELF inspection, symbol-set and library-requirement discovery, linker
+script generation, second link, cleanup, diagnostics, logging, and atomic
+publication path. The front ends retain only their deliberate policy
+differences:
+
+| Behaviour | direct `aros-collect --ld` | `collect-aros[32]` alias |
+| --- | --- | --- |
+| first-link arguments | preserve the explicit CMake contract | add `-r` when absent |
+| empty collection | publish the first pass immediately | retain the reference two-pass flow |
+| collector-owned extras and library resupply | disabled | enabled from the explicit sysroot |
+| undefined-symbol audit, AROS ABI byte, executable permissions | disabled | enabled |
+| report and retained linker-script paths | accepted | not exposed |
+
+Both paths stage beside the requested output. A failed first or second link
+therefore leaves an existing good output untouched. Temporary files are
+removed unless `COLLECT_AROS_DEBUG` is set; an explicitly requested retained
+script is never treated as temporary.
+
 ## Diagnostics
 
 Human-readable diagnostics are the default. Machine consumers can request one
