@@ -64,6 +64,7 @@ pub const NAMES: &[&str] = &[
     "mesa20-galliumaux-recipe",
     "mesa20-vc4-manifest",
     "mesa20-vc4-recipe",
+    "mesa20-v3d-recipe",
     "mesautil-generator-capability",
 ];
 
@@ -75,7 +76,7 @@ mod tests {
     #[test]
     fn every_entry_is_a_unique_named_digest() {
         let entries = aros_common::pins::entries(FINGERPRINTS, FILE);
-        assert_eq!(entries.len(), 14, "{} entries", entries.len());
+        assert_eq!(entries.len(), 15, "{} entries", entries.len());
         let mut seen = BTreeSet::new();
         for (name, value) in entries {
             assert!(

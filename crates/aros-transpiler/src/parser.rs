@@ -188,7 +188,7 @@ fn apply_mesa_compile_contract(
         return Ok(false);
     };
     flags.defines = contract.defines;
-    flags.undefines.clear();
+    flags.undefines = contract.undefines;
     flags.compile_options = contract.options;
     flags.link_options.clear();
     includes.dirs = contract.includes;
@@ -2499,6 +2499,30 @@ fn parse_mmakefile_impl(
             ));
             skipped_programs.push(format!(
                 "{}: Mesa 20.0.8 archive/generator capability skipped: {reason}",
+                rel_dir.display()
+            ));
+        }
+    }
+    match mesa20::parse_v3d(
+        root,
+        &rel_dir,
+        target,
+        &content,
+        &targets,
+        &ownership_fetches,
+    ) {
+        Ok(declarations) => python_outputs.extend(declarations),
+        Err(reason) => {
+            targets.retain(|candidate| candidate.mmake_name != "linklibs-gallium_v3d");
+            capability_errors.push(capability_diagnostic(
+                &relative_path,
+                None,
+                format!(
+                    "Mesa 20.0.8 V3D archive/generators no longer match their closed capability: {reason}"
+                ),
+            ));
+            skipped_programs.push(format!(
+                "{}: Mesa 20.0.8 V3D archive/generator capability skipped: {reason}",
                 rel_dir.display()
             ));
         }

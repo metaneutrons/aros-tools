@@ -101,6 +101,7 @@ pub(crate) fn current_profile(
 
 pub(crate) struct CompileContract {
     pub(crate) defines: Vec<String>,
+    pub(crate) undefines: Vec<String>,
     pub(crate) includes: Vec<String>,
     pub(crate) options: Vec<String>,
 }
@@ -147,6 +148,7 @@ pub(crate) fn compile_contract(
                 Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4"
             )
+            | (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d")
     );
     if !supported {
         return Ok(None);
@@ -284,6 +286,40 @@ pub(crate) fn compile_contract(
                 vec!["-std=gnu99".to_owned(), "-fno-strict-aliasing".to_owned()],
             )
         }
+        (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d") => {
+            let mut defines = base_defines(profile);
+            defines.extend(
+                [
+                    "USING_V3D_SIMULATOR=0",
+                    "using_v3d_simulator=0",
+                    "GCA_CONSUMER_MODULE",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            (
+                defines,
+                std::iter::once("${CMAKE_SOURCE_DIR}/workbench/hidds/v3d/drm-stubs")
+                    .chain(base)
+                    .chain([
+                        "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/galliumglue",
+                        "${CMAKE_SOURCE_DIR}/workbench/hidds/v3d",
+                        "${CMAKE_BINARY_DIR}/gen/cle-gen",
+                        "${CMAKE_BINARY_DIR}/gen/cle-gen/broadcom",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/v3d",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/auxiliary",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers",
+                        "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
+                        "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
+                    ])
+                    .map(str::to_owned)
+                    .collect(),
+                vec!["-std=gnu11".to_owned(), "-fno-strict-aliasing".to_owned()],
+            )
+        }
         _ => return Ok(None),
     };
     if mmake == "mesa3d-linklib-mesa" {
@@ -299,6 +335,11 @@ pub(crate) fn compile_contract(
     defines.retain(|define| seen.insert(define.clone()));
     Ok(Some(CompileContract {
         defines,
+        undefines: if mmake == "linklibs-gallium_v3d" {
+            vec!["HAVE_VALGRIND".to_owned()]
+        } else {
+            Vec::new()
+        },
         includes,
         options,
     }))
@@ -323,6 +364,7 @@ pub(crate) fn remaining_linklib_sources(
                 Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4"
             )
+            | (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d")
     );
     if !supported_declaration {
         return Ok(None);
@@ -441,6 +483,69 @@ pub(crate) fn remaining_linklib_sources(
                 ".c",
                 &format!("{SOURCE_ROOT}/src/gallium/drivers/vc4"),
             )?;
+        }
+        (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d") => {
+            for stem in [
+                "v3d_blit",
+                "v3d_bufmgr",
+                "v3d_cl",
+                "v3d_context",
+                "v3d_fence",
+                "v3d_formats",
+                "v3d_job",
+                "v3d_program",
+                "v3d_query",
+                "v3d_resource",
+                "v3d_screen",
+                "v3d_tiling",
+                "v3d_uniforms",
+            ] {
+                sources
+                    .c
+                    .push(format!("{SOURCE_ROOT}/src/gallium/drivers/v3d/{stem}"));
+            }
+            for version in ["33", "41"] {
+                for stem in ["draw", "emit", "format_table", "job", "rcl", "state"] {
+                    sources.c.push(format!(
+                        "${{AROS_BUILD_DIR}}/gen/workbench/hidds/v3d/v3dx-gen/v3d{version}_{stem}"
+                    ));
+                }
+            }
+            for stem in [
+                "nir_to_vir",
+                "vir",
+                "vir_dump",
+                "vir_live_variables",
+                "vir_opt_copy_propagate",
+                "vir_opt_dead_code",
+                "vir_opt_redundant_flags",
+                "vir_opt_small_immediates",
+                "vir_register_allocate",
+                "vir_to_qpu",
+                "qpu_schedule",
+                "qpu_validate",
+                "v3d40_tex",
+                "v3d33_tex",
+                "v3d33_vpm_setup",
+                "v3d_nir_lower_io",
+                "v3d_nir_lower_image_load_store",
+                "v3d_nir_lower_logic_ops",
+                "v3d_nir_lower_scratch",
+                "v3d_nir_lower_txf_ms",
+            ] {
+                sources
+                    .c
+                    .push(format!("{SOURCE_ROOT}/src/broadcom/compiler/{stem}"));
+            }
+            for stem in [
+                "common/v3d_debug",
+                "common/v3d_device_info",
+                "qpu/qpu_instr",
+                "qpu/qpu_pack",
+                "qpu/qpu_disasm",
+            ] {
+                sources.c.push(format!("{SOURCE_ROOT}/src/broadcom/{stem}"));
+            }
         }
         _ => return Ok(None),
     }

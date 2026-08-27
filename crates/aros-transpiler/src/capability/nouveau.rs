@@ -323,6 +323,7 @@ pub(crate) fn gallium_compile_contract(
     let profile = nouveau_current_profile(target)?;
     Ok(Some(CompileContract {
         defines: base_defines(profile),
+        undefines: Vec::new(),
         includes: [
             "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
             "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",

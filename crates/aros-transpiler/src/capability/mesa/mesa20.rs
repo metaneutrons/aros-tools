@@ -150,44 +150,93 @@ pub(crate) fn target_contract_is_exact(
         "mesa3d-linklib-galliumauxiliary" => "galliumauxiliary",
         "mesa3d-linklib-mesa" => "mesa",
         "linklibs-gallium_vc4" => "gallium_vc4",
+        "linklibs-gallium_v3d" => "gallium_v3d",
         _ => return Err(format!("unsupported Mesa target contract {mmake}")),
     };
     let includes_match = declaration.include_dirs == expected_flags.includes;
-    let exact = declaration.target_name == target_name
-        && declaration.module_type == ModuleType::LinkLib
-        && !declaration.genmodule_only
-        && !declaration.empty_archive
-        && declaration.source_files == expected_sources.c
-        && declaration.cxx_source_files == expected_sources.cxx
-        && declaration.objc_source_files.is_empty()
-        && declaration.asm_source_files == expected_sources.asm
-        && declaration.use_libs.is_empty()
-        && declaration.dependencies.is_empty()
-        && declaration.dir_path == relative_dir
-        && declaration.target_dir.is_none()
-        && !declaration.variant_32bit
-        && declaration.link_libs.is_empty()
-        && declaration.declared_mod_type.is_none()
-        && declaration.mod_suffix.is_none()
-        && declaration.linklib_name.is_none()
-        && declaration.genmodule_linklibs.is_none()
-        && declaration.linklib_output_dir.as_deref() == Some(PRIVATE_LIBDIR)
-        && !declaration.canonical_linklib_output
-        && !declaration.canonical_linklib_eligible
-        && declaration.compiler_flags.is_empty()
-        && declaration.arch_modules.is_empty()
-        && declaration.arch_includes.is_empty()
-        && declaration.undefines.is_empty()
-        && declaration.link_options.is_empty()
-        && declaration.arch_sources.is_empty()
-        && declaration.arch_defines.is_empty()
-        && declaration.arch_compile_options.is_empty()
-        && declaration.defines == expected_flags.defines
-        && includes_match
-        && declaration.compile_options == expected_flags.options;
-    if !exact {
+    let mut mismatches = Vec::new();
+    macro_rules! require {
+        ($label:literal, $condition:expr) => {
+            if !$condition {
+                mismatches.push($label);
+            }
+        };
+    }
+    require!("target name", declaration.target_name == target_name);
+    require!(
+        "module type",
+        declaration.module_type == ModuleType::LinkLib
+    );
+    require!("genmodule-only state", !declaration.genmodule_only);
+    require!("empty-archive state", !declaration.empty_archive);
+    require!("C sources", declaration.source_files == expected_sources.c);
+    require!(
+        "C++ sources",
+        declaration.cxx_source_files == expected_sources.cxx
+    );
+    require!(
+        "Objective-C sources",
+        declaration.objc_source_files.is_empty()
+    );
+    require!(
+        "assembler sources",
+        declaration.asm_source_files == expected_sources.asm
+    );
+    require!("use libraries", declaration.use_libs.is_empty());
+    require!("dependencies", declaration.dependencies.is_empty());
+    require!("source directory", declaration.dir_path == relative_dir);
+    require!("target directory", declaration.target_dir.is_none());
+    require!("32-bit variant", !declaration.variant_32bit);
+    require!("resolved link libraries", declaration.link_libs.is_empty());
+    require!(
+        "declared module type",
+        declaration.declared_mod_type.is_none()
+    );
+    require!("module suffix", declaration.mod_suffix.is_none());
+    require!("link-library alias", declaration.linklib_name.is_none());
+    require!(
+        "genmodule link libraries",
+        declaration.genmodule_linklibs.is_none()
+    );
+    require!(
+        "private output directory",
+        declaration.linklib_output_dir.as_deref() == Some(PRIVATE_LIBDIR)
+    );
+    require!(
+        "canonical output state",
+        !declaration.canonical_linklib_output
+    );
+    require!(
+        "canonical eligibility",
+        !declaration.canonical_linklib_eligible
+    );
+    require!("compiler flags", declaration.compiler_flags.is_empty());
+    require!("architecture modules", declaration.arch_modules.is_empty());
+    require!(
+        "architecture includes",
+        declaration.arch_includes.is_empty()
+    );
+    require!(
+        "undefines",
+        declaration.undefines == expected_flags.undefines
+    );
+    require!("link options", declaration.link_options.is_empty());
+    require!("architecture sources", declaration.arch_sources.is_empty());
+    require!("architecture defines", declaration.arch_defines.is_empty());
+    require!(
+        "architecture compile options",
+        declaration.arch_compile_options.is_empty()
+    );
+    require!("defines", declaration.defines == expected_flags.defines);
+    require!("include directories", includes_match);
+    require!(
+        "compile options",
+        declaration.compile_options == expected_flags.options
+    );
+    if !mismatches.is_empty() {
         return Err(format!(
-            "{mmake} source, language, flag, include or private-output contract differs from the audited capability"
+            "{mmake} differs from the audited capability in: {}",
+            mismatches.join(", ")
         ));
     }
     Ok(())
@@ -471,6 +520,108 @@ pub(crate) fn vc4_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
     })
     .collect();
     (inputs, jobs)
+}
+
+fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
+    const CLE: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle";
+    let bases = ["draw", "emit", "format_table", "job", "rcl", "state"];
+    let wrapper_inputs = bases
+        .iter()
+        .map(|base| format!("src/gallium/drivers/v3d/v3dx_{base}.c"))
+        .collect::<Vec<_>>();
+    let mut wrapper_jobs = Vec::new();
+    for version in ["33", "41"] {
+        for base in bases {
+            wrapper_jobs.push(generator_job(
+                &format!("src/gallium/drivers/v3d/v3dx_{base}.c"),
+                &format!("v3dx-gen/v3d{version}_{base}.c"),
+                &["v3dx-wrapper", version],
+            ));
+        }
+    }
+    let cle_inputs = vec!["src/broadcom/cle/v3d_packet_v33.xml".to_owned()];
+    let cle_jobs = [
+        ("v3d_packet_v33_pack.h", "33"),
+        ("v3d_packet_v41_pack.h", "41"),
+        ("v3d_packet_v42_pack.h", "42"),
+    ]
+    .into_iter()
+    .map(|(output, version)| {
+        generator_job(
+            "src/broadcom/cle/gen_pack_header.py",
+            &format!("broadcom/cle/{output}"),
+            &[
+                "python-stdout",
+                &format!("{CLE}/v3d_packet_v33.xml"),
+                version,
+            ],
+        )
+    })
+    .collect::<Vec<_>>();
+    let common = |owner: &str,
+                  build_root: &str,
+                  source_inputs: Vec<String>,
+                  jobs: Vec<PythonGeneratorJob>| PythonOutputsDecl {
+        owner: owner.to_owned(),
+        source_root: SOURCE_ROOT.to_owned(),
+        build_root: build_root.to_owned(),
+        fetch_target: "mesa3d-fetch".to_owned(),
+        source_inputs,
+        jobs,
+        driver_script: Some(DRIVER.to_owned()),
+        python_packages: Vec::new(),
+        audited_source_dir: SOURCE_ROOT.to_owned(),
+        local_patch_files: vec![
+            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+        ],
+        consumers: vec!["linklibs-gallium_v3d".to_owned()],
+        dir_path: dir_path.to_path_buf(),
+    };
+    vec![
+        common(
+            "linklibs-gallium_v3d-gen-v3dx",
+            "${AROS_BUILD_DIR}/gen/workbench/hidds/v3d",
+            wrapper_inputs,
+            wrapper_jobs,
+        ),
+        common(
+            "linklibs-gallium_v3d-gen-cle",
+            "${AROS_BUILD_DIR}/gen/cle-gen",
+            cle_inputs,
+            cle_jobs,
+        ),
+    ]
+}
+
+pub(crate) fn parse_v3d(
+    root: &Path,
+    relative_dir: &Path,
+    target: Option<&TargetContext>,
+    make_source: &str,
+    targets: &[TargetDefinition],
+    fetches: &[FetchDecl],
+) -> std::result::Result<Vec<PythonOutputsDecl>, String> {
+    if relative_dir != Path::new("workbench/hidds/v3d") {
+        return Ok(Vec::new());
+    }
+    let _ = current_profile(target)?;
+    let recipe_block = normalized_make_capability_block(
+        make_source,
+        "V3DX_BASE",
+        "%build_linklib mmake=linklibs-gallium_v3d",
+    )
+    .ok_or_else(|| {
+        "linklibs-gallium_v3d: generator recipe block is missing; the transpiler capability must be reviewed and updated".to_owned()
+    })?;
+    require_text_fingerprint(
+        "workbench/hidds/v3d/mmakefile.src",
+        &recipe_block,
+        fingerprint("mesa20-v3d-recipe")?,
+        "linklibs-gallium_v3d",
+    )?;
+    require_fetches(fetches)?;
+    target_contract_is_exact(root, relative_dir, "linklibs-gallium_v3d", target, targets)?;
+    Ok(v3d_outputs(relative_dir))
 }
 
 pub(crate) fn parse_remaining(
