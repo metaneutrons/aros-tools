@@ -15,6 +15,18 @@ use std::process::Command;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static DOWNLOAD: Emoji<'_, '_> = Emoji("⬇️  ", "");
+const REQUIRED_CXX_HEADERS: &[&str] = &[
+    "algorithm",
+    "cerrno",
+    "cinttypes",
+    "cstddef",
+    "cstdint",
+    "deque",
+    "memory",
+    "string",
+    "system_error",
+    "vector",
+];
 
 #[derive(Debug, Clone)]
 pub struct ToolchainPaths {
@@ -419,7 +431,9 @@ fn is_legacy_aros_prefix(root: &Path, preset: &str) -> bool {
     llvm_marker
         && runtime_marker
         && require_tool_paths(root).is_ok()
-        && root.join("include/c++/v1").is_dir()
+        && REQUIRED_CXX_HEADERS
+            .iter()
+            .all(|header| root.join("include/c++/v1").join(header).is_file())
         && root.join("lib/libc++.a").is_file()
         && root.join("lib/libc++abi.a").is_file()
         && root.join("lib/libunwind.a").is_file()
