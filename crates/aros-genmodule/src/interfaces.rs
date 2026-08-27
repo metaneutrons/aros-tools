@@ -358,13 +358,15 @@ pub fn render(iface: &Interface) -> String {
          #include <proto/oop.h>\n\
          \n"
     );
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "#define IID_{:<32} \"{}\"\n\n",
         name, iface.interface_id
-    ));
+    );
 
     // The method base is resolved lazily through OOP on first use.
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "#if !defined({mb}) && !defined(__OOP_NOMETHODBASES__) && !defined(__{name}_NOMETHODBASE__)\n\
          #define {mb} {name}_GetMethodBase(__obj)\n\
          \n\
@@ -379,50 +381,53 @@ pub fn render(iface: &Interface) -> String {
          }}\n\
          #endif\n\
          \n"
-    ));
+    );
 
     if !iface.attributes.is_empty() {
-        out.push_str(&format!("#define {ab:<32} __I{name}\n\n"));
-        out.push_str(&format!(
+        let _ = write!(out, "#define {ab:<32} __I{name}\n\n");
+        let _ = write!(
+            out,
             "#if !defined(__OOP_NOATTRBASES__) && !defined(__{name}_NOATTRBASE__)\n\
              extern OOP_AttrBase {ab};\n\
              #endif\n\
              \n\
              enum\n\
              {{\n"
-        ));
+        );
 
         let mut max_lvo: i64 = -1;
         for a in &iface.attributes {
-            out.push_str(&format!("    ao{name}_{} = {},", a.name, a.lvo));
+            let _ = write!(out, "    ao{name}_{} = {},", a.name, a.lvo);
             if let Some(c) = &a.comment {
-                out.push_str(&format!("  /* {c} */"));
+                let _ = write!(out, "  /* {c} */");
             }
             out.push('\n');
             max_lvo = max_lvo.max(i64::from(a.lvo));
         }
         if max_lvo >= 0 {
-            out.push_str(&format!("    num_{name}_Attrs = {},\n}};\n\n", max_lvo + 1));
+            let _ = write!(out, "    num_{name}_Attrs = {},\n}};\n\n", max_lvo + 1);
         }
 
         for a in &iface.attributes {
-            out.push_str(&format!(
-                "#define a{name}_{:<32} ({ab} + ao{name}_{})\n",
+            let _ = writeln!(
+                out,
+                "#define a{name}_{:<32} ({ab} + ao{name}_{})",
                 a.name, a.name
-            ));
+            );
         }
     }
 
     // Emitted unconditionally by the reference generator, attributes or not.
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "\n#define {name}_Switch(attr, idx) \\\n\
          if (((idx) = (attr) - {ab}) < num_{name}_Attrs) \\\n\
          switch (idx)\n\
          \n"
-    ));
+    );
 
     if iface.methods.is_empty() {
-        out.push_str(&format!("#endif /* INTERFACE_{name}_H */\n"));
+        let _ = writeln!(out, "#endif /* INTERFACE_{name}_H */");
         return out;
     }
 
@@ -430,52 +435,53 @@ pub fn render(iface: &Interface) -> String {
     out.push_str("\nenum {\n");
     let mut max_lvo: i64 = -1;
     for m in &iface.methods {
-        out.push_str(&format!("    mo{name}_{} = {},\n", m.name, m.lvo));
+        let _ = writeln!(out, "    mo{name}_{} = {},", m.name, m.lvo);
         max_lvo = max_lvo.max(i64::from(m.lvo));
     }
-    out.push_str(&format!(
-        "    num_{name}_Methods = {}\n}};\n\n",
-        max_lvo + 1
-    ));
+    let _ = write!(out, "    num_{name}_Methods = {}\n}};\n\n", max_lvo + 1);
 
     // Per-method message struct and inline stub.
     for m in &iface.methods {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "struct p{name}_{}\n{{\n    OOP_MethodID mID;\n",
             m.name
-        ));
+        );
         for arg in &m.args {
-            out.push_str(&format!("    {arg};\n"));
+            let _ = writeln!(out, "    {arg};");
         }
         out.push_str("};\n\n");
 
         if let Some(c) = &m.comment {
-            out.push_str(&format!("/* {c} */\n"));
+            let _ = writeln!(out, "/* {c} */");
         }
 
         let stub = &iface.method_stub;
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "#define {stub}_{mname}(obj, args...) \\\n\
              \x20   ({{OOP_Object *__obj = obj;\\\n\
              \x20     {stub}_{mname}_({mb}, __obj ,##args); }})\n\
              \n",
             mname = m.name
-        ));
+        );
 
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "static inline {} {stub}_{}_(OOP_MethodID __{mb}, OOP_Object *__obj",
             m.ty, m.name
-        ));
+        );
         for arg in &m.args {
-            out.push_str(&format!(", {arg}"));
+            let _ = write!(out, ", {arg}");
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             ")\n{{\n    struct p{name}_{mname} p;\n    p.mID = __{mb} + mo{name}_{mname};\n",
             mname = m.name
-        ));
+        );
         for arg in &m.args {
             if let Some(an) = arg_name(arg) {
-                out.push_str(&format!("    p.{an} = {an};\n"));
+                let _ = writeln!(out, "    p.{an} = {an};");
             }
         }
         let ret = if m.ty.eq_ignore_ascii_case("void") {
@@ -483,10 +489,10 @@ pub fn render(iface: &Interface) -> String {
         } else {
             format!("return ({})", m.ty)
         };
-        out.push_str(&format!("    {ret}OOP_DoMethod(__obj, &p.mID);\n}}\n\n"));
+        let _ = write!(out, "    {ret}OOP_DoMethod(__obj, &p.mID);\n}}\n\n");
     }
 
-    out.push_str(&format!("#endif /* INTERFACE_{name}_H */\n"));
+    let _ = writeln!(out, "#endif /* INTERFACE_{name}_H */");
     out
 }
 

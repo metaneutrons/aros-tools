@@ -987,11 +987,12 @@ impl DependencyGraph {
     ///
     /// Returns what it could not use, for reporting.
     pub fn resolve_hidd_stubs(&mut self) -> Vec<String> {
+        const MMAKE: &str = "linklibs-hiddstubs";
+        const ARCHIVE: &str = "hiddstubs";
+
         if self.hidd_stubs.is_empty() {
             return Vec::new();
         }
-        const MMAKE: &str = "linklibs-hiddstubs";
-        const ARCHIVE: &str = "hiddstubs";
 
         let mut reports = Vec::new();
         if let Some(existing) = self.targets.get(MMAKE) {

@@ -285,7 +285,7 @@ pub(crate) enum ConditionalTruth {
 }
 
 impl ConditionalTruth {
-    fn not(self) -> Self {
+    const fn not(self) -> Self {
         match self {
             Self::False => Self::True,
             Self::True => Self::False,
@@ -293,7 +293,7 @@ impl ConditionalTruth {
         }
     }
 
-    fn and(self, other: Self) -> Self {
+    const fn and(self, other: Self) -> Self {
         match (self, other) {
             (Self::False, _) | (_, Self::False) => Self::False,
             (Self::True, Self::True) => Self::True,
@@ -301,7 +301,7 @@ impl ConditionalTruth {
         }
     }
 
-    fn or(self, other: Self) -> Self {
+    const fn or(self, other: Self) -> Self {
         match (self, other) {
             (Self::True, _) | (_, Self::True) => Self::True,
             (Self::False, Self::False) => Self::False,
@@ -318,7 +318,7 @@ pub(crate) struct ConditionalFrame {
 }
 
 impl ConditionalFrame {
-    pub(crate) fn new(parent: ConditionalTruth, condition: ConditionalTruth) -> Self {
+    pub(crate) const fn new(parent: ConditionalTruth, condition: ConditionalTruth) -> Self {
         Self {
             parent,
             matched: condition,
@@ -326,12 +326,12 @@ impl ConditionalFrame {
         }
     }
 
-    pub(crate) fn else_if(&mut self, condition: ConditionalTruth) {
+    pub(crate) const fn else_if(&mut self, condition: ConditionalTruth) {
         self.current = self.parent.and(self.matched.not()).and(condition);
         self.matched = self.matched.or(condition);
     }
 
-    pub(crate) fn otherwise(&mut self) {
+    pub(crate) const fn otherwise(&mut self) {
         self.current = self.parent.and(self.matched.not());
         self.matched = ConditionalTruth::True;
     }

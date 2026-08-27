@@ -17,10 +17,17 @@
 //!
 //! Faithful to `tools/genmodule/writestubs.c`, `writeautoinit.c` and
 //! `writegetlibbase.c`. One deliberate omission is recorded at
-//! `regcall_stubs_unsupported`.
+//! generated from the audited register declarations.
 
 use crate::varargs::Function;
 use std::fmt::Write as _;
+
+#[derive(PartialEq, Clone, Copy)]
+enum ArgumentKind {
+    Normal,
+    Quad,
+    Double,
+}
 
 /// What a writer needs to know about the module.
 ///
@@ -183,24 +190,18 @@ fn lc_suffix(f: &Function) -> String {
     if f.args.is_empty() {
         return "0".to_owned();
     }
-    #[derive(PartialEq, Clone, Copy)]
-    enum Kind {
-        Normal,
-        Quad,
-        Double,
-    }
-    let kinds: Vec<Kind> = f
+    let kinds: Vec<ArgumentKind> = f
         .args
         .iter()
         .map(|a| {
             if a.reg.as_deref().is_some_and(|r| r.contains('/')) {
                 if a.ty.trim() == "double" {
-                    Kind::Double
+                    ArgumentKind::Double
                 } else {
-                    Kind::Quad
+                    ArgumentKind::Quad
                 }
             } else {
-                Kind::Normal
+                ArgumentKind::Normal
             }
         })
         .collect();
@@ -208,14 +209,14 @@ fn lc_suffix(f: &Function) -> String {
     let mut out = String::new();
     let mut current = kinds[0];
     let mut run = 0usize;
-    let mut flush = |kind: Kind, run: usize, out: &mut String| match kind {
-        Kind::Double => {
+    let flush = |kind: ArgumentKind, run: usize, out: &mut String| match kind {
+        ArgumentKind::Double => {
             let _ = write!(out, "DOUBLE{run}");
         }
-        Kind::Quad => {
+        ArgumentKind::Quad => {
             let _ = write!(out, "QUAD{run}");
         }
-        Kind::Normal => {
+        ArgumentKind::Normal => {
             let _ = write!(out, "{run}");
         }
     };
@@ -300,21 +301,6 @@ pub fn regcall_stubs(m: &ModuleFacts<'_>, funcs: &[Function], is_rel: bool) -> S
     }
     out
 }
-
-/// Historical note kept for the record.
-///
-/// writestubs.c also writes one shared `<mod>_regcall_stubs.c` holding a full C
-/// function per register-call entry, expanded through `AROS_LC<n>` with an
-/// `AROS_LCA` per argument. That needs the per-argument register names, which
-/// this parser reads only far enough to detect their presence, and the
-/// argument-type grouping that picks the `AROS_LC` variant.
-///
-/// It is left out rather than approximated because a wrong register mapping
-/// produces a stub that links and then corrupts arguments at runtime, which is
-/// far worse than a missing symbol the audit can see. Stack-call functions are
-/// the large majority and are what the audit reports as missing.
-pub const REGCALL_STUBS_UNSUPPORTED: &str =
-    "register-call stubs are not generated; see linklib::REGCALL_STUBS_UNSUPPORTED";
 
 /// `<mod>_autoinit.c`, per `writeautoinit.c`.
 #[must_use]

@@ -479,10 +479,9 @@ pub(crate) fn macro_invocations(joined: &str) -> Vec<Invocation> {
         let Some(after) = t.strip_prefix('%') else {
             continue;
         };
-        let (name, args) = match after.find(char::is_whitespace) {
-            Some(i) => (&after[..i], after[i..].trim()),
-            None => (after, ""),
-        };
+        let (name, args) = after
+            .find(char::is_whitespace)
+            .map_or((after, ""), |i| (&after[..i], after[i..].trim()));
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             continue;
         }
@@ -918,17 +917,17 @@ fn parse_mmakefile_impl(
     // after the complete file has been read. Both use the same selected
     // conditional scope but deliberately query it at different positions.
     let joined = join_continuations(&local_make_scan.expanded);
-    let (scope, conditional_line_states) = match target {
-        Some(target) => {
+    let (scope, conditional_line_states) = target.map_or_else(
+        || (collect_vars(&joined), None),
+        |target| {
             let (scope, states) = if port_scope_adopted {
                 collect_vars_impl_with_forward_locals(&joined, Some(target), true)
             } else {
                 collect_vars_impl(&joined, Some(target))
             };
             (scope, Some(states))
-        }
-        None => (collect_vars(&joined), None),
-    };
+        },
+    );
     let mut targets = Vec::new();
     let mut meta_rules = Vec::new();
     let mut skipped_meta_rules = Vec::new();
@@ -996,53 +995,50 @@ fn parse_mmakefile_impl(
         // Include paths from an option file are resolved against the including
         // mmakefile's directory, which is what Make does.
         let opts_incs = collect_includes(&body, &rel_dir);
-        match &f.tag {
-            Some(tag) => {
-                for d in opts_flags.defines {
-                    arch_defines.push((tag.clone(), d));
-                }
-                for o in opts_flags.compile_options {
-                    arch_compile_options.push((tag.clone(), o));
-                }
-                for d in opts_incs.dirs {
-                    opts_arch_includes.push((tag.clone(), d));
-                }
-                // USER_LDFLAGS in a make.opts was read and then dropped, with
-                // no report. arch/all-pc/kernel/make.opts:1 is
-                //
-                //   USER_LDFLAGS := -L$(GENDIR)/lib -lbootconsole -lacpica
-                //
-                // and without it kernel.resource leaves con_Putc, scr_Width,
-                // the whole boot console and every Acpi* undefined. The
-                // bootstrap loader forgives exactly one undefined symbol,
-                // SysBase (bootstrap/elfloader.c:157), so that image cannot
-                // load.
-                //
-                // Folded in rather than carried as a tagged lane, because the
-                // graph has to see the `-L` to authorise a private archive:
-                // libbootconsole.a lives in $(GENDIR)/lib, and
-                // has_matching_private_link_archive compares that directory
-                // against the consumer's own link options.
-                if opts_flags.link_options.is_empty() {
-                } else if active_tags.iter().any(|active| active == tag) {
-                    opts_link_options.extend(opts_flags.link_options);
-                    opts_spec_switches.extend(opts_flags.spec_switches);
-                } else if target.is_none() {
-                    undecidable_arch_link_options.push(format!(
-                        "{}: link options tagged {tag} cannot be decided without a target: {}",
-                        f.path,
-                        opts_flags.link_options.join(" ")
-                    ));
-                }
+        if let Some(tag) = &f.tag {
+            for d in opts_flags.defines {
+                arch_defines.push((tag.clone(), d));
             }
-            None => {
-                // A local make.opts always applies.
-                flag_set.defines.extend(opts_flags.defines);
-                flag_set.compile_options.extend(opts_flags.compile_options);
+            for o in opts_flags.compile_options {
+                arch_compile_options.push((tag.clone(), o));
+            }
+            for d in opts_incs.dirs {
+                opts_arch_includes.push((tag.clone(), d));
+            }
+            // USER_LDFLAGS in a make.opts was read and then dropped, with
+            // no report. arch/all-pc/kernel/make.opts:1 is
+            //
+            //   USER_LDFLAGS := -L$(GENDIR)/lib -lbootconsole -lacpica
+            //
+            // and without it kernel.resource leaves con_Putc, scr_Width,
+            // the whole boot console and every Acpi* undefined. The
+            // bootstrap loader forgives exactly one undefined symbol,
+            // SysBase (bootstrap/elfloader.c:157), so that image cannot
+            // load.
+            //
+            // Folded in rather than carried as a tagged lane, because the
+            // graph has to see the `-L` to authorise a private archive:
+            // libbootconsole.a lives in $(GENDIR)/lib, and
+            // has_matching_private_link_archive compares that directory
+            // against the consumer's own link options.
+            if opts_flags.link_options.is_empty() {
+            } else if active_tags.iter().any(|active| active == tag) {
                 opts_link_options.extend(opts_flags.link_options);
                 opts_spec_switches.extend(opts_flags.spec_switches);
-                opts_include_dirs.extend(opts_incs.dirs);
+            } else if target.is_none() {
+                undecidable_arch_link_options.push(format!(
+                    "{}: link options tagged {tag} cannot be decided without a target: {}",
+                    f.path,
+                    opts_flags.link_options.join(" ")
+                ));
             }
+        } else {
+            // A local make.opts always applies.
+            flag_set.defines.extend(opts_flags.defines);
+            flag_set.compile_options.extend(opts_flags.compile_options);
+            opts_link_options.extend(opts_flags.link_options);
+            opts_spec_switches.extend(opts_flags.spec_switches);
+            opts_include_dirs.extend(opts_incs.dirs);
         }
     }
 

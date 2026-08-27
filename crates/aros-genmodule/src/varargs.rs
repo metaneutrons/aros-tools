@@ -26,6 +26,13 @@
 
 use std::fmt::Write as _;
 
+#[derive(PartialEq, Clone, Copy)]
+enum ArgumentKind {
+    Normal,
+    Quad,
+    Double,
+}
+
 /// One parameter of a function declaration.
 #[derive(Debug, Clone)]
 pub struct Arg {
@@ -454,9 +461,10 @@ fn render_rawarg_stub(
     out.push_str("}\n\n");
 
     let named_macro_args = fixed.len().saturating_sub(1);
-    let params = (1..=named_macro_args)
-        .map(|index| format!("arg{index}, "))
-        .collect::<String>();
+    let mut params = String::new();
+    for index in 1..=named_macro_args {
+        let _ = write!(params, "arg{index}, ");
+    }
     let _ = writeln!(out, "#define {vararg_name}({params}...) \\");
     let _ = write!(
         out,
@@ -522,7 +530,8 @@ fn render_register_defines(cx: &DefinesContext<'_>, functions: &[Function]) -> S
     }
 
     for f in functions {
-        if f.private || f.stack_call || (f.lvo < cx.first_lvo) {
+        let below_first_lvo = f.lvo < cx.first_lvo;
+        if f.private || f.stack_call || below_first_lvo {
             continue;
         }
         let version = f
@@ -609,38 +618,32 @@ fn lc_suffix(f: &Function) -> String {
     if f.args.is_empty() {
         return "0".to_owned();
     }
-    #[derive(PartialEq, Clone, Copy)]
-    enum Kind {
-        Normal,
-        Quad,
-        Double,
-    }
-    let kinds: Vec<Kind> = f
+    let kinds: Vec<ArgumentKind> = f
         .args
         .iter()
         .map(|a| {
             if a.reg.as_deref().is_some_and(|r| r.contains('/')) {
                 if a.ty.trim() == "double" {
-                    Kind::Double
+                    ArgumentKind::Double
                 } else {
-                    Kind::Quad
+                    ArgumentKind::Quad
                 }
             } else {
-                Kind::Normal
+                ArgumentKind::Normal
             }
         })
         .collect();
     let mut out = String::new();
     let mut current = kinds[0];
     let mut run = 0usize;
-    let flush = |kind: Kind, run: usize, out: &mut String| match kind {
-        Kind::Double => {
+    let flush = |kind: ArgumentKind, run: usize, out: &mut String| match kind {
+        ArgumentKind::Double => {
             let _ = write!(out, "DOUBLE{run}");
         }
-        Kind::Quad => {
+        ArgumentKind::Quad => {
             let _ = write!(out, "QUAD{run}");
         }
-        Kind::Normal => {
+        ArgumentKind::Normal => {
             let _ = write!(out, "{run}");
         }
     };

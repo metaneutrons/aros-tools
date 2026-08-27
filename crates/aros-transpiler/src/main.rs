@@ -233,16 +233,18 @@ fn run(args: &Args) -> Result<()> {
     let parsed_results: Vec<_> = files
         .par_iter()
         .map(|path| {
-            let res = match &target {
-                Some(target) => parse_mmakefile_with_dirs_and_context_and_fetches(
-                    path,
-                    &args.source_dir,
-                    &dirs,
-                    target,
-                    &known_fetches,
-                ),
-                None => parse_mmakefile_with_dirs(path, &args.source_dir, &dirs),
-            };
+            let res = target.as_ref().map_or_else(
+                || parse_mmakefile_with_dirs(path, &args.source_dir, &dirs),
+                |target| {
+                    parse_mmakefile_with_dirs_and_context_and_fetches(
+                        path,
+                        &args.source_dir,
+                        &dirs,
+                        target,
+                        &known_fetches,
+                    )
+                },
+            );
             pb.inc(1);
             (path, res)
         })

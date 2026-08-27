@@ -171,7 +171,7 @@ pub(crate) struct EvaluatedSources {
 }
 
 impl EvaluatedSources {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.c.is_empty() && self.cxx.is_empty() && self.objc.is_empty() && self.asm.is_empty()
     }
 

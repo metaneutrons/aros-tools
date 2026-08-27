@@ -17,6 +17,10 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub struct TempTree(pub PathBuf);
 
 impl TempTree {
+    /// # Panics
+    ///
+    /// Panics when the process cannot create its uniquely named temporary
+    /// test directory.
     #[must_use]
     pub fn new() -> Self {
         let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);

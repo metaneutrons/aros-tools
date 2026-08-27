@@ -30,7 +30,7 @@ fn mmakefiles(root: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name() == "mmakefile.src")
-        .map(|entry| entry.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect()
 }
 

@@ -50,6 +50,7 @@ pub struct HiddStubsDecl {
 ///
 /// Returns the declarations and, for reporting, the ones whose sources could not
 /// be resolved. Nothing is dropped silently.
+#[must_use]
 pub fn collect_hidd_stubs(
     content: &str,
     scope: &VarScope,

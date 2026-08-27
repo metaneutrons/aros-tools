@@ -368,7 +368,8 @@ fn catalog_outputs(
 }
 
 fn is_po_catalog_recipe(recipe: &str) -> bool {
-    let recipe = recipe.trim().strip_prefix('@').unwrap_or(recipe.trim());
+    let recipe = recipe.trim();
+    let recipe = recipe.strip_prefix('@').unwrap_or(recipe);
     recipe == "$(FLEXCAT) POFILE $< CATALOG $@"
 }
 

@@ -69,8 +69,8 @@ pub struct ArchSourceDecl {
 /// (arch/x86_64-all/stdc) or through a file-local variable
 /// (arch/x86_64-pc/kernel says `maindir=$(MAINDIR)`). Both name the arch object
 /// root, so a raw value silently fails to match it.
-fn file_local(value: &Option<String>, raw: &HashMap<String, String>) -> Option<String> {
-    let stated = value.as_ref()?.trim();
+fn file_local(value: Option<&String>, raw: &HashMap<String, String>) -> Option<String> {
+    let stated = value?.trim();
     if stated.is_empty() {
         return None;
     }
@@ -371,8 +371,14 @@ pub fn collect_arch_sources(
 
         out.push(ArchSourceDecl {
             mainmmake,
-            maindir: file_local(&crate::includes::arg_value(&body, "maindir"), &raw_vars),
-            modname: file_local(&crate::includes::arg_value(&body, "modname"), &raw_vars),
+            maindir: file_local(
+                crate::includes::arg_value(&body, "maindir").as_ref(),
+                &raw_vars,
+            ),
+            modname: file_local(
+                crate::includes::arg_value(&body, "modname").as_ref(),
+                &raw_vars,
+            ),
             tag,
             dir: dir.clone(),
             files,
@@ -426,11 +432,7 @@ AFILES := \
             .iter()
             .map(|decl| {
                 let flags = crate::flags::collect_flags_at(&scope, decl.line);
-                (
-                    decl.tag.clone(),
-                    decl.files.clone(),
-                    flags.compile_options.clone(),
-                )
+                (decl.tag.clone(), decl.files.clone(), flags.compile_options)
             })
             .collect();
         seen.sort();

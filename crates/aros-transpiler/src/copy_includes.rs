@@ -862,7 +862,10 @@ fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<Parse
     // landing there is a header whatever its name, including pattern rules and
     // variable-named targets. $(GENDIR) holds every kind of generated file, so
     // there the suffix decides.
-    let is_header = root != "$(GENDIR)/" || dest.ends_with(".h") || dest.ends_with(".hpp");
+    let extension = Path::new(&dest)
+        .extension()
+        .and_then(|value| value.to_str());
+    let is_header = root != "$(GENDIR)/" || matches!(extension, Some("h" | "hpp"));
     if is_header {
         return Some(ParsedRule::Header(AdhocHeaderRule {
             file: mmakefile.to_owned(),
@@ -877,7 +880,7 @@ fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<Parse
     // output of their own. CMake creates output directories itself and tracks
     // header dependencies through the compiler, so these cannot go missing and
     // would only dilute the report.
-    let is_bookkeeping = dest.ends_with(".d")
+    let is_bookkeeping = extension == Some("d")
         || !dest.contains('.')
         || dest.ends_with(".includes-generated")
         || dest.ends_with(".stubs-generated");

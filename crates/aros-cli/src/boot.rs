@@ -108,7 +108,7 @@ pub struct BootReport {
 
 impl BootReport {
     #[must_use]
-    pub fn is_success(&self) -> bool {
+    pub const fn is_success(&self) -> bool {
         self.failures.is_empty() && self.faults.is_empty()
     }
 }
@@ -187,11 +187,7 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
 
 fn read_lossy(path: &Path) -> String {
     std::fs::read(path)
-        .map(|bytes| {
-            String::from_utf8_lossy(&bytes)
-                .replace('\u{0}', "")
-                .to_string()
-        })
+        .map(|bytes| String::from_utf8_lossy(&bytes).replace('\u{0}', ""))
         .unwrap_or_default()
 }
 
@@ -277,13 +273,12 @@ fn run_qemu(
 fn furthest_milestone(serial: &str, trace: &str) -> Option<Milestone> {
     let mut reached = None;
     for milestone in Milestone::ALL {
-        let proved = match milestone.serial_marker() {
-            Some(marker) => serial.contains(marker),
-            // cpl=3 in an exception record is the only positive evidence of user
-            // mode available without a debugger: the kernel prints nothing when
-            // it drops privileges.
-            None => trace.contains("cpl=3"),
-        };
+        // cpl=3 in an exception record is the only positive evidence of user
+        // mode available without a debugger: the kernel prints nothing when
+        // it drops privileges.
+        let proved = milestone
+            .serial_marker()
+            .map_or_else(|| trace.contains("cpl=3"), |marker| serial.contains(marker));
         if proved {
             reached = Some(milestone);
         }
@@ -732,7 +727,11 @@ fn corrected_offset(
         return (computed, None);
     }
     let found = low as u64 + hits[0] as u64;
-    let delta = found as i64 - computed as i64;
+    let delta = match found.cmp(&computed) {
+        std::cmp::Ordering::Greater => i64::try_from(found - computed).unwrap_or(i64::MAX),
+        std::cmp::Ordering::Less => -i64::try_from(computed - found).unwrap_or(i64::MAX),
+        std::cmp::Ordering::Equal => 0,
+    };
     (found, Some(delta))
 }
 
@@ -828,23 +827,30 @@ fn describe(
 ) -> String {
     // The bytes first, the arithmetic only as a fallback: a wrong layout model
     // names a neighbouring function without hesitating, and this one did.
-    let (found, how) = match located_by_bytes(packed, traced, fault.ip) {
-        Some(offset) => (Some(offset), "by its bytes".to_owned()),
-        None => match fault.ip.checked_sub(base) {
-            None => (None, String::new()),
-            Some(computed) => {
-                let (offset, delta) = corrected_offset(packed, traced, fault.ip, computed);
-                let how = match delta {
-                    None => "by arithmetic alone; its bytes are not unique nearby".to_owned(),
-                    Some(0) => "by arithmetic, confirmed by its bytes".to_owned(),
-                    Some(delta) => {
-                        format!("by its bytes, {delta:+#x} from where the load model computed it")
-                    }
-                };
-                (Some(offset), how)
-            }
+    let (found, how) = located_by_bytes(packed, traced, fault.ip).map_or_else(
+        || {
+            fault.ip.checked_sub(base).map_or_else(
+                || (None, String::new()),
+                |computed| {
+                    let (offset, delta) = corrected_offset(packed, traced, fault.ip, computed);
+                    let how = delta.map_or_else(
+                        || "by arithmetic alone; its bytes are not unique nearby".to_owned(),
+                        |delta| {
+                            if delta == 0 {
+                                "by arithmetic, confirmed by its bytes".to_owned()
+                            } else {
+                                format!(
+                                "by its bytes, {delta:+#x} from where the load model computed it"
+                            )
+                            }
+                        },
+                    );
+                    (Some(offset), how)
+                },
+            )
         },
-    };
+        |offset| (Some(offset), "by its bytes".to_owned()),
+    );
     let Some(offset_in_block) = found else {
         return format!(
             "v={:02x} cpl={} IP={:#x}: below the load base, so not in the read-only block",

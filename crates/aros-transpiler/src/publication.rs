@@ -53,32 +53,32 @@ struct CoverageDocument<'a> {
 /// A complete output generation which becomes visible only after every file
 /// has been rendered and staged successfully.
 #[derive(Debug, Default)]
-pub(super) struct Publication {
+pub struct Publication {
     artifacts: Vec<Artifact>,
     notices: Vec<String>,
     coverage: Vec<CoverageEntry>,
 }
 
 impl Publication {
-    pub(super) fn present(&mut self, destination: PathBuf, content: impl Into<Vec<u8>>) {
+    pub fn present(&mut self, destination: PathBuf, content: impl Into<Vec<u8>>) {
         self.artifacts.push(Artifact {
             destination,
             content: ArtifactContent::Present(content.into()),
         });
     }
 
-    pub(super) fn absent(&mut self, destination: PathBuf) {
+    pub fn absent(&mut self, destination: PathBuf) {
         self.artifacts.push(Artifact {
             destination,
             content: ArtifactContent::Absent,
         });
     }
 
-    pub(super) fn notice(&mut self, notice: impl Into<String>) {
+    pub fn notice(&mut self, notice: impl Into<String>) {
         self.notices.push(notice.into());
     }
 
-    pub(super) fn record_coverage(
+    pub fn record_coverage(
         &mut self,
         code: &str,
         severity: DiagnosticSeverity,
@@ -97,7 +97,7 @@ impl Publication {
         });
     }
 
-    pub(super) fn coverage_json(&mut self) -> serde_json::Result<String> {
+    pub fn coverage_json(&mut self) -> serde_json::Result<String> {
         self.coverage
             .sort_by(|left, right| left.code.cmp(&right.code));
         serde_json::to_string_pretty(&CoverageDocument {
@@ -110,7 +110,7 @@ impl Publication {
         })
     }
 
-    pub(super) fn publish(self) -> io::Result<()> {
+    pub fn publish(self) -> io::Result<()> {
         let notices = self.notices.clone();
         self.publish_impl(None)?;
         for notice in notices {

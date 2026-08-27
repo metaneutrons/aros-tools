@@ -209,6 +209,7 @@ pub(crate) fn validate_drm(
             matching.len()
         ));
     };
+    let includes_match = declaration.include_dirs == expected_flags.includes;
     let exact = declaration.target_name == "drm_nouveau"
         && declaration.module_type == ModuleType::LinkLib
         && !declaration.genmodule_only
@@ -239,7 +240,7 @@ pub(crate) fn validate_drm(
         && declaration.arch_defines.is_empty()
         && declaration.arch_compile_options.is_empty()
         && declaration.defines == expected_flags.defines
-        && (declaration.include_dirs == expected_flags.includes)
+        && includes_match
         && declaration.compile_options == expected_flags.options;
     if !exact {
         return Err(
@@ -376,6 +377,7 @@ pub(crate) fn validate_gallium(
             matching.len()
         ));
     };
+    let includes_match = declaration.include_dirs == expected_flags.includes;
     let exact = declaration.target_name == "gallium_nouveau"
         && declaration.module_type == ModuleType::LinkLib
         && !declaration.genmodule_only
@@ -406,7 +408,7 @@ pub(crate) fn validate_gallium(
         && declaration.arch_defines.is_empty()
         && declaration.arch_compile_options.is_empty()
         && declaration.defines == expected_flags.defines
-        && declaration.include_dirs == expected_flags.includes
+        && includes_match
         && declaration.compile_options == expected_flags.options;
     if !exact {
         return Err(

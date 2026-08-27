@@ -152,6 +152,7 @@ pub(crate) fn target_contract_is_exact(
         "linklibs-gallium_vc4" => "gallium_vc4",
         _ => return Err(format!("unsupported Mesa target contract {mmake}")),
     };
+    let includes_match = declaration.include_dirs == expected_flags.includes;
     let exact = declaration.target_name == target_name
         && declaration.module_type == ModuleType::LinkLib
         && !declaration.genmodule_only
@@ -182,7 +183,7 @@ pub(crate) fn target_contract_is_exact(
         && declaration.arch_defines.is_empty()
         && declaration.arch_compile_options.is_empty()
         && declaration.defines == expected_flags.defines
-        && declaration.include_dirs == expected_flags.includes
+        && includes_match
         && declaration.compile_options == expected_flags.options;
     if !exact {
         return Err(format!(
@@ -482,10 +483,12 @@ pub(crate) fn parse_remaining(
 ) -> std::result::Result<Option<PythonOutputsDecl>, String> {
     if !matches!(
         relative_dir.to_str(),
-        Some("workbench/libs/mesa/libcompiler")
-            | Some("workbench/libs/mesa/libgalliumaux")
-            | Some("workbench/libs/mesa/libmesa")
-            | Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium")
+        Some(
+            "workbench/libs/mesa/libcompiler"
+                | "workbench/libs/mesa/libgalliumaux"
+                | "workbench/libs/mesa/libmesa"
+                | "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
+        )
     ) {
         return Ok(None);
     }
@@ -552,7 +555,6 @@ pub(crate) fn parse_remaining(
                 Vec::new(),
             )
         }
-        Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") => return Ok(None),
         _ => return Ok(None),
     };
 

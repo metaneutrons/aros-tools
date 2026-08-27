@@ -90,6 +90,24 @@ struct Args {
 }
 
 #[derive(Debug, Default)]
+struct ConfModuleOptions(u8);
+
+impl ConfModuleOptions {
+    const EXPLICIT_LIB_BASE: u8 = 1 << 0;
+    const AUTO_INIT: u8 = 1 << 1;
+    const NO_RESIDENT: u8 = 1 << 2;
+    const NO_INCLUDES: u8 = 1 << 3;
+
+    const fn contains(&self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    const fn insert(&mut self, flag: u8) {
+        self.0 |= flag;
+    }
+}
+
+#[derive(Debug, Default)]
 struct ConfModule {
     name: String,
     /// `basename` from the config, or the module name with its first letter
@@ -107,9 +125,7 @@ struct ConfModule {
     /// `libbasetypeextern` if the config states one; the type is otherwise
     /// derived from the module type by extern_base_type().
     explicit_base_type_extern: Option<String>,
-    /// True once a `libbase` line has been seen, so a later `basename` does not
-    /// overwrite it.
-    explicit_lib_base: bool,
+    options: ConfModuleOptions,
     cdef: String,
     /// Contents of `##begin cdefprivate`. The reference generator writes these
     /// lines verbatim into `<mod>_libdefs.h`; they are how a module pulls in the
@@ -127,11 +143,6 @@ struct ConfModule {
     /// the .conf does not state one, rather than stamped with the build date,
     /// which would make output non-reproducible.
     date: String,
-    /// Whether the config declared `options autoinit`.
-    auto_init: bool,
-    /// Whether the config declared `options noresident`, which starts the
-    /// library vectors at 1 instead of the module type's default.
-    no_resident: bool,
     /// Module type (`library`, `device`, `resource`, `hidd`, `handler`, ...).
     /// Not part of the .conf; taken from the sibling mmakefile.src.
     mod_type: String,
@@ -147,9 +158,6 @@ struct ConfModule {
     /// Directory of the .conf, relative to the scan root. Used to give the
     /// module-private headers a unique location.
     rel_dir: PathBuf,
-    /// `options noincludes`: the stubs must not include <proto/<mod>.h> and
-    /// declare __aros_getbase_ themselves instead.
-    no_includes: bool,
     /// `forcebase` entries. The autoinit file imports __aros_getbase_ for each,
     /// which is what makes a parent open those libraries.
     force_bases: Vec<String>,
@@ -280,7 +288,7 @@ fn read_module_declaration(conf_path: &Path, stem: &str) -> Option<ModuleDeclara
         let mod_type = module_macro_value(head, "modtype=");
         let conffile = module_macro_value(head, "conffile=");
         if fallback_type.is_none() {
-            fallback_type = mod_type.clone();
+            fallback_type.clone_from(&mod_type);
         }
 
         let matches_explicit_config = conffile.as_deref().is_some_and(|config| {
@@ -370,7 +378,7 @@ fn resident_flags(module: &ConfModule) -> String {
     } else if module.resident_pri < -120 {
         flags.push("RTF_AFTERDOS");
     }
-    if module.auto_init {
+    if module.options.contains(ConfModuleOptions::AUTO_INIT) {
         flags.push("RTF_AUTOINIT");
     }
     if flags.is_empty() {
@@ -409,7 +417,11 @@ fn functions_count(module: &ConfModule) -> u32 {
         .map(|f| f.lvo)
         .max()
         .unwrap_or_else(|| {
-            varargs::first_lvo(&module.mod_type, module.no_resident).saturating_sub(1)
+            varargs::first_lvo(
+                &module.mod_type,
+                module.options.contains(ConfModuleOptions::NO_RESIDENT),
+            )
+            .saturating_sub(1)
         })
 }
 
@@ -425,10 +437,9 @@ fn functions_count(module: &ConfModule) -> u32 {
 /// `struct Library` instead.
 fn default_basename(module_name: &str) -> String {
     let mut chars = module_name.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
 }
 
 fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
@@ -492,10 +503,8 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
             section = "";
         } else if trimmed == "##begin startup" {
             section = "startup";
-            continue;
         } else if trimmed == "##end startup" {
             section = "";
-            continue;
         } else if trimmed == "##begin cdefprivate" {
             section = "cdefprivate";
         } else if trimmed == "##end cdefprivate" {
@@ -503,7 +512,10 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
         } else if trimmed == "##begin functionlist" {
             section = "functions";
             if !lvo_ready {
-                lvo = varargs::first_lvo(&module.mod_type, module.no_resident);
+                lvo = varargs::first_lvo(
+                    &module.mod_type,
+                    module.options.contains(ConfModuleOptions::NO_RESIDENT),
+                );
                 lvo_ready = true;
             }
         } else if trimmed == "##end functionlist" {
@@ -521,13 +533,16 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 // (tools/genmodule/config.c:1336).
                 "basename" => {
                     module.base_name = val.to_string();
-                    if !module.explicit_lib_base {
+                    if !module
+                        .options
+                        .contains(ConfModuleOptions::EXPLICIT_LIB_BASE)
+                    {
                         module.lib_base = format!("{val}Base");
                     }
                 }
                 "libbase" => {
                     module.lib_base = val.to_string();
-                    module.explicit_lib_base = true;
+                    module.options.insert(ConfModuleOptions::EXPLICIT_LIB_BASE);
                 }
                 "libbasetypeextern" => {
                     module.explicit_base_type_extern = Some(val.to_string());
@@ -553,9 +568,13 @@ fn parse_conf(path: &Path, root: &Path) -> Option<ConfModule> {
                 "options" => {
                     for opt in val.split([',', ' ']) {
                         match opt.trim() {
-                            "autoinit" => module.auto_init = true,
-                            "noresident" => module.no_resident = true,
-                            "noincludes" => module.no_includes = true,
+                            "autoinit" => module.options.insert(ConfModuleOptions::AUTO_INIT),
+                            "noresident" => {
+                                module.options.insert(ConfModuleOptions::NO_RESIDENT);
+                            }
+                            "noincludes" => {
+                                module.options.insert(ConfModuleOptions::NO_INCLUDES);
+                            }
                             _ => {}
                         }
                     }
@@ -770,7 +789,10 @@ fn generate_sdk_headers(
         lib_base: &module.lib_base,
         lib_base_type_extern: &extern_base_type(module),
         basename: &module.base_name,
-        first_lvo: varargs::first_lvo(&module.mod_type, module.no_resident),
+        first_lvo: varargs::first_lvo(
+            &module.mod_type,
+            module.options.contains(ConfModuleOptions::NO_RESIDENT),
+        ),
         major_version: module.major_version,
     };
     let defines = varargs::render_defines(&defines_cx, &module.functions);
@@ -1125,7 +1147,7 @@ fn generate_linklib_sources(module: &ConfModule, root: &Path) -> std::io::Result
         lib_base_type_extern: &extern_base_type(module),
         basename: &module.base_name,
         suffix,
-        no_includes: module.no_includes,
+        no_includes: module.options.contains(ConfModuleOptions::NO_INCLUDES),
         cdef_private: &module.cdef_private,
         major_version: module.major_version,
         force_bases: &module.force_bases,
