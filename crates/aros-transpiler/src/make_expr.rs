@@ -4,9 +4,11 @@
 //! 116 `filter`, 15 `filter-out`, 119 `patsubst`, 24 `subst`, 28 `notdir`, 73 `dir`, 11
 //! `basename`, seven `sort`, 20 `strip`, 41 `wildcard`, 143
 //! `call WILDCARD`, and 44 substitution-reference occurrences. The evaluator
-//! deliberately implements that finite, side-effect-free subset instead of
-//! trying to embed GNU Make. Unsupported functions and unresolved variables
-//! are errors; they never turn into an empty list by accident.
+//! implements the complete side-effect-free GNU Make word/list vocabulary used
+//! by those expressions. Functions which execute commands or mutate Make's
+//! parser (`shell`, `eval`, `file`, `guile`) remain explicit errors rather than
+//! hidden host-dependent inputs. Unsupported functions and unresolved
+//! variables never turn into an empty list by accident.
 //!
 //! Evaluation is positional through [`VarScope::raw_at`]. Directory variables
 //! fall back to [`DirVars::expand_with`]. `SRCDIR` and `CURDIR` can be
@@ -177,10 +179,16 @@ impl fmt::Display for MakeExprError {
                 )
             }
             Self::UnsupportedFunction { name } => {
-                write!(f, "unsupported Make function `{name}`")
+                write!(
+                    f,
+                    "unsupported Make function `{name}`; upstream now requires syntax that aros-transpiler does not model, so the transpiler must be updated"
+                )
             }
             Self::UnsupportedReference { reference } => {
-                write!(f, "unsupported Make reference `{reference}`")
+                write!(
+                    f,
+                    "unsupported Make reference `{reference}`; upstream now requires syntax that aros-transpiler does not model, so the transpiler must be updated"
+                )
             }
             Self::DeferredWildcard { pattern } => {
                 write!(
@@ -545,6 +553,83 @@ impl<'a> Evaluator<'a> {
                 let text = self.expand_text(args[2], depth)?;
                 Ok(text.replace(&from, &to))
             }
+            "findstring" => {
+                let args = function_arguments(name, raw_args, 2)?;
+                let needle = self.expand_text(args[0], depth)?;
+                let haystack = self.expand_text(args[1], depth)?;
+                Ok(if haystack.contains(&needle) {
+                    needle
+                } else {
+                    String::new()
+                })
+            }
+            "word" | "wordlist" => {
+                let expected = if name == "word" { 2 } else { 3 };
+                let args = function_arguments(name, raw_args, expected)?;
+                let first =
+                    parse_word_index(name, &self.expand_text(args[0].trim(), depth)?, raw_args)?;
+                let (last, text_at) = if name == "word" {
+                    (first, 1)
+                } else {
+                    (
+                        parse_word_index(
+                            name,
+                            &self.expand_text(args[1].trim(), depth)?,
+                            raw_args,
+                        )?,
+                        2,
+                    )
+                };
+                let words = make_words(&self.expand_text(args[text_at], depth)?);
+                if first == 0 || last < first || first > words.len() {
+                    return Ok(String::new());
+                }
+                let end = last.min(words.len());
+                Ok(join_words(&words[first - 1..end]))
+            }
+            "join" => {
+                let args = function_arguments(name, raw_args, 2)?;
+                let left = make_words(&self.expand_text(args[0], depth)?);
+                let right = make_words(&self.expand_text(args[1], depth)?);
+                let length = left.len().max(right.len());
+                let output = (0..length)
+                    .map(|index| {
+                        format!(
+                            "{}{}",
+                            left.get(index).map_or("", String::as_str),
+                            right.get(index).map_or("", String::as_str)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Ok(join_words(&output))
+            }
+            "if" => {
+                let args = function_arguments_between(name, raw_args, 2, 3)?;
+                let condition = self.expand_text(args[0], depth)?;
+                let selected = if condition.trim().is_empty() {
+                    args.get(2).copied().unwrap_or("")
+                } else {
+                    args[1]
+                };
+                self.expand_text(selected, depth)
+            }
+            "or" | "and" => {
+                let args = function_arguments_at_least(name, raw_args, 1)?;
+                let mut last = String::new();
+                for argument in args {
+                    let value = self.expand_text(argument, depth)?;
+                    let nonempty = !value.is_empty();
+                    if (name == "or" && nonempty) || (name == "and" && !nonempty) {
+                        return Ok(value);
+                    }
+                    last = value;
+                }
+                if name == "and" {
+                    Ok(last)
+                } else {
+                    Ok(String::new())
+                }
+            }
             "notdir" | "dir" | "basename" | "suffix" | "sort" | "strip" | "wildcard" => {
                 let args = function_arguments(name, raw_args, 1)?;
                 let expanded = self.expand_text(args[0].trim(), depth)?;
@@ -584,16 +669,53 @@ impl<'a> Evaluator<'a> {
                     _ => unreachable!(),
                 }
             }
-            "call" => {
-                let args = function_arguments(name, raw_args, 2)?;
-                let callee = self.expand_text(args[0].trim(), depth)?;
-                if callee.trim() != "WILDCARD" {
-                    return Err(MakeExprError::UnsupportedFunction {
-                        name: format!("call {}", callee.trim()),
+            "firstword" | "lastword" | "words" => {
+                let args = function_arguments(name, raw_args, 1)?;
+                let words = make_words(&self.expand_text(args[0], depth)?);
+                match name {
+                    "firstword" => Ok(words.first().cloned().unwrap_or_default()),
+                    "lastword" => Ok(words.last().cloned().unwrap_or_default()),
+                    "words" => Ok(words.len().to_string()),
+                    _ => unreachable!(),
+                }
+            }
+            "value" => {
+                let args = function_arguments(name, raw_args, 1)?;
+                let variable = args[0].trim();
+                if variable.is_empty() || variable.contains(char::is_whitespace) {
+                    return Err(MakeExprError::InvalidSyntax {
+                        expression: format!("$(value {raw_args})"),
+                        detail: "value requires one variable name".to_owned(),
                     });
                 }
-                let patterns = self.expand_text(args[1].trim(), depth)?;
-                Ok(join_words(&self.wildcard(&patterns, true)?))
+                self.resolve_variable(variable)
+            }
+            "call" => {
+                let args = function_arguments_at_least(name, raw_args, 1)?;
+                let callee = self.expand_text(args[0].trim(), depth)?;
+                let callee = callee.trim();
+                if callee == "WILDCARD" {
+                    if args.len() != 2 {
+                        return Err(MakeExprError::InvalidSyntax {
+                            expression: format!("$(call {raw_args})"),
+                            detail: "AROS WILDCARD expects one argument".to_owned(),
+                        });
+                    }
+                    let patterns = self.expand_text(args[1].trim(), depth)?;
+                    return Ok(join_words(&self.wildcard(&patterns, true)?));
+                }
+                let body = self.resolve_variable(callee)?;
+                let mut bindings = Vec::with_capacity(args.len());
+                bindings.push(("0".to_owned(), callee.to_owned()));
+                for (index, argument) in args.iter().skip(1).enumerate() {
+                    bindings.push(((index + 1).to_string(), self.expand_text(argument, depth)?));
+                }
+                let binding_count = bindings.len();
+                self.loop_vars.extend(bindings);
+                let expanded = self.expand_text(&body, depth);
+                self.loop_vars
+                    .truncate(self.loop_vars.len() - binding_count);
+                expanded
             }
             _ => Err(MakeExprError::UnsupportedFunction {
                 name: name.to_owned(),
@@ -788,6 +910,56 @@ fn function_arguments<'a>(
         });
     }
     Ok(args)
+}
+
+fn function_arguments_between<'a>(
+    function: &str,
+    raw: &'a str,
+    minimum: usize,
+    maximum: usize,
+) -> Result<Vec<&'a str>, MakeExprError> {
+    let args = split_top_level(raw, ',')?;
+    if args.len() < minimum || args.len() > maximum {
+        return Err(MakeExprError::InvalidSyntax {
+            expression: format!("$({function} {raw})"),
+            detail: format!(
+                "function `{function}` expects {minimum}..={maximum} argument(s), got {}",
+                args.len()
+            ),
+        });
+    }
+    Ok(args)
+}
+
+fn function_arguments_at_least<'a>(
+    function: &str,
+    raw: &'a str,
+    minimum: usize,
+) -> Result<Vec<&'a str>, MakeExprError> {
+    let args = split_top_level(raw, ',')?;
+    if args.len() < minimum {
+        return Err(MakeExprError::InvalidSyntax {
+            expression: format!("$({function} {raw})"),
+            detail: format!(
+                "function `{function}` expects at least {minimum} argument(s), got {}",
+                args.len()
+            ),
+        });
+    }
+    Ok(args)
+}
+
+fn parse_word_index(function: &str, value: &str, raw_args: &str) -> Result<usize, MakeExprError> {
+    let index = value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|index| *index > 0)
+        .ok_or_else(|| MakeExprError::InvalidSyntax {
+            expression: format!("$({function} {raw_args})"),
+            detail: format!("function `{function}` requires a positive word index, got `{value}`"),
+        })?;
+    Ok(index)
 }
 
 fn split_top_level(raw: &str, separator: char) -> Result<Vec<&str>, MakeExprError> {
@@ -1037,6 +1209,7 @@ mod tests {
     use aros_common::read_source;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -1292,13 +1465,18 @@ mod tests {
         let cycle = evaluate("A := $(B)\nB := $(A)\n", "$(A)").unwrap_err();
         assert!(matches!(cycle, MakeExprError::VariableCycle { .. }));
 
+        let unsupported = evaluate("", "$(eval SOMETHING := x)").unwrap_err();
         assert!(matches!(
-            evaluate("", "$(eval SOMETHING := x)"),
-            Err(MakeExprError::UnsupportedFunction { name }) if name == "eval"
+            unsupported,
+            MakeExprError::UnsupportedFunction { ref name } if name == "eval"
         ));
+        assert!(unsupported
+            .to_string()
+            .contains("transpiler must be updated"));
         assert!(matches!(
             evaluate("", "$(call SOMETHING,x)"),
-            Err(MakeExprError::UnsupportedFunction { .. })
+            Err(MakeExprError::UnresolvedVariables { names, .. })
+                if names == vec!["SOMETHING"]
         ));
         assert!(matches!(
             evaluate("", "$(notdir $@)"),
@@ -1442,5 +1620,96 @@ mod tests {
             "x1 x2 y1 y2"
         );
         assert_eq!(evaluate("", "[$(foreach a,,body)]").unwrap(), "[]");
+    }
+
+    #[test]
+    fn remaining_aros_word_and_conditional_functions_match_make_semantics() {
+        let source = "LIST := alpha beta gamma\n\
+                      OTHER := 1 2\n\
+                      mapper = $(addprefix $(1)-,$(2))\n";
+        assert_eq!(
+            evaluate(
+                source,
+                "$(findstring et,$(LIST))|$(word 2,$(LIST))|\
+                 $(wordlist 2,9,$(LIST))|$(words $(LIST))|\
+                 $(firstword $(LIST))|$(lastword $(LIST))|\
+                 $(join $(LIST),$(OTHER))",
+            )
+            .unwrap(),
+            "et|beta|beta gamma|3|alpha|gamma|alpha1 beta2 gamma"
+        );
+        assert_eq!(
+            evaluate(source, "$(if ,bad,good) $(or ,first,second) $(and yes,ok)").unwrap(),
+            "good first ok"
+        );
+        assert_eq!(
+            evaluate(source, "$(call mapper,item,a b)").unwrap(),
+            "item-a item-b"
+        );
+        assert_eq!(
+            evaluate("RAW = literal\n", "$(value RAW)"),
+            Ok("literal".to_owned())
+        );
+    }
+
+    #[test]
+    fn pure_function_corpus_is_differentially_checked_against_gnu_make() {
+        let executable = ["gmake", "make"].into_iter().find(|candidate| {
+            Command::new(candidate)
+                .arg("--version")
+                .output()
+                .ok()
+                .is_some_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("GNU Make")
+                })
+        });
+        let Some(executable) = executable else {
+            return;
+        };
+
+        let source = "LIST := gamma alpha beta alpha\n\
+                      OTHER := 1 2\n\
+                      mapper = $(addsuffix -$(1),$(2))\n";
+        let expressions = [
+            "$(sort $(LIST))",
+            "$(patsubst %a,X%,$(LIST))",
+            "$(filter %a,$(LIST))",
+            "$(filter-out %a,$(LIST))",
+            "$(wordlist 2,7,$(LIST))",
+            "$(join $(LIST),$(OTHER))",
+            "$(if $(findstring beta,$(LIST)),yes,no)",
+            "$(or ,,$(firstword $(LIST)))",
+            "$(and one,two,$(lastword $(LIST)))",
+            "$(call mapper,tag,a b)",
+            "$(foreach item,a b,prefix-$(item))",
+        ];
+        let tree = TempTree::new();
+        for (index, expression) in expressions.iter().enumerate() {
+            let expected = evaluate(source, expression).unwrap();
+            let makefile = tree.0.join(format!("oracle-{index}.mk"));
+            fs::write(
+                &makefile,
+                format!("{source}RESULT := {expression}\nall:\n\t@printf '%s\\n' '$(RESULT)'\n"),
+            )
+            .unwrap();
+            let output = Command::new(executable)
+                .arg("--no-print-directory")
+                .arg("-f")
+                .arg(&makefile)
+                .current_dir(&tree.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "GNU Make oracle failed for {expression}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                expected,
+                String::from_utf8_lossy(&output.stdout).trim_end(),
+                "expression: {expression}"
+            );
+        }
     }
 }

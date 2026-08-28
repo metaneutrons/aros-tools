@@ -264,7 +264,15 @@ fn expand_immediate_locals(raw: &str, scope: &VarScope, depth: usize) -> String 
                 character.is_ascii_alphanumeric() || character == '_' || character == '-'
             }))
         .then_some(body);
-        if let Some(value) = simple_name.and_then(|name| scope.latest_raw(name)) {
+        // These are configured/built-in Make path variables. In particular,
+        // OBJDIR is $(GENDIR)/$(CURDIR), and CURDIR comes from GNU Make rather
+        // than an assignment in an mmakefile. A collector prelude may know the
+        // name while holding no physical current-directory value; freezing
+        // that provisional state would turn $(OBJDIR)/x into $(GENDIR)/x.
+        let local_value = simple_name
+            .filter(|name| !matches!(*name, "CURDIR" | "OBJDIR"))
+            .and_then(|name| scope.latest_raw(name));
+        if let Some(value) = local_value {
             output.push_str(&expand_immediate_locals(value, scope, depth - 1));
         } else {
             output.push('$');
