@@ -5,7 +5,7 @@ Small fail-closed RAII wrapper around macOS Disk Arbitration's
 buffered device path (`/dev/diskN`), never unmounts anything, and keeps the
 claim alive until the guard is dropped.
 
-The crate is an internal implementation detail of the `aros pi sd` workflow.
+The crate is an internal implementation detail of the `aros board sd` workflow.
 It must not be used as a substitute for the workflow's removable-device,
 identity, capacity, complete descendant mount-topology, and raw-device identity
 rechecks. The whole disk's own `VolumePath` absence is only an extra check, not

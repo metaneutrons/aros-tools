@@ -9,7 +9,7 @@ locked AROS cross-toolchain profile. For the Pi 4 debug CMake preset, set
 For USB-ECM, a profile must use a stable USB identity rather than a host network
 name: USB vendor ID, product ID, USB serial, and the expected Pi-side
 CDC-ECM MAC. macOS (`enX`) and Linux (`enx…` or another name) assign the host
-interface name dynamically. `aros pi scan` reports that current name together
+interface name dynamically. `aros board scan` reports that current name together
 with the USB descriptors, but scanning is read-only and never pairs a board by
 itself.
 
@@ -28,7 +28,7 @@ serial = "aros-rpi4-lab-01"
 expected_target_mac = "02:aa:00:00:00:01"
 ```
 
-`aros pi serve --board <local-name>` repeats the USB lookup and requires
+`aros board serve --board <local-name>` repeats the USB lookup and requires
 exactly one VID:PID+serial match. It verifies `host_address` is currently
 assigned to that matched interface before binding. The expected target MAC is
 checked at DHCP packet time: the service gives the one `target_address` lease
@@ -52,12 +52,12 @@ expected_target_mac = "02:aa:00:00:00:02"
 `serve` verifies that `server_address` is on exactly that named interface; it
 never guesses an RJ45 port. In both transport modes the CLI owns no host
 network configuration, has no `--bind` escape hatch, and rejects wildcard or
-wrong-interface addresses. Use `aros pi serve --board <name> --dry-run` to
+wrong-interface addresses. Use `aros board serve --board <name> --dry-run` to
 validate the complete plan before opening any sockets.
 
 ## SD boot-bundle boundary
 
-`aros pi sd image --board <name> --boot-bundle <dir> --output <new-dir>`
+`aros board sd image --board <name> --boot-bundle <dir> --output <new-dir>`
 requires a versioned external `boot-bundle.toml` whose board/model/transport
 and, for USB-ECM, complete identity match the selected profile. The Pi 4
 `uboot-usb-ecm` format additionally needs hash-pinned `config.txt`,
@@ -67,9 +67,9 @@ default; `--apply` produces a filesystem artifact, never a physical disk
 write. The U-Boot source, patch series and `arosboot` hand-off remain external
 inputs; their absence must stop image creation rather than be guessed.
 
-`aros pi sd scan --artifact <dir>` is the only way to obtain a candidate's
+`aros board sd scan --artifact <dir>` is the only way to obtain a candidate's
 current opaque `scan-id` and artifact-bound confirmation token. A later
-`aros pi sd write --board <name> --artifact <dir> --device <scan-id>` is only
+`aros board sd write --board <name> --artifact <dir> --device <scan-id>` is only
 a preview until that exact token is passed with `--confirm`. The actual writer
 revalidates the artifact and local board identity, re-scans the same whole,
 physical, removable, non-internal and writable disk with stable identity, and
@@ -85,7 +85,7 @@ SHA-256 readback; the raw descriptor closes before claim release. Physical
 unplug remains an I/O/readback error boundary rather than something the claim
 can prevent.
 
-For an already mounted card, `aros pi sd unmount` lists only mounted whole
+For an already mounted card, `aros board sd unmount` lists only mounted whole
 physical removable non-internal writable disks with complete descendant
 topology. `--device <scan-id>` is a preview; only the same opaque ID plus
 `--apply` can perform a fresh-revalidated unmount. Raw paths, mountpoints

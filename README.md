@@ -10,7 +10,8 @@ contracts and keep generated state outside authoritative upstream inputs.
 | Crate | Owns | Must not own |
 | --- | --- | --- |
 | `aros-common` | stable diagnostics, local logging, target/config parsing, SHA-256, ELF and toolchain contracts | command policy or component-specific workflows |
-| `aros-cli` | repository orchestration, host compiler and released cross-toolchain selection, builds, tests, Pi workflows | transpiler or collector implementation |
+| `aros-board` | local physical-board registry, hardware identity, deployment, network boot, and removable-media safety | CLI parsing or repository-wide build orchestration |
+| `aros-cli` | repository orchestration, host compiler and released cross-toolchain selection, builds, tests, board presentation | transpiler, collector, or hardware-engine implementation |
 | `aros-transpiler` | MetaMake parsing, capability modelling, dependency graph and transactional CMake publication | reference-verifier semantics or package-version policy |
 | `aros-verify` | independent historic MetaMake expansion and differential verification | transpiler implementation details |
 | `aros-collect` | two-pass AROS linking, set collection, ABI checks and atomic output publication | general build orchestration |
@@ -23,7 +24,8 @@ The dependency direction is deliberately one-way:
 
 ```text
 aros-common
-  ├── aros-cli ──process──> build tools
+  ├── aros-board
+  │     └── aros-cli ──process──> build tools
   ├── aros-transpiler
   ├── aros-verify          (independent reference semantics)
   ├── aros-collect

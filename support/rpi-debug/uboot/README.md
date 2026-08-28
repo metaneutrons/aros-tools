@@ -21,7 +21,7 @@ FAT boot partition
 from a pinned U-Boot revision plus a reviewed patch series.  The SD card is
 not rewritten for normal AROS development builds.
 
-The external input directory passed to `aros pi sd image --board <name>
+The external input directory passed to `aros board sd image --board <name>
 --boot-bundle <dir> --output <new-artifact-dir>` is versioned by
 `boot-bundle.toml`. Start with `boot-bundle.toml.in`, replace every
 board/USB identity value and every file checksum, and put the six regular
@@ -48,12 +48,12 @@ After `sd image --apply` has created an artifact, use this reviewable
 two-phase write sequence:
 
 ```text
-aros pi sd unmount
-aros pi sd unmount --device <scan-id>
-aros pi sd unmount --device <scan-id> --apply
-aros pi sd scan --artifact <artifact-dir>
-aros pi sd write --board <name> --artifact <artifact-dir> --device <scan-id>
-aros pi sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
+aros board sd unmount
+aros board sd unmount --device <scan-id>
+aros board sd unmount --device <scan-id> --apply
+aros board sd scan --artifact <artifact-dir>
+aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id>
+aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
 ```
 
 The three optional `unmount` forms list, preview, and then explicitly unmount
@@ -128,7 +128,7 @@ placeholders for the server, *bare* deployment-root filenames and verified
 load addresses, and names the required `arosboot` U-Boot command. It must not
 be converted to `boot.scr` until that command and its associated patch are
 available. The generated script must request only the bare filenames because
-`aros pi serve` exposes the atomically published board deployment as its TFTP
+`aros board serve` exposes the atomically published board deployment as its TFTP
 root, not the parent `tftp_root`.
 
 The template does not use Linux `booti`: the existing AROS Pi bootstrap is a

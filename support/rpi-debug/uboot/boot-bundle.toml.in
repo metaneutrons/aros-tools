@@ -2,7 +2,7 @@
 #
 # Copy this file into a new input directory as `boot-bundle.toml`. Every
 # `REPLACE_ME` and 64-zero SHA-256 value below must be replaced before
-# `aros pi sd image --board <name> --boot-bundle <dir> --output <new-dir>`
+# `aros board sd image --board <name> --boot-bundle <dir> --output <new-dir>`
 # validates it. Add `--apply` only to create the raw image artifact. All
 # `source` paths are relative to this directory and must be ordinary files,
 # never symlinks.

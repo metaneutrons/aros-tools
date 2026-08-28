@@ -2,8 +2,8 @@
 # name with local values. Board names and all USB identities below are local
 # lab data; they are never portable AROS target metadata.
 #
-# `usb_ecm.identity` is stable pairing data for `aros pi scan` and
-# `aros pi serve`. `serve` resolves it again on each run; it never trusts an
+# `usb_ecm.identity` is stable pairing data for `aros board scan` and
+# `aros board serve`. `serve` resolves it again on each run; it never trusts an
 # old dynamically assigned host-interface name.
 #
 # Board names are local labels.  They are not AROS targets and do not belong in
@@ -13,12 +13,12 @@ format_version = 1
 
 [boards.rpi4-native]
 model = "rpi4"
-target = "rpi4-aarch64-debug"
+preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
 transport = "native-tftp"
-artifact_directory = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
+artifact_dir = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
 # Required by the Pi 4 CMake boot-bundle target.  Obtain this only through the
-# explicitly pinned firmware workflow; it is not downloaded by `aros pi`.
+# explicitly pinned firmware workflow; it is not downloaded by `aros board`.
 dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
 # The current CMake core-link bridge consumes these three legacy-generated
 # AArch64 ET_REL KOBJs: kernel_resource.o, exec_library.o, task_resource.o.
@@ -31,7 +31,7 @@ debug_transport = "jtag"
 power_control = "manual"
 
 # The EEPROM network boot transport needs the Pi's integrated RJ45 Ethernet.
-# `interface` is deliberately explicit: `aros pi serve` never guesses a
+# `interface` is deliberately explicit: `aros board serve` never guesses a
 # physical Ethernet port. It verifies that server_address is currently on it.
 [boards.rpi4-native.network]
 interface = "REPLACE_ME"
@@ -43,10 +43,10 @@ expected_target_mac = "02:aa:00:00:00:02"
 
 [boards.rpi4-usb]
 model = "rpi4"
-target = "rpi4-aarch64-debug"
+preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
 transport = "uboot-usb-ecm"
-artifact_directory = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
+artifact_dir = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
 dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
 core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
 tftp_root = "/absolute/path/to/aros-tftp"
@@ -57,11 +57,11 @@ debug_transport = "jtag"
 power_control = "manual"
 
 # These are private USB-ECM lab addresses. Configure host_address on the
-# selected dynamic USB-ECM interface before invoking `aros pi serve`; the CLI
+# selected dynamic USB-ECM interface before invoking `aros board serve`; the CLI
 # intentionally never changes host network configuration itself.
 #
 # Do not persist `en7`, `enx…`, or another host interface name here. Those
-# names are assigned dynamically by macOS and Linux. Use `aros pi scan` to
+# names are assigned dynamically by macOS and Linux. Use `aros board scan` to
 # obtain the USB descriptor values, then pair this one physical Pi by all
 # fields in the nested identity table.
 [boards.rpi4-usb.usb_ecm]

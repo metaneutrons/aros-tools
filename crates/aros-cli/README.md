@@ -3,7 +3,7 @@
 `aros` is the user-facing orchestration boundary for an AROS-NG checkout. It
 discovers the repository, selects declarative target and toolchain state,
 builds checkout-local helpers, configures and builds AROS, validates boot
-results, and drives guarded Raspberry Pi workflows. It invokes the transpiler,
+results, and drives guarded physical-board workflows. It invokes the transpiler,
 collector, generators, and runners as independent processes rather than
 linking their implementations.
 
@@ -17,7 +17,7 @@ linking their implementations.
 | `toolchain` | install, list, verify, and locate released AROS cross-toolchains |
 | `build` / `clean` | configure and build a declared target profile |
 | `test` | run evidence-producing, non-interactive QEMU boot validation |
-| `pi` | validated board, network boot, serial, and removable-media workflows |
+| `board` | validated physical-board, network boot, serial, and removable-media workflows |
 | `golden` | capture or compare deterministic transpiler output |
 | `sync` | integrate upstream AROS and regenerate derived state |
 | `info` | report active compiler, toolchain lock, and configured targets |
@@ -66,7 +66,7 @@ hint, and optional deterministic context. The schema is
 | `AR0601` | CMake configuration |
 | `AR0602` | build execution |
 | `AR0701` | boot validation |
-| `AR0801` | Raspberry Pi operation |
+| `AR0801` | physical-board operation |
 | `AR0802` | removable-media safety |
 | `AR0901` | output publication, cleanup, deployment, or golden data |
 | `AR0999` | internal invariant |

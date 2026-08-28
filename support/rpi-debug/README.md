@@ -3,9 +3,9 @@
 This directory is the checked-in, machine-independent asset and contract part
 of the AROS Raspberry Pi bring-up workflow. It deliberately contains no
 downloaded firmware, host-network configuration, or device-specific serial
-paths. The executable behaviour lives in the repository's `aros pi` CLI.
+paths. The executable behaviour lives in the repository's `aros board` CLI.
 
-`aros pi` consumes the board-profile and artifact conventions in this
+`aros board` consumes the board-profile and artifact conventions in this
 directory.  The directory remains a reviewed provisioning reference, not a
 replacement for the normal AROS build: it deliberately does not download
 firmware, configure the host network, or touch a physical board.
@@ -58,7 +58,7 @@ It contains host paths, IP addresses, USB identities, serial-device names and
 debugger selection. Copy and adapt `boards.example.toml`; do not commit the
 result.
 
-`aros pi init --board <local-name>` prints an intentionally incomplete
+`aros board init --board <local-name>` prints an intentionally incomplete
 USB-ECM template without writing anything. Add `--apply` to create a *new*
 configuration file at the selected `--config` path (or the normal default).
 It creates parent directories when needed but refuses to overwrite or merge an
@@ -81,9 +81,9 @@ Mac TFTP server -- RJ45 --> Pi EEPROM firmware --> AROS boot bundle
 
 The published bundle contains the firmware-selected Pi 4 DTB, the raw AROS
 bootstrap image, the AROS BSP package and a manifest. CMake creates it under
-`build/rpi4-aarch64-debug/boot/raspi` by way of `rpi-artifacts`; `aros pi
+`build/rpi4-aarch64-debug/boot/raspi` by way of `rpi-artifacts`; `aros board
 deploy --board <name> --apply` atomically publishes a completed bundle into
-the configured `<tftp_root>/<tftp_prefix>` directory. `aros pi serve` exposes
+the configured `<tftp_root>/<tftp_prefix>` directory. `aros board serve` exposes
 only that verified, AROS-managed deployment directory—never its parent TFTP
 root and never the build directory directly.
 
@@ -95,8 +95,8 @@ Pi 4 artifact target deliberately requires a local `core_kobj_dir` containing
 the legacy-generated AArch64 `kernel_resource.o`, `exec_library.o` and
 `task_resource.o`. Generate them with the legacy Pi build's `make
 kernel-raspi-aarch64`; its directory is normally
-`<legacy-build>/bin/raspi-aarch64/gen/kobjs`. `aros pi doctor` validates them
-and `aros pi build` passes the directory explicitly to CMake. It must not
+`<legacy-build>/bin/raspi-aarch64/gen/kobjs`. `aros board doctor` validates them
+and `aros board build` passes the directory explicitly to CMake. It must not
 substitute the modern runtime relocatable module ELFs: doing so produces
 unresolved loader glue and is not a bootable core.
 
@@ -137,7 +137,7 @@ Pi-side CDC-ECM Ethernet function. The U-Boot gadget configuration must supply
 both the serial descriptor and the target MAC consistently. A device with no
 serial is visible for diagnosis, but must not be paired automatically.
 
-`aros pi scan` is the read-only discovery step. It finds CDC-ECM candidates and
+`aros board scan` is the read-only discovery step. It finds CDC-ECM candidates and
 prints their current interface name, USB VID:PID, USB serial when available,
 host-interface MAC, current IPv4 addresses and whether CDC-ECM was confirmed.
 It neither writes `boards.toml`, changes addresses, nor opens DHCP or TFTP
@@ -152,7 +152,7 @@ platforms:
 | macOS | USB device descriptors through IOKit/IORegistry, correlated with the registered USB network interface | BSD interface such as `en7` |
 | Linux | `/sys/class/net/<interface>/device` and its USB-device ancestors, with CDC-ECM class/driver validation | interface such as `enx…` |
 
-`aros pi serve --board <name>` repeats discovery at service start. For
+`aros board serve --board <name>` repeats discovery at service start. For
 `uboot-usb-ecm`, it accepts exactly one CDC-ECM match for USB VID, PID and
 serial, resolves that candidate's current interface, and verifies that
 `usb_ecm.host_address` is assigned to it. It then binds DHCP and TFTP only to
@@ -181,7 +181,7 @@ must supply `network.expected_target_mac`; `serve` verifies that
 `network.server_address` belongs to that named interface and applies the same
 one-MAC/one-lease restriction. The command does not configure either host
 interface; configure the private address first, then use
-`aros pi serve --board <name> --dry-run` to prove the full selection and
+`aros board serve --board <name> --dry-run` to prove the full selection and
 deployment plan without opening DHCP or TFTP sockets.
 
 `serve` is intentionally separate from `deploy`: deployment publishes a
@@ -192,15 +192,15 @@ finished bundle, while service startup is an explicit foreground lab action.
 Image creation, disk discovery and writing are deliberately separate:
 
 ```text
-aros pi sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir>
-aros pi sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir> --apply
-aros pi sd unmount
-aros pi sd unmount --device <scan-id>
-aros pi sd unmount --device <scan-id> --apply
-aros pi sd scan
-aros pi sd scan --artifact <artifact-dir>
-aros pi sd write --board <name> --artifact <artifact-dir> --device <scan-id>
-aros pi sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
+aros board sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir>
+aros board sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir> --apply
+aros board sd unmount
+aros board sd unmount --device <scan-id>
+aros board sd unmount --device <scan-id> --apply
+aros board sd scan
+aros board sd scan --artifact <artifact-dir>
+aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id>
+aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
 ```
 
 Without `--apply`, `sd image` is a read-only validation run: it checks the
@@ -219,7 +219,7 @@ directory; it never opens, selects or writes a physical disk.
 `uboot/boot-bundle.toml.in` records the exact format-1 fields, required roles
 and FAT destinations. Do not treat `sd image` as an U-Boot builder.
 
-`aros pi sd unmount` is a separate operation for preparing an already mounted
+`aros board sd unmount` is a separate operation for preparing an already mounted
 card. With no `--device` it performs a read-only scan and lists only mounted
 whole physical disks for which the operating system explicitly reports every
 required removable, non-internal, writable and stable-identity property. A
@@ -234,7 +234,7 @@ topmost mount's device identity, while macOS addresses the verified descendant
 device node. It never uses force/lazy unmount, a broad whole-disk command,
 eject, repartitioning or a shell command.
 
-`aros pi sd scan` is read-only. It lists only candidates that the platform
+`aros board sd scan` is read-only. It lists only candidates that the platform
 explicitly reports as whole, physical, removable, non-internal, writable and
 completely unmounted disks with stable identity; it never chooses one.
 Unknown or missing safety evidence excludes the disk. With `--artifact
@@ -243,7 +243,7 @@ prints a distinct confirmation token for each currently safe candidate. The
 token is bound to the artifact manifest hash, raw-image hash and size, the
 candidate's identity/fingerprint, and its capacity.
 
-`aros pi sd write` requires the opaque `scan-id` from that current scan.
+`aros board sd write` requires the opaque `scan-id` from that current scan.
 Raw `/dev/...` paths are rejected at argument parsing.
 Without `--confirm` it is a preview: it validates the selected board and
 artifact, shows the exact token, and writes nothing. `--dry-run` also prevents
@@ -287,11 +287,11 @@ instead package a verified direct-firmware Pi boot bundle.
 
 - Do not let tooling silently download or update Pi firmware or U-Boot.  The
   source revision and required file set are recorded in `firmware.lock.toml`.
-- Do not make `aros pi deploy` configure DHCP, TFTP or a power relay.  Those
+- Do not make `aros board deploy` configure DHCP, TFTP or a power relay.  Those
   are explicit lab-owner actions.
-- `aros pi scan`, `aros pi serve --dry-run`, `aros pi sd scan`, `aros pi sd
-  unmount` without `--apply`, `aros pi sd image` without `--apply`, and `aros
-  pi sd write` without `--confirm` are non-mutating. Starting `aros pi serve`,
+- `aros board scan`, `aros board serve --dry-run`, `aros board sd scan`, `aros board sd
+  unmount` without `--apply`, `aros board sd image` without `--apply`, and `aros
+  board sd write` without `--confirm` are non-mutating. Starting `aros board serve`,
   applying an unmount, or confirming an SD write are separate explicit
   lab-owner actions; each must fail closed against its identity, address,
   artifact and disk checks. Unmount authorization never authorizes a later
@@ -311,18 +311,18 @@ The CLI owns local orchestration; CMake owns build artifacts:
 
 ```text
 CMake              rpi-artifacts / debug ELF / maps / boot bundle
-aros pi init       prints, or with --apply creates, a new local board config
-aros pi scan       read-only macOS/Linux USB CDC-ECM candidate discovery
-aros pi doctor     validates local board configuration and prerequisites
-aros pi deploy     atomically publishes an already-built board deployment
-aros pi serve      explicit foreground restricted DHCP + read-only TFTP service
-aros pi sd image   validates, then with --apply creates, an SD image artifact
-aros pi sd unmount list/preview by default; explicitly unmount bound removable volumes
-aros pi sd scan    read-only safe removable-disk discovery and token display
-aros pi sd write   preview by default; token-gated physical write on Linux/macOS
-aros pi console    opens an external physical UART terminal
+aros board init       prints, or with --apply creates, a new local board config
+aros board scan       read-only macOS/Linux USB CDC-ECM candidate discovery
+aros board doctor     validates local board configuration and prerequisites
+aros board deploy     atomically publishes an already-built board deployment
+aros board serve      explicit foreground restricted DHCP + read-only TFTP service
+aros board sd image   validates, then with --apply creates, an SD image artifact
+aros board sd unmount list/preview by default; explicitly unmount bound removable volumes
+aros board sd scan    read-only safe removable-disk discovery and token display
+aros board sd write   preview by default; token-gated physical write on Linux/macOS
+aros board console    opens an external physical UART terminal
 ```
 
-Both transports must expose the same `aros pi deploy --board <name>` contract.
+Both transports must expose the same `aros board deploy --board <name>` contract.
 Only the backend changes.  This keeps a later Pi 5 implementation from being
 coupled to the Pi 4 USB-ECM experiment.

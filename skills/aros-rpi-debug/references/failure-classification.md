@@ -12,6 +12,6 @@ Use the UART capture and the deployed manifest to identify the earliest failed p
 Do not symbolize an FDT stop solely from a text marker: a bootstrap ELF/map becomes actionable only after a PC, LR, or exception address is available. If that requires a JTAG halt or register dump, explain that it changes board state and obtain authorization first.
 
 If a deployment may have been incomplete, compare the manifest hashes in the
-atomically published board deployment (the only directory `aros pi serve`
+atomically published board deployment (the only directory `aros board serve`
 exports) with the local build output before resetting the board. A reset, an
 SD rewrite, or a power cycle is a separate user-authorized action.

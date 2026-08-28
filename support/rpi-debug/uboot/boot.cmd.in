@@ -16,7 +16,7 @@ setenv aros_image_addr_r "@AROS_IMAGE_ADDRESS@"
 setenv aros_bsp_addr_r "@AROS_BSP_ADDRESS@"
 setenv aros_fdt_addr_r "@AROS_FDT_ADDRESS@"
 
-# Each name is a *bare filename*. `aros pi serve` exposes the already
+# Each name is a *bare filename*. `aros board serve` exposes the already
 # published board deployment as its TFTP root, not the parent `tftp_root`;
 # do not add a board prefix or a leading slash here.
 setenv aros_image "@AROS_IMAGE_FILENAME@"
