@@ -83,8 +83,9 @@ module-level documentation throughout `aros-cli`, keeps the largest test
 suites outside production modules, enforces `miette` as the CLI's sole error
 boundary, and prevents subprocesses from bypassing the shared execution and
 observability layers. Clippy additionally rejects undocumented public error
-paths and functions over 500 lines; the three ordered translation/serialization
-pipelines above that limit carry explicit, reasoned `expect` markers. The file
+paths and functions over Clippy's current 100-line `too_many_lines` threshold;
+the three ordered translation/serialization pipelines above that limit carry
+explicit, reasoned `expect` markers. The file
 cap is a regression limit, not a target size: cohesive modules should remain
 substantially smaller.
 
