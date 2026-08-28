@@ -1,4 +1,4 @@
-//! Read-only TFTP adapter for the opt-in Pi lab service.
+//! Read-only TFTP adapter for the opt-in physical-board service.
 //!
 //! This module deliberately accepts a concrete bind address and an already
 //! resolved interface from the caller. It never discovers an interface,
@@ -11,6 +11,11 @@ use tftp_rs::server::{self, ServerConfig, ServerEvent};
 use tokio::sync::{mpsc, watch};
 
 /// Start a read-only TFTP service for an already-built, local boot bundle.
+///
+/// # Errors
+///
+/// Returns an error when the artifact root or bind address is invalid, or the
+/// server cannot bind, serve, or shut down cleanly.
 pub async fn serve_read_only(
     bind_addr: SocketAddr,
     interface_name: &str,

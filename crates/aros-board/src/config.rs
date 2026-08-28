@@ -25,9 +25,7 @@ pub struct BoardsConfig {
 pub struct BoardConfig {
     /// Human-readable hardware identity, for example `rpi4` or `rpi5`.
     pub model: String,
-    /// `target` is accepted as the name used by the checked-in example.
-    /// Internally this is the CMake preset used by the shared build path.
-    #[serde(alias = "target")]
+    /// CMake preset used by the shared build path.
     pub preset: String,
     /// Locked cross-toolchain profile for this CMake preset. A board-specific
     /// debug preset can intentionally share the audited `rpi-aarch64` release.
@@ -37,7 +35,7 @@ pub struct BoardConfig {
     #[serde(default)]
     pub transport: Transport,
     /// Relative paths are resolved against the AROS-NG checkout.
-    #[serde(default, alias = "artifact_directory")]
+    #[serde(default)]
     pub artifact_dir: Option<PathBuf>,
     /// Local, pinned Raspberry Pi 4 device tree passed to CMake as
     /// `AROS_RPI4_DTB`. Relative paths are resolved against the checkout.
@@ -113,8 +111,8 @@ impl std::fmt::Display for DebugTransport {
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     /// Explicit local Ethernet interface for the native-RJ45 service path.
-    /// It is intentionally optional for backwards-compatible profiles, but
-    /// `aros pi serve` refuses to start without it.
+    /// Parsing permits its absence so non-native transports do not need a
+    /// dummy value; `aros board serve` requires it for native TFTP.
     #[serde(default)]
     pub interface: Option<String>,
     pub server_address: IpAddr,
@@ -123,7 +121,7 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub subnet_mask: Option<std::net::Ipv4Addr>,
     /// Pi-side Ethernet MAC allowed to receive the board's DHCP lease.
-    /// This is required by `aros pi serve` for the native-RJ45 path.
+    /// This is required by `aros board serve` for the native-RJ45 path.
     #[serde(default)]
     pub expected_target_mac: Option<String>,
 }
@@ -140,10 +138,6 @@ pub struct UsbEcmConfig {
     /// dynamic host interface name is deliberately not stored here.
     #[serde(default)]
     pub identity: Option<UsbEcmIdentity>,
-    /// Legacy display-only hint accepted for existing local profiles. New
-    /// profiles must use `identity` rather than persisting an `enN` name.
-    #[serde(default)]
-    pub mac_interface_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -163,6 +157,8 @@ pub struct Board {
 }
 
 impl Board {
+    /// Resolve the board's build artifact directory against the checkout.
+    #[must_use]
     pub fn artifact_dir(&self, repo_root: &Path) -> PathBuf {
         match &self.config.artifact_dir {
             Some(path) if path.is_absolute() => path.clone(),
@@ -174,6 +170,12 @@ impl Board {
         }
     }
 
+    /// Resolve and validate the Raspberry Pi 4 device-tree input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an RPi 4 profile has no readable, regular,
+    /// flattened-device-tree input.
     pub fn rpi4_dtb_path(
         &self,
         repo_root: &Path,
@@ -216,6 +218,12 @@ impl Board {
         Ok(Some(canonical_path))
     }
 
+    /// Resolve and validate the Raspberry Pi 4 legacy core-object directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an RPi 4 profile has no safe directory containing
+    /// the complete expected relocatable-object set.
     pub fn rpi4_core_kobj_dir(
         &self,
         repo_root: &Path,
@@ -264,6 +272,11 @@ impl Board {
         Ok(Some(canonical_path))
     }
 
+    /// Return the configured absolute TFTP root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the profile has no safe absolute TFTP root.
     pub fn tftp_root(&self) -> Result<&Path> {
         let root = self.config.tftp_root.as_deref().ok_or_else(|| {
             miette::miette!(
@@ -282,11 +295,21 @@ impl Board {
         Ok(root)
     }
 
+    /// Resolve the board-specific deployment directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the TFTP root or prefix is missing or unsafe.
     pub fn deployment_dir(&self) -> Result<PathBuf> {
         let prefix = self.tftp_prefix()?;
         Ok(self.tftp_root()?.join(prefix))
     }
 
+    /// Return the validated relative prefix below the TFTP root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absolute or traversing prefix.
     pub fn tftp_prefix(&self) -> Result<PathBuf> {
         let prefix = self
             .config
@@ -297,6 +320,11 @@ impl Board {
         Ok(prefix)
     }
 
+    /// Return the configured absolute serial device path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no absolute serial device is configured.
     pub fn serial_device(&self) -> Result<&Path> {
         let device = self.config.serial_device.as_deref().ok_or_else(|| {
             miette::miette!(
@@ -315,6 +343,12 @@ impl Board {
         Ok(device)
     }
 
+    /// Validate the complete local board profile without touching hardware.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported versions, unsafe paths, incomplete
+    /// identities, invalid addresses, or inconsistent build selectors.
     pub fn validate(&self) -> Result<()> {
         validate_board_name(&self.name)?;
         if self.config.model.trim().is_empty() {
@@ -323,8 +357,8 @@ impl Board {
         if self.config.serial_baud == 0 {
             miette::bail!("Board '{}' has serial_baud = 0.", self.name);
         }
-        crate::build::validate_preset(&self.config.preset)?;
-        crate::build::validate_preset(&self.config.toolchain_preset)?;
+        crate::validate_profile_name(&self.config.preset, "CMake preset")?;
+        crate::validate_profile_name(&self.config.toolchain_preset, "toolchain preset")?;
         if self.config.build_target.trim().is_empty() {
             miette::bail!("Board '{}' has an empty build_target.", self.name);
         }
@@ -373,6 +407,12 @@ impl Board {
     }
 }
 
+/// Load one named physical board from the local registry.
+///
+/// # Errors
+///
+/// Returns an error when the registry cannot be read or parsed, the board is
+/// absent, or its profile fails validation.
 pub fn load_board(config_override: Option<&Path>, board_name: &str) -> Result<Board> {
     validate_board_name(board_name)?;
     let config_path = config_override.map_or_else(default_config_path, Path::to_path_buf);
@@ -417,28 +457,60 @@ pub fn load_board(config_override: Option<&Path>, board_name: &str) -> Result<Bo
     Ok(board)
 }
 
-/// Print or explicitly create a new, intentionally incomplete USB-ECM board
-/// profile.  It never merges into an existing TOML file: preserving a user's
-/// comments and local choices is safer than a lossy rewrite.
-pub fn initialize_template(
-    config_override: Option<&Path>,
-    board_name: &str,
-    apply: bool,
-) -> Result<()> {
+/// Prepared, intentionally incomplete local board-registry template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardTemplate {
+    path: PathBuf,
+    board_name: String,
+    contents: String,
+}
+
+impl BoardTemplate {
+    /// Destination selected for the local registry.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Local board name embedded in the template.
+    #[must_use]
+    pub fn board_name(&self) -> &str {
+        &self.board_name
+    }
+
+    /// Complete TOML document that will be created.
+    #[must_use]
+    pub fn contents(&self) -> &str {
+        &self.contents
+    }
+}
+
+/// Prepare an intentionally incomplete USB-ECM board profile without writing.
+///
+/// # Errors
+///
+/// Returns an error for an invalid board name or destination.
+pub fn prepare_template(config_override: Option<&Path>, board_name: &str) -> Result<BoardTemplate> {
     validate_board_name(board_name)?;
     let path = config_override.map_or_else(default_config_path, Path::to_path_buf);
-    let template = board_template(board_name);
-
-    println!("🧭 AROS Pi board profile template");
-    println!("  • File:  {}", path.display());
-    println!("  • Board: {board_name}");
-    if !apply {
-        println!("\n{template}");
-        println!(
-            "Dry run: no file was created. Review the values, then rerun with `aros pi init --board {board_name} --apply`."
-        );
-        return Ok(());
+    if path.as_os_str().is_empty() || path.file_name().is_none() {
+        miette::bail!("Board configuration destination must name a file.");
     }
+    Ok(BoardTemplate {
+        path,
+        board_name: board_name.to_string(),
+        contents: board_template(board_name),
+    })
+}
+
+/// Create a prepared registry without merging or replacing any existing file.
+///
+/// # Errors
+///
+/// Returns an error when the registry already exists or its parent directory,
+/// atomic file creation, write, or synchronization fails.
+pub fn create_template(template: &BoardTemplate) -> Result<()> {
+    let path = template.path();
 
     if path.exists() {
         miette::bail!(
@@ -462,29 +534,26 @@ pub fn initialize_template(
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
+        .open(path)
         .map_err(|error| {
             miette::miette!(
                 "Could not create board configuration '{}': {error}",
                 path.display()
             )
         })?;
-    file.write_all(template.as_bytes()).map_err(|error| {
-        miette::miette!(
-            "Could not write board configuration '{}': {error}",
-            path.display()
-        )
-    })?;
+    file.write_all(template.contents().as_bytes())
+        .map_err(|error| {
+            miette::miette!(
+                "Could not write board configuration '{}': {error}",
+                path.display()
+            )
+        })?;
     file.sync_all().map_err(|error| {
         miette::miette!(
             "Could not persist board configuration '{}': {error}",
             path.display()
         )
     })?;
-    println!(
-        "✅ Created '{}'. Replace every REPLACE_ME value before serving a board.",
-        path.display()
-    );
     Ok(())
 }
 
@@ -517,21 +586,21 @@ pub fn default_config_path_from(
 
 fn board_template(board_name: &str) -> String {
     format!(
-        r#"# Local AROS Pi lab profile. This file contains host-specific data;
+        r#"# Local AROS board profile. This file contains host-specific data;
 # do not commit it to AROS-NG.
 #
-# First: connect the Pi's U-Boot USB-ECM gadget, run `aros pi scan`, then
+# First: connect the Pi's U-Boot USB-ECM gadget, run `aros board scan`, then
 # replace the USB descriptor values and Pi-side gadget MAC below.
 
 format_version = 1
 
 [boards.{board_name}]
 model = "rpi4"
-target = "rpi4-aarch64-debug"
+preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
 build_target = "rpi-artifacts"
 transport = "uboot-usb-ecm"
-artifact_directory = "build/rpi4-aarch64-debug/boot/raspi"
+artifact_dir = "build/rpi4-aarch64-debug/boot/raspi"
 dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
 core_kobj_dir = "/REPLACE_ME/legacy-build/bin/raspi-aarch64/gen/kobjs"
 tftp_root = "/REPLACE_ME/aros-tftp"
@@ -543,13 +612,13 @@ power_control = "manual"
 
 [boards.{board_name}.usb_ecm]
 # Use private lab addresses that are already configured on the selected USB
-# interface. `aros pi serve` refuses wildcard or wrong-interface addresses.
+# interface. `aros board serve` refuses wildcard or wrong-interface addresses.
 host_address = "192.168.77.1"
 target_address = "192.168.77.2"
 subnet_mask = "255.255.255.0"
 
 [boards.{board_name}.usb_ecm.identity]
-# Stable USB descriptor identity from `aros pi scan`.
+# Stable USB descriptor identity from `aros board scan`.
 vendor_id = 0xffff # REPLACE_ME
 product_id = 0xffff # REPLACE_ME
 serial = "REPLACE_ME"
@@ -623,6 +692,8 @@ fn validate_usb_ecm_identity(identity: &UsbEcmIdentity) -> Result<()> {
     Ok(())
 }
 
+/// Parse one unicast, non-zero MAC address.
+#[must_use]
 pub fn parse_unicast_mac(value: &str) -> Option<[u8; 6]> {
     let pieces = value.split(':').collect::<Vec<_>>();
     if pieces.len() != 6 {
@@ -696,7 +767,9 @@ fn validate_rpi4_dtb(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_config_path_from, initialize_template, load_board, Transport};
+    use super::{
+        create_template, default_config_path_from, load_board, prepare_template, Transport,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -707,7 +780,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "format_version = 1\n\n[boards.rpi4]\nmodel = \"rpi4\"\ntarget = \"rpi-aarch64\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\nartifact_directory = \"build/rpi-aarch64/boot/raspi\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
+                "format_version = 1\n\n[boards.rpi4]\nmodel = \"rpi4\"\npreset = \"rpi-aarch64\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\nartifact_dir = \"build/rpi-aarch64/boot/raspi\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
                 root.display()
             ),
         )
@@ -756,13 +829,13 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let path = temporary.path().join("nested/boards.toml");
 
-        initialize_template(Some(&path), "rpi4-usb", false).expect("dry run");
+        let template = prepare_template(Some(&path), "rpi4-usb").expect("template");
         assert!(!path.exists());
 
-        initialize_template(Some(&path), "rpi4-usb", true).expect("created template");
+        create_template(&template).expect("created template");
         let board = load_board(Some(&path), "rpi4-usb").expect("template parses");
         assert_eq!(board.config.transport, Transport::UbootUsbEcm);
-        assert!(initialize_template(Some(&path), "rpi4-usb", true).is_err());
+        assert!(create_template(&template).is_err());
     }
 
     #[test]
@@ -785,7 +858,7 @@ mod tests {
         let config = root.join("boards.toml");
         std::fs::write(
             &config,
-            "[boards.rpi4]\nmodel = \"rpi4\"\ntarget = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
+            "[boards.rpi4]\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
         )
         .expect("configuration");
 

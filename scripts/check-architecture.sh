@@ -25,7 +25,7 @@ for source in graph generator copy_includes parser; do
     fi
 done
 
-for source in crates/aros-cli/src/*.rs crates/aros-cli/src/pi/*.rs; do
+for source in crates/aros-board/src/*.rs crates/aros-cli/src/*.rs crates/aros-cli/src/board/*.rs; do
     case "$source" in
         *_tests.rs) continue ;;
     esac
@@ -48,7 +48,7 @@ if [ -n "$direct_output" ]; then
     failed=1
 fi
 
-for component in aros-ahi-runner aros-collect aros-verify; do
+for component in aros-ahi-runner aros-board aros-collect aros-verify; do
     direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' "crates/$component/src" || true)
     if [ -n "$direct_process" ]; then
         echo "$direct_process" >&2
@@ -56,5 +56,16 @@ for component in aros-ahi-runner aros-collect aros-verify; do
         failed=1
     fi
 done
+
+if grep -R -n --include='*.rs' --include='*.md' --include='*.toml' 'aros pi' \
+    crates scripts README.md; then
+    echo "the unreleased CLI has no legacy 'aros pi' command or documentation" >&2
+    failed=1
+fi
+
+if grep -R -n --include='*.rs' -E 'PiCommand|Commands::Pi|mod pi|crate::pi' crates/aros-cli; then
+    echo "the CLI board surface must not retain legacy Pi command aliases" >&2
+    failed=1
+fi
 
 exit "$failed"

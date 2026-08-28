@@ -1,46 +1,38 @@
-//! Raspberry Pi build, deployment, service, console, and SD-card workflows.
+//! CLI presentation and orchestration for physical-board workflows.
 
-pub mod config;
 pub mod console;
-pub mod deploy;
-pub mod dhcp;
-mod disk_inventory;
 pub mod doctor;
-mod scan;
-#[cfg(target_os = "linux")]
-mod scan_linux;
-#[cfg(target_os = "macos")]
-mod scan_macos;
-pub mod sd;
-pub mod sd_disk;
-mod sd_manifest;
-pub mod sd_unmount;
-pub mod serve;
-pub mod tftp;
+pub use aros_board::{config, deploy, scan, sd, sd_disk, sd_unmount};
 
 use crate::build::{self, BuildOptions};
 use config::{Board, Transport};
 use console::ConsoleProgram;
 use miette::Result;
-use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
-/// A USB CDC-ECM network function discovered on the local host.
-///
-/// The current BSD/Linux interface name is deliberately reported but not used
-/// as the stable identity.  A later board pairing step matches the USB
-/// descriptor identity and resolves the ephemeral interface name again.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UsbEcmAdapter {
-    pub interface: String,
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub serial: Option<String>,
-    pub manufacturer: Option<String>,
-    pub product: Option<String>,
-    pub interface_mac: Option<String>,
-    pub ipv4_addresses: Vec<Ipv4Addr>,
-    pub cdc_ecm: bool,
+pub fn initialize_template(
+    config_override: Option<&Path>,
+    board_name: &str,
+    apply: bool,
+) -> Result<()> {
+    let template = config::prepare_template(config_override, board_name)?;
+    println!("🧭 AROS board profile template");
+    println!("  • File:  {}", template.path().display());
+    println!("  • Board: {}", template.board_name());
+    if !apply {
+        println!("\n{}", template.contents());
+        println!(
+            "Dry run: no file was created. Review the values, then rerun with `aros board init --board {board_name} --apply`."
+        );
+        return Ok(());
+    }
+
+    config::create_template(&template)?;
+    println!(
+        "✅ Created '{}'. Replace every REPLACE_ME value before serving a board.",
+        template.path().display()
+    );
+    Ok(())
 }
 
 /// Convert a selected local board profile into the immutable identity contract
@@ -85,7 +77,7 @@ pub fn create_sd_image(
 ) -> Result<()> {
     let expectation = sd_bundle_expectation(board)?;
     let bundle = sd::validate_boot_bundle(boot_bundle, &expectation)?;
-    println!("💾 AROS Pi SD image plan");
+    println!("💾 AROS board SD image plan");
     println!(
         "  • Board:      {} ({})",
         board.name, board.config.transport
@@ -132,7 +124,7 @@ pub fn scan_sd_disks(artifact_dir: Option<&Path>) -> Result<()> {
         .transpose()?;
     let candidates = sd_disk::scan()?;
 
-    println!("💾 AROS Pi safe SD-card scan");
+    println!("💾 AROS board safe SD-card scan");
     if let Some(artifact) = &artifact {
         println!("  • Artifact:   {}", artifact.artifact_dir().display());
         println!("  • Image:      {}", artifact.image_path().display());
@@ -168,7 +160,7 @@ pub fn scan_sd_disks(artifact_dir: Option<&Path>) -> Result<()> {
 pub fn unmount_sd_disk(selected_scan_id: Option<&str>, apply: bool, dry_run: bool) -> Result<()> {
     let candidates = sd_unmount::scan()?;
 
-    println!("💾 AROS Pi safe SD-card unmount");
+    println!("💾 AROS board safe SD-card unmount");
     let Some(selected_scan_id) = selected_scan_id else {
         if candidates.is_empty() {
             println!("  No mounted removable whole-disk target was found.");
@@ -195,7 +187,7 @@ pub fn unmount_sd_disk(selected_scan_id: Option<&str>, apply: bool, dry_run: boo
         [candidate] => *candidate,
         [] => {
             miette::bail!(
-                "No currently mounted removable whole disk has scan ID '{}'. Re-run `aros pi sd unmount`; nothing was unmounted.",
+                "No currently mounted removable whole disk has scan ID '{}'. Re-run `aros board sd unmount`; nothing was unmounted.",
                 selected_scan_id
             );
         }
@@ -254,7 +246,7 @@ pub fn write_sd_image(
         [candidate] => *candidate,
         [] => {
             miette::bail!(
-                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros pi sd scan`; no disk was opened.",
+                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros board sd scan`; no disk was opened.",
                 selected_scan_id
             );
         }
@@ -267,7 +259,7 @@ pub fn write_sd_image(
     };
     let expected_token = sd_disk::confirmation_token(&artifact, candidate);
 
-    println!("💾 AROS Pi SD-card write plan");
+    println!("💾 AROS board SD-card write plan");
     println!(
         "  • Board:      {} ({})",
         board.name, board.config.transport
@@ -312,11 +304,83 @@ pub fn write_sd_image(
 
 /// Find USB CDC-ECM adapters without changing any network configuration.
 pub fn scan() -> Result<()> {
-    scan::print()
+    let adapters = scan::adapters()?;
+    if adapters.is_empty() {
+        println!("No USB CDC-ECM adapters found.");
+        println!("Connect and boot the board's USB-ECM profile, then run `aros board scan` again.");
+        return Ok(());
+    }
+    print!("{}", scan::format_adapters(&adapters));
+    Ok(())
+}
+
+struct CliEventSink;
+
+impl aros_board::EventSink for CliEventSink {
+    fn event(
+        &self,
+        level: aros_common::LogLevel,
+        event: &str,
+        message: &str,
+        context: &aros_common::DiagnosticContext,
+    ) -> Result<()> {
+        crate::observability::log_event(level, event, message, context)?;
+        if event.starts_with("board.tftp.") || event == "board.dhcp.response_failed" {
+            println!(
+                "  {}: {message}",
+                context.tool.as_deref().unwrap_or("board")
+            );
+        }
+        Ok(())
+    }
+}
+
+pub async fn serve(board: &Board, dry_run: bool) -> Result<()> {
+    let plan = aros_board::serve::resolve(board)?;
+    println!("🧭 AROS board service plan");
+    println!("  • Board:     {} ({})", plan.board_name, plan.transport);
+    println!("  • Interface: {}", plan.interface);
+    println!(
+        "  • Address:   {} / {}",
+        plan.server_address, plan.subnet_mask
+    );
+    println!(
+        "  • Board lease: {} for {}",
+        plan.target_address,
+        format_mac(plan.expected_target_mac)
+    );
+    println!("  • TFTP root: {}", plan.tftp_root.display());
+    if dry_run {
+        println!("  Dry run: no DHCP or TFTP socket was opened.");
+        return Ok(());
+    }
+
+    println!("\n▶ Starting restricted board service. Press Ctrl-C to stop it.");
+    println!(
+        "  DHCP: {}:67 → {} ({})",
+        plan.server_address,
+        plan.target_address,
+        format_mac(plan.expected_target_mac)
+    );
+    println!(
+        "  TFTP: {}:69 (root {})",
+        plan.server_address,
+        plan.tftp_root.display()
+    );
+    let result = aros_board::serve::run(&plan, &CliEventSink).await;
+    println!("\nStopped board service.");
+    result
+}
+
+fn format_mac(mac: [u8; 6]) -> String {
+    mac.iter()
+        .map(|octet| format!("{octet:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 pub fn doctor(board: &Board, repo_root: &Path) -> Result<()> {
-    println!("🩺 Checking AROS Pi board profile '{}'...", board.name);
+    println!("🩺 Checking AROS board profile '{}'...", board.name);
     let report = doctor::inspect(board, repo_root);
     report.print();
     if report.has_failures() {
@@ -336,7 +400,7 @@ pub async fn build(
     core_kobj_override: Option<&Path>,
 ) -> Result<()> {
     println!(
-        "🧭 Building Pi board '{}' ({}, transport {})...",
+        "🧭 Building board '{}' ({}, transport {})...",
         board.name, board.config.model, board.config.transport
     );
     if let Some(dtb_path) = board.rpi4_dtb_path(repo_root, dtb_override)? {
@@ -361,8 +425,25 @@ pub fn deploy(
     apply: bool,
 ) -> Result<()> {
     let plan = deploy::DeploymentPlan::create(board, repo_root, artifact_override)?;
-    deploy::print_plan(&plan, apply);
+    let mode = if apply { "APPLY" } else { "DRY RUN" };
+    println!("📦 AROS board deployment ({mode})");
+    println!("  • Board:       {}", plan.board_name);
+    println!("  • Source:      {}", plan.source_dir.display());
+    println!("  • Destination: {}", plan.destination_dir.display());
+    println!(
+        "  • Files:       {} ({})",
+        plan.files.len(),
+        format_bytes(plan.total_bytes())
+    );
+    for file in &plan.files {
+        println!(
+            "    - {} ({})",
+            file.relative_path.display(),
+            format_bytes(file.bytes)
+        );
+    }
     if !apply {
+        println!("  No files were changed. Pass --apply to publish this bundle.");
         return Ok(());
     }
 
@@ -373,6 +454,18 @@ pub fn deploy(
         plan.destination_dir.display()
     );
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * KIB;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 pub fn console(

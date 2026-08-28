@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const DEPLOY_MARKER: &str = ".aros-pi-deploy";
-const DEPLOY_MARKER_CONTENT: &str = "AROS PI deployment directory\n";
+const DEPLOY_MARKER: &str = ".aros-board-deploy";
+const DEPLOY_MARKER_CONTENT: &str = "AROS board deployment directory\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployFile {
@@ -25,6 +25,12 @@ pub struct DeploymentPlan {
 }
 
 impl DeploymentPlan {
+    /// Validate and inventory one board deployment before publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe paths, a missing artifact, invalid files,
+    /// or a destination outside the configured TFTP root.
     pub fn create(
         board: &Board,
         repo_root: &Path,
@@ -65,32 +71,15 @@ impl DeploymentPlan {
     }
 }
 
-pub fn print_plan(plan: &DeploymentPlan, apply: bool) {
-    let mode = if apply { "APPLY" } else { "DRY RUN" };
-    println!("📦 AROS Pi deployment ({mode})");
-    println!("  • Board:       {}", plan.board_name);
-    println!("  • Source:      {}", plan.source_dir.display());
-    println!("  • Destination: {}", plan.destination_dir.display());
-    println!(
-        "  • Files:       {} ({})",
-        plan.files.len(),
-        format_bytes(plan.total_bytes())
-    );
-    for file in &plan.files {
-        println!(
-            "    - {} ({})",
-            file.relative_path.display(),
-            format_bytes(file.bytes)
-        );
-    }
-    if !apply {
-        println!("  No files were changed. Pass --apply to publish this bundle.");
-    }
-}
-
-/// Publishes a fully staged bundle to an explicitly configured local TFTP
-/// directory. The existing destination is replaced only when it carries our
-/// marker, preventing a typo from clobbering an unrelated TFTP tree.
+/// Publish a fully staged bundle to its configured local TFTP directory.
+///
+/// An existing destination is replaced only when it carries our marker,
+/// preventing a typo from clobbering an unrelated TFTP tree.
+///
+/// # Errors
+///
+/// Returns an error when staging, validation, synchronization, or atomic
+/// publication fails.
 pub fn publish(plan: &DeploymentPlan) -> Result<()> {
     let parent = plan.destination_dir.parent().ok_or_else(|| {
         miette::miette!(
@@ -113,7 +102,7 @@ pub fn publish(plan: &DeploymentPlan) -> Result<()> {
             miette::miette!("Deployment destination has no final path component.")
         })?);
 
-    let stage = create_unique_directory(&parent, ".aros-pi-stage")?;
+    let stage = create_unique_directory(&parent, ".aros-board-stage")?;
     let publish_result = stage_and_publish(plan, &stage, &destination);
     if publish_result.is_err() && stage.exists() {
         let _ = fs::remove_dir_all(&stage);
@@ -355,22 +344,10 @@ fn create_unique_path_with_attempt(parent: &Path, prefix: &str, attempt: u16) ->
     ))
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * KIB;
-    if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{publish, DeploymentPlan};
-    use crate::pi::config::{Board, BoardConfig, Transport};
+    use crate::config::{Board, BoardConfig, Transport};
     use std::path::Path;
 
     fn board(name: &str, tftp_root: &Path) -> Board {

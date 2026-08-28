@@ -18,7 +18,7 @@ const SYS_CLASS_NET: &str = "/sys/class/net";
 /// USB and link-layer identity needed to select an adapter, but does not offer
 /// a portable interface-to-IPv4 mapping. Address validation belongs to the
 /// service startup path, where it can fail closed for the selected interface.
-pub(super) fn scan() -> Result<Vec<UsbEcmAdapter>> {
+pub fn scan() -> Result<Vec<UsbEcmAdapter>> {
     scan_root(Path::new(SYS_CLASS_NET))
 }
 

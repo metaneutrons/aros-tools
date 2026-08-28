@@ -1,4 +1,4 @@
-//! Fail-closed service planning for the local Pi lab.
+//! Fail-closed service planning for a local physical-board lab.
 //!
 //! The plan is deliberately resolved before any DHCP or TFTP socket is
 //! opened.  In USB-ECM mode it is rooted in a full USB descriptor identity,
@@ -10,7 +10,8 @@
 use super::config::{parse_unicast_mac, Board, Transport};
 use super::dhcp::{self, DhcpConfig};
 use super::tftp;
-use super::UsbEcmAdapter;
+use super::{EventSink, UsbEcmAdapter};
+use aros_common::{DiagnosticContext, LogLevel};
 use if_addrs::{get_if_addrs, IfAddr};
 use miette::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -53,22 +54,23 @@ pub(super) fn resolve_from_adapters(
 
 /// Resolve a plan against the real host state.  This is read-only; service
 /// startup remains a separate operation.
+///
+/// # Errors
+///
+/// Returns an error when host adapter discovery fails or no adapter safely
+/// matches the selected board profile.
 pub fn resolve(board: &Board) -> Result<ServicePlan> {
     let adapters = super::scan::adapters()?;
     resolve_from_adapters(board, &adapters)
 }
 
-/// Resolve and, unless `dry_run` is requested, run a board's narrow DHCP and
-/// TFTP service until Ctrl-C.  The caller never supplies a bind address: it
-/// comes solely from the board profile after identity verification.
-pub async fn run(board: &Board, dry_run: bool) -> Result<()> {
-    let plan = resolve(board)?;
-    print_plan(&plan);
-    if dry_run {
-        println!("  Dry run: no DHCP or TFTP socket was opened.");
-        return Ok(());
-    }
-
+/// Run an already resolved board DHCP/TFTP plan until Ctrl-C.
+///
+/// # Errors
+///
+/// Returns an error when configuration, socket startup, serving, event
+/// reporting, shutdown signalling, or service-task completion fails.
+pub async fn run(plan: &ServicePlan, events: &dyn EventSink) -> Result<()> {
     let dhcp_config = DhcpConfig {
         server_address: plan.server_address,
         target_address: plan.target_address,
@@ -82,18 +84,7 @@ pub async fn run(board: &Board, dry_run: bool) -> Result<()> {
 
     let tftp_bind = SocketAddr::V4(SocketAddrV4::new(plan.server_address, TFTP_PORT));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
-    let event_task = tokio::spawn(print_tftp_events(event_rx));
-
-    println!("\n▶ Starting restricted Pi lab service. Press Ctrl-C to stop it.");
-    println!(
-        "  DHCP: {}:67 → {} ({})",
-        plan.server_address,
-        plan.target_address,
-        format_mac(plan.expected_target_mac)
-    );
-    println!("  TFTP: {} (root {})", tftp_bind, plan.tftp_root.display());
-
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let mut tftp_task = Box::pin(tftp::serve_read_only(
         tftp_bind,
         &plan.interface,
@@ -105,18 +96,22 @@ pub async fn run(board: &Board, dry_run: bool) -> Result<()> {
         dhcp_config,
         &plan.interface,
         shutdown_rx,
+        events,
     ));
 
-    let result = tokio::select! {
-        signal = tokio::signal::ctrl_c() => match signal {
-            Ok(()) => {
-                println!("\nStopping Pi lab service…");
-                Ok(())
-            }
-            Err(error) => Err(miette::miette!("Could not wait for Ctrl-C: {error}")),
-        },
-        result = &mut tftp_task => result,
-        result = &mut dhcp_task => result.map_err(|error| miette::miette!("DHCP service failed: {error}")),
+    let result = loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => break match signal {
+                Ok(()) => Ok(()),
+                Err(error) => Err(miette::miette!("Could not wait for Ctrl-C: {error}")),
+            },
+            result = &mut tftp_task => break result,
+            result = &mut dhcp_task => break result.map_err(|error| miette::miette!("DHCP service failed: {error}")),
+            event = event_rx.recv() => match event {
+                Some(event) => report_tftp_event(events, event)?,
+                None => break Err(miette::miette!("TFTP event channel closed while the service was still running.")),
+            },
+        }
     };
 
     // The selected future may already have completed, so do not poll it a
@@ -125,53 +120,54 @@ pub async fn run(board: &Board, dry_run: bool) -> Result<()> {
     let _ = shutdown_tx.send(true);
     drop(tftp_task);
     drop(dhcp_task);
-    event_task.abort();
-
     result
 }
 
-fn print_plan(plan: &ServicePlan) {
-    println!("🧭 AROS Pi lab service plan");
-    println!("  • Board:     {} ({})", plan.board_name, plan.transport);
-    println!("  • Interface: {}", plan.interface);
-    println!(
-        "  • Address:   {} / {}",
-        plan.server_address, plan.subnet_mask
-    );
-    println!(
-        "  • Pi lease:  {} for {}",
-        plan.target_address,
-        format_mac(plan.expected_target_mac)
-    );
-    println!("  • TFTP root: {}", plan.tftp_root.display());
-}
-
-async fn print_tftp_events(mut events: mpsc::UnboundedReceiver<ServerEvent>) {
-    while let Some(event) = events.recv().await {
-        match event {
-            ServerEvent::Log(message) => println!("  TFTP: {message}"),
-            ServerEvent::TransferStarted(transfer) => println!(
-                "  TFTP: {:?} '{}' for {}",
+fn report_tftp_event(events: &dyn EventSink, event: ServerEvent) -> Result<()> {
+    let (level, name, message, target) = match event {
+        ServerEvent::Log(message) => (LogLevel::Debug, "board.tftp.log", message, None),
+        ServerEvent::TransferStarted(transfer) => (
+            LogLevel::Info,
+            "board.tftp.transfer_started",
+            format!(
+                "{:?} '{}' for {}",
                 transfer.kind, transfer.filename, transfer.peer
             ),
-            ServerEvent::TransferProgress {
-                id,
-                transferred,
-                total_bytes,
-            } => println!("  TFTP: transfer {id}: {transferred}/{total_bytes} bytes"),
-            ServerEvent::TransferComplete(id) => println!("  TFTP: transfer {id} complete"),
-            ServerEvent::TransferFailed { id, error } => {
-                println!("  TFTP: transfer {id} failed: {error}");
-            }
-        }
-    }
-}
-
-fn format_mac(mac: [u8; 6]) -> String {
-    mac.iter()
-        .map(|octet| format!("{octet:02x}"))
-        .collect::<Vec<_>>()
-        .join(":")
+            Some(transfer.peer.to_string()),
+        ),
+        ServerEvent::TransferProgress {
+            id,
+            transferred,
+            total_bytes,
+        } => (
+            LogLevel::Debug,
+            "board.tftp.transfer_progress",
+            format!("transfer {id}: {transferred}/{total_bytes} bytes"),
+            Some(id.to_string()),
+        ),
+        ServerEvent::TransferComplete(id) => (
+            LogLevel::Info,
+            "board.tftp.transfer_complete",
+            format!("transfer {id} complete"),
+            Some(id.to_string()),
+        ),
+        ServerEvent::TransferFailed { id, error } => (
+            LogLevel::Warn,
+            "board.tftp.transfer_failed",
+            format!("transfer {id} failed: {error}"),
+            Some(id.to_string()),
+        ),
+    };
+    events.event(
+        level,
+        name,
+        &message,
+        &DiagnosticContext {
+            tool: Some("tftp".into()),
+            target,
+            ..DiagnosticContext::default()
+        },
+    )
 }
 
 fn resolve_usb_ecm(board: &Board, adapters: &[UsbEcmAdapter]) -> Result<ServicePlan> {
@@ -184,7 +180,7 @@ fn resolve_usb_ecm(board: &Board, adapters: &[UsbEcmAdapter]) -> Result<ServiceP
     })?;
     let identity = usb_ecm.identity.as_ref().ok_or_else(|| {
         miette::miette!(
-            "Board '{}' has no usb_ecm.identity. `aros pi serve` requires vendor_id, product_id, serial and expected_target_mac before it can bind a USB adapter.",
+            "Board '{}' has no usb_ecm.identity. `aros board serve` requires vendor_id, product_id, serial and expected_target_mac before it can bind a USB adapter.",
             board.name
         )
     })?;
@@ -202,7 +198,7 @@ fn resolve_usb_ecm(board: &Board, adapters: &[UsbEcmAdapter]) -> Result<ServiceP
         [adapter] => *adapter,
         [] => {
             miette::bail!(
-                "No USB CDC-ECM adapter matches board '{}' (USB {:04x}:{:04x}, serial '{}'). Run `aros pi scan`; no service was started.",
+                "No USB CDC-ECM adapter matches board '{}' (USB {:04x}:{:04x}, serial '{}'). Run `aros board scan`; no service was started.",
                 board.name,
                 identity.vendor_id,
                 identity.product_id,
@@ -253,7 +249,7 @@ fn resolve_native(board: &Board) -> Result<ServicePlan> {
     })?;
     let interface = network.interface.as_deref().ok_or_else(|| {
         miette::miette!(
-            "Board '{}' has no network.interface. Name the intended physical Ethernet interface explicitly; `aros pi serve` never guesses an RJ45 port.",
+            "Board '{}' has no network.interface. Name the intended physical Ethernet interface explicitly; `aros board serve` never guesses an RJ45 port.",
             board.name
         )
     })?;
@@ -381,7 +377,7 @@ fn published_deployment_dir(board: &Board) -> Result<PathBuf> {
     let deployment = board.deployment_dir()?;
     let metadata = std::fs::symlink_metadata(&deployment).map_err(|error| {
         miette::miette!(
-            "Board '{}' has no published deployment at '{}': {error}. Run `aros pi deploy --board {} --apply` first.",
+            "Board '{}' has no published deployment at '{}': {error}. Run `aros board deploy --board {} --apply` first.",
             board.name,
             deployment.display(),
             board.name
@@ -396,7 +392,7 @@ fn published_deployment_dir(board: &Board) -> Result<PathBuf> {
     let marker = deployment.join(".aros-pi-deploy");
     let marker_contents = std::fs::read_to_string(&marker).map_err(|error| {
         miette::miette!(
-            "Published deployment '{}' is not AROS-managed (missing '{}': {error}). Run `aros pi deploy --apply` first.",
+            "Published deployment '{}' is not AROS-managed (missing '{}': {error}). Run `aros board deploy --apply` first.",
             deployment.display(),
             marker.display()
         )
@@ -430,8 +426,8 @@ fn displayed_addresses(addresses: &[Ipv4Addr]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{resolve_from_adapters, validated_subnet_mask};
-    use crate::pi::config::{Board, BoardConfig, Transport, UsbEcmConfig, UsbEcmIdentity};
-    use crate::pi::UsbEcmAdapter;
+    use crate::config::{Board, BoardConfig, Transport, UsbEcmConfig, UsbEcmIdentity};
+    use crate::UsbEcmAdapter;
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
 
@@ -512,7 +508,6 @@ mod tests {
                         serial: "aros-rpi4-lab-01".to_string(),
                         expected_target_mac: "02:aa:00:00:00:01".to_string(),
                     }),
-                    mac_interface_hint: None,
                 }),
             },
             config_path: PathBuf::from("boards.toml"),

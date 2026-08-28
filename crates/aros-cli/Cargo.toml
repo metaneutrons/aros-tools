@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Unified build, toolchain, test, and Raspberry Pi workflow for AROS-NG"
+description = "Unified build, toolchain, test, and physical-board workflow for AROS-NG"
 
 [lints]
 workspace = true
@@ -16,13 +16,8 @@ workspace = true
 name = "aros"
 path = "src/main.rs"
 
-[features]
-default = []
-# Kept as a no-op compatibility feature for early local users.  The Pi lab
-# TFTP implementation is now part of the normal `aros` binary.
-pi-lab-tftp = []
-
 [dependencies]
+aros-board.workspace = true
 aros-common.workspace = true
 clap.workspace = true
 console.workspace = true
@@ -38,14 +33,3 @@ futures-util.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-serde.workspace = true
-toml.workspace = true
-walkdir.workspace = true
-if-addrs.workspace = true
-socket2.workspace = true
-fatfs.workspace = true
-rustix.workspace = true
-tftp-rs = { git = "https://github.com/metaneutrons/tftp-rs.git", rev = "f29959b", default-features = false }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-aros-macos-disk-claim.workspace = true

@@ -40,23 +40,27 @@ use super::config::{Board, Transport};
 use super::disk_inventory::diskutil_plist_json;
 #[cfg(target_os = "linux")]
 use super::disk_inventory::linux_inventory_command;
+#[cfg(target_os = "macos")]
+use super::disk_inventory::macos_whole_disk_identifiers;
 pub use super::disk_inventory::DiskPlatform;
 use super::disk_inventory::{
-    is_linux_whole_device_path, json_bool_like, json_nonempty_string, json_u64_like, safe_metadata,
+    is_linux_whole_device_path, is_macos_whole_disk_identifier, json_bool_like,
+    json_nonempty_string, json_u64_like, safe_metadata,
 };
 #[cfg(any(target_os = "macos", test))]
 use super::disk_inventory::{
-    is_macos_descendant_identifier, is_macos_whole_disk_identifier, macos_descendant_identifiers,
-    macos_transport, macos_whole_disk_identifiers,
+    is_macos_descendant_identifier, macos_descendant_identifiers, macos_transport,
 };
 #[cfg(any(target_os = "linux", test))]
 use super::disk_inventory::{json_object, linux_identity, linux_model};
 use super::sd_manifest::{ImageManifest, FORMAT_VERSION, KIND};
-use crate::artifact::sha256_file_with_size as sha256_file;
+use crate::sha256_file_with_size as sha256_file;
 #[cfg(target_os = "macos")]
 use aros_macos_disk_claim::{WholeDiskClaim, DEFAULT_CLAIM_TIMEOUT};
 use miette::Result;
-use serde_json::{Map, Value};
+#[cfg(any(target_os = "macos", test))]
+use serde_json::Map;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::collections::{HashMap, HashSet};
@@ -81,10 +85,11 @@ pub struct UsbEcmArtifactIdentity {
     pub expected_target_mac: String,
 }
 
-/// Immutable board values an SD image must match before a physical disk can be
-/// selected.  The value is obtained either from a local [`Board`] via
-/// [`board_image_expectation`] or constructed by a test/integration that has
-/// an equally strict local board source.
+/// Immutable board values an SD image must match before disk selection.
+///
+/// The value is obtained either from a local [`Board`] via
+/// [`board_image_expectation`] or constructed by an integration with an
+/// equally strict local board source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardImageExpectation {
     /// Local board-profile name.
@@ -328,13 +333,13 @@ impl OpenedTarget {
         })
     }
 
+    #[cfg(target_os = "macos")]
     fn finish(mut self) -> Result<()> {
         // Close the raw descriptor before releasing the Disk Arbitration
         // claim.  `drop(self)` below preserves the same ordering for all
         // earlier error returns.
         drop(self.file.take());
 
-        #[cfg(target_os = "macos")]
         if let Some(claim) = self.claim.take() {
             claim.release().map_err(|error| {
                 miette::miette!(
@@ -344,6 +349,11 @@ impl OpenedTarget {
         }
 
         Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn finish(mut self) {
+        drop(self.file.take());
     }
 }
 
@@ -362,6 +372,11 @@ impl Drop for TestTargetGuard {
 /// macOS uses `diskutil`'s plist format; Linux uses `lsblk` JSON.  On an
 /// unsupported host this function fails instead of attempting a broad fallback
 /// such as `/dev/*` globbing.
+///
+/// # Errors
+///
+/// Returns an error when the host is unsupported or its disk inventory cannot
+/// be queried or parsed without weakening the safety predicates.
 pub fn scan() -> Result<Vec<DiskCandidate>> {
     #[cfg(target_os = "macos")]
     {
@@ -384,6 +399,11 @@ pub fn scan() -> Result<Vec<DiskCandidate>> {
 /// Both `manifest_relative_path` and `image_relative_path` must be portable,
 /// non-symlink relative paths below `artifact_dir`.  The supplied `image` path
 /// must exactly match `image.filename` in the manifest.
+///
+/// # Errors
+///
+/// Returns an error when paths are unsafe, files are unreadable, the manifest
+/// is invalid, or the image size or digest differs from the manifest.
 pub fn verify_image_artifact(
     artifact_dir: &Path,
     manifest_relative_path: &Path,
@@ -455,9 +475,15 @@ pub fn verify_image_artifact(
     })
 }
 
-/// Convert the selected local board profile into the immutable fields an SD
-/// image manifest must carry.  In USB-ECM mode an incomplete profile is an
-/// error rather than a reason to make a broadly reusable image.
+/// Convert a board profile into the immutable fields an SD image must carry.
+///
+/// In USB-ECM mode an incomplete profile is an error rather than a reason to
+/// make a broadly reusable image.
+///
+/// # Errors
+///
+/// Returns an error when required board or USB-ECM identity fields are absent
+/// or malformed.
 pub fn board_image_expectation(board: &Board) -> Result<BoardImageExpectation> {
     let mut expectation = BoardImageExpectation::new(
         &board.name,
@@ -493,6 +519,11 @@ pub fn board_image_expectation(board: &Board) -> Result<BoardImageExpectation> {
 /// The re-read makes a stale `VerifiedImageArtifact` insufficient after a
 /// rebuild or a manifest edit.  Use [`validate_artifact_for_board`] when the
 /// selected profile is already represented by [`Board`].
+///
+/// # Errors
+///
+/// Returns an error when the artifact changed, is no longer valid, or does not
+/// match the supplied board expectation.
 pub fn validate_artifact_against_expectation(
     artifact: &VerifiedImageArtifact,
     expectation: &BoardImageExpectation,
@@ -514,6 +545,11 @@ pub fn validate_artifact_against_expectation(
 /// Re-read and bind a verified image artifact to a selected local board
 /// profile.  This is the check a `--board` CLI path should run before it shows
 /// a selectable SD disk.
+///
+/// # Errors
+///
+/// Returns an error when the board expectation is incomplete, the artifact
+/// changed, or its embedded identity does not match the selected board.
 #[allow(dead_code)] // Public guard for non-CLI callers; CLI uses the atomic verifier/writer pair.
 pub fn validate_artifact_for_board(artifact: &VerifiedImageArtifact, board: &Board) -> Result<()> {
     let expectation = board_image_expectation(board)?;
@@ -523,6 +559,11 @@ pub fn validate_artifact_for_board(artifact: &VerifiedImageArtifact, board: &Boa
 /// Verify image content and bind its board metadata to `board` in one
 /// read-only operation.  This is suitable for a `--dry-run` write plan or for
 /// showing board-scoped confirmation tokens after `sd scan`.
+///
+/// # Errors
+///
+/// Returns an error when artifact verification fails or its board identity
+/// differs from the selected local board.
 pub fn verify_image_artifact_for_board(
     artifact_dir: &Path,
     manifest_relative_path: &Path,
@@ -564,6 +605,11 @@ pub fn confirmation_token(artifact: &VerifiedImageArtifact, candidate: &DiskCand
 /// This is the safe physical-write entry point for a CLI that accepts
 /// `--board`: the final board/manifest comparison occurs after the artifact is
 /// re-read and before the disk scanner or raw-device opener are called.
+///
+/// # Errors
+///
+/// Returns an error when board binding, confirmation, disk revalidation,
+/// exclusive opening, writing, flushing, or post-write verification fails.
 pub fn write_verified_image_for_board(
     artifact: &VerifiedImageArtifact,
     board: &Board,
@@ -673,7 +719,7 @@ fn write_verified_image_with_backend_and_expectation(
         [candidate] => *candidate,
         [] => {
             miette::bail!(
-                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros pi sd scan`; no disk was opened.",
+                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros board sd scan`; no disk was opened.",
                 selected_scan_id
             );
         }
@@ -732,7 +778,10 @@ fn write_verified_image_with_backend_and_expectation(
         );
     }
 
+    #[cfg(target_os = "macos")]
     target.finish()?;
+    #[cfg(not(target_os = "macos"))]
+    target.finish();
 
     Ok(WriteReport {
         scan_id: candidate.scan_id.clone(),
@@ -1181,10 +1230,9 @@ fn linux_mountpoints_are_empty(value: &Value) -> bool {
 
 #[cfg(target_os = "linux")]
 fn scan_linux() -> Result<Vec<DiskCandidate>> {
-    let output = crate::observability::run_output_at(
+    let output = crate::run_output(
         &mut linux_inventory_command(true),
         "lsblk safe SD-card inventory",
-        crate::observability::ErrorBoundary::MEDIA_SAFETY,
     )?;
     let parsed: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         miette::miette!(
@@ -1264,7 +1312,6 @@ fn macos_mountpoint_is_empty(object: &Map<String, Value>) -> bool {
         || matches!(object.get("MountPoint"), Some(Value::String(value)) if value.trim().is_empty())
 }
 
-#[cfg(any(target_os = "macos", test))]
 #[cfg(any(target_os = "macos", test))]
 fn macos_topology_is_complete_and_unmounted(
     whole: &str,

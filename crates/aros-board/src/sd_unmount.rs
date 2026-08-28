@@ -14,12 +14,13 @@ use super::disk_inventory::linux_inventory_command;
 use super::disk_inventory::{is_linux_whole_device_path, json_object, linux_identity, linux_model};
 #[cfg(any(target_os = "macos", test))]
 use super::disk_inventory::{
-    is_macos_descendant_identifier, is_macos_whole_disk_identifier, macos_descendant_identifiers,
-    macos_transport, macos_whole_disk_identifiers,
+    is_macos_descendant_identifier, is_macos_whole_disk_identifier, macos_transport,
 };
 use super::disk_inventory::{
     json_bool_like, json_nonempty_string, json_u64_like, safe_metadata, DiskPlatform,
 };
+#[cfg(target_os = "macos")]
+use super::disk_inventory::{macos_descendant_identifiers, macos_whole_disk_identifiers};
 use miette::Result;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -37,9 +38,8 @@ struct LinuxDeviceNumber {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum MountedSource {
-    Macos {
-        device_node: PathBuf,
-    },
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    Macos { device_node: PathBuf },
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Linux {
         device_node: PathBuf,
@@ -222,6 +222,11 @@ impl UnmountBackend for SystemBackend {
 
 /// List only mounted devices for which every removable-media safety predicate
 /// is explicitly known and satisfied.
+///
+/// # Errors
+///
+/// Returns an error when the platform is unsupported or its mounted-device
+/// inventory cannot be obtained and validated safely.
 pub fn scan() -> Result<Vec<UnmountCandidate>> {
     scan_with_backend(&SystemBackend)
 }
@@ -230,6 +235,11 @@ pub fn scan() -> Result<Vec<UnmountCandidate>> {
 ///
 /// `selected_scan_id` must be the opaque ID returned by [`scan`].  A raw device
 /// path is never accepted as an alternative selector.
+///
+/// # Errors
+///
+/// Returns an error when the selection is invalid or stale, safety predicates
+/// no longer hold, unmounting fails, or the result cannot be verified.
 pub fn unmount(selected_scan_id: &str) -> Result<UnmountReport> {
     unmount_with_backend(&SystemBackend, selected_scan_id)
 }
@@ -249,7 +259,7 @@ fn unmount_with_backend(
 ) -> Result<UnmountReport> {
     if !valid_scan_id(selected_scan_id) {
         miette::bail!(
-            "Unmount selection must be an opaque ID printed by `aros pi sd unmount`; raw device paths are never accepted."
+            "Unmount selection must be an opaque ID printed by `aros board sd unmount`; raw device paths are never accepted."
         );
     }
 
@@ -622,10 +632,9 @@ fn safe_linux_kernel_name(name: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn scan_linux_inventory() -> Result<Vec<DeviceState>> {
-    let output = crate::observability::run_output_at(
+    let output = crate::run_output(
         &mut linux_inventory_command(false),
         "lsblk removable-media inventory",
-        crate::observability::ErrorBoundary::MEDIA_SAFETY,
     )?;
     let parsed: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| miette::miette!("Could not parse structured lsblk JSON: {error}"))?;
@@ -898,7 +907,6 @@ fn ordered_volumes(volumes: &[MountedVolume]) -> Vec<MountedVolume> {
 // ---------------------------------------------------------------------------
 
 #[cfg(any(target_os = "macos", test))]
-#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MacosRootEvidence {
     identifier: String,
@@ -1050,7 +1058,6 @@ fn macos_explicitly_removable(object: &Map<String, Value>) -> bool {
     present
 }
 
-#[cfg(any(target_os = "macos", test))]
 #[cfg(target_os = "macos")]
 fn scan_macos_inventory() -> Result<Vec<DeviceState>> {
     let list = diskutil_plist_json(&["list", "-plist"])?;
@@ -1115,7 +1122,7 @@ impl MacosUnmountOps for SystemMacosUnmountOps {
         if !safe_removable_mount_point(&volume.mount_point) {
             miette::bail!("Refusing a macOS unmount outside the removable-media mount roots.");
         }
-        crate::observability::run_output_at(
+        crate::run_output(
             Command::new("/usr/sbin/diskutil")
                 .arg("unmount")
                 .arg(device_node),
@@ -1123,7 +1130,6 @@ impl MacosUnmountOps for SystemMacosUnmountOps {
                 "diskutil normal unmount for '{}' (no force or eject fallback)",
                 volume.mount_point.display()
             ),
-            crate::observability::ErrorBoundary::MEDIA_SAFETY,
         )?;
         Ok(())
     }

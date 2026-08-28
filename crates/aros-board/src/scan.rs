@@ -10,34 +10,35 @@ use miette::Result;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
 
-pub(super) fn print() -> Result<()> {
-    let adapters = adapters()?;
-    if adapters.is_empty() {
-        println!("No USB CDC-ECM adapters found.");
-        println!(
-            "Connect and boot the Pi's U-Boot USB-ECM profile, then run `aros pi scan` again."
-        );
-        return Ok(());
-    }
-
-    print!("{}", format_adapters(&adapters));
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
-pub(super) fn adapters() -> Result<Vec<UsbEcmAdapter>> {
+/// Discover Linux USB CDC-ECM adapters and their current IPv4 addresses.
+///
+/// # Errors
+///
+/// Returns an error when USB or interface inventory cannot be read safely.
+pub fn adapters() -> Result<Vec<UsbEcmAdapter>> {
     enrich_ipv4_addresses(super::scan_linux::scan()?)
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn adapters() -> Result<Vec<UsbEcmAdapter>> {
+/// Discover macOS USB CDC-ECM adapters and their current IPv4 addresses.
+///
+/// # Errors
+///
+/// Returns an error when USB or interface inventory cannot be read safely.
+pub fn adapters() -> Result<Vec<UsbEcmAdapter>> {
     enrich_ipv4_addresses(super::scan_macos::scan()?)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) fn adapters() -> Result<Vec<UsbEcmAdapter>> {
+/// Refuse adapter discovery on unsupported host platforms.
+///
+/// # Errors
+///
+/// Always returns an unsupported-platform error.
+pub fn adapters() -> Result<Vec<UsbEcmAdapter>> {
     miette::bail!(
-        "`aros pi scan` currently supports macOS and Linux only; no USB adapter was selected."
+        "`aros board scan` currently supports macOS and Linux only; no USB adapter was selected."
     )
 }
 
@@ -66,7 +67,9 @@ fn enrich_ipv4_addresses(mut adapters: Vec<UsbEcmAdapter>) -> Result<Vec<UsbEcmA
     Ok(adapters)
 }
 
-fn format_adapters(adapters: &[UsbEcmAdapter]) -> String {
+#[must_use]
+/// Render already discovered adapters without changing host state.
+pub fn format_adapters(adapters: &[UsbEcmAdapter]) -> String {
     let mut output = String::from("USB CDC-ECM adapters:\n");
     for (index, adapter) in adapters.iter().enumerate() {
         let _ = writeln!(
@@ -119,7 +122,7 @@ fn format_adapters(adapters: &[UsbEcmAdapter]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{enrich_ipv4_addresses, format_adapters};
-    use crate::pi::UsbEcmAdapter;
+    use crate::UsbEcmAdapter;
     use std::net::Ipv4Addr;
 
     #[test]

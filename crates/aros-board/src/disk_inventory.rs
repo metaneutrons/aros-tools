@@ -27,6 +27,7 @@ pub enum DiskPlatform {
 }
 
 impl DiskPlatform {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Macos => "macos",
@@ -115,6 +116,7 @@ pub fn is_linux_whole_device_path(path: &Path) -> bool {
     sd_name || mmc_name
 }
 
+#[cfg(target_os = "macos")]
 pub fn macos_whole_disk_identifiers(list: &Value) -> Result<Vec<String>> {
     let object = json_object(list, "diskutil list plist")?;
     let identifiers = object
@@ -132,6 +134,7 @@ pub fn macos_whole_disk_identifiers(list: &Value) -> Result<Vec<String>> {
     Ok(result)
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn macos_descendant_identifiers(list: &Value, whole: &str) -> Result<Vec<String>> {
     let object = json_object(list, "diskutil descendant plist")?;
     let identifiers = object
@@ -179,6 +182,7 @@ pub fn is_macos_whole_disk_identifier(identifier: &str) -> bool {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn is_macos_descendant_identifier(identifier: &str, whole: &str) -> bool {
     if identifier == whole {
         return is_macos_whole_disk_identifier(whole);
@@ -205,6 +209,7 @@ pub fn is_macos_descendant_identifier(identifier: &str, whole: &str) -> bool {
     segments > 0 && suffix.is_empty()
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn macos_transport(object: &Map<String, Value>) -> Option<String> {
     let mut canonical = None;
     for field in ["Protocol", "BusProtocol"] {
@@ -243,10 +248,9 @@ pub fn diskutil_plist_json(arguments: &[&str]) -> Result<Value> {
 
     let mut diskutil = Command::new("/usr/sbin/diskutil");
     diskutil.args(arguments);
-    let output = crate::observability::run_output_at(
+    let output = crate::run_output(
         &mut diskutil,
         "diskutil structured removable-media inventory",
-        crate::observability::ErrorBoundary::MEDIA_SAFETY,
     )?;
 
     let mut child = Command::new("/usr/bin/plutil")

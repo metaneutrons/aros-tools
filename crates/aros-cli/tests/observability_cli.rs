@@ -119,6 +119,25 @@ fn help_succeeds_without_repository_discovery() {
 }
 
 #[test]
+fn board_is_the_only_physical_board_command() {
+    let board = command().args(["board", "--help"]).output().unwrap();
+    assert!(board.status.success());
+    assert!(board.stderr.is_empty());
+
+    let pi = command()
+        .args(["--diagnostic-format=json", "pi", "--help"])
+        .output()
+        .unwrap();
+    assert!(pi.stdout.is_empty());
+    let value = json(&pi);
+    assert_eq!(value["diagnostics"][0]["code"], "AR0001");
+    assert!(value["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unrecognized subcommand 'pi'"));
+}
+
+#[test]
 fn clean_rejects_a_preset_path_before_touching_the_filesystem() {
     let output = command()
         .args([

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod artifact;
+mod board;
 mod boot;
 mod build;
 mod build_tools;
@@ -21,7 +22,6 @@ mod commands;
 mod golden;
 mod host_compiler;
 mod observability;
-mod pi;
 mod repo;
 mod toolchain;
 
@@ -119,10 +119,10 @@ enum Commands {
         command: ToolchainCommands,
     },
 
-    /// Manage a locally configured Raspberry Pi development board
-    Pi {
+    /// Manage locally configured physical development boards
+    Board {
         #[command(subcommand)]
-        command: PiCommand,
+        command: BoardCommand,
     },
 
     /// Build AROS for a specific target preset (pc-x86_64, rpi-aarch64, arm-raspi)
@@ -295,7 +295,7 @@ enum BuildToolsCommand {
 }
 
 #[derive(Subcommand)]
-enum PiCommand {
+enum BoardCommand {
     /// Print or explicitly create a new local USB-ECM board-profile template
     Init {
         /// Local profile name to create
@@ -311,7 +311,7 @@ enum PiCommand {
         apply: bool,
     },
 
-    /// Find USB CDC-ECM adapters that can be paired with an AROS Pi board
+    /// Find USB CDC-ECM adapters that can be paired with a board profile
     Scan,
 
     /// Check a local board profile and its non-mutating prerequisites
@@ -395,8 +395,8 @@ enum PiCommand {
         board: BoardSelection,
 
         /// Serial terminal implementation to invoke
-        #[arg(long, value_enum, default_value_t = pi::console::ConsoleProgram::Auto)]
-        program: pi::console::ConsoleProgram,
+        #[arg(long, value_enum, default_value_t = board::console::ConsoleProgram::Auto)]
+        program: board::console::ConsoleProgram,
 
         /// Override the configured serial device for this invocation
         #[arg(long, value_name = "PATH")]
@@ -463,15 +463,15 @@ enum SdCommand {
         #[command(flatten)]
         board: BoardSelection,
 
-        /// Directory created by `aros pi sd image --apply`
+        /// Directory created by `aros board sd image --apply`
         #[arg(long, value_name = "DIR")]
         artifact: PathBuf,
 
-        /// Opaque whole-disk ID printed by `aros pi sd scan`
+        /// Opaque whole-disk ID printed by `aros board sd scan`
         #[arg(long, value_name = "SCAN_ID", value_parser = parse_opaque_scan_id)]
         device: String,
 
-        /// Exact token printed by `aros pi sd scan --artifact ...`; without it this is a preview
+        /// Exact token printed by `aros board sd scan --artifact ...`; without it this is a preview
         #[arg(long, value_name = "TOKEN")]
         confirm: Option<String>,
 
@@ -484,7 +484,7 @@ enum SdCommand {
 fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
     if value.is_empty() || value.trim() != value || value.contains('/') || value.contains('\\') {
         return Err(
-            "expected an opaque scan ID printed by the corresponding `aros pi sd` scan command, not a device path"
+            "expected an opaque scan ID printed by the corresponding `aros board sd` scan command, not a device path"
                 .to_string(),
         );
     }
@@ -540,22 +540,22 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 "verify the toolchain lock, selected host/profile artifact, cache, and installation prefix",
             )
         }
-        Commands::Pi { command } => match command {
-            PiCommand::Build { board, .. } => (
+        Commands::Board { command } => match command {
+            BoardCommand::Build { board, .. } => (
                 DiagnosticCode::CliBuild,
                 DiagnosticStage::BuildExecution,
-                "pi.build",
+                "board.build",
                 Some(board.board.clone()),
                 "inspect the board profile and the reported configure or build failure",
             ),
-            PiCommand::Deploy { board, .. } => (
+            BoardCommand::Deploy { board, .. } => (
                 DiagnosticCode::CliPublication,
                 DiagnosticStage::Publication,
-                "pi.deploy",
+                "board.deploy",
                 Some(board.board.clone()),
                 "validate the board profile, build artifact, and deployment destination before retrying",
             ),
-            PiCommand::Sd { command } => {
+            BoardCommand::Sd { command } => {
                 let target = match command {
                     SdCommand::Image { board, .. } | SdCommand::Write { board, .. } => {
                         Some(board.board.clone())
@@ -565,35 +565,35 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 (
                     DiagnosticCode::CliMediaSafety,
                     DiagnosticStage::MediaSafety,
-                    "pi.sd",
+                    "board.sd",
                     target,
                     "re-run the non-mutating scan or dry run and satisfy every reported media-safety check",
                 )
             }
-            PiCommand::Init { board, .. } => (
-                DiagnosticCode::CliPi,
-                DiagnosticStage::PiOperation,
-                "pi.init",
+            BoardCommand::Init { board, .. } => (
+                DiagnosticCode::CliBoard,
+                DiagnosticStage::BoardOperation,
+                "board.init",
                 Some(board.clone()),
                 "check the board name, configuration destination, and explicit apply mode",
             ),
-            PiCommand::Doctor(selection)
-            | PiCommand::Serve {
+            BoardCommand::Doctor(selection)
+            | BoardCommand::Serve {
                 board: selection, ..
             }
-            | PiCommand::Console {
+            | BoardCommand::Console {
                 board: selection, ..
             } => (
-                DiagnosticCode::CliPi,
-                DiagnosticStage::PiOperation,
-                "pi",
+                DiagnosticCode::CliBoard,
+                DiagnosticStage::BoardOperation,
+                "board",
                 Some(selection.board.clone()),
                 "inspect the board profile and the failed local prerequisite reported above",
             ),
-            PiCommand::Scan => (
-                DiagnosticCode::CliPi,
-                DiagnosticStage::PiOperation,
-                "pi.scan",
+            BoardCommand::Scan => (
+                DiagnosticCode::CliBoard,
+                DiagnosticStage::BoardOperation,
+                "board.scan",
                 None,
                 "verify the local USB network interface and platform discovery tools",
             ),

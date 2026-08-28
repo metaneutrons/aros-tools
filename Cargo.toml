@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aros-common",
+    "crates/aros-board",
     "crates/aros-ahi-runner",
     "crates/aros-collect",
     "crates/aros-transpiler",
@@ -40,6 +41,7 @@ missing_errors_doc = "warn"
 doc_markdown = "allow"
 
 [workspace.dependencies]
+aros-board = { path = "crates/aros-board" }
 aros-common = { path = "crates/aros-common" }
 aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
 
@@ -76,7 +78,7 @@ which = "7.0"
 regex = "1.11"
 sha2 = "0.10"
 tempfile = "3.17"
-# The Pi lab service must verify an address on the exact USB-ECM interface;
+# The board service must verify an address on the exact USB-ECM interface;
 # this is a small native interface-enumeration crate, not an external command.
 if-addrs = "0.15"
 # Safe, platform-native socket options for the fail-closed DHCP interface

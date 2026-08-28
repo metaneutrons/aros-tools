@@ -18,11 +18,10 @@ const IOREG_PATH: &str = "/usr/sbin/ioreg";
 /// No address lookup is performed here.  The service startup path must verify
 /// the selected interface still owns the configured concrete address before it
 /// binds any network socket.
-pub(super) fn scan() -> Result<Vec<UsbEcmAdapter>> {
-    let output = crate::observability::run_output_at(
+pub fn scan() -> Result<Vec<UsbEcmAdapter>> {
+    let output = crate::run_output(
         Command::new(IOREG_PATH).args(["-r", "-c", "IOUSBHostDevice", "-l", "-w", "0"]),
         "IOKit USB CDC-ECM inventory",
-        crate::observability::ErrorBoundary::PI,
     )?;
 
     let output = String::from_utf8(output.stdout)

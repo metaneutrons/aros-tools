@@ -102,7 +102,7 @@ pub enum DiagnosticCode {
     #[serde(rename = "AR0701")]
     CliBoot,
     #[serde(rename = "AR0801")]
-    CliPi,
+    CliBoard,
     #[serde(rename = "AR0802")]
     CliMediaSafety,
     #[serde(rename = "AR0901")]
@@ -160,7 +160,7 @@ impl fmt::Display for DiagnosticCode {
             Self::CliConfigure => "AR0601",
             Self::CliBuild => "AR0602",
             Self::CliBoot => "AR0701",
-            Self::CliPi => "AR0801",
+            Self::CliBoard => "AR0801",
             Self::CliMediaSafety => "AR0802",
             Self::CliPublication => "AR0901",
             Self::CliInternal => "AR0999",
@@ -227,7 +227,7 @@ pub enum DiagnosticStage {
     BuildConfiguration,
     BuildExecution,
     BootValidation,
-    PiOperation,
+    BoardOperation,
     MediaSafety,
 }
 
@@ -270,7 +270,7 @@ impl fmt::Display for DiagnosticStage {
             Self::BuildConfiguration => "build configuration",
             Self::BuildExecution => "build execution",
             Self::BootValidation => "boot validation",
-            Self::PiOperation => "Raspberry Pi operation",
+            Self::BoardOperation => "physical board operation",
             Self::MediaSafety => "removable-media safety",
         })
     }

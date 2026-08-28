@@ -165,7 +165,7 @@ fn check_build_tools(report: &mut DoctorReport, repo_root: &Path) {
         report.push(
             CheckStatus::Warning,
             "build tools",
-            format!("missing {missing}; `aros pi build` will build them automatically"),
+            format!("missing {missing}; `aros board build` will build them automatically"),
         );
     }
 }
@@ -183,7 +183,7 @@ fn check_artifacts(report: &mut DoctorReport, board: &Board, repo_root: &Path) {
             CheckStatus::Warning,
             "artifacts",
             format!(
-                "'{}' does not exist yet; run `aros pi build` first",
+                "'{}' does not exist yet; run `aros board build` first",
                 artifacts.display()
             ),
         );
@@ -238,7 +238,7 @@ fn check_serial(report: &mut DoctorReport, board: &Board) {
         Err(_) => report.push(
             CheckStatus::Warning,
             "serial device",
-            "not configured; `aros pi console` needs serial_device or --device",
+            "not configured; `aros board console` needs serial_device or --device",
         ),
     }
 }
@@ -253,7 +253,7 @@ fn check_serial_terminal(report: &mut DoctorReport) {
         None => report.push(
             CheckStatus::Warning,
             "serial terminal",
-            "install picocom, screen, or minicom before using `aros pi console`",
+            "install picocom, screen, or minicom before using `aros board console`",
         ),
     }
 }
@@ -261,7 +261,7 @@ fn check_serial_terminal(report: &mut DoctorReport) {
 #[cfg(test)]
 mod tests {
     use super::{inspect, CheckStatus};
-    use crate::pi::config::{Board, BoardConfig, Transport};
+    use crate::board::config::{Board, BoardConfig, Transport};
 
     #[test]
     fn doctor_flags_a_missing_tftp_root_without_touching_it() {

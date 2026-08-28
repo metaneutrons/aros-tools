@@ -4,8 +4,8 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    boot, build, golden, host_compiler, observability, pi, repo, style, toolchain, BoardSelection,
-    BuildToolsCommand, Commands, GoldenAction, HostCompilerCommands, PiCommand, SdCommand,
+    board, boot, build, golden, host_compiler, observability, repo, style, toolchain, BoardCommand,
+    BoardSelection, BuildToolsCommand, Commands, GoldenAction, HostCompilerCommands, SdCommand,
     ToolchainCommands, CHECK, SPARKLES,
 };
 use miette::Result;
@@ -24,7 +24,7 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
         Commands::HostCompiler { command } => host_compiler_command(command).await,
         Commands::BuildTools { command } => build_tools_command(command, repo_root),
         Commands::Toolchain { command } => toolchain_command(command).await,
-        Commands::Pi { command } => pi_command(command, repo_root).await,
+        Commands::Board { command } => board_command(command, repo_root).await,
         Commands::Build {
             preset,
             target,
@@ -128,19 +128,19 @@ async fn toolchain_command(command: ToolchainCommands) -> Result<()> {
     Ok(())
 }
 
-async fn pi_command(command: PiCommand, repo_root: &Path) -> Result<()> {
+async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
     match command {
-        PiCommand::Init {
+        BoardCommand::Init {
             board,
             config,
             apply,
-        } => crate::pi::config::initialize_template(config.as_deref(), &board, apply),
-        PiCommand::Scan => crate::pi::scan(),
-        PiCommand::Doctor(selection) => {
+        } => crate::board::initialize_template(config.as_deref(), &board, apply),
+        BoardCommand::Scan => crate::board::scan(),
+        BoardCommand::Doctor(selection) => {
             let board = load_board(&selection)?;
-            crate::pi::doctor(&board, repo_root)
+            crate::board::doctor(&board, repo_root)
         }
-        PiCommand::Build {
+        BoardCommand::Build {
             board: selection,
             target,
             jobs,
@@ -152,7 +152,7 @@ async fn pi_command(command: PiCommand, repo_root: &Path) -> Result<()> {
             core_kobj_dir,
         } => {
             let board = load_board(&selection)?;
-            crate::pi::build(
+            crate::board::build(
                 &board,
                 repo_root,
                 build::BuildOptions {
@@ -171,7 +171,7 @@ async fn pi_command(command: PiCommand, repo_root: &Path) -> Result<()> {
             )
             .await
         }
-        PiCommand::Deploy {
+        BoardCommand::Deploy {
             board: selection,
             artifact_dir,
             apply,
@@ -179,17 +179,17 @@ async fn pi_command(command: PiCommand, repo_root: &Path) -> Result<()> {
         } => {
             exclusive_apply_dry_run(apply, dry_run)?;
             let board = load_board(&selection)?;
-            crate::pi::deploy(&board, repo_root, artifact_dir.as_deref(), apply)
+            crate::board::deploy(&board, repo_root, artifact_dir.as_deref(), apply)
         }
-        PiCommand::Serve {
+        BoardCommand::Serve {
             board: selection,
             dry_run,
         } => {
             let board = load_board(&selection)?;
-            crate::pi::serve::run(&board, dry_run).await
+            crate::board::serve(&board, dry_run).await
         }
-        PiCommand::Sd { command } => sd(command),
-        PiCommand::Console {
+        BoardCommand::Sd { command } => sd(command),
+        BoardCommand::Console {
             board: selection,
             program,
             device,
@@ -197,7 +197,7 @@ async fn pi_command(command: PiCommand, repo_root: &Path) -> Result<()> {
             dry_run,
         } => {
             let board = load_board(&selection)?;
-            crate::pi::console(&board, program, device, baud, dry_run)
+            crate::board::console(&board, program, device, baud, dry_run)
         }
     }
 }
@@ -213,14 +213,14 @@ fn sd(command: SdCommand) -> Result<()> {
         } => {
             exclusive_apply_dry_run(apply, dry_run)?;
             let board = load_board(&selection)?;
-            crate::pi::create_sd_image(&board, &boot_bundle, &output, apply)
+            crate::board::create_sd_image(&board, &boot_bundle, &output, apply)
         }
-        SdCommand::Scan { artifact } => crate::pi::scan_sd_disks(artifact.as_deref()),
+        SdCommand::Scan { artifact } => crate::board::scan_sd_disks(artifact.as_deref()),
         SdCommand::Unmount {
             device,
             apply,
             dry_run,
-        } => crate::pi::unmount_sd_disk(device.as_deref(), apply, dry_run),
+        } => crate::board::unmount_sd_disk(device.as_deref(), apply, dry_run),
         SdCommand::Write {
             board: selection,
             artifact,
@@ -229,7 +229,7 @@ fn sd(command: SdCommand) -> Result<()> {
             dry_run,
         } => {
             let board = load_board(&selection)?;
-            crate::pi::write_sd_image(&board, &artifact, &device, confirm.as_deref(), dry_run)
+            crate::board::write_sd_image(&board, &artifact, &device, confirm.as_deref(), dry_run)
         }
     }
 }
@@ -485,8 +485,8 @@ fn info() -> Result<()> {
     Ok(())
 }
 
-fn load_board(selection: &BoardSelection) -> Result<pi::config::Board> {
-    pi::config::load_board(selection.config.as_deref(), &selection.board)
+fn load_board(selection: &BoardSelection) -> Result<board::config::Board> {
+    board::config::load_board(selection.config.as_deref(), &selection.board)
 }
 
 #[cfg(test)]

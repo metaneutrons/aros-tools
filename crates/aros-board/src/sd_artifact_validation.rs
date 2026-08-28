@@ -5,7 +5,7 @@ use super::{
     Path, Result, UsbEcmArtifactIdentity, VerifiedImageArtifact, FORMAT_VERSION, KIND,
     UBOOT_USB_ECM_TRANSPORT,
 };
-use crate::pi::sd_manifest::ManifestUsbEcmIdentity;
+use crate::sd_manifest::ManifestUsbEcmIdentity;
 
 pub(super) fn validate_image_manifest(
     manifest: &ImageManifest,

@@ -1104,8 +1104,8 @@ expected_target_mac = "02:AA:00:00:00:01"
 "#,
     )
     .expect("board profile");
-    let board = super::super::config::load_board(Some(&boards_path), "rpi4-lab")
-        .expect("local board profile");
+    let board =
+        crate::config::load_board(Some(&boards_path), "rpi4-lab").expect("local board profile");
 
     let artifact_dir = temporary.path().join("artifact");
     write_image_artifact(&artifact_dir, "image.img", b"payload");
@@ -1147,8 +1147,8 @@ expected_target_mac = "02:AA:00:00:00:01"
 "#,
     )
     .expect("board profile");
-    let mut wrong_board = super::super::config::load_board(Some(&boards_path), "rpi4-lab")
-        .expect("local board profile");
+    let mut wrong_board =
+        crate::config::load_board(Some(&boards_path), "rpi4-lab").expect("local board profile");
     wrong_board.name = "rpi5-lab".to_string();
 
     let artifact_dir = temporary.path().join("artifact");

@@ -12,6 +12,7 @@
 //! contract in this small module prevents a default pool, lease database or
 //! wildcard listener from accidentally escaping the selected USB/RJ45 link.
 
+use crate::EventSink;
 use aros_common::{DiagnosticContext, LogLevel};
 use if_addrs::{get_if_addrs, IfAddr};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
@@ -36,7 +37,7 @@ const OPTION_SERVER_IDENTIFIER: u8 = 54;
 const OPTION_PAD: u8 = 0;
 const OPTION_END: u8 = 255;
 
-/// A currently resolved, concrete local interface for the Pi lab service.
+/// A currently resolved, concrete local interface for the board service.
 ///
 /// The name is required by Linux's `SO_BINDTODEVICE`; the index is required by
 /// macOS's IPv4 `IP_BOUND_IF` socket option. Keeping both prevents a caller
@@ -53,6 +54,11 @@ impl DhcpInterface {
     ///
     /// This is deliberately a live lookup: interface indices can change when
     /// a USB CDC-ECM device is unplugged and reattached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty, missing, duplicated, or zero-index
+    /// interface identity.
     pub fn resolve(name: impl AsRef<str>) -> Result<Self> {
         let name = name.as_ref();
         validate_interface_name(name)?;
@@ -64,6 +70,10 @@ impl DhcpInterface {
     /// Construct a checked interface identity from a caller-provided name and
     /// index. [`serve_on_interface`] revalidates it against current host state
     /// immediately before opening the socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the interface name is empty or unsafe.
     pub fn new(name: impl Into<String>, index: NonZeroU32) -> Result<Self> {
         let name = name.into();
         validate_interface_name(&name)?;
@@ -105,6 +115,11 @@ pub struct DhcpConfig {
 
 impl DhcpConfig {
     /// Validate that this configuration is narrow enough for an isolated link.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe addresses, MACs, masks, leases, or
+    /// cross-subnet server and target values.
     pub fn validate(&self) -> Result<()> {
         validate_concrete_unicast(self.server_address, "DHCP server address")?;
         validate_concrete_unicast(self.target_address, "DHCP target address")?;
@@ -176,13 +191,19 @@ impl DhcpConfig {
 /// the selected interface by name, derives its current index, confirms that
 /// the configured server address belongs to it, and never chooses another
 /// interface as a fallback.
+///
+/// # Errors
+///
+/// Returns an error when identity resolution, validation, interface binding,
+/// socket I/O, or event logging fails.
 pub async fn serve_on_named_interface(
     config: DhcpConfig,
     interface_name: impl AsRef<str>,
     shutdown: watch::Receiver<bool>,
+    events: &dyn EventSink,
 ) -> Result<()> {
     let interface = DhcpInterface::resolve(interface_name)?;
-    serve_on_interface(config, interface, shutdown).await
+    serve_on_interface(config, interface, shutdown, events).await
 }
 
 /// Serve DHCPv4 strictly on an already resolved interface identity.
@@ -190,19 +211,26 @@ pub async fn serve_on_named_interface(
 /// The identity is checked against the current interface table and the
 /// configured address immediately before the socket is created. This prevents
 /// a stale USB-ECM interface index from silently targeting a new interface.
+///
+/// # Errors
+///
+/// Returns an error when validation, interface binding, socket I/O, or event
+/// logging fails.
 pub async fn serve_on_interface(
     config: DhcpConfig,
     interface: DhcpInterface,
     mut shutdown: watch::Receiver<bool>,
+    events: &dyn EventSink,
 ) -> Result<()> {
     config.validate()?;
-    serve_with_interface(config, interface, &mut shutdown).await
+    serve_with_interface(config, interface, &mut shutdown, events).await
 }
 
 async fn serve_with_interface(
     config: DhcpConfig,
     interface: DhcpInterface,
     shutdown: &mut watch::Receiver<bool>,
+    events: &dyn EventSink,
 ) -> Result<()> {
     validate_current_interface(&interface, config.server_address)?;
 
@@ -213,10 +241,10 @@ async fn serve_with_interface(
         .into_diagnostic()
         .wrap_err("could not enable directed DHCP broadcasts")?;
 
-    crate::observability::log_event(
+    events.event(
         LogLevel::Info,
-        "pi.dhcp.started",
-        "started restricted Pi lab DHCPv4 service",
+        "board.dhcp.started",
+        "started restricted board-lab DHCPv4 service",
         &DiagnosticContext {
             tool: Some("dhcpv4".into()),
             mode: Some(interface.name().into()),
@@ -256,9 +284,9 @@ async fn serve_with_interface(
                 };
 
                 if let Err(error) = socket.send_to(&response, destination).await {
-                    crate::observability::log_event(
+                    events.event(
                         LogLevel::Warn,
-                        "pi.dhcp.response_failed",
+                        "board.dhcp.response_failed",
                         &format!("could not send restricted DHCP response: {error}"),
                         &DiagnosticContext {
                             tool: Some("dhcpv4".into()),

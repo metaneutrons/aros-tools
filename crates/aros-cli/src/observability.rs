@@ -1,13 +1,12 @@
 //! Stable `aros` diagnostics and opt-in local logging.
 
 use aros_common::{
-    bounded_output_detail, exit_signal, run_output as execute_output, run_status as execute_status,
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet,
-    DiagnosticStage, LogLevel, Logger, ObservabilityPolicy,
+    exit_signal, run_status as execute_status, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogLevel, Logger, ObservabilityPolicy,
 };
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
@@ -121,37 +120,6 @@ pub fn run_quiet_command(command: &mut Command, description: &str) -> Result<(),
         return run_captured_command(command, description, false);
     }
     run_interactive_command(command, description)
-}
-
-/// Run a command whose stdout is structured input for the caller.
-///
-/// Output is never replayed to the terminal.  A failed command is converted
-/// into the same bounded, machine-attributed failure used by interactive CLI
-/// subprocesses.
-pub fn run_output_at(
-    command: &mut Command,
-    description: &str,
-    boundary: ErrorBoundary,
-) -> Result<Output, ProcessFailure> {
-    run_output_checked(command, description).map_err(|error| error.with_boundary(boundary))
-}
-
-fn run_output_checked(command: &mut Command, description: &str) -> Result<Output, ProcessFailure> {
-    let tool = command.get_program().to_string_lossy().into_owned();
-    let output = execute_output(command)
-        .map_err(|error| ProcessFailure::start(description, tool, &error))?;
-    let tool = output.tool;
-    let output = output.output;
-    if output.status.success() {
-        return Ok(output);
-    }
-    let detail = bounded_output_detail(&output.stdout, &output.stderr, 64 * 1024);
-    Err(ProcessFailure::exit(
-        description,
-        tool,
-        output.status,
-        &detail,
-    ))
 }
 
 pub fn run_interactive_command(
@@ -270,18 +238,6 @@ impl ErrorBoundary {
         stage: DiagnosticStage::RepositoryDiscovery,
         hint: "run the command inside an AROS-NG checkout containing aros-targets.toml",
     };
-
-    pub const PI: Self = Self {
-        code: DiagnosticCode::CliPi,
-        stage: DiagnosticStage::PiOperation,
-        hint: "inspect the reported host tool and Raspberry Pi identity data before retrying",
-    };
-
-    pub const MEDIA_SAFETY: Self = Self {
-        code: DiagnosticCode::CliMediaSafety,
-        stage: DiagnosticStage::MediaSafety,
-        hint: "re-scan the removable device and resolve every reported identity or mount ambiguity before retrying",
-    };
 }
 
 #[must_use]
@@ -345,20 +301,5 @@ mod tests {
         assert_eq!(diagnostic.code, DiagnosticCode::CliRepository);
         assert!(diagnostic.message.contains("cannot load configuration"));
         assert!(diagnostic.message.contains("missing fixture"));
-    }
-
-    #[test]
-    fn structured_output_failure_keeps_bounded_stdout_and_stderr() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "printf structured; printf problem >&2; exit 7"]);
-        let error = run_output_at(&mut command, "fixture query", ErrorBoundary::PI)
-            .expect_err("command must fail");
-        assert_eq!(error.exit_code, Some(7));
-        assert_eq!(
-            error.boundary.map(|boundary| boundary.code),
-            Some(DiagnosticCode::CliPi)
-        );
-        assert!(error.message.contains("stdout:\nstructured"));
-        assert!(error.message.contains("stderr:\nproblem"));
     }
 }

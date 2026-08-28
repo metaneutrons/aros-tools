@@ -48,7 +48,7 @@ use super::sd_manifest::{
     ManifestPartition as ArtifactPartition, ManifestPayloadFile, ManifestSource,
     ManifestUsbEcmIdentity,
 };
-use crate::artifact::sha256_file_with_size as sha256_file;
+use crate::sha256_file_with_size as sha256_file;
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -252,6 +252,11 @@ impl StagedArtifact {
 /// The result contains canonical source paths and immutable expected hashes.
 /// [`stage_boot_bundle`] verifies those hashes again while it copies, so a
 /// changed source cannot silently pass through a prior validation result.
+///
+/// # Errors
+///
+/// Returns an error when the bundle, manifest, declared files, hashes, board
+/// identity, or partition constraints are invalid or cannot be read safely.
 pub fn validate_boot_bundle(
     bundle_dir: &Path,
     expectation: &BundleExpectation,
@@ -303,6 +308,11 @@ pub fn validate_boot_bundle(
 /// The temporary directory is created beside `output_dir` so the final rename
 /// is atomic on the target filesystem.  No source file is modified and an
 /// existing output directory is never replaced.
+///
+/// # Errors
+///
+/// Returns an error when the validated source changed, a destination path is
+/// unsafe or already exists, or the staged files cannot be copied and verified.
 pub fn stage_boot_bundle(
     bundle: &ValidatedBootBundle,
     output_dir: &Path,
@@ -1855,7 +1865,7 @@ mod tests {
         assert!(manifest.contains("\"kind\": \"aros-pi-sd-image\""));
         assert!(manifest.contains("\"minimum_device_bytes\""));
         assert!(manifest.contains(RAW_IMAGE_FILENAME));
-        let disk_artifact = super::super::sd_disk::verify_image_artifact(
+        let disk_artifact = crate::sd_disk::verify_image_artifact(
             first.artifact_dir(),
             Path::new(ARTIFACT_MANIFEST),
             Path::new(RAW_IMAGE_FILENAME),

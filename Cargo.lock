@@ -94,31 +94,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "aros-cli"
+name = "aros-board"
 version = "0.1.0"
 dependencies = [
  "aros-common",
  "aros-macos-disk-claim",
- "clap",
- "console",
  "fatfs",
- "futures-util",
  "if-addrs",
- "indicatif",
  "miette",
- "reqwest",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "socket2",
- "tar",
  "tempfile",
  "tftp-rs",
- "thiserror",
  "tokio",
  "toml",
  "walkdir",
+]
+
+[[package]]
+name = "aros-cli"
+version = "0.1.0"
+dependencies = [
+ "aros-board",
+ "aros-common",
+ "clap",
+ "console",
+ "futures-util",
+ "indicatif",
+ "miette",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "which",
  "xz2",
 ]
