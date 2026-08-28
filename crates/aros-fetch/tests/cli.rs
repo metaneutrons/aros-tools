@@ -51,6 +51,8 @@ fn legacy_contract_fetches_verifies_and_extracts_local_archive() {
             ports.to_str().unwrap(),
             "-b",
             ports.to_str().unwrap(),
+            "-p",
+            "::",
             "--log-level",
             "info",
             "--log-format",

@@ -108,8 +108,14 @@ impl FetchRequest {
         let archive_origins = nonempty_words(&cli.archive_origins, "archive origins")?;
         let patch_origins = nonempty_words(&cli.patch_origins, "patch origins")?;
         let patches = words(&cli.patches)
-            .iter()
-            .map(|value| parse_patch(value))
+            .into_iter()
+            // Upstream fetch.sh treats the exact triple-field sentinel `::`
+            // as an empty patch name and therefore a no-op.  The transpiler
+            // emits that canonical value when an optional Make patch variable
+            // expands to empty.  No other malformed empty-name form is
+            // accepted by the native contract.
+            .filter(|value| value != "::")
+            .map(|value| parse_patch(&value))
             .collect::<FetchResult<Vec<_>>>()?;
         if let Some(rename) = &cli.rename_directory {
             validate_basename(rename, "renamed directory")?;
@@ -396,5 +402,17 @@ mod tests {
         assert!(parse_patch("fix.diff:../escape:-p1").is_err());
         assert!(parse_patch("fix.diff:src:--output=owned").is_err());
         assert!(parse_patch("fix.diff:src:-f,-p1").is_ok());
+    }
+
+    #[test]
+    fn exact_legacy_empty_patch_sentinel_is_a_noop() {
+        let mut value = cli();
+        value.patches = ":: fix.diff:src:-f,-p1".to_owned();
+        let request = FetchRequest::from_cli(&value).unwrap();
+        assert_eq!(request.patches.len(), 1);
+        assert_eq!(request.patches[0].name, "fix.diff");
+
+        value.patches = ":src:-p1".to_owned();
+        assert!(FetchRequest::from_cli(&value).is_err());
     }
 }

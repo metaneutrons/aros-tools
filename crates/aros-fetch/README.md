@@ -8,7 +8,8 @@ patches.
 The tool preserves `scripts/fetch.sh`'s build-facing arguments while providing
 stable `AFxxxx` diagnostics and opt-in local structured logging. It never
 generates checksums, trusts a payload on first use, weakens TLS, or executes a
-shell command assembled from build input.
+shell command assembled from build input. The exact upstream `::` empty-patch
+sentinel is a no-op; other malformed empty patch names remain contract errors.
 
 AROS-NG CMake builds resolve the checkout-local release binary explicitly and
 fail if it is missing. `scripts/fetch.sh` remains only as the upstream GNU Make
