@@ -176,6 +176,11 @@ fn parse_spec_expression(
 }
 
 /// Reads and expands the default link set for one object format.
+///
+/// # Errors
+///
+/// Returns an error when the required specs cannot be read or their supported
+/// conditional `-l` grammar cannot be parsed.
 pub fn read_default_link_set(
     source_dir: &Path,
     object_format: &str,

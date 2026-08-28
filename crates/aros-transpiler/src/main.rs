@@ -195,6 +195,10 @@ fn main() -> ExitCode {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the transpiler command coordinates one diagnostic transaction; parsing and generation remain isolated library stages"
+)]
 fn run(args: &Args, logger: &Logger) -> Result<()> {
     if let Err(error) = aros_transpiler::fingerprints::validate() {
         return Err(diagnostics_error(vec![Diagnostic::error(

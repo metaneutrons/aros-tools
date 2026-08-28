@@ -225,6 +225,11 @@ fn valid_marker_field(value: &str, purpose: &str) -> Result<String, String> {
 /// feature's recognised shape. Once a recognised genmodule wildcard is found,
 /// ambiguity is an error: falling back to an empty Make wildcard would silently
 /// restore the missing target.
+///
+/// # Errors
+///
+/// Returns an error when a recognized generated-linklib expression is
+/// ambiguous, unsafe, or cannot be mapped to its declared generator.
 pub fn resolve_generated_linklib_sources<F>(
     files: &str,
     joined: &str,

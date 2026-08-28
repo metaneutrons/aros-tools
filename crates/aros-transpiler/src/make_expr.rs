@@ -211,6 +211,11 @@ impl std::error::Error for MakeExprError {}
 /// This supports nested `$(...)` references, suffix and `%` substitution
 /// references, and the functions documented by this module. Quotes retain
 /// their ordinary Make meaning: they are characters, not shell quoting.
+///
+/// # Errors
+///
+/// Returns an error for unsupported syntax, unresolved values, unsafe
+/// wildcards, recursion limits, or invalid function arguments.
 pub fn evaluate_make_expr(
     raw: &str,
     context: &MakeExprContext<'_>,
@@ -222,6 +227,10 @@ pub fn evaluate_make_expr(
 }
 
 /// Evaluates an expression and splits its result into Make list words.
+///
+/// # Errors
+///
+/// Returns the same evaluation errors as [`evaluate_make_expr`].
 pub fn evaluate_make_list(
     raw: &str,
     context: &MakeExprContext<'_>,

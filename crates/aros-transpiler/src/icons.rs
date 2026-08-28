@@ -64,7 +64,7 @@ struct IconInvocation {
 /// A representative configuration for the only target-dependent icon
 /// declarations in the tree. Together these rows exhaustively partition the
 /// `ifeq`/`ifneq` forms used by both monitor mmakefiles.
-struct TargetContext {
+struct IconTargetScenario {
     arch: &'static str,
     cpu: &'static str,
     cmake: &'static str,
@@ -75,28 +75,28 @@ struct RuleGroup {
     contexts: Vec<usize>,
 }
 
-const TARGET_CONTEXTS: &[TargetContext] = &[
-    TargetContext {
+const TARGET_CONTEXTS: &[IconTargetScenario] = &[
+    IconTargetScenario {
         arch: "pc",
         cpu: "x86_64",
         cmake: "AROS_TARGET_PLATFORM STREQUAL \"pc\"",
     },
-    TargetContext {
+    IconTargetScenario {
         arch: "opensbi",
         cpu: "riscv64",
         cmake: "AROS_TARGET_PLATFORM STREQUAL \"opensbi\"",
     },
-    TargetContext {
+    IconTargetScenario {
         arch: "amiga",
         cpu: "m68k",
         cmake: "(AROS_TARGET_PLATFORM STREQUAL \"amiga\") AND (AROS_TARGET_CPU STREQUAL \"m68k\")",
     },
-    TargetContext {
+    IconTargetScenario {
         arch: "amiga",
         cpu: "ppc",
         cmake: "(AROS_TARGET_PLATFORM STREQUAL \"amiga\") AND (NOT AROS_TARGET_CPU STREQUAL \"m68k\")",
     },
-    TargetContext {
+    IconTargetScenario {
         arch: "raspi",
         cpu: "aarch64",
         cmake: "(NOT AROS_TARGET_PLATFORM STREQUAL \"pc\") AND (NOT AROS_TARGET_PLATFORM STREQUAL \"opensbi\") AND (NOT AROS_TARGET_PLATFORM STREQUAL \"amiga\")",
@@ -433,7 +433,7 @@ impl ConditionalFrame {
     }
 }
 
-fn filter_conditionals(joined: &str, context: &TargetContext) -> Result<String, String> {
+fn filter_conditionals(joined: &str, context: &IconTargetScenario) -> Result<String, String> {
     let mut out = String::with_capacity(joined.len());
     let mut stack: Vec<ConditionalFrame> = Vec::new();
 
@@ -505,7 +505,7 @@ fn conditional_directive(line: &str) -> Option<(bool, &str)> {
 fn evaluate_conditional(
     arguments: &str,
     want_equal: bool,
-    context: &TargetContext,
+    context: &IconTargetScenario,
 ) -> Result<bool, String> {
     let inner = arguments
         .strip_prefix('(')
@@ -525,7 +525,7 @@ enum ExpansionEnvironment<'a> {
         dirs: &'a DirVars,
         line: usize,
     },
-    Target(&'a TargetContext),
+    Target(&'a IconTargetScenario),
 }
 
 struct MakeExpander<'a> {
@@ -541,7 +541,7 @@ impl<'a> MakeExpander<'a> {
         }
     }
 
-    const fn for_context(context: &'a TargetContext) -> Self {
+    const fn for_context(context: &'a IconTargetScenario) -> Self {
         Self {
             environment: ExpansionEnvironment::Target(context),
             stack: Vec::new(),
