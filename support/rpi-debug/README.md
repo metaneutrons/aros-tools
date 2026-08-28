@@ -1,7 +1,7 @@
-# Raspberry Pi debug and transport assets
+# AROS board debug and transport assets
 
 This directory is the checked-in, machine-independent asset and contract part
-of the AROS Raspberry Pi bring-up workflow. It deliberately contains no
+of the AROS board bring-up workflow. It deliberately contains no
 downloaded firmware, host-network configuration, or device-specific serial
 paths. The executable behaviour lives in the repository's `aros board` CLI.
 
@@ -12,13 +12,17 @@ firmware, configure the host network, or touch a physical board.
 
 ## Scope and phases
 
-The first supported board profile is the Raspberry Pi 4 (BCM2711).  It has
-two transport choices:
+The board engine has reviewed build contracts for Raspberry Pi 3B+, Pi 4,
+Pi 5 and Milk-V Titan. Transport support is deliberately narrower than model
+recognition:
 
 | Transport | Firmware path | Purpose | Status |
 | --- | --- | --- | --- |
-| `native-tftp` | Raspberry Pi EEPROM firmware over the built-in RJ45 port | Reference and recovery path | Restricted host DHCP/TFTP service implemented; needs its ordinary Pi boot inputs |
-| `uboot-usb-ecm` | SD card firmware starts U-Boot; U-Boot exposes USB-C CDC-ECM and fetches over TFTP | Optional cable-constrained Pi 4 lab path | Restricted host service implemented; bootable SD bootstrap still waits for external U-Boot inputs |
+| Pi 3B+ `native-tftp` | Pi firmware over built-in RJ45 | ARM32 reference path | Model-specific configure and bundle contract implemented; physical boot pending |
+| Pi 4 `native-tftp` | Pi EEPROM firmware over built-in RJ45 | Reference and recovery path | Restricted DHCP/TFTP service and model-specific bundle contract implemented |
+| Pi 4 `uboot-usb-ecm` | SD firmware starts U-Boot; U-Boot exposes USB-C CDC-ECM | Optional cable-constrained lab path | Restricted service implemented; external U-Boot hand-off inputs still required |
+| Pi 5 `native-tftp` | Pi EEPROM firmware over built-in RJ45 | AArch64 BCM2712 path | Model-specific configure and bundle contract implemented; physical boot pending |
+| Milk-V Titan `uefi-esp` | OpenSBI/UEFI removable-media ESP | Initial RISC-V bring-up path | Configure, artifact and verified image contracts implemented; toolchain release and physical boot pending |
 
 `native-tftp` is the reference because the Raspberry Pi boot firmware already
 understands the Pi boot partition and does not introduce a second bootloader.
@@ -30,16 +34,43 @@ format.  A fixed SD card holds only Pi firmware, U-Boot and its boot script.
 Every AROS rebuild is published by the Mac's TFTP service and loaded after a
 board reset.
 
-Raspberry Pi 5 is a separate future phase.  Its BCM2712 platform support,
-boot hand-off and debugger wiring must be validated independently; the
-Pi-4-specific U-Boot profile in this directory must not be presented as Pi 5
-support.
+Pi 3 and Pi 5 do not inherit the Pi-4-only USB-ECM experiment. Titan likewise
+does not inherit Pi network deployment: `deploy` and `serve` reject its
+`uefi-esp` transport, while `sd image` stages its UEFI loader, kernel image,
+BSP package, command line and startup script into a verified FAT32 image.
+
+These statuses distinguish software contracts from hardware evidence. No
+Pi 3, Pi 5 or Titan boot is claimed until UART output and a reproducible boot
+record from the physical model have been captured.
+
+## Evidence not yet established
+
+The following are release blockers, not implied successes:
+
+1. **Current core KOBJs:** ARM, AArch64 and RISC-V builds must produce the
+   three architecture-correct legacy core objects from the same committed
+   source revision and matching AROS toolchain. Their hashes and build
+   identities must be preserved, accepted by `aros board doctor`, and used by
+   a completed model-specific artifact target.
+2. **Deterministic RISC-V toolchains:** the `opensbi-riscv64` archives for
+   macOS/Linux on ARM64/x86-64 must each be built twice with byte-identical
+   results, verified, compatibility-tested and published with immutable
+   hashes, provenance, SBOM and release index. The disabled zero-digest lock
+   entries are placeholders, not releases.
+3. **Physical UART boots:** Pi 3B+, Pi 5 and Milk-V Titan each need an
+   uninterrupted UART record tied to the exact source, toolchain, KOBJ, DTB
+   and boot-manifest hashes. Configuration, staging, emulation or a transport
+   smoke test does not establish a physical boot.
+
+The authoritative completion criteria and retained evidence checklist live in
+the "Board verification blockers" section of the repository's
+`OPEN-POINTS.md`.
 
 ## Directory layout
 
 ```text
 tools/rpi-debug/
-  README.md                  this contract
+  README.md                  board-engine contract and operating rules
   firmware.lock.toml         pinned Pi firmware source revision and required files
   config.txt.in              SD boot-partition template for the Pi 4 U-Boot profile
   boards.example.toml        non-secret examples for a local board config
@@ -65,11 +96,11 @@ It creates parent directories when needed but refuses to overwrite or merge an
 existing file, so comments and local choices cannot be lost. Replace every
 `REPLACE_ME` value before using the profile.
 
-The board's `target` / `preset` selects its CMake configuration. Its
+The board's `preset` selects its CMake configuration. Its
 `toolchain_preset` independently selects the locked cross-toolchain profile;
-the Pi 4 debug preset deliberately uses `rpi-aarch64`. This keeps
-board-specific CMake settings separate from the portable, audited toolchain
-identity.
+the Pi 3, Pi 4, Pi 5 and Titan presets use `arm-raspi`, `rpi-aarch64`,
+`rpi-aarch64` and `opensbi-riscv64`, respectively. This keeps board-specific
+CMake settings separate from the portable, audited toolchain identity.
 
 ## Boot contracts
 
@@ -79,9 +110,9 @@ identity.
 Mac TFTP server -- RJ45 --> Pi EEPROM firmware --> AROS boot bundle
 ```
 
-The published bundle contains the firmware-selected Pi 4 DTB, the raw AROS
+The published bundle contains the exact model-selected Pi DTB, the raw AROS
 bootstrap image, the AROS BSP package and a manifest. CMake creates it under
-`build/rpi4-aarch64-debug/boot/raspi` by way of `rpi-artifacts`; `aros board
+`build/<preset>/boot/<model>` by way of `rpi-artifacts`; `aros board
 deploy --board <name> --apply` atomically publishes a completed bundle into
 the configured `<tftp_root>/<tftp_prefix>` directory. `aros board serve` exposes
 only that verified, AROS-managed deployment directory—never its parent TFTP
@@ -90,13 +121,14 @@ root and never the build directory directly.
 ### Current core-link boundary
 
 The modern CMake module graph does not yet generate the three legacy KOBJ
-inputs that the Pi core linker requires.  Until that CMake port exists, the
-Pi 4 artifact target deliberately requires a local `core_kobj_dir` containing
-the legacy-generated AArch64 `kernel_resource.o`, `exec_library.o` and
-`task_resource.o`. Generate them with the legacy Pi build's `make
-kernel-raspi-aarch64`; its directory is normally
-`<legacy-build>/bin/raspi-aarch64/gen/kobjs`. `aros board doctor` validates them
-and `aros board build` passes the directory explicitly to CMake. It must not
+inputs that the board core linkers require. Until that CMake port exists, each
+artifact target deliberately requires a local `core_kobj_dir` containing the
+legacy-generated architecture-correct `kernel_resource.o`, `exec_library.o`
+and `task_resource.o`. Generate them with the matching legacy board build; its
+directory is normally `<legacy-build>/bin/<target>/gen/kobjs`. `aros board
+doctor` validates their ELF class, endianness, relocatable type and machine
+architecture, and `aros board build` passes the directory explicitly to
+CMake. It must not
 substitute the modern runtime relocatable module ELFs: doing so produces
 unresolved loader glue and is not a bootable core.
 
@@ -209,7 +241,7 @@ SHA-256 values, the selected board/model/transport/USB-ECM identity, and the
 declared MBR/FAT32 layout. It writes no image. `--apply` creates a new,
 previously absent output directory atomically and produces:
 
-- `aros-pi-boot.img` — the verified raw MBR/FAT32 image;
+- `aros-board-boot.img` — the verified raw MBR/FAT32 image;
 - `boot/` — the verified boot-partition payload;
 - `manifest.json` — deterministic artifact metadata; and
 - `SHA256SUMS` — checksums for the artifact members.
@@ -275,13 +307,14 @@ or accepts a blanket `--force`/`--yes` bypass. Partitions, internal/system
 disks, mounted targets, stale `scan-id` values, changed artifacts and
 mismatched tokens are rejected.
 
-The image generator is usable once a complete external U-Boot boot bundle is
-provided. This repository still does not contain a pinned U-Boot
+The Pi-4 USB-ECM image generator is usable once a complete external U-Boot
+boot bundle is provided. This repository still does not contain a pinned U-Boot
 source/build/patch pipeline or the required `arosboot` hand-off. Until those
 external inputs are supplied and manifest-verified, `sd image` for
 `uboot-usb-ecm` fails with the missing-input list rather than emitting a
-plausible but unbootable image. A future explicit `native-firmware` mode can
-instead package a verified direct-firmware Pi boot bundle.
+plausible but unbootable image. The Titan `uefi-esp` producer is separate and
+requires its generated `BOOTRISCV64.EFI`, `Image`, BSP package, command line
+and startup script instead.
 
 ## Safe operating rules
 
@@ -310,7 +343,7 @@ instead package a verified direct-firmware Pi boot bundle.
 The CLI owns local orchestration; CMake owns build artifacts:
 
 ```text
-CMake              rpi-artifacts / debug ELF / maps / boot bundle
+CMake                model-specific artifacts / debug ELF / maps / boot bundle
 aros board init       prints, or with --apply creates, a new local board config
 aros board scan       read-only macOS/Linux USB CDC-ECM candidate discovery
 aros board doctor     validates local board configuration and prerequisites
@@ -323,6 +356,6 @@ aros board sd write   preview by default; token-gated physical write on Linux/ma
 aros board console    opens an external physical UART terminal
 ```
 
-Both transports must expose the same `aros board deploy --board <name>` contract.
-Only the backend changes.  This keeps a later Pi 5 implementation from being
-coupled to the Pi 4 USB-ECM experiment.
+Network-capable Pi transports expose the same `aros board deploy --board
+<name>` contract. Removable-media-only backends fail closed for deployment and
+service commands and use the common `aros board sd` verification pipeline.

@@ -2,9 +2,36 @@
 
 Board profiles describe a specific lab device: transport, TFTP destination, UART adapter, debugger endpoint, and optional explicitly authorized power control. They are local and must not be added to portable target metadata.
 
-`target` / `preset` names the CMake preset, while `toolchain_preset` names the
-locked AROS cross-toolchain profile. For the Pi 4 debug CMake preset, set
-`toolchain_preset = "rpi-aarch64"`; do not invent a separate lock-profile name.
+Schema version 2 separates the physical model, artifact backend, CMake preset,
+locked toolchain profile and build target. The reviewed combinations are:
+
+| Model | Backend | Preset | Toolchain | Transport |
+| --- | --- | --- | --- | --- |
+| `rpi3` | `raspberry-pi` | `rpi3-arm-debug` | `arm-raspi` | `native-tftp` |
+| `rpi4` | `raspberry-pi` | `rpi4-aarch64-debug` | `rpi-aarch64` | `native-tftp` or `uboot-usb-ecm` |
+| `rpi5` | `raspberry-pi` | `rpi5-aarch64-debug` | `rpi-aarch64` | `native-tftp` |
+| `milk-v-titan` | `opensbi-uefi` | `milk-v-titan-riscv64-debug` | `opensbi-riscv64` | `uefi-esp` |
+
+Each Pi profile has a nested `[boards.<name>.raspberry_pi]` table with the
+exact model DTB and architecture-correct legacy KOBJ directory. Titan instead
+has `[boards.<name>.opensbi_uefi]` with its RISC-V KOBJ directory. Mixing
+backends, nested tables, models or transports must fail at profile validation.
+
+```toml
+format_version = 2
+
+[boards.<local-name>]
+backend = "raspberry-pi"
+model = "rpi4"
+preset = "rpi4-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
+transport = "native-tftp"
+
+[boards.<local-name>.raspberry_pi]
+dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "/absolute/path/to/legacy-kobjs"
+```
 
 For USB-ECM, a profile must use a stable USB identity rather than a host network
 name: USB vendor ID, product ID, USB serial, and the expected Pi-side
@@ -95,6 +122,12 @@ topology and source-device identity are checked again; no broad whole-disk,
 force/lazy unmount or eject is available. This is a separate authorization;
 afterward obtain a new writer candidate and token with `sd scan --artifact`.
 
+## Raspberry Pi 3B+
+
+- Use the exact `bcm2710-rpi-3-b-plus.dtb` input and ARM32 KOBJs.
+- The reviewed transport is `native-tftp`; do not reuse the Pi-4 USB gadget profile.
+- Treat the CMake/artifact milestone and a physical UART-confirmed boot as separate evidence.
+
 ## Raspberry Pi 4
 
 - Use a 3.3 V UART on GPIO14/15 as the first-line console.
@@ -104,4 +137,13 @@ afterward obtain a new writer candidate and token with `sd scan --artifact`.
 ## Raspberry Pi 5
 
 - The three-pin debug connector can be switched between its UART role and CPU SWD; preserve an independent UART route when halt debugging is enabled.
-- Keep Pi 5 profiles disabled until the AROS BCM2712 platform support is implemented and validated. A compatible TFTP or USB transport alone is insufficient.
+- Use the exact `bcm2712-rpi-5-b.dtb` input and AArch64 KOBJs.
+- The model-specific CMake/artifact contract is implemented, but a compatible native transport does not prove a physical AROS boot. Require captured UART evidence.
+- Do not reuse the Pi-4-only USB-ECM/U-Boot profile.
+
+## Milk-V Titan boundary
+
+- Titan is handled by the generic board engine, not by the Raspberry Pi transport code.
+- Its first contract is a removable-media `uefi-esp` containing `BOOTRISCV64.EFI`, the AROS `Image`, BSP package, `aros.cmd`, and `startup.nsh`.
+- Network deploy/serve must reject this transport. AHI is intentionally absent from the initial RISC-V graph rather than silently mapped to an unsupported driver.
+- The four deterministic `opensbi-riscv64` host release slots exist but remain disabled until matching archives are published and verified. Do not bypass that gate with an untracked compiler.

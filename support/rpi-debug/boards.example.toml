@@ -1,28 +1,44 @@
-# Copy to ~/.config/aros/boards.toml and replace every path, address and device
-# name with local values. Board names and all USB identities below are local
-# lab data; they are never portable AROS target metadata.
-#
-# `usb_ecm.identity` is stable pairing data for `aros board scan` and
-# `aros board serve`. `serve` resolves it again on each run; it never trusts an
-# old dynamically assigned host-interface name.
-#
-# Board names are local labels.  They are not AROS targets and do not belong in
-# aros-targets.toml.
+# Copy the profiles you own to ~/.config/aros/boards.toml and replace every
+# path, address, interface, serial device, USB identity and power description
+# with local values. Board names are local lab labels, not portable AROS
+# targets, and therefore do not belong in aros-targets.toml.
 
-format_version = 1
+format_version = 2
+
+[boards.rpi3-native]
+backend = "raspberry-pi"
+model = "rpi3"
+preset = "rpi3-arm-debug"
+toolchain_preset = "arm-raspi"
+build_target = "rpi-artifacts"
+transport = "native-tftp"
+artifact_dir = "build/rpi3-arm-debug/boot/rpi3"
+tftp_root = "/absolute/path/to/aros-tftp"
+tftp_prefix = "rpi3-native/current"
+serial_device = "/dev/cu.usbserial-REPLACE_ME"
+serial_baud = 115200
+debug_transport = "jtag"
+power_control = "manual"
+
+[boards.rpi3-native.raspberry_pi]
+dtb_path = "/absolute/path/to/bcm2710-rpi-3-b-plus.dtb"
+core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-arm/gen/kobjs"
+
+[boards.rpi3-native.network]
+interface = "REPLACE_ME"
+server_address = "192.168.73.1"
+target_address = "192.168.73.2"
+subnet_mask = "255.255.255.0"
+expected_target_mac = "02:aa:00:00:03:01"
 
 [boards.rpi4-native]
+backend = "raspberry-pi"
 model = "rpi4"
 preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
 transport = "native-tftp"
-artifact_dir = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
-# Required by the Pi 4 CMake boot-bundle target.  Obtain this only through the
-# explicitly pinned firmware workflow; it is not downloaded by `aros board`.
-dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
-# The current CMake core-link bridge consumes these three legacy-generated
-# AArch64 ET_REL KOBJs: kernel_resource.o, exec_library.o, task_resource.o.
-core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
+artifact_dir = "build/rpi4-aarch64-debug/boot/rpi4"
 tftp_root = "/absolute/path/to/aros-tftp"
 tftp_prefix = "rpi4-native/current"
 serial_device = "/dev/cu.usbserial-REPLACE_ME"
@@ -30,25 +46,25 @@ serial_baud = 115200
 debug_transport = "jtag"
 power_control = "manual"
 
-# The EEPROM network boot transport needs the Pi's integrated RJ45 Ethernet.
-# `interface` is deliberately explicit: `aros board serve` never guesses a
-# physical Ethernet port. It verifies that server_address is currently on it.
+[boards.rpi4-native.raspberry_pi]
+dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
+
 [boards.rpi4-native.network]
 interface = "REPLACE_ME"
-server_address = "192.168.77.1"
-target_address = "192.168.77.2"
+server_address = "192.168.74.1"
+target_address = "192.168.74.2"
 subnet_mask = "255.255.255.0"
-# Actual Pi integrated-Ethernet MAC, not the host's MAC.
-expected_target_mac = "02:aa:00:00:00:02"
+expected_target_mac = "02:aa:00:00:04:01"
 
 [boards.rpi4-usb]
+backend = "raspberry-pi"
 model = "rpi4"
 preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
 transport = "uboot-usb-ecm"
-artifact_dir = "/absolute/path/to/AROS-NG/build/rpi4-aarch64-debug/boot/raspi"
-dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
-core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
+artifact_dir = "build/rpi4-aarch64-debug/boot/rpi4"
 tftp_root = "/absolute/path/to/aros-tftp"
 tftp_prefix = "rpi4-usb/current"
 serial_device = "/dev/cu.usbserial-REPLACE_ME"
@@ -56,32 +72,61 @@ serial_baud = 115200
 debug_transport = "jtag"
 power_control = "manual"
 
-# These are private USB-ECM lab addresses. Configure host_address on the
-# selected dynamic USB-ECM interface before invoking `aros board serve`; the CLI
-# intentionally never changes host network configuration itself.
-#
-# Do not persist `en7`, `enx…`, or another host interface name here. Those
-# names are assigned dynamically by macOS and Linux. Use `aros board scan` to
-# obtain the USB descriptor values, then pair this one physical Pi by all
-# fields in the nested identity table.
+[boards.rpi4-usb.raspberry_pi]
+dtb_path = "/absolute/path/to/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
+
 [boards.rpi4-usb.usb_ecm]
-host_address = "192.168.77.1"
-target_address = "192.168.77.2"
+host_address = "192.168.74.1"
+target_address = "192.168.74.2"
 subnet_mask = "255.255.255.0"
 
 [boards.rpi4-usb.usb_ecm.identity]
-# USB device descriptor identity, not the host's dynamically assigned network
-# interface. VID:PID identifies the U-Boot gadget profile; serial identifies
-# this physical Pi.
+# Copy these stable descriptor values from `aros board scan`; never persist a
+# dynamic macOS/Linux interface name such as en7 or enx... here.
 vendor_id = 0x1d6b
 product_id = 0x0104
 serial = "aros-rpi4-lab-01"
-# Pin the Ethernet MAC emitted by the Pi/U-Boot CDC-ECM gadget. This is not
-# the Mac/Linux interface MAC. Generate a locally administered unicast address
-# and configure the same value in the U-Boot gadget profile. Restricted DHCP
-# responds only to this MAC and assigns only target_address above.
-expected_target_mac = "02:aa:00:00:00:01"
+expected_target_mac = "02:aa:00:00:04:02"
 
-# Pi 5 intentionally has no active profile here.  When its BCM2712 AROS port
-# exists, add a separate profile with a separately validated native-TFTP,
-# UART and SWD contract.
+[boards.rpi5-native]
+backend = "raspberry-pi"
+model = "rpi5"
+preset = "rpi5-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
+transport = "native-tftp"
+artifact_dir = "build/rpi5-aarch64-debug/boot/rpi5"
+tftp_root = "/absolute/path/to/aros-tftp"
+tftp_prefix = "rpi5-native/current"
+serial_device = "/dev/cu.usbserial-REPLACE_ME"
+serial_baud = 115200
+debug_transport = "swd"
+power_control = "manual"
+
+[boards.rpi5-native.raspberry_pi]
+dtb_path = "/absolute/path/to/bcm2712-rpi-5-b.dtb"
+core_kobj_dir = "/absolute/path/to/legacy-build/bin/raspi-aarch64/gen/kobjs"
+
+[boards.rpi5-native.network]
+interface = "REPLACE_ME"
+server_address = "192.168.75.1"
+target_address = "192.168.75.2"
+subnet_mask = "255.255.255.0"
+expected_target_mac = "02:aa:00:00:05:01"
+
+[boards.milk-v-titan]
+backend = "opensbi-uefi"
+model = "milk-v-titan"
+preset = "milk-v-titan-riscv64-debug"
+toolchain_preset = "opensbi-riscv64"
+build_target = "opensbi-uefi-artifacts"
+transport = "uefi-esp"
+artifact_dir = "build/milk-v-titan-riscv64-debug/boot/milk-v-titan"
+serial_device = "/dev/cu.usbserial-REPLACE_ME"
+serial_baud = 115200
+debug_transport = "jtag"
+power_control = "manual"
+
+[boards.milk-v-titan.opensbi_uefi]
+core_kobj_dir = "/absolute/path/to/legacy-build/bin/opensbi-riscv64/gen/kobjs"
