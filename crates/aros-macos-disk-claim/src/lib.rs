@@ -33,6 +33,16 @@ mod platform {
             Err(ClaimError::UnsupportedPlatform)
         }
 
+        // The platform-neutral owner calls the same fallible, mutable release
+        // contract on every target. This non-constructible fallback has no
+        // state to mutate and no cleanup that can fail, but changing its
+        // signature would split that internal platform boundary.
+        #[allow(
+            clippy::missing_const_for_fn,
+            clippy::needless_pass_by_ref_mut,
+            clippy::unnecessary_wraps,
+            clippy::unused_self
+        )]
         pub fn release(&mut self) -> Result<(), ClaimError> {
             Ok(())
         }
