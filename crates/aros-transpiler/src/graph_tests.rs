@@ -42,6 +42,7 @@ fn port_directory_copy_binds_its_unique_fetch_owner() {
         archive: "boost_1_89_0".to_owned(),
         suffixes: "tar.gz".to_owned(),
         origins: "https://example.invalid/boost.tar.gz".to_owned(),
+        checksums: String::new(),
         location: "${AROS_PORTS_SOURCE_DIR}".to_owned(),
         destination: "${AROS_PORTS_DIR}/boost".to_owned(),
         base: String::new(),

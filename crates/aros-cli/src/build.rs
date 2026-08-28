@@ -28,12 +28,21 @@ pub struct BuildOptions {
     pub clean: bool,
     /// Request verbose CMake configuration diagnostics.
     pub verbose: bool,
-    /// Prohibit toolchain downloads and require local verified state.
-    pub offline: bool,
+    /// Network and integrity policy applied to every build input.
+    pub input_policy: BuildInputPolicy,
     /// Explicit local cross-toolchain override.
     pub toolchain_dir: Option<PathBuf>,
     /// Additional strictly named CMake cache definitions.
     pub cmake_definitions: Vec<CmakeDefinition>,
+}
+
+/// Acquisition and integrity policy shared by toolchains and port sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildInputPolicy {
+    /// Prohibit network access and require installed, cached, or local inputs.
+    pub offline: bool,
+    /// Reject `%fetch` archives without source-declared SHA-256 values.
+    pub require_fetch_checksums: bool,
 }
 
 /// One validated `-DKEY=VALUE` CMake cache definition.
@@ -57,7 +66,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let resolved = toolchain::resolve_for_build(
         &options.toolchain_preset,
         options.toolchain_dir.as_deref(),
-        options.offline,
+        options.input_policy.offline,
     )
     .await?;
     build_tools::ensure(repo_root)?;
@@ -120,6 +129,22 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     configure.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));
     configure.arg(format!("-DAROS_TARGET_PROFILE={}", profile.name));
     configure.arg(format!("-DAROS_TARGET_TRIPLE={}", resolved.target_triple));
+    configure.arg(format!(
+        "-DAROS_FETCH_OFFLINE={}",
+        if options.input_policy.offline {
+            "ON"
+        } else {
+            "OFF"
+        }
+    ));
+    configure.arg(format!(
+        "-DAROS_FETCH_REQUIRE_CHECKSUMS={}",
+        if options.input_policy.require_fetch_checksums {
+            "ON"
+        } else {
+            "OFF"
+        }
+    ));
     if let Some(float_abi) = &profile.float_abi {
         configure.arg(format!("-DGCC_CONFIG_FLOAT_ABI={float_abi}"));
     }

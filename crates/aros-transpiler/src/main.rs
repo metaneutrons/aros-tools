@@ -1065,6 +1065,7 @@ fn render_source_inventory_manifest(graph: &DependencyGraph) -> String {
             ("ARCHIVE", fetch.archive.as_str()),
             ("SUFFIXES", fetch.suffixes.as_str()),
             ("ORIGINS", fetch.origins.as_str()),
+            ("CHECKSUMS", fetch.checksums.as_str()),
             ("LOCATION", fetch.location.as_str()),
             ("DESTINATION", fetch.destination.as_str()),
             ("BASE", fetch.base.as_str()),

@@ -30,6 +30,9 @@ pub struct FetchDecl {
     pub suffixes: String,
     /// `archive_origins=`: mirrors to try, in order.
     pub origins: String,
+    /// `checksums=`: exact `filename=sha256:<digest>` archive contracts.
+    #[serde(default)]
+    pub checksums: String,
     /// `location=`: where the downloaded archive is kept.
     pub location: String,
     /// `destination=`: where it is unpacked.
@@ -310,6 +313,7 @@ fn collect_fetches_with_lookup(
             archive,
             suffixes: get("suffixes").unwrap_or_else(|| "tar.bz2 tar.gz".to_owned()),
             origins: get("archive_origins").unwrap_or_else(|| ".".to_owned()),
+            checksums: get("checksums").unwrap_or_default(),
             location: get("location").unwrap_or_default(),
             destination: get("destination").unwrap_or_else(|| ".".to_owned()),
             base: get("base").unwrap_or_default(),
@@ -341,6 +345,7 @@ fn collect_fetches_with_lookup(
             &decl.archive,
             &decl.suffixes,
             &decl.origins,
+            &decl.checksums,
             &decl.location,
             &decl.destination,
             &decl.base,
@@ -482,6 +487,20 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
         let src = "%fetch mmake=y archive=pkg-1.0 destination=$(PORTSDIR)/y\n";
         let (decls, _) = collect_fetches(src, &PathBuf::from("d"));
         assert_eq!(decls[0].suffixes, "tar.bz2 tar.gz");
+    }
+
+    #[test]
+    fn explicit_checksums_are_resolved_without_inference() {
+        let digest = "0123456789abcdef".repeat(4);
+        let src = format!(
+            "VERSION := 1.0\n%fetch mmake=pkg-fetch archive=pkg-$(VERSION) \\\n+             destination=$(PORTSDIR)/pkg suffixes=\"tar.xz tar.gz\" \\\n+             checksums=\"pkg-$(VERSION).tar.xz=sha256:{digest} pkg-$(VERSION).tar.gz=sha256:{digest}\"\n"
+        );
+        let (decls, skipped) = collect_fetches(&src, &PathBuf::from("external/pkg"));
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(
+            decls[0].checksums,
+            format!("pkg-1.0.tar.xz=sha256:{digest} pkg-1.0.tar.gz=sha256:{digest}")
+        );
     }
 
     #[test]

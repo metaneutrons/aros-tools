@@ -424,11 +424,12 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             write!(
                 out,
                 "aros_fetch_archive(NAME \"{}\" ARCHIVE \"{}\" SUFFIXES \"{}\" ORIGINS \"{}\"\n\
-                 \x20   LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\"",
+                 \x20   CHECKSUMS \"{}\" LOCATION \"{}\" DESTINATION \"{}\" BASE \"{}\" PATCH_ORIGINS \"{}\" PATCHES \"{}\"",
                 f.name,
                 f.archive,
                 f.suffixes,
                 f.origins,
+                f.checksums,
                 f.location,
                 f.destination,
                 f.base,

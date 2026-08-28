@@ -37,6 +37,30 @@ intent, staged image verification, a platform-native exclusive claim, and
 complete readback verification. The macOS claim helper does not replace any
 of those checks.
 
+## Third-party source integrity and offline builds
+
+`aros build --offline` is a complete network policy for the build transaction:
+both released toolchain acquisition and `%fetch` port-source access are
+restricted to already installed, cached, or explicitly local inputs. An
+offline cache miss fails with the archive name and cache path; it never falls
+through to HTTP, FTP, the AROS external-source cache, or a named mirror.
+
+Upstream-compatible `%fetch` declarations may optionally provide exact
+archive contracts:
+
+```make
+%fetch mmake=example-fetch archive=example-1.0 suffixes="tar.xz tar.gz" \
+    checksums="example-1.0.tar.xz=sha256:<digest> example-1.0.tar.gz=sha256:<digest>"
+```
+
+The classic MetaMake path and transpiled CMake path both delegate to the same
+verifier. It checks downloads and cache hits before unpacking, rejects malformed
+or incomplete multi-suffix declarations, and reports expected and actual
+digests on mismatch. No hash is inferred or emitted into generated CMake.
+Release and CI validation can add `--require-fetch-checksums` (or set
+`AROS_FETCH_REQUIRE_CHECKSUMS=1`) to reject hashless source archives while
+ordinary upstream builds remain additive and compatible.
+
 ## Diagnostics and local logging
 
 `aros` uses the same versioned diagnostic document as the transpiler,

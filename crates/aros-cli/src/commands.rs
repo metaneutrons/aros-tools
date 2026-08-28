@@ -32,6 +32,7 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             clean,
             verbose,
             offline,
+            require_fetch_checksums,
             toolchain_dir,
         } => {
             build::run(
@@ -43,7 +44,10 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
                     jobs,
                     clean,
                     verbose,
-                    offline,
+                    input_policy: build::BuildInputPolicy {
+                        offline,
+                        require_fetch_checksums,
+                    },
                     toolchain_dir,
                     cmake_definitions: Vec::new(),
                 },
@@ -149,6 +153,7 @@ async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
             clean,
             verbose,
             offline,
+            require_fetch_checksums,
             toolchain_dir,
             dtb_path,
             core_kobj_dir,
@@ -164,7 +169,10 @@ async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
                     jobs,
                     clean,
                     verbose,
-                    offline,
+                    input_policy: build::BuildInputPolicy {
+                        offline,
+                        require_fetch_checksums,
+                    },
                     toolchain_dir,
                     cmake_definitions: Vec::new(),
                 },

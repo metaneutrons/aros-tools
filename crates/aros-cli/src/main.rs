@@ -147,9 +147,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Never access the network; use only a verified installed/cached toolchain
+        /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
         offline: bool,
+
+        /// Reject every third-party source archive without an explicit SHA-256
+        #[arg(long, env = "AROS_FETCH_REQUIRE_CHECKSUMS")]
+        require_fetch_checksums: bool,
 
         /// Use an existing AROS-built cross-toolchain prefix
         #[arg(long)]
@@ -338,9 +342,13 @@ enum BoardCommand {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Never access the network; use only a verified installed/cached toolchain
+        /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
         offline: bool,
+
+        /// Reject every third-party source archive without an explicit SHA-256
+        #[arg(long, env = "AROS_FETCH_REQUIRE_CHECKSUMS")]
+        require_fetch_checksums: bool,
 
         /// Use an existing AROS-built cross-toolchain prefix
         #[arg(long)]

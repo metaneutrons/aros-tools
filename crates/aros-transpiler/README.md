@@ -6,9 +6,12 @@ bytes.
 
 ## Pin policy
 
-- `%fetch` keeps the upstream archive name, version, URL, suffix and patch
-  declaration. The transpiler does not add an archive checksum that upstream
-  did not declare.
+- `%fetch` keeps the upstream archive name, version, URL, suffix, patch and
+  optional checksum declaration. A checksum is an exact, source-authored
+  `filename=sha256:<digest>` contract. The transpiler only carries it into
+  CMake; it never discovers, computes or adds one. When multiple suffixes are
+  candidates, every concrete archive filename must be declared so fallback
+  cannot silently weaken verification.
 - Repository scripts and patches are direct build dependencies. Editing one
   invalidates the corresponding generated output or fetch result; it does not
   require updating a second checksum.
