@@ -36,6 +36,7 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&fetch_file, &root, &context)

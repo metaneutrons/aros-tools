@@ -95,6 +95,9 @@ pub(crate) fn aom_profile_options(
             // configuration shared with the reproducible x86_64 profile.
             &["-DAOM_TARGET_CPU=generic"]
         }
+        (Some("riscv64"), Some("opensbi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
+            &["-DAOM_TARGET_CPU=riscv64", "-DCONFIG_RUNTIME_CPU_DETECT=0"]
+        }
         _ => {
             return Err(format!(
                 "AOM capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",

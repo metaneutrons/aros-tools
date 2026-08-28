@@ -42,6 +42,7 @@ fn production_nouveau_libdrm_is_exact_for_all_current_architectures() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let parsed = parse_mmakefile_with_dirs_and_context(&mmakefile, &root, &dirs, &context)

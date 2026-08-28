@@ -34,6 +34,7 @@ fn production_hidds_preserve_always_cxx_link_for_every_current_architecture() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&mesa_mmakefile, &root, &context)

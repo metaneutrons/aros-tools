@@ -32,6 +32,7 @@ fn cunit_external_contract_is_exact_for_every_current_architecture() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = parse_mmakefile_with_dirs_and_context(
             &root.join("compiler/cunit/mmakefile.src"),
@@ -286,6 +287,7 @@ fn every_llvm_external_cmake_declaration_stays_explicitly_skipped() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let relative = "tools/crosstools/llvm/mmakefile.src";

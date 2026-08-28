@@ -112,6 +112,14 @@ pub(crate) fn profile(
             Some(""),
             Some("1"),
             Some(""),
+        )
+        | (
+            Some("riscv64"),
+            Some("opensbi"),
+            Some("llvm"),
+            Some(""),
+            Some("1"),
+            Some(""),
         ) => Ok(Some(false)),
         _ => Err(format!(
             "Mesa SSE4.1 capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",

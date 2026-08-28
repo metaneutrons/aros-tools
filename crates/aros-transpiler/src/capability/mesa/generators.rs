@@ -54,7 +54,8 @@ pub(crate) fn parse_glapi(
     let x86_64 = match profile_key {
         (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => true,
         (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard"))
-        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => false,
+        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some(""))
+        | (Some("riscv64"), Some("opensbi"), Some("llvm"), Some(""), Some("1"), Some("")) => false,
         _ => {
             return Err(format!(
                 "Mesa glapi generator capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
@@ -325,7 +326,8 @@ pub(crate) fn parse_mesautil(
     let x86_64 = match profile_key {
         (Some("x86_64"), Some("pc"), Some("llvm"), Some("i386"), Some("1"), Some("")) => true,
         (Some("arm"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("hard"))
-        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => false,
+        | (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some(""))
+        | (Some("riscv64"), Some("opensbi"), Some("llvm"), Some(""), Some("1"), Some("")) => false,
         _ => {
             return Err(format!(
                 "Mesa utility generator capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",

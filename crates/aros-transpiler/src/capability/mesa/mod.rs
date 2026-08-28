@@ -87,6 +87,9 @@ pub(crate) fn current_profile(
         (Some("aarch64"), Some("raspi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
             Ok("aarch64")
         }
+        (Some("riscv64"), Some("opensbi"), Some("llvm"), Some(""), Some("1"), Some("")) => {
+            Ok("riscv64")
+        }
         _ => Err(format!(
             "Mesa 20.0.8 archive capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
             profile.cpu.as_deref().unwrap_or("<unset>"),

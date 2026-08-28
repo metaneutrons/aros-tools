@@ -35,6 +35,7 @@ fn production_sse41_is_sourceful_on_x86_and_an_empty_archive_on_raspberry_pi() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&fetch_file, &root, &context)

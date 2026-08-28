@@ -9,11 +9,11 @@ use super::{
     copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
     declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
     evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
-    evaluate_output_directory, expand_file_list, expected_grub_profile_exclusion, external_cmake,
-    generators, implicit_module_meta_rules, inline_collector_make_includes,
-    inline_local_make_includes, is_explicit_genmodule_only, join_continuations,
-    join_mm_continuations, literal_defines, macro_arg, map_linklib_object_sources,
-    merge_named_link_flags, read_genmodule_linklib_config, read_source,
+    evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
+    expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
+    inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
+    join_continuations, join_mm_continuations, literal_defines, macro_arg,
+    map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config, read_source,
     record_partial_source_lists, remaining_linklib_sources, render_meta_token,
     resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
     resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
@@ -395,11 +395,13 @@ pub(super) fn parse_mmakefile_impl(
             Err(reason) => {
                 let mmake = macro_arg(&invocation.args, "mmake")
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
-                capability_errors.push(capability_diagnostic(
-                    &relative_path,
-                    Some(invocation.line + 1),
-                    format!("%build_with_configure{mmake} no longer matches the closed AHI capability: {reason}"),
-                ));
+                if !expected_ahi_profile_exclusion(target) {
+                    capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(invocation.line + 1),
+                        format!("%build_with_configure{mmake} no longer matches the closed AHI capability: {reason}"),
+                    ));
+                }
                 skipped_programs.push(format!(
                     "{}:{}: %build_with_configure{mmake} skipped: {reason}",
                     rel_dir.display(),

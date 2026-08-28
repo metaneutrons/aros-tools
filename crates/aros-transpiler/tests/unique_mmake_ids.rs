@@ -24,6 +24,7 @@ fn formerly_colliding_programs_keep_distinct_ids_outputs_and_parent_edges() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let expectations = [
@@ -171,6 +172,7 @@ fn concrete_profiles_have_unique_compiled_mmake_ids() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let fetches = files

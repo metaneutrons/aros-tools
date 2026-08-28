@@ -58,6 +58,7 @@ fn configure_contracts_are_exact_for_every_current_architecture() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let declarations =
             declarations_for(&root, &dirs, &target_context(cpu, platform, float_abi));

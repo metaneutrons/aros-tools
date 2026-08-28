@@ -807,6 +807,36 @@ fn expected_grub_profile_exclusion(target: Option<&TargetContext>) -> bool {
                 Some(""),
                 Some("1"),
                 Some("")
+            ) | (
+                Some("riscv64"),
+                Some("opensbi"),
+                Some("llvm"),
+                Some(""),
+                Some("1"),
+                Some("")
+            )
+        )
+    })
+}
+
+fn expected_ahi_profile_exclusion(target: Option<&TargetContext>) -> bool {
+    target.is_some_and(|target| {
+        matches!(
+            (
+                target.cpu.as_deref(),
+                target.platform.as_deref(),
+                target.toolchain.as_deref(),
+                target.cpu32.as_deref(),
+                target.use_mmu.as_deref(),
+                target.float_abi.as_deref(),
+            ),
+            (
+                Some("riscv64"),
+                Some("opensbi"),
+                Some("llvm"),
+                Some(""),
+                Some("1"),
+                Some("")
             )
         )
     })

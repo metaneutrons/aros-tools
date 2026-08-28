@@ -67,6 +67,7 @@ fn production_nouveau_gallium_is_closed_and_canonical_for_all_current_architectu
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let context = target_context(cpu, platform, float_abi);
         let fetches = collect_mmakefile_fetches_with_context(&mesa_mmakefile, &root, &context)

@@ -388,6 +388,10 @@ fn aom_external_cmake_capability_is_profile_exact() {
             target_context("aarch64", "raspi", ""),
             vec!["-DAOM_TARGET_CPU=generic"],
         ),
+        (
+            target_context("riscv64", "opensbi", ""),
+            vec!["-DAOM_TARGET_CPU=riscv64", "-DCONFIG_RUNTIME_CPU_DETECT=0"],
+        ),
     ] {
         let (invocation, scope, fetches, content) = parsed_aom_capability(&profile);
         let expression_context = MakeExprContext::new(
@@ -1180,6 +1184,7 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &file,
@@ -1455,6 +1460,7 @@ fn concrete_profiles_keep_core_conditional_targets_and_select_png_sources() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let target = target_context(cpu, platform, float_abi);
         let mut parsed_targets = BTreeMap::new();
@@ -1558,6 +1564,7 @@ fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &file,
@@ -1639,6 +1646,7 @@ fn zstd_plain_source_inventory_is_cold_fetch_exact_in_all_current_profiles() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &file,
@@ -1817,6 +1825,7 @@ fn atheros_hal_literal_fragment_is_exact_in_all_current_profiles() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &file,
@@ -2386,6 +2395,7 @@ fn generated_linklib_wildcards_are_exact_manifests_in_all_current_profiles() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let target_context = target_context(cpu, platform, float_abi);
         let mut targets = BTreeMap::new();
@@ -2450,6 +2460,7 @@ fn concrete_profiles_keep_webp_dsp_targets_and_select_only_x86_sse2() {
         ("x86_64", "pc", ""),
         ("arm", "raspi", "hard"),
         ("aarch64", "raspi", ""),
+        ("riscv64", "opensbi", ""),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
             &file,

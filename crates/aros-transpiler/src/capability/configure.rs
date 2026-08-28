@@ -132,6 +132,14 @@ fn configure_profile_is_supported(
             Some(""),
             Some("1"),
             Some(""),
+        )
+        | (
+            Some("riscv64"),
+            Some("opensbi"),
+            Some("llvm"),
+            Some(""),
+            Some("1"),
+            Some(""),
         ) => Ok(()),
         _ => Err(format!(
             "configure-style capability does not support target profile cpu={} platform={} toolchain={} cpu32={} use_mmu={} float_abi={}",
