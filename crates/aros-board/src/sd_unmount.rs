@@ -6,21 +6,26 @@
 //! inventory, requires one exact match, performs a normal (non-force,
 //! non-lazy) unmount, and verifies the same physical device is fully unmounted.
 
-#[cfg(target_os = "macos")]
-use super::disk_inventory::diskutil_plist_json;
 #[cfg(target_os = "linux")]
 use super::disk_inventory::linux_inventory_command;
 #[cfg(any(target_os = "linux", test))]
-use super::disk_inventory::{is_linux_whole_device_path, json_object, linux_identity, linux_model};
+use super::disk_inventory::lsblk_field;
 #[cfg(any(target_os = "macos", test))]
 use super::disk_inventory::{
-    is_macos_descendant_identifier, is_macos_whole_disk_identifier, macos_transport,
+    diskutil_field, is_macos_descendant_identifier, is_macos_whole_disk_identifier,
+    macos_transport, DISKUTIL_PHYSICAL_VALUE,
 };
+#[cfg(target_os = "macos")]
+use super::disk_inventory::{diskutil_plist_json, DISKUTIL_PLIST_ARGUMENT};
+#[cfg(any(target_os = "linux", test))]
+use super::disk_inventory::{is_linux_whole_device_path, json_object, linux_identity, linux_model};
 use super::disk_inventory::{
     json_bool_like, json_nonempty_string, json_u64_like, safe_metadata, DiskPlatform,
 };
 #[cfg(target_os = "macos")]
-use super::disk_inventory::{macos_descendant_identifiers, macos_whole_disk_identifiers};
+use super::disk_inventory::{
+    macos_descendant_identifiers, macos_whole_disk_identifiers, DISKUTIL_PATH,
+};
 use miette::Result;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -462,7 +467,7 @@ fn mount_point_from_json(value: &Value) -> Option<ParsedMountPoint> {
 fn parse_linux_inventory(value: &Value) -> Result<Vec<DeviceState>> {
     let root = json_object(value, "lsblk JSON output")?;
     let devices = root
-        .get("blockdevices")
+        .get(lsblk_field::BLOCK_DEVICES)
         .and_then(Value::as_array)
         .ok_or_else(|| miette::miette!("lsblk JSON output must contain blockdevices."))?;
     Ok(devices.iter().filter_map(linux_state_from_node).collect())
@@ -471,25 +476,28 @@ fn parse_linux_inventory(value: &Value) -> Result<Vec<DeviceState>> {
 #[cfg(any(target_os = "linux", test))]
 fn linux_state_from_node(node: &Value) -> Option<DeviceState> {
     let object = node.as_object()?;
-    if json_nonempty_string(object, "type")? != "disk"
-        || !json_bool_like(object, "rm")?
-        || !json_bool_like(object, "hotplug")?
-        || json_bool_like(object, "ro")?
+    if json_nonempty_string(object, lsblk_field::TYPE)? != "disk"
+        || !json_bool_like(object, lsblk_field::REMOVABLE)?
+        || !json_bool_like(object, lsblk_field::HOTPLUG)?
+        || json_bool_like(object, lsblk_field::READ_ONLY)?
     {
         return None;
     }
 
-    let device_path = PathBuf::from(json_nonempty_string(object, "path")?);
+    let device_path = PathBuf::from(json_nonempty_string(object, lsblk_field::PATH)?);
     if !is_linux_whole_device_path(&device_path) {
         return None;
     }
-    let root_kname = json_nonempty_string(object, "kname")?;
+    let root_kname = json_nonempty_string(object, lsblk_field::KERNEL_NAME)?;
     if device_path.file_name()?.to_str()? != root_kname
-        || !matches!(object.get("pkname"), Some(Value::Null))
+        || !matches!(
+            object.get(lsblk_field::PARENT_KERNEL_NAME),
+            Some(Value::Null)
+        )
     {
         return None;
     }
-    let transport = json_nonempty_string(object, "tran")?.to_ascii_lowercase();
+    let transport = json_nonempty_string(object, lsblk_field::TRANSPORT)?.to_ascii_lowercase();
     let path_matches_transport = match transport.as_str() {
         "usb" => root_kname.starts_with("sd"),
         "mmc" => root_kname.starts_with("mmcblk"),
@@ -499,7 +507,7 @@ fn linux_state_from_node(node: &Value) -> Option<DeviceState> {
         return None;
     }
 
-    let size_bytes = json_u64_like(object, "size")?;
+    let size_bytes = json_u64_like(object, lsblk_field::SIZE)?;
     let model = linux_model(object)?;
     let identity = linux_identity(object)?;
     let mut mounted_volumes = Vec::new();
@@ -529,10 +537,10 @@ fn linux_collect_mounts(
     let Some(object) = node.as_object() else {
         return false;
     };
-    let Some(kname) = json_nonempty_string(object, "kname") else {
+    let Some(kname) = json_nonempty_string(object, lsblk_field::KERNEL_NAME) else {
         return false;
     };
-    let Some(node_type) = json_nonempty_string(object, "type") else {
+    let Some(node_type) = json_nonempty_string(object, lsblk_field::TYPE) else {
         return false;
     };
     if (expected_parent.is_none() && node_type != "disk")
@@ -540,7 +548,7 @@ fn linux_collect_mounts(
     {
         return false;
     }
-    let Some(device_node_value) = json_nonempty_string(object, "path") else {
+    let Some(device_node_value) = json_nonempty_string(object, lsblk_field::PATH) else {
         return false;
     };
     let device_node = PathBuf::from(device_node_value);
@@ -554,11 +562,21 @@ fn linux_collect_mounts(
         return false;
     }
     match expected_parent {
-        None if !matches!(object.get("pkname"), Some(Value::Null)) => return false,
-        Some(parent) if json_nonempty_string(object, "pkname") != Some(parent) => return false,
+        None if !matches!(
+            object.get(lsblk_field::PARENT_KERNEL_NAME),
+            Some(Value::Null)
+        ) =>
+        {
+            return false;
+        }
+        Some(parent)
+            if json_nonempty_string(object, lsblk_field::PARENT_KERNEL_NAME) != Some(parent) =>
+        {
+            return false;
+        }
         _ => {}
     }
-    let Some(mounts) = linux_mount_points(object.get("mountpoints")) else {
+    let Some(mounts) = linux_mount_points(object.get(lsblk_field::MOUNT_POINTS)) else {
         return false;
     };
     mounted_volumes.extend(mounts.into_iter().map(|mount_point| MountedVolume {
@@ -569,7 +587,7 @@ fn linux_collect_mounts(
         },
     }));
 
-    match object.get("children") {
+    match object.get(lsblk_field::CHILDREN) {
         None | Some(Value::Null) => true,
         Some(Value::Array(children)) => children
             .iter()
@@ -580,7 +598,7 @@ fn linux_collect_mounts(
 
 #[cfg(any(target_os = "linux", test))]
 fn linux_device_number(object: &Map<String, Value>) -> Option<LinuxDeviceNumber> {
-    parse_linux_device_number(json_nonempty_string(object, "maj:min")?)
+    parse_linux_device_number(json_nonempty_string(object, lsblk_field::MAJOR_MINOR)?)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -920,19 +938,20 @@ struct MacosRootEvidence {
 #[cfg(any(target_os = "macos", test))]
 fn macos_root_evidence(info: &Value) -> Option<MacosRootEvidence> {
     let root = info.as_object()?;
-    let identifier = json_nonempty_string(root, "DeviceIdentifier")?;
+    let identifier = json_nonempty_string(root, diskutil_field::DEVICE_IDENTIFIER)?;
     if !is_macos_whole_disk_identifier(identifier)
-        || !json_bool_like(root, "WholeDisk")?
-        || json_nonempty_string(root, "ParentWholeDisk")? != identifier
-        || json_bool_like(root, "Internal")?
-        || !json_bool_like(root, "Writable")?
-        || !json_bool_like(root, "Ejectable")?
+        || !json_bool_like(root, diskutil_field::WHOLE_DISK)?
+        || json_nonempty_string(root, diskutil_field::PARENT_WHOLE_DISK)? != identifier
+        || json_bool_like(root, diskutil_field::INTERNAL)?
+        || !json_bool_like(root, diskutil_field::WRITABLE)?
+        || !json_bool_like(root, diskutil_field::EJECTABLE)?
         || !macos_explicitly_removable(root)
-        || !json_nonempty_string(root, "VirtualOrPhysical")?.eq_ignore_ascii_case("physical")
+        || !json_nonempty_string(root, diskutil_field::VIRTUAL_OR_PHYSICAL)?
+            .eq_ignore_ascii_case(DISKUTIL_PHYSICAL_VALUE)
     {
         return None;
     }
-    let device_path = PathBuf::from(json_nonempty_string(root, "DeviceNode")?);
+    let device_path = PathBuf::from(json_nonempty_string(root, diskutil_field::DEVICE_NODE)?);
     let expected_device_path = format!("/dev/{identifier}");
     if device_path.as_os_str() != expected_device_path.as_str() {
         return None;
@@ -940,9 +959,12 @@ fn macos_root_evidence(info: &Value) -> Option<MacosRootEvidence> {
     Some(MacosRootEvidence {
         identifier: identifier.to_string(),
         device_path,
-        size_bytes: json_u64_like(root, "Size")?,
-        identity: format!("serial:{}", json_nonempty_string(root, "SerialNumber")?),
-        model: json_nonempty_string(root, "MediaName")?.to_string(),
+        size_bytes: json_u64_like(root, diskutil_field::SIZE)?,
+        identity: format!(
+            "serial:{}",
+            json_nonempty_string(root, diskutil_field::SERIAL_NUMBER)?
+        ),
+        model: json_nonempty_string(root, diskutil_field::MEDIA_NAME)?.to_string(),
         transport: macos_transport(root)?,
     })
 }
@@ -950,22 +972,22 @@ fn macos_root_evidence(info: &Value) -> Option<MacosRootEvidence> {
 #[cfg(any(target_os = "macos", test))]
 fn macos_root_observations_match(first: &Value, second: &Value) -> bool {
     const FIELDS: &[&str] = &[
-        "DeviceIdentifier",
-        "DeviceNode",
-        "ParentWholeDisk",
-        "WholeDisk",
-        "Internal",
-        "Writable",
-        "Ejectable",
-        "Removable",
-        "RemovableMedia",
-        "VirtualOrPhysical",
-        "Protocol",
-        "BusProtocol",
-        "SerialNumber",
-        "MediaName",
-        "Size",
-        "MountPoint",
+        diskutil_field::DEVICE_IDENTIFIER,
+        diskutil_field::DEVICE_NODE,
+        diskutil_field::PARENT_WHOLE_DISK,
+        diskutil_field::WHOLE_DISK,
+        diskutil_field::INTERNAL,
+        diskutil_field::WRITABLE,
+        diskutil_field::EJECTABLE,
+        diskutil_field::REMOVABLE,
+        diskutil_field::REMOVABLE_MEDIA,
+        diskutil_field::VIRTUAL_OR_PHYSICAL,
+        diskutil_field::PROTOCOL,
+        diskutil_field::BUS_PROTOCOL,
+        diskutil_field::SERIAL_NUMBER,
+        diskutil_field::MEDIA_NAME,
+        diskutil_field::SIZE,
+        diskutil_field::MOUNT_POINT,
     ];
     let (Some(first), Some(second)) = (first.as_object(), second.as_object()) else {
         return false;
@@ -1003,15 +1025,15 @@ fn macos_state_from_info(
     let mut mounted_volumes = Vec::new();
     for info in descendant_infos {
         let object = info.as_object()?;
-        let descendant = json_nonempty_string(object, "DeviceIdentifier")?;
-        let descendant_is_whole = json_bool_like(object, "WholeDisk")?;
+        let descendant = json_nonempty_string(object, diskutil_field::DEVICE_IDENTIFIER)?;
+        let descendant_is_whole = json_bool_like(object, diskutil_field::WHOLE_DISK)?;
         let expected_device_node = format!("/dev/{descendant}");
-        let device_node = PathBuf::from(json_nonempty_string(object, "DeviceNode")?);
+        let device_node = PathBuf::from(json_nonempty_string(object, diskutil_field::DEVICE_NODE)?);
         if !expected.contains(descendant)
             || !seen.insert(descendant.to_string())
             || !is_macos_descendant_identifier(descendant, identifier)
             || descendant_is_whole ^ (descendant == identifier)
-            || json_nonempty_string(object, "ParentWholeDisk")? != identifier
+            || json_nonempty_string(object, diskutil_field::PARENT_WHOLE_DISK)? != identifier
             || device_node.as_os_str() != expected_device_node.as_str()
         {
             return None;
@@ -1022,7 +1044,9 @@ fn macos_state_from_info(
         {
             return None;
         }
-        if let ParsedMountPoint::Mounted(path) = mount_point_from_json(object.get("MountPoint")?)? {
+        if let ParsedMountPoint::Mounted(path) =
+            mount_point_from_json(object.get(diskutil_field::MOUNT_POINT)?)?
+        {
             mounted_volumes.push(MountedVolume {
                 mount_point: path,
                 source: MountedSource::Macos { device_node },
@@ -1047,7 +1071,7 @@ fn macos_state_from_info(
 #[cfg(any(target_os = "macos", test))]
 fn macos_explicitly_removable(object: &Map<String, Value>) -> bool {
     let mut present = false;
-    for field in ["Removable", "RemovableMedia"] {
+    for field in [diskutil_field::REMOVABLE, diskutil_field::REMOVABLE_MEDIA] {
         if object.contains_key(field) {
             present = true;
             if json_bool_like(object, field) != Some(true) {
@@ -1060,15 +1084,16 @@ fn macos_explicitly_removable(object: &Map<String, Value>) -> bool {
 
 #[cfg(target_os = "macos")]
 fn scan_macos_inventory() -> Result<Vec<DeviceState>> {
-    let list = diskutil_plist_json(&["list", "-plist"])?;
+    let list = diskutil_plist_json(&["list", DISKUTIL_PLIST_ARGUMENT])?;
     let identifiers = macos_whole_disk_identifiers(&list)?;
     let mut states = Vec::new();
     for identifier in identifiers {
         let path = format!("/dev/{identifier}");
-        let Ok(root_info) = diskutil_plist_json(&["info", "-plist", &path]) else {
+        let Ok(root_info) = diskutil_plist_json(&["info", DISKUTIL_PLIST_ARGUMENT, &path]) else {
             continue;
         };
-        let Ok(descendant_list) = diskutil_plist_json(&["list", "-plist", &path]) else {
+        let Ok(descendant_list) = diskutil_plist_json(&["list", DISKUTIL_PLIST_ARGUMENT, &path])
+        else {
             continue;
         };
         let Ok(descendants) = macos_descendant_identifiers(&descendant_list, &identifier) else {
@@ -1082,7 +1107,9 @@ fn scan_macos_inventory() -> Result<Vec<DeviceState>> {
         query_order.sort_by_key(|descendant| descendant == &identifier);
         for descendant in &query_order {
             let descendant_path = format!("/dev/{descendant}");
-            if let Ok(info) = diskutil_plist_json(&["info", "-plist", &descendant_path]) {
+            if let Ok(info) =
+                diskutil_plist_json(&["info", DISKUTIL_PLIST_ARGUMENT, &descendant_path])
+            {
                 infos.push(info);
             } else {
                 complete = false;
@@ -1123,9 +1150,7 @@ impl MacosUnmountOps for SystemMacosUnmountOps {
             miette::bail!("Refusing a macOS unmount outside the removable-media mount roots.");
         }
         crate::run_output(
-            Command::new("/usr/sbin/diskutil")
-                .arg("unmount")
-                .arg(device_node),
+            Command::new(DISKUTIL_PATH).arg("unmount").arg(device_node),
             &format!(
                 "diskutil normal unmount for '{}' (no force or eject fallback)",
                 volume.mount_point.display()

@@ -10,6 +10,10 @@ use std::path::{Component, Path, PathBuf};
 
 const CURRENT_FORMAT_VERSION: u32 = 2;
 const DEFAULT_SERIAL_BAUD: u32 = 115_200;
+pub(crate) const NETWORK_SERVER_ADDRESS_FIELD: &str = "network.server_address";
+pub(crate) const NETWORK_TARGET_ADDRESS_FIELD: &str = "network.target_address";
+pub(crate) const USB_ECM_HOST_ADDRESS_FIELD: &str = "usb_ecm.host_address";
+pub(crate) const USB_ECM_TARGET_ADDRESS_FIELD: &str = "usb_ecm.target_address";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -551,8 +555,8 @@ impl Board {
             validate_distinct_addresses(
                 network.server_address,
                 network.target_address,
-                "network.server_address",
-                "network.target_address",
+                NETWORK_SERVER_ADDRESS_FIELD,
+                NETWORK_TARGET_ADDRESS_FIELD,
             )?;
             if network
                 .interface
@@ -573,8 +577,8 @@ impl Board {
             validate_distinct_addresses(
                 usb_ecm.host_address,
                 usb_ecm.target_address,
-                "usb_ecm.host_address",
-                "usb_ecm.target_address",
+                USB_ECM_HOST_ADDRESS_FIELD,
+                USB_ECM_TARGET_ADDRESS_FIELD,
             )?;
             if let Some(identity) = &usb_ecm.identity {
                 validate_usb_ecm_identity(identity)?;

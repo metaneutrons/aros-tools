@@ -7,6 +7,7 @@ use super::{
 };
 use crate::sd_manifest::ManifestUsbEcmIdentity;
 
+/// Validate schema discriminators, paths, digests, and payload inventory.
 pub(super) fn validate_image_manifest(
     manifest: &ImageManifest,
     requested_image_relative_path: &Path,
@@ -61,6 +62,7 @@ pub(super) fn validate_image_manifest(
     Ok(())
 }
 
+/// Parse and normalize the board identity embedded in an image manifest.
 pub(super) fn board_expectation_from_manifest(
     manifest: &ImageManifest,
 ) -> Result<BoardImageExpectation> {
@@ -78,6 +80,7 @@ pub(super) fn board_expectation_from_manifest(
     normalized_board_expectation(&expectation, "SD image manifest")
 }
 
+/// Convert the serialized USB identity into the verifier's immutable type.
 pub(super) fn usb_ecm_identity_from_manifest(
     identity: &ManifestUsbEcmIdentity,
 ) -> UsbEcmArtifactIdentity {
@@ -89,6 +92,7 @@ pub(super) fn usb_ecm_identity_from_manifest(
     }
 }
 
+/// Enforce the transport-dependent completeness of a board expectation.
 pub(super) fn validate_board_expectation(
     expectation: &BoardImageExpectation,
     label: &str,
@@ -125,6 +129,7 @@ pub(super) fn validate_board_expectation(
     Ok(())
 }
 
+/// Return a validated expectation with canonical nested identity fields.
 pub(super) fn normalized_board_expectation(
     expectation: &BoardImageExpectation,
     label: &str,
@@ -142,6 +147,7 @@ pub(super) fn normalized_board_expectation(
     })
 }
 
+/// Validate IDs and serial data, then normalize the expected target MAC.
 pub(super) fn normalized_usb_ecm_identity(
     identity: &UsbEcmArtifactIdentity,
     label: &str,
@@ -162,6 +168,7 @@ pub(super) fn normalized_usb_ecm_identity(
     })
 }
 
+/// Parse a non-zero unicast MAC and return canonical lowercase notation.
 pub(super) fn normalize_unicast_mac(value: &str, label: &str) -> Result<String> {
     let parts = value.split(':').collect::<Vec<_>>();
     if parts.len() != 6 || parts.iter().any(|part| part.len() != 2) {
@@ -196,12 +203,14 @@ pub(super) fn normalize_unicast_mac(value: &str, label: &str) -> Result<String> 
     Ok(normalized)
 }
 
+/// Append one byte as two lowercase hexadecimal digits.
 pub(super) fn append_hex_byte(output: &mut String, byte: u8) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     output.push(char::from(HEX[usize::from(byte >> 4)]));
     output.push(char::from(HEX[usize::from(byte & 0x0f)]));
 }
 
+/// Require every embedded board field to equal the selected local profile.
 pub(super) fn validate_verified_board_match(
     artifact: &VerifiedImageArtifact,
     expectation: &BoardImageExpectation,

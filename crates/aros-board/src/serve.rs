@@ -7,7 +7,10 @@
 //! that the configured concrete IPv4 address is currently assigned to that
 //! exact interface.
 
-use super::config::{parse_unicast_mac, Board, Transport};
+use super::config::{
+    parse_unicast_mac, Board, Transport, NETWORK_SERVER_ADDRESS_FIELD,
+    NETWORK_TARGET_ADDRESS_FIELD, USB_ECM_HOST_ADDRESS_FIELD, USB_ECM_TARGET_ADDRESS_FIELD,
+};
 use super::dhcp::{self, DhcpConfig};
 use super::tftp;
 use super::{EventSink, UsbEcmAdapter};
@@ -220,9 +223,9 @@ fn resolve_usb_ecm(board: &Board, adapters: &[UsbEcmAdapter]) -> Result<ServiceP
         }
     };
 
-    let server_address = concrete_ipv4(usb_ecm.host_address, "usb_ecm.host_address")?;
-    let target_address = concrete_ipv4(usb_ecm.target_address, "usb_ecm.target_address")?;
-    ensure_address_on_adapter(server_address, adapter, "usb_ecm.host_address")?;
+    let server_address = concrete_ipv4(usb_ecm.host_address, USB_ECM_HOST_ADDRESS_FIELD)?;
+    let target_address = concrete_ipv4(usb_ecm.target_address, USB_ECM_TARGET_ADDRESS_FIELD)?;
+    ensure_address_on_adapter(server_address, adapter, USB_ECM_HOST_ADDRESS_FIELD)?;
     let subnet_mask = validated_subnet_mask(usb_ecm.subnet_mask)?;
     ensure_same_subnet(server_address, target_address, subnet_mask)?;
 
@@ -266,8 +269,8 @@ fn resolve_native(board: &Board) -> Result<ServicePlan> {
             board.name
         )
     })?;
-    let server_address = concrete_ipv4(network.server_address, "network.server_address")?;
-    let target_address = concrete_ipv4(network.target_address, "network.target_address")?;
+    let server_address = concrete_ipv4(network.server_address, NETWORK_SERVER_ADDRESS_FIELD)?;
+    let target_address = concrete_ipv4(network.target_address, NETWORK_TARGET_ADDRESS_FIELD)?;
     let subnet_mask = validated_subnet_mask(network.subnet_mask)?;
     ensure_same_subnet(server_address, target_address, subnet_mask)?;
     ensure_address_on_named_interface(interface, server_address)?;
@@ -369,7 +372,7 @@ fn ensure_address_on_named_interface(interface_name: &str, address: Ipv4Addr) ->
     });
     if !found {
         miette::bail!(
-            "network.server_address '{}' is not assigned to explicitly configured interface '{}'; no service was started.",
+            "{NETWORK_SERVER_ADDRESS_FIELD} '{}' is not assigned to explicitly configured interface '{}'; no service was started.",
             address,
             interface_name
         );

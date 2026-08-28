@@ -1,6 +1,7 @@
 //! Atomic publication of verified Pi boot artifacts into a TFTP tree.
 
 use super::config::{Board, Transport};
+use crate::canonical_existing_directory;
 use miette::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -207,17 +208,6 @@ fn resolve_artifact_dir(
         repo_root.join(raw_path)
     };
     canonical_existing_directory(&source, "artifact directory")
-}
-
-fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        miette::miette!("Could not access {label} '{}': {error}", path.display())
-    })?;
-    if !metadata.is_dir() {
-        miette::bail!("{label} '{}' is not a directory.", path.display());
-    }
-    path.canonicalize()
-        .map_err(|error| miette::miette!("Could not resolve {label} '{}': {error}", path.display()))
 }
 
 fn reject_device_path(path: &Path) -> Result<()> {

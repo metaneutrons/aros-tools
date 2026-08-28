@@ -48,7 +48,7 @@ use super::sd_manifest::{
     ManifestPartition as ArtifactPartition, ManifestPayloadFile, ManifestSource,
     ManifestUsbEcmIdentity,
 };
-use crate::sha256_file_with_size as sha256_file;
+use crate::{canonical_existing_directory, sha256_file_with_size as sha256_file};
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -856,17 +856,6 @@ fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
             path.display()
         )),
     }
-}
-
-fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        miette::miette!("Could not access {label} '{}': {error}", path.display())
-    })?;
-    if !metadata.is_dir() {
-        miette::bail!("{label} '{}' is not a directory.", path.display());
-    }
-    path.canonicalize()
-        .map_err(|error| miette::miette!("Could not resolve {label} '{}': {error}", path.display()))
 }
 
 fn validate_nonempty(value: &str, label: &str) -> Result<()> {

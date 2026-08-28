@@ -9,6 +9,88 @@ use miette::Result;
 use serde_json::{Map, Value};
 use std::path::Path;
 
+/// Stable absolute path used for every structured `diskutil` operation.
+#[cfg(target_os = "macos")]
+pub const DISKUTIL_PATH: &str = "/usr/sbin/diskutil";
+/// Machine-readable output switch required by every `diskutil` inventory.
+#[cfg(target_os = "macos")]
+pub const DISKUTIL_PLIST_ARGUMENT: &str = "-plist";
+/// Accepted value of `VirtualOrPhysical` for physical removable media.
+#[cfg(any(target_os = "macos", test))]
+pub const DISKUTIL_PHYSICAL_VALUE: &str = "physical";
+
+/// Field names emitted by `lsblk --json`.
+#[cfg(any(target_os = "linux", test))]
+pub mod lsblk_field {
+    /// Top-level array of block devices.
+    pub const BLOCK_DEVICES: &str = "blockdevices";
+    /// Optional nested device array.
+    pub const CHILDREN: &str = "children";
+    /// Kernel hot-plug observation.
+    pub const HOTPLUG: &str = "hotplug";
+    /// Kernel device name without `/dev`.
+    pub const KERNEL_NAME: &str = "kname";
+    /// Kernel major/minor device number.
+    pub const MAJOR_MINOR: &str = "maj:min";
+    /// Complete mount-point array.
+    pub const MOUNT_POINTS: &str = "mountpoints";
+    /// Name requested in absolute-path mode.
+    pub const NAME: &str = "name";
+    /// Parent kernel device name.
+    pub const PARENT_KERNEL_NAME: &str = "pkname";
+    /// Absolute device path.
+    pub const PATH: &str = "path";
+    /// Read-only flag.
+    pub const READ_ONLY: &str = "ro";
+    /// Removable-media flag.
+    pub const REMOVABLE: &str = "rm";
+    /// Device capacity in bytes.
+    pub const SIZE: &str = "size";
+    /// Host transport identifier.
+    pub const TRANSPORT: &str = "tran";
+    /// Device node type.
+    pub const TYPE: &str = "type";
+}
+
+/// Field names emitted by `diskutil -plist`.
+#[cfg(any(target_os = "macos", test))]
+pub mod diskutil_field {
+    /// Complete disk-identifier list.
+    pub const ALL_DISKS: &str = "AllDisks";
+    /// Alternate transport observation.
+    pub const BUS_PROTOCOL: &str = "BusProtocol";
+    /// Canonical `diskN` identifier.
+    pub const DEVICE_IDENTIFIER: &str = "DeviceIdentifier";
+    /// Absolute `/dev/diskN` node.
+    pub const DEVICE_NODE: &str = "DeviceNode";
+    /// Media-ejectability observation.
+    pub const EJECTABLE: &str = "Ejectable";
+    /// Internal-device observation.
+    pub const INTERNAL: &str = "Internal";
+    /// Human-readable media model.
+    pub const MEDIA_NAME: &str = "MediaName";
+    /// Current volume mount point.
+    pub const MOUNT_POINT: &str = "MountPoint";
+    /// Owning whole-disk identifier.
+    pub const PARENT_WHOLE_DISK: &str = "ParentWholeDisk";
+    /// Primary transport observation.
+    pub const PROTOCOL: &str = "Protocol";
+    /// Removable-media observation.
+    pub const REMOVABLE: &str = "Removable";
+    /// Alternate removable-media observation.
+    pub const REMOVABLE_MEDIA: &str = "RemovableMedia";
+    /// Persistent media or reader serial.
+    pub const SERIAL_NUMBER: &str = "SerialNumber";
+    /// Device capacity in bytes.
+    pub const SIZE: &str = "Size";
+    /// Physical-versus-virtual observation.
+    pub const VIRTUAL_OR_PHYSICAL: &str = "VirtualOrPhysical";
+    /// Whole-disk observation.
+    pub const WHOLE_DISK: &str = "WholeDisk";
+    /// Media-writability observation.
+    pub const WRITABLE: &str = "Writable";
+}
+
 #[cfg(target_os = "linux")]
 pub const LSBLK_PATH: &str = "/usr/bin/lsblk";
 #[cfg(target_os = "linux")]
@@ -27,6 +109,7 @@ pub enum DiskPlatform {
 }
 
 impl DiskPlatform {
+    /// Stable lowercase value used in fingerprints and diagnostics.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -36,16 +119,19 @@ impl DiskPlatform {
     }
 }
 
+/// Accept only non-empty, trimmed, control-character-free inventory text.
 pub fn safe_metadata(value: &str) -> bool {
     !value.is_empty() && value.trim() == value && !value.chars().any(char::is_control)
 }
 
+/// Require one structured inventory node to be a JSON object.
 pub fn json_object<'a>(value: &'a Value, context: &str) -> Result<&'a Map<String, Value>> {
     value
         .as_object()
         .ok_or_else(|| miette::miette!("{context} must be an object."))
 }
 
+/// Read a metadata-safe string field.
 pub fn json_nonempty_string<'a>(object: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
     object
         .get(field)
@@ -53,6 +139,7 @@ pub fn json_nonempty_string<'a>(object: &'a Map<String, Value>, field: &str) -> 
         .filter(|value| safe_metadata(value))
 }
 
+/// Read a strict boolean or numeric zero/one field.
 pub fn json_bool_like(object: &Map<String, Value>, field: &str) -> Option<bool> {
     match object.get(field)? {
         Value::Bool(value) => Some(*value),
@@ -65,11 +152,13 @@ pub fn json_bool_like(object: &Map<String, Value>, field: &str) -> Option<bool> 
     }
 }
 
+/// Read an unsigned integer field without string coercion.
 pub fn json_u64_like(object: &Map<String, Value>, field: &str) -> Option<u64> {
     object.get(field)?.as_u64()
 }
 
 #[cfg(any(target_os = "linux", test))]
+/// Combine validated Linux vendor and model fields for display.
 pub fn linux_model(object: &Map<String, Value>) -> Option<String> {
     let model = json_nonempty_string(object, "model")?;
     let vendor = json_nonempty_string(object, "vendor");
@@ -81,6 +170,7 @@ pub fn linux_model(object: &Map<String, Value>) -> Option<String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+/// Derive a persistent Linux identity from serial and/or WWN.
 pub fn linux_identity(object: &Map<String, Value>) -> Option<String> {
     let serial = json_nonempty_string(object, "serial");
     let wwn = json_nonempty_string(object, "wwn");
@@ -92,6 +182,7 @@ pub fn linux_identity(object: &Map<String, Value>) -> Option<String> {
     }
 }
 
+/// Recognize only canonical whole SCSI/USB and MMC device paths.
 pub fn is_linux_whole_device_path(path: &Path) -> bool {
     let Some(raw) = path.to_str() else {
         return false;
@@ -117,10 +208,11 @@ pub fn is_linux_whole_device_path(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// Extract sorted, unique whole-disk identifiers from a `diskutil` list.
 pub fn macos_whole_disk_identifiers(list: &Value) -> Result<Vec<String>> {
     let object = json_object(list, "diskutil list plist")?;
     let identifiers = object
-        .get("AllDisks")
+        .get(diskutil_field::ALL_DISKS)
         .and_then(Value::as_array)
         .ok_or_else(|| miette::miette!("diskutil list plist must contain an AllDisks array."))?;
     let mut result = identifiers
@@ -135,10 +227,11 @@ pub fn macos_whole_disk_identifiers(list: &Value) -> Result<Vec<String>> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+/// Validate and extract a complete descendant identifier topology.
 pub fn macos_descendant_identifiers(list: &Value, whole: &str) -> Result<Vec<String>> {
     let object = json_object(list, "diskutil descendant plist")?;
     let identifiers = object
-        .get("AllDisks")
+        .get(diskutil_field::ALL_DISKS)
         .and_then(Value::as_array)
         .ok_or_else(|| {
             miette::miette!("diskutil descendant plist must contain an AllDisks array.")
@@ -174,6 +267,7 @@ pub fn macos_descendant_identifiers(list: &Value, whole: &str) -> Result<Vec<Str
     Ok(result)
 }
 
+/// Recognize canonical `diskN` identifiers without leading zeroes.
 pub fn is_macos_whole_disk_identifier(identifier: &str) -> bool {
     identifier.strip_prefix("disk").is_some_and(|suffix| {
         !suffix.is_empty()
@@ -183,6 +277,7 @@ pub fn is_macos_whole_disk_identifier(identifier: &str) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
+/// Recognize canonical descendants of one exact whole disk.
 pub fn is_macos_descendant_identifier(identifier: &str, whole: &str) -> bool {
     if identifier == whole {
         return is_macos_whole_disk_identifier(whole);
@@ -210,9 +305,10 @@ pub fn is_macos_descendant_identifier(identifier: &str, whole: &str) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
+/// Reconcile all present `diskutil` transport observations.
 pub fn macos_transport(object: &Map<String, Value>) -> Option<String> {
     let mut canonical = None;
-    for field in ["Protocol", "BusProtocol"] {
+    for field in [diskutil_field::PROTOCOL, diskutil_field::BUS_PROTOCOL] {
         let Some(_) = object.get(field) else {
             continue;
         };
@@ -231,6 +327,7 @@ pub fn macos_transport(object: &Map<String, Value>) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+/// Construct the sole supported structured `lsblk` inventory command.
 pub fn linux_inventory_command(absolute_names: bool) -> std::process::Command {
     let mut command = std::process::Command::new(LSBLK_PATH);
     command.args(["--json", "--bytes"]);
@@ -242,11 +339,12 @@ pub fn linux_inventory_command(absolute_names: bool) -> std::process::Command {
 }
 
 #[cfg(target_os = "macos")]
+/// Execute `diskutil` and convert its binary/XML plist into structured JSON.
 pub fn diskutil_plist_json(arguments: &[&str]) -> Result<Value> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    let mut diskutil = Command::new("/usr/sbin/diskutil");
+    let mut diskutil = Command::new(DISKUTIL_PATH);
     diskutil.args(arguments);
     let output = crate::run_output(
         &mut diskutil,

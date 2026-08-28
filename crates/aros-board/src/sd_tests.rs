@@ -1,3 +1,5 @@
+//! Regression tests for boot-bundle validation and deterministic image staging.
+
 use super::{
     sha256_file, stage_boot_bundle, validate_boot_bundle, BundleExpectation, PartitionLayout,
     UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,

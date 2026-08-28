@@ -7,7 +7,7 @@
 use aros_common::{bounded_output_detail, DiagnosticContext, LogLevel};
 use miette::Result;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 pub mod config;
@@ -23,6 +23,7 @@ pub mod sd;
 pub mod sd_disk;
 mod sd_manifest;
 pub mod sd_unmount;
+mod sd_write_plan;
 pub mod serve;
 pub mod tftp;
 
@@ -91,6 +92,21 @@ pub(crate) fn sha256_file_with_size(path: &Path) -> Result<(String, u64)> {
     aros_common::sha256_file(path)
         .map(|result| (result.digest.to_string(), result.size))
         .map_err(|error| miette::miette!("failed to hash '{}': {error}", path.display()))
+}
+
+/// Require an existing directory and return its canonical absolute path.
+///
+/// Board workflows use this single boundary before resolving caller-supplied
+/// children, preventing path-policy drift between deployment and SD artifacts.
+pub(crate) fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        miette::miette!("Could not access {label} '{}': {error}", path.display())
+    })?;
+    if !metadata.is_dir() {
+        miette::bail!("{label} '{}' is not a directory.", path.display());
+    }
+    path.canonicalize()
+        .map_err(|error| miette::miette!("Could not resolve {label} '{}': {error}", path.display()))
 }
 
 pub(crate) fn run_output(command: &mut Command, description: &str) -> Result<Output> {

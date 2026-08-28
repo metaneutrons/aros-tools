@@ -6,7 +6,9 @@
 //!    disks whose persistent identity is known.
 //! 2. [`verify_image_artifact`] verifies a canonical image artifact before it
 //!    can be selected for writing.
-//! 3. [`write_verified_image_for_board`] rescans the selected disk, verifies the image
+//! 3. [`prepare_write_for_board`] creates the only supported board-bound write
+//!    preview from the same selection contract used by the writer.
+//! 4. [`write_verified_image_for_board`] rescans the selected disk, verifies the image
 //!    again, requires a token tied to both, and only then opens the raw whole
 //!    disk.  On Linux it uses `O_EXCL | O_NOFOLLOW` and rechecks the complete
 //!    mount topology after that exclusive open but before the first byte is
@@ -36,25 +38,27 @@
 //! an explicit review instead of being accepted optimistically.
 
 use super::config::{Board, Transport};
-#[cfg(target_os = "macos")]
-use super::disk_inventory::diskutil_plist_json;
 #[cfg(target_os = "linux")]
 use super::disk_inventory::linux_inventory_command;
 #[cfg(target_os = "macos")]
 use super::disk_inventory::macos_whole_disk_identifiers;
 pub use super::disk_inventory::DiskPlatform;
+#[cfg(any(target_os = "macos", test))]
+use super::disk_inventory::{
+    diskutil_field, is_macos_descendant_identifier, macos_descendant_identifiers, macos_transport,
+    DISKUTIL_PHYSICAL_VALUE,
+};
+#[cfg(target_os = "macos")]
+use super::disk_inventory::{diskutil_plist_json, DISKUTIL_PLIST_ARGUMENT};
 use super::disk_inventory::{
     is_linux_whole_device_path, is_macos_whole_disk_identifier, json_bool_like,
     json_nonempty_string, json_u64_like, safe_metadata,
 };
-#[cfg(any(target_os = "macos", test))]
-use super::disk_inventory::{
-    is_macos_descendant_identifier, macos_descendant_identifiers, macos_transport,
-};
 #[cfg(any(target_os = "linux", test))]
-use super::disk_inventory::{json_object, linux_identity, linux_model};
+use super::disk_inventory::{json_object, linux_identity, linux_model, lsblk_field};
 use super::sd_manifest::{ImageManifest, FORMAT_VERSION, KIND};
-use crate::sha256_file_with_size as sha256_file;
+pub use super::sd_write_plan::WritePlan;
+use crate::{canonical_existing_directory, sha256_file_with_size as sha256_file};
 #[cfg(target_os = "macos")]
 use aros_macos_disk_claim::{WholeDiskClaim, DEFAULT_CLAIM_TIMEOUT};
 use miette::Result;
@@ -122,9 +126,11 @@ impl BoardImageExpectation {
 
     /// Require an exact U-Boot USB-ECM identity as part of this expectation.
     #[must_use]
-    pub fn with_usb_ecm_identity(mut self, identity: UsbEcmArtifactIdentity) -> Self {
-        self.usb_ecm_identity = Some(identity);
-        self
+    pub fn with_usb_ecm_identity(self, identity: UsbEcmArtifactIdentity) -> Self {
+        Self {
+            usb_ecm_identity: Some(identity),
+            ..self
+        }
     }
 }
 
@@ -605,6 +611,28 @@ pub fn confirmation_token(artifact: &VerifiedImageArtifact, candidate: &DiskCand
     )
 }
 
+/// Verify an image, bind it to `board`, and select one current disk read-only.
+/// [`write_verified_image_for_board`] repeats all checks before opening it.
+///
+/// # Errors
+///
+/// Returns an error for an invalid artifact/binding/scan ID or unsafe target.
+pub fn prepare_write_for_board(
+    artifact_dir: &Path,
+    manifest_relative_path: &Path,
+    image_relative_path: &Path,
+    board: &Board,
+    selected_scan_id: &str,
+) -> Result<WritePlan> {
+    let artifact = verify_image_artifact_for_board(
+        artifact_dir,
+        manifest_relative_path,
+        image_relative_path,
+        board,
+    )?;
+    prepare_verified_write_with_backend(&artifact, selected_scan_id, &SystemDiskBackend)
+}
+
 /// Reverify, bind and write an image for exactly one selected board profile.
 ///
 /// This is the safe physical-write entry point for a CLI that accepts
@@ -715,35 +743,15 @@ fn write_verified_image_with_backend_and_expectation(
     }
     validate_verified_board_match(&reverified, expectation)?;
 
-    let current_candidates = backend.scan()?;
-    let selected = current_candidates
-        .iter()
-        .filter(|candidate| candidate.scan_id == selected_scan_id)
-        .collect::<Vec<_>>();
-    let candidate = match selected.as_slice() {
-        [candidate] => *candidate,
-        [] => {
-            miette::bail!(
-                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros board sd scan`; no disk was opened.",
-                selected_scan_id
-            );
-        }
-        _ => {
-            miette::bail!(
-                "More than one current disk has scan ID '{}'; refusing an ambiguous write.",
-                selected_scan_id
-            );
-        }
-    };
-    candidate.validate_for_write(reverified.minimum_device_bytes)?;
-
-    let expected_token = confirmation_token(&reverified, candidate);
+    let plan = prepare_verified_write_with_backend(&reverified, selected_scan_id, backend)?;
+    let expected_token = plan.confirmation_token();
     if confirmation_token_value != expected_token {
         miette::bail!(
             "Confirmation token does not match the current verified image and disk '{}'; no disk was opened.",
             selected_scan_id
         );
     }
+    let candidate = plan.candidate();
 
     // This is deliberately the first raw-device open.  Linux uses O_EXCL |
     // O_NOFOLLOW; macOS acquires a whole-disk Disk Arbitration claim first.
@@ -796,23 +804,51 @@ fn write_verified_image_with_backend_and_expectation(
     })
 }
 
+fn prepare_verified_write_with_backend(
+    artifact: &VerifiedImageArtifact,
+    selected_scan_id: &str,
+    backend: &dyn DiskBackend,
+) -> Result<WritePlan> {
+    if selected_scan_id.trim().is_empty() {
+        miette::bail!("An explicit non-empty SD scan ID is required before writing.");
+    }
+
+    let current_candidates = backend.scan()?;
+    let selected = current_candidates
+        .into_iter()
+        .filter(|candidate| candidate.scan_id == selected_scan_id)
+        .collect::<Vec<_>>();
+    let candidate = match selected.as_slice() {
+        [candidate] => candidate.clone(),
+        [] => {
+            miette::bail!(
+                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros board sd scan`; no disk was opened.",
+                selected_scan_id
+            );
+        }
+        _ => {
+            miette::bail!(
+                "More than one current disk has scan ID '{}'; refusing an ambiguous write.",
+                selected_scan_id
+            );
+        }
+    };
+    candidate.validate_for_write(artifact.minimum_device_bytes)?;
+    let confirmation_token = confirmation_token(artifact, &candidate);
+
+    Ok(WritePlan {
+        artifact: artifact.clone(),
+        candidate,
+        confirmation_token,
+    })
+}
+
 #[path = "sd_artifact_validation.rs"]
 mod artifact_validation;
 use artifact_validation::{
     board_expectation_from_manifest, validate_board_expectation, validate_image_manifest,
     validate_verified_board_match,
 };
-
-fn canonical_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        miette::miette!("Could not access {label} '{}': {error}", path.display())
-    })?;
-    if !metadata.is_dir() {
-        miette::bail!("{label} '{}' is not a directory.", path.display());
-    }
-    path.canonicalize()
-        .map_err(|error| miette::miette!("Could not resolve {label} '{}': {error}", path.display()))
-}
 
 fn safe_relative_path(path: &Path, label: &str) -> Result<PathBuf> {
     if path.as_os_str().is_empty() {
@@ -1001,7 +1037,7 @@ fn make_candidate(
 fn parse_linux_inventory(value: &Value) -> Result<Vec<DiskCandidate>> {
     let root = json_object(value, "lsblk JSON output")?;
     let devices = root
-        .get("blockdevices")
+        .get(lsblk_field::BLOCK_DEVICES)
         .and_then(Value::as_array)
         .ok_or_else(|| miette::miette!("lsblk JSON output must contain a blockdevices array."))?;
 
@@ -1049,17 +1085,17 @@ fn retain_unambiguous_physical_candidates(candidates: Vec<DiskCandidate>) -> Vec
 #[cfg(any(target_os = "linux", test))]
 fn linux_candidate_from_node(node: &Value) -> Option<DiskCandidate> {
     let object = node.as_object()?;
-    if object.get("type")?.as_str()? != "disk" {
+    if object.get(lsblk_field::TYPE)?.as_str()? != "disk" {
         return None;
     }
-    if !json_bool_like(object, "rm")?
-        || !json_bool_like(object, "hotplug")?
-        || json_bool_like(object, "ro")?
+    if !json_bool_like(object, lsblk_field::REMOVABLE)?
+        || !json_bool_like(object, lsblk_field::HOTPLUG)?
+        || json_bool_like(object, lsblk_field::READ_ONLY)?
     {
         return None;
     }
-    let path_text = json_nonempty_string(object, "path")?;
-    if json_nonempty_string(object, "name")? != path_text {
+    let path_text = json_nonempty_string(object, lsblk_field::PATH)?;
+    if json_nonempty_string(object, lsblk_field::NAME)? != path_text {
         return None;
     }
     let path = PathBuf::from(path_text);
@@ -1067,17 +1103,20 @@ fn linux_candidate_from_node(node: &Value) -> Option<DiskCandidate> {
         return None;
     }
     let root_name = path.file_name()?.to_str()?;
-    if linux_kernel_name(json_nonempty_string(object, "kname")?)? != root_name
-        || !matches!(object.get("pkname"), Some(Value::Null))
+    if linux_kernel_name(json_nonempty_string(object, lsblk_field::KERNEL_NAME)?)? != root_name
+        || !matches!(
+            object.get(lsblk_field::PARENT_KERNEL_NAME),
+            Some(Value::Null)
+        )
     {
         return None;
     }
-    let transport = json_nonempty_string(object, "tran")?.to_ascii_lowercase();
+    let transport = json_nonempty_string(object, lsblk_field::TRANSPORT)?.to_ascii_lowercase();
     let family = linux_device_family(root_name, &transport)?;
     if !linux_tree_is_complete_and_unmounted(node, root_name, family)? {
         return None;
     }
-    let size_bytes = json_u64_like(object, "size")?;
+    let size_bytes = json_u64_like(object, lsblk_field::SIZE)?;
     let model = linux_model(object)?;
     let identity = linux_identity(object)?;
 
@@ -1161,27 +1200,35 @@ fn linux_node_is_complete_and_unmounted(
     } else {
         "part"
     };
-    if json_nonempty_string(object, "type")? != expected_type {
+    if json_nonempty_string(object, lsblk_field::TYPE)? != expected_type {
         return Some(false);
     }
 
-    let path = json_nonempty_string(object, "path")?;
-    if json_nonempty_string(object, "name")? != path {
+    let path = json_nonempty_string(object, lsblk_field::PATH)?;
+    if json_nonempty_string(object, lsblk_field::NAME)? != path {
         return Some(false);
     }
-    let kname = linux_kernel_name(json_nonempty_string(object, "kname")?)?;
+    let kname = linux_kernel_name(json_nonempty_string(object, lsblk_field::KERNEL_NAME)?)?;
     if path != format!("/dev/{kname}") || !seen.insert(kname.to_string()) {
         return Some(false);
     }
     match expected_parent {
         None => {
-            if kname != root_name || !matches!(object.get("pkname"), Some(Value::Null)) {
+            if kname != root_name
+                || !matches!(
+                    object.get(lsblk_field::PARENT_KERNEL_NAME),
+                    Some(Value::Null)
+                )
+            {
                 return Some(false);
             }
         }
         Some(parent) => {
             if parent != root_name
-                || linux_kernel_name(json_nonempty_string(object, "pkname")?)? != parent
+                || linux_kernel_name(json_nonempty_string(
+                    object,
+                    lsblk_field::PARENT_KERNEL_NAME,
+                )?)? != parent
                 || !linux_partition_name_is_canonical(root_name, family, kname)
             {
                 return Some(false);
@@ -1189,10 +1236,10 @@ fn linux_node_is_complete_and_unmounted(
         }
     }
 
-    if !linux_mountpoints_are_empty(object.get("mountpoints")?) {
+    if !linux_mountpoints_are_empty(object.get(lsblk_field::MOUNT_POINTS)?) {
         return Some(false);
     }
-    match object.get("children") {
+    match object.get(lsblk_field::CHILDREN) {
         None | Some(Value::Null) => Some(true),
         Some(Value::Array(children)) => {
             // This writer intentionally understands only a whole disk with
@@ -1261,31 +1308,33 @@ fn macos_candidate_from_info(
     descendants_are_unmounted: bool,
 ) -> Option<DiskCandidate> {
     let object = info.as_object()?;
-    let identifier = json_nonempty_string(object, "DeviceIdentifier")?;
+    let identifier = json_nonempty_string(object, diskutil_field::DEVICE_IDENTIFIER)?;
     if !is_macos_whole_disk_identifier(identifier)
-        || !json_bool_like(object, "WholeDisk")?
-        || json_nonempty_string(object, "ParentWholeDisk")? != identifier
-        || json_bool_like(object, "Internal")?
-        || !json_bool_like(object, "Writable")?
-        || !json_bool_like(object, "Ejectable")?
+        || !json_bool_like(object, diskutil_field::WHOLE_DISK)?
+        || json_nonempty_string(object, diskutil_field::PARENT_WHOLE_DISK)? != identifier
+        || json_bool_like(object, diskutil_field::INTERNAL)?
+        || !json_bool_like(object, diskutil_field::WRITABLE)?
+        || !json_bool_like(object, diskutil_field::EJECTABLE)?
         || !macos_media_is_removable(object)
         || !macos_mountpoint_is_empty(object)
         || !descendants_are_unmounted
     {
         return None;
     }
-    if !json_nonempty_string(object, "VirtualOrPhysical")?.eq_ignore_ascii_case("physical") {
+    if !json_nonempty_string(object, diskutil_field::VIRTUAL_OR_PHYSICAL)?
+        .eq_ignore_ascii_case(DISKUTIL_PHYSICAL_VALUE)
+    {
         return None;
     }
     let transport = macos_transport(object)?;
-    let serial = json_nonempty_string(object, "SerialNumber")?;
-    let model = json_nonempty_string(object, "MediaName")?.to_string();
-    let device_path = PathBuf::from(json_nonempty_string(object, "DeviceNode")?);
+    let serial = json_nonempty_string(object, diskutil_field::SERIAL_NUMBER)?;
+    let model = json_nonempty_string(object, diskutil_field::MEDIA_NAME)?.to_string();
+    let device_path = PathBuf::from(json_nonempty_string(object, diskutil_field::DEVICE_NODE)?);
     let expected_device_path = PathBuf::from(format!("/dev/{identifier}"));
     if device_path != expected_device_path {
         return None;
     }
-    let size_bytes = json_u64_like(object, "Size")?;
+    let size_bytes = json_u64_like(object, diskutil_field::SIZE)?;
     make_candidate(
         DiskPlatform::Macos,
         device_path,
@@ -1300,7 +1349,7 @@ fn macos_candidate_from_info(
 #[cfg(any(target_os = "macos", test))]
 fn macos_media_is_removable(object: &Map<String, Value>) -> bool {
     let mut saw_explicit_true = false;
-    for field in ["Removable", "RemovableMedia"] {
+    for field in [diskutil_field::REMOVABLE, diskutil_field::REMOVABLE_MEDIA] {
         if object.contains_key(field) {
             match json_bool_like(object, field) {
                 Some(true) => saw_explicit_true = true,
@@ -1313,8 +1362,8 @@ fn macos_media_is_removable(object: &Map<String, Value>) -> bool {
 
 #[cfg(any(target_os = "macos", test))]
 fn macos_mountpoint_is_empty(object: &Map<String, Value>) -> bool {
-    matches!(object.get("MountPoint"), Some(Value::Null))
-        || matches!(object.get("MountPoint"), Some(Value::String(value)) if value.trim().is_empty())
+    matches!(object.get(diskutil_field::MOUNT_POINT), Some(Value::Null))
+        || matches!(object.get(diskutil_field::MOUNT_POINT), Some(Value::String(value)) if value.trim().is_empty())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1350,16 +1399,18 @@ fn macos_topology_is_complete_and_unmounted(
         let Some(object) = info.as_object() else {
             return false;
         };
-        let Some(identifier) = json_nonempty_string(object, "DeviceIdentifier") else {
+        let Some(identifier) = json_nonempty_string(object, diskutil_field::DEVICE_IDENTIFIER)
+        else {
             return false;
         };
         let expected_path = format!("/dev/{identifier}");
         if !expected.contains(identifier)
             || !seen.insert(identifier.to_string())
             || !is_macos_descendant_identifier(identifier, whole)
-            || json_bool_like(object, "WholeDisk") != Some(identifier == whole)
-            || json_nonempty_string(object, "ParentWholeDisk") != Some(whole)
-            || json_nonempty_string(object, "DeviceNode") != Some(expected_path.as_str())
+            || json_bool_like(object, diskutil_field::WHOLE_DISK) != Some(identifier == whole)
+            || json_nonempty_string(object, diskutil_field::PARENT_WHOLE_DISK) != Some(whole)
+            || json_nonempty_string(object, diskutil_field::DEVICE_NODE)
+                != Some(expected_path.as_str())
             || !macos_mountpoint_is_empty(object)
         {
             return false;
@@ -1376,14 +1427,14 @@ fn macos_candidate_from_inventory(
 ) -> Option<DiskCandidate> {
     let whole = root_info
         .as_object()
-        .and_then(|object| json_nonempty_string(object, "DeviceIdentifier"))?;
+        .and_then(|object| json_nonempty_string(object, diskutil_field::DEVICE_IDENTIFIER))?;
     let candidate = macos_candidate_from_info(root_info, true)?;
     if !macos_topology_is_complete_and_unmounted(whole, descendant_identifiers, descendant_infos) {
         return None;
     }
     let topology_root = descendant_infos.iter().find(|info| {
         info.as_object()
-            .and_then(|object| json_nonempty_string(object, "DeviceIdentifier"))
+            .and_then(|object| json_nonempty_string(object, diskutil_field::DEVICE_IDENTIFIER))
             == Some(whole)
     })?;
     let topology_candidate = macos_candidate_from_info(topology_root, true)?;
@@ -1392,16 +1443,16 @@ fn macos_candidate_from_inventory(
 
 #[cfg(target_os = "macos")]
 fn scan_macos() -> Result<Vec<DiskCandidate>> {
-    let list = diskutil_plist_json(&["list", "-plist"])?;
+    let list = diskutil_plist_json(&["list", DISKUTIL_PLIST_ARGUMENT])?;
     let identifiers = macos_whole_disk_identifiers(&list)?;
     let mut candidates = Vec::new();
 
     for identifier in identifiers {
         let path = format!("/dev/{identifier}");
-        let Ok(info) = diskutil_plist_json(&["info", "-plist", &path]) else {
+        let Ok(info) = diskutil_plist_json(&["info", DISKUTIL_PLIST_ARGUMENT, &path]) else {
             continue;
         };
-        let Ok(descendants) = diskutil_plist_json(&["list", "-plist", &path]) else {
+        let Ok(descendants) = diskutil_plist_json(&["list", DISKUTIL_PLIST_ARGUMENT, &path]) else {
             continue;
         };
         let Ok(descendant_identifiers) = macos_descendant_identifiers(&descendants, &identifier)
@@ -1412,7 +1463,8 @@ fn scan_macos() -> Result<Vec<DiskCandidate>> {
         let mut complete = true;
         for descendant in &descendant_identifiers {
             let descendant_path = format!("/dev/{descendant}");
-            if let Ok(descendant_info) = diskutil_plist_json(&["info", "-plist", &descendant_path])
+            if let Ok(descendant_info) =
+                diskutil_plist_json(&["info", DISKUTIL_PLIST_ARGUMENT, &descendant_path])
             {
                 descendant_infos.push(descendant_info);
             } else {

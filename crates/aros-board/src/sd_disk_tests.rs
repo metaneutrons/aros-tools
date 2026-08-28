@@ -1,9 +1,11 @@
+//! Regression tests for fail-closed disk discovery, write planning, and raw writes.
+
 use super::{
     confirmation_token, macos_candidate_from_info, make_candidate, parse_linux_inventory,
-    validate_artifact_against_expectation, validate_artifact_for_board, verify_image_artifact,
-    write_verified_image_with_backend, write_verified_image_with_backend_and_expectation,
-    BoardImageExpectation, DiskBackend, DiskCandidate, DiskPlatform, OpenedTarget, TestTargetGuard,
-    UsbEcmArtifactIdentity,
+    prepare_verified_write_with_backend, validate_artifact_against_expectation,
+    validate_artifact_for_board, verify_image_artifact, write_verified_image_with_backend,
+    write_verified_image_with_backend_and_expectation, BoardImageExpectation, DiskBackend,
+    DiskCandidate, DiskPlatform, OpenedTarget, TestTargetGuard, UsbEcmArtifactIdentity,
 };
 use miette::Result;
 use serde_json::{json, Value};
@@ -1284,6 +1286,90 @@ fn verified_artifact_and_fake_target_receive_a_checked_write_and_readback() {
         &fs::read(&target).expect("target bytes")[..image.len()],
         image
     );
+}
+
+#[test]
+fn write_preview_and_writer_share_candidate_and_token_derivation() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact_dir = temporary.path().join("artifact");
+    let image = b"AROS SD image payload";
+    write_image_artifact(&artifact_dir, "image.img", image);
+    let artifact = verify_image_artifact(
+        &artifact_dir,
+        Path::new("manifest.json"),
+        Path::new("image.img"),
+    )
+    .expect("verified artifact");
+
+    let target = temporary.path().join("fake-whole-disk");
+    fs::write(&target, vec![0_u8; 8192]).expect("fake target");
+    let candidate = fake_candidate();
+    let backend = FakeBackend {
+        candidates: vec![candidate.clone()],
+        target: target.clone(),
+        after_open_safe: true,
+    };
+
+    let preview = prepare_verified_write_with_backend(&artifact, &candidate.scan_id, &backend)
+        .expect("read-only write preview");
+    assert_eq!(preview.artifact(), &artifact);
+    assert_eq!(preview.candidate(), &candidate);
+    assert_eq!(
+        preview.confirmation_token(),
+        confirmation_token(&artifact, &candidate)
+    );
+    assert_eq!(
+        fs::read(&target).expect("untouched preview target"),
+        vec![0_u8; 8192]
+    );
+
+    let report = write_verified_image_with_backend(
+        preview.artifact(),
+        &preview.candidate().scan_id,
+        preview.confirmation_token(),
+        &backend,
+    )
+    .expect("writer accepts the shared preview contract");
+    assert_eq!(report.scan_id, preview.candidate().scan_id);
+    assert_eq!(report.disk_fingerprint, preview.candidate().fingerprint);
+    assert_eq!(
+        &fs::read(&target).expect("target bytes")[..image.len()],
+        image
+    );
+}
+
+#[test]
+fn write_preview_rejects_missing_and_ambiguous_scan_ids() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let artifact_dir = temporary.path().join("artifact");
+    write_image_artifact(&artifact_dir, "image.img", b"payload");
+    let artifact = verify_image_artifact(
+        &artifact_dir,
+        Path::new("manifest.json"),
+        Path::new("image.img"),
+    )
+    .expect("verified artifact");
+    let target = temporary.path().join("fake-whole-disk");
+    fs::write(&target, b"still intact").expect("fake target");
+    let candidate = fake_candidate();
+
+    for (candidates, expected) in [
+        (Vec::new(), "No currently safe removable whole disk"),
+        (
+            vec![candidate.clone(), candidate.clone()],
+            "More than one current disk",
+        ),
+    ] {
+        let backend = FakeBackend {
+            candidates,
+            target: target.clone(),
+            after_open_safe: true,
+        };
+        let error = prepare_verified_write_with_backend(&artifact, &candidate.scan_id, &backend)
+            .expect_err("selection must be unique");
+        assert!(error.to_string().contains(expected));
+    }
+    assert_eq!(fs::read_to_string(&target).expect("target"), "still intact");
 }
 
 #[test]
