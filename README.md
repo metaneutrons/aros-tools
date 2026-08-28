@@ -71,9 +71,20 @@ Run from this directory:
 
 ```console
 cargo fmt --all -- --check
+sh scripts/check-architecture.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
+
+The architecture check caps production source files at 2,000 lines, requires
+module-level documentation throughout `aros-cli`, keeps the largest test
+suites outside production modules, enforces `miette` as the CLI's sole error
+boundary, and prevents subprocesses from bypassing the shared execution and
+observability layers. Clippy additionally rejects undocumented public error
+paths and functions over 500 lines; the three ordered translation/serialization
+pipelines above that limit carry explicit, reasoned `expect` markers. The file
+cap is a regression limit, not a target size: cohesive modules should remain
+substantially smaller.
 
 Every user-facing component must keep human and JSON diagnostics on the shared
 `aros-tool-diagnostics-v1` contract. Local logging is opt-in, requires an

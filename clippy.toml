@@ -1,0 +1,4 @@
+# Large translation functions hide responsibility boundaries and make review
+# unreliable. Five hundred lines catches the original CLI dispatch regression;
+# the few irreducible phase pipelines carry local, reasoned `expect` markers.
+too-many-lines-threshold = 500
