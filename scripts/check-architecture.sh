@@ -50,7 +50,8 @@ if [ -n "$direct_process" ]; then
 fi
 
 for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-verify; do
-    direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' "crates/$component/src" || true)
+    direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' "crates/$component/src" \
+        | grep -v ':.*response\.status()' || true)
     if [ -n "$direct_process" ]; then
         echo "$direct_process" >&2
         echo "$component subprocesses must pass through aros-common process primitives" >&2
