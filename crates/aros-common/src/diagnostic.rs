@@ -81,6 +81,26 @@ pub enum DiagnosticCode {
     AhiSourceAudit,
     #[serde(rename = "AH0901")]
     AhiInternal,
+    #[serde(rename = "AF0001")]
+    FetchInvocation,
+    #[serde(rename = "AF0002")]
+    FetchObservability,
+    #[serde(rename = "AF0101")]
+    FetchContract,
+    #[serde(rename = "AF0201")]
+    FetchCache,
+    #[serde(rename = "AF0301")]
+    FetchNetwork,
+    #[serde(rename = "AF0401")]
+    FetchIntegrity,
+    #[serde(rename = "AF0501")]
+    FetchExtraction,
+    #[serde(rename = "AF0601")]
+    FetchPatch,
+    #[serde(rename = "AF0701")]
+    FetchPublication,
+    #[serde(rename = "AF0901")]
+    FetchInternal,
     #[serde(rename = "AR0001")]
     CliInvocation,
     #[serde(rename = "AR0002")]
@@ -150,6 +170,16 @@ impl fmt::Display for DiagnosticCode {
             Self::AhiProductValidation => "AH0601",
             Self::AhiSourceAudit => "AH0701",
             Self::AhiInternal => "AH0901",
+            Self::FetchInvocation => "AF0001",
+            Self::FetchObservability => "AF0002",
+            Self::FetchContract => "AF0101",
+            Self::FetchCache => "AF0201",
+            Self::FetchNetwork => "AF0301",
+            Self::FetchIntegrity => "AF0401",
+            Self::FetchExtraction => "AF0501",
+            Self::FetchPatch => "AF0601",
+            Self::FetchPublication => "AF0701",
+            Self::FetchInternal => "AF0901",
             Self::CliInvocation => "AR0001",
             Self::CliObservability => "AR0002",
             Self::CliRepository => "AR0101",
@@ -221,6 +251,14 @@ pub enum DiagnosticStage {
     AhiBuild,
     AhiProductValidation,
     AhiSourceAudit,
+    FetchInvocation,
+    FetchObservability,
+    FetchContract,
+    CacheOperation,
+    FetchTransfer,
+    IntegrityValidation,
+    ArchiveExtraction,
+    PatchApplication,
     RepositoryDiscovery,
     Configuration,
     NetworkTransfer,
@@ -264,6 +302,14 @@ impl fmt::Display for DiagnosticStage {
             Self::AhiBuild => "AHI build",
             Self::AhiProductValidation => "AHI product validation",
             Self::AhiSourceAudit => "AHI source audit",
+            Self::FetchInvocation => "fetch invocation",
+            Self::FetchObservability => "fetch observability",
+            Self::FetchContract => "fetch contract validation",
+            Self::CacheOperation => "fetch cache operation",
+            Self::FetchTransfer => "fetch transfer",
+            Self::IntegrityValidation => "fetch integrity validation",
+            Self::ArchiveExtraction => "archive extraction",
+            Self::PatchApplication => "patch application",
             Self::RepositoryDiscovery => "repository discovery",
             Self::Configuration => "configuration",
             Self::NetworkTransfer => "network transfer",

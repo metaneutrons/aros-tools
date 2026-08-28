@@ -49,7 +49,7 @@ if [ -n "$direct_process" ]; then
     failed=1
 fi
 
-for component in aros-ahi-runner aros-board aros-collect aros-verify; do
+for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-verify; do
     direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' "crates/$component/src" || true)
     if [ -n "$direct_process" ]; then
         echo "$direct_process" >&2

@@ -4,6 +4,7 @@ members = [
     "crates/aros-common",
     "crates/aros-board",
     "crates/aros-ahi-runner",
+    "crates/aros-fetch",
     "crates/aros-collect",
     "crates/aros-transpiler",
     "crates/aros-genmodule",
@@ -70,6 +71,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tar = "0.4"
 xz2 = "0.1"
 futures-util = "0.3"
+flate2 = "1.0"
+bzip2 = "0.6"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2", "bzip2", "deflate64"] }
 
 # Filesystem & Utilities
 walkdir = "2.5"
@@ -78,6 +82,7 @@ which = "7.0"
 regex = "1.11"
 sha2 = "0.10"
 tempfile = "3.17"
+fs2 = "0.4"
 # The board service must verify an address on the exact USB-ECM interface;
 # this is a small native interface-enumeration crate, not an external command.
 if-addrs = "0.15"

@@ -18,6 +18,7 @@ contracts and keep generated state outside authoritative upstream inputs.
 | `aros-genmodule` | `.conf` parsing and generated module/SDK sources | build scheduling |
 | `aros-romtool` | ROM package layout and image validation | target selection |
 | `aros-ahi-runner` | validated execution of external AHI build contracts | generic external-project execution |
+| `aros-fetch` | validated source transport, integrity, safe extraction, cache locking, and patch application | package-version policy or generated checksums |
 | `aros-macos-disk-claim` | the narrow macOS whole-disk claim lifetime | device selection or removable-media policy |
 
 The dependency direction is deliberately one-way:
@@ -31,7 +32,8 @@ aros-common
   ├── aros-collect
   ├── aros-genmodule
   ├── aros-romtool
-  └── aros-ahi-runner
+  ├── aros-ahi-runner
+  └── aros-fetch
 
 aros-cli ──macOS only──> aros-macos-disk-claim
 ```
