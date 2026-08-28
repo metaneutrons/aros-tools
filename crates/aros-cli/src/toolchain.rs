@@ -521,6 +521,11 @@ mod tests {
                 aros_common::Architecture::AArch64,
                 "aarch64-unknown-aros",
             ),
+            (
+                "opensbi-riscv64",
+                aros_common::Architecture::Riscv64,
+                "riscv64-unknown-aros",
+            ),
         ] {
             let profile = TargetProfile {
                 name: name.into(),
