@@ -27,12 +27,23 @@ pub struct Logger {
 }
 
 impl Logger {
+    /// Open the AHI runner's local structured log.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured observability failure for an invalid or
+    /// inaccessible log destination.
     pub fn open(level: LogLevel, format: LogFormat, path: Option<PathBuf>) -> AhiResult<Self> {
         SharedLogger::open(level, format, path, "aros-ahi-runner", POLICY)
             .map(|inner| Self { inner })
             .map_err(|error| AhiFailure::new(error.into_diagnostic()))
     }
 
+    /// Append one AHI execution event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured observability failure when writing fails.
     pub fn event(
         &mut self,
         level: LogLevel,
@@ -45,6 +56,11 @@ impl Logger {
             .map_err(|error| AhiFailure::new(error.into_diagnostic()))
     }
 
+    /// Append one structured AHI diagnostic.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured observability failure when writing fails.
     pub fn diagnostic(&mut self, diagnostic: &Diagnostic) -> AhiResult<()> {
         self.inner
             .diagnostic(diagnostic)

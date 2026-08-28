@@ -1,14 +1,16 @@
+//! Locked AROS cross-toolchain installation, resolution, and verification.
+
 use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive, tree_inventory,
     INSTALL_COMPLETE_FILE,
 };
 use crate::host_compiler::host_platform_key;
-use anyhow::{bail, Context, Result};
 use aros_common::target::TargetProfile;
 use aros_common::toolchain_manifest::{
     ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use console::{style, Emoji};
+use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,7 +65,8 @@ pub fn lock_file_path() -> PathBuf {
 pub fn load_lock() -> Result<ArosToolchainLock> {
     let path = lock_file_path();
     ArosToolchainLock::load(&path)
-        .with_context(|| format!("failed to load AROS toolchain lock '{}'", path.display()))
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to load AROS toolchain lock '{}'", path.display()))
 }
 
 pub fn default_store_root() -> PathBuf {
@@ -78,12 +81,13 @@ pub fn explicit_local_override(argument: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
+    let llvm = crate::host_compiler::host_compiler_paths(root);
     ToolchainPaths {
         root: root.into(),
-        clang: root.join("bin/clang"),
-        clangxx: root.join("bin/clang++"),
-        lld: root.join("bin/ld.lld"),
-        llvm_ar: root.join("bin/llvm-ar"),
+        clang: llvm.clang,
+        clangxx: llvm.clangxx,
+        lld: llvm.lld,
+        llvm_ar: llvm.llvm_ar,
         aros_collect: root.join("bin/aros-collect"),
         collect_aros: root.join("bin/collect-aros"),
         collect_aros32: root.join("bin/collect-aros32"),
@@ -91,10 +95,10 @@ pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
 }
 
 pub fn target_profile(name: &str) -> Result<TargetProfile> {
-    TargetProfile::load_from_file(Path::new("aros-targets.toml"))?
+    crate::repo::load_target_profiles()?
         .into_iter()
         .find(|profile| profile.name == name)
-        .ok_or_else(|| anyhow::anyhow!("unknown target preset '{name}' in aros-targets.toml"))
+        .ok_or_else(|| miette::miette!("unknown target preset '{name}' in aros-targets.toml"))
 }
 
 pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
@@ -133,7 +137,7 @@ pub async fn install(
     let expected_triple = target_triple_for_profile(&profile);
     let lock = load_lock()?;
     let artifact = lock.resolve(host, preset).ok_or_else(|| {
-        anyhow::anyhow!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
     })?;
     if artifact.target_triple != expected_triple {
         bail!(
@@ -166,7 +170,9 @@ pub async fn install(
         style(preset).yellow()
     );
     let archive = obtain_archive(
-        &lock.asset_url(artifact).map_err(anyhow::Error::msg)?,
+        &lock
+            .asset_url(artifact)
+            .map_err(|error| miette::miette!("{error}"))?,
         &artifact.sha256,
         artifact.size,
         offline,
@@ -175,7 +181,7 @@ pub async fn install(
     .await?;
 
     if envelope.exists() {
-        verify_locked_install(&payload, &lock, artifact, true).with_context(|| {
+        verify_locked_install(&payload, &lock, artifact, true).wrap_err_with(|| {
             format!(
                 "content-addressed destination '{}' already exists but is invalid; it was not overwritten",
                 envelope.display()
@@ -186,23 +192,26 @@ pub async fn install(
 
     let parent = envelope
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("toolchain destination has no parent"))?;
+        .ok_or_else(|| miette::miette!("toolchain destination has no parent"))?;
     let payload_staging = extract_to_staging(&archive, parent, artifact.strip_components)?;
     verify_locked_install(payload_staging.path(), &lock, artifact, false)?;
     let envelope_staging = tempfile::Builder::new()
         .prefix(".envelope-")
         .tempdir_in(parent)
-        .context("failed to create toolchain envelope staging directory")?;
+        .into_diagnostic()
+        .wrap_err("failed to create toolchain envelope staging directory")?;
     fs::rename(
         payload_staging.path(),
         envelope_staging.path().join("toolchain"),
     )
-    .context("failed to place verified payload in installation envelope")?;
+    .into_diagnostic()
+    .wrap_err("failed to place verified payload in installation envelope")?;
     fs::write(
         envelope_staging.path().join(INSTALL_COMPLETE_FILE),
         b"complete\n",
     )
-    .context("failed to write toolchain completion marker")?;
+    .into_diagnostic()
+    .wrap_err("failed to write toolchain completion marker")?;
     commit_staging(&envelope_staging, &envelope)?;
     verify_locked_install(&payload, &lock, artifact, true)?;
     println!("{CHECK} Installed at {}", payload.display());
@@ -235,7 +244,7 @@ pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     let host = host_platform_key()?;
     let lock = load_lock()?;
     let artifact = lock.resolve(host, preset).ok_or_else(|| {
-        anyhow::anyhow!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
     })?;
     let destination = locked_store_path(&lock, artifact);
     verify_locked_install(&destination, &lock, artifact, true)?;
@@ -282,12 +291,13 @@ pub fn list() -> Result<()> {
 fn resolve_local(root: &Path, preset: &str) -> Result<ResolvedToolchain> {
     let root = root
         .canonicalize()
-        .with_context(|| format!("local toolchain '{}' does not exist", root.display()))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("local toolchain '{}' does not exist", root.display()))?;
     let profile = target_profile(preset)?;
     let expected_triple = target_triple_for_profile(&profile);
     let manifest_path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
     if manifest_path.exists() {
-        let manifest = ArosToolchainManifest::load(&root)?;
+        let manifest = ArosToolchainManifest::load(&root).into_diagnostic()?;
         let host = host_platform_key()?;
         if manifest.host != host
             || manifest.target_profile != preset
@@ -355,7 +365,7 @@ fn verify_locked_install(
     {
         bail!("toolchain installation is incomplete");
     }
-    let manifest = ArosToolchainManifest::load(root)?;
+    let manifest = ArosToolchainManifest::load(root).into_diagnostic()?;
     if manifest.release_id != lock.release_id
         || manifest.host != artifact.host
         || manifest.target_profile != artifact.target_profile

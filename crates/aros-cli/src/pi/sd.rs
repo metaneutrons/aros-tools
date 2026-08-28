@@ -43,6 +43,12 @@
 //! ROM.  `partition.layout_sha256` is the SHA-256 of the exact canonical
 //! layout representation emitted by [`PartitionLayout::layout_sha256`].
 
+use super::sd_manifest::{
+    ImageManifest, ManifestBoard as ArtifactBoard, ManifestImage,
+    ManifestPartition as ArtifactPartition, ManifestPayloadFile, ManifestSource,
+    ManifestUsbEcmIdentity,
+};
+use crate::artifact::sha256_file_with_size as sha256_file;
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -55,7 +61,7 @@ use std::path::{Component, Path, PathBuf};
 pub const BOOT_BUNDLE_MANIFEST: &str = "boot-bundle.toml";
 
 /// Name of the deterministic manifest emitted into a staged artifact.
-pub const ARTIFACT_MANIFEST: &str = "manifest.json";
+pub const ARTIFACT_MANIFEST: &str = super::sd_manifest::FILE_NAME;
 
 /// Name of the checksum file emitted into a staged artifact.
 pub const ARTIFACT_CHECKSUMS: &str = "SHA256SUMS";
@@ -353,7 +359,7 @@ pub fn stage_boot_bundle(
     }
 
     let staged_image = build_raw_image(bundle, stage_path)?;
-    let artifact_manifest = render_artifact_manifest(bundle, &staged_image);
+    let artifact_manifest = render_artifact_manifest(bundle, &staged_image)?;
     let manifest_path = stage_path.join(ARTIFACT_MANIFEST);
     write_new_file(&manifest_path, artifact_manifest.as_bytes())?;
     let manifest_sha256 = sha256_hex(artifact_manifest.as_bytes());
@@ -957,16 +963,6 @@ fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<()>
         }
     }
     Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<(String, u64)> {
-    let result = aros_common::sha256_file(path).map_err(|error| {
-        miette::miette!(
-            "Could not hash '{}' for SHA-256 verification: {error}",
-            path.display()
-        )
-    })?;
-    Ok((result.digest.to_string(), result.size))
 }
 
 fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64)> {
@@ -1620,133 +1616,58 @@ impl Seek for PartitionStream {
     }
 }
 
-fn render_artifact_manifest(bundle: &ValidatedBootBundle, image: &RawImage) -> String {
-    let mut output = String::new();
-    output.push_str("{\n");
-    append_json_number_field(
-        &mut output,
-        "  ",
-        "format_version",
-        u64::from(FORMAT_VERSION),
-        true,
-    );
-    append_json_string_field(&mut output, "  ", "kind", "aros-pi-sd-image", true);
-    output.push_str("  \"board\": {\n");
-    append_json_string_field(&mut output, "    ", "name", &bundle.board_name, true);
-    append_json_string_field(&mut output, "    ", "model", &bundle.model, true);
-    append_json_string_field(&mut output, "    ", "transport", &bundle.transport, false);
-    output.push_str("  },\n");
-    match &bundle.usb_ecm_identity {
-        Some(identity) => {
-            output.push_str("  \"usb_ecm\": {\n");
-            append_json_number_field(
-                &mut output,
-                "    ",
-                "vendor_id",
-                u64::from(identity.vendor_id),
-                true,
-            );
-            append_json_number_field(
-                &mut output,
-                "    ",
-                "product_id",
-                u64::from(identity.product_id),
-                true,
-            );
-            append_json_string_field(&mut output, "    ", "serial", &identity.serial, true);
-            append_json_string_field(
-                &mut output,
-                "    ",
-                "expected_target_mac",
-                &identity.expected_target_mac,
-                false,
-            );
-            output.push_str("  },\n");
-        }
-        None => output.push_str("  \"usb_ecm\": null,\n"),
-    }
-    output.push_str("  \"partition\": {\n");
-    append_json_string_field(
-        &mut output,
-        "    ",
-        "scheme",
-        &bundle.partition.scheme,
-        true,
-    );
-    append_json_string_field(
-        &mut output,
-        "    ",
-        "filesystem",
-        &bundle.partition.filesystem,
-        true,
-    );
-    append_json_number_field(
-        &mut output,
-        "    ",
-        "start_lba",
-        bundle.partition.start_lba,
-        true,
-    );
-    append_json_number_field(
-        &mut output,
-        "    ",
-        "size_bytes",
-        bundle.partition.size_bytes,
-        true,
-    );
-    append_json_string_field(&mut output, "    ", "label", &bundle.partition.label, true);
-    append_json_string_field(
-        &mut output,
-        "    ",
-        "layout_sha256",
-        &bundle.partition.layout_sha256(),
-        false,
-    );
-    output.push_str("  },\n");
-    output.push_str("  \"source_manifest\": {\n");
-    append_json_string_field(&mut output, "    ", "filename", BOOT_BUNDLE_MANIFEST, true);
-    append_json_string_field(
-        &mut output,
-        "    ",
-        "sha256",
-        &bundle.source_manifest_sha256,
-        false,
-    );
-    output.push_str("  },\n");
-    output.push_str("  \"image\": {\n");
-    append_json_string_field(&mut output, "    ", "filename", RAW_IMAGE_FILENAME, true);
-    append_json_string_field(&mut output, "    ", "sha256", &image.sha256, true);
-    append_json_number_field(&mut output, "    ", "size_bytes", image.size_bytes, false);
-    output.push_str("  },\n");
-    append_json_number_field(
-        &mut output,
-        "  ",
-        "minimum_device_bytes",
-        image.size_bytes,
-        true,
-    );
-    output.push_str("  \"payload\": [\n");
-    for (index, file) in bundle.files.iter().enumerate() {
-        output.push_str("    {\n");
-        append_json_string_field(&mut output, "      ", "role", &file.role, true);
-        append_json_string_field(
-            &mut output,
-            "      ",
-            "destination",
-            &portable_path(&file.destination),
-            true,
-        );
-        append_json_string_field(&mut output, "      ", "sha256", &file.sha256, true);
-        append_json_number_field(&mut output, "      ", "size_bytes", file.size_bytes, false);
-        output.push_str("    }");
-        if index + 1 != bundle.files.len() {
-            output.push(',');
-        }
-        output.push('\n');
-    }
-    output.push_str("  ]\n");
-    output.push_str("}\n");
-    output
+fn render_artifact_manifest(bundle: &ValidatedBootBundle, image: &RawImage) -> Result<String> {
+    let manifest = ImageManifest {
+        format_version: super::sd_manifest::FORMAT_VERSION,
+        kind: super::sd_manifest::KIND.to_string(),
+        board: ArtifactBoard {
+            name: bundle.board_name.clone(),
+            model: bundle.model.clone(),
+            transport: bundle.transport.clone(),
+        },
+        usb_ecm: bundle
+            .usb_ecm_identity
+            .as_ref()
+            .map(|identity| ManifestUsbEcmIdentity {
+                vendor_id: identity.vendor_id,
+                product_id: identity.product_id,
+                serial: identity.serial.clone(),
+                expected_target_mac: identity.expected_target_mac.clone(),
+            }),
+        partition: ArtifactPartition {
+            scheme: bundle.partition.scheme.clone(),
+            filesystem: bundle.partition.filesystem.clone(),
+            start_lba: bundle.partition.start_lba,
+            size_bytes: bundle.partition.size_bytes,
+            label: bundle.partition.label.clone(),
+            layout_sha256: bundle.partition.layout_sha256(),
+        },
+        source_manifest: ManifestSource {
+            filename: BOOT_BUNDLE_MANIFEST.to_string(),
+            sha256: bundle.source_manifest_sha256.clone(),
+        },
+        image: ManifestImage {
+            filename: RAW_IMAGE_FILENAME.to_string(),
+            sha256: image.sha256.clone(),
+            size_bytes: image.size_bytes,
+        },
+        minimum_device_bytes: image.size_bytes,
+        payload: bundle
+            .files
+            .iter()
+            .map(|file| ManifestPayloadFile {
+                role: file.role.clone(),
+                destination: portable_path(&file.destination),
+                sha256: file.sha256.clone(),
+                size_bytes: file.size_bytes,
+            })
+            .collect(),
+    };
+    let mut output = serde_json::to_string_pretty(&manifest).map_err(|error| {
+        miette::miette!("Could not serialize the typed SD image manifest: {error}")
+    })?;
+    output.push('\n');
+    Ok(output)
 }
 
 fn render_checksums(
@@ -1776,61 +1697,6 @@ fn render_checksums(
     output
 }
 
-fn append_json_string_field(
-    output: &mut String,
-    indent: &str,
-    name: &str,
-    value: &str,
-    trailing_comma: bool,
-) {
-    output.push_str(indent);
-    append_json_string(output, name);
-    output.push_str(": ");
-    append_json_string(output, value);
-    if trailing_comma {
-        output.push(',');
-    }
-    output.push('\n');
-}
-
-fn append_json_number_field(
-    output: &mut String,
-    indent: &str,
-    name: &str,
-    value: u64,
-    trailing_comma: bool,
-) {
-    output.push_str(indent);
-    append_json_string(output, name);
-    output.push_str(": ");
-    output.push_str(&value.to_string());
-    if trailing_comma {
-        output.push(',');
-    }
-    output.push('\n');
-}
-
-fn append_json_string(output: &mut String, value: &str) {
-    output.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\u{08}' => output.push_str("\\b"),
-            '\u{0c}' => output.push_str("\\f"),
-            '\n' => output.push_str("\\n"),
-            '\r' => output.push_str("\\r"),
-            '\t' => output.push_str("\\t"),
-            character if character.is_control() => {
-                output.push_str("\\u");
-                append_json_control_code(output, u32::from(character));
-            }
-            _ => output.push(character),
-        }
-    }
-    output.push('"');
-}
-
 fn portable_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
@@ -1846,13 +1712,6 @@ fn portable_path(path: &Path) -> String {
 
 fn sha256_hex(contents: &[u8]) -> String {
     aros_common::sha256_bytes(contents).to_string()
-}
-
-fn append_json_control_code(output: &mut String, code: u32) {
-    for shift in [12, 8, 4, 0] {
-        let nibble = ((code >> shift) & 0x0f) as u8;
-        output.push(hex_digit(nibble));
-    }
 }
 
 fn append_hex_byte(output: &mut String, byte: u8) {

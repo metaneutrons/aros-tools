@@ -1,3 +1,5 @@
+//! Validated CMake configure/build orchestration shared by all build commands.
+
 use crate::{build_tools, toolchain};
 use console::{style, Emoji};
 use miette::Result;
@@ -33,15 +35,13 @@ pub struct CmakeDefinition {
 
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let build_dir = build_dir(repo_root, &options.preset)?;
-    let profile = toolchain::target_profile(&options.toolchain_preset)
-        .map_err(|error| miette::miette!("{error:#}"))?;
+    let profile = toolchain::target_profile(&options.toolchain_preset)?;
     let resolved = toolchain::resolve_for_build(
         &options.toolchain_preset,
         options.toolchain_dir.as_deref(),
         options.offline,
     )
-    .await
-    .map_err(|error| miette::miette!("{error:#}"))?;
+    .await?;
     build_tools::ensure(repo_root)?;
 
     println!(

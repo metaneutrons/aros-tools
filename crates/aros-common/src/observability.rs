@@ -197,6 +197,12 @@ pub struct Logger {
 }
 
 impl Logger {
+    /// Open the configured local log sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic failure when logging is enabled without a path or
+    /// when the selected file cannot be opened for append.
     pub fn open(
         level: LogLevel,
         format: LogFormat,
@@ -244,6 +250,12 @@ impl Logger {
         })
     }
 
+    /// Append one structured event when its level is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic failure when the configured log cannot be locked,
+    /// serialized, or written.
     pub fn event(
         &self,
         level: LogLevel,
@@ -254,6 +266,12 @@ impl Logger {
         self.write(level, event, message, context, None)
     }
 
+    /// Append one diagnostic using its severity and structured context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic failure when the configured log cannot be locked,
+    /// serialized, or written.
     pub fn diagnostic(&self, diagnostic: &Diagnostic) -> Result<(), DiagnosticFailure> {
         let level = match diagnostic.severity {
             DiagnosticSeverity::Error => LogLevel::Error,

@@ -54,11 +54,19 @@ pub struct TargetProfile {
 
 impl TargetProfile {
     /// Load targets from the authoritative configuration file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, parsed, or validated.
     pub fn load_from_file(path: &Path) -> Result<Vec<Self>> {
         Ok(Self::load_config(path)?.targets)
     }
 
     /// Load the full authoritative configuration, failing on missing or empty data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, parsed, or validated.
     pub fn load_config(path: &Path) -> Result<ArosConfig> {
         let content =
             fs::read_to_string(path).map_err(|error| crate::error::ArosError::Configuration {

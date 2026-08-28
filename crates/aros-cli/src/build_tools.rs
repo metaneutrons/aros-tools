@@ -1,3 +1,5 @@
+//! Build and resolve the Rust tools consumed by the generated AROS build.
+
 use console::style;
 use miette::Result;
 use std::ffi::OsString;

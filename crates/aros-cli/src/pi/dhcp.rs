@@ -12,9 +12,9 @@
 //! contract in this small module prevents a default pool, lease database or
 //! wildcard listener from accidentally escaping the selected USB/RJ45 link.
 
-use anyhow::{bail, Context, Result};
 use aros_common::{DiagnosticContext, LogLevel};
 use if_addrs::{get_if_addrs, IfAddr};
+use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -210,7 +210,8 @@ async fn serve_with_interface(
     let socket = bind_interface_socket(bind_address, &interface)?;
     socket
         .set_broadcast(true)
-        .context("could not enable directed DHCP broadcasts")?;
+        .into_diagnostic()
+        .wrap_err("could not enable directed DHCP broadcasts")?;
 
     crate::observability::log_event(
         LogLevel::Info,
@@ -240,7 +241,9 @@ async fn serve_with_interface(
                 }
             }
             received = socket.recv_from(&mut receive_buffer) => {
-                let (received_len, peer) = received.context("DHCP receive failed")?;
+                let (received_len, peer) = received
+                    .into_diagnostic()
+                    .wrap_err("DHCP receive failed")?;
                 if peer.port() != DHCP_CLIENT_PORT {
                     continue;
                 }
@@ -282,7 +285,8 @@ struct LocalInterface {
 
 fn local_interfaces() -> Result<Vec<LocalInterface>> {
     get_if_addrs()
-        .context("could not enumerate local interfaces for DHCP binding")
+        .into_diagnostic()
+        .wrap_err("could not enumerate local interfaces for DHCP binding")
         .map(|interfaces| {
             interfaces
                 .into_iter()
@@ -309,7 +313,7 @@ fn index_for_name(interfaces: &[LocalInterface], name: &str) -> Result<NonZeroU3
     let mut indexes = BTreeSet::new();
     for interface in interfaces.iter().filter(|interface| interface.name == name) {
         let index = interface.index.and_then(NonZeroU32::new).ok_or_else(|| {
-            anyhow::anyhow!(
+            miette::miette!(
                 "local interface '{name}' has no usable OS interface index; DHCP will not bind without one"
             )
         })?;
@@ -351,7 +355,7 @@ fn validate_interface_in_records(
         .filter(|observed| observed.ipv4_address == Some(address))
     {
         let index = observed.index.and_then(NonZeroU32::new).ok_or_else(|| {
-            anyhow::anyhow!(
+            miette::miette!(
                 "local interface '{}' owns DHCP address '{}' but has no usable OS interface index",
                 observed.name,
                 address
@@ -383,11 +387,13 @@ fn bind_interface_socket(
     interface: &DhcpInterface,
 ) -> Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-        .with_context(|| format!("could not create restricted DHCP socket for {bind_address}"))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("could not create restricted DHCP socket for {bind_address}"))?;
     apply_interface_binding(&socket, interface)?;
     socket
         .bind(&SocketAddr::V4(bind_address).into())
-        .with_context(|| {
+        .into_diagnostic()
+        .wrap_err_with(|| {
             format!(
                 "could not bind restricted DHCP socket at {bind_address} on interface '{}'",
                 interface.name()
@@ -395,16 +401,20 @@ fn bind_interface_socket(
         })?;
     socket
         .set_nonblocking(true)
-        .context("could not make restricted DHCP socket nonblocking")?;
+        .into_diagnostic()
+        .wrap_err("could not make restricted DHCP socket nonblocking")?;
     let socket: std::net::UdpSocket = socket.into();
-    UdpSocket::from_std(socket).context("could not register restricted DHCP socket with Tokio")
+    UdpSocket::from_std(socket)
+        .into_diagnostic()
+        .wrap_err("could not register restricted DHCP socket with Tokio")
 }
 
 #[cfg(target_os = "linux")]
 fn apply_interface_binding(socket: &Socket, interface: &DhcpInterface) -> Result<()> {
     socket
         .bind_device(Some(interface.name().as_bytes()))
-        .with_context(|| {
+        .into_diagnostic()
+        .wrap_err_with(|| {
             format!(
                 "could not apply Linux SO_BINDTODEVICE for DHCP interface '{}'",
                 interface.name()
@@ -416,7 +426,8 @@ fn apply_interface_binding(socket: &Socket, interface: &DhcpInterface) -> Result
 fn apply_interface_binding(socket: &Socket, interface: &DhcpInterface) -> Result<()> {
     socket
         .bind_device_by_index_v4(Some(interface.index()))
-        .with_context(|| {
+        .into_diagnostic()
+        .wrap_err_with(|| {
             format!(
                 "could not apply macOS IP_BOUND_IF for DHCP interface '{}' (index {})",
                 interface.name(),

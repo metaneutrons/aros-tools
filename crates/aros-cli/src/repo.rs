@@ -1,5 +1,15 @@
-use miette::Result;
+//! Repository discovery and access to repository-level configuration.
+
+use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
+
+/// Repository-relative target and host-compiler configuration.
+pub const TARGETS_FILE: &str = "aros-targets.toml";
+
+/// Load every configured target from the repository SSOT.
+pub fn load_target_profiles() -> Result<Vec<aros_common::TargetProfile>> {
+    aros_common::TargetProfile::load_from_file(Path::new(TARGETS_FILE)).into_diagnostic()
+}
 
 /// Finds the repository root from a directory inside an AROS-NG checkout.
 ///
@@ -33,7 +43,7 @@ pub fn find_root() -> Result<PathBuf> {
 
 fn is_repo_root(path: &Path) -> bool {
     path.join("CMakeLists.txt").is_file()
-        && path.join("aros-targets.toml").is_file()
+        && path.join(TARGETS_FILE).is_file()
         && path.join("tools/aros-tools/Cargo.toml").is_file()
 }
 

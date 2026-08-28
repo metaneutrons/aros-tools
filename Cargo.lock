@@ -97,7 +97,6 @@ dependencies = [
 name = "aros-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "aros-common",
  "aros-macos-disk-claim",
  "clap",

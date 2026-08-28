@@ -1,9 +1,11 @@
+//! Deterministic host LLVM selection, download, and installation.
+
 use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive, require_sha256,
 };
-use anyhow::{bail, Context, Result};
 use aros_common::target::{HostCompilerConfig, TargetProfile};
 use console::{style, Emoji};
+use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -55,9 +57,10 @@ pub fn host_platform_label(host_key: &str) -> &str {
 }
 
 pub fn load_host_compiler_config() -> Result<HostCompilerConfig> {
-    let config = TargetProfile::load_config(Path::new("aros-targets.toml"))?;
+    let config =
+        TargetProfile::load_config(Path::new(crate::repo::TARGETS_FILE)).into_diagnostic()?;
     config.host_compiler.ok_or_else(|| {
-        anyhow::anyhow!("aros-targets.toml has no required [host_compiler] configuration")
+        miette::miette!("aros-targets.toml has no required [host_compiler] configuration")
     })
 }
 
@@ -65,7 +68,7 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
     let host_key = host_platform_key()?;
     let version = std::env::var("AROS_LLVM_VERSION").unwrap_or_else(|_| cfg.llvm_version.clone());
     let host_asset = cfg.hosts.get(host_key).ok_or_else(|| {
-        anyhow::anyhow!("host '{host_key}' is not configured in aros-targets.toml")
+        miette::miette!("host '{host_key}' is not configured in aros-targets.toml")
     })?;
     let asset = host_asset.asset.replace(VERSION_TOKEN, &version);
     let base_url = std::env::var("AROS_HOST_COMPILER_URL")
@@ -132,7 +135,7 @@ pub async fn install(force: bool, offline: bool) -> Result<HostCompilerPaths> {
 
     let parent = destination
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("host-compiler destination has no parent"))?;
+        .ok_or_else(|| miette::miette!("host-compiler destination has no parent"))?;
     let staging = extract_to_staging(&archive, parent, 1)?;
     let staged_paths = host_compiler_paths(staging.path());
     if !is_host_compiler_installed(&staged_paths) {
@@ -142,7 +145,8 @@ pub async fn install(force: bool, offline: bool) -> Result<HostCompilerPaths> {
         staging.path().join(".aros-host-compiler-sha256"),
         format!("{expected_sha256}\n"),
     )
-    .context("failed to write host-compiler installation marker")?;
+    .into_diagnostic()
+    .wrap_err("failed to write host-compiler installation marker")?;
     commit_staging(&staging, &destination)?;
     println!(
         "{CHECK} Installed host compiler at {}",

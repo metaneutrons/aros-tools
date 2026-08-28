@@ -19,19 +19,11 @@ const IOREG_PATH: &str = "/usr/sbin/ioreg";
 /// the selected interface still owns the configured concrete address before it
 /// binds any network socket.
 pub(super) fn scan() -> Result<Vec<UsbEcmAdapter>> {
-    let output = Command::new(IOREG_PATH)
-        .args(["-r", "-c", "IOUSBHostDevice", "-l", "-w", "0"])
-        .output()
-        .map_err(|error| miette::miette!("Could not run '{IOREG_PATH}': {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        miette::bail!(
-            "'{IOREG_PATH}' exited with {}: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
+    let output = crate::observability::run_output_at(
+        Command::new(IOREG_PATH).args(["-r", "-c", "IOUSBHostDevice", "-l", "-w", "0"]),
+        "IOKit USB CDC-ECM inventory",
+        crate::observability::ErrorBoundary::PI,
+    )?;
 
     let output = String::from_utf8(output.stdout)
         .map_err(|error| miette::miette!("'{IOREG_PATH}' returned non-UTF-8 output: {error}"))?;

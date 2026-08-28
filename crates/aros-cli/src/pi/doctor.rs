@@ -1,3 +1,5 @@
+//! Read-only board, artifact, network, and tool readiness diagnostics.
+
 use super::config::Board;
 use super::console;
 use crate::{build_tools, toolchain};

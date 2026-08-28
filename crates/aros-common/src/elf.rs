@@ -171,6 +171,10 @@ fn string_at(table: &[u8], at: usize) -> String {
 }
 
 /// Reads the class, the section headers and the symbols of an ELF file.
+///
+/// # Errors
+///
+/// Returns an error for malformed, truncated, unsupported, or non-ELF input.
 pub fn read(bytes: &[u8]) -> Result<Object> {
     if bytes.get(..4) != Some(b"\x7fELF") {
         bail!("not an ELF file");

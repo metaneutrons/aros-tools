@@ -6,6 +6,20 @@
 //! inventory, requires one exact match, performs a normal (non-force,
 //! non-lazy) unmount, and verifies the same physical device is fully unmounted.
 
+#[cfg(target_os = "macos")]
+use super::disk_inventory::diskutil_plist_json;
+#[cfg(target_os = "linux")]
+use super::disk_inventory::linux_inventory_command;
+#[cfg(any(target_os = "linux", test))]
+use super::disk_inventory::{is_linux_whole_device_path, json_object, linux_identity, linux_model};
+#[cfg(any(target_os = "macos", test))]
+use super::disk_inventory::{
+    is_macos_descendant_identifier, is_macos_whole_disk_identifier, macos_descendant_identifiers,
+    macos_transport, macos_whole_disk_identifiers,
+};
+use super::disk_inventory::{
+    json_bool_like, json_nonempty_string, json_u64_like, safe_metadata, DiskPlatform,
+};
 use miette::Result;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -113,23 +127,6 @@ pub struct UnmountReport {
     /// Mount points which were present before the operation and verified gone
     /// afterward.
     pub unmounted_mount_points: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum DiskPlatform {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    Macos,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Linux,
-}
-
-impl DiskPlatform {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Macos => "macos",
-            Self::Linux => "linux",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,14 +393,6 @@ fn hash_parts(parts: &[&str]) -> String {
     format!("{:x}", digest.finalize())
 }
 
-fn safe_metadata(value: &str) -> bool {
-    !value.is_empty()
-        && value.trim() == value
-        && !value
-            .chars()
-            .any(|character| character.is_control() || character == '\0')
-}
-
 fn safe_absolute_mount_path(path: &Path) -> bool {
     if !path.is_absolute()
         || path.as_os_str().is_empty()
@@ -436,35 +425,6 @@ fn safe_removable_mount_point(path: &Path) -> bool {
         let root = Path::new(root);
         path != root && path.starts_with(root)
     })
-}
-
-fn json_object<'a>(value: &'a Value, context: &str) -> Result<&'a Map<String, Value>> {
-    value
-        .as_object()
-        .ok_or_else(|| miette::miette!("{context} must be an object."))
-}
-
-fn json_nonempty_string<'a>(object: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| safe_metadata(value))
-}
-
-fn json_bool_like(object: &Map<String, Value>, field: &str) -> Option<bool> {
-    match object.get(field)? {
-        Value::Bool(value) => Some(*value),
-        Value::Number(value) => match value.as_u64() {
-            Some(0) => Some(false),
-            Some(1) => Some(true),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn json_u64_like(object: &Map<String, Value>, field: &str) -> Option<u64> {
-    object.get(field)?.as_u64()
 }
 
 enum ParsedMountPoint {
@@ -653,29 +613,6 @@ fn linux_mount_points(value: Option<&Value>) -> Option<Vec<PathBuf>> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn linux_model(object: &Map<String, Value>) -> Option<String> {
-    let model = json_nonempty_string(object, "model")?;
-    let vendor = json_nonempty_string(object, "vendor");
-    let display = match vendor {
-        Some(vendor) if vendor != model => format!("{vendor} {model}"),
-        _ => model.to_string(),
-    };
-    safe_metadata(&display).then_some(display)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_identity(object: &Map<String, Value>) -> Option<String> {
-    let serial = json_nonempty_string(object, "serial");
-    let wwn = json_nonempty_string(object, "wwn");
-    match (serial, wwn) {
-        (Some(serial), Some(wwn)) => Some(format!("serial:{serial};wwn:{wwn}")),
-        (Some(serial), None) => Some(format!("serial:{serial}")),
-        (None, Some(wwn)) => Some(format!("wwn:{wwn}")),
-        (None, None) => None,
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
 fn safe_linux_kernel_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -683,48 +620,13 @@ fn safe_linux_kernel_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'+'))
 }
 
-#[cfg(any(target_os = "linux", test))]
-fn is_linux_whole_device_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if path.parent() != Some(Path::new("/dev")) || path != Path::new("/dev").join(name) {
-        return false;
-    }
-    let sd = name.strip_prefix("sd").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_lowercase())
-    });
-    let mmc = name.strip_prefix("mmcblk").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            && (suffix.len() == 1 || !suffix.starts_with('0'))
-    });
-    sd || mmc
-}
-
 #[cfg(target_os = "linux")]
 fn scan_linux_inventory() -> Result<Vec<DeviceState>> {
-    use std::process::Command;
-
-    let output = Command::new("/usr/bin/lsblk")
-        .args([
-            "--json",
-            "--bytes",
-            "--output",
-            "PATH,KNAME,PKNAME,TYPE,SIZE,RM,RO,MOUNTPOINTS,TRAN,SERIAL,WWN,MODEL,VENDOR,HOTPLUG,MAJ:MIN",
-        ])
-        .output()
-        .map_err(|error| {
-            miette::miette!(
-                "Could not execute /usr/bin/lsblk for removable-media discovery: {error}"
-            )
-        })?;
-    if !output.status.success() {
-        miette::bail!(
-            "lsblk did not provide structured removable-media data (exit status {}).",
-            output.status
-        );
-    }
+    let output = crate::observability::run_output_at(
+        &mut linux_inventory_command(false),
+        "lsblk removable-media inventory",
+        crate::observability::ErrorBoundary::MEDIA_SAFETY,
+    )?;
     let parsed: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| miette::miette!("Could not parse structured lsblk JSON: {error}"))?;
     parse_linux_inventory(&parsed)
@@ -996,49 +898,6 @@ fn ordered_volumes(volumes: &[MountedVolume]) -> Vec<MountedVolume> {
 // ---------------------------------------------------------------------------
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_whole_disk_identifiers(list: &Value) -> Result<Vec<String>> {
-    let object = json_object(list, "diskutil list plist")?;
-    let identifiers = object
-        .get("AllDisks")
-        .and_then(Value::as_array)
-        .ok_or_else(|| miette::miette!("diskutil list plist must contain AllDisks."))?;
-    let mut result = identifiers
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|identifier| is_macos_whole_disk_identifier(identifier))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    result.sort();
-    result.dedup();
-    Ok(result)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn macos_descendant_identifiers(list: &Value, whole: &str) -> Result<Vec<String>> {
-    let object = json_object(list, "diskutil descendant plist")?;
-    let identifiers = object
-        .get("AllDisks")
-        .and_then(Value::as_array)
-        .ok_or_else(|| miette::miette!("diskutil descendant plist must contain AllDisks."))?;
-    let mut result = Vec::with_capacity(identifiers.len());
-    for value in identifiers {
-        let identifier = value
-            .as_str()
-            .ok_or_else(|| miette::miette!("diskutil descendant identifier must be a string."))?;
-        if !is_macos_descendant_identifier(identifier, whole) {
-            miette::bail!("diskutil returned a descendant outside the selected whole disk.");
-        }
-        result.push(identifier.to_string());
-    }
-    let original_len = result.len();
-    result.sort();
-    result.dedup();
-    if result.len() != original_len || !result.iter().any(|identifier| identifier == whole) {
-        miette::bail!("diskutil returned an incomplete or duplicate descendant topology.");
-    }
-    Ok(result)
-}
-
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MacosRootEvidence {
@@ -1192,58 +1051,6 @@ fn macos_explicitly_removable(object: &Map<String, Value>) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn macos_transport(object: &Map<String, Value>) -> Option<String> {
-    let mut transport = None;
-    for field in ["Protocol", "BusProtocol"] {
-        let Some(value) = object.get(field) else {
-            continue;
-        };
-        let canonical = match value.as_str()?.to_ascii_lowercase().as_str() {
-            "usb" => "usb",
-            "sd" | "secure digital" => "sd",
-            _ => return None,
-        };
-        if transport.is_some_and(|known| known != canonical) {
-            return None;
-        }
-        transport = Some(canonical);
-    }
-    transport.map(ToOwned::to_owned)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn is_macos_whole_disk_identifier(identifier: &str) -> bool {
-    identifier.strip_prefix("disk").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            && (suffix.len() == 1 || !suffix.starts_with('0'))
-    })
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn is_macos_descendant_identifier(identifier: &str, whole: &str) -> bool {
-    if identifier == whole {
-        return true;
-    }
-    let Some(mut suffix) = identifier.strip_prefix(whole) else {
-        return false;
-    };
-    let mut segments = 0;
-    while let Some(rest) = suffix.strip_prefix('s') {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 {
-            return false;
-        }
-        let number = &rest[..digits];
-        if number.len() > 1 && number.starts_with('0') {
-            return false;
-        }
-        suffix = &rest[digits..];
-        segments += 1;
-    }
-    segments > 0 && suffix.is_empty()
-}
-
 #[cfg(target_os = "macos")]
 fn scan_macos_inventory() -> Result<Vec<DeviceState>> {
     let list = diskutil_plist_json(&["list", "-plist"])?;
@@ -1285,46 +1092,6 @@ fn scan_macos_inventory() -> Result<Vec<DeviceState>> {
 }
 
 #[cfg(target_os = "macos")]
-fn diskutil_plist_json(arguments: &[&str]) -> Result<Value> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
-
-    let output = Command::new("/usr/sbin/diskutil")
-        .args(arguments)
-        .output()
-        .map_err(|error| miette::miette!("Could not execute diskutil: {error}"))?;
-    if !output.status.success() {
-        miette::bail!(
-            "diskutil did not provide structured disk data (exit status {}).",
-            output.status
-        );
-    }
-    let mut child = Command::new("/usr/bin/plutil")
-        .args(["-convert", "json", "-o", "-", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| miette::miette!("Could not execute plutil: {error}"))?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| miette::miette!("Could not supply diskutil plist to plutil."))?;
-    input
-        .write_all(&output.stdout)
-        .map_err(|error| miette::miette!("Could not pass diskutil plist to plutil: {error}"))?;
-    drop(input);
-    let converted = child
-        .wait_with_output()
-        .map_err(|error| miette::miette!("Could not wait for plutil: {error}"))?;
-    if !converted.status.success() {
-        miette::bail!("plutil could not convert diskutil plist output to JSON.");
-    }
-    serde_json::from_slice(&converted.stdout)
-        .map_err(|error| miette::miette!("Could not parse converted diskutil plist: {error}"))
-}
-
-#[cfg(target_os = "macos")]
 struct SystemMacosUnmountOps;
 
 #[cfg(any(target_os = "macos", test))]
@@ -1348,18 +1115,16 @@ impl MacosUnmountOps for SystemMacosUnmountOps {
         if !safe_removable_mount_point(&volume.mount_point) {
             miette::bail!("Refusing a macOS unmount outside the removable-media mount roots.");
         }
-        let output = Command::new("/usr/sbin/diskutil")
-            .arg("unmount")
-            .arg(device_node)
-            .output()
-            .map_err(|error| miette::miette!("Could not execute diskutil unmount: {error}"))?;
-        if !output.status.success() {
-            miette::bail!(
-                "diskutil unmount failed for '{}' (status {}). No force or eject fallback was attempted.",
-                volume.mount_point.display(),
-                output.status
-            );
-        }
+        crate::observability::run_output_at(
+            Command::new("/usr/sbin/diskutil")
+                .arg("unmount")
+                .arg(device_node),
+            &format!(
+                "diskutil normal unmount for '{}' (no force or eject fallback)",
+                volume.mount_point.display()
+            ),
+            crate::observability::ErrorBoundary::MEDIA_SAFETY,
+        )?;
         Ok(())
     }
 }

@@ -1,3 +1,5 @@
+//! Strict local board-profile schema, validation, and template generation.
+
 use miette::Result;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -7,9 +9,6 @@ use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
 const CURRENT_FORMAT_VERSION: u32 = 1;
-const DEFAULT_PRESET: &str = "rpi4-aarch64-debug";
-const DEFAULT_TOOLCHAIN_PRESET: &str = "rpi-aarch64";
-const DEFAULT_BUILD_TARGET: &str = "rpi-artifacts";
 const DEFAULT_SERIAL_BAUD: u32 = 115_200;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,14 +27,12 @@ pub struct BoardConfig {
     pub model: String,
     /// `target` is accepted as the name used by the checked-in example.
     /// Internally this is the CMake preset used by the shared build path.
-    #[serde(default = "default_preset", alias = "target")]
+    #[serde(alias = "target")]
     pub preset: String,
     /// Locked cross-toolchain profile for this CMake preset. A board-specific
     /// debug preset can intentionally share the audited `rpi-aarch64` release.
-    #[serde(default = "default_toolchain_preset")]
     pub toolchain_preset: String,
     /// The CMake target that produces a deployable board bundle.
-    #[serde(default = "default_build_target")]
     pub build_target: String,
     #[serde(default)]
     pub transport: Transport,
@@ -518,14 +515,6 @@ pub fn default_config_path_from(
     PathBuf::from(".aros/boards.toml")
 }
 
-fn default_preset() -> String {
-    DEFAULT_PRESET.to_string()
-}
-
-fn default_toolchain_preset() -> String {
-    DEFAULT_TOOLCHAIN_PRESET.to_string()
-}
-
 fn board_template(board_name: &str) -> String {
     format!(
         r#"# Local AROS Pi lab profile. This file contains host-specific data;
@@ -540,6 +529,7 @@ format_version = 1
 model = "rpi4"
 target = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
 transport = "uboot-usb-ecm"
 artifact_directory = "build/rpi4-aarch64-debug/boot/raspi"
 dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
@@ -567,10 +557,6 @@ serial = "REPLACE_ME"
 expected_target_mac = "02:aa:00:00:00:01"
 "#
     )
-}
-
-fn default_build_target() -> String {
-    DEFAULT_BUILD_TARGET.to_string()
 }
 
 const fn default_format_version() -> u32 {
@@ -721,7 +707,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "format_version = 1\n\n[boards.rpi4]\nmodel = \"rpi4\"\ntarget = \"rpi-aarch64\"\ntransport = \"uboot-usb-ecm\"\nartifact_directory = \"build/rpi-aarch64/boot/raspi\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
+                "format_version = 1\n\n[boards.rpi4]\nmodel = \"rpi4\"\ntarget = \"rpi-aarch64\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\nartifact_directory = \"build/rpi-aarch64/boot/raspi\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
                 root.display()
             ),
         )
@@ -799,7 +785,7 @@ mod tests {
         let config = root.join("boards.toml");
         std::fs::write(
             &config,
-            "[boards.rpi4]\nmodel = \"rpi4\"\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
+            "[boards.rpi4]\nmodel = \"rpi4\"\ntarget = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
         )
         .expect("configuration");
 
@@ -829,7 +815,7 @@ mod tests {
         let config = temp.path().join("boards.toml");
         std::fs::write(
             &config,
-            "[boards.rpi4-usb]\nmodel = \"rpi4\"\ntransport = \"uboot-usb-ecm\"\n\n[boards.rpi4-usb.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n\n[boards.rpi4-usb.usb_ecm.identity]\nvendor_id = 0x1d6b\nproduct_id = 0x0104\nserial = \"aros-rpi4-lab-01\"\nexpected_target_mac = \"02:aa:00:00:00:01\"\n",
+            "[boards.rpi4-usb]\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\n\n[boards.rpi4-usb.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n\n[boards.rpi4-usb.usb_ecm.identity]\nvendor_id = 0x1d6b\nproduct_id = 0x0104\nserial = \"aros-rpi4-lab-01\"\nexpected_target_mac = \"02:aa:00:00:00:01\"\n",
         )
         .expect("configuration");
 

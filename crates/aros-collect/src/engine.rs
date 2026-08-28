@@ -666,9 +666,8 @@ fn read_object(path: &Path) -> Result<Object> {
 }
 
 fn run_tool(tool: &Path, args: &[OsString]) -> Result<ExitStatus> {
-    Command::new(tool)
-        .args(args)
-        .status()
+    aros_common::run_status(Command::new(tool).args(args))
+        .map(|observed| observed.status)
         .with_context(|| format!("cannot execute required sibling tool {}", tool.display()))
 }
 

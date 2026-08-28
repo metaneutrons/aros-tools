@@ -198,6 +198,12 @@ struct RawValue {
 }
 
 impl Contract {
+    /// Load a strict AHI execution contract from a regular UTF-8 file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured contract error for unsafe paths, I/O failures, or
+    /// invalid contract syntax and values.
     pub fn load(path: &Path) -> AhiResult<Self> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             path_failure(path, None, format!("cannot inspect AHI contract: {error}"))
@@ -219,6 +225,12 @@ impl Contract {
         Self::parse(&text, path)
     }
 
+    /// Parse and validate one AHI execution contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured contract error for missing, unknown, duplicate,
+    /// malformed, or internally inconsistent fields.
     pub fn parse(text: &str, source: &Path) -> AhiResult<Self> {
         let mut values = parse_assignments(text, source)?;
         let expected: BTreeSet<&str> = REQUIRED_FIELDS.iter().copied().collect();

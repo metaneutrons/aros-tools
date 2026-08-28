@@ -1,7 +1,10 @@
+//! Raspberry Pi build, deployment, service, console, and SD-card workflows.
+
 pub mod config;
 pub mod console;
 pub mod deploy;
 pub mod dhcp;
+mod disk_inventory;
 pub mod doctor;
 mod scan;
 #[cfg(target_os = "linux")]
@@ -10,6 +13,7 @@ mod scan_linux;
 mod scan_macos;
 pub mod sd;
 pub mod sd_disk;
+mod sd_manifest;
 pub mod sd_unmount;
 pub mod serve;
 pub mod tftp;
@@ -37,10 +41,6 @@ struct UsbEcmAdapter {
     pub interface_mac: Option<String>,
     pub ipv4_addresses: Vec<Ipv4Addr>,
     pub cdc_ecm: bool,
-}
-
-pub fn load_board(config_path: Option<&Path>, board_name: &str) -> Result<Board> {
-    config::load_board(config_path, board_name)
 }
 
 /// Convert a selected local board profile into the immutable identity contract

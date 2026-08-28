@@ -20,6 +20,11 @@ pub struct Sha256Digest(String);
 
 impl Sha256Digest {
     /// Parse hexadecimal SHA-256 text and normalize it to lower case.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidSha256Digest`] unless `value` contains exactly 64
+    /// hexadecimal characters.
     pub fn parse(value: &str) -> Result<Self, InvalidSha256Digest> {
         value.parse()
     }
@@ -109,6 +114,10 @@ pub fn finish_sha256(hasher: Sha256) -> Sha256Digest {
 }
 
 /// Hash a reader without taking ownership of it.
+///
+/// # Errors
+///
+/// Returns an I/O error when reading fails or the byte count overflows `u64`.
 pub fn sha256_reader(reader: &mut impl Read) -> io::Result<Sha256Result> {
     let mut hasher = Sha256::new();
     let mut size = 0_u64;
@@ -130,6 +139,10 @@ pub fn sha256_reader(reader: &mut impl Read) -> io::Result<Sha256Result> {
 }
 
 /// Open and hash one regular file.
+///
+/// # Errors
+///
+/// Returns an I/O error when the file cannot be opened or read.
 pub fn sha256_file(path: &Path) -> io::Result<Sha256Result> {
     sha256_reader(&mut File::open(path)?)
 }

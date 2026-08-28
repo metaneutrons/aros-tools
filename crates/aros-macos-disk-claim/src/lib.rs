@@ -51,6 +51,11 @@ impl BsdDiskName {
     ///
     /// Slice names (`disk4s1`), raw paths (`/dev/rdisk4`), relative paths,
     /// non-UTF-8 input, leading zeroes, and all other spellings are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClaimError::InvalidDiskName`] for any non-canonical whole-disk
+    /// identifier.
     pub fn parse(value: impl AsRef<OsStr>) -> Result<Self, ClaimError> {
         let value = value.as_ref();
         let Some(text) = value.to_str() else {
@@ -139,6 +144,11 @@ impl WholeDiskClaim {
     /// Disk Arbitration callback is driven on an owned worker run loop, and a
     /// timeout never frees callback state that Disk Arbitration might still
     /// reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid name or timeout, or when Disk
+    /// Arbitration cannot establish the exclusive claim.
     pub fn acquire(device: impl AsRef<OsStr>, timeout: Duration) -> Result<Self, ClaimError> {
         if timeout.is_zero() {
             return Err(ClaimError::InvalidTimeout);
@@ -180,6 +190,11 @@ impl WholeDiskClaim {
     ///
     /// Normal callers can rely on `Drop`; this method is useful when cleanup
     /// errors should be surfaced before returning from a destructive command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Disk Arbitration cannot release the claim within
+    /// its bounded cleanup operation.
     pub fn release(mut self) -> Result<(), ClaimError> {
         self.claim.release()
     }

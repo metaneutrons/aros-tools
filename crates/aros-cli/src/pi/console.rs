@@ -1,3 +1,5 @@
+//! Validated serial-console planning and execution for configured boards.
+
 use clap::ValueEnum;
 use miette::Result;
 use std::ffi::OsString;

@@ -7,6 +7,7 @@ pub mod elf;
 pub mod error;
 pub mod observability;
 pub mod pins;
+pub mod process;
 pub mod target;
 pub mod text;
 pub mod toolchain;
@@ -24,6 +25,9 @@ pub use error::{ArosError, Result};
 pub use observability::{
     render_diagnostics, requested_diagnostic_format, DiagnosticFailure, DiagnosticFormat,
     LogFormat, LogLevel, Logger, ObservabilityPolicy,
+};
+pub use process::{
+    bounded_output_detail, exit_signal, run_output, run_status, ProcessOutput, ProcessStatus,
 };
 pub use target::TargetProfile;
 pub use text::read_source;

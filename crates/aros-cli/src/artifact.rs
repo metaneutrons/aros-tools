@@ -1,6 +1,8 @@
-use anyhow::{bail, Context, Result};
+//! Verified download, extraction, inventory, and atomic publication helpers.
+
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::BufReader;
@@ -29,9 +31,14 @@ pub fn archive_cache_root() -> PathBuf {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
+    sha256_file_with_size(path).map(|(digest, _)| digest)
+}
+
+pub fn sha256_file_with_size(path: &Path) -> Result<(String, u64)> {
     aros_common::sha256_file(path)
-        .map(|result| result.digest.to_string())
-        .with_context(|| format!("failed to hash '{}'", path.display()))
+        .map(|result| (result.digest.to_string(), result.size))
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to hash '{}'", path.display()))
 }
 
 pub fn verify_archive(
@@ -40,7 +47,8 @@ pub fn verify_archive(
     expected_size: Option<u64>,
 ) -> Result<()> {
     let metadata = fs::metadata(path)
-        .with_context(|| format!("failed to inspect archive '{}'", path.display()))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to inspect archive '{}'", path.display()))?;
     if let Some(expected) = expected_size {
         if metadata.len() != expected {
             bail!(
@@ -72,7 +80,8 @@ pub async fn obtain_archive(
 ) -> Result<PathBuf> {
     let cache_dir = archive_cache_root().join("downloads").join("sha256");
     fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("failed to create cache '{}'", cache_dir.display()))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to create cache '{}'", cache_dir.display()))?;
     let cache_path = cache_dir.join(format!("{}.tar.xz", expected_sha256.to_ascii_lowercase()));
 
     if cache_path.exists() && !force_download {
@@ -89,12 +98,14 @@ pub async fn obtain_archive(
 
     let client = reqwest::Client::builder()
         .user_agent("aros-tools/0.1.0 (https://aros.org)")
-        .build()?;
+        .build()
+        .into_diagnostic()?;
     let response = client
         .get(url)
         .send()
         .await
-        .with_context(|| format!("failed to download '{url}'"))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to download '{url}'"))?;
     if !response.status().is_success() {
         bail!("failed to download '{url}': HTTP {}", response.status());
     }
@@ -110,30 +121,37 @@ pub async fn obtain_archive(
     );
 
     let named = tempfile::NamedTempFile::new_in(&cache_dir)
-        .context("failed to create temporary archive in cache")?;
+        .into_diagnostic()
+        .wrap_err("failed to create temporary archive in cache")?;
     let (file, temp_path) = named.into_parts();
     drop(file);
     let mut output = tokio::fs::File::create(&temp_path)
         .await
-        .context("failed to open temporary archive")?;
+        .into_diagnostic()
+        .wrap_err("failed to open temporary archive")?;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("failed while downloading toolchain archive")?;
+        let chunk = chunk
+            .into_diagnostic()
+            .wrap_err("failed while downloading toolchain archive")?;
         tokio::io::AsyncWriteExt::write_all(&mut output, &chunk)
             .await
-            .context("failed to write toolchain archive")?;
+            .into_diagnostic()
+            .wrap_err("failed to write toolchain archive")?;
         progress.inc(chunk.len() as u64);
     }
     tokio::io::AsyncWriteExt::flush(&mut output)
         .await
-        .context("failed to flush toolchain archive")?;
+        .into_diagnostic()
+        .wrap_err("failed to flush toolchain archive")?;
     drop(output);
     progress.finish_with_message("downloaded");
 
     verify_archive(&temp_path, expected_sha256, expected_size)?;
     if force_download && cache_path.exists() {
         fs::remove_file(&cache_path)
-            .with_context(|| format!("failed to replace cache '{}'", cache_path.display()))?;
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to replace cache '{}'", cache_path.display()))?;
     }
     match temp_path.persist(&cache_path) {
         Ok(()) => {}
@@ -142,7 +160,7 @@ pub async fn obtain_archive(
             verify_archive(&cache_path, expected_sha256, expected_size)?;
         }
         Err(error) => {
-            return Err(error.error).with_context(|| {
+            return Err(error.error).into_diagnostic().wrap_err_with(|| {
                 format!("failed to commit archive cache '{}'", cache_path.display())
             });
         }
@@ -156,19 +174,29 @@ pub fn extract_to_staging(
     strip_components: usize,
 ) -> Result<TempDir> {
     fs::create_dir_all(store_parent)
-        .with_context(|| format!("failed to create store '{}'", store_parent.display()))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to create store '{}'", store_parent.display()))?;
     let staging = tempfile::Builder::new()
         .prefix(".install-")
         .tempdir_in(store_parent)
-        .context("failed to create toolchain staging directory")?;
+        .into_diagnostic()
+        .wrap_err("failed to create toolchain staging directory")?;
 
     let input = File::open(archive_path)
-        .with_context(|| format!("failed to open '{}'", archive_path.display()))?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to open '{}'", archive_path.display()))?;
     let decoder = XzDecoder::new(BufReader::new(input));
     let mut archive = tar::Archive::new(decoder);
-    for entry in archive.entries().context("failed to read tar archive")? {
-        let mut entry = entry.context("invalid tar entry")?;
-        let source_path = entry.path().context("invalid tar entry path")?;
+    for entry in archive
+        .entries()
+        .into_diagnostic()
+        .wrap_err("failed to read tar archive")?
+    {
+        let mut entry = entry.into_diagnostic().wrap_err("invalid tar entry")?;
+        let source_path = entry
+            .path()
+            .into_diagnostic()
+            .wrap_err("invalid tar entry path")?;
         let Some(relative_path) = safe_stripped_path(&source_path, strip_components)? else {
             continue;
         };
@@ -178,8 +206,9 @@ pub fn extract_to_staging(
         if entry_type.is_symlink() {
             let link = entry
                 .link_name()
-                .context("invalid symlink target")?
-                .ok_or_else(|| anyhow::anyhow!("symlink has no target"))?;
+                .into_diagnostic()
+                .wrap_err("invalid symlink target")?
+                .ok_or_else(|| miette::miette!("symlink has no target"))?;
             validate_symlink_target(&relative_path, &link)?;
         } else if !(entry_type.is_file() || entry_type.is_dir()) {
             bail!(
@@ -190,11 +219,12 @@ pub fn extract_to_staging(
 
         let destination = staging.path().join(&relative_path);
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).into_diagnostic()?;
         }
         entry
             .unpack(&destination)
-            .with_context(|| format!("failed to extract '{}'", relative_path.display()))?;
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to extract '{}'", relative_path.display()))?;
     }
     Ok(staging)
 }
@@ -205,14 +235,16 @@ pub fn commit_staging(staging: &TempDir, destination: &Path) -> Result<()> {
     }
     let parent = destination
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("toolchain destination has no parent"))?;
-    fs::create_dir_all(parent)?;
-    fs::rename(staging.path(), destination).with_context(|| {
-        format!(
-            "failed to atomically install toolchain at '{}'",
-            destination.display()
-        )
-    })?;
+        .ok_or_else(|| miette::miette!("toolchain destination has no parent"))?;
+    fs::create_dir_all(parent).into_diagnostic()?;
+    fs::rename(staging.path(), destination)
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "failed to atomically install toolchain at '{}'",
+                destination.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -233,7 +265,7 @@ pub fn tree_inventory(root: &Path) -> Result<(String, Vec<ArosToolchainManifestE
 fn inventory_sha256(entries: &[ArosToolchainManifestEntry]) -> Result<String> {
     let mut tree = Sha256::new();
     for entry in entries {
-        tree.update(serde_json::to_vec(&canonical_entry(entry))?);
+        tree.update(serde_json::to_vec(&canonical_entry(entry)).into_diagnostic()?);
         tree.update(b"\n");
     }
     Ok(format!("{:x}", tree.finalize()))
@@ -246,20 +278,22 @@ fn collect_tree_entries(
 ) -> Result<()> {
     let directory = root.join(relative);
     let mut entries = fs::read_dir(&directory)
-        .with_context(|| format!("failed to read '{}'", directory.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to read '{}'", directory.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .into_diagnostic()?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let child_relative = relative.join(entry.file_name());
         if child_relative == Path::new(AROS_TOOLCHAIN_MANIFEST_FILE) {
             continue;
         }
-        let metadata = fs::symlink_metadata(entry.path())?;
+        let metadata = fs::symlink_metadata(entry.path()).into_diagnostic()?;
         let path = portable_relative_path(&child_relative)?;
         if metadata.file_type().is_symlink() {
-            let target = fs::read_link(entry.path())?;
+            let target = fs::read_link(entry.path()).into_diagnostic()?;
             let target = target.to_str().ok_or_else(|| {
-                anyhow::anyhow!("symlink target is not UTF-8: {}", target.display())
+                miette::miette!("symlink target is not UTF-8: {}", target.display())
             })?;
             output.push(ArosToolchainManifestEntry {
                 path,
@@ -320,7 +354,7 @@ fn portable_relative_path(path: &Path) -> Result<String> {
             Component::Normal(value) => value
                 .to_str()
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("toolchain path is not UTF-8: {}", path.display())),
+                .ok_or_else(|| miette::miette!("toolchain path is not UTF-8: {}", path.display())),
             _ => bail!(
                 "toolchain inventory path is not relative: {}",
                 path.display()
@@ -441,7 +475,7 @@ fn ensure_no_symlink_ancestors(root: &Path, relative: &Path) -> Result<()> {
 pub fn require_sha256(value: Option<&str>, description: &str) -> Result<String> {
     let value = value
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| anyhow::anyhow!("{description} has no valid pinned SHA256"))?;
+        .ok_or_else(|| miette::miette!("{description} has no valid pinned SHA256"))?;
     Ok(value.to_ascii_lowercase())
 }
 

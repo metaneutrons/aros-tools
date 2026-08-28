@@ -80,6 +80,11 @@ const fn default_strip_components() -> usize {
 }
 
 impl ArosToolchainLock {
+    /// Load and validate a JSON or TOML release lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, decoded, or validated.
     pub fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let lock: Self = if path
@@ -104,6 +109,11 @@ impl ArosToolchainLock {
         Ok(lock)
     }
 
+    /// Validate schema, selectors, paths, URLs, and digest invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of the first violated release-lock invariant.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.schema != AROS_TOOLCHAIN_LOCK_SCHEMA {
             return Err(format!(
@@ -150,6 +160,11 @@ impl ArosToolchainLock {
             .find(|artifact| artifact.host == host && artifact.target_profile == target_profile)
     }
 
+    /// Resolve an artifact's absolute or lock-relative download URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a relative asset has no lock-level base URL.
     pub fn asset_url(
         &self,
         artifact: &ArosToolchainArtifact,
@@ -207,6 +222,12 @@ fn is_null_sha256(value: &str) -> bool {
 }
 
 impl ArosToolchainManifest {
+    /// Load the installed toolchain manifest below `root`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the manifest cannot be read or decoded, or uses
+    /// an unsupported schema version.
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
         let content = fs::read_to_string(&path)?;

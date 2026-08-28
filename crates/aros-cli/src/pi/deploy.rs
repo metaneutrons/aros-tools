@@ -1,3 +1,5 @@
+//! Atomic publication of verified Pi boot artifacts into a TFTP tree.
+
 use super::config::Board;
 use miette::Result;
 use std::fs;

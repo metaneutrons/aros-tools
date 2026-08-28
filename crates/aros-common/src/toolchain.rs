@@ -17,6 +17,11 @@ pub struct Toolchain {
 
 impl Toolchain {
     /// Detect or verify a cross-compiler for the given target architecture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArosError::ToolchainNotFound`] when the architecture's C
+    /// compiler is unavailable on `PATH` and in the supported fallback root.
     pub fn detect(arch: Architecture) -> Result<Self> {
         let prefix = arch.triple_prefix();
         let cc_name = format!("{prefix}-gcc");

@@ -13,6 +13,12 @@ use crate::contract::{Contract, ProductKind};
 use crate::{AhiFailure, AhiResult};
 
 impl Contract {
+    /// Prove the contract's filesystem and input-integrity preconditions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured validation failure for missing, unsafe, aliased,
+    /// modified, or otherwise inconsistent filesystem inputs.
     pub fn validate_filesystem(&self, contract_source: &Path) -> AhiResult<()> {
         for (path, label) in [
             (&self.source_root, "source root"),

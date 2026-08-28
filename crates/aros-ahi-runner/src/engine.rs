@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::SystemTime;
 
-use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage};
+use aros_common::{run_output, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage};
 use sha2::{Digest, Sha256};
 
 use crate::contract::{Contract, Mode, ProductKind};
@@ -19,6 +19,12 @@ use crate::{AhiFailure, AhiResult};
 const SCRIPT_NAMES: &[&str] = &["configure", "config.guess", "config.sub", "install-sh"];
 const DEPENDENCY_ALIASES: &[&str] = &["libamiga.a", "libm.a", "libmui.a"];
 
+/// Execute one already parsed and filesystem-validated AHI contract.
+///
+/// # Errors
+///
+/// Returns a structured failure when staging, generation, compilation,
+/// installation, product validation, or logging fails.
 pub fn run(contract: &Contract, logger: &mut Logger) -> AhiResult<()> {
     let context = context(contract);
     logger.event(
@@ -201,9 +207,11 @@ fn config_cache(mode: Mode) -> String {
 fn check_sfdc(contract: &Contract) -> AhiResult<()> {
     let mut command = closed_command(&contract.host_perl);
     command.arg("-c").arg(&contract.host_sfdc);
-    let output = command.output().map_err(|error| {
-        configure_failure(contract, format!("cannot start HOST_PERL: {error}"), None)
-    })?;
+    let output = run_output(&mut command)
+        .map_err(|error| {
+            configure_failure(contract, format!("cannot start HOST_PERL: {error}"), None)
+        })?
+        .output;
     require_success(
         &output,
         contract,
@@ -259,13 +267,15 @@ fn configure(contract: &Contract) -> AhiResult<()> {
             contract.target_ldflags.join(" ")
         ))
         .arg("--with-target-optflags=-O2");
-    let output = command.output().map_err(|error| {
-        configure_failure(
-            contract,
-            format!("cannot start AHI configure: {error}"),
-            None,
-        )
-    })?;
+    let output = run_output(&mut command)
+        .map_err(|error| {
+            configure_failure(
+                contract,
+                format!("cannot start AHI configure: {error}"),
+                None,
+            )
+        })?
+        .output;
     require_success(
         &output,
         contract,
@@ -338,13 +348,15 @@ fn build(contract: &Contract) -> AhiResult<()> {
         .arg("-C")
         .arg(contract.stage_build.join("Include"))
         .arg("gcc-include");
-    let output = include.output().map_err(|error| {
-        build_failure(
-            contract,
-            format!("cannot start gcc-include preparation: {error}"),
-            None,
-        )
-    })?;
+    let output = run_output(&mut include)
+        .map_err(|error| {
+            build_failure(
+                contract,
+                format!("cannot start gcc-include preparation: {error}"),
+                None,
+            )
+        })?
+        .output;
     require_success(
         &output,
         contract,
@@ -368,13 +380,15 @@ fn build(contract: &Contract) -> AhiResult<()> {
     }
     let mut install = closed_build_command(contract, &contract.make);
     install.arg("-C").arg(&contract.stage_build).arg("install");
-    let output = install.output().map_err(|error| {
-        build_failure(
-            contract,
-            format!("cannot start AHI make install: {error}"),
-            None,
-        )
-    })?;
+    let output = run_output(&mut install)
+        .map_err(|error| {
+            build_failure(
+                contract,
+                format!("cannot start AHI make install: {error}"),
+                None,
+            )
+        })?
+        .output;
     require_success(
         &output,
         contract,
