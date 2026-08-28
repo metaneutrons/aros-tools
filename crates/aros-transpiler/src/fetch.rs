@@ -6,7 +6,7 @@
 //! that `libraries/acpica.h` pulls in come from the unpacked result.
 //!
 //! Only the declaration is transpiled. Downloading is left to the tree's own
-//! `scripts/fetch.sh`, which already handles the origin flavours the tree uses
+//! `aros-fetch`, which handles the closed origin flavours the tree uses
 //! (plain mirrors, GNU, SourceForge, GitHub, and a local `cache://`). Rebuilding
 //! that in CMake would be a lot of surface for no gain; a Rust replacement can
 //! come later without changing the declarations.

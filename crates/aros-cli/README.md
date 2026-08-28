@@ -53,10 +53,12 @@ archive contracts:
     checksums="example-1.0.tar.xz=sha256:<digest> example-1.0.tar.gz=sha256:<digest>"
 ```
 
-The classic MetaMake path and transpiled CMake path both delegate to the same
-verifier. It checks downloads and cache hits before unpacking, rejects malformed
-or incomplete multi-suffix declarations, and reports expected and actual
-digests on mismatch. No hash is inferred or emitted into generated CMake.
+The AROS-NG CMake path delegates to the native `aros-fetch` verifier. It checks
+downloads and cache hits before unpacking, rejects malformed or incomplete
+multi-suffix declarations, and reports expected and actual digests on mismatch.
+The classic upstream GNU Make path retains `scripts/fetch.sh` as its compatible
+fallback; it consumes the same explicit declarations but is not silently used
+by AROS-NG. No hash is inferred or emitted into generated CMake.
 Release and CI validation can add `--require-fetch-checksums` (or set
 `AROS_FETCH_REQUIRE_CHECKSUMS=1`) to reject hashless source archives while
 ordinary upstream builds remain additive and compatible.

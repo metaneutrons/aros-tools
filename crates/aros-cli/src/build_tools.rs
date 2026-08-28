@@ -16,6 +16,7 @@ const REQUIRED_BUILD_TOOLS: &[&str] = &[
     "aros-romtool",
     "aros-collect",
     "aros-ahi-runner",
+    "aros-fetch",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
