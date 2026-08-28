@@ -86,34 +86,46 @@ pub fn inspect(board: &Board, repo_root: &Path) -> DoctorReport {
 }
 
 fn check_dtb(report: &mut DoctorReport, board: &Board, repo_root: &Path) {
-    match board.rpi4_dtb_path(repo_root, None) {
+    match board.raspberry_pi_dtb_path(repo_root, None) {
         Ok(Some(path)) => report.push(
             CheckStatus::Pass,
-            "rpi4 dtb",
-            format!("{} (passed as AROS_RPI4_DTB)", path.display()),
+            "board dtb",
+            format!("{} (passed as AROS_RPI_DTB)", path.display()),
         ),
         Ok(None) => report.push(
             CheckStatus::Pass,
-            "rpi4 dtb",
+            "board dtb",
             "not required for this board model",
         ),
-        Err(error) => report.push(CheckStatus::Failure, "rpi4 dtb", error.to_string()),
+        Err(error) => report.push(CheckStatus::Failure, "board dtb", error.to_string()),
     }
 }
 
 fn check_core_kobjs(report: &mut DoctorReport, board: &Board, repo_root: &Path) {
-    match board.rpi4_core_kobj_dir(repo_root, None) {
+    let result = match board.config.backend {
+        crate::board::config::BoardBackend::RaspberryPi => {
+            board.raspberry_pi_core_kobj_dir(repo_root, None)
+        }
+        crate::board::config::BoardBackend::OpensbiUefi => {
+            board.opensbi_core_kobj_dir(repo_root, None)
+        }
+    };
+    match result {
         Ok(Some(path)) => report.push(
             CheckStatus::Pass,
-            "rpi4 core KOBJs",
-            format!("{} (passed as AROS_RPI4_CORE_KOBJ_DIR)", path.display()),
+            "board core KOBJs",
+            format!(
+                "{} (validated for {})",
+                path.display(),
+                board.config.backend
+            ),
         ),
         Ok(None) => report.push(
             CheckStatus::Pass,
-            "rpi4 core KOBJs",
+            "board core KOBJs",
             "not required for this board model",
         ),
-        Err(error) => report.push(CheckStatus::Failure, "rpi4 core KOBJs", error.to_string()),
+        Err(error) => report.push(CheckStatus::Failure, "board core KOBJs", error.to_string()),
     }
 }
 
@@ -191,6 +203,14 @@ fn check_artifacts(report: &mut DoctorReport, board: &Board, repo_root: &Path) {
 }
 
 fn check_tftp_root(report: &mut DoctorReport, board: &Board) {
+    if board.config.transport == crate::board::config::Transport::UefiEsp {
+        report.push(
+            CheckStatus::Pass,
+            "tftp root",
+            "not used by the uefi-esp transport",
+        );
+        return;
+    }
     let Ok(root) = board.tftp_root() else {
         report.push(
             CheckStatus::Failure,
@@ -261,7 +281,9 @@ fn check_serial_terminal(report: &mut DoctorReport) {
 #[cfg(test)]
 mod tests {
     use super::{inspect, CheckStatus};
-    use crate::board::config::{Board, BoardConfig, Transport};
+    use crate::board::config::{
+        Board, BoardBackend, BoardConfig, BoardModel, RaspberryPiConfig, Transport,
+    };
 
     #[test]
     fn doctor_flags_a_missing_tftp_root_without_touching_it() {
@@ -270,14 +292,18 @@ mod tests {
         let board = Board {
             name: "rpi4".to_string(),
             config: BoardConfig {
-                model: "rpi4".to_string(),
+                backend: BoardBackend::RaspberryPi,
+                model: BoardModel::Rpi4,
                 preset: "rpi4-aarch64-debug".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::NativeTftp,
                 artifact_dir: None,
-                dtb_path: None,
-                core_kobj_dir: None,
+                raspberry_pi: Some(RaspberryPiConfig {
+                    dtb_path: temp.path().join("bcm2711-rpi-4-b.dtb"),
+                    core_kobj_dir: temp.path().join("kobjs"),
+                }),
+                opensbi_uefi: None,
                 tftp_root: Some(missing_root.clone()),
                 tftp_prefix: None,
                 serial_device: None,

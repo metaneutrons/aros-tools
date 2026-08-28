@@ -1,4 +1,4 @@
-//! Typed contract for staged Raspberry Pi SD image artifacts.
+//! Typed contract for staged board SD image artifacts.
 //!
 //! The producer and verifier deliberately share these exact types.  Changing
 //! the on-disk schema therefore requires one explicit, versioned edit instead
@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const FORMAT_VERSION: u32 = 1;
-pub const KIND: &str = "aros-pi-sd-image";
+pub const KIND: &str = "aros-board-sd-image";
 pub const FILE_NAME: &str = "manifest.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

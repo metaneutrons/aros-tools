@@ -38,9 +38,14 @@ pub fn initialize_template(
 /// Convert a selected local board profile into the immutable identity contract
 /// required by an external SD boot bundle.
 pub fn sd_bundle_expectation(board: &Board) -> Result<sd::BundleExpectation> {
+    let manifest_board_name = if board.config.transport == Transport::UefiEsp {
+        board.config.model.as_str()
+    } else {
+        &board.name
+    };
     let expectation = sd::BundleExpectation::new(
-        &board.name,
-        &board.config.model,
+        manifest_board_name,
+        board.config.model.to_string(),
         board.config.transport.to_string(),
     );
     if board.config.transport != Transport::UbootUsbEcm {
@@ -403,15 +408,21 @@ pub async fn build(
         "🧭 Building board '{}' ({}, transport {})...",
         board.name, board.config.model, board.config.transport
     );
-    if let Some(dtb_path) = board.rpi4_dtb_path(repo_root, dtb_override)? {
+    if let Some(dtb_path) = board.raspberry_pi_dtb_path(repo_root, dtb_override)? {
         options.cmake_definitions.push(build::CmakeDefinition {
-            key: "AROS_RPI4_DTB".to_string(),
+            key: "AROS_RPI_DTB".to_string(),
             value: dtb_path.to_string_lossy().into_owned(),
         });
     }
-    if let Some(core_kobj_dir) = board.rpi4_core_kobj_dir(repo_root, core_kobj_override)? {
+    if let Some(core_kobj_dir) = board.raspberry_pi_core_kobj_dir(repo_root, core_kobj_override)? {
         options.cmake_definitions.push(build::CmakeDefinition {
-            key: "AROS_RPI4_CORE_KOBJ_DIR".to_string(),
+            key: "AROS_RPI_CORE_KOBJ_DIR".to_string(),
+            value: core_kobj_dir.to_string_lossy().into_owned(),
+        });
+    }
+    if let Some(core_kobj_dir) = board.opensbi_core_kobj_dir(repo_root, core_kobj_override)? {
+        options.cmake_definitions.push(build::CmakeDefinition {
+            key: "AROS_OPENSBI_CORE_KOBJ_DIR".to_string(),
             value: core_kobj_dir.to_string_lossy().into_owned(),
         });
     }

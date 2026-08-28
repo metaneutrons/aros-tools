@@ -125,9 +125,9 @@ enum Commands {
         command: BoardCommand,
     },
 
-    /// Build AROS for a specific target preset (pc-x86_64, rpi-aarch64, arm-raspi)
+    /// Build AROS for a target preset (pc-x86_64, rpi-aarch64, arm-raspi, opensbi-riscv64)
     Build {
-        /// Target preset (e.g. pc-x86_64, rpi-aarch64, arm-raspi)
+        /// Target preset (e.g. pc-x86_64, rpi-aarch64, arm-raspi, opensbi-riscv64)
         #[arg(short, long, default_value = "pc-x86_64")]
         preset: String,
 
@@ -346,11 +346,11 @@ enum BoardCommand {
         #[arg(long)]
         toolchain_dir: Option<PathBuf>,
 
-        /// Override the board profile's pinned Raspberry Pi 4 DTB for this build
+        /// Override a Raspberry Pi board profile's exact model DTB for this build
         #[arg(long, value_name = "PATH")]
         dtb_path: Option<PathBuf>,
 
-        /// Override the board profile's legacy Raspberry Pi 4 core KOBJ directory
+        /// Override the board profile's architecture-correct legacy core KOBJ directory
         #[arg(long, value_name = "DIR")]
         core_kobj_dir: Option<PathBuf>,
     },

@@ -1,6 +1,6 @@
 //! Atomic publication of verified Pi boot artifacts into a TFTP tree.
 
-use super::config::Board;
+use super::config::{Board, Transport};
 use miette::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +36,12 @@ impl DeploymentPlan {
         repo_root: &Path,
         artifact_override: Option<&Path>,
     ) -> Result<Self> {
+        if board.config.transport == Transport::UefiEsp {
+            miette::bail!(
+                "Board '{}' uses uefi-esp. Create and write its verified boot image with `aros board sd image` and `aros board sd write`; TFTP deploy does not apply.",
+                board.name
+            );
+        }
         let source_dir = resolve_artifact_dir(board, repo_root, artifact_override)?;
         let tftp_root = canonical_existing_directory(board.tftp_root()?, "tftp_root")?;
         reject_device_path(&tftp_root)?;
@@ -347,21 +353,27 @@ fn create_unique_path_with_attempt(parent: &Path, prefix: &str, attempt: u16) ->
 #[cfg(test)]
 mod tests {
     use super::{publish, DeploymentPlan};
-    use crate::config::{Board, BoardConfig, Transport};
+    use crate::config::{
+        Board, BoardBackend, BoardConfig, BoardModel, RaspberryPiConfig, Transport,
+    };
     use std::path::Path;
 
     fn board(name: &str, tftp_root: &Path) -> Board {
         Board {
             name: name.to_string(),
             config: BoardConfig {
-                model: "rpi4".to_string(),
+                backend: BoardBackend::RaspberryPi,
+                model: BoardModel::Rpi4,
                 preset: "rpi-aarch64".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::NativeTftp,
                 artifact_dir: None,
-                dtb_path: None,
-                core_kobj_dir: None,
+                raspberry_pi: Some(RaspberryPiConfig {
+                    dtb_path: tftp_root.join("bcm2711-rpi-4-b.dtb"),
+                    core_kobj_dir: tftp_root.join("kobjs"),
+                }),
+                opensbi_uefi: None,
                 tftp_root: Some(tftp_root.to_path_buf()),
                 tftp_prefix: None,
                 serial_device: None,

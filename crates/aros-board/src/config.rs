@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
-const CURRENT_FORMAT_VERSION: u32 = 1;
+const CURRENT_FORMAT_VERSION: u32 = 2;
 const DEFAULT_SERIAL_BAUD: u32 = 115_200;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -23,8 +23,10 @@ pub struct BoardsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardConfig {
-    /// Human-readable hardware identity, for example `rpi4` or `rpi5`.
-    pub model: String,
+    /// Firmware and artifact contract implemented by the board engine.
+    pub backend: BoardBackend,
+    /// Supported physical hardware model.
+    pub model: BoardModel,
     /// CMake preset used by the shared build path.
     pub preset: String,
     /// Locked cross-toolchain profile for this CMake preset. A board-specific
@@ -37,14 +39,12 @@ pub struct BoardConfig {
     /// Relative paths are resolved against the AROS-NG checkout.
     #[serde(default)]
     pub artifact_dir: Option<PathBuf>,
-    /// Local, pinned Raspberry Pi 4 device tree passed to CMake as
-    /// `AROS_RPI4_DTB`. Relative paths are resolved against the checkout.
+    /// Raspberry-Pi-only build inputs. They never apply to another backend.
     #[serde(default)]
-    pub dtb_path: Option<PathBuf>,
-    /// Directory holding the three legacy Raspberry Pi 4 core KOBJs passed to
-    /// CMake as `AROS_RPI4_CORE_KOBJ_DIR`. Relative paths use the checkout.
+    pub raspberry_pi: Option<RaspberryPiConfig>,
+    /// OpenSBI/UEFI-only build inputs. They never apply to a Pi backend.
     #[serde(default)]
-    pub core_kobj_dir: Option<PathBuf>,
+    pub opensbi_uefi: Option<OpenSbiUefiConfig>,
     /// Must be an absolute, pre-existing local directory when deploying.
     #[serde(default)]
     pub tftp_root: Option<PathBuf>,
@@ -70,12 +70,114 @@ pub struct BoardConfig {
     pub usb_ecm: Option<UsbEcmConfig>,
 }
 
+/// Implemented firmware/artifact families.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardBackend {
+    RaspberryPi,
+    OpensbiUefi,
+}
+
+impl std::fmt::Display for BoardBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RaspberryPi => formatter.write_str("raspberry-pi"),
+            Self::OpensbiUefi => formatter.write_str("opensbi-uefi"),
+        }
+    }
+}
+
+/// Hardware models with reviewed board-engine contracts.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoardModel {
+    Rpi3,
+    Rpi4,
+    Rpi5,
+    MilkVTitan,
+}
+
+impl BoardModel {
+    /// Backend which owns this model's boot contract.
+    #[must_use]
+    pub const fn backend(self) -> BoardBackend {
+        match self {
+            Self::Rpi3 | Self::Rpi4 | Self::Rpi5 => BoardBackend::RaspberryPi,
+            Self::MilkVTitan => BoardBackend::OpensbiUefi,
+        }
+    }
+
+    /// Stable profile spelling used in manifests.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rpi3 => "rpi3",
+            Self::Rpi4 => "rpi4",
+            Self::Rpi5 => "rpi5",
+            Self::MilkVTitan => "milk-v-titan",
+        }
+    }
+
+    /// Firmware-selected device-tree filename for a Raspberry Pi model.
+    #[must_use]
+    pub const fn dtb_filename(self) -> Option<&'static str> {
+        match self {
+            Self::Rpi3 => Some("bcm2710-rpi-3-b-plus.dtb"),
+            Self::Rpi4 => Some("bcm2711-rpi-4-b.dtb"),
+            Self::Rpi5 => Some("bcm2712-rpi-5-b.dtb"),
+            Self::MilkVTitan => None,
+        }
+    }
+
+    /// Architecture expected in legacy core KOBJs for this model.
+    #[must_use]
+    pub const fn core_architecture(self) -> Option<CoreArchitecture> {
+        match self {
+            Self::Rpi3 => Some(CoreArchitecture::Arm),
+            Self::Rpi4 | Self::Rpi5 => Some(CoreArchitecture::Aarch64),
+            Self::MilkVTitan => None,
+        }
+    }
+}
+
+impl std::fmt::Display for BoardModel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// ELF machine contract for the legacy Pi core-link bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreArchitecture {
+    Arm,
+    Aarch64,
+}
+
+/// Inputs needed only by the Raspberry Pi artifact backend.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RaspberryPiConfig {
+    /// Pinned firmware DTB selected for this exact model.
+    pub dtb_path: PathBuf,
+    /// Three legacy-generated kernel/exec/task relocatable objects.
+    pub core_kobj_dir: PathBuf,
+}
+
+/// Inputs needed only by the OpenSBI/UEFI artifact backend.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSbiUefiConfig {
+    /// Three legacy-generated RISC-V kernel/exec/task relocatable objects.
+    pub core_kobj_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
     #[default]
     NativeTftp,
     UbootUsbEcm,
+    UefiEsp,
 }
 
 impl std::fmt::Display for Transport {
@@ -83,6 +185,7 @@ impl std::fmt::Display for Transport {
         match self {
             Self::NativeTftp => formatter.write_str("native-tftp"),
             Self::UbootUsbEcm => formatter.write_str("uboot-usb-ecm"),
+            Self::UefiEsp => formatter.write_str("uefi-esp"),
         }
     }
 }
@@ -166,34 +269,33 @@ impl Board {
             None => repo_root
                 .join("build")
                 .join(&self.config.preset)
-                .join("boot/raspi"),
+                .join("boot")
+                .join(self.config.model.as_str()),
         }
     }
 
-    /// Resolve and validate the Raspberry Pi 4 device-tree input.
+    /// Resolve and validate the exact Raspberry Pi device-tree input.
     ///
     /// # Errors
     ///
-    /// Returns an error when an RPi 4 profile has no readable, regular,
+    /// Returns an error when a Raspberry Pi profile has no readable, regular,
     /// flattened-device-tree input.
-    pub fn rpi4_dtb_path(
+    pub fn raspberry_pi_dtb_path(
         &self,
         repo_root: &Path,
         override_path: Option<&Path>,
     ) -> Result<Option<PathBuf>> {
-        if !self.config.model.eq_ignore_ascii_case("rpi4") {
+        if self.config.backend != BoardBackend::RaspberryPi {
             return Ok(None);
         }
-        let raw_path = override_path
-            .map(Path::to_path_buf)
-            .or_else(|| self.config.dtb_path.clone())
-            .ok_or_else(|| {
-                miette::miette!(
-                    "Board '{}' needs dtb_path for the rpi4 CMake preset. Add a pinned local DTB path to '{}' or pass --dtb-path.",
-                    self.name,
-                    self.config_path.display()
-                )
-            })?;
+        let pi = self.config.raspberry_pi.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "Board '{}' uses the raspberry-pi backend but has no [boards.{}.raspberry_pi] inputs.",
+                self.name,
+                self.name
+            )
+        })?;
+        let raw_path = override_path.map_or_else(|| pi.dtb_path.clone(), Path::to_path_buf);
         let path = if raw_path.is_absolute() {
             raw_path
         } else {
@@ -201,47 +303,51 @@ impl Board {
         };
         let metadata = std::fs::metadata(&path).map_err(|error| {
             miette::miette!(
-                "Could not access rpi4 dtb_path '{}': {error}",
+                "Could not access {} dtb_path '{}': {error}",
+                self.config.model,
                 path.display()
             )
         })?;
         if !metadata.is_file() {
-            miette::bail!("rpi4 dtb_path '{}' is not a regular file.", path.display());
+            miette::bail!(
+                "{} dtb_path '{}' is not a regular file.",
+                self.config.model,
+                path.display()
+            );
         }
         let canonical_path = path.canonicalize().map_err(|error| {
             miette::miette!(
-                "Could not resolve rpi4 dtb_path '{}': {error}",
+                "Could not resolve {} dtb_path '{}': {error}",
+                self.config.model,
                 path.display()
             )
         })?;
-        validate_rpi4_dtb(&canonical_path)?;
+        validate_raspberry_pi_dtb(self.config.model, &canonical_path)?;
         Ok(Some(canonical_path))
     }
 
-    /// Resolve and validate the Raspberry Pi 4 legacy core-object directory.
+    /// Resolve and validate the Raspberry Pi legacy core-object directory.
     ///
     /// # Errors
     ///
-    /// Returns an error when an RPi 4 profile has no safe directory containing
+    /// Returns an error when a Pi profile has no safe directory containing
     /// the complete expected relocatable-object set.
-    pub fn rpi4_core_kobj_dir(
+    pub fn raspberry_pi_core_kobj_dir(
         &self,
         repo_root: &Path,
         override_path: Option<&Path>,
     ) -> Result<Option<PathBuf>> {
-        if !self.config.model.eq_ignore_ascii_case("rpi4") {
+        let Some(architecture) = self.config.model.core_architecture() else {
             return Ok(None);
-        }
-        let raw_path = override_path
-            .map(Path::to_path_buf)
-            .or_else(|| self.config.core_kobj_dir.clone())
-            .ok_or_else(|| {
-                miette::miette!(
-                    "Board '{}' needs core_kobj_dir for the rpi4 CMake preset. Add the legacy KOBJ directory to '{}' or pass --core-kobj-dir.",
-                    self.name,
-                    self.config_path.display()
-                )
-            })?;
+        };
+        let pi = self.config.raspberry_pi.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "Board '{}' uses the raspberry-pi backend but has no [boards.{}.raspberry_pi] inputs.",
+                self.name,
+                self.name
+            )
+        })?;
+        let raw_path = override_path.map_or_else(|| pi.core_kobj_dir.clone(), Path::to_path_buf);
         let path = if raw_path.is_absolute() {
             raw_path
         } else {
@@ -249,27 +355,92 @@ impl Board {
         };
         let metadata = std::fs::metadata(&path).map_err(|error| {
             miette::miette!(
-                "Could not access rpi4 core_kobj_dir '{}': {error}",
+                "Could not access {} core_kobj_dir '{}': {error}",
+                self.config.model,
                 path.display()
             )
         })?;
         if !metadata.is_dir() {
             miette::bail!(
-                "rpi4 core_kobj_dir '{}' is not a directory.",
+                "{} core_kobj_dir '{}' is not a directory.",
+                self.config.model,
                 path.display()
             );
         }
         for filename in ["kernel_resource.o", "exec_library.o", "task_resource.o"] {
             let object = path.join(filename);
-            validate_rpi4_kobj(&object, &path, filename)?;
+            validate_raspberry_pi_kobj(self.config.model, architecture, &object, &path, filename)?;
         }
         let canonical_path = path.canonicalize().map_err(|error| {
             miette::miette!(
-                "Could not resolve rpi4 core_kobj_dir '{}': {error}",
+                "Could not resolve {} core_kobj_dir '{}': {error}",
+                self.config.model,
                 path.display()
             )
         })?;
         Ok(Some(canonical_path))
+    }
+
+    /// Resolve and validate the OpenSBI RISC-V core-object directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an OpenSBI/UEFI profile has no complete set of
+    /// ELF64 little-endian RISC-V relocatable core objects.
+    pub fn opensbi_core_kobj_dir(
+        &self,
+        repo_root: &Path,
+        override_path: Option<&Path>,
+    ) -> Result<Option<PathBuf>> {
+        if self.config.backend != BoardBackend::OpensbiUefi {
+            return Ok(None);
+        }
+        let opensbi = self.config.opensbi_uefi.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "Board '{}' uses opensbi-uefi but has no [boards.{}.opensbi_uefi] inputs.",
+                self.name,
+                self.name
+            )
+        })?;
+        let raw_path =
+            override_path.map_or_else(|| opensbi.core_kobj_dir.clone(), Path::to_path_buf);
+        let path = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            repo_root.join(raw_path)
+        };
+        let metadata = std::fs::metadata(&path).map_err(|error| {
+            miette::miette!(
+                "Could not access {} core_kobj_dir '{}': {error}",
+                self.config.model,
+                path.display()
+            )
+        })?;
+        if !metadata.is_dir() {
+            miette::bail!(
+                "{} core_kobj_dir '{}' is not a directory.",
+                self.config.model,
+                path.display()
+            );
+        }
+        for filename in ["kernel_resource.o", "exec_library.o", "task_resource.o"] {
+            validate_relocatable_elf(
+                self.config.model,
+                &path.join(filename),
+                &path,
+                filename,
+                2,
+                [0xf3, 0x00],
+                "ELF64 little-endian RISC-V",
+            )?;
+        }
+        path.canonicalize().map(Some).map_err(|error| {
+            miette::miette!(
+                "Could not resolve {} core_kobj_dir '{}': {error}",
+                self.config.model,
+                path.display()
+            )
+        })
     }
 
     /// Return the configured absolute TFTP root.
@@ -351,8 +522,14 @@ impl Board {
     /// identities, invalid addresses, or inconsistent build selectors.
     pub fn validate(&self) -> Result<()> {
         validate_board_name(&self.name)?;
-        if self.config.model.trim().is_empty() {
-            miette::bail!("Board '{}' has an empty model.", self.name);
+        if self.config.model.backend() != self.config.backend {
+            miette::bail!(
+                "Board '{}' declares backend '{}' but model '{}' requires backend '{}'.",
+                self.name,
+                self.config.backend,
+                self.config.model,
+                self.config.model.backend()
+            );
         }
         if self.config.serial_baud == 0 {
             miette::bail!("Board '{}' has serial_baud = 0.", self.name);
@@ -402,6 +579,67 @@ impl Board {
             if let Some(identity) = &usb_ecm.identity {
                 validate_usb_ecm_identity(identity)?;
             }
+        }
+        match (
+            self.config.backend,
+            self.config.model,
+            self.config.transport,
+        ) {
+            (BoardBackend::RaspberryPi, _, Transport::UefiEsp) => {
+                miette::bail!(
+                    "Board '{}' cannot use transport 'uefi-esp' with the raspberry-pi backend.",
+                    self.name
+                );
+            }
+            (BoardBackend::RaspberryPi, model, Transport::UbootUsbEcm)
+                if model != BoardModel::Rpi4 =>
+            {
+                miette::bail!(
+                    "Board '{}' uses '{}': uboot-usb-ecm is reviewed only for model 'rpi4'.",
+                    self.name,
+                    self.config.model
+                );
+            }
+            (BoardBackend::OpensbiUefi, _, transport) if transport != Transport::UefiEsp => {
+                miette::bail!(
+                    "Board '{}' uses the opensbi-uefi backend but transport '{}' is not a UEFI ESP deployment.",
+                    self.name,
+                    transport
+                );
+            }
+            _ => {}
+        }
+        match self.config.backend {
+            BoardBackend::RaspberryPi if self.config.raspberry_pi.is_none() => {
+                miette::bail!(
+                    "Board '{}' needs a [boards.{}.raspberry_pi] table with dtb_path and core_kobj_dir.",
+                    self.name,
+                    self.name
+                );
+            }
+            BoardBackend::OpensbiUefi if self.config.raspberry_pi.is_some() => {
+                miette::bail!(
+                    "Board '{}' uses opensbi-uefi and must not declare Raspberry Pi build inputs.",
+                    self.name
+                );
+            }
+            _ => {}
+        }
+        match self.config.backend {
+            BoardBackend::RaspberryPi if self.config.opensbi_uefi.is_some() => {
+                miette::bail!(
+                    "Board '{}' uses raspberry-pi and must not declare OpenSBI/UEFI build inputs.",
+                    self.name
+                );
+            }
+            BoardBackend::OpensbiUefi if self.config.opensbi_uefi.is_none() => {
+                miette::bail!(
+                    "Board '{}' needs a [boards.{}.opensbi_uefi] table with core_kobj_dir.",
+                    self.name,
+                    self.name
+                );
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -592,23 +830,26 @@ fn board_template(board_name: &str) -> String {
 # First: connect the Pi's U-Boot USB-ECM gadget, run `aros board scan`, then
 # replace the USB descriptor values and Pi-side gadget MAC below.
 
-format_version = 1
+format_version = 2
 
 [boards.{board_name}]
+backend = "raspberry-pi"
 model = "rpi4"
 preset = "rpi4-aarch64-debug"
 toolchain_preset = "rpi-aarch64"
 build_target = "rpi-artifacts"
 transport = "uboot-usb-ecm"
-artifact_dir = "build/rpi4-aarch64-debug/boot/raspi"
-dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
-core_kobj_dir = "/REPLACE_ME/legacy-build/bin/raspi-aarch64/gen/kobjs"
+artifact_dir = "build/rpi4-aarch64-debug/boot/rpi4"
 tftp_root = "/REPLACE_ME/aros-tftp"
 tftp_prefix = "{board_name}/current"
 serial_device = "/dev/REPLACE_ME"
 serial_baud = 115200
 debug_transport = "jtag"
 power_control = "manual"
+
+[boards.{board_name}.raspberry_pi]
+dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "/REPLACE_ME/legacy-build/bin/raspi-aarch64/gen/kobjs"
 
 [boards.{board_name}.usb_ecm]
 # Use private lab addresses that are already configured on the selected USB
@@ -709,17 +950,49 @@ pub fn parse_unicast_mac(value: &str) -> Option<[u8; 6]> {
     (octets[0] & 1 == 0).then_some(octets)
 }
 
-fn validate_rpi4_kobj(object: &Path, directory: &Path, filename: &str) -> Result<()> {
+fn validate_raspberry_pi_kobj(
+    model: BoardModel,
+    architecture: CoreArchitecture,
+    object: &Path,
+    directory: &Path,
+    filename: &str,
+) -> Result<()> {
+    let (elf_class, machine, description) = match architecture {
+        CoreArchitecture::Arm => (1, [0x28, 0x00], "ELF32 little-endian ARM"),
+        CoreArchitecture::Aarch64 => (2, [0xb7, 0x00], "ELF64 little-endian AArch64"),
+    };
+    validate_relocatable_elf(
+        model,
+        object,
+        directory,
+        filename,
+        elf_class,
+        machine,
+        description,
+    )
+}
+
+fn validate_relocatable_elf(
+    model: BoardModel,
+    object: &Path,
+    directory: &Path,
+    filename: &str,
+    elf_class: u8,
+    machine: [u8; 2],
+    description: &str,
+) -> Result<()> {
     let metadata = std::fs::metadata(object).map_err(|error| {
         miette::miette!(
-            "rpi4 core_kobj_dir '{}' is missing '{}': {error}",
+            "{} core_kobj_dir '{}' is missing '{}': {error}",
+            model,
             directory.display(),
             filename
         )
     })?;
     if !metadata.is_file() {
         miette::bail!(
-            "rpi4 core KOBJ '{}' is not a regular file.",
+            "{} core KOBJ '{}' is not a regular file.",
+            model,
             object.display()
         );
     }
@@ -728,37 +1001,53 @@ fn validate_rpi4_kobj(object: &Path, directory: &Path, filename: &str) -> Result
         .and_then(|mut file| file.read_exact(&mut header))
         .map_err(|error| {
             miette::miette!(
-                "Could not read the ELF header of rpi4 core KOBJ '{}': {error}",
+                "Could not read the ELF header of {} core KOBJ '{}': {error}",
+                model,
                 object.display()
             )
         })?;
-    let is_aarch64_relocatable = header[0..4] == [0x7f, b'E', b'L', b'F']
-        && header[4] == 2
+    let is_expected_relocatable = header[0..4] == [0x7f, b'E', b'L', b'F']
+        && header[4] == elf_class
         && header[5] == 1
         && header[16..18] == [1, 0]
-        && header[18..20] == [0xb7, 0];
-    if !is_aarch64_relocatable {
+        && header[18..20] == machine;
+    if !is_expected_relocatable {
         miette::bail!(
-            "rpi4 core KOBJ '{}' is not an ELF64 little-endian AArch64 relocatable object.",
-            object.display()
+            "{} core KOBJ '{}' is not a {} relocatable object.",
+            model,
+            object.display(),
+            description
         );
     }
     Ok(())
 }
 
-fn validate_rpi4_dtb(path: &Path) -> Result<()> {
+fn validate_raspberry_pi_dtb(model: BoardModel, path: &Path) -> Result<()> {
+    let expected_name = model
+        .dtb_filename()
+        .ok_or_else(|| miette::miette!("Model '{}' has no Raspberry Pi DTB contract.", model))?;
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name) {
+        miette::bail!(
+            "{} dtb_path '{}' must name the firmware-selected file '{}'.",
+            model,
+            path.display(),
+            expected_name
+        );
+    }
     let mut magic = [0_u8; 4];
     std::fs::File::open(path)
         .and_then(|mut file| file.read_exact(&mut magic))
         .map_err(|error| {
             miette::miette!(
-                "Could not read the flattened-device-tree header of rpi4 dtb_path '{}': {error}",
+                "Could not read the flattened-device-tree header of {} dtb_path '{}': {error}",
+                model,
                 path.display()
             )
         })?;
     if magic != [0xd0, 0x0d, 0xfe, 0xed] {
         miette::bail!(
-            "rpi4 dtb_path '{}' is not a flattened device tree (expected magic d00dfeed).",
+            "{} dtb_path '{}' is not a flattened device tree (expected magic d00dfeed).",
+            model,
             path.display()
         );
     }
@@ -780,7 +1069,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "format_version = 1\n\n[boards.rpi4]\nmodel = \"rpi4\"\npreset = \"rpi-aarch64\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\nartifact_dir = \"build/rpi-aarch64/boot/raspi\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
+                "format_version = 2\n\n[boards.rpi4]\nbackend = \"raspberry-pi\"\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\nartifact_dir = \"build/rpi4-aarch64-debug/boot/rpi4\"\ntftp_root = \"{}\"\nserial_device = \"/dev/cu.usbserial-test\"\ndebug_transport = \"jtag\"\npower_control = \"manual\"\n\n[boards.rpi4.raspberry_pi]\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n\n[boards.rpi4.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n",
                 root.display()
             ),
         )
@@ -788,7 +1077,7 @@ mod tests {
 
         let board = load_board(Some(&config), "rpi4").expect("board");
         assert_eq!(board.config.transport, Transport::UbootUsbEcm);
-        assert_eq!(board.config.preset, "rpi-aarch64");
+        assert_eq!(board.config.preset, "rpi4-aarch64-debug");
         assert_eq!(board.config.serial_baud, 115_200);
         assert_eq!(
             board.deployment_dir().expect("deployment"),
@@ -858,7 +1147,7 @@ mod tests {
         let config = root.join("boards.toml");
         std::fs::write(
             &config,
-            "[boards.rpi4]\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
+            "format_version = 2\n\n[boards.rpi4]\nbackend = \"raspberry-pi\"\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\n\n[boards.rpi4.raspberry_pi]\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
         )
         .expect("configuration");
 
@@ -868,18 +1157,65 @@ mod tests {
         assert_eq!(board.config.build_target, "rpi-artifacts");
         assert_eq!(
             board
-                .rpi4_dtb_path(root, None)
+                .raspberry_pi_dtb_path(root, None)
                 .expect("dtb path")
                 .expect("rpi4 dtb"),
             firmware.join("bcm2711-rpi-4-b.dtb").canonicalize().unwrap()
         );
         assert_eq!(
             board
-                .rpi4_core_kobj_dir(root, None)
+                .raspberry_pi_core_kobj_dir(root, None)
                 .expect("kobj dir")
                 .expect("rpi4 kobj dir"),
             kobjs.canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn milk_v_titan_uses_only_the_riscv64_opensbi_contract() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path();
+        let kobjs = root.join("legacy-kobjs");
+        std::fs::create_dir_all(&kobjs).expect("kobj directory");
+        for filename in ["kernel_resource.o", "exec_library.o", "task_resource.o"] {
+            std::fs::write(kobjs.join(filename), valid_riscv64_relocatable_header()).expect("kobj");
+        }
+
+        let config = root.join("boards.toml");
+        std::fs::write(
+            &config,
+            "format_version = 2\n\n[boards.titan]\nbackend = \"opensbi-uefi\"\nmodel = \"milk-v-titan\"\npreset = \"milk-v-titan-riscv64-debug\"\ntoolchain_preset = \"opensbi-riscv64\"\nbuild_target = \"opensbi-uefi-artifacts\"\ntransport = \"uefi-esp\"\n\n[boards.titan.opensbi_uefi]\ncore_kobj_dir = \"legacy-kobjs\"\n",
+        )
+        .expect("configuration");
+
+        let board = load_board(Some(&config), "titan").expect("board");
+        assert!(board
+            .raspberry_pi_dtb_path(root, None)
+            .expect("no Pi DTB")
+            .is_none());
+        assert_eq!(
+            board
+                .opensbi_core_kobj_dir(root, None)
+                .expect("OpenSBI KOBJ path")
+                .expect("Titan KOBJ directory"),
+            kobjs.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn model_backend_and_transport_mismatches_fail_closed() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let config = temp.path().join("boards.toml");
+        std::fs::write(
+            &config,
+            "format_version = 2\n\n[boards.invalid]\nbackend = \"raspberry-pi\"\nmodel = \"milk-v-titan\"\npreset = \"milk-v-titan-riscv64-debug\"\ntoolchain_preset = \"opensbi-riscv64\"\nbuild_target = \"opensbi-uefi-artifacts\"\ntransport = \"native-tftp\"\n\n[boards.invalid.raspberry_pi]\ndtb_path = \"firmware/invalid.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n",
+        )
+        .expect("configuration");
+
+        let error = load_board(Some(&config), "invalid").expect_err("must reject mismatch");
+        assert!(error
+            .to_string()
+            .contains("requires backend 'opensbi-uefi'"));
     }
 
     #[test]
@@ -888,7 +1224,7 @@ mod tests {
         let config = temp.path().join("boards.toml");
         std::fs::write(
             &config,
-            "[boards.rpi4-usb]\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\n\n[boards.rpi4-usb.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n\n[boards.rpi4-usb.usb_ecm.identity]\nvendor_id = 0x1d6b\nproduct_id = 0x0104\nserial = \"aros-rpi4-lab-01\"\nexpected_target_mac = \"02:aa:00:00:00:01\"\n",
+            "format_version = 2\n\n[boards.rpi4-usb]\nbackend = \"raspberry-pi\"\nmodel = \"rpi4\"\npreset = \"rpi4-aarch64-debug\"\ntoolchain_preset = \"rpi-aarch64\"\nbuild_target = \"rpi-artifacts\"\ntransport = \"uboot-usb-ecm\"\n\n[boards.rpi4-usb.raspberry_pi]\ndtb_path = \"firmware/bcm2711-rpi-4-b.dtb\"\ncore_kobj_dir = \"legacy-kobjs\"\n\n[boards.rpi4-usb.usb_ecm]\nhost_address = \"192.0.2.1\"\ntarget_address = \"192.0.2.2\"\n\n[boards.rpi4-usb.usb_ecm.identity]\nvendor_id = 0x1d6b\nproduct_id = 0x0104\nserial = \"aros-rpi4-lab-01\"\nexpected_target_mac = \"02:aa:00:00:00:01\"\n",
         )
         .expect("configuration");
 
@@ -911,6 +1247,16 @@ mod tests {
         header[5] = 1;
         header[16..18].copy_from_slice(&[1, 0]);
         header[18..20].copy_from_slice(&[0xb7, 0]);
+        header
+    }
+
+    fn valid_riscv64_relocatable_header() -> [u8; 20] {
+        let mut header = [0_u8; 20];
+        header[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        header[4] = 2;
+        header[5] = 1;
+        header[16..18].copy_from_slice(&[1, 0]);
+        header[18..20].copy_from_slice(&[0xf3, 0]);
         header
     }
 }

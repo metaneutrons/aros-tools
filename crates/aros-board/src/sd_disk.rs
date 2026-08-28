@@ -485,9 +485,14 @@ pub fn verify_image_artifact(
 /// Returns an error when required board or USB-ECM identity fields are absent
 /// or malformed.
 pub fn board_image_expectation(board: &Board) -> Result<BoardImageExpectation> {
+    let manifest_board_name = if board.config.transport == Transport::UefiEsp {
+        board.config.model.as_str()
+    } else {
+        &board.name
+    };
     let mut expectation = BoardImageExpectation::new(
-        &board.name,
-        &board.config.model,
+        manifest_board_name,
+        board.config.model.to_string(),
         board.config.transport.to_string(),
     );
     if board.config.transport == Transport::UbootUsbEcm {
@@ -960,7 +965,7 @@ fn make_candidate(
         return None;
     }
     let fingerprint_material = format!(
-        "aros-pi-sd-disk-v1\\nplatform={}\\ndevice={}\\nidentity={}\\nsize={}\\nmodel={}\\ntransport={}\\n",
+        "aros-board-sd-disk-v1\\nplatform={}\\ndevice={}\\nidentity={}\\nsize={}\\nmodel={}\\ntransport={}\\n",
         platform.label(),
         device_path.display(),
         identity,

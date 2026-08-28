@@ -94,7 +94,7 @@ fn write_image_artifact(artifact_dir: &Path, image_name: &str, image: &[u8]) {
     fs::write(artifact_dir.join(image_name), image).expect("image");
     let manifest = json!({
         "format_version": 1,
-        "kind": "aros-pi-sd-image",
+        "kind": "aros-board-sd-image",
         "board": {
             "name": "rpi4-lab",
             "model": "rpi4",
@@ -1083,14 +1083,19 @@ fn local_board_profile_is_converted_and_bound_to_the_artifact() {
     fs::write(
         &boards_path,
         r#"
-format_version = 1
+format_version = 2
 
 [boards.rpi4-lab]
+backend = "raspberry-pi"
 model = "rpi4"
 transport = "uboot-usb-ecm"
 preset = "arm-raspi"
 toolchain_preset = "arm-raspi"
 build_target = "rpi-artifacts"
+
+[boards.rpi4-lab.raspberry_pi]
+dtb_path = "firmware/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "legacy-kobjs"
 
 [boards.rpi4-lab.usb_ecm]
 host_address = "192.168.101.1"
@@ -1126,14 +1131,19 @@ fn production_writer_requires_a_matching_local_board_before_any_disk_scan() {
     fs::write(
         &boards_path,
         r#"
-format_version = 1
+format_version = 2
 
 [boards.rpi4-lab]
+backend = "raspberry-pi"
 model = "rpi4"
 transport = "uboot-usb-ecm"
 preset = "arm-raspi"
 toolchain_preset = "arm-raspi"
 build_target = "rpi-artifacts"
+
+[boards.rpi4-lab.raspberry_pi]
+dtb_path = "firmware/bcm2711-rpi-4-b.dtb"
+core_kobj_dir = "legacy-kobjs"
 
 [boards.rpi4-lab.usb_ecm]
 host_address = "192.168.101.1"

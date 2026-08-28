@@ -49,6 +49,10 @@ pub(super) fn resolve_from_adapters(
     match board.config.transport {
         Transport::UbootUsbEcm => resolve_usb_ecm(board, adapters),
         Transport::NativeTftp => resolve_native(board),
+        Transport::UefiEsp => miette::bail!(
+            "Board '{}' uses uefi-esp; it has no DHCP/TFTP service to start.",
+            board.name
+        ),
     }
 }
 
@@ -483,14 +487,18 @@ mod tests {
         Board {
             name: "rpi4".to_string(),
             config: BoardConfig {
-                model: "rpi4".to_string(),
+                backend: crate::config::BoardBackend::RaspberryPi,
+                model: crate::config::BoardModel::Rpi4,
                 preset: "rpi4-aarch64-debug".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),
                 transport: Transport::UbootUsbEcm,
                 artifact_dir: None,
-                dtb_path: None,
-                core_kobj_dir: None,
+                raspberry_pi: Some(crate::config::RaspberryPiConfig {
+                    dtb_path: tftp_root.join("bcm2711-rpi-4-b.dtb"),
+                    core_kobj_dir: tftp_root.join("kobjs"),
+                }),
+                opensbi_uefi: None,
                 tftp_root: Some(tftp_root.to_path_buf()),
                 tftp_prefix: None,
                 serial_device: None,

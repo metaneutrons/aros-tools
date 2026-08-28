@@ -36,7 +36,7 @@ expected_target_mac = "02:aa:00:00:00:01"
 # Format 1 creates one MBR/FAT32 boot partition. This default is 64 MiB at
 # 1 MiB alignment. If any of the first five values change, recompute
 # layout_sha256 from exactly:
-# aros-pi-sd-partition-v1
+# aros-board-sd-partition-v1
 # scheme=<scheme>
 # filesystem=<filesystem>
 # start_lba=<start_lba>
