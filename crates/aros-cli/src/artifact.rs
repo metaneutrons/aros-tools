@@ -12,8 +12,10 @@ use xz2::read::XzDecoder;
 
 use aros_common::toolchain_manifest::{ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE};
 
+/// Marker published only after a toolchain envelope is complete.
 pub const INSTALL_COMPLETE_FILE: &str = ".complete";
 
+/// Resolve the user-controlled AROS state directory.
 pub fn aros_home() -> PathBuf {
     std::env::var_os("AROS_HOME").map_or_else(
         || {
@@ -26,21 +28,28 @@ pub fn aros_home() -> PathBuf {
     )
 }
 
+/// Return the content-addressed archive-cache root.
 pub fn archive_cache_root() -> PathBuf {
     std::env::var_os("AROS_CACHE_DIR").map_or_else(|| aros_home().join("cache"), PathBuf::from)
 }
 
+/// Hash one regular file and return its lowercase SHA-256 digest.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened or read completely.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    sha256_file_with_size(path).map(|(digest, _)| digest)
-}
-
-pub fn sha256_file_with_size(path: &Path) -> Result<(String, u64)> {
     aros_common::sha256_file(path)
-        .map(|result| (result.digest.to_string(), result.size))
+        .map(|result| result.digest.to_string())
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to hash '{}'", path.display()))
 }
 
+/// Verify an archive's exact size, when known, and required SHA-256 digest.
+///
+/// # Errors
+///
+/// Returns an error for inaccessible content or any identity mismatch.
 pub fn verify_archive(
     path: &Path,
     expected_sha256: &str,
@@ -71,6 +80,15 @@ pub fn verify_archive(
     Ok(())
 }
 
+/// Resolve an archive from the verified local cache or an authenticated URL.
+///
+/// Downloads are streamed into a temporary file, verified, and published to
+/// the content-addressed cache only after all checks pass.
+///
+/// # Errors
+///
+/// Returns an error for offline cache misses, transport failures, invalid
+/// responses, or archive identity mismatches.
 pub async fn obtain_archive(
     url: &str,
     expected_sha256: &str,
@@ -168,6 +186,15 @@ pub async fn obtain_archive(
     Ok(cache_path)
 }
 
+/// Extract a verified `.tar.xz` into an isolated staging directory.
+///
+/// Every archive path is checked before extraction and the resulting tree is
+/// matched against the embedded toolchain manifest.
+///
+/// # Errors
+///
+/// Returns an error for unsafe members, unsupported entry types, malformed
+/// manifests, or inventory mismatches.
 pub fn extract_to_staging(
     archive_path: &Path,
     store_parent: &Path,
@@ -229,6 +256,12 @@ pub fn extract_to_staging(
     Ok(staging)
 }
 
+/// Atomically publish a fully verified staging tree at `destination`.
+///
+/// # Errors
+///
+/// Returns an error when the destination already exists or the final rename
+/// cannot be completed on the same filesystem.
 pub fn commit_staging(staging: &TempDir, destination: &Path) -> Result<()> {
     if destination.exists() {
         bail!("destination '{}' already exists", destination.display());
@@ -251,10 +284,21 @@ pub fn commit_staging(staging: &TempDir, destination: &Path) -> Result<()> {
 /// Compute the producer-compatible tree digest over canonical JSON inventory
 /// lines. The embedded manifest is excluded to avoid a hash cycle.
 #[cfg(test)]
+/// Compute the canonical digest of a directory inventory.
+///
+/// # Errors
+///
+/// Returns an error when the tree contains unsupported or unreadable entries.
 pub fn tree_sha256(root: &Path) -> Result<String> {
     tree_inventory(root).map(|(digest, _)| digest)
 }
 
+/// Return a canonical tree digest and its sorted manifest entries.
+///
+/// # Errors
+///
+/// Returns an error for missing roots, unsafe paths, symbolic links, or files
+/// that cannot be read completely.
 pub fn tree_inventory(root: &Path) -> Result<(String, Vec<ArosToolchainManifestEntry>)> {
     let mut entries = Vec::new();
     collect_tree_entries(root, Path::new(""), &mut entries)?;
@@ -472,6 +516,12 @@ fn ensure_no_symlink_ancestors(root: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Require and normalize one SHA-256 value from configuration.
+///
+/// # Errors
+///
+/// Returns an error when the value is absent or not exactly 64 hexadecimal
+/// digits.
 pub fn require_sha256(value: Option<&str>, description: &str) -> Result<String> {
     let value = value
         .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -479,6 +529,7 @@ pub fn require_sha256(value: Option<&str>, description: &str) -> Result<String> 
     Ok(value.to_ascii_lowercase())
 }
 
+/// Return whether a path names an executable regular file.
 pub fn command_exists(path: &Path) -> bool {
     path.is_file()
         || path

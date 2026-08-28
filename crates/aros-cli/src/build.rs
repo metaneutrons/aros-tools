@@ -11,28 +11,46 @@ static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
 static HAMMER: Emoji<'_, '_> = Emoji("🔨 ", "");
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 
+/// Validated inputs for one configure-and-build transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildOptions {
+    /// CMake preset naming the build tree and configuration.
     pub preset: String,
     /// The locked AROS cross-toolchain profile. This is intentionally distinct
     /// from the CMake preset: a board-specific debug preset can share the
     /// audited `rpi-aarch64` target toolchain.
     pub toolchain_preset: String,
+    /// Optional CMake target; absence builds the preset default graph.
     pub target: Option<String>,
+    /// Optional parallel-job limit passed to the build tool.
     pub jobs: Option<usize>,
+    /// Remove the validated preset build tree before configuring.
     pub clean: bool,
+    /// Request verbose CMake configuration diagnostics.
     pub verbose: bool,
+    /// Prohibit toolchain downloads and require local verified state.
     pub offline: bool,
+    /// Explicit local cross-toolchain override.
     pub toolchain_dir: Option<PathBuf>,
+    /// Additional strictly named CMake cache definitions.
     pub cmake_definitions: Vec<CmakeDefinition>,
 }
 
+/// One validated `-DKEY=VALUE` CMake cache definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmakeDefinition {
+    /// CMake cache-variable name.
     pub key: String,
+    /// Non-empty value passed without shell interpretation.
     pub value: String,
 }
 
+/// Resolve tools and execute one complete CMake configure/build transaction.
+///
+/// # Errors
+///
+/// Returns an error for invalid options, missing toolchains or build tools,
+/// configuration failures, and compilation failures.
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let build_dir = build_dir(repo_root, &options.preset)?;
     let profile = toolchain::target_profile(&options.toolchain_preset)?;
@@ -72,7 +90,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         }
     }
 
-    let launcher = compiler_cache_launcher();
+    let launcher = detected_compiler_cache().map_or("none", CompilerCache::program);
     println!(
         "⚡ Compiler cache launcher: {}",
         style(launcher).green().bold()
@@ -150,11 +168,21 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     Ok(())
 }
 
+/// Return a preset's validated build directory below the checkout.
+///
+/// # Errors
+///
+/// Returns an error when `preset` could introduce a path component.
 pub fn build_dir(repo_root: &Path, preset: &str) -> Result<PathBuf> {
     validate_preset(preset)?;
     Ok(repo_root.join("build").join(preset))
 }
 
+/// Require a portable preset identifier without path syntax.
+///
+/// # Errors
+///
+/// Returns an error for empty names or characters outside the allowed set.
 pub fn validate_preset(preset: &str) -> Result<()> {
     let valid = !preset.is_empty()
         && preset
@@ -168,6 +196,12 @@ pub fn validate_preset(preset: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate one CMake definition name and non-empty value.
+///
+/// # Errors
+///
+/// Returns an error when the key is not a CMake identifier or the value is
+/// empty.
 pub fn validate_cmake_definition(definition: &CmakeDefinition) -> Result<()> {
     let mut characters = definition.key.chars();
     let Some(first) = characters.next() else {
@@ -190,13 +224,46 @@ pub fn validate_cmake_definition(definition: &CmakeDefinition) -> Result<()> {
     Ok(())
 }
 
-fn compiler_cache_launcher() -> &'static str {
+/// Supported compiler-cache implementation with its command-line contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerCache {
+    /// Mozilla's distributed/local compiler cache, preferred when available.
+    Sccache,
+    /// Traditional local compiler cache fallback.
+    Ccache,
+}
+
+impl CompilerCache {
+    /// Executable name used both as compiler launcher and management command.
+    pub const fn program(self) -> &'static str {
+        match self {
+            Self::Sccache => "sccache",
+            Self::Ccache => "ccache",
+        }
+    }
+
+    /// Argument which clears the selected cache.
+    pub const fn clear_argument(self) -> &'static str {
+        match self {
+            Self::Sccache => "-z",
+            Self::Ccache => "-C",
+        }
+    }
+
+    /// Argument which prints cache statistics.
+    pub const fn stats_argument() -> &'static str {
+        "-s"
+    }
+}
+
+/// Select the preferred available compiler cache once for all CLI commands.
+pub fn detected_compiler_cache() -> Option<CompilerCache> {
     if which::which("sccache").is_ok() {
-        "sccache"
+        Some(CompilerCache::Sccache)
     } else if which::which("ccache").is_ok() {
-        "ccache"
+        Some(CompilerCache::Ccache)
     } else {
-        "none"
+        None
     }
 }
 

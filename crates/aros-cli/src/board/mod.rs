@@ -236,33 +236,16 @@ pub fn write_sd_image(
     confirmation: Option<&str>,
     dry_run: bool,
 ) -> Result<()> {
-    let artifact = sd_disk::verify_image_artifact_for_board(
+    let plan = sd_disk::prepare_write_for_board(
         artifact_dir,
         Path::new(sd::ARTIFACT_MANIFEST),
         Path::new(sd::RAW_IMAGE_FILENAME),
         board,
+        selected_scan_id,
     )?;
-    let candidates = sd_disk::scan()?;
-    let selected = candidates
-        .iter()
-        .filter(|candidate| candidate.scan_id == selected_scan_id)
-        .collect::<Vec<_>>();
-    let candidate = match selected.as_slice() {
-        [candidate] => *candidate,
-        [] => {
-            miette::bail!(
-                "No currently safe removable whole disk has scan ID '{}'. Re-run `aros board sd scan`; no disk was opened.",
-                selected_scan_id
-            );
-        }
-        _ => {
-            miette::bail!(
-                "More than one current disk has scan ID '{}'; refusing an ambiguous write.",
-                selected_scan_id
-            );
-        }
-    };
-    let expected_token = sd_disk::confirmation_token(&artifact, candidate);
+    let artifact = plan.artifact();
+    let candidate = plan.candidate();
+    let expected_token = plan.confirmation_token();
 
     println!("💾 AROS board SD-card write plan");
     println!(
@@ -295,7 +278,7 @@ pub fn write_sd_image(
     }
 
     let report = sd_disk::write_verified_image_for_board(
-        &artifact,
+        artifact,
         board,
         selected_scan_id,
         confirmation.expect("checked above"),

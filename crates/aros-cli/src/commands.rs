@@ -58,7 +58,9 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             modules,
             evidence,
             memory,
-        } => test(&preset, timeout, packages, modules, evidence, memory),
+        } => test(
+            repo_root, &preset, timeout, packages, modules, evidence, memory,
+        ),
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
         Commands::Sync { transpile } => sync(transpile),
         Commands::Golden { action } => golden_command(action),
@@ -260,6 +262,7 @@ fn clean(repo_root: &Path, preset: Option<String>) -> Result<()> {
 }
 
 fn test(
+    repo_root: &Path,
     preset: &str,
     timeout: u64,
     packages: bool,
@@ -267,7 +270,7 @@ fn test(
     evidence: Option<PathBuf>,
     memory: u32,
 ) -> Result<()> {
-    let build_dir = PathBuf::from(format!("build/{preset}"));
+    let build_dir = build::build_dir(repo_root, preset)?;
     if !build_dir.is_dir() {
         miette::bail!(
             "no build directory at {} -- configure and build the preset first",
@@ -332,23 +335,18 @@ fn compiler_cache(stats: bool, clear: bool) -> Result<()> {
     if !stats && !clear {
         return Ok(());
     }
-    let (program, clear_argument, stats_argument) = if which::which("sccache").is_ok() {
-        ("sccache", "-z", "-s")
-    } else if which::which("ccache").is_ok() {
-        ("ccache", "-C", "-s")
-    } else {
-        miette::bail!("neither sccache nor ccache is available on PATH");
-    };
+    let cache = build::detected_compiler_cache()
+        .ok_or_else(|| miette::miette!("neither sccache nor ccache is available on PATH"))?;
     if clear {
         observability::run_command(
-            Command::new(program).arg(clear_argument),
+            Command::new(cache.program()).arg(cache.clear_argument()),
             "compiler cache clear",
         )?;
         println!("{CHECK} Compiler cache cleared.");
     }
     if stats {
         observability::run_command(
-            Command::new(program).arg(stats_argument),
+            Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
             "compiler cache statistics query",
         )?;
     }
@@ -465,9 +463,15 @@ fn info() -> Result<()> {
     );
     println!(
         "  • C/C++ Compiler Launcher: {}",
-        which::which("sccache")
-            .or_else(|_| which::which("ccache"))
-            .map_or_else(|_| "none".into(), |path| path.display().to_string())
+        build::detected_compiler_cache().map_or_else(
+            || "none".into(),
+            |cache| {
+                which::which(cache.program()).map_or_else(
+                    |_| cache.program().into(),
+                    |path| path.display().to_string(),
+                )
+            },
+        )
     );
     let target_names = repo::load_target_profiles()?
         .into_iter()
@@ -491,12 +495,28 @@ fn load_board(selection: &BoardSelection) -> Result<board::config::Board> {
 
 #[cfg(test)]
 mod tests {
-    use super::exclusive_apply_dry_run;
+    use super::{exclusive_apply_dry_run, test};
 
     #[test]
     fn apply_and_dry_run_are_mutually_exclusive() {
         assert!(exclusive_apply_dry_run(true, true).is_err());
         assert!(exclusive_apply_dry_run(true, false).is_ok());
         assert!(exclusive_apply_dry_run(false, true).is_ok());
+    }
+
+    #[test]
+    fn boot_test_rejects_a_preset_path_before_reading_a_build_tree() {
+        let checkout = tempfile::tempdir().expect("temporary checkout");
+        let error = test(
+            checkout.path(),
+            "../outside",
+            1,
+            false,
+            Vec::new(),
+            None,
+            64,
+        )
+        .expect_err("preset path must fail before build-tree access");
+        assert!(error.to_string().contains("Invalid CMake preset"));
     }
 }

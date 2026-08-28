@@ -13,22 +13,34 @@ static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static DOWNLOAD: Emoji<'_, '_> = Emoji("⬇️  ", "");
 const VERSION_TOKEN: &str = "{version}";
 
+/// Required executable layout of a host LLVM installation.
 #[derive(Debug, Clone)]
 pub struct HostCompilerPaths {
+    /// C compiler frontend.
     pub clang: PathBuf,
+    /// C++ compiler frontend.
     pub clangxx: PathBuf,
+    /// LLVM linker.
     pub lld: PathBuf,
+    /// LLVM archive tool.
     pub llvm_ar: PathBuf,
 }
 
+/// Host-specific release asset selected from `aros-targets.toml`.
 pub struct HostCompilerSelection {
+    /// Stable host matrix key.
     pub host_key: String,
+    /// Human-readable host description.
     pub platform_label: String,
+    /// Selected LLVM release version.
     pub version: String,
+    /// Fully resolved release-asset URL.
     pub url: String,
+    /// Required archive digest from configuration.
     pub sha256: Option<String>,
 }
 
+/// Resolve the configured host-compiler installation directory.
 pub fn default_host_compiler_dir() -> PathBuf {
     std::env::var_os("AROS_HOST_COMPILER_DIR")
         .or_else(|| std::env::var_os("AROS_HOST_TOOLS_DIR"))
@@ -36,6 +48,11 @@ pub fn default_host_compiler_dir() -> PathBuf {
         .map_or_else(|| aros_home().join("toolchain"), PathBuf::from)
 }
 
+/// Map the running OS and CPU to the release-matrix host key.
+///
+/// # Errors
+///
+/// Returns an error when the host has no supported deterministic release.
 pub fn host_platform_key() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("macos-aarch64"),
@@ -46,6 +63,7 @@ pub fn host_platform_key() -> Result<&'static str> {
     }
 }
 
+/// Return a human-readable label for a host matrix key.
 pub fn host_platform_label(host_key: &str) -> &str {
     match host_key {
         "macos-aarch64" => "macOS Apple Silicon (aarch64)",
@@ -56,6 +74,11 @@ pub fn host_platform_label(host_key: &str) -> &str {
     }
 }
 
+/// Load the host-compiler release contract from the target SSOT.
+///
+/// # Errors
+///
+/// Returns an error for missing, malformed, or incomplete configuration.
 pub fn load_host_compiler_config() -> Result<HostCompilerConfig> {
     let config =
         TargetProfile::load_config(Path::new(crate::repo::TARGETS_FILE)).into_diagnostic()?;
@@ -64,6 +87,11 @@ pub fn load_host_compiler_config() -> Result<HostCompilerConfig> {
     })
 }
 
+/// Resolve the current host's exact configured asset.
+///
+/// # Errors
+///
+/// Returns an error for unsupported hosts or absent matrix entries.
 pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSelection> {
     let host_key = host_platform_key()?;
     let version = std::env::var("AROS_LLVM_VERSION").unwrap_or_else(|_| cfg.llvm_version.clone());
@@ -84,6 +112,7 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
     })
 }
 
+/// Derive required LLVM executable paths from an installation root.
 pub fn host_compiler_paths(root: &Path) -> HostCompilerPaths {
     HostCompilerPaths {
         clang: root.join("bin/clang"),
@@ -93,6 +122,7 @@ pub fn host_compiler_paths(root: &Path) -> HostCompilerPaths {
     }
 }
 
+/// Check that every required host compiler executable exists and is runnable.
 pub fn is_host_compiler_installed(paths: &HostCompilerPaths) -> bool {
     command_exists(&paths.clang)
         && command_exists(&paths.clangxx)
@@ -100,6 +130,12 @@ pub fn is_host_compiler_installed(paths: &HostCompilerPaths) -> bool {
         && command_exists(&paths.llvm_ar)
 }
 
+/// Install or reuse the deterministic host compiler for the current host.
+///
+/// # Errors
+///
+/// Returns an error for invalid configuration, cache/download/verification
+/// failures, unsafe existing destinations, or incomplete extracted layouts.
 pub async fn install(force: bool, offline: bool) -> Result<HostCompilerPaths> {
     let config = load_host_compiler_config()?;
     let selection = select_host_compiler(&config)?;

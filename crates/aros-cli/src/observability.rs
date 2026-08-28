@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static DIAGNOSTIC_FORMAT: OnceLock<DiagnosticFormat> = OnceLock::new();
 
+/// Stable logging and diagnostic policy for the `aros` frontend.
 pub const POLICY: ObservabilityPolicy = ObservabilityPolicy {
     log_schema: "aros-cli-log-v1",
     component: "aros CLI",
@@ -23,6 +24,11 @@ pub const POLICY: ObservabilityPolicy = ObservabilityPolicy {
     hint: "pass --log-file PATH or set AROS_LOG_FILE, or disable logging with --log-level off",
 };
 
+/// Install the process-wide logger and diagnostic format exactly once.
+///
+/// # Panics
+///
+/// Panics if the runtime was already installed in this process.
 pub fn install_runtime(logger: Logger, format: DiagnosticFormat) -> &'static Logger {
     assert!(LOGGER.set(logger).is_ok(), "aros logger installed twice");
     assert!(
@@ -32,6 +38,11 @@ pub fn install_runtime(logger: Logger, format: DiagnosticFormat) -> &'static Log
     LOGGER.get().expect("aros logger was just installed")
 }
 
+/// Emit one structured event when local logging is enabled.
+///
+/// # Errors
+///
+/// Returns an error when the configured sink cannot persist the event.
 pub fn log_event(
     level: LogLevel,
     event: &str,
@@ -45,13 +56,18 @@ pub fn log_event(
     })
 }
 
+/// Stable diagnostic classification applied at one CLI error boundary.
 #[derive(Debug, Clone, Copy)]
 pub struct ErrorBoundary {
+    /// Machine-readable diagnostic code.
     pub code: DiagnosticCode,
+    /// Lifecycle stage in which the operation failed.
     pub stage: DiagnosticStage,
+    /// Actionable recovery guidance shown to the user.
     pub hint: &'static str,
 }
 
+/// Captured subprocess failure retaining tool, exit, and signal context.
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("{message}")]
 pub struct ProcessFailure {
@@ -100,6 +116,12 @@ impl ProcessFailure {
     }
 }
 
+/// Run a command interactively, or captured when JSON diagnostics require it.
+///
+/// # Errors
+///
+/// Returns a structured failure when the process cannot start or exits
+/// unsuccessfully.
 pub fn run_command(command: &mut Command, description: &str) -> Result<(), ProcessFailure> {
     if DIAGNOSTIC_FORMAT.get() == Some(&DiagnosticFormat::Json) {
         return run_captured_command(command, description, true);
@@ -107,6 +129,12 @@ pub fn run_command(command: &mut Command, description: &str) -> Result<(), Proce
     run_interactive_command(command, description)
 }
 
+/// Run a command and override its diagnostic classification on failure.
+///
+/// # Errors
+///
+/// Returns a structured failure when the process cannot start or exits
+/// unsuccessfully.
 pub fn run_command_at(
     command: &mut Command,
     description: &str,
@@ -115,6 +143,12 @@ pub fn run_command_at(
     run_command(command, description).map_err(|error| error.with_boundary(boundary))
 }
 
+/// Run a command without replaying successful captured output in JSON mode.
+///
+/// # Errors
+///
+/// Returns a structured failure when the process cannot start or exits
+/// unsuccessfully.
 pub fn run_quiet_command(command: &mut Command, description: &str) -> Result<(), ProcessFailure> {
     if DIAGNOSTIC_FORMAT.get() == Some(&DiagnosticFormat::Json) {
         return run_captured_command(command, description, false);
@@ -122,6 +156,12 @@ pub fn run_quiet_command(command: &mut Command, description: &str) -> Result<(),
     run_interactive_command(command, description)
 }
 
+/// Run a command with inherited streams and normalized exit metadata.
+///
+/// # Errors
+///
+/// Returns a structured failure when the process cannot start or exits
+/// unsuccessfully.
 pub fn run_interactive_command(
     command: &mut Command,
     description: &str,
@@ -227,12 +267,14 @@ fn process_detail(
 }
 
 impl ErrorBoundary {
+    /// Classification for invalid command-line input.
     pub const INVOCATION: Self = Self {
         code: DiagnosticCode::CliInvocation,
         stage: DiagnosticStage::Invocation,
         hint: "run `aros --help` or `aros <command> --help` to inspect the accepted command line",
     };
 
+    /// Classification for checkout discovery and repository-state failures.
     pub const REPOSITORY: Self = Self {
         code: DiagnosticCode::CliRepository,
         stage: DiagnosticStage::RepositoryDiscovery,
@@ -241,6 +283,7 @@ impl ErrorBoundary {
 }
 
 #[must_use]
+/// Convert a Clap parse failure into the shared diagnostic schema.
 pub fn clap_diagnostic(error: &clap::Error) -> Diagnostic {
     Diagnostic::error(
         ErrorBoundary::INVOCATION.code,
@@ -251,6 +294,7 @@ pub fn clap_diagnostic(error: &clap::Error) -> Diagnostic {
 }
 
 #[must_use]
+/// Convert a rich error report into one stable external diagnostic.
 pub fn report_diagnostic(
     error: &miette::Report,
     mut boundary: ErrorBoundary,
@@ -281,6 +325,7 @@ fn render_error_chain(error: &miette::Report) -> String {
 }
 
 #[must_use]
+/// Construct a diagnostic set for the process renderer.
 pub fn set(diagnostics: Vec<Diagnostic>) -> DiagnosticSet {
     DiagnosticSet::new(diagnostics)
 }

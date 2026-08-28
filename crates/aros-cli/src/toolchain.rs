@@ -30,38 +30,62 @@ const REQUIRED_CXX_HEADERS: &[&str] = &[
     "vector",
 ];
 
+/// Required executable layout of an installed AROS cross-toolchain.
 #[derive(Debug, Clone)]
 pub struct ToolchainPaths {
+    /// Installation payload root.
     pub root: PathBuf,
+    /// Clang C frontend.
     pub clang: PathBuf,
+    /// Clang C++ frontend.
     pub clangxx: PathBuf,
+    /// LLVM linker.
     pub lld: PathBuf,
+    /// LLVM archive tool.
     pub llvm_ar: PathBuf,
+    /// Native collector frontend.
     pub aros_collect: PathBuf,
+    /// Upstream-compatible collector driver.
     pub collect_aros: PathBuf,
+    /// Upstream-compatible 32-bit collector driver.
     pub collect_aros32: PathBuf,
 }
 
+/// Provenance class of a resolved cross-toolchain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolchainSource {
+    /// Content-addressed, lock-file-backed release asset.
     LockedRelease,
+    /// Explicit local tree carrying a complete manifest.
     LocalManifest,
+    /// Explicit legacy AROS-built prefix accepted by its markers.
     LegacyLocal,
 }
 
+/// Verified toolchain selection used by one build.
 #[derive(Debug, Clone)]
 pub struct ResolvedToolchain {
+    /// Required tool paths.
     pub paths: ToolchainPaths,
+    /// Exact target triple supplied to the compiler.
     pub target_triple: String,
+    /// Release identity, absent only for explicit local toolchains.
     pub release_id: Option<String>,
+    /// Provenance class of the selection.
     pub source: ToolchainSource,
 }
 
+/// Resolve the toolchain lock-file path.
 pub fn lock_file_path() -> PathBuf {
     std::env::var_os("AROS_TOOLCHAIN_LOCK")
         .map_or_else(|| PathBuf::from("aros-toolchains.lock.toml"), PathBuf::from)
 }
 
+/// Load and validate the deterministic toolchain release lock.
+///
+/// # Errors
+///
+/// Returns an error when the lock cannot be read or violates its schema.
 pub fn load_lock() -> Result<ArosToolchainLock> {
     let path = lock_file_path();
     ArosToolchainLock::load(&path)
@@ -69,17 +93,20 @@ pub fn load_lock() -> Result<ArosToolchainLock> {
         .wrap_err_with(|| format!("failed to load AROS toolchain lock '{}'", path.display()))
 }
 
+/// Return the root of the content-addressed cross-toolchain store.
 pub fn default_store_root() -> PathBuf {
     std::env::var_os("AROS_CROSS_TOOLCHAINS_DIR")
         .map_or_else(|| aros_home().join("cross-toolchains"), PathBuf::from)
 }
 
+/// Resolve a command-line or environment local-toolchain override.
 pub fn explicit_local_override(argument: Option<&Path>) -> Option<PathBuf> {
     argument
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("AROS_CROSS_TOOLCHAIN_DIR").map(PathBuf::from))
 }
 
+/// Derive every required tool path from one payload root.
 pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
     let llvm = crate::host_compiler::host_compiler_paths(root);
     ToolchainPaths {
@@ -94,6 +121,11 @@ pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
     }
 }
 
+/// Load one target profile by its canonical name.
+///
+/// # Errors
+///
+/// Returns an error for invalid target configuration or an unknown profile.
 pub fn target_profile(name: &str) -> Result<TargetProfile> {
     crate::repo::load_target_profiles()?
         .into_iter()
@@ -101,10 +133,12 @@ pub fn target_profile(name: &str) -> Result<TargetProfile> {
         .ok_or_else(|| miette::miette!("unknown target preset '{name}' in aros-targets.toml"))
 }
 
+/// Derive the canonical AROS compiler triple for a target profile.
 pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
     format!("{}-unknown-aros", profile.arch)
 }
 
+/// Return an artifact's content-addressed payload path.
 pub fn locked_store_path(lock: &ArosToolchainLock, artifact: &ArosToolchainArtifact) -> PathBuf {
     locked_store_envelope(lock, artifact).join("toolchain")
 }
@@ -117,6 +151,12 @@ fn locked_store_envelope(lock: &ArosToolchainLock, artifact: &ArosToolchainArtif
         .join(artifact.sha256.to_ascii_lowercase())
 }
 
+/// Install, verify, or explicitly resolve one target cross-toolchain.
+///
+/// # Errors
+///
+/// Returns an error for unsupported matrix entries, disabled artifacts,
+/// download or identity failures, invalid layouts, or unsafe destinations.
 pub async fn install(
     preset: &str,
     offline: bool,
@@ -218,6 +258,12 @@ pub async fn install(
     Ok(resolved_locked(&payload, &lock, artifact))
 }
 
+/// Resolve the verified toolchain required for a build, installing if needed.
+///
+/// # Errors
+///
+/// Returns an error when neither an explicit local tree, accepted legacy
+/// prefix, nor verified locked release can satisfy the target profile.
 pub async fn resolve_for_build(
     preset: &str,
     local: Option<&Path>,
@@ -237,6 +283,12 @@ pub async fn resolve_for_build(
     install(preset, offline, false, None).await
 }
 
+/// Resolve an already installed target toolchain without downloading.
+///
+/// # Errors
+///
+/// Returns an error when the selected local or locked installation is absent
+/// or fails verification.
 pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     if let Some(local) = explicit_local_override(local) {
         return resolve_local(&local, preset);
@@ -251,6 +303,11 @@ pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     Ok(resolved_locked(&destination, &lock, artifact))
 }
 
+/// Fully verify an installed toolchain and smoke-test its executables.
+///
+/// # Errors
+///
+/// Returns an error for identity, inventory, layout, or executable failures.
 pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     let resolved = path(preset, local)?;
     smoke_toolchain_tools(&resolved.paths)?;
@@ -263,6 +320,11 @@ pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     Ok(resolved)
 }
 
+/// Print availability and installation state for the current host matrix.
+///
+/// # Errors
+///
+/// Returns an error when host detection or lock-file validation fails.
 pub fn list() -> Result<()> {
     let lock = load_lock()?;
     let current_host = host_platform_key()?;
