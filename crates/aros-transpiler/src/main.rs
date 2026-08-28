@@ -297,6 +297,7 @@ fn run(args: &Args) -> Result<()> {
     let mut skipped_icons: Vec<String> = Vec::new();
     let mut skipped_catalogs: Vec<String> = Vec::new();
     let mut skipped_flexcat_sources: Vec<String> = Vec::new();
+    let mut skipped_ilbm_sources: Vec<String> = Vec::new();
     let mut skipped_meta_rules: Vec<String> = Vec::new();
     for parsed in parsed_files {
         capability_errors.extend(parsed.capability_errors);
@@ -319,7 +320,10 @@ fn run(args: &Args) -> Result<()> {
             graph.add_python_outputs(declaration);
         }
         graph.add_flexcat_sources(parsed.flexcat_sources);
+        graph.add_flexcat_headers(parsed.flexcat_headers);
         skipped_flexcat_sources.extend(parsed.skipped_flexcat_sources);
+        graph.add_ilbm_sources(parsed.ilbm_sources);
+        skipped_ilbm_sources.extend(parsed.skipped_ilbm_sources);
         for rule in parsed.meta_rules {
             graph.add_meta_rule(rule);
         }
@@ -331,6 +335,7 @@ fn run(args: &Args) -> Result<()> {
         graph.add_host_generated_headers(parsed.host_generated_headers);
         graph.add_hidd_stubs(parsed.hidd_stubs);
         skipped_hidd_stubs.extend(parsed.skipped_hidd_stubs);
+        graph.add_bison_outputs(parsed.bison_outputs);
         graph.add_script_outputs(parsed.script_outputs);
         skipped_script_outputs.extend(parsed.skipped_script_outputs);
         skipped_host_generated_headers.extend(parsed.skipped_host_generated_headers);
@@ -382,6 +387,7 @@ fn run(args: &Args) -> Result<()> {
                 )
             }),
     );
+    graph.resolve_header_inventory_fetches(args.ports_dir.as_deref());
 
     // Architecture includes are declared in the arch/ tree but consumed in
     // rom/, so they can only be joined once every file has been parsed.
@@ -509,6 +515,13 @@ fn run(args: &Args) -> Result<()> {
         "skipped-script-outputs.txt",
         skipped_script_outputs,
         "script-generated file rule(s) could not be bound",
+    );
+    write_report(
+        &mut publication,
+        &args.output,
+        "skipped-ilbm-sources.txt",
+        skipped_ilbm_sources,
+        "ILBM-to-C source rule(s) could not be represented safely",
     );
     write_report(
         &mut publication,
@@ -1038,6 +1051,7 @@ fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
         "skipped-flags.txt" => ("AT1029", Warning),
         "skipped-conditions.txt" => ("AT1030", Warning),
         "unresolved-includes.txt" => ("AT1031", Warning),
+        "skipped-ilbm-sources.txt" => ("AT1033", Warning),
         // Adding a report without assigning a stable code is an internal
         // contract error. Publication rejects Error-severity coverage entries.
         _ => ("AT1099", Error),

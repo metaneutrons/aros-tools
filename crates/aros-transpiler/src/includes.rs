@@ -59,19 +59,17 @@ pub struct IncludeSet {
 /// Make variables that carry an include path we can map onto a CMake location.
 fn map_known_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" | "TOP" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "TOP" => Some("${AROS_BUILD_DIR}"),
         "GENINCDIR" => Some("${CMAKE_BINARY_DIR}/GENINCDIR"),
         // Third-party sources fetched via %fetch. Modules that build against
         // them reach their headers through variables rooted here, e.g.
         // ACPICASRCDIR := $(PORTSDIR)/acpica/$(ACPICAARCHBASE).
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),
-        // Generated per-module output. BootstrapSDK.cmake puts this under
-        // <build>/gen, so the mapping needs that segment: a module reaching
-        // its own generated header writes -I$(GENDIR)/$(CURDIR)/<sub>, and
-        // without it the path pointed one level too high and the include was
-        // simply absent.
-        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
+        // Generated output root. OBJDIR is handled separately because GNU
+        // Make defines it as $(GENDIR)/$(CURDIR), not as an alias of GENDIR.
+        "GENDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
         "AROS_INCLUDES" => Some("${CMAKE_BINARY_DIR}/SDK/include"),
         // Target parameters are passed through as CMake variables so the
         // transpiler stays target-agnostic.
@@ -80,6 +78,10 @@ fn map_known_var(name: &str) -> Option<&'static str> {
         "FAMILY" => Some("${AROS_TARGET_FAMILY}"),
         _ => None,
     }
+}
+
+fn is_deferred_path_var(name: &str) -> bool {
+    name == "OBJDIR" || map_known_var(name).is_some()
 }
 
 /// Variables that hold the result of a `%get_archincludes` call.
@@ -177,7 +179,7 @@ fn expand(
     for tok in tokens {
         // A token that is exactly one variable reference can be substituted.
         if let Some(name) = tok.strip_prefix("$(").and_then(|t| t.strip_suffix(')')) {
-            if map_known_var(name).is_some() || arch_include_var(name).is_some() {
+            if is_deferred_path_var(name) || arch_include_var(name).is_some() {
                 out.push(tok.clone());
                 continue;
             }
@@ -224,7 +226,7 @@ fn substitute_inline(
         let name = &after[..end];
         let verbatim = &rest[start..=start + 2 + end];
 
-        if map_known_var(name).is_some() || arch_include_var(name).is_some() {
+        if is_deferred_path_var(name) || arch_include_var(name).is_some() {
             out.push_str(verbatim);
         } else if guard.iter().any(|g| g == name) {
             // Self-reference; drop it rather than recurse.
@@ -264,6 +266,12 @@ fn to_cmake_path(raw: &str, rel_dir: &Path) -> Result<String, String> {
         let name = &after[..end];
         if name == "CURDIR" {
             resolved.push_str(&dir);
+        } else if name == "OBJDIR" {
+            resolved.push_str("${CMAKE_BINARY_DIR}/gen");
+            if !dir.is_empty() {
+                resolved.push('/');
+                resolved.push_str(&dir);
+            }
         } else if let Some(m) = map_known_var(name) {
             resolved.push_str(m);
         } else {
@@ -425,7 +433,7 @@ fn expand_scoped_tokens(
             .strip_prefix("$(")
             .and_then(|value| value.strip_suffix(')'))
         {
-            if map_known_var(name).is_some() || arch_include_var(name).is_some() {
+            if is_deferred_path_var(name) || arch_include_var(name).is_some() {
                 output.push(token.to_owned());
                 continue;
             }
@@ -465,7 +473,7 @@ fn substitute_inline_scoped(
         };
         let name = &after[..end];
         let verbatim = &rest[start..=start + 2 + end];
-        if map_known_var(name).is_some()
+        if is_deferred_path_var(name)
             || arch_include_var(name).is_some()
             || guard.iter().any(|item| item == name)
             || scope.conditionally_assigned_before(name, line)
@@ -718,6 +726,23 @@ USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
         assert!(set
             .dirs
             .contains(&"${CMAKE_BINARY_DIR}/GENINCDIR".to_owned()));
+    }
+
+    #[test]
+    fn objdir_is_the_current_mmake_generated_directory() {
+        let src = "CLE_GENROOT := $(OBJDIR)/cle-gen\n\
+USER_INCLUDES := -iquote $(CLE_GENROOT) -iquote $(CLE_GENROOT)/broadcom\n\
+%build_linklib mmake=example libname=example files=example\n";
+        let set = collect_includes(src, &dir("workbench/hidds/v3d"));
+        let expected = vec![
+            "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen",
+            "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen/broadcom",
+        ];
+        assert_eq!(set.dirs, expected);
+
+        let scope = crate::make_vars::collect_vars(src);
+        let positional = collect_includes_at(src, &scope, 2, &dir("workbench/hidds/v3d"));
+        assert_eq!(positional.dirs, expected);
     }
 
     #[test]

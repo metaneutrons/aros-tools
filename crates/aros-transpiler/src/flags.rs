@@ -1,7 +1,8 @@
 //! Preprocessor and codegen flag propagation from `mmakefile.src` to CMake.
 //!
-//! The historic build folds `USER_CPPFLAGS` and `USER_CFLAGS` into the
-//! `CPPFLAGS`/`CFLAGS` handed to every compile (see `config/make.tmpl`, the
+//! The historic build folds `USER_CPPFLAGS`, `USER_CFLAGS` and
+//! `USER_CXXFLAGS` into the flags handed to each matching compile (see
+//! `config/make.tmpl`, the
 //! `%compile_q` definition). Modules rely on this for semantics, not just for
 //! tuning: `rom/devs/ahci` sets `-D__OOP_NOMETHODBASES__`, and its library base
 //! struct declares the method-base fields only inside
@@ -117,6 +118,33 @@ fn map_flag_var(name: &str) -> Option<&'static str> {
     }
 }
 
+fn map_cxx_flag_var(name: &str) -> Option<&'static str> {
+    match name {
+        // config/aros.cfg derives this from the selected compiler. The
+        // declaration is the stable semantic contract; importing the host or
+        // configure-time spelling would make the result toolchain-dependent.
+        "CXXFLAGS_GNU20" => Some("-std=gnu++20"),
+        _ => None,
+    }
+}
+
+fn cxx_only(option: &str) -> String {
+    format!("$<$<COMPILE_LANGUAGE:CXX>:{option}>")
+}
+
+/// Whether one warning-policy token can be forwarded without invoking a shell
+/// or changing the target/ABI. GNU Make passes USER_*FLAGS as compiler argv;
+/// preserving literal `-W...` tokens is therefore part of the declaration's
+/// semantics, not a toolchain guess. Keep the alphabet narrower than Clang's
+/// option grammar so separators, quoting and generator syntax fail closed.
+fn safe_warning_option(option: &str) -> bool {
+    option.starts_with("-W")
+        && option.len() > 2
+        && option.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '+' | '_' | '.' | '=')
+        })
+}
+
 /// Make roots accepted in a direct-linker `-L` option.
 ///
 /// A private archive is useful only inside this build tree. Mapping the roots
@@ -152,10 +180,11 @@ fn resolve_vars(text: &str) -> Option<String> {
     Some(out)
 }
 
-/// Recognises the Make spelling of a string-literal define value.
+/// Recognises the Make spellings of a string-literal define value.
 ///
-/// `"\"pc\""` yields `pc`. Both the outer shell quotes and the inner escaped
-/// quotes have to be present; anything else is not a string literal.
+/// `"\"pc\""` and `\"C:\"` yield `pc` and `C:` respectively.  The first
+/// form protects the complete compiler argument with shell quotes; the second
+/// is the ordinary AROS spelling when the value itself contains no spaces.
 /// Splits a flag list on whitespace, but keeps a `$(...)` call together.
 ///
 /// `-DISODATE="\"$(shell date '+%Y-%m-%d')\""` is one flag containing two
@@ -224,9 +253,23 @@ fn map_shell_date(value: &str) -> Option<String> {
 
 fn string_literal_value(raw: &str) -> Option<String> {
     let t = raw.trim();
-    let inner = t.strip_prefix('"')?.strip_suffix('"')?;
-    let inner = inner.strip_prefix("\\\"")?.strip_suffix("\\\"")?;
-    Some(inner.to_owned())
+    if let Some(inner) = t.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        return inner
+            .strip_prefix("\\\"")
+            .and_then(|v| v.strip_suffix("\\\""))
+            .map(ToOwned::to_owned);
+    }
+    if let Some(inner) = t
+        .strip_prefix("\\\"")
+        .and_then(|value| value.strip_suffix("\\\""))
+    {
+        return Some(inner.to_owned());
+    }
+    t.strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .and_then(|v| v.strip_prefix('"'))
+        .and_then(|v| v.strip_suffix('"'))
+        .map(ToOwned::to_owned)
 }
 
 /// Whether a name is usable as a C identifier once CMake substitutes any
@@ -318,7 +361,21 @@ fn simple_define(body: &str) -> Option<String> {
             } else {
                 resolve_vars(&inner)?
             };
-            if inner.contains('"') || inner.contains('\\') || inner.contains(char::is_whitespace) {
+            // CMake passes compile definitions without a shell, but semicolon
+            // still separates list elements and `$` can begin a generator
+            // expression.  Keep the accepted payload printable and literal;
+            // paths, URLs and Amiga volume names legitimately use `/` and `:`.
+            let probe = inner
+                .replace("${AROS_TARGET_PLATFORM}", "x")
+                .replace("${AROS_TARGET_LEGACY_PLATFORM}", "x")
+                .replace("${AROS_TARGET_CPU}", "x")
+                .replace("${AROS_TARGET_FAMILY}", "x")
+                .replace("${AROS_BUILD_DATE_DMY}", "x")
+                .replace("${AROS_BUILD_DATE_ISO}", "x");
+            if probe.contains(['"', '\\', ';', '$', '`'])
+                || probe.contains(char::is_whitespace)
+                || probe.chars().any(char::is_control)
+            {
                 return None;
             }
             return Some(format!("{name}=\"{inner}\""));
@@ -608,7 +665,7 @@ pub fn collect_flags(content: &str) -> FlagSet {
     let (vars, counts) = collect_raw(content);
     let mut set = FlagSet::default();
 
-    let reassigned = ["USER_CPPFLAGS", "USER_CFLAGS"]
+    let reassigned = ["USER_CPPFLAGS", "USER_CFLAGS", "USER_CXXFLAGS"]
         .iter()
         .any(|k| counts.get(*k).copied().unwrap_or(0) > 1);
     let modules = content.matches("%build_module").count();
@@ -619,6 +676,13 @@ pub fn collect_flags(content: &str) -> FlagSet {
         let expanded = expand(raw, &vars, key, 8);
         for tok in split_flags(&expanded) {
             classify(tok, &mut set);
+        }
+    }
+
+    if let Some(raw) = vars.get("USER_CXXFLAGS") {
+        let expanded = expand(raw, &vars, "USER_CXXFLAGS", 8);
+        for tok in split_flags(&expanded) {
+            classify_cxx(tok, &mut set);
         }
     }
 
@@ -688,6 +752,15 @@ pub(crate) fn collect_flags_at(scope: &VarScope, line: usize) -> FlagSet {
         let expanded = expand_scoped(&raw, scope, line, key, 8);
         for tok in split_flags(&expanded) {
             classify(tok, &mut set);
+        }
+    }
+
+    if conditionally_replaced_before(scope, "USER_CXXFLAGS", line) {
+        set.skipped.push("$(USER_CXXFLAGS)".to_owned());
+    } else if let Some(raw) = scope.raw_at("USER_CXXFLAGS", line) {
+        let expanded = expand_scoped(&raw, scope, line, "USER_CXXFLAGS", 8);
+        for tok in split_flags(&expanded) {
+            classify_cxx(tok, &mut set);
         }
     }
 
@@ -878,23 +951,64 @@ fn classify(tok: &str, set: &mut FlagSet) {
         return;
     }
 
-    // These options are semantic inputs to Mesa's C compilation, rather than
-    // a broad warning-policy import. Keep only the exact audited spellings;
-    // near matches remain visible in the skipped-flags report.
-    if matches!(
-        tok,
-        "-std=gnu11"
-            | "-fno-strict-aliasing"
-            | "-Wno-unused-value"
-            | "-Wno-unused-variable"
-            | "-Wno-strict-aliasing"
-    ) {
+    // Warning policy is a literal, deterministic part of USER_*FLAGS. It is
+    // safe to preserve after lexical validation and is sometimes required by
+    // newer Clang versions for otherwise accepted third-party sources.
+    if safe_warning_option(tok) {
+        push_unique(&mut set.compile_options, tok.to_owned());
+        return;
+    }
+
+    // These remaining options are semantic inputs to Mesa's C compilation.
+    // Keep only the exact audited spellings; near matches remain visible in
+    // the skipped-flags report.
+    if matches!(tok, "-std=gnu11" | "-fno-strict-aliasing") {
         push_unique(&mut set.compile_options, tok.to_owned());
         return;
     }
 
     // Anything else is a compiler option we do not second-guess.
     if tok.starts_with('-') {
+        push_unique(&mut set.skipped, tok.to_owned());
+    }
+}
+
+fn classify_cxx(tok: &str, set: &mut FlagSet) {
+    if let Some(name) = tok.strip_prefix("$(").and_then(|t| t.strip_suffix(')')) {
+        if let Some(flag) = map_cxx_flag_var(name) {
+            push_unique(&mut set.compile_options, cxx_only(flag));
+        } else {
+            push_unique(&mut set.skipped, tok.to_owned());
+        }
+        return;
+    }
+
+    if matches!(
+        tok,
+        "-std=c++11"
+            | "-std=c++14"
+            | "-std=c++17"
+            | "-std=c++20"
+            | "-std=gnu++11"
+            | "-std=gnu++14"
+            | "-std=gnu++17"
+            | "-std=gnu++20"
+    ) {
+        push_unique(&mut set.compile_options, cxx_only(tok));
+        return;
+    }
+
+    if safe_warning_option(tok) {
+        push_unique(&mut set.compile_options, cxx_only(tok));
+        return;
+    }
+
+    // Definitions are language-independent even when upstream happened to put
+    // them in USER_CXXFLAGS. Reuse the strict define classifier; all other C++
+    // flags remain visible in the skipped-flags report.
+    if tok.starts_with("-D") || tok.starts_with("-U") {
+        classify(tok, set);
+    } else if tok.starts_with('-') || tok.starts_with("$(") {
         push_unique(&mut set.skipped, tok.to_owned());
     }
 }
@@ -1094,10 +1208,27 @@ mod tests {
                 "-fno-strict-aliasing",
                 "-Wno-unused-value",
                 "-Wno-unused-variable",
-                "-Wno-strict-aliasing"
+                "-Wno-strict-aliasing",
+                "-Wno-unused-parameter"
             ]
         );
-        assert_eq!(flags.skipped, ["-std=gnu17", "-Wno-unused-parameter"]);
+        assert_eq!(flags.skipped, ["-std=gnu17"]);
+    }
+
+    #[test]
+    fn literal_warning_options_are_preserved_and_language_scoped() {
+        let flags = collect_flags(
+            "USER_CFLAGS := -Werror=implicit-function-declaration\n\
+             USER_CXXFLAGS := -Wno-c++11-narrowing -Wno-unsafe;option\n",
+        );
+        assert_eq!(
+            flags.compile_options,
+            [
+                "-Werror=implicit-function-declaration",
+                "$<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>",
+            ]
+        );
+        assert_eq!(flags.skipped, ["-Wno-unsafe;option"]);
     }
 
     #[test]
@@ -1303,6 +1434,18 @@ USER_CPPFLAGS += -DINTUITION_INLINE_NEWOBJECT
     }
 
     #[test]
+    fn keeps_cxx_standard_language_scoped() {
+        let src = "USER_CXXFLAGS := $(NOWARN_CXXFLAGS) $(CXXFLAGS_GNU20) -DONLY_CXX_BUILD=1\n";
+        let f = collect_flags(src);
+        assert_eq!(f.defines, ["ONLY_CXX_BUILD=1"]);
+        assert_eq!(
+            f.compile_options,
+            ["$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20>"]
+        );
+        assert_eq!(f.skipped, ["$(NOWARN_CXXFLAGS)"]);
+    }
+
+    #[test]
     fn resolves_local_variables() {
         let src = "\
 MY_DEFS := -DONE -DTWO
@@ -1323,7 +1466,8 @@ USER_CPPFLAGS := $(MY_DEFS) -DTHREE
     fn collects_defines_from_user_cflags_too() {
         let f = collect_flags("USER_CFLAGS := -DFROM_CFLAGS -Wno-attributes\n");
         assert_eq!(f.defines, vec!["FROM_CFLAGS"]);
-        assert_eq!(f.skipped, vec!["-Wno-attributes"]);
+        assert_eq!(f.compile_options, vec!["-Wno-attributes"]);
+        assert!(f.skipped.is_empty());
     }
 
     #[test]
@@ -1445,6 +1589,31 @@ endif
         assert_eq!(
             f.defines,
             vec!["AROS_ARCHITECTURE=\"${AROS_TARGET_LEGACY_PLATFORM}\""]
+        );
+        assert!(f.skipped.is_empty(), "skipped: {:?}", f.skipped);
+
+        // DHCP and several libraries escape only the quotes which must reach
+        // the preprocessor.  No outer shell-quote pair is needed because the
+        // payload contains no whitespace.
+        let f = collect_flags(
+            "USER_CPPFLAGS := -DCLIENT_PATH=\\\"C:\\\" \\\n+             -DUNICODE_VERSION=\\\"17.0.0\\\" \\\n+             -DPACKAGE_BUGREPORT=\\\"https://bugs.example.invalid/new\\\"\n",
+        );
+        assert_eq!(
+            f.defines,
+            vec![
+                "CLIENT_PATH=\"C:\"",
+                "UNICODE_VERSION=\"17.0.0\"",
+                "PACKAGE_BUGREPORT=\"https://bugs.example.invalid/new\"",
+            ]
+        );
+        assert!(f.skipped.is_empty(), "skipped: {:?}", f.skipped);
+
+        // mbedTLS uses shell single quotes around the C string literal.
+        let f =
+            collect_flags("USER_CPPFLAGS := -DMBEDTLS_CONFIG_FILE='\"mbedtls_aros_config.h\"'\n");
+        assert_eq!(
+            f.defines,
+            vec!["MBEDTLS_CONFIG_FILE=\"mbedtls_aros_config.h\""]
         );
         assert!(f.skipped.is_empty(), "skipped: {:?}", f.skipped);
     }

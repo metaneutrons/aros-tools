@@ -7,8 +7,9 @@ use crate::catalogs::CatalogDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::default_link_set::DefaultLinkSet;
 use crate::fetch::FetchDecl;
-use crate::flexcat::FlexCatSourceDecl;
+use crate::flexcat::{FlexCatHeaderDecl, FlexCatSourceDecl};
 use crate::icons::{IconSet, IconTarget};
+use crate::ilbm::IlbmSourceDecl;
 use crate::includes::ArchIncludeDecl;
 use crate::packages::{runtime_name, ResolvedPackageMember};
 use aros_common::{ArosError, Result};
@@ -24,6 +25,13 @@ pub struct ResolvedScriptOutput {
     pub arguments: Vec<String>,
     pub outputs: Vec<String>,
     pub depends: Vec<String>,
+    /// Capture the script's standard output into the sole declared output.
+    pub stdout: bool,
+    /// Directory selected by an exact `cd <dir> && $(PYTHON) ...` recipe.
+    pub working_directory: Option<String>,
+    /// Fetch targets which materialise the script, its inputs, or its working
+    /// directory. These must be custom-command dependencies, not sibling edges.
+    pub dependency_targets: Vec<String>,
     /// Targets that name one of the outputs as a source.
     pub consumers: Vec<String>,
 }
@@ -37,9 +45,9 @@ pub struct DependencyGraph {
     pub default_link_set: Vec<ResolvedDefaultLinkItem>,
     /// `%rule_link_binary` declarations, in declaration order.
     pub binary_objects: Vec<crate::binary_objects::BinaryObjectDecl>,
-    /// Rules whose recipe runs an in-tree Python script, each resolved to the
-    /// target that consumes its output. Empty until `resolve_script_outputs`
-    /// runs.
+    /// Reachable exact Python recipes, each resolved to the target that
+    /// consumes its output. The script may be in-tree or materialised by a
+    /// `%fetch`. Empty until `resolve_script_outputs` runs.
     pub script_outputs: Vec<ResolvedScriptOutput>,
     /// The same declarations before they are bound to a consumer.
     pending_script_outputs: Vec<crate::copy_includes::ScriptOutputDecl>,
@@ -79,6 +87,12 @@ pub struct DependencyGraph {
     /// source product replaces a nominal source-tree `locale.c` with a
     /// build-tree output before concrete targets are created.
     pub flexcat_sources: Vec<FlexCatSourceDecl>,
+    /// Safe header-only FlexCat rules. Their #MM owner edge supplies ordering
+    /// and propagates the generated include directory to concrete consumers.
+    pub flexcat_headers: Vec<FlexCatHeaderDecl>,
+    /// Exact ILBM-to-C include generators. Their owner edge publishes the
+    /// private generated include directory to the concrete compile target.
+    pub ilbm_sources: Vec<IlbmSourceDecl>,
     /// Every `%set_archincludes` declaration in the tree, keyed by `modname`.
     pub arch_decls: HashMap<String, Vec<ArchIncludeDecl>>,
     /// Every resolved `%copy_includes` declaration, deduplicated.
@@ -90,6 +104,8 @@ pub struct DependencyGraph {
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe hand-written header transforms, with graph-resolved ordering.
     pub header_transforms: Vec<HeaderTransformDecl>,
+    /// Exact host-Bison generated C outputs.
+    pub bison_outputs: Vec<crate::copy_includes::BisonOutputDecl>,
     /// Declaration-owned literal define headers, with their compile consumers.
     pub define_headers: Vec<DefineHeaderDecl>,
     /// `%build_archspecific` declarations, keyed by the target they extend.
@@ -445,6 +461,30 @@ impl DependencyGraph {
         }
     }
 
+    pub fn add_flexcat_headers(&mut self, declarations: Vec<FlexCatHeaderDecl>) {
+        for declaration in declarations {
+            if !self.flexcat_headers.iter().any(|existing| {
+                existing.owner == declaration.owner
+                    && existing.declaring_dir == declaration.declaring_dir
+                    && existing.header == declaration.header
+            }) {
+                self.flexcat_headers.push(declaration);
+            }
+        }
+    }
+
+    pub fn add_ilbm_sources(&mut self, declarations: Vec<IlbmSourceDecl>) {
+        for declaration in declarations {
+            if !self.ilbm_sources.iter().any(|existing| {
+                existing.owner == declaration.owner
+                    && existing.declaring_dir == declaration.declaring_dir
+                    && existing.line == declaration.line
+            }) {
+                self.ilbm_sources.push(declaration);
+            }
+        }
+    }
+
     /// Finds concrete compilation targets which require a relative
     /// `%build_catalogs source=` output.
     ///
@@ -574,6 +614,46 @@ impl DependencyGraph {
         unresolved
     }
 
+    /// Adds fetched public-header trees to the configure-time inventory pass.
+    ///
+    /// The later CMake header-ownership pass follows private includes from
+    /// concrete Port sources into `%copy_includes` products. On an empty build
+    /// tree neither side exists yet, so a build could fetch a source archive
+    /// and start compiling before the public header it includes was staged.
+    /// Materialising only fetches that publish headers gives the second
+    /// transpiler/configure pass enough source text to derive those exact
+    /// edges without prefetching every third-party package.
+    pub fn resolve_header_inventory_fetches(&mut self, ports_dir: Option<&Path>) {
+        for declaration in &self.copy_includes {
+            let source = declaration.source_dir.trim_end_matches('/');
+            if let (Some(ports_dir), Some(relative)) =
+                (ports_dir, source.strip_prefix("${AROS_PORTS_DIR}"))
+            {
+                let relative = relative.trim_start_matches('/');
+                if ports_dir.join(relative).is_dir() {
+                    continue;
+                }
+            }
+            let owner = self
+                .fetches
+                .iter()
+                .filter(|fetch| {
+                    let destination = fetch.destination.trim_end_matches('/');
+                    source == destination
+                        || source
+                            .strip_prefix(destination)
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .max_by_key(|fetch| fetch.destination.len());
+            if let Some(fetch) = owner {
+                if !self.source_inventory_fetches.contains(&fetch.name) {
+                    self.source_inventory_fetches.push(fetch.name.clone());
+                }
+            }
+        }
+        self.source_inventory_fetches.sort();
+    }
+
     pub fn add_header_transforms(&mut self, decls: Vec<HeaderTransformDecl>) {
         self.header_transforms.extend(decls);
     }
@@ -653,6 +733,28 @@ impl DependencyGraph {
     pub fn resolve_header_transforms(&mut self) -> Vec<String> {
         const PORTS_ROOT: &str = "${AROS_PORTS_DIR}";
 
+        // The host-generated-header capability publishes its primary SDK
+        // output and mirrors the same file into GENINCDIR in one atomic build
+        // rule. GNU Make spells that mirror as a second plain `$(CP)` rule;
+        // after optional-`@` copy recognition it would otherwise become a
+        // second Ninja producer for the same file. Consolidate only that exact
+        // derived copy, leaving every other duplicate to CMake's hard error.
+        let host_header_copies: HashSet<(String, String)> = self
+            .host_generated_headers
+            .iter()
+            .map(|header| {
+                (
+                    format!("${{AROS_SDK_INCLUDE_DIR}}/{}", header.header),
+                    format!("${{CMAKE_BINARY_DIR}}/GENINCDIR/{}", header.header),
+                )
+            })
+            .collect();
+        self.header_transforms.retain(|transform| {
+            !transform.copy_only
+                || !host_header_copies
+                    .contains(&(transform.input.clone(), transform.output.clone()))
+        });
+
         let mut fetches: Vec<(String, String)> = self
             .fetches
             .iter()
@@ -708,14 +810,20 @@ impl DependencyGraph {
                         .strip_prefix(destination)
                         .is_some_and(|tail| tail.starts_with('/'))
             });
-            let Some((fetch, _)) = owner else {
+            if let Some((fetch, _)) = owner {
+                transform.dependencies.push(fetch.clone());
+            } else if !transform.input.starts_with("${CMAKE_SOURCE_DIR}/") {
+                // Repository-owned inputs are already present when CMake
+                // configures. Ports inputs, on the other hand, must have an
+                // exact fetch owner or a cache-empty Ninja build could race or
+                // use stale material. Other generated inputs need a distinct
+                // producer capability and must not be silently accepted here.
                 unresolved.push(format!(
                     "{}:{}: {} input {} has no matching %fetch owner",
                     transform.file, transform.line, transform.name, transform.input
                 ));
                 continue;
-            };
-            transform.dependencies.push(fetch.clone());
+            }
 
             let input_dir = transform
                 .input
@@ -899,7 +1007,11 @@ impl DependencyGraph {
         self.pending_script_outputs.extend(decls);
     }
 
-    /// Binds each script-generated file to the target that names it as a source.
+    pub fn add_bison_outputs(&mut self, decls: Vec<crate::copy_includes::BisonOutputDecl>) {
+        self.bison_outputs.extend(decls);
+    }
+
+    /// Binds each reachable script-generated file to its consumers.
     ///
     /// A generated source is not on disk when CMake configures, so the target
     /// that declares it needs the generator registered first;
@@ -912,7 +1024,12 @@ impl DependencyGraph {
     /// (`cmake/AROS.cmake:60`), and a source list carries stems while a rule
     /// names the file, so the extension is dropped from the rule's output.
     ///
-    /// Returns what could not be bound, for reporting.
+    /// Recognisable rules for outputs outside the selected source and aggregate
+    /// graph are deliberately omitted. Upstream routinely keeps recipes for
+    /// several dependency versions in one file; activating all of them would
+    /// require scripts which the selected archive does not contain. The return
+    /// value is retained as the reporting boundary for future recognised-but-
+    /// unsafe active forms.
     pub fn resolve_script_outputs(&mut self) -> Vec<String> {
         fn normalise(path: &str) -> String {
             let path = path.replace("${AROS_BUILD_DIR}", "${CMAKE_BINARY_DIR}");
@@ -930,38 +1047,159 @@ impl DependencyGraph {
             }
         }
 
-        let mut reports = Vec::new();
+        let reports = Vec::new();
+        let legacy_outputs: HashSet<String> = self
+            .python_outputs
+            .iter()
+            .flat_map(|declaration| {
+                declaration.jobs.iter().map(|job| {
+                    normalise(&format!(
+                        "{}/{}",
+                        declaration.build_root.trim_end_matches('/'),
+                        job.output.trim_start_matches('/')
+                    ))
+                })
+            })
+            .collect();
         let pending = std::mem::take(&mut self.pending_script_outputs);
         for decl in pending {
-            let wanted = normalise(&decl.output);
+            let mut declared_outputs = vec![decl.output.clone()];
+            declared_outputs.extend(decl.additional_outputs.iter().cloned());
+            let wanted: Vec<String> = declared_outputs
+                .iter()
+                .map(|output| normalise(output))
+                .collect();
+            // A few complex Mesa groups still use the older, audited adapter.
+            // Never declare the same output twice while those capabilities are
+            // retired incrementally in favour of exact recipe translation.
+            if wanted.iter().any(|output| legacy_outputs.contains(output)) {
+                continue;
+            }
             let mut consumers: Vec<String> = self
                 .targets
                 .iter()
                 .filter(|(_, target)| {
-                    target
+                    let names_generated_source = target
                         .source_files
                         .iter()
                         .chain(target.cxx_source_files.iter())
                         .chain(target.asm_source_files.iter())
-                        .any(|source| normalise(source) == wanted)
+                        .any(|source| wanted.iter().any(|output| normalise(source) == *output));
+                    let target_directory = target.dir_path.to_string_lossy().replace('\\', "/");
+                    let names_header_consumer = target_directory == decl.directory
+                        && !decl.consumer_source_stems.is_empty()
+                        && target
+                            .source_files
+                            .iter()
+                            .chain(target.cxx_source_files.iter())
+                            .chain(target.asm_source_files.iter())
+                            .filter_map(|source| {
+                                Path::new(source).file_stem().and_then(|stem| stem.to_str())
+                            })
+                            .any(|stem| {
+                                decl.consumer_source_stems
+                                    .iter()
+                                    .any(|candidate| candidate == stem)
+                            });
+                    names_generated_source || names_header_consumer
                 })
                 .map(|(mmake, _)| mmake.clone())
                 .collect();
+
+            // Some generated headers are collected into a dedicated #MM
+            // target rather than named by a compile source list. Preserve
+            // that explicit GNU Make edge as a CMake consumer edge.
+            consumers.extend(
+                self.meta_targets
+                    .iter()
+                    .filter(|(_, dependencies)| {
+                        dependencies.iter().any(|dependency| {
+                            wanted.iter().any(|output| normalise(dependency) == *output)
+                        })
+                    })
+                    .map(|(name, _)| name.clone()),
+            );
+            consumers.extend(
+                decl.consumer_targets
+                    .iter()
+                    .filter(|target| self.targets.contains_key(*target))
+                    .cloned(),
+            );
             consumers.sort();
-            if consumers.is_empty() {
-                reports.push(format!(
-                    "{}: {} is generated by {} and no target names it as a source",
-                    decl.directory, decl.output, decl.script
-                ));
+            consumers.dedup();
+            if consumers.is_empty() && decl.consumer_targets.is_empty() {
+                // GNU Make may carry generator recipes for several upstream
+                // versions in one mmakefile. A rule whose output is absent
+                // from both the selected source inventory and every aggregate
+                // prerequisite is unreachable in this configuration. Do not
+                // activate it merely because its recipe is recognisable.
                 continue;
             }
-            let owner = format!("{}-generated", consumers[0]);
+            let output_stem = Path::new(&decl.output)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output")
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+                .collect::<String>();
+            let Some(owner_prefix) = consumers.first().or_else(|| decl.consumer_targets.first())
+            else {
+                continue;
+            };
+            let owner = format!("{owner_prefix}-{output_stem}-generated");
+            for consumer in &decl.consumer_targets {
+                if !self.targets.contains_key(consumer) {
+                    self.meta_targets
+                        .entry(consumer.clone())
+                        .or_default()
+                        .insert(owner.clone());
+                }
+            }
+
+            // A script rule may live in an mmakefile in this repository while
+            // the actual generator and XML inputs are unpacked by `%fetch`.
+            // Match the narrowest owning destination for every referenced
+            // path; depending on that fetch target lets clean Ninja builds
+            // materialise the files before the custom command runs.
+            let mut dependency_targets = BTreeSet::new();
+            let mut referenced_paths = Vec::with_capacity(decl.depends.len() + 2);
+            referenced_paths.push(decl.script.as_str());
+            referenced_paths.extend(decl.depends.iter().map(String::as_str));
+            if let Some(directory) = decl.working_directory.as_deref() {
+                referenced_paths.push(directory);
+            }
+            for path in referenced_paths {
+                let mut owners: Vec<&FetchDecl> = self
+                    .fetches
+                    .iter()
+                    .filter(|fetch| {
+                        let destination = fetch.destination.trim_end_matches('/');
+                        path == destination
+                            || path
+                                .strip_prefix(destination)
+                                .is_some_and(|tail| tail.starts_with('/'))
+                    })
+                    .collect();
+                owners.sort_by(|left, right| {
+                    right
+                        .destination
+                        .len()
+                        .cmp(&left.destination.len())
+                        .then_with(|| left.name.cmp(&right.name))
+                });
+                if let Some(fetch) = owners.first() {
+                    dependency_targets.insert(fetch.name.clone());
+                }
+            }
             self.script_outputs.push(ResolvedScriptOutput {
                 owner,
                 script: decl.script,
                 arguments: decl.arguments,
-                outputs: vec![decl.output],
+                outputs: declared_outputs,
                 depends: decl.depends,
+                stdout: decl.stdout,
+                working_directory: decl.working_directory,
+                dependency_targets: dependency_targets.into_iter().collect(),
                 consumers,
             });
         }
@@ -2693,7 +2931,20 @@ mod tests {
             graph.add_target(target);
         }
         graph.add_fetches(parsed.fetches);
+        graph.add_copy_includes(parsed.copy_includes);
         graph.add_header_transforms(parsed.header_transforms);
+        graph.resolve_header_inventory_fetches(None);
+        assert_eq!(graph.source_inventory_fetches, ["zlib-fetch"]);
+
+        let materialized = tempfile::tempdir().unwrap();
+        let relative_source = graph.copy_includes[0]
+            .source_dir
+            .strip_prefix("${AROS_PORTS_DIR}/")
+            .unwrap();
+        std::fs::create_dir_all(materialized.path().join(relative_source)).unwrap();
+        graph.source_inventory_fetches.clear();
+        graph.resolve_header_inventory_fetches(Some(materialized.path()));
+        assert!(graph.source_inventory_fetches.is_empty());
         assert!(graph.resolve_port_source_fetches().is_empty());
         for target in [
             "workbench-libs-z",

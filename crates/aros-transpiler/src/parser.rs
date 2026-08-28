@@ -18,6 +18,7 @@ use crate::fetch::{collect_fetches_with_scope, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at, collect_named_link_flags_at, FlagSet};
 use crate::flexcat::collect_flexcat_source_rules;
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
+use crate::ilbm::collect_ilbm_sources;
 use crate::includes::{collect_arch_decls, collect_includes, collect_includes_at};
 use crate::local_make_includes::{
     inline_local_make_includes, LocalMakeFragmentPolicy, LocalMakeIncludeLimits,
@@ -937,7 +938,7 @@ fn parse_mmakefile_impl(
     // parsed out of this file.
     let include_set = collect_includes(&content, &rel_dir);
     let arch_decls = collect_arch_decls(&content, &rel_dir);
-    let copy_scan = collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope);
+    let mut copy_scan = collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope);
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
@@ -2532,6 +2533,7 @@ fn parse_mmakefile_impl(
     // macro.  Parse them after all concrete source lists are known, so the
     // graph can bind their generated `locale.c` only to real consumers.
     let flexcat_scan = collect_flexcat_source_rules(&content, root, &rel_dir, &scope, dirs);
+    let ilbm_scan = collect_ilbm_sources(&content, root, &rel_dir, &scope, dirs);
 
     // 3. Extract #MM and #MM- meta-target rules
     let mm_content = join_mm_continuations(&content);
@@ -2594,6 +2596,39 @@ fn parse_mmakefile_impl(
         &arch_object_roots,
     );
 
+    // A pattern recipe is a template, not a literal missing output. When a
+    // closed Python-output capability instantiates concrete products matching
+    // that template (V3D's version wrappers are the current case), keep the
+    // template out of the residual generated-file report.
+    let capability_outputs = python_outputs
+        .iter()
+        .flat_map(|declaration| {
+            declaration.jobs.iter().map(|job| {
+                format!(
+                    "{}/{}",
+                    declaration.build_root.trim_end_matches('/'),
+                    job.output.trim_start_matches('/')
+                )
+                .replace("${AROS_BUILD_DIR}", "${CMAKE_BINARY_DIR}")
+            })
+        })
+        .collect::<Vec<_>>();
+    copy_scan.generated_files.retain(|report| {
+        let Some((target, _)) = report.split_once(" <- ") else {
+            return true;
+        };
+        let target = target.replace("${AROS_BUILD_DIR}", "${CMAKE_BINARY_DIR}");
+        let Some((prefix, suffix)) = target.split_once('%') else {
+            return true;
+        };
+        !capability_outputs.iter().any(|output| {
+            output
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .is_some()
+        })
+    });
+
     Ok(ParsedMmakefile {
         capability_errors,
         targets,
@@ -2603,7 +2638,10 @@ fn parse_mmakefile_impl(
         ahi_builds,
         python_outputs,
         flexcat_sources: flexcat_scan.declarations,
+        flexcat_headers: flexcat_scan.headers,
         skipped_flexcat_sources: flexcat_scan.skipped,
+        ilbm_sources: ilbm_scan.declarations,
+        skipped_ilbm_sources: ilbm_scan.skipped,
         meta_rules,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
@@ -2619,6 +2657,7 @@ fn parse_mmakefile_impl(
         skipped_copy_directories,
         adhoc_header_rules: copy_scan.adhoc,
         header_transforms: copy_scan.transforms,
+        bison_outputs: copy_scan.bison_outputs,
         define_headers,
         generated_file_rules: copy_scan.generated_files,
         script_outputs: copy_scan.script_outputs,

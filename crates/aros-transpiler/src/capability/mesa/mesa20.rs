@@ -495,35 +495,7 @@ pub(crate) fn mesa_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
     (inputs, jobs)
 }
 
-pub(crate) fn vc4_jobs() -> (Vec<String>, Vec<PythonGeneratorJob>) {
-    const CLE: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle";
-    let inputs = [
-        "src/broadcom/cle/v3d_packet_v21.xml",
-        "src/broadcom/cle/v3d_packet_v33.xml",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
-    let jobs = [
-        ("v3d_packet_v21.xml", "v3d_packet_v21_pack.h", "21"),
-        ("v3d_packet_v33.xml", "v3d_packet_v33_pack.h", "33"),
-        ("v3d_packet_v33.xml", "v3d_packet_v41_pack.h", "41"),
-        ("v3d_packet_v33.xml", "v3d_packet_v42_pack.h", "42"),
-    ]
-    .into_iter()
-    .map(|(xml, output, version)| {
-        generator_job(
-            "src/broadcom/cle/gen_pack_header.py",
-            &format!("src/broadcom/cle/{output}"),
-            &["python-stdout", &format!("{CLE}/{xml}"), version],
-        )
-    })
-    .collect();
-    (inputs, jobs)
-}
-
 fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
-    const CLE: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle";
     let bases = ["draw", "emit", "format_table", "job", "rcl", "state"];
     let wrapper_inputs = bases
         .iter()
@@ -539,25 +511,6 @@ fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
             ));
         }
     }
-    let cle_inputs = vec!["src/broadcom/cle/v3d_packet_v33.xml".to_owned()];
-    let cle_jobs = [
-        ("v3d_packet_v33_pack.h", "33"),
-        ("v3d_packet_v41_pack.h", "41"),
-        ("v3d_packet_v42_pack.h", "42"),
-    ]
-    .into_iter()
-    .map(|(output, version)| {
-        generator_job(
-            "src/broadcom/cle/gen_pack_header.py",
-            &format!("broadcom/cle/{output}"),
-            &[
-                "python-stdout",
-                &format!("{CLE}/v3d_packet_v33.xml"),
-                version,
-            ],
-        )
-    })
-    .collect::<Vec<_>>();
     let common = |owner: &str,
                   build_root: &str,
                   source_inputs: Vec<String>,
@@ -577,20 +530,12 @@ fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
         consumers: vec!["linklibs-gallium_v3d".to_owned()],
         dir_path: dir_path.to_path_buf(),
     };
-    vec![
-        common(
-            "linklibs-gallium_v3d-gen-v3dx",
-            "${AROS_BUILD_DIR}/gen/workbench/hidds/v3d",
-            wrapper_inputs,
-            wrapper_jobs,
-        ),
-        common(
-            "linklibs-gallium_v3d-gen-cle",
-            "${AROS_BUILD_DIR}/gen/cle-gen",
-            cle_inputs,
-            cle_jobs,
-        ),
-    ]
+    vec![common(
+        "linklibs-gallium_v3d-gen-v3dx",
+        "${AROS_BUILD_DIR}/gen/workbench/hidds/v3d",
+        wrapper_inputs,
+        wrapper_jobs,
+    )]
 }
 
 pub(crate) fn parse_v3d(
@@ -693,18 +638,11 @@ pub(crate) fn parse_remaining(
                 python_packages(),
             )
         }
+        // CLE rules are now translated directly from their exact Make recipe;
+        // keeping a second, fingerprint-pinned job list would be a hidden pin
+        // and would claim the same outputs twice.
         Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium") if profile != "x86_64" => {
-            let (inputs, jobs) = vc4_jobs();
-            (
-                "linklibs-gallium_vc4",
-                "linklibs-gallium_vc4-gen-cle",
-                fingerprint("mesa20-vc4-recipe")?,
-                "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
-                fingerprint("mesa20-vc4-manifest")?,
-                inputs,
-                jobs,
-                Vec::new(),
-            )
+            return Ok(None);
         }
         _ => return Ok(None),
     };

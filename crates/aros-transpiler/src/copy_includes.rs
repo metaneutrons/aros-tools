@@ -55,13 +55,14 @@ pub struct AdhocHeaderRule {
     pub prereqs: String,
 }
 
-/// A hand-written SDK-header rule whose recipe is a safe, literal one-line
-/// substitution.
+/// A hand-written SDK-header rule whose recipe is a safe, literal copy or
+/// one-line substitution.
 ///
-/// This is intentionally narrower than arbitrary Make recipes.  The parser
-/// accepts only `$(SED) -e 's/^literal/literal/' $< > $@`, records the exact
-/// input/output and lets CMake own the real build-time transform.  Dependencies
-/// and consumers are joined later from the complete target/fetch graph.
+/// This is intentionally narrower than arbitrary Make recipes. The parser
+/// accepts exact `$<` to `$@` copies and
+/// `$(SED) -e 's/^literal/literal/' $< > $@`, records the exact input/output,
+/// and lets CMake own the real build-time operation. Dependencies and consumers
+/// are joined later from the complete target/fetch graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderTransformDecl {
     /// Make target which owns the generated header.
@@ -78,12 +79,29 @@ pub struct HeaderTransformDecl {
     pub match_text: String,
     /// Literal replacement text.
     pub replacement: String,
+    /// The recipe is an exact `$<` to `$@` copy rather than a substitution.
+    #[serde(default)]
+    pub copy_only: bool,
+    /// Alternating literal token/replacement values for a safe template pipe.
+    #[serde(default)]
+    pub substitutions: Vec<String>,
     /// Direct fetch targets owning the input, filled by the graph.
     #[serde(default)]
     pub dependencies: Vec<String>,
     /// Concrete compile targets whose port source tree contains the input.
     #[serde(default)]
     pub consumers: Vec<String>,
+}
+
+/// A deterministic host-Bison rule whose generated C file is included by one
+/// concrete compile target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BisonOutputDecl {
+    pub owner: String,
+    pub file: String,
+    pub line: usize,
+    pub input: String,
+    pub output: String,
 }
 
 /// What one mmakefile yielded for header staging.
@@ -97,6 +115,8 @@ pub struct CopyIncludesScan {
     pub adhoc: Vec<AdhocHeaderRule>,
     /// Safe literal transforms promoted from hand-written header recipes.
     pub transforms: Vec<HeaderTransformDecl>,
+    /// Exact `$(BISON) -o $@ $<` generated-source rules.
+    pub bison_outputs: Vec<BisonOutputDecl>,
     /// Hand-written rules under `$(GENDIR)` producing something other than a
     /// header (objects, ELF images, linker scripts). Reported only, since a
     /// missing one of these surfaces as a link or packaging failure rather
@@ -124,13 +144,32 @@ pub struct ScriptOutputDecl {
     pub directory: String,
     /// The file the rule declares, as a CMake path.
     pub output: String,
+    /// Further files declared by the same exact multi-target rule.
+    #[serde(default)]
+    pub additional_outputs: Vec<String>,
     /// The script the recipe runs, as a CMake path.
     pub script: String,
     /// Literal arguments after the script, as CMake paths or plain words.
     pub arguments: Vec<String>,
+    /// Run the script with its standard output captured as `output` instead of
+    /// expecting the output path as one of the script arguments.
+    #[serde(default)]
+    pub stdout: bool,
+    /// Optional working directory from an exact `cd <dir> && $(PYTHON) ...`
+    /// recipe prefix.
+    #[serde(default)]
+    pub working_directory: Option<String>,
     /// The rule's prerequisites, as CMake paths. Order-only ones are dropped:
     /// they are directories, which CMake creates itself.
     pub depends: Vec<String>,
+    /// Source stems whose Make object rules depend on this output. This covers
+    /// generated headers which are included by a source but are not themselves
+    /// listed in a build macro's source inventory.
+    #[serde(default)]
+    pub consumer_source_stems: Vec<String>,
+    /// Exact simple Make targets whose prerequisite list names this output.
+    #[serde(default)]
+    pub consumer_targets: Vec<String>,
 }
 
 /// One resolved `%copy_includes` declaration.
@@ -175,6 +214,46 @@ fn split_assignment(line: &str) -> Option<(&str, &str, bool)> {
     Some((l, r, false))
 }
 
+fn collect_local_assignments(lines: &[&str], vars: &mut HashMap<String, String>) {
+    let mut pending: Option<String> = None;
+    for line in lines {
+        let trimmed = line.trim();
+        let continues = trimmed.ends_with('\\');
+        let payload = trimmed.trim_end_matches('\\').trim();
+        if let Some(name) = pending.take() {
+            let entry = vars.entry(name.clone()).or_default();
+            if !entry.is_empty() {
+                entry.push(' ');
+            }
+            entry.push_str(payload);
+            if continues {
+                pending = Some(name);
+            }
+            continue;
+        }
+        if line.starts_with('\t') || trimmed.starts_with('#') || trimmed.starts_with('%') {
+            continue;
+        }
+        let Some((lhs, rhs, append)) = split_assignment(payload) else {
+            continue;
+        };
+        let name = lhs.trim().to_owned();
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        let entry = vars.entry(name.clone()).or_default();
+        if append && !entry.is_empty() && !rhs.trim().is_empty() {
+            entry.push(' ');
+        } else if !append {
+            entry.clear();
+        }
+        entry.push_str(rhs.trim());
+        if continues {
+            pending = Some(name);
+        }
+    }
+}
+
 /// Make variables that map onto a CMake location.
 ///
 /// `%fetch` unpacks third-party sources under the ports directory, and a module
@@ -184,12 +263,13 @@ fn split_assignment(line: &str) -> Option<(&str, &str, bool)> {
 /// SDK, which is what the ACPI-dependent drivers fail on.
 fn map_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" | "TOP" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "TOP" => Some("${AROS_BUILD_DIR}"),
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),
         // Same mapping as includes.rs: the generated per-module tree lives
         // under <build>/gen, not at the build root.
-        "GENDIR" | "OBJDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
+        "GENDIR" => Some("${CMAKE_BINARY_DIR}/gen"),
         "GENINCDIR" => Some("${CMAKE_BINARY_DIR}/GENINCDIR"),
         _ => None,
     }
@@ -316,6 +396,83 @@ fn split_top_level_comma(expression: &str) -> Option<(&str, &str)> {
     None
 }
 
+fn split_top_level_arguments(expression: &str) -> Option<Vec<&str>> {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut out = Vec::new();
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                out.push(expression[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    out.push(expression[start..].trim());
+    Some(out)
+}
+
+/// Splits a Make word list without cutting whitespace inside `$(...)`.
+fn split_make_words(expression: &str) -> Option<Vec<&str>> {
+    let bytes = expression.as_bytes();
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut words = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'$' && bytes.get(cursor + 1) == Some(&b'(') {
+            if start.is_none() {
+                start = Some(cursor);
+            }
+            depth += 1;
+            cursor += 2;
+            continue;
+        }
+        if bytes[cursor] == b')' && depth > 0 {
+            depth -= 1;
+        } else if bytes[cursor].is_ascii_whitespace() && depth == 0 {
+            if let Some(word_start) = start.take() {
+                words.push(&expression[word_start..cursor]);
+            }
+            cursor += 1;
+            continue;
+        } else if start.is_none() {
+            start = Some(cursor);
+        }
+        cursor += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+    if let Some(word_start) = start {
+        words.push(&expression[word_start..]);
+    }
+    Some(words)
+}
+
+fn apply_percent_substitution(word: &str, pattern: &str, replacement: &str) -> String {
+    let Some((prefix, suffix)) = pattern.split_once('%') else {
+        return if word == pattern {
+            replacement.to_owned()
+        } else {
+            word.to_owned()
+        };
+    };
+    let Some(stem) = word
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
+    else {
+        return word.to_owned();
+    };
+    replacement.replace('%', stem)
+}
+
 fn resolve_file_list(
     raw: &str,
     vars: &HashMap<String, String>,
@@ -330,6 +487,90 @@ fn resolve_file_list_expression(
     vars: &HashMap<String, String>,
     external: ExternalVarLookup<'_>,
 ) -> Option<ResolvedFileList> {
+    for function in ["addprefix", "addsuffix"] {
+        if let Some(arguments) = outer_make_function(expression, function) {
+            let (affix, words) = split_top_level_comma(arguments)?;
+            let affix = substitute(affix.trim(), vars, external, 8);
+            if affix.contains("$(") || affix.contains(char::is_whitespace) {
+                return None;
+            }
+            let mut resolved = resolve_file_list(words.trim(), vars, external)?;
+            for list in [&mut resolved.patterns, &mut resolved.excludes] {
+                for word in list {
+                    *word = if function == "addprefix" {
+                        format!("{affix}{word}")
+                    } else {
+                        format!("{word}{affix}")
+                    };
+                }
+            }
+            return Some(resolved);
+        }
+    }
+
+    if let Some(arguments) = outer_make_function(expression, "filter") {
+        let (raw_filters, raw_words) = split_top_level_comma(arguments)?;
+        let filters = resolve_file_list(raw_filters.trim(), vars, external)?;
+        let mut words = resolve_file_list(raw_words.trim(), vars, external)?;
+        let matches = |word: &str| {
+            filters.patterns.iter().any(|filter| {
+                if let Some((prefix, suffix)) = filter.split_once('%') {
+                    word.strip_prefix(prefix)
+                        .and_then(|rest| rest.strip_suffix(suffix))
+                        .is_some()
+                } else {
+                    word == filter
+                }
+            })
+        };
+        words.patterns.retain(|word| matches(word));
+        words.excludes.retain(|word| matches(word));
+        return Some(words);
+    }
+
+    if let Some(arguments) = outer_make_function(expression, "sort") {
+        let mut resolved = resolve_file_list(arguments, vars, external)?;
+        resolved.patterns.sort();
+        resolved.patterns.dedup();
+        resolved.excludes.sort();
+        resolved.excludes.dedup();
+        return Some(resolved);
+    }
+
+    // GNU Make's lowercase wildcard form is equivalent here to the AROS
+    // WILDCARD wrapper: CMake receives the pattern and evaluates it against the
+    // source directory. Keeping it declarative also works before a Port fetch.
+    if let Some(arguments) = outer_make_function(expression, "wildcard") {
+        let expanded = substitute(arguments, vars, external, 8);
+        if expanded.contains("$(") {
+            return None;
+        }
+        let mut resolved = ResolvedFileList::default();
+        for pattern in expanded.split_whitespace() {
+            resolved.patterns.extend(expand_char_classes(pattern));
+        }
+        return (!resolved.patterns.is_empty()).then_some(resolved);
+    }
+
+    if let Some(arguments) = outer_make_function(expression, "patsubst") {
+        let arguments = split_top_level_arguments(arguments)?;
+        if arguments.len() != 3 {
+            return None;
+        }
+        let pattern = substitute(arguments[0], vars, external, 8);
+        let replacement = substitute(arguments[1], vars, external, 8);
+        if pattern.contains("$(") || replacement.contains("$(") {
+            return None;
+        }
+        let mut resolved = resolve_file_list(arguments[2], vars, external)?;
+        for list in [&mut resolved.patterns, &mut resolved.excludes] {
+            for word in list.iter_mut() {
+                *word = apply_percent_substitution(word, &pattern, &replacement);
+            }
+        }
+        return Some(resolved);
+    }
+
     if let Some(arguments) = outer_make_function(expression, "notdir") {
         let mut resolved = resolve_file_list(arguments, vars, external)?;
         for list in [&mut resolved.patterns, &mut resolved.excludes] {
@@ -402,7 +643,7 @@ fn resolve_file_list_expression(
 /// Adds literal file names, rejecting anything still holding a Make variable.
 fn push_plain_tokens(text: &str, out: &mut Vec<String>) -> Option<()> {
     for tok in text.split_whitespace() {
-        if tok.contains('$') {
+        if tok.contains("$(") {
             return None;
         }
         out.extend(expand_char_classes(tok));
@@ -460,16 +701,24 @@ fn collect_copy_includes_with_lookup(
     if !base.is_empty() {
         vars.insert("CURDIR".to_owned(), base.clone());
     }
+    // config/make.cfg.in defines the per-mmakefile object directory this way.
+    // The collector intentionally does not inline the generated global config,
+    // so seed its public default here; an ordinary assignment in the source
+    // file still replaces it sequentially below.
+    vars.insert("OBJDIR".to_owned(), "$(GENDIR)/$(CURDIR)".to_owned());
     let mut decls = Vec::new();
     let mut skipped = Vec::new();
     let mut adhoc = Vec::new();
     let mut transforms = Vec::new();
+    let mut bison_outputs = Vec::new();
     let mut generated_files = Vec::new();
     let mut script_outputs: Vec<ScriptOutputDecl> = Vec::new();
     let mut skipped_script_outputs: Vec<String> = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
-    let output_owners = collect_header_output_owners(&lines);
+    let mut owner_vars = vars.clone();
+    collect_local_assignments(&lines, &mut owner_vars);
+    let output_owners = collect_header_output_owners(&lines, &owner_vars, external);
     let mut i = 0usize;
     // Tracks a variable assignment continued over several lines.
     let mut pending_var: Option<String> = None;
@@ -522,17 +771,43 @@ fn collect_copy_includes_with_lookup(
             continue;
         }
 
+        if let Some(decl) = parse_bison_output(&lines, i, &mmakefile, &base, &vars, external) {
+            bison_outputs.push(decl);
+            i += 1;
+            continue;
+        }
+
+        // A Python pattern rule is a template, not an output. Its concrete
+        // instances are selected by source inventory (and may belong to a
+        // version-specific capability); never report or emit the literal `%`.
+        if is_python_pattern_rule(&lines, i) {
+            i += 1;
+            while i < lines.len() && lines[i - 1].trim_end().ends_with('\\') {
+                i += 1;
+            }
+            continue;
+        }
+
         // A rule whose recipe runs an in-tree Python script. Tried before the
         // generic shape so a modelled rule is not also reported as unmodelled.
         match parse_script_output(&lines, i, &base, &vars, external) {
-            Some(Ok(decl)) => {
+            Some(Ok(mut decl)) => {
+                if let Some(owner) = output_owners.get(&decl.output) {
+                    decl.consumer_targets.push(owner.clone());
+                }
                 script_outputs.push(decl);
                 i += 1;
+                while i < lines.len() && lines[i - 1].trim_end().ends_with('\\') {
+                    i += 1;
+                }
                 continue;
             }
             Some(Err(reason)) => {
                 skipped_script_outputs.push(reason);
                 i += 1;
+                while i < lines.len() && lines[i - 1].trim_end().ends_with('\\') {
+                    i += 1;
+                }
                 continue;
             }
             None => {}
@@ -540,7 +815,13 @@ fn collect_copy_includes_with_lookup(
 
         // A hand-written rule writing into an include root, e.g.
         //   $(AROS_INCLUDES)/hidd/pci.h: include/pci_hidd.h
-        match parse_adhoc_rule(payload, &mmakefile, line_no) {
+        let rendered_rule = substitute(payload, &vars, external, 8);
+        let parsed_rule = parse_adhoc_rule(payload, &mmakefile, line_no).or_else(|| {
+            (rendered_rule != payload)
+                .then(|| parse_adhoc_rule(&rendered_rule, &mmakefile, line_no))
+                .flatten()
+        });
+        match parsed_rule {
             Some(ParsedRule::Header(rule)) => {
                 if let Some(transform) =
                     parse_header_transform(&rule, &lines, i, &base, &vars, external, &output_owners)
@@ -586,46 +867,91 @@ fn collect_copy_includes_with_lookup(
         skipped,
         adhoc,
         transforms,
+        bison_outputs,
         generated_files,
         script_outputs,
         skipped_script_outputs,
     }
 }
 
+fn is_python_pattern_rule(lines: &[&str], index: usize) -> bool {
+    let mut rule = String::new();
+    let mut cursor = index;
+    loop {
+        let Some(line) = lines.get(cursor) else {
+            return false;
+        };
+        let trimmed = line.trim_end();
+        rule.push_str(trimmed.trim_end_matches('\\').trim_end());
+        cursor += 1;
+        if !trimmed.ends_with('\\') {
+            break;
+        }
+        rule.push(' ');
+    }
+    let Some((target, _)) = rule.split_once(':') else {
+        return false;
+    };
+    target.contains('%')
+        && lines[cursor..]
+            .iter()
+            .take_while(|line| line.starts_with('\t'))
+            .any(|line| line.contains("$(PYTHON)"))
+}
+
 /// Maps a concrete generated-output token to the simple Make target which
 /// owns it, for example `workbench-libs-z-geninc : $(AROS_INCLUDES)/zconf.h`.
-fn collect_header_output_owners(lines: &[&str]) -> HashMap<String, String> {
+fn collect_header_output_owners(
+    lines: &[&str],
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> HashMap<String, String> {
     let mut owners = HashMap::new();
     for raw in lines {
         if raw.starts_with('\t') {
             continue;
         }
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.contains('=') {
-            continue;
+        let literal = raw.trim();
+        let rendered = substitute(literal, vars, external, 8);
+        for line in [literal, rendered.as_str()] {
+            if line.is_empty() || line.starts_with('#') || line.contains('=') {
+                continue;
+            }
+            let Some((target, prereqs)) = line.split_once(':') else {
+                continue;
+            };
+            let target = target.trim();
+            if target.is_empty()
+                || target.contains(char::is_whitespace)
+                || target.contains(['$', '/', '%'])
+            {
+                continue;
+            }
+            let outputs = resolve_file_list(prereqs, vars, external).map_or_else(
+                || prereqs.split_whitespace().map(str::to_owned).collect(),
+                |resolved| resolved.patterns,
+            );
+            if outputs.is_empty()
+                || !outputs.iter().all(|output| {
+                    [
+                        "$(AROS_INCLUDES)/",
+                        "$(GENINCDIR)/",
+                        "$(GENDIR)/",
+                        "${AROS_SDK_INCLUDE_DIR}/",
+                        "${AROS_GENINC_DIR}/",
+                        "${CMAKE_BINARY_DIR}/GENINCDIR/",
+                        "${CMAKE_BINARY_DIR}/gen/",
+                    ]
+                    .iter()
+                    .any(|root| output.starts_with(root))
+                })
+            {
+                continue;
+            }
+            for output in outputs {
+                owners.entry(output).or_insert_with(|| target.to_owned());
+            }
         }
-        let Some((target, prereqs)) = line.split_once(':') else {
-            continue;
-        };
-        let target = target.trim();
-        if target.is_empty()
-            || target.contains(char::is_whitespace)
-            || target.contains(['$', '/', '%'])
-        {
-            continue;
-        }
-        let mut words = prereqs.split_whitespace();
-        let Some(output) = words.next() else { continue };
-        if words.next().is_some()
-            || !["$(AROS_INCLUDES)/", "$(GENINCDIR)/", "$(GENDIR)/"]
-                .iter()
-                .any(|root| output.starts_with(root))
-        {
-            continue;
-        }
-        owners
-            .entry(output.to_owned())
-            .or_insert_with(|| target.to_owned());
     }
     owners
 }
@@ -650,6 +976,7 @@ fn resolve_transform_path(
     if output {
         if !rendered.starts_with("${AROS_SDK_INCLUDE_DIR}/")
             && !rendered.starts_with("${AROS_GENINC_DIR}/")
+            && !rendered.starts_with("${CMAKE_BINARY_DIR}/GENINCDIR/")
             && !rendered.starts_with("${CMAKE_BINARY_DIR}/gen/")
         {
             return None;
@@ -711,6 +1038,143 @@ fn safe_mkdir_guard(command: &str) -> bool {
         })
 }
 
+fn safe_recipe_prelude(command: &str) -> bool {
+    if let Some(message) = command
+        .strip_prefix("@$(ECHO) \"")
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        return !message.is_empty()
+            && !message
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r' | '`' | '$' | '\\'));
+    }
+    if let Some(directory) = command.strip_prefix("%mkdir_q dir=") {
+        return !directory.is_empty()
+            && directory.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(
+                        character,
+                        '_' | '-' | '.' | '/' | '$' | '(' | ')' | '{' | '}'
+                    )
+            });
+    }
+    safe_mkdir_guard(command)
+}
+
+fn literal_copy(commands: &[String]) -> bool {
+    let Some((copy, prelude)) = commands.split_last() else {
+        return false;
+    };
+    // GNU Make's leading `@` controls recipe echoing only; it is not part of
+    // the command.  Both spellings therefore have the same build semantics.
+    copy.strip_prefix('@').unwrap_or(copy) == "$(CP) $< $@"
+        && prelude.iter().all(|command| safe_recipe_prelude(command))
+}
+
+fn split_top_level_arguments_preserving_space(expression: &str) -> Option<Vec<&str>> {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut out = Vec::new();
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
+            ',' if depth == 0 => {
+                out.push(&expression[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then(|| {
+        out.push(&expression[start..]);
+        out
+    })
+}
+
+fn resolve_scalar_make_expression(
+    raw: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> Option<String> {
+    let substituted = substitute(raw, vars, external, 8);
+    let expression = substituted.trim();
+    if let Some(arguments) = outer_make_function(expression, "subst") {
+        let arguments = split_top_level_arguments_preserving_space(arguments)?;
+        if arguments.len() != 3 {
+            return None;
+        }
+        let from = resolve_scalar_make_expression(arguments[0].trim(), vars, external)?;
+        let replacement = substitute(arguments[1], vars, external, 8);
+        let text = resolve_scalar_make_expression(arguments[2].trim(), vars, external)?;
+        if replacement.contains("$(") {
+            return None;
+        }
+        return Some(text.replace(&from, &replacement));
+    }
+    if let Some(arguments) = outer_make_function(expression, "word") {
+        let arguments = split_top_level_arguments(arguments)?;
+        if arguments.len() != 2 {
+            return None;
+        }
+        let index: usize = resolve_scalar_make_expression(arguments[0], vars, external)?
+            .parse()
+            .ok()?;
+        if index == 0 {
+            return None;
+        }
+        let words = resolve_scalar_make_expression(arguments[1], vars, external)?;
+        return Some(
+            words
+                .split_whitespace()
+                .nth(index - 1)
+                .unwrap_or("")
+                .to_owned(),
+        );
+    }
+    (!expression.contains("$(")).then(|| expression.to_owned())
+}
+
+fn literal_template_substitutions(
+    commands: &[String],
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> Option<Vec<String>> {
+    let (recipe, prelude) = commands.split_last()?;
+    if !prelude.iter().all(|command| safe_recipe_prelude(command)) {
+        return None;
+    }
+    let pipeline = recipe
+        .strip_prefix("@cat $< | $(SED) ")?
+        .strip_suffix(" > $@")?;
+    let mut substitutions = Vec::new();
+    for expression in pipeline.split(" | $(SED) ") {
+        let chars: Vec<_> = expression.strip_prefix('s')?.chars().collect();
+        let delimiter = *chars.first()?;
+        if delimiter.is_ascii_alphanumeric() || delimiter.is_whitespace() || delimiter == '\\' {
+            return None;
+        }
+        let mut at = 1usize;
+        let token = parse_literal_sed_field(&chars, &mut at, delimiter)?;
+        let replacement = parse_literal_sed_field(&chars, &mut at, delimiter)?;
+        if at != chars.len()
+            || token.is_empty()
+            || token
+                .chars()
+                .any(|ch| matches!(ch, '.' | '*' | '[' | ']' | '^' | '$' | '\\'))
+        {
+            return None;
+        }
+        let replacement = resolve_scalar_make_expression(&replacement, vars, external)?;
+        if replacement.contains([';', '\n', '\r']) {
+            return None;
+        }
+        substitutions.push(token);
+        substitutions.push(replacement);
+    }
+    (!substitutions.is_empty()).then_some(substitutions)
+}
+
 fn literal_sed_substitution(commands: &[String]) -> Option<(String, String)> {
     let recipe = match commands {
         [sed] => sed.as_str(),
@@ -761,10 +1225,15 @@ fn parse_header_transform(
     output_owners: &HashMap<String, String>,
 ) -> Option<HeaderTransformDecl> {
     let raw_output = format!("{}/{}", rule.root.trim_end_matches('/'), rule.dest);
-    let owner = output_owners.get(&raw_output)?.clone();
+    let output = resolve_transform_path(&raw_output, base, vars, external, true)?;
+    let owner = output_owners
+        .get(&raw_output)
+        .or_else(|| output_owners.get(&output))?
+        .clone();
     let mut prereqs = rule.prereqs.split_whitespace();
     let raw_input = prereqs.next()?;
-    if prereqs.next().is_some() || raw_input.contains(['%', '*', '?']) {
+    if raw_input.contains(['%', '*', '?']) || prereqs.any(|prereq| prereq.contains(['%', '*', '?']))
+    {
         return None;
     }
 
@@ -787,9 +1256,19 @@ fn parse_header_transform(
     if !command.is_empty() {
         return None;
     }
-    let (match_text, replacement) = literal_sed_substitution(&commands)?;
+    let (match_text, replacement, copy_only, substitutions) =
+        if let Some((match_text, replacement)) = literal_sed_substitution(&commands) {
+            (match_text, replacement, false, Vec::new())
+        } else if literal_copy(&commands) {
+            (String::new(), String::new(), true, Vec::new())
+        } else if let Some(substitutions) =
+            literal_template_substitutions(&commands, vars, external)
+        {
+            (String::new(), String::new(), false, substitutions)
+        } else {
+            return None;
+        };
     let input = resolve_transform_path(raw_input, base, vars, external, false)?;
-    let output = resolve_transform_path(&raw_output, base, vars, external, true)?;
 
     Some(HeaderTransformDecl {
         name: owner,
@@ -799,6 +1278,8 @@ fn parse_header_transform(
         output,
         match_text,
         replacement,
+        copy_only,
+        substitutions,
         dependencies: Vec::new(),
         consumers: Vec::new(),
     })
@@ -820,11 +1301,24 @@ enum ParsedRule {
 /// meant such a rule was silently absent and only surfaced as an undeclared
 /// identifier in the module that includes it.
 fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<ParsedRule> {
-    const ROOTS: [&str; 3] = ["$(AROS_INCLUDES)/", "$(GENINCDIR)/", "$(GENDIR)/"];
+    const ROOTS: [&str; 7] = [
+        "$(AROS_INCLUDES)/",
+        "$(GENINCDIR)/",
+        "$(GENDIR)/",
+        "${AROS_SDK_INCLUDE_DIR}/",
+        "${AROS_GENINC_DIR}/",
+        "${CMAKE_BINARY_DIR}/GENINCDIR/",
+        "${CMAKE_BINARY_DIR}/gen/",
+    ];
 
     // A rule, not a variable assignment.
     let (target, prereqs) = line.split_once(':')?;
     if target.contains('=') || prereqs.starts_with('=') {
+        return None;
+    }
+    // GNU Make target-specific variable assignment, not a file-producing
+    // rule: `output.h: PRIVATE_SCRIPT := $(PYTHON) generator.py`.
+    if split_assignment(prereqs.trim()).is_some() {
         return None;
     }
 
@@ -865,7 +1359,8 @@ fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<Parse
     let extension = Path::new(&dest)
         .extension()
         .and_then(|value| value.to_str());
-    let is_header = root != "$(GENDIR)/" || matches!(extension, Some("h" | "hpp"));
+    let is_private_generated = matches!(root, "$(GENDIR)/" | "${CMAKE_BINARY_DIR}/gen/");
+    let is_header = !is_private_generated || matches!(extension, Some("h" | "hpp"));
     if is_header {
         return Some(ParsedRule::Header(AdhocHeaderRule {
             file: mmakefile.to_owned(),
@@ -891,6 +1386,72 @@ fn parse_adhoc_rule(line: &str, mmakefile: &str, line_no: usize) -> Option<Parse
     Some(ParsedRule::Other(format!(
         "{root}{dest} <- {prereqs}  ({mmakefile}:{line_no})"
     )))
+}
+
+fn parse_bison_output(
+    lines: &[&str],
+    index: usize,
+    mmakefile: &str,
+    base: &str,
+    vars: &HashMap<String, String>,
+    external: ExternalVarLookup<'_>,
+) -> Option<BisonOutputDecl> {
+    let rule = lines.get(index)?.trim();
+    let (raw_output, raw_input) = rule.split_once(':')?;
+    let raw_output = raw_output.trim();
+    let raw_input = raw_input.trim();
+    if raw_output.contains(char::is_whitespace)
+        || raw_input.contains(char::is_whitespace)
+        || !Path::new(raw_output)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("c"))
+        || !Path::new(raw_input)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("y"))
+    {
+        return None;
+    }
+
+    let commands: Vec<_> = lines
+        .iter()
+        .skip(index + 1)
+        .take_while(|line| line.starts_with('\t'))
+        .map(|line| line.trim().to_owned())
+        .collect();
+    if commands.as_slice()
+        != [
+            "@$(ECHO) Generating $(notdir $@) from $<...",
+            "@$(BISON) -o $@ $<",
+        ]
+    {
+        return None;
+    }
+
+    let output = resolve_transform_path(raw_output, base, vars, external, true)?;
+    let input = resolve_transform_path(raw_input, base, vars, external, false)?;
+    let owner = lines.iter().find_map(|line| {
+        if line.starts_with('\t') {
+            return None;
+        }
+        let (target, prereqs) = line.trim().split_once(':')?;
+        let owner = target.trim().strip_prefix("$(")?.strip_suffix("_DEPS)")?;
+        if owner.is_empty() || owner.contains(char::is_whitespace) {
+            return None;
+        }
+        let rendered = substitute(prereqs.trim(), vars, external, 8);
+        rendered
+            .split_whitespace()
+            .any(|prereq| prereq == output)
+            .then(|| owner.to_owned())
+    })?;
+
+    Some(BisonOutputDecl {
+        owner,
+        file: mmakefile.to_owned(),
+        line: index + 1,
+        input,
+        output,
+    })
 }
 
 /// A rule of the shape `$(GENDIR)/... : <inputs>` whose single recipe line is
@@ -923,7 +1484,7 @@ fn parse_script_output(
 
     let (target, prereqs) = joined.split_once(':')?;
     let target = target.trim();
-    if !target.starts_with("$(GENDIR)/") {
+    if target.contains('%') {
         return None;
     }
 
@@ -932,9 +1493,26 @@ fn parse_script_output(
         .take_while(|line| line.starts_with('\t'))
         .map(|line| line.trim())
         .collect();
-    // `$(PYTHON)` before substitution, so the shape is what the reference
-    // states rather than whatever a variable happens to expand to.
-    if recipe.len() != 1 || !recipe[0].starts_with("$(PYTHON)") {
+    // Directory creation and the exact informational status line carry no
+    // generator semantics. Every other recipe still has to collapse to one
+    // Python invocation.
+    let commands: Vec<&str> = recipe
+        .iter()
+        .copied()
+        .filter(|line| {
+            !line.starts_with("%mkdir_q ")
+                && !line.starts_with("$(Q)$(ECHO) \"Generating ")
+                && !line.starts_with("@$(ECHO) Generating $@")
+        })
+        .collect();
+    let [python_recipe] = commands.as_slice() else {
+        return None;
+    };
+    // Do not diagnose ordinary compile/copy/sed rules merely because their
+    // target contains a variable this specialised recogniser cannot resolve.
+    // From here on, every error is reserved for a recipe that actually claims
+    // to invoke the supported Python lane.
+    if !python_recipe.contains("$(PYTHON)") {
         return None;
     }
 
@@ -949,47 +1527,154 @@ fn parse_script_output(
         Ok(value)
     };
 
-    let output = match resolve(target) {
+    let rendered_outputs = match resolve(target) {
         Ok(value) => value,
         Err(reason) => return Some(Err(format!("{base}: target {reason}"))),
     };
+    let outputs: Vec<String> = rendered_outputs
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if outputs.is_empty()
+        || outputs.iter().any(|output| {
+            !output.starts_with("${AROS_BUILD_DIR}/") && !output.starts_with("${CMAKE_BINARY_DIR}/")
+        })
+    {
+        return None;
+    }
+    let output = outputs[0].clone();
 
     // The order-only half of the prerequisites is a directory, which CMake
     // creates itself.
     let ordered = prereqs.split('|').next().unwrap_or_default();
     let mut depends = Vec::new();
-    for raw in ordered.split_whitespace() {
+    for raw in split_make_words(ordered)? {
         match resolve(raw) {
-            Ok(value) => depends.push(value),
+            Ok(value) => depends.extend(value.split_whitespace().map(str::to_owned)),
             Err(reason) => return Some(Err(format!("{base}: prerequisite {reason}"))),
         }
     }
 
-    let mut words = recipe[0]
-        .strip_prefix("$(PYTHON)")
-        .unwrap_or_default()
-        .split_whitespace();
-    let Some(raw_script) = words.next() else {
+    let mut command = python_recipe
+        .trim_start_matches('@')
+        .strip_prefix("$(Q)")
+        .unwrap_or_else(|| python_recipe.trim_start_matches('@'))
+        .trim();
+    if let Some(without_failure) = command.strip_suffix(" || ($(RM) $@; false)") {
+        command = without_failure.trim_end();
+    }
+
+    let stdout = if let Some((invocation, destination)) = command.rsplit_once('>') {
+        if destination.trim() != "$@" {
+            return Some(Err(format!(
+                "{base}: {output} redirects Python output to unsupported `{}`",
+                destination.trim()
+            )));
+        }
+        command = invocation.trim_end();
+        true
+    } else {
+        false
+    };
+    if stdout && outputs.len() != 1 {
+        return Some(Err(format!(
+            "{base}: stdout recipe declares {} outputs; transpiler update required",
+            outputs.len()
+        )));
+    }
+
+    let mut working_directory = None;
+    if let Some(after_cd) = command.strip_prefix("cd ") {
+        let Some((raw_directory, invocation)) = after_cd.split_once(" && ") else {
+            return Some(Err(format!("{base}: malformed Python working directory")));
+        };
+        working_directory = match resolve(raw_directory.trim()) {
+            Ok(value) => Some(value),
+            Err(reason) => return Some(Err(format!("{base}: working directory {reason}"))),
+        };
+        command = invocation.trim();
+    }
+
+    command = command.strip_prefix("$(Q)").unwrap_or(command).trim();
+    let after_python = command.strip_prefix("$(PYTHON)")?;
+    let raw_words: Vec<&str> = split_make_words(after_python)?
+        .into_iter()
+        .filter(|word| *word != "$(PYTHON_FLAGS)")
+        .collect();
+    let mut expanded_words = Vec::new();
+    for raw in raw_words {
+        if raw == "$^" {
+            expanded_words.extend(depends.iter().cloned());
+            continue;
+        }
+        let resolved = match raw {
+            "$<" => depends
+                .first()
+                .cloned()
+                .ok_or_else(|| format!("{base}: {output} uses $< without a prerequisite")),
+            "$@" => Ok(output.clone()),
+            "$(dir $@)" => Ok(format!(
+                "{}/",
+                Path::new(&output)
+                    .parent()
+                    .and_then(Path::to_str)
+                    .unwrap_or_default()
+            )),
+            _ => resolve(raw).map_err(|reason| format!("{base}: argument {reason}")),
+        };
+        match resolved {
+            Ok(value) => expanded_words.extend(value.split_whitespace().map(str::to_owned)),
+            Err(reason) => return Some(Err(reason)),
+        }
+    }
+    let Some(script) = expanded_words.first().cloned() else {
         return Some(Err(format!("{base}: {output} has no script to run")));
     };
-    let script = match resolve(raw_script) {
-        Ok(value) => value,
-        Err(reason) => return Some(Err(format!("{base}: script {reason}"))),
-    };
-    let mut arguments = Vec::new();
-    for raw in words {
-        match resolve(raw) {
-            Ok(value) => arguments.push(value),
-            Err(reason) => return Some(Err(format!("{base}: argument {reason}"))),
+    let arguments = expanded_words.into_iter().skip(1).collect();
+
+    let mut consumer_source_stems = Vec::new();
+    for raw in lines {
+        if raw.starts_with('\t') {
+            continue;
+        }
+        let Some((targets, prerequisites)) = raw.trim().split_once(':') else {
+            continue;
+        };
+        let rendered_prerequisites = substitute(prerequisites.trim(), vars, external, 8);
+        if !rendered_prerequisites
+            .split_whitespace()
+            .any(|prerequisite| prerequisite == output)
+        {
+            continue;
+        }
+        let rendered_targets = substitute(targets.trim(), vars, external, 8);
+        for target in rendered_targets.split_whitespace() {
+            let path = Path::new(target);
+            let is_object_dependency = path.extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("o") || extension.eq_ignore_ascii_case("d")
+            });
+            if !is_object_dependency {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                if !consumer_source_stems.iter().any(|known| known == stem) {
+                    consumer_source_stems.push(stem.to_owned());
+                }
+            }
         }
     }
 
     Some(Ok(ScriptOutputDecl {
         directory: base.to_owned(),
         output,
+        additional_outputs: outputs.into_iter().skip(1).collect(),
         script,
         arguments,
+        stdout,
+        working_directory,
         depends,
+        consumer_source_stems,
+        consumer_targets: Vec::new(),
     }))
 }
 
@@ -1265,6 +1950,140 @@ $(AROS_INCLUDES)/zconf.h : $(ARCHSRCDIR)/zconf.h.chr
             "#if !defined(CHROMIUM_ZLIB_NO_CHROMECONF)"
         );
         assert_eq!(transform.replacement, "#if defined(ZLIB_USE_CHROMECONF)");
+        assert!(!transform.copy_only);
+    }
+
+    #[test]
+    fn promotes_an_exact_header_copy_with_safe_prelude() {
+        let src = r#"
+webp-generated : $(GENDIR)/$(CURDIR)/src/webp/config.h
+
+$(GENDIR)/$(CURDIR)/src/webp/config.h : $(SRCDIR)/$(CURDIR)/config.h $(SRCDIR)/$(CURDIR)/mmakefile.src
+	@$(ECHO) "Generating src/webp/config.h ..."
+	%mkdir_q dir=$(GENDIR)/$(CURDIR)/src/webp
+	@$(CP) $< $@
+"#;
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/classes/datatypes/webp"));
+        assert!(adhoc.is_empty(), "promoted copy stayed adhoc: {adhoc:?}");
+        assert_eq!(transforms.len(), 1, "transforms: {transforms:?}");
+        let transform = &transforms[0];
+        assert!(transform.copy_only);
+        assert_eq!(transform.name, "webp-generated");
+        assert_eq!(
+            transform.input,
+            "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/webp/config.h"
+        );
+        assert_eq!(
+            transform.output,
+            "${CMAKE_BINARY_DIR}/gen/workbench/classes/datatypes/webp/src/webp/config.h"
+        );
+    }
+
+    #[test]
+    fn promotes_the_real_tiff_sdk_header_copies_without_recipe_echo_suppression() {
+        let src = include_str!("../../../../../workbench/libs/tiff/mmakefile.src");
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/libs/tiff"));
+
+        for header in ["tiffconf.h", "tifftypes.h", "tiffinline.h"] {
+            let transform = transforms
+                .iter()
+                .find(|transform| transform.output.ends_with(header))
+                .unwrap_or_else(|| panic!("missing transform for {header}: {transforms:?}"));
+            assert_eq!(transform.name, "workbench-libs-tiff-generated");
+            assert!(transform.copy_only);
+            assert!(transform
+                .input
+                .ends_with(&format!("/workbench/libs/tiff/{header}")));
+        }
+        assert!(
+            adhoc
+                .iter()
+                .all(|rule| !["tiffconf.h", "tifftypes.h", "tiffinline.h"]
+                    .contains(&rule.dest.as_str())),
+            "TIFF copies stayed in the residual audit: {adhoc:?}"
+        );
+    }
+
+    #[test]
+    fn promotes_a_copy_through_a_module_private_include_variable() {
+        let src = r#"
+JXLGENINCDIR := $(GENDIR)/$(CURDIR)/include
+$(JXLGENINCDIR)/jxl/jxl_export.h : $(SRCDIR)/$(CURDIR)/jxl_export.h
+	@$(ECHO) "Generating jxl/jxl_export.h ..."
+	%mkdir_q dir=$(JXLGENINCDIR)/jxl
+	@$(CP) $< $@
+
+jxl-genfiles : $(JXLGENINCDIR)/jxl/jxl_export.h
+"#;
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/classes/datatypes/jpegxl"));
+        assert!(adhoc.is_empty(), "promoted copy stayed adhoc: {adhoc:?}");
+        assert_eq!(transforms.len(), 1, "transforms: {transforms:?}");
+        assert!(transforms[0].copy_only);
+        assert_eq!(transforms[0].name, "jxl-genfiles");
+        assert_eq!(
+            transforms[0].output,
+            "${CMAKE_BINARY_DIR}/gen/workbench/classes/datatypes/jpegxl/include/jxl/jxl_export.h"
+        );
+    }
+
+    #[test]
+    fn real_jpegxl_export_copy_is_promoted() {
+        let src = include_str!("../../../../../workbench/classes/datatypes/jpegxl/mmakefile.src");
+        let CopyIncludesScan {
+            transforms, adhoc, ..
+        } = collect_copy_includes(src, &PathBuf::from("workbench/classes/datatypes/jpegxl"));
+        assert!(
+            transforms.iter().any(|transform| {
+                transform.copy_only && transform.output.ends_with("/jxl/jxl_export.h")
+            }),
+            "transforms: {transforms:?}; adhoc: {adhoc:?}"
+        );
+        let version = transforms
+            .iter()
+            .find(|transform| transform.output.ends_with("/jxl/version.h"))
+            .expect("version template was not promoted");
+        assert_eq!(
+            version.substitutions,
+            [
+                "@JPEGXL_MAJOR_VERSION@",
+                "0",
+                "@JPEGXL_MINOR_VERSION@",
+                "12",
+                "@JPEGXL_PATCH_VERSION@",
+                "0",
+            ]
+        );
+    }
+
+    #[test]
+    fn promotes_exact_bison_output_and_binds_its_dependency_owner() {
+        let src = r"
+$(OBJDIR)/evalParser.tab.c : evalParser.y
+	@$(ECHO) Generating $(notdir $@) from $<...
+	@$(BISON) -o $@ $<
+
+$(workbench-c-eval_DEPS) : $(OBJDIR)/evalParser.tab.c
+";
+        let scan = collect_copy_includes(src, &PathBuf::from("workbench/c"));
+        assert!(
+            scan.generated_files.is_empty(),
+            "{:?}",
+            scan.generated_files
+        );
+        assert_eq!(scan.bison_outputs.len(), 1, "{:?}", scan.bison_outputs);
+        let output = &scan.bison_outputs[0];
+        assert_eq!(output.owner, "workbench-c-eval");
+        assert_eq!(output.input, "${CMAKE_SOURCE_DIR}/workbench/c/evalParser.y");
+        assert_eq!(
+            output.output,
+            "${CMAKE_BINARY_DIR}/gen/workbench/c/evalParser.tab.c"
+        );
     }
 
     #[test]
@@ -1385,6 +2204,32 @@ FT2SVC_INCLUDE_FILES := $(notdir $(call WILDCARD, $(FT2SRCDIR)/include/freetype/
     }
 
     #[test]
+    fn resolves_gnu_wildcard_sort_and_patsubst_header_lists() {
+        let src = "\
+ARCHSRCDIR := $(PORTSDIR)/xz/xz-5.8.3
+API_HEADERS := $(sort $(wildcard $(ARCHSRCDIR)/src/liblzma/api/lzma/*.h))
+APIINCLUDE_FILES := $(patsubst $(ARCHSRCDIR)/src/liblzma/api/lzma/%,%,$(API_HEADERS))
+%copy_includes mmake=lzma-includes dir=$(ARCHSRCDIR)/src/liblzma/api/lzma includes=$(APIINCLUDE_FILES) path=lzma
+INCLUDE_FILES := $(wildcard include/*.h)
+%copy_includes mmake=dbus-includes dir=include path=dbus
+";
+        let CopyIncludesScan { decls, skipped, .. } =
+            collect_copy_includes(src, &PathBuf::from("workbench/libs/example"));
+
+        assert!(skipped.is_empty(), "skipped: {skipped:?}");
+        assert_eq!(decls.len(), 2);
+        assert_eq!(
+            decls[0].source_dir,
+            "${AROS_PORTS_DIR}/xz/xz-5.8.3/src/liblzma/api/lzma"
+        );
+        assert_eq!(decls[0].patterns, ["*.h"]);
+        assert_eq!(decls[0].dest, "lzma");
+        assert_eq!(decls[1].source_dir, "workbench/libs/example/include");
+        assert_eq!(decls[1].patterns, ["*.h"]);
+        assert_eq!(decls[1].dest, "dbus");
+    }
+
+    #[test]
     fn module_private_generated_header_is_recorded() {
         // rom/dos/mmakefile.src:90. Before $(GENDIR) was a recognised root this
         // rule went unreported, and the missing errorlist.h surfaced as an
@@ -1500,5 +2345,86 @@ $(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
             "{:?}",
             scan.generated_files
         );
+    }
+
+    #[test]
+    fn vc4_cle_stdout_generators_are_modelled_exactly() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let rel = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";
+        let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
+        let external = |name: &str| match name {
+            "top_builddir" => Some("$(GENDIR)/workbench/libs/mesa/20.0.8".to_owned()),
+            "top_srcdir" => Some("$(PORTSDIR)/mesa/mesa-20.0.8".to_owned()),
+            _ => None,
+        };
+        let scan =
+            collect_copy_includes_with_lookup(&content, std::path::Path::new(rel), Some(&external));
+
+        assert!(
+            !scan
+                .skipped_script_outputs
+                .iter()
+                .any(|reason| reason.contains("v3d_packet")),
+            "{:?}",
+            scan.skipped_script_outputs
+        );
+        assert_eq!(scan.script_outputs.len(), 4, "{:?}", scan.script_outputs);
+        let v33 = scan
+            .script_outputs
+            .iter()
+            .find(|declaration| declaration.output.ends_with("v3d_packet_v33_pack.h"))
+            .expect("v33 generator");
+        assert!(v33.stdout);
+        assert_eq!(v33.arguments.last().map(String::as_str), Some("33"));
+        assert!(v33.script.ends_with("/src/broadcom/cle/gen_pack_header.py"));
+        assert!(v33
+            .depends
+            .iter()
+            .any(|path| path.ends_with("v3d_packet_v33.xml")));
+        assert!(v33.working_directory.is_none());
+        assert!(
+            !scan
+                .generated_files
+                .iter()
+                .any(|note| note.contains("v3d_packet")),
+            "{:?}",
+            scan.generated_files
+        );
+    }
+
+    #[test]
+    fn generated_owner_resolves_addprefix_and_filter() {
+        let src = r"
+GENERATED := one.c two.h
+ROOT := $(GENDIR)/module
+owner-generated : $(addprefix $(ROOT)/,$(filter %.h,$(GENERATED)))
+$(ROOT)/two.h: $(SRCDIR)/generator.py
+	$(PYTHON) $< > $@
+";
+        let scan = collect_copy_includes(src, Path::new("module"));
+        assert_eq!(scan.script_outputs.len(), 1, "{:?}", scan.script_outputs);
+        assert_eq!(scan.script_outputs[0].consumer_targets, ["owner-generated"]);
+    }
+
+    #[test]
+    fn aboutaros_private_python_headers_are_modelled_with_their_consumer() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let rel = "workbench/system/AboutAROS";
+        let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
+        let scan = collect_copy_includes(&content, std::path::Path::new(rel));
+
+        assert_eq!(scan.script_outputs.len(), 3, "{:?}", scan.script_outputs);
+        assert!(scan.skipped_script_outputs.is_empty());
+        for declaration in &scan.script_outputs {
+            assert!(
+                declaration
+                    .output
+                    .starts_with("${AROS_BUILD_DIR}/workbench/system/AboutAROS/"),
+                "{}",
+                declaration.output
+            );
+            assert_eq!(declaration.consumer_source_stems, ["aboutaros"]);
+            assert_eq!(declaration.arguments.last(), Some(&declaration.output));
+        }
     }
 }

@@ -18,6 +18,7 @@ pub mod graph;
 pub mod hidd_stubs;
 pub mod host_generated_headers;
 pub mod icons;
+pub mod ilbm;
 pub mod includes;
 pub mod local_make_includes;
 pub mod make_deps;

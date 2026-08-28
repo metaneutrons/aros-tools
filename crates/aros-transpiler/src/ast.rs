@@ -2,7 +2,7 @@ use crate::arch_sources::ArchSourceDecl;
 use crate::copy_includes::{AdhocHeaderRule, CopyIncludesDecl, HeaderTransformDecl};
 use crate::fetch::FetchDecl;
 use crate::flags::FlagSet;
-use crate::flexcat::FlexCatSourceDecl;
+use crate::flexcat::{FlexCatHeaderDecl, FlexCatSourceDecl};
 use crate::includes::ArchIncludeDecl;
 use aros_common::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -487,6 +487,12 @@ pub struct ParsedMmakefile {
     pub python_outputs: Vec<PythonOutputsDecl>,
     /// Paired hand-written FlexCat source/header/catalog rules.
     pub flexcat_sources: Vec<FlexCatSourceDecl>,
+    /// Hand-written FlexCat rules which generate only a compile-time header.
+    pub flexcat_headers: Vec<FlexCatHeaderDecl>,
+    /// Exact in-tree ILBM-to-C include generators.
+    pub ilbm_sources: Vec<crate::ilbm::IlbmSourceDecl>,
+    /// ILBM-to-C recipes that no longer satisfy the safe closed contract.
+    pub skipped_ilbm_sources: Vec<String>,
     /// Hand-written FlexCat source rules that did not meet the narrow safe
     /// contract and therefore remain deliberately unmodelled.
     pub skipped_flexcat_sources: Vec<String>,
@@ -526,6 +532,8 @@ pub struct ParsedMmakefile {
     pub adhoc_header_rules: Vec<AdhocHeaderRule>,
     /// Safe, literal hand-written recipes promoted to real build outputs.
     pub header_transforms: Vec<HeaderTransformDecl>,
+    /// Exact host-Bison generated C outputs.
+    pub bison_outputs: Vec<crate::copy_includes::BisonOutputDecl>,
     /// Safe declaration-owned literal `#define` headers.
     pub define_headers: Vec<DefineHeaderDecl>,
     /// Hand-written `$(GENDIR)` rules producing something other than a header,

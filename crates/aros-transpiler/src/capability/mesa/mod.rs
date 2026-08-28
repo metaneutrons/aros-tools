@@ -304,8 +304,8 @@ pub(crate) fn compile_contract(
                     .chain([
                         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/galliumglue",
                         "${CMAKE_SOURCE_DIR}/workbench/hidds/v3d",
-                        "${CMAKE_BINARY_DIR}/gen/cle-gen",
-                        "${CMAKE_BINARY_DIR}/gen/cle-gen/broadcom",
+                        "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen",
+                        "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen/broadcom",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/v3d",

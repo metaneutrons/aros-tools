@@ -71,6 +71,13 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
             .unwrap_or_else(|| panic!("{cpu}: missing V3D archive"));
         assert_eq!(target.source_files.len(), 50, "{cpu}");
         assert_eq!(target.undefines, ["HAVE_VALGRIND"], "{cpu}");
+        assert!(
+            target.include_dirs.iter().any(|directory| {
+                directory == "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen"
+            }),
+            "{cpu}: {:#?}",
+            target.include_dirs
+        );
         assert_eq!(
             target.linklib_output_dir.as_deref(),
             Some("${AROS_BUILD_DIR}/gen/lib/mesa20.0.8"),
@@ -84,12 +91,7 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             owners,
-            [
-                "linklibs-gallium_v3d-gen-cle",
-                "linklibs-gallium_v3d-gen-v3dx",
-            ]
-            .into_iter()
-            .collect(),
+            std::iter::once("linklibs-gallium_v3d-gen-v3dx").collect(),
             "{cpu}"
         );
         let wrappers = parsed
@@ -108,18 +110,15 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
         }));
 
         let cle = parsed
-            .python_outputs
+            .script_outputs
             .iter()
-            .find(|declaration| declaration.owner.ends_with("gen-cle"))
-            .unwrap();
-        assert_eq!(
-            cle.source_inputs,
-            ["src/broadcom/cle/v3d_packet_v33.xml"],
-            "{cpu}"
-        );
-        assert_eq!(cle.jobs.len(), 3, "{cpu}");
-        assert!(cle.jobs.iter().all(|job| {
-            job.output.starts_with("broadcom/cle/v3d_packet_v") && job.output.ends_with("_pack.h")
+            .filter(|declaration| declaration.output.contains("cle-gen/broadcom/cle"))
+            .collect::<Vec<_>>();
+        assert_eq!(cle.len(), 3, "{cpu}: {cle:#?}");
+        assert!(cle.iter().all(|declaration| {
+            declaration.stdout
+                && declaration.output.ends_with("_pack.h")
+                && declaration.consumer_targets == ["linklibs-gallium_v3d-gen-cle"]
         }));
     }
 }

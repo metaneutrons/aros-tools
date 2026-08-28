@@ -61,10 +61,26 @@ pub struct FlexCatSourceDecl {
     pub consumers: Vec<String>,
 }
 
+/// One hand-written FlexCat rule which produces only a generated header.
+///
+/// Unlike [`FlexCatSourceDecl`], its owner is reached through an ordinary #MM
+/// dependency, so the generated include directory can be propagated while
+/// that edge is attached; no source-list substitution is required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlexCatHeaderDecl {
+    pub owner: String,
+    pub declaring_dir: String,
+    pub line: usize,
+    pub header: String,
+    pub description: String,
+    pub header_template: String,
+}
+
 /// Result of scanning one mmakefile for the narrow paired FlexCat capability.
 #[derive(Debug, Default)]
 pub struct FlexCatSourceScan {
     pub declarations: Vec<FlexCatSourceDecl>,
+    pub headers: Vec<FlexCatHeaderDecl>,
     pub skipped: Vec<String>,
 }
 
@@ -95,6 +111,71 @@ pub fn collect_flexcat_source_rules(
     let mut scan = FlexCatSourceScan::default();
 
     for rule in &rules {
+        let header = rule.target.trim();
+        if !simple_file_name(header, ".h") {
+            continue;
+        }
+        let Some((description_raw, outputs)) = flexcat_recipe(rule) else {
+            continue;
+        };
+        let [(output, template_raw)] = outputs.as_slice() else {
+            continue;
+        };
+        if output != header {
+            continue;
+        }
+
+        let owners: Vec<_> = rules
+            .iter()
+            .filter(|candidate| {
+                simple_target_name(candidate.target.trim())
+                    && words(candidate.prereqs).contains(&header.to_owned())
+            })
+            .map(|candidate| candidate.target.trim().to_owned())
+            .collect();
+        if owners.len() != 1 {
+            scan.skipped.push(format!(
+                "{}:{}: FlexCat header {} has {} possible MetaMake owners",
+                declaring_dir,
+                rule.line,
+                header,
+                owners.len()
+            ));
+            continue;
+        }
+
+        let Some(description_path) = source_path(&description_raw, root, rel_dir) else {
+            scan.skipped.push(format!(
+                "{}:{}: FlexCat header {} has no safe source-tree description path",
+                declaring_dir, rule.line, header
+            ));
+            continue;
+        };
+        let Some(template_path) = source_path(template_raw, root, rel_dir) else {
+            scan.skipped.push(format!(
+                "{}:{}: FlexCat header {} has no safe source-description template",
+                declaring_dir, rule.line, header
+            ));
+            continue;
+        };
+        let Some(description) = cmake_source_path(&description_path, root) else {
+            continue;
+        };
+        let Some(header_template) = cmake_source_path(&template_path, root) else {
+            continue;
+        };
+
+        scan.headers.push(FlexCatHeaderDecl {
+            owner: owners[0].clone(),
+            declaring_dir: declaring_dir.clone(),
+            line: rule.line,
+            header: header.to_owned(),
+            description,
+            header_template,
+        });
+    }
+
+    for rule in &rules {
         let source = rule.target.trim();
         if !simple_file_name(source, ".c") {
             continue;
@@ -102,6 +183,9 @@ pub fn collect_flexcat_source_rules(
         let Some((description_raw, outputs)) = flexcat_recipe(rule) else {
             continue;
         };
+        if outputs.len() != 2 {
+            continue;
+        }
 
         let mut header = None;
         let mut header_template = None;
@@ -273,7 +357,7 @@ fn flexcat_recipe(rule: &Rule<'_>) -> Option<(String, Vec<(String, String)>)> {
         }
         outputs.push((output.to_owned(), template.to_owned()));
     }
-    (outputs.len() == 2).then_some((description, outputs))
+    (!outputs.is_empty()).then_some((description, outputs))
 }
 
 /// The catalog products that accompany a hand-written FlexCat source rule.
@@ -398,9 +482,12 @@ fn po_languages(directory: &Path) -> Option<Vec<String>> {
 
 fn source_path(raw: &str, root: &Path, rel_dir: &Path) -> Option<PathBuf> {
     let relative = raw.strip_prefix("$(SRCDIR)/$(CURDIR)/")?;
-    let relative = safe_relative(relative)?;
-    let path = root.join(rel_dir).join(relative);
-    path.is_file().then_some(path)
+    if relative.is_empty() || relative.contains(['$', ';']) || Path::new(relative).is_absolute() {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let path = fs::canonicalize(root.join(rel_dir).join(relative)).ok()?;
+    (path.is_file() && path.starts_with(&canonical_root)).then_some(path)
 }
 
 fn safe_relative(raw: &str) -> Option<PathBuf> {
@@ -450,7 +537,8 @@ fn slash_path(path: &Path) -> String {
 /// `None` if the path is not below `root`, which cannot happen for a path this
 /// module built, and must be reported rather than emitted if it ever does.
 fn cmake_source_path(path: &Path, root: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let relative = path.strip_prefix(canonical_root).ok()?;
     let relative = relative.to_string_lossy().replace('\\', "/");
     if relative.is_empty() {
         return None;
@@ -499,6 +587,36 @@ mod tests {
         );
         assert!(declaration.languages.contains(&"german".to_owned()));
         assert!(declaration.languages.contains(&"russian".to_owned()));
+    }
+
+    #[test]
+    fn openurl_header_only_rule_keeps_parent_description_path() {
+        let root = root();
+        let rel = Path::new("external/openurl/prefs");
+        let content = read_source(&root.join(rel).join("mmakefile.src")).unwrap();
+        let joined = join_continuations(&content);
+        let scan = collect_flexcat_source_rules(
+            &content,
+            &root,
+            rel,
+            &collect_vars(&joined),
+            &DirVars::load(&root),
+        );
+
+        assert!(scan.skipped.is_empty(), "{:#?}", scan.skipped);
+        assert!(scan.declarations.is_empty());
+        assert_eq!(scan.headers.len(), 1);
+        let header = &scan.headers[0];
+        assert_eq!(header.owner, "external-openurl-prefs-setup");
+        assert_eq!(header.header, "locale.h");
+        assert_eq!(
+            header.description,
+            "${CMAKE_SOURCE_DIR}/external/openurl/locale/OpenURL.pot"
+        );
+        assert_eq!(
+            header.header_template,
+            "${CMAKE_SOURCE_DIR}/external/openurl/prefs/locale_h.sd"
+        );
     }
 
     #[test]
