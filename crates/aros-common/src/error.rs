@@ -16,6 +16,9 @@ pub enum ArosError {
     #[error("Transpiler syntax error in '{file}': {message}")]
     TranspilerSyntax { file: String, message: String },
 
+    #[error("Invalid AROS configuration in '{file}': {message}")]
+    Configuration { file: String, message: String },
+
     #[error("{0}")]
     Diagnostics(DiagnosticSet),
 

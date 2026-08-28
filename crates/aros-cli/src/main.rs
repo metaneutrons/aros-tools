@@ -1,3 +1,5 @@
+//! User-facing orchestration for AROS-NG builds, toolchains, tests, and boards.
+
 use aros_common::{
     render_diagnostics, requested_diagnostic_format, DiagnosticCode, DiagnosticContext,
     DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
@@ -13,9 +15,9 @@ use std::time::Instant;
 mod artifact;
 mod boot;
 mod build;
+mod build_tools;
 mod golden;
-mod host_tools;
-mod hosttools;
+mod host_compiler;
 mod observability;
 mod pi;
 mod repo;
@@ -97,16 +99,18 @@ enum Commands {
         local: Option<PathBuf>,
     },
 
-    /// Manage the host LLVM tools used to bootstrap builds
-    HostTools {
+    /// Manage the host LLVM compiler used to bootstrap builds
+    #[command(name = "host-compiler", visible_alias = "host-tools")]
+    HostCompiler {
         #[command(subcommand)]
-        command: HostToolsCommands,
+        command: HostCompilerCommands,
     },
 
     /// Build or inspect the local Rust helpers consumed by CMake
-    Hosttools {
+    #[command(name = "build-tools", visible_alias = "hosttools")]
+    BuildTools {
         #[command(subcommand)]
-        command: HosttoolsCommand,
+        command: BuildToolsCommand,
     },
 
     /// Manage deterministic AROS cross-toolchain releases
@@ -241,7 +245,7 @@ enum GoldenAction {
 }
 
 #[derive(Subcommand)]
-enum HostToolsCommands {
+enum HostCompilerCommands {
     /// Download and install the pinned host LLVM tools
     Install {
         #[arg(short, long)]
@@ -283,7 +287,7 @@ enum ToolchainCommands {
 }
 
 #[derive(Subcommand)]
-enum HosttoolsCommand {
+enum BuildToolsCommand {
     /// Build the CMake configure-time Rust helpers in tools/aros-tools/target/release
     Build,
     /// Verify that all mandatory CMake configure-time Rust helpers are ready
@@ -507,19 +511,19 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             preset.clone(),
             "verify the selected profile, toolchain lock, network policy, and local cache",
         ),
-        Commands::HostTools { .. } => (
+        Commands::HostCompiler { .. } => (
             DiagnosticCode::CliToolResolution,
             DiagnosticStage::ToolResolution,
-            "host-tools",
+            "host-compiler",
             None,
-            "install the pinned host tools or verify the configured offline cache",
+            "install the declared host compiler or verify the configured offline cache",
         ),
-        Commands::Hosttools { .. } => (
+        Commands::BuildTools { .. } => (
             DiagnosticCode::CliToolResolution,
             DiagnosticStage::ToolResolution,
-            "hosttools",
+            "build-tools",
             None,
-            "inspect the reported helper and Cargo failure, then rebuild the required host tools",
+            "inspect the reported helper and Cargo failure, then rebuild the required build tools",
         ),
         Commands::Toolchain { command } => {
             let target = match command {
@@ -804,26 +808,26 @@ async fn run(cli: Cli, repo_root: PathBuf) -> Result<()> {
             } else if local.is_some() {
                 miette::bail!("--local requires --preset");
             } else {
-                host_tools::install(force, offline)
+                host_compiler::install(force, offline)
                     .await
                     .map_err(|error| miette::miette!("{error:#}"))?;
             }
         }
 
-        Commands::HostTools { command } => match command {
-            HostToolsCommands::Install { force, offline } => {
-                host_tools::install(force, offline)
+        Commands::HostCompiler { command } => match command {
+            HostCompilerCommands::Install { force, offline } => {
+                host_compiler::install(force, offline)
                     .await
                     .map_err(|error| miette::miette!("{error:#}"))?;
             }
         },
 
-        Commands::Hosttools { command } => match command {
-            HosttoolsCommand::Build => {
-                hosttools::build(&repo_root)?;
+        Commands::BuildTools { command } => match command {
+            BuildToolsCommand::Build => {
+                build_tools::build(&repo_root)?;
             }
-            HosttoolsCommand::Check => {
-                hosttools::print_check(&repo_root)?;
+            BuildToolsCommand::Check => {
+                build_tools::print_check(&repo_root)?;
             }
         },
 
@@ -1307,14 +1311,14 @@ async fn run(cli: Cli, repo_root: PathBuf) -> Result<()> {
             );
             println!("  • Toolchain Architecture: Multi-Target Modern CMake + Ninja");
 
-            let host_dir = host_tools::default_host_tools_dir();
-            let host_paths = host_tools::host_tool_paths(&host_dir);
-            let tc_status = if host_tools::is_host_tools_installed(&host_paths) {
+            let host_dir = host_compiler::default_host_compiler_dir();
+            let host_paths = host_compiler::host_compiler_paths(&host_dir);
+            let tc_status = if host_compiler::is_host_compiler_installed(&host_paths) {
                 format!("Pinned host LLVM ({})", host_paths.clang.display())
             } else if let Ok(clang) = which::which("clang") {
                 format!("Unmanaged system LLVM ({})", clang.display())
             } else {
-                "Not found (run `aros host-tools install`)".to_string()
+                "Not found (run `aros host-compiler install`)".to_string()
             };
             println!(
                 "  • Active C/C++ Compiler:  {}",
@@ -1331,7 +1335,7 @@ async fn run(cli: Cli, repo_root: PathBuf) -> Result<()> {
             let targets = aros_common::TargetProfile::load_from_file(std::path::Path::new(
                 "aros-targets.toml",
             ))
-            .unwrap_or_else(|_| aros_common::TargetProfile::default_profiles());
+            .map_err(|error| miette::miette!("{error:#}"))?;
             let target_names: Vec<String> = targets.into_iter().map(|t| t.name).collect();
             println!("  • Configured Targets:     {}", target_names.join(", "));
             match toolchain::load_lock() {

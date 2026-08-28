@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Unified build, toolchain, test, and Raspberry Pi workflow for AROS-NG"
 
 [lints]
 workspace = true
@@ -20,7 +24,6 @@ pi-lab-tftp = []
 
 [dependencies]
 aros-common.workspace = true
-aros-transpiler.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true
@@ -31,7 +34,6 @@ which.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 tar.workspace = true
-flate2.workspace = true
 xz2.workspace = true
 futures-util.workspace = true
 sha2.workspace = true

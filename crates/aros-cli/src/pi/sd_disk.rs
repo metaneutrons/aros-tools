@@ -201,7 +201,7 @@ impl DiskCandidate {
 
     fn validate_for_write(&self, minimum_device_bytes: u64) -> Result<()> {
         if self.scan_id.is_empty()
-            || !is_sha256(&self.fingerprint)
+            || aros_common::Sha256Digest::parse(&self.fingerprint).is_err()
             || !safe_metadata_component(&self.identity)
             || !safe_metadata_component(&self.model)
             || !safe_metadata_component(&self.transport)
@@ -1122,47 +1122,19 @@ fn json_u64_field(object: &Map<String, Value>, field: &str, label: &str) -> Resu
 }
 
 fn normalized_sha256(value: &str, label: &str) -> Result<String> {
-    if !is_sha256(value) {
-        miette::bail!("{label} must be a 64-character SHA-256 hexadecimal digest.");
-    }
-    Ok(value.to_ascii_lowercase())
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    aros_common::Sha256Digest::parse(value)
+        .map(|digest| digest.to_string())
+        .map_err(|_| miette::miette!("{label} must be a 64-character SHA-256 hexadecimal digest."))
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path).map_err(|error| {
+    let result = aros_common::sha256_file(path).map_err(|error| {
         miette::miette!(
-            "Could not open '{}' for SHA-256 verification: {error}",
+            "Could not hash '{}' for SHA-256 verification: {error}",
             path.display()
         )
     })?;
-    let mut hasher = Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            miette::miette!(
-                "Could not read '{}' for SHA-256 verification: {error}",
-                path.display()
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        size = size
-            .checked_add(u64::try_from(read).map_err(|error| {
-                miette::miette!(
-                    "Could not account for '{}' while hashing: {error}",
-                    path.display()
-                )
-            })?)
-            .ok_or_else(|| miette::miette!("File '{}' is too large to hash.", path.display()))?;
-    }
-    Ok((hex_digest(hasher.finalize()), size))
+    Ok((result.digest.to_string(), result.size))
 }
 
 fn copy_image_to_target(image_path: &Path, target: &mut File) -> Result<String> {
@@ -1189,7 +1161,7 @@ fn copy_image_to_target(image_path: &Path, target: &mut File) -> Result<String> 
         })?;
         hasher.update(&buffer[..read]);
     }
-    Ok(hex_digest(hasher.finalize()))
+    Ok(aros_common::finish_sha256(hasher).to_string())
 }
 
 fn hash_target_prefix(target: &mut File, bytes_to_read: u64) -> Result<String> {
@@ -1215,22 +1187,11 @@ fn hash_target_prefix(target: &mut File, bytes_to_read: u64) -> Result<String> {
             })?)
             .ok_or_else(|| miette::miette!("Internal SD image readback underflow."))?;
     }
-    Ok(hex_digest(hasher.finalize()))
+    Ok(aros_common::finish_sha256(hasher).to_string())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    hex_digest(Sha256::digest(bytes))
-}
-
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = digest.as_ref();
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
+    aros_common::sha256_bytes(bytes).to_string()
 }
 
 fn safe_metadata_component(value: &str) -> bool {

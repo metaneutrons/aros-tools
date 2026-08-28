@@ -23,6 +23,10 @@ pub enum DiagnosticCode {
     GraphValidation,
     #[serde(rename = "AT0007")]
     InternalInvariant,
+    #[serde(rename = "AT0008")]
+    TranspilerInvocation,
+    #[serde(rename = "AT0009")]
+    TranspilerObservability,
     #[serde(rename = "AC0001")]
     CollectorInvocation,
     #[serde(rename = "AC0002")]
@@ -117,6 +121,8 @@ impl fmt::Display for DiagnosticCode {
             Self::OutputIo => "AT0005",
             Self::GraphValidation => "AT0006",
             Self::InternalInvariant => "AT0007",
+            Self::TranspilerInvocation => "AT0008",
+            Self::TranspilerObservability => "AT0009",
             Self::CollectorInvocation => "AC0001",
             Self::CollectorObservability => "AC0002",
             Self::CollectorToolResolution => "AC0101",

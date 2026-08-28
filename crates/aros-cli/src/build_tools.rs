@@ -8,7 +8,7 @@ use std::process::Command;
 // build rather than at configure time. Generated build rules require these
 // exact checkout-local executables; omitting either one makes a fresh checkout
 // configure successfully only to fail later or bypass required AROS semantics.
-const REQUIRED_HOST_TOOLS: &[&str] = &[
+const REQUIRED_BUILD_TOOLS: &[&str] = &[
     "aros-transpiler",
     "aros-genmodule",
     "aros-romtool",
@@ -17,12 +17,12 @@ const REQUIRED_HOST_TOOLS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostToolsCheck {
+pub struct BuildToolsCheck {
     pub bin_dir: PathBuf,
     pub missing: Vec<PathBuf>,
 }
 
-impl HostToolsCheck {
+impl BuildToolsCheck {
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.missing.is_empty()
@@ -40,15 +40,15 @@ pub fn binary_dir(repo_root: &Path) -> PathBuf {
 }
 
 #[must_use]
-pub fn check(repo_root: &Path) -> HostToolsCheck {
+pub fn check(repo_root: &Path) -> BuildToolsCheck {
     let bin_dir = binary_dir(repo_root);
-    let missing = REQUIRED_HOST_TOOLS
+    let missing = REQUIRED_BUILD_TOOLS
         .iter()
         .map(|name| bin_dir.join(executable_name(name)))
         .filter(|path| !is_executable(path))
         .collect();
 
-    HostToolsCheck { bin_dir, missing }
+    BuildToolsCheck { bin_dir, missing }
 }
 
 /// Builds the Rust programs which CMake consumes at configure time.
@@ -57,11 +57,11 @@ pub fn check(repo_root: &Path) -> HostToolsCheck {
 /// so this command pins `CARGO_TARGET_DIR` to that same per-checkout path.
 /// That keeps independent Git worktrees isolated while avoiding a mismatch
 /// between Cargo output and CMake's lookup path.
-pub fn build(repo_root: &Path) -> Result<HostToolsCheck> {
+pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
     let workspace = workspace_dir(repo_root);
     if !workspace.join("Cargo.toml").is_file() {
         miette::bail!(
-            "AROS host-tools workspace is missing at '{}'.",
+            "AROS build-tools workspace is missing at '{}'.",
             workspace.display()
         );
     }
@@ -69,7 +69,7 @@ pub fn build(repo_root: &Path) -> Result<HostToolsCheck> {
     let target_dir = workspace.join("target");
     let args = cargo_build_args();
     println!(
-        "🔧 Building AROS host tools in {}...",
+        "🔧 Building AROS build tools in {}...",
         style(target_dir.display()).cyan()
     );
 
@@ -78,19 +78,19 @@ pub fn build(repo_root: &Path) -> Result<HostToolsCheck> {
             .args(&args)
             .current_dir(&workspace)
             .env("CARGO_TARGET_DIR", &target_dir),
-        "Cargo while building the required AROS host tools",
+        "Cargo while building the required AROS build tools",
     )?;
 
     let result = check(repo_root);
     if !result.is_complete() {
         miette::bail!(
-            "Cargo completed, but required AROS host tools are still missing: {}",
+            "Cargo completed, but required AROS build tools are still missing: {}",
             format_missing(&result.missing)
         );
     }
 
     println!(
-        "✅ AROS host tools are ready in {}.",
+        "✅ AROS build tools are ready in {}.",
         result.bin_dir.display()
     );
     Ok(result)
@@ -98,14 +98,14 @@ pub fn build(repo_root: &Path) -> Result<HostToolsCheck> {
 
 /// Ensures the CMake configure-time Rust helpers exist, building them only
 /// when they are absent or no longer executable.
-pub fn ensure(repo_root: &Path) -> Result<HostToolsCheck> {
+pub fn ensure(repo_root: &Path) -> Result<BuildToolsCheck> {
     let result = check(repo_root);
     if result.is_complete() {
         return Ok(result);
     }
 
     println!(
-        "ℹ️ Required AROS host tools are missing: {}",
+        "ℹ️ Required AROS build tools are missing: {}",
         format_missing(&result.missing)
     );
     build(repo_root)
@@ -115,18 +115,18 @@ pub fn print_check(repo_root: &Path) -> Result<()> {
     let result = check(repo_root);
     if result.is_complete() {
         println!(
-            "✅ AROS host tools are ready in {}.",
+            "✅ AROS build tools are ready in {}.",
             result.bin_dir.display()
         );
         return Ok(());
     }
 
     println!(
-        "❌ Missing AROS host tools: {}",
+        "❌ Missing AROS build tools: {}",
         format_missing(&result.missing)
     );
-    println!("   Run `aros hosttools build` to build them.");
-    miette::bail!("Required AROS host tools are unavailable.");
+    println!("   Run `aros build-tools build` to build them.");
+    miette::bail!("Required AROS build tools are unavailable.");
 }
 
 #[must_use]
@@ -136,7 +136,7 @@ pub fn cargo_build_args() -> Vec<OsString> {
         OsString::from("--locked"),
         OsString::from("--release"),
     ];
-    for package in REQUIRED_HOST_TOOLS {
+    for package in REQUIRED_BUILD_TOOLS {
         args.push(OsString::from("--package"));
         args.push(OsString::from(package));
     }
@@ -189,7 +189,7 @@ fn format_missing(paths: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{binary_dir, cargo_build_args, check, REQUIRED_HOST_TOOLS};
+    use super::{binary_dir, cargo_build_args, check, REQUIRED_BUILD_TOOLS};
 
     #[test]
     fn cargo_build_plan_builds_every_required_tool_in_release_mode() {
@@ -200,7 +200,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered[..3], ["build", "--locked", "--release"]);
-        for tool in REQUIRED_HOST_TOOLS {
+        for tool in REQUIRED_BUILD_TOOLS {
             assert!(rendered.iter().any(|argument| argument == tool));
         }
     }
@@ -211,6 +211,6 @@ mod tests {
         let result = check(temp.path());
 
         assert_eq!(result.bin_dir, binary_dir(temp.path()));
-        assert_eq!(result.missing.len(), REQUIRED_HOST_TOOLS.len());
+        assert_eq!(result.missing.len(), REQUIRED_BUILD_TOOLS.len());
     }
 }

@@ -2,6 +2,7 @@
 
 pub mod arch;
 pub mod diagnostic;
+pub mod digest;
 pub mod elf;
 pub mod error;
 pub mod observability;
@@ -15,6 +16,9 @@ pub use arch::Architecture;
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticSeverity,
     DiagnosticStage, SourceLocation,
+};
+pub use digest::{
+    finish_sha256, sha256_bytes, sha256_file, sha256_reader, Sha256Digest, Sha256Result,
 };
 pub use error::{ArosError, Result};
 pub use observability::{

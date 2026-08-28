@@ -1,6 +1,9 @@
+//! Fail-closed command boundary for MetaMake-to-CMake transpilation.
+
 use aros_common::{
-    ArosError, Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticSeverity, DiagnosticStage,
-    Result, SourceLocation,
+    requested_diagnostic_format, ArosError, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticFormat, DiagnosticSet, DiagnosticSeverity, DiagnosticStage, LogFormat, LogLevel,
+    Logger, Result, SourceLocation,
 };
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
@@ -8,21 +11,26 @@ use aros_transpiler::{
     generated_header, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
     read_default_link_set, DependencyGraph, TargetContext,
 };
-use clap::{Parser, ValueEnum};
+use clap::{error::ErrorKind, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use tracing::info;
 use walkdir::WalkDir;
 
+mod observability;
 mod publication;
 
 use publication::Publication;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "AROS-NG Parallel mmakefile Transpiler")]
+#[command(
+    author,
+    version,
+    about = "AROS-NG Parallel mmakefile Transpiler",
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default and is written only to an\nexplicitly selected local file."
+)]
 struct Args {
     /// Root directory of AROS source tree
     #[arg(short, long, default_value = ".")]
@@ -69,34 +77,125 @@ struct Args {
     float_abi: Option<String>,
 
     /// Diagnostic renderer used for failures
-    #[arg(long, value_enum, default_value_t = DiagnosticFormat::Human)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = DiagnosticFormat::Human,
+        env = "AROS_TRANSPILER_DIAGNOSTIC_FORMAT"
+    )]
     diagnostic_format: DiagnosticFormat,
-}
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum DiagnosticFormat {
-    Human,
-    Json,
+    /// Local logging threshold; logging is disabled by default.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LogLevel::Off,
+        env = "AROS_TRANSPILER_LOG_LEVEL"
+    )]
+    log_level: LogLevel,
+
+    /// Stable local log encoding.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LogFormat::Human,
+        env = "AROS_TRANSPILER_LOG_FORMAT"
+    )]
+    log_format: LogFormat,
+
+    /// Explicit local log destination.
+    #[arg(long, env = "AROS_TRANSPILER_LOG_FILE")]
+    log_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    if matches!(args.diagnostic_format, DiagnosticFormat::Json) {
-        tracing_subscriber::fmt().with_writer(std::io::sink).init();
-    } else {
-        tracing_subscriber::fmt::init();
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let requested_format =
+        requested_diagnostic_format(&arguments, "AROS_TRANSPILER_DIAGNOSTIC_FORMAT");
+    let args = match Args::try_parse_from(arguments) {
+        Ok(args) => args,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            print!("{error}");
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            observability::render(
+                &DiagnosticSet::single(observability::clap_diagnostic(&error)),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let logger = match Logger::open(
+        args.log_level,
+        args.log_format,
+        args.log_file.clone(),
+        "aros-transpiler",
+        observability::POLICY,
+    ) {
+        Ok(logger) => logger,
+        Err(error) => {
+            observability::render(
+                &DiagnosticSet::single(error.into_diagnostic()),
+                args.diagnostic_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let context = DiagnosticContext {
+        mode: Some("transpile".into()),
+        output: Some(args.output.display().to_string()),
+        ..DiagnosticContext::default()
+    };
+    if let Err(error) = logger.event(
+        LogLevel::Info,
+        "invocation.start",
+        "transpiler invocation started",
+        &context,
+    ) {
+        observability::render(
+            &DiagnosticSet::single(error.into_diagnostic()),
+            args.diagnostic_format,
+        );
+        return ExitCode::FAILURE;
     }
 
-    match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+    match run(&args, &logger) {
+        Ok(()) => match logger.event(
+            LogLevel::Info,
+            "invocation.complete",
+            "transpiler invocation completed",
+            &context,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                observability::render(
+                    &DiagnosticSet::single(error.into_diagnostic()),
+                    args.diagnostic_format,
+                );
+                ExitCode::FAILURE
+            }
+        },
         Err(error) => {
-            render_diagnostics(&error_to_diagnostics(error), args.diagnostic_format);
+            let mut diagnostics = error_to_diagnostics(error);
+            for diagnostic in diagnostics.diagnostics.clone() {
+                if let Err(error) = logger.diagnostic(&diagnostic) {
+                    diagnostics.diagnostics.push(error.into_diagnostic());
+                    break;
+                }
+            }
+            observability::render(&diagnostics, args.diagnostic_format);
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(args: &Args) -> Result<()> {
+fn run(args: &Args, logger: &Logger) -> Result<()> {
     if let Err(error) = aros_transpiler::fingerprints::validate() {
         return Err(diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::InternalInvariant,
@@ -798,7 +897,14 @@ fn run(args: &Args) -> Result<()> {
     );
 
     graph.validate_cycles()?;
-    info!("Dependency graph validated: 0 cycles detected");
+    logger
+        .event(
+            LogLevel::Info,
+            "graph.validated",
+            "dependency graph validated with no cycles",
+            &DiagnosticContext::default(),
+        )
+        .map_err(|error| diagnostics_error(vec![error.into_diagnostic()]))?;
 
     println!(
         "📝 Generating CMake target definitions -> {}...",
@@ -901,6 +1007,14 @@ fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
             )
             .with_location(SourceLocation::new(file)),
         ),
+        ArosError::Configuration { file, message } => DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::InternalInvariant,
+                DiagnosticStage::Internal,
+                format!("unexpected configuration error in `{file}`: {message}"),
+            )
+            .with_location(SourceLocation::new(file)),
+        ),
         ArosError::DependencyCycle { target } => DiagnosticSet::single(
             Diagnostic::error(
                 DiagnosticCode::GraphValidation,
@@ -929,19 +1043,6 @@ fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
             DiagnosticStage::Internal,
             format!("unexpected command failure: {cmd}"),
         )),
-    }
-}
-
-fn render_diagnostics(diagnostics: &DiagnosticSet, format: DiagnosticFormat) {
-    match format {
-        DiagnosticFormat::Human => eprint!("{diagnostics}"),
-        DiagnosticFormat::Json => match serde_json::to_string_pretty(&diagnostics) {
-            Ok(json) => eprintln!("{json}"),
-            Err(_) => eprintln!(
-                "{{\"schema\":\"{}\",\"diagnostics\":[{{\"code\":\"AT0007\",\"severity\":\"error\",\"stage\":\"internal\",\"message\":\"diagnostic serialization failed\"}}]}}",
-                DiagnosticSet::SCHEMA
-            ),
-        },
     }
 }
 

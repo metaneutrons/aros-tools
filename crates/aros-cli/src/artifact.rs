@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::{Component, Path, PathBuf};
 use tempfile::TempDir;
 use xz2::read::XzDecoder;
@@ -29,20 +29,9 @@ pub fn archive_cache_root() -> PathBuf {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open '{}' for hashing", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 128 * 1024];
-    loop {
-        let bytes = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to hash '{}'", path.display()))?;
-        if bytes == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    aros_common::sha256_file(path)
+        .map(|result| result.digest.to_string())
+        .with_context(|| format!("failed to hash '{}'", path.display()))
 }
 
 pub fn verify_archive(

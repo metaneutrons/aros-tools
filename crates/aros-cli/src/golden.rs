@@ -33,7 +33,6 @@
 //! `kickstart-sets.txt` and others are written by CMake, not by the transpiler.
 
 use miette::{Context, IntoDiagnostic, Result};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -118,7 +117,7 @@ fn describe(directory: &Path, name: &str) -> Result<Product> {
         // for no measurable gain here.
         #[allow(clippy::naive_bytecount)]
         lines: bytes.iter().filter(|byte| **byte == b'\n').count(),
-        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        sha256: aros_common::sha256_bytes(&bytes).to_string(),
     })
 }
 

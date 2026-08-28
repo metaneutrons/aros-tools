@@ -12,7 +12,7 @@ static DOWNLOAD: Emoji<'_, '_> = Emoji("⬇️  ", "");
 const VERSION_TOKEN: &str = "{version}";
 
 #[derive(Debug, Clone)]
-pub struct HostToolPaths {
+pub struct HostCompilerPaths {
     pub clang: PathBuf,
     pub clangxx: PathBuf,
     pub lld: PathBuf,
@@ -27,8 +27,9 @@ pub struct HostCompilerSelection {
     pub sha256: Option<String>,
 }
 
-pub fn default_host_tools_dir() -> PathBuf {
-    std::env::var_os("AROS_HOST_TOOLS_DIR")
+pub fn default_host_compiler_dir() -> PathBuf {
+    std::env::var_os("AROS_HOST_COMPILER_DIR")
+        .or_else(|| std::env::var_os("AROS_HOST_TOOLS_DIR"))
         .or_else(|| std::env::var_os("AROS_TOOLCHAIN_DIR"))
         .map_or_else(|| aros_home().join("toolchain"), PathBuf::from)
 }
@@ -55,7 +56,9 @@ pub fn host_platform_label(host_key: &str) -> &str {
 
 pub fn load_host_compiler_config() -> Result<HostCompilerConfig> {
     let config = TargetProfile::load_config(Path::new("aros-targets.toml"))?;
-    Ok(config.host_compiler.unwrap_or_default())
+    config.host_compiler.ok_or_else(|| {
+        anyhow::anyhow!("aros-targets.toml has no required [host_compiler] configuration")
+    })
 }
 
 pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSelection> {
@@ -65,7 +68,8 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
         anyhow::anyhow!("host '{host_key}' is not configured in aros-targets.toml")
     })?;
     let asset = host_asset.asset.replace(VERSION_TOKEN, &version);
-    let base_url = std::env::var("AROS_HOST_TOOLS_URL")
+    let base_url = std::env::var("AROS_HOST_COMPILER_URL")
+        .or_else(|_| std::env::var("AROS_HOST_TOOLS_URL"))
         .or_else(|_| std::env::var("AROS_TOOLCHAIN_URL"))
         .unwrap_or_else(|_| cfg.base_url.replace(VERSION_TOKEN, &version));
     Ok(HostCompilerSelection {
@@ -77,8 +81,8 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
     })
 }
 
-pub fn host_tool_paths(root: &Path) -> HostToolPaths {
-    HostToolPaths {
+pub fn host_compiler_paths(root: &Path) -> HostCompilerPaths {
+    HostCompilerPaths {
         clang: root.join("bin/clang"),
         clangxx: root.join("bin/clang++"),
         lld: root.join("bin/ld.lld"),
@@ -86,25 +90,25 @@ pub fn host_tool_paths(root: &Path) -> HostToolPaths {
     }
 }
 
-pub fn is_host_tools_installed(paths: &HostToolPaths) -> bool {
+pub fn is_host_compiler_installed(paths: &HostCompilerPaths) -> bool {
     command_exists(&paths.clang)
         && command_exists(&paths.clangxx)
         && command_exists(&paths.lld)
         && command_exists(&paths.llvm_ar)
 }
 
-pub async fn install(force: bool, offline: bool) -> Result<HostToolPaths> {
+pub async fn install(force: bool, offline: bool) -> Result<HostCompilerPaths> {
     let config = load_host_compiler_config()?;
     let selection = select_host_compiler(&config)?;
-    let destination = default_host_tools_dir();
-    let paths = host_tool_paths(&destination);
+    let destination = default_host_compiler_dir();
+    let paths = host_compiler_paths(&destination);
 
     println!("Host compiler: {}", style(&selection.platform_label).cyan());
     println!("LLVM version:  {}", style(&selection.version).yellow());
     println!("Location:      {}", destination.display());
 
-    if is_host_tools_installed(&paths) && !force {
-        println!("{CHECK} Host tools already available and structurally valid");
+    if is_host_compiler_installed(&paths) && !force {
+        println!("{CHECK} Host compiler already available and structurally valid");
         return Ok(paths);
     }
 
@@ -116,30 +120,33 @@ pub async fn install(force: bool, offline: bool) -> Result<HostToolPaths> {
     let archive = obtain_archive(&selection.url, &expected_sha256, None, offline, force).await?;
 
     if destination.exists() {
-        if is_host_tools_installed(&paths) {
-            println!("{CHECK} Existing host tools match the required layout");
+        if is_host_compiler_installed(&paths) {
+            println!("{CHECK} Existing host compiler matches the required layout");
             return Ok(paths);
         }
         bail!(
-            "refusing to overwrite existing host-tools directory '{}'; move it aside or set AROS_HOST_TOOLS_DIR",
+            "refusing to overwrite existing host-compiler directory '{}'; move it aside or set AROS_HOST_COMPILER_DIR",
             destination.display()
         );
     }
 
     let parent = destination
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("host-tools destination has no parent"))?;
+        .ok_or_else(|| anyhow::anyhow!("host-compiler destination has no parent"))?;
     let staging = extract_to_staging(&archive, parent, 1)?;
-    let staged_paths = host_tool_paths(staging.path());
-    if !is_host_tools_installed(&staged_paths) {
+    let staged_paths = host_compiler_paths(staging.path());
+    if !is_host_compiler_installed(&staged_paths) {
         bail!("downloaded host compiler does not contain the required LLVM tools");
     }
     fs::write(
-        staging.path().join(".aros-host-tools-sha256"),
+        staging.path().join(".aros-host-compiler-sha256"),
         format!("{expected_sha256}\n"),
     )
-    .context("failed to write host-tools installation marker")?;
+    .context("failed to write host-compiler installation marker")?;
     commit_staging(&staging, &destination)?;
-    println!("{CHECK} Installed host tools at {}", destination.display());
+    println!(
+        "{CHECK} Installed host compiler at {}",
+        destination.display()
+    );
     Ok(paths)
 }

@@ -1,6 +1,6 @@
 use super::config::Board;
 use super::console;
-use crate::{hosttools, toolchain};
+use crate::{build_tools, toolchain};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub fn inspect(board: &Board, repo_root: &Path) -> DoctorReport {
     check_command(&mut report, "cmake", "cmake");
     check_command(&mut report, "cargo", "cargo");
     check_toolchain_profile(&mut report, board);
-    check_hosttools(&mut report, repo_root);
+    check_build_tools(&mut report, repo_root);
     check_artifacts(&mut report, board, repo_root);
     check_dtb(&mut report, board, repo_root);
     check_core_kobjs(&mut report, board, repo_root);
@@ -144,16 +144,16 @@ fn check_toolchain_profile(report: &mut DoctorReport, board: &Board) {
     }
 }
 
-fn check_hosttools(report: &mut DoctorReport, repo_root: &Path) {
-    let hosttools = hosttools::check(repo_root);
-    if hosttools.is_complete() {
+fn check_build_tools(report: &mut DoctorReport, repo_root: &Path) {
+    let build_tools = build_tools::check(repo_root);
+    if build_tools.is_complete() {
         report.push(
             CheckStatus::Pass,
-            "host tools",
-            hosttools.bin_dir.display().to_string(),
+            "build tools",
+            build_tools.bin_dir.display().to_string(),
         );
     } else {
-        let missing = hosttools
+        let missing = build_tools
             .missing
             .iter()
             .filter_map(|path| path.file_name())
@@ -162,7 +162,7 @@ fn check_hosttools(report: &mut DoctorReport, repo_root: &Path) {
             .join(", ");
         report.push(
             CheckStatus::Warning,
-            "host tools",
+            "build tools",
             format!("missing {missing}; `aros pi build` will build them automatically"),
         );
     }

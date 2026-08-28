@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Fail-closed macOS Disk Arbitration whole-disk claim guard for AROS tooling"
 keywords = ["macos", "disk-arbitration", "sd-card", "aros"]
 categories = ["os::macos-apis", "hardware-support"]

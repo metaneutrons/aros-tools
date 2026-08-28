@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Deterministic AROS linker collection engine and compiler-driver aliases"
 
 [lints]
 workspace = true
@@ -16,7 +20,6 @@ path = "src/main.rs"
 aros-common.workspace = true
 anyhow.workspace = true
 clap.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

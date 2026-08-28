@@ -1,4 +1,4 @@
-use crate::{hosttools, toolchain};
+use crate::{build_tools, toolchain};
 use console::{style, Emoji};
 use miette::Result;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     )
     .await
     .map_err(|error| miette::miette!("{error:#}"))?;
-    hosttools::ensure(repo_root)?;
+    build_tools::ensure(repo_root)?;
 
     println!(
         "{ROCKET} {}Building AROS for target preset [{}]...",

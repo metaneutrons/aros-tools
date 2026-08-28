@@ -47,7 +47,7 @@ pub fn try_pin<'a>(source: &'a str, file: &str, name: &str) -> Result<&'a str, S
             continue;
         }
         let value = value.trim();
-        if !is_sha256(value) {
+        if crate::Sha256Digest::parse(value).is_err() {
             return Err(format!("{file}: {name} is not a sha256: {value:?}"));
         }
         return Ok(value);
@@ -87,10 +87,6 @@ pub fn try_entries<'a>(source: &'a str, file: &str) -> Result<Vec<(&'a str, &'a 
         found.push((key.trim(), value.trim()));
     }
     Ok(found)
-}
-
-fn is_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

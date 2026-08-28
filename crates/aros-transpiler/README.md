@@ -40,10 +40,11 @@ target profiles.
 Filesystem traversal, fetch discovery, MetaMake parsing and recognised
 capability drift are fatal. Parallel failures are collected, sorted and
 deduplicated so one invocation reports the complete deterministic set. Fatal
-diagnostics carry stable `AT0001`–`AT0007` codes, a typed stage and severity,
+diagnostics carry stable `AT0001`–`AT0009` codes, a typed stage and severity,
 an optional source location and an actionable hint. `--diagnostic-format json`
 emits the versioned `aros-tool-diagnostics-v1` document on stderr; progress and
-tracing cannot contaminate that stream. A capability deliberately excluded
+local logs cannot contaminate that stream. `AT0008` identifies invalid command
+invocations and `AT0009` identifies observability failures. A capability deliberately excluded
 from another supported architecture is not drift; an owned declaration whose
 recipe no longer matches is. Ownership is decided by typed parser paths, never
 by searching rendered diagnostic text.
@@ -63,3 +64,20 @@ or directory-sync error is fatal and restores the previous generation when
 rollback succeeds. Tests inject both a staging failure and a mid-commit
 failure. The embedded fingerprint registry also has a non-panicking startup
 validation gate before any source scanning begins.
+
+## Local logging
+
+Logging uses the shared AROS observability implementation and is disabled by
+default. Enabling it requires an explicit local file:
+
+```console
+aros-transpiler --log-level info --log-format jsonl \
+  --log-file build/aros-transpiler.jsonl
+```
+
+Levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`; formats are
+`human` and `jsonl`. The environment equivalents are
+`AROS_TRANSPILER_LOG_LEVEL`, `AROS_TRANSPILER_LOG_FORMAT`, and
+`AROS_TRANSPILER_LOG_FILE`. JSONL records use `aros-transpiler-log-v1` and omit
+ambient timestamps and host identity so local logs remain explicit
+observations, not inputs to deterministic artifacts.

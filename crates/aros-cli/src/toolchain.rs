@@ -2,7 +2,7 @@ use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive, tree_inventory,
     INSTALL_COMPLETE_FILE,
 };
-use crate::host_tools::host_platform_key;
+use crate::host_compiler::host_platform_key;
 use anyhow::{bail, Context, Result};
 use aros_common::target::TargetProfile;
 use aros_common::toolchain_manifest::{
@@ -220,7 +220,7 @@ pub async fn resolve_for_build(
 
     // An explicitly AROS-built legacy prefix remains usable without copying.
     // A plain host LLVM bundle cannot pass this marker-based check.
-    let legacy = crate::host_tools::default_host_tools_dir();
+    let legacy = crate::host_compiler::default_host_compiler_dir();
     if is_legacy_aros_prefix(&legacy, preset) {
         return resolve_local(&legacy, preset);
     }
@@ -244,7 +244,7 @@ pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
 
 pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     let resolved = path(preset, local)?;
-    smoke_host_tools(&resolved.paths)?;
+    smoke_toolchain_tools(&resolved.paths)?;
     println!(
         "{CHECK} Verified {} for {} ({})",
         resolved.paths.root.display(),
@@ -439,7 +439,7 @@ fn is_legacy_aros_prefix(root: &Path, preset: &str) -> bool {
         && root.join("lib/libunwind.a").is_file()
 }
 
-fn smoke_host_tools(paths: &ToolchainPaths) -> Result<()> {
+fn smoke_toolchain_tools(paths: &ToolchainPaths) -> Result<()> {
     let mut tools = vec![("clang", &paths.clang), ("llvm-ar", &paths.llvm_ar)];
     if paths.aros_collect.is_file() {
         tools.push(("aros-collect", &paths.aros_collect));
@@ -495,15 +495,31 @@ mod tests {
 
     #[test]
     fn target_triples_are_profile_exact() {
-        for (name, triple) in [
-            ("pc-x86_64", "x86_64-unknown-aros"),
-            ("arm-raspi", "arm-unknown-aros"),
-            ("rpi-aarch64", "aarch64-unknown-aros"),
+        for (name, arch, triple) in [
+            (
+                "pc-x86_64",
+                aros_common::Architecture::X86_64,
+                "x86_64-unknown-aros",
+            ),
+            (
+                "arm-raspi",
+                aros_common::Architecture::Arm,
+                "arm-unknown-aros",
+            ),
+            (
+                "rpi-aarch64",
+                aros_common::Architecture::AArch64,
+                "aarch64-unknown-aros",
+            ),
         ] {
-            let profile = TargetProfile::default_profiles()
-                .into_iter()
-                .find(|profile| profile.name == name)
-                .unwrap();
+            let profile = TargetProfile {
+                name: name.into(),
+                arch,
+                platform: String::new(),
+                bsp: String::new(),
+                features: Vec::new(),
+                float_abi: None,
+            };
             assert_eq!(target_triple_for_profile(&profile), triple);
         }
     }

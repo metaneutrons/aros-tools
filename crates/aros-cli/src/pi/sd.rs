@@ -926,10 +926,11 @@ fn validate_relative_path(raw_path: &str, label: &str) -> Result<PathBuf> {
 }
 
 fn normalize_sha256(value: &str, label: &str) -> Result<String> {
-    if value.len() != SHA256_HEX_LENGTH || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        miette::bail!("{label} must be a {SHA256_HEX_LENGTH}-character SHA-256 hex digest.");
-    }
-    Ok(value.to_ascii_lowercase())
+    aros_common::Sha256Digest::parse(value)
+        .map(|digest| digest.to_string())
+        .map_err(|_| {
+            miette::miette!("{label} must be a {SHA256_HEX_LENGTH}-character SHA-256 hex digest.")
+        })
 }
 
 fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<()> {
@@ -959,38 +960,13 @@ fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<()>
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path).map_err(|error| {
+    let result = aros_common::sha256_file(path).map_err(|error| {
         miette::miette!(
-            "Could not open '{}' for SHA-256 verification: {error}",
+            "Could not hash '{}' for SHA-256 verification: {error}",
             path.display()
         )
     })?;
-    let mut hasher = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            miette::miette!(
-                "Could not read '{}' for SHA-256 verification: {error}",
-                path.display()
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        bytes = bytes
-            .checked_add(u64::try_from(read).map_err(|error| {
-                miette::miette!(
-                    "Could not account for '{}' while hashing: {error}",
-                    path.display()
-                )
-            })?)
-            .ok_or_else(|| {
-                miette::miette!("File '{}' is too large to account for.", path.display())
-            })?;
-    }
-    Ok((hex_digest(hasher.finalize()), bytes))
+    Ok((result.digest.to_string(), result.size))
 }
 
 fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64)> {
@@ -1045,7 +1021,7 @@ fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64)> {
             destination.display()
         )
     })?;
-    Ok((hex_digest(hasher.finalize()), bytes))
+    Ok((aros_common::finish_sha256(hasher).to_string(), bytes))
 }
 
 fn write_new_file(path: &Path, contents: &[u8]) -> Result<()> {
@@ -1365,7 +1341,7 @@ fn copy_source_to_writer<W: Write>(
                 )
             })?;
     }
-    Ok((hex_digest(hasher.finalize()), bytes))
+    Ok((aros_common::finish_sha256(hasher).to_string(), bytes))
 }
 
 fn verify_raw_image(
@@ -1481,24 +1457,10 @@ fn verify_mbr(image_path: &Path, geometry: &ImageGeometry) -> Result<()> {
 }
 
 fn hash_reader<R: Read>(input: &mut R, label: &str) -> Result<(String, u64)> {
-    let mut hasher = Sha256::new();
-    let mut bytes = 0_u64;
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = input.read(&mut buffer).map_err(|error| {
-            miette::miette!("Could not read '{label}' during SHA-256 verification: {error}")
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        bytes = bytes
-            .checked_add(u64::try_from(read).map_err(|error| {
-                miette::miette!("Could not account for '{label}' while hashing: {error}")
-            })?)
-            .ok_or_else(|| miette::miette!("File '{label}' is too large to account for."))?;
-    }
-    Ok((hex_digest(hasher.finalize()), bytes))
+    let result = aros_common::sha256_reader(input).map_err(|error| {
+        miette::miette!("Could not read '{label}' during SHA-256 verification: {error}")
+    })?;
+    Ok((result.digest.to_string(), result.size))
 }
 
 fn sync_image_file(image_path: &Path) -> Result<()> {
@@ -1883,16 +1845,7 @@ fn portable_path(path: &Path) -> String {
 }
 
 fn sha256_hex(contents: &[u8]) -> String {
-    hex_digest(Sha256::digest(contents))
-}
-
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    let bytes = digest.as_ref();
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        append_hex_byte(&mut output, *byte);
-    }
-    output
+    aros_common::sha256_bytes(contents).to_string()
 }
 
 fn append_json_control_code(output: &mut String, code: u32) {
