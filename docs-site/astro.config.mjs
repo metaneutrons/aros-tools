@@ -37,6 +37,7 @@ export default defineConfig({
             { label: 'Architecture', slug: 'reference/architecture' },
             { label: 'Diagnostics and logs', slug: 'reference/diagnostics' },
             { label: 'Release engineering', slug: 'reference/releases' },
+            { label: 'Package publication', slug: 'reference/publication' },
             { label: 'Release status', slug: 'reference/release-status' },
           ],
         },

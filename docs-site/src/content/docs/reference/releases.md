@@ -73,6 +73,13 @@ x86-64 package is additionally installed and exercised in an Arch Linux
 environment. These qualification copies substitute only a loopback download
 base while the immutable GitHub draft is still private.
 
+Stable tags use a second, credential-isolated promotion boundary. The verified
+draft first becomes a non-latest prerelease so downstream package managers can
+consume its immutable URLs. APT, Homebrew, and AUR publication and public-byte
+verification must all succeed before the release can become stable/latest. See
+[Package publication](/aros-tools/reference/publication/) for the exact
+credential and failure contract.
+
 ## Release diagnostics
 
 The producer uses stable `APxxxx` diagnostic codes and the shared observability

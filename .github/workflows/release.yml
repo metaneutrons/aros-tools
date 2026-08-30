@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - '.github/workflows/publish-ecosystem.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'crates/**'
@@ -420,6 +421,54 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  apt-metadata:
+    name: Signed APT repository metadata
+    needs: [metadata, aggregate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Install audited APT tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev gnupg
+      - name: Generate a deterministic signed repository twice
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/qualification-gnupg"
+          install -d -m 0700 "$GNUPGHOME"
+          gpg --batch --faked-system-time "${SOURCE_DATE_EPOCH}!" \
+            --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key 'AROS qualification <qualification@example.invalid>' \
+            rsa2048 sign 1d
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys --fingerprint | \
+            awk -F: '$1 == "fpr" { print toupper($10); exit }')
+          gpg --batch --armor --pinentry-mode loopback --passphrase '' \
+            --export-secret-keys "$fingerprint" > "$RUNNER_TEMP/private.asc"
+          : > "$RUNNER_TEMP/passphrase"
+          for copy in a b; do
+            scripts/release/build-apt-repository.sh \
+              --candidate-dir candidate \
+              --output-dir "$RUNNER_TEMP/repository-${copy}" \
+              --version "$VERSION" \
+              --source-date-epoch "$SOURCE_DATE_EPOCH" \
+              --private-key "$RUNNER_TEMP/private.asc" \
+              --passphrase-file "$RUNNER_TEMP/passphrase" \
+              --fingerprint "$fingerprint"
+          done
+          diff --recursive --no-dereference \
+            "$RUNNER_TEMP/repository-a" "$RUNNER_TEMP/repository-b"
+          test "$(find "$RUNNER_TEMP/repository-a" -type f | wc -l)" -eq 10
+
   homebrew:
     name: Homebrew install (${{ matrix.name }})
     needs: aggregate
@@ -561,10 +610,130 @@ jobs:
             done
           fi
 
-  publish:
-    name: Publish verified GitHub prerelease or release
-    if: needs.metadata.outputs.is_release == 'true'
-    needs: [metadata, aggregate, homebrew, aur]
+  publication-preflight:
+    name: Validate publication credentials
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      !contains(needs.metadata.outputs.tag, '-')
+    needs: metadata
+    environment: release
+    runs-on: ubuntu-24.04
+    env:
+      PACKAGE_PUBLISH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    steps:
+      - name: Fail closed before any public mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            PACKAGE_PUBLISH_TOKEN AUR_SSH_PRIVATE_KEY APT_GPG_PRIVATE_KEY
+            APT_GPG_PASSPHRASE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+            AUR_SSH_KNOWN_HOSTS APT_GPG_FINGERPRINT APT_PUBLIC_BASE_URL
+            R2_ACCOUNT_ID R2_BUCKET_NAME
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::AP7101 required release environment value is missing: $name"
+              exit 1
+            fi
+          done
+          if [[ ! "$APT_GPG_FINGERPRINT" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+            echo "::error::AP7102 APT_GPG_FINGERPRINT must be a full 40-hex fingerprint"
+            exit 1
+          fi
+          if [[ ! "$APT_PUBLIC_BASE_URL" =~ ^https://[^[:space:]?#]+/apt$ ]]; then
+            echo "::error::AP7103 APT_PUBLIC_BASE_URL must be an HTTPS URL ending in /apt"
+            exit 1
+          fi
+          if [[ ! "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::AP7104 R2_ACCOUNT_ID must be a 32-hex Cloudflare account ID"
+            exit 1
+          fi
+          if [[ ! "$R2_BUCKET_NAME" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+            echo "::error::AP7105 R2_BUCKET_NAME is malformed"
+            exit 1
+          fi
+      - name: Verify the dedicated Homebrew tap credential
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          permission=$(gh api repos/metaneutrons/homebrew-tap --jq '.permissions.push')
+          if [[ "$permission" != true ]]; then
+            echo "::error::AP7110 package credential cannot write metaneutrons/homebrew-tap"
+            exit 1
+          fi
+      - name: Verify the bucket-scoped R2 credential
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3api head-bucket --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME"
+      - name: Verify signing and AUR identities without publishing
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          install -d -m 0700 "$GNUPGHOME"
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/apt-private.asc"
+          gpg --batch --import "$RUNNER_TEMP/apt-private.asc" >/dev/null 2>&1
+          measured=$(gpg --batch --with-colons --list-secret-keys \
+            --fingerprint "$APT_GPG_FINGERPRINT" | \
+            awk -F: '$1 == "fpr" { print toupper($10); exit }')
+          if [[ "$measured" != "${APT_GPG_FINGERPRINT^^}" ]]; then
+            echo "::error::AP7120 imported APT key fingerprint does not match the release variable"
+            exit 1
+          fi
+          printf 'aros-tools publication preflight\n' > "$RUNNER_TEMP/signing-probe"
+          printf '%s' "$APT_GPG_PASSPHRASE" | gpg \
+            --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --local-user "$APT_GPG_FINGERPRINT" --detach-sign \
+            --output "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
+          gpg --batch --verify "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
+          install -m 0600 /dev/null "$RUNNER_TEMP/aur-key"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/aur-key"
+          ssh-keygen -y -f "$RUNNER_TEMP/aur-key" >/dev/null
+          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          if ! ssh-keygen -F aur.archlinux.org -f "$RUNNER_TEMP/known_hosts" >/dev/null; then
+            echo "::error::AP7121 pinned AUR known_hosts data lacks aur.archlinux.org"
+            exit 1
+          fi
+          if ! ssh -i "$RUNNER_TEMP/aur-key" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            aur@aur.archlinux.org help >/dev/null; then
+            echo "::error::AP7122 AUR did not accept the dedicated release key"
+            exit 1
+          fi
+
+  stage:
+    name: Stage verified public prerelease
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.aggregate.result == 'success' &&
+      needs.apt-metadata.result == 'success' &&
+      needs.homebrew.result == 'success' &&
+      needs.aur.result == 'success' &&
+      (
+        contains(needs.metadata.outputs.tag, '-') ||
+        needs.publication-preflight.result == 'success'
+      )
+    needs: [metadata, aggregate, apt-metadata, homebrew, aur, publication-preflight]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -623,14 +792,42 @@ jobs:
           for subject in isolated/*; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
           done
-      - name: Promote the unchanged draft
+      - name: Expose the unchanged draft as a non-latest prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "$TAG" == *-* ]]; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
-          else
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
-          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease --latest=false
+
+  ecosystem:
+    name: Publish and verify stable package channels
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      !contains(needs.metadata.outputs.tag, '-')
+    needs: [metadata, stage]
+    uses: ./.github/workflows/publish-ecosystem.yml
+    with:
+      tag: ${{ needs.metadata.outputs.tag }}
+      version: ${{ needs.metadata.outputs.version }}
+      source_date_epoch: ${{ needs.metadata.outputs.source_date_epoch }}
+
+  promote-stable:
+    name: Promote stable release after every package channel
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      !contains(needs.metadata.outputs.tag, '-')
+    needs: [metadata, ecosystem]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Promote the already verified prerelease without changing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --prerelease=false --latest
