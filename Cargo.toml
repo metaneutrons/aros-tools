@@ -12,6 +12,7 @@ members = [
     "crates/aros-cli",
     "crates/aros-verify",
     "crates/aros-macos-disk-claim",
+    "crates/aros-release",
 ]
 
 [workspace.package]

@@ -129,6 +129,22 @@ pub enum DiagnosticCode {
     CliPublication,
     #[serde(rename = "AR0999")]
     CliInternal,
+    #[serde(rename = "AP0001")]
+    ReleaseInvocation,
+    #[serde(rename = "AP0002")]
+    ReleaseObservability,
+    #[serde(rename = "AP0101")]
+    ReleaseContract,
+    #[serde(rename = "AP0201")]
+    ReleaseInput,
+    #[serde(rename = "AP0301")]
+    ReleasePackaging,
+    #[serde(rename = "AP0401")]
+    ReleaseIntegrity,
+    #[serde(rename = "AP0501")]
+    ReleasePublication,
+    #[serde(rename = "AP0999")]
+    ReleaseInternal,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -194,6 +210,14 @@ impl fmt::Display for DiagnosticCode {
             Self::CliMediaSafety => "AR0802",
             Self::CliPublication => "AR0901",
             Self::CliInternal => "AR0999",
+            Self::ReleaseInvocation => "AP0001",
+            Self::ReleaseObservability => "AP0002",
+            Self::ReleaseContract => "AP0101",
+            Self::ReleaseInput => "AP0201",
+            Self::ReleasePackaging => "AP0301",
+            Self::ReleaseIntegrity => "AP0401",
+            Self::ReleasePublication => "AP0501",
+            Self::ReleaseInternal => "AP0999",
         };
         formatter.write_str(value)
     }
@@ -267,6 +291,10 @@ pub enum DiagnosticStage {
     BootValidation,
     BoardOperation,
     MediaSafety,
+    ReleaseContract,
+    ReleaseInput,
+    ArchivePackaging,
+    ReleaseIntegrity,
 }
 
 impl fmt::Display for DiagnosticStage {
@@ -318,6 +346,10 @@ impl fmt::Display for DiagnosticStage {
             Self::BootValidation => "boot validation",
             Self::BoardOperation => "physical board operation",
             Self::MediaSafety => "removable-media safety",
+            Self::ReleaseContract => "release contract validation",
+            Self::ReleaseInput => "release input validation",
+            Self::ArchivePackaging => "release archive packaging",
+            Self::ReleaseIntegrity => "release integrity validation",
         })
     }
 }
