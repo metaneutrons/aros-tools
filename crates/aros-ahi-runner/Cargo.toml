@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Validated external AHI build runner for AROS-NG"
+description = "Validated external AHI build runner for AROS"
 
 [lints]
 workspace = true

@@ -1,3 +1,5 @@
+mod common;
+
 #[path = "../src/local_make_includes.rs"]
 mod local_make_includes;
 
@@ -140,8 +142,7 @@ fn literal_define_header_policy_rejects_every_broader_recipe_shape() {
 
 #[test]
 fn production_atheros_fragment_matches_the_literal_header_grammar() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.join("../../../..").canonicalize().unwrap();
+    let root = common::source_root();
     let mmake = Path::new("workbench/devs/networks/atheros5000/hal/mmakefile.src");
     let content = fs::read_to_string(root.join(mmake)).unwrap();
 
@@ -456,8 +457,7 @@ fn non_local_include_families_are_left_for_their_existing_collectors() {
 
 #[test]
 fn real_btcore_fragment_is_a_generic_28_source_assignment() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.join("../../../..").canonicalize().unwrap();
+    let root = common::source_root();
     let mmake = Path::new("rom/bluetooth/stack/mmakefile.src");
     let content = fs::read_to_string(root.join(mmake)).unwrap();
 
@@ -492,8 +492,7 @@ fn real_btcore_fragment_is_a_generic_28_source_assignment() {
 
 #[test]
 fn broad_or_recipe_bearing_real_fragments_remain_reported_and_unexpanded() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.join("../../../..").canonicalize().unwrap();
+    let root = common::source_root();
     let cases = [
         (
             "workbench/libs/z/mmakefile.src",
@@ -558,8 +557,7 @@ fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
         }
     }
 
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.join("../../../..").canonicalize().unwrap();
+    let root = common::source_root();
     let mut files = Vec::new();
     visit(&root, &mut files);
     let mut accepted = Vec::new();

@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Independent MetaMake reference verifier for AROS-NG transpiler output"
+description = "Independent MetaMake reference verifier for AROS transpiler output"
 
 [lints]
 workspace = true

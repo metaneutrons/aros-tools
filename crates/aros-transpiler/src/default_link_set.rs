@@ -278,10 +278,7 @@ mod tree_tests {
     use super::*;
 
     fn root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../..")
-            .canonicalize()
-            .unwrap()
+        crate::testing::root()
     }
 
     #[test]

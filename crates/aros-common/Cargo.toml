@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Shared deterministic contracts and primitives for AROS-NG tools"
+description = "Shared deterministic contracts and primitives for AROS tools"
 
 [lints]
 workspace = true

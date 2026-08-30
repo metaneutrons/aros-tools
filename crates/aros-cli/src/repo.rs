@@ -11,7 +11,7 @@ pub fn load_target_profiles() -> Result<Vec<aros_common::TargetProfile>> {
     aros_common::TargetProfile::load_from_file(Path::new(TARGETS_FILE)).into_diagnostic()
 }
 
-/// Finds the repository root from a directory inside an AROS-NG checkout.
+/// Finds the repository root from a directory inside an AROS checkout.
 ///
 /// The CLI is normally run from the checkout root, but resolving it explicitly
 /// keeps `aros` useful when invoked from a subdirectory or by a wrapper.
@@ -30,7 +30,7 @@ pub fn find_root_from(start: &Path) -> Result<PathBuf> {
     }
 
     miette::bail!(
-        "Could not find an AROS-NG checkout above '{}'. Run this command from the repository or one of its subdirectories.",
+        "Could not find an AROS source checkout above '{}'. Run this command from the repository or one of its subdirectories.",
         start.display()
     );
 }
@@ -42,9 +42,11 @@ pub fn find_root() -> Result<PathBuf> {
 }
 
 fn is_repo_root(path: &Path) -> bool {
-    path.join("CMakeLists.txt").is_file()
-        && path.join(TARGETS_FILE).is_file()
-        && path.join("tools/aros-tools/Cargo.toml").is_file()
+    path.join("configure").is_file()
+        && path.join("Makefile.in").is_file()
+        && path.join("arch").is_dir()
+        && path.join("compiler").is_dir()
+        && path.join("rom").is_dir()
 }
 
 #[cfg(test)]
@@ -54,13 +56,14 @@ mod tests {
     #[test]
     fn finds_checkout_root_from_a_nested_directory() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let root = temp.path().join("AROS-NG");
-        std::fs::create_dir_all(root.join("tools/aros-tools/crates")).expect("checkout layout");
-        std::fs::write(root.join("CMakeLists.txt"), "").expect("cmake marker");
-        std::fs::write(root.join("aros-targets.toml"), "").expect("target marker");
-        std::fs::write(root.join("tools/aros-tools/Cargo.toml"), "").expect("cargo marker");
+        let root = temp.path().join("AROS");
+        for directory in ["arch", "compiler", "rom", "developer"] {
+            std::fs::create_dir_all(root.join(directory)).expect("checkout layout");
+        }
+        std::fs::write(root.join("configure"), "").expect("configure marker");
+        std::fs::write(root.join("Makefile.in"), "").expect("make marker");
 
-        let nested = root.join("tools/aros-tools/crates");
+        let nested = root.join("developer");
         assert_eq!(
             find_root_from(&nested).expect("root"),
             root.canonicalize().unwrap()

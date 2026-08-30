@@ -816,7 +816,7 @@ mod tests {
     use walkdir::WalkDir;
 
     fn root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+        crate::testing::root()
     }
 
     fn dirs() -> DirVars {

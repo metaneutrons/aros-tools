@@ -212,7 +212,7 @@ $(GENDIR)/$(CURDIR)/src/webp/config.h : $(SRCDIR)/$(CURDIR)/config.h $(SRCDIR)/$
 
 #[test]
 fn promotes_the_real_tiff_sdk_header_copies_without_recipe_echo_suppression() {
-    let src = include_str!("../../../../../workbench/libs/tiff/mmakefile.src");
+    let src = include_str!("../tests/fixtures/upstream/tiff-mmakefile.src");
     let CopyIncludesScan {
         transforms, adhoc, ..
     } = collect_copy_includes(src, &PathBuf::from("workbench/libs/tiff"));
@@ -262,7 +262,7 @@ jxl-genfiles : $(JXLGENINCDIR)/jxl/jxl_export.h
 
 #[test]
 fn real_jpegxl_export_copy_is_promoted() {
-    let src = include_str!("../../../../../workbench/classes/datatypes/jpegxl/mmakefile.src");
+    let src = include_str!("../tests/fixtures/upstream/jpegxl-mmakefile.src");
     let CopyIncludesScan {
         transforms, adhoc, ..
     } = collect_copy_includes(src, &PathBuf::from("workbench/classes/datatypes/jpegxl"));
@@ -539,7 +539,7 @@ $(DEST_INCLUDES) : $(AROS_INCLUDES)/% : $(SRCDIR)/$(CURDIR)/%
 
 #[test]
 fn the_udis86_itab_rule_is_modelled_not_reported() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = crate::testing::root();
     let rel = "arch/all-pc/udis86";
     let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
     let scan = collect_copy_includes(&content, std::path::Path::new(rel));
@@ -577,7 +577,7 @@ fn the_udis86_itab_rule_is_modelled_not_reported() {
 
 #[test]
 fn vc4_cle_stdout_generators_are_modelled_exactly() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = crate::testing::root();
     let rel = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";
     let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
     let external = |name: &str| match name {
@@ -636,7 +636,7 @@ $(ROOT)/two.h: $(SRCDIR)/generator.py
 
 #[test]
 fn aboutaros_private_python_headers_are_modelled_with_their_consumer() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = crate::testing::root();
     let rel = "workbench/system/AboutAROS";
     let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
     let scan = collect_copy_includes(&content, std::path::Path::new(rel));

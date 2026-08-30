@@ -1,0 +1,24 @@
+# Extracted from upstream workbench/classes/datatypes/jpegxl/mmakefile.src.
+# This is the complete version/export generated-header group used by the test.
+
+LIBJXLVERSION=0.12.0
+JXL_VER_MAJOR := $(word 1,$(subst ., ,$(LIBJXLVERSION)))
+JXL_VER_MINOR := $(word 2,$(subst ., ,$(LIBJXLVERSION)))
+JXL_VER_PATCH := $(word 3,$(subst ., ,$(LIBJXLVERSION)))
+JXLARCHSRCDIR := $(PORTSDIR)/libjxl/libjxl-$(LIBJXLVERSION)
+JXLGENINCDIR := $(GENDIR)/$(CURDIR)/include
+
+$(JXLGENINCDIR)/jxl/version.h : $(JXLARCHSRCDIR)/lib/jxl/version.h.in
+	@$(ECHO) "Generating jxl/version.h ..."
+	%mkdir_q dir=$(JXLGENINCDIR)/jxl
+	@cat $< | $(SED) s/@JPEGXL_MAJOR_VERSION@/$(JXL_VER_MAJOR)/ | $(SED) s/@JPEGXL_MINOR_VERSION@/$(JXL_VER_MINOR)/ | $(SED) s/@JPEGXL_PATCH_VERSION@/$(JXL_VER_PATCH)/ > $@
+
+$(JXLGENINCDIR)/jxl/jxl_export.h : $(SRCDIR)/$(CURDIR)/jxl_export.h
+	@$(ECHO) "Generating jxl/jxl_export.h ..."
+	%mkdir_q dir=$(JXLGENINCDIR)/jxl
+	@$(CP) $< $@
+
+#MM datatypes-jpegxl-linklibs-jxl-genfiles : linklibs-jxl-fetch
+
+#MM
+datatypes-jpegxl-linklibs-jxl-genfiles : $(JXLGENINCDIR)/jxl/version.h $(JXLGENINCDIR)/jxl/jxl_export.h

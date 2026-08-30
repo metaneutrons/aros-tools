@@ -8,7 +8,7 @@
 use crate::dirs::DirVars;
 use crate::parser::TargetContext;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -45,10 +45,31 @@ impl Drop for TempTree {
     }
 }
 
-/// The repository root, from this crate's manifest.
+/// The explicitly selected AROS source tree used by contract tests.
+///
+/// The tools repository is deliberately independent of an AROS checkout, so
+/// tests which validate real MetaMake declarations must never infer a source
+/// tree from the Cargo workspace's location.
+///
+/// # Panics
+///
+/// Panics when `AROS_TEST_SOURCE_ROOT` is absent, cannot be resolved or does
+/// not contain the required AROS source-tree markers.
 #[must_use]
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    let configured = std::env::var_os("AROS_TEST_SOURCE_ROOT").unwrap_or_else(|| {
+        panic!("AROS_TEST_SOURCE_ROOT must name the AROS checkout used by source-contract tests")
+    });
+    let root = PathBuf::from(configured)
+        .canonicalize()
+        .expect("AROS_TEST_SOURCE_ROOT must resolve to a directory");
+    for marker in ["configure", "Makefile.in", "arch", "compiler", "rom"] {
+        assert!(
+            root.join(marker).exists(),
+            "AROS_TEST_SOURCE_ROOT is missing required marker {marker}"
+        );
+    }
+    root
 }
 
 /// A concrete target profile, the way CMake derives one for a preset.

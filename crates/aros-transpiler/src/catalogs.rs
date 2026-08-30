@@ -545,7 +545,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn repo_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+        crate::testing::root()
     }
 
     #[test]

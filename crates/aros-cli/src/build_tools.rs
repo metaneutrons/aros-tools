@@ -2,14 +2,15 @@
 
 use console::style;
 use miette::Result;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // aros-collect and aros-ahi-runner belong here even though they run during the
 // build rather than at configure time. Generated build rules require these
-// exact checkout-local executables; omitting either one makes a fresh checkout
-// configure successfully only to fail later or bypass required AROS semantics.
+// exact executables; omitting either one makes a fresh checkout configure
+// successfully only to fail later or bypass required AROS semantics.
 const REQUIRED_BUILD_TOOLS: &[&str] = &[
     "aros-transpiler",
     "aros-genmodule",
@@ -33,18 +34,28 @@ impl BuildToolsCheck {
 }
 
 #[must_use]
-pub fn workspace_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join("tools/aros-tools")
-}
-
-#[must_use]
-pub fn binary_dir(repo_root: &Path) -> PathBuf {
-    workspace_dir(repo_root).join("target/release")
-}
-
-#[must_use]
 pub fn check(repo_root: &Path) -> BuildToolsCheck {
-    let bin_dir = binary_dir(repo_root);
+    if let Some(explicit) = std::env::var_os("AROS_BUILD_TOOLS_DIR") {
+        return check_directory(PathBuf::from(explicit));
+    }
+
+    let candidates = candidate_directories(repo_root);
+    for candidate in &candidates {
+        let result = check_directory(candidate.clone());
+        if result.is_complete() {
+            return result;
+        }
+    }
+
+    check_directory(
+        candidates
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| repo_root.join("tools/aros-tools/target/release")),
+    )
+}
+
+fn check_directory(bin_dir: PathBuf) -> BuildToolsCheck {
     let missing = REQUIRED_BUILD_TOOLS
         .iter()
         .map(|name| bin_dir.join(executable_name(name)))
@@ -54,14 +65,48 @@ pub fn check(repo_root: &Path) -> BuildToolsCheck {
     BuildToolsCheck { bin_dir, missing }
 }
 
+fn candidate_directories(repo_root: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path));
+    }
+    if let Some(workspace) = source_workspace(repo_root) {
+        candidates.push(workspace.join("target/release"));
+    }
+
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.clone()));
+    candidates
+}
+
+fn source_workspace(repo_root: &Path) -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("AROS_TOOLS_SOURCE_DIR") {
+        return Some(PathBuf::from(explicit));
+    }
+    let transitional = repo_root.join("tools/aros-tools");
+    transitional
+        .join("Cargo.toml")
+        .is_file()
+        .then_some(transitional)
+}
+
 /// Builds the Rust programs which CMake consumes at configure time.
 ///
-/// CMake deliberately uses the workspace's default `target/release` location,
-/// so this command pins `CARGO_TARGET_DIR` to that same per-checkout path.
-/// That keeps independent Git worktrees isolated while avoiding a mismatch
-/// between Cargo output and CMake's lookup path.
+/// Standalone installations normally ship all binaries together and do not
+/// need this command. Source builds select the workspace explicitly with
+/// `AROS_TOOLS_SOURCE_DIR`; the embedded AROS-NG path remains a transitional
+/// fallback until the old repository is retired.
 pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
-    let workspace = workspace_dir(repo_root);
+    let workspace = source_workspace(repo_root).ok_or_else(|| {
+        miette::miette!(
+            "No AROS tools source workspace is configured. Install the complete aros-tools package, or set AROS_TOOLS_SOURCE_DIR to a checkout of the aros-tools repository."
+        )
+    })?;
     if !workspace.join("Cargo.toml").is_file() {
         miette::bail!(
             "AROS build-tools workspace is missing at '{}'.",
@@ -84,7 +129,7 @@ pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
         "Cargo while building the required AROS build tools",
     )?;
 
-    let result = check(repo_root);
+    let result = check_directory(target_dir.join("release"));
     if !result.is_complete() {
         miette::bail!(
             "Cargo completed, but required AROS build tools are still missing: {}",
@@ -107,11 +152,19 @@ pub fn ensure(repo_root: &Path) -> Result<BuildToolsCheck> {
         return Ok(result);
     }
 
-    println!(
-        "ℹ️ Required AROS build tools are missing: {}",
+    if source_workspace(repo_root).is_some() {
+        println!(
+            "ℹ️ Required AROS build tools are missing: {}",
+            format_missing(&result.missing)
+        );
+        return build(repo_root);
+    }
+
+    miette::bail!(
+        "Required AROS build tools are unavailable from '{}': {}. Install the complete aros-tools package, add its binary directory to PATH, or set AROS_BUILD_TOOLS_DIR.",
+        result.bin_dir.display(),
         format_missing(&result.missing)
     );
-    build(repo_root)
 }
 
 pub fn print_check(repo_root: &Path) -> Result<()> {
@@ -128,7 +181,9 @@ pub fn print_check(repo_root: &Path) -> Result<()> {
         "❌ Missing AROS build tools: {}",
         format_missing(&result.missing)
     );
-    println!("   Run `aros build-tools build` to build them.");
+    println!(
+        "   Install the complete aros-tools package, add its binary directory to PATH, or set AROS_BUILD_TOOLS_DIR."
+    );
     miette::bail!("Required AROS build tools are unavailable.");
 }
 
@@ -192,7 +247,7 @@ fn format_missing(paths: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{binary_dir, cargo_build_args, check, REQUIRED_BUILD_TOOLS};
+    use super::{cargo_build_args, check_directory, REQUIRED_BUILD_TOOLS};
 
     #[test]
     fn cargo_build_plan_builds_every_required_tool_in_release_mode() {
@@ -209,11 +264,11 @@ mod tests {
     }
 
     #[test]
-    fn check_reports_missing_tools_from_the_checkout_local_release_directory() {
+    fn check_reports_missing_tools_from_the_selected_directory() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let result = check(temp.path());
+        let result = check_directory(temp.path().to_path_buf());
 
-        assert_eq!(result.bin_dir, binary_dir(temp.path()));
+        assert_eq!(result.bin_dir, temp.path());
         assert_eq!(result.missing.len(), REQUIRED_BUILD_TOOLS.len());
     }
 }

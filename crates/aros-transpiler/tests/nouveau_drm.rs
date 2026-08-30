@@ -1,17 +1,16 @@
+mod common;
+
 use aros_transpiler::{
     dirs::DirVars, generate_cmake, parse_mmakefile_with_dirs_and_context_and_fetches,
     DependencyGraph, ModuleType, TargetContext,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
 const SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

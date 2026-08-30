@@ -1,5 +1,14 @@
 use super::*;
 
+fn source_root() -> PathBuf {
+    let configured = std::env::var_os("AROS_TEST_SOURCE_ROOT").unwrap_or_else(|| {
+        panic!("AROS_TEST_SOURCE_ROOT must name the AROS checkout used by source-contract tests")
+    });
+    PathBuf::from(configured)
+        .canonicalize()
+        .expect("AROS_TEST_SOURCE_ROOT must resolve to a directory")
+}
+
 fn declaration(file: &str, macro_name: &str) -> Declaration {
     Declaration {
         mmake: "test-target".to_owned(),
@@ -302,7 +311,7 @@ fn eligible_ids(
 // two tests that really depend on it. OPEN-POINTS 7.
 #[test]
 fn current_architecture_denominators_are_pinned() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = source_root();
     require_translation_submodules(&root);
     let files = find_mmakefiles(&root);
     let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
@@ -356,7 +365,7 @@ fn current_architecture_denominators_are_pinned() {
 // with it.
 #[test]
 fn toolchain_provisioning_splits_the_target_obligations() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = source_root();
     require_translation_submodules(&root);
     let files = find_mmakefiles(&root);
     let context = detect_toolchain_provisioning_context(&root);
@@ -434,7 +443,7 @@ fn toolchain_provisioning_splits_the_target_obligations() {
 
 #[test]
 fn llvm_provisioning_context_is_structural_not_pinned() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = source_root();
     let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
     let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
     let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
@@ -453,7 +462,7 @@ fn llvm_provisioning_context_is_structural_not_pinned() {
 
 #[test]
 fn llvm_provisioning_contract_mutations_fail_closed() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let root = source_root();
     let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
     let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
     let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();

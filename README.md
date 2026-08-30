@@ -1,9 +1,16 @@
-# AROS-NG Rust tools
+# AROS tools
 
 This workspace contains the host-side programs used to configure, build,
-verify, package, and deploy AROS-NG. It is intentionally compatible with the
-upstream AROS source tree: the tools model existing MetaMake and build
-contracts and keep generated state outside authoritative upstream inputs.
+verify, package, and deploy AROS. It is being extracted from AROS-NG into an
+independent, upstream-compatible tool suite. The tools model existing MetaMake
+and build contracts and keep generated state outside authoritative upstream
+inputs.
+
+Repository discovery and installed build-tool resolution already accept a
+pristine upstream checkout and do not depend on an embedded Rust workspace.
+The existing CMake build path still targets AROS-NX while the native GNU Make
+backend is completed. Until that cutover is green, this repository is a
+migration workspace rather than a stable release.
 
 ## Architecture and ownership
 
@@ -47,13 +54,15 @@ both sides of the comparison.
 
 ## Sources of truth
 
-- Repository target profiles and downloadable host-compiler declarations:
-  root `aros-targets.toml`. Missing, malformed, or empty target data is fatal.
-- Released AROS cross-toolchains: root `aros-toolchains.lock.toml` and the
-  corresponding release manifests.
+- Repository target profiles and downloadable host-compiler declarations live
+  in the selected AROS checkout. AROS-NX uses `aros-targets.toml`; pristine
+  upstream support must not require that file once the GNU Make backend lands.
+- Released AROS cross-toolchains are selected by the consumer checkout's
+  `aros-toolchains.lock.toml` and corresponding release manifests.
 - Transpiler capability fingerprints: only
-  `aros-transpiler/capability-fingerprints.pins`, for explicitly documented
-  opaque recipe inputs. Ordinary packages and source files are not pinned.
+  `crates/aros-transpiler/capability-fingerprints.pins`, for explicitly
+  documented opaque recipe inputs. Ordinary packages and source files are not
+  pinned.
 - Stable diagnostics and local-log schema mechanics: `aros-common`.
 - Component-specific diagnostic code, hint, and logging policy: the owning
   component.
@@ -63,9 +72,9 @@ both sides of the comparison.
 The terminology distinguishes three layers:
 
 - **host compiler**: downloaded LLVM used to bootstrap builds; managed by
-  `aros host-compiler` (`host-tools` remains a compatibility alias);
-- **build tools**: checkout-local Rust executables consumed by CMake; managed
-  by `aros build-tools` (`hosttools` remains a compatibility alias);
+  `aros host-compiler`;
+- **build tools**: Rust executables consumed by AROS builds; managed by
+  `aros build-tools`;
 - **AROS cross-toolchain**: released target compiler, runtime, collector, and
   sysroot selected by `aros toolchain`.
 
@@ -77,8 +86,13 @@ Run from this directory:
 cargo fmt --all -- --check
 sh scripts/check-architecture.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+AROS_TEST_SOURCE_ROOT=/path/to/AROS cargo test --workspace --all-features
 ```
+
+Source-contract tests deliberately require an explicit AROS checkout. They do
+not infer one from the location of this repository. The selected tree must have
+its translation submodules initialized when running the full verification
+suite.
 
 The architecture check caps production source files at 2,000 lines, requires
 module-level documentation throughout `aros-cli`, keeps the largest test

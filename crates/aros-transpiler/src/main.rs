@@ -207,14 +207,14 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             error,
         )
         .with_location(SourceLocation::new(
-            "tools/aros-tools/crates/aros-transpiler/capability-fingerprints.pins",
+            "crates/aros-transpiler/capability-fingerprints.pins",
         ))
         .with_hint(
             "repair the embedded registry and rebuild the transpiler binary",
         )]));
     }
     println!(
-        "⚡ AROS-NG Transpiler v0.1.0 — Scanning MetaMake inputs in {}...",
+        "⚡ AROS Transpiler v0.1.0 — Scanning MetaMake inputs in {}...",
         args.source_dir.display()
     );
 

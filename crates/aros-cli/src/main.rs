@@ -100,14 +100,14 @@ enum Commands {
     },
 
     /// Manage the host LLVM compiler used to bootstrap builds
-    #[command(name = "host-compiler", visible_alias = "host-tools")]
+    #[command(name = "host-compiler")]
     HostCompiler {
         #[command(subcommand)]
         command: HostCompilerCommands,
     },
 
     /// Build or inspect the local Rust helpers consumed by CMake
-    #[command(name = "build-tools", visible_alias = "hosttools")]
+    #[command(name = "build-tools")]
     BuildTools {
         #[command(subcommand)]
         command: BuildToolsCommand,
@@ -292,7 +292,7 @@ enum ToolchainCommands {
 
 #[derive(Subcommand, Clone, Copy)]
 enum BuildToolsCommand {
-    /// Build the CMake configure-time Rust helpers in tools/aros-tools/target/release
+    /// Build the Rust helpers from the workspace selected by AROS_TOOLS_SOURCE_DIR
     Build,
     /// Verify that all mandatory CMake configure-time Rust helpers are ready
     Check,

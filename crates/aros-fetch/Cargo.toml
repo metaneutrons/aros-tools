@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Validated and observable third-party source fetcher for AROS-NG"
+description = "Validated and observable third-party source fetcher for AROS"
 
 [lints]
 workspace = true

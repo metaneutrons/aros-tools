@@ -1,0 +1,20 @@
+# Extracted from upstream workbench/libs/tiff/mmakefile.src.  Keep the complete
+# generated-header rule group needed by the parser regression test.
+
+$(AROS_INCLUDES)/tiffconf.h :  $(SRCDIR)/$(CURDIR)/tiffconf.h
+	$(CP) $< $@
+
+$(AROS_INCLUDES)/tifftypes.h :  $(SRCDIR)/$(CURDIR)/tifftypes.h
+	$(CP) $< $@
+
+$(AROS_INCLUDES)/tiffinline.h :  $(SRCDIR)/$(CURDIR)/tiffinline.h
+	$(CP) $< $@
+
+$(GENDIR)/$(CURDIR):
+	%mkdir_q dir="$@"
+
+$(GENDIR)/$(CURDIR)/tif_config.h :  $(SRCDIR)/$(CURDIR)/tif_config.h | $(GENDIR)/$(CURDIR)
+	$(CP) $< $@
+
+#MM
+workbench-libs-tiff-generated : $(AROS_INCLUDES)/tifftypes.h $(AROS_INCLUDES)/tiffinline.h $(AROS_INCLUDES)/tiffconf.h $(GENDIR)/$(CURDIR)/tif_config.h

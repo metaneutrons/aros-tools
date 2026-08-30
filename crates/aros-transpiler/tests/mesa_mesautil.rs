@@ -1,8 +1,10 @@
+mod common;
+
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, generate_cmake,
     parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, TargetContext,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const STATIC_SOURCES: &[&str] = &[
     "anon_file",
@@ -58,10 +60,7 @@ const STATIC_SOURCES: &[&str] = &[
 const GENERATED_SOURCES: &[&str] = &["format_srgb", "format/u_format_table"];
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

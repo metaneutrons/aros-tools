@@ -1,5 +1,9 @@
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
+
+static CHECKOUT: OnceLock<tempfile::TempDir> = OnceLock::new();
 
 const fn aros() -> &'static str {
     env!("CARGO_BIN_EXE_aros")
@@ -8,12 +12,26 @@ const fn aros() -> &'static str {
 fn command() -> Command {
     let mut command = Command::new(aros());
     command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(checkout())
         .env_remove("AROS_DIAGNOSTIC_FORMAT")
         .env_remove("AROS_LOG_LEVEL")
         .env_remove("AROS_LOG_FORMAT")
         .env_remove("AROS_LOG_FILE");
     command
+}
+
+fn checkout() -> &'static Path {
+    CHECKOUT
+        .get_or_init(|| {
+            let checkout = tempfile::tempdir().expect("temporary AROS checkout");
+            for directory in ["arch", "compiler", "rom"] {
+                fs::create_dir_all(checkout.path().join(directory)).expect("checkout directory");
+            }
+            fs::write(checkout.path().join("configure"), "").expect("configure marker");
+            fs::write(checkout.path().join("Makefile.in"), "").expect("make marker");
+            checkout
+        })
+        .path()
 }
 
 fn json(output: &Output) -> serde_json::Value {

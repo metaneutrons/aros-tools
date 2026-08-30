@@ -43,8 +43,6 @@ pub struct HostCompilerSelection {
 /// Resolve the configured host-compiler installation directory.
 pub fn default_host_compiler_dir() -> PathBuf {
     std::env::var_os("AROS_HOST_COMPILER_DIR")
-        .or_else(|| std::env::var_os("AROS_HOST_TOOLS_DIR"))
-        .or_else(|| std::env::var_os("AROS_TOOLCHAIN_DIR"))
         .map_or_else(|| aros_home().join("toolchain"), PathBuf::from)
 }
 
@@ -100,8 +98,6 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
     })?;
     let asset = host_asset.asset.replace(VERSION_TOKEN, &version);
     let base_url = std::env::var("AROS_HOST_COMPILER_URL")
-        .or_else(|_| std::env::var("AROS_HOST_TOOLS_URL"))
-        .or_else(|_| std::env::var("AROS_TOOLCHAIN_URL"))
         .unwrap_or_else(|_| cfg.base_url.replace(VERSION_TOKEN, &version));
     Ok(HostCompilerSelection {
         host_key: host_key.into(),

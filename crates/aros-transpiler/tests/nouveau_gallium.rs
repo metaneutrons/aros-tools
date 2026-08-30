@@ -1,17 +1,16 @@
+mod common;
+
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, generate_cmake,
     parse_mmakefile_with_dirs_and_context_and_fetches, DependencyGraph, ModuleType, TargetContext,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
 const MESA_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

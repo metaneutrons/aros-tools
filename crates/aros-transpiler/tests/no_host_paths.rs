@@ -11,6 +11,8 @@
 //! this asserts on the whole parse result: no declaration from any mmakefile in
 //! the tree may mention the source root, for any of the three architectures.
 
+mod common;
+
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars,
     parse_mmakefile_with_dirs_and_context_and_fetches, TargetContext,
@@ -19,10 +21,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn mmakefiles(root: &Path) -> Vec<PathBuf> {

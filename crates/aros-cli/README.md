@@ -1,19 +1,19 @@
 # `aros` CLI
 
-`aros` is the user-facing orchestration boundary for an AROS-NG checkout. It
+`aros` is the user-facing orchestration boundary for an AROS checkout. It
 discovers the repository, selects declarative target and toolchain state,
-builds checkout-local helpers, configures and builds AROS, validates boot
-results, and drives guarded physical-board workflows. It invokes the transpiler,
-collector, generators, and runners as independent processes rather than
-linking their implementations.
+resolves the installed build-tool suite, configures and builds AROS, validates
+boot results, and drives guarded physical-board workflows. It invokes the
+transpiler, collector, generators, and runners as independent processes rather
+than linking their implementations.
 
 ## Command model
 
 | Command | Responsibility |
 | --- | --- |
 | `setup` | install the host compiler or locked cross-toolchains |
-| `host-compiler` | manage downloaded host LLVM (`host-tools` compatibility alias) |
-| `build-tools` | build/check checkout-local Rust tools (`hosttools` compatibility alias) |
+| `host-compiler` | manage downloaded host LLVM |
+| `build-tools` | build/check the complete Rust build-tool suite |
 | `toolchain` | install, list, verify, and locate released AROS cross-toolchains |
 | `build` / `clean` | configure and build a declared target profile |
 | `test` | run evidence-producing, non-interactive QEMU boot validation |
@@ -24,12 +24,25 @@ linking their implementations.
 
 The root `aros-targets.toml` is the sole source of target profiles and host
 compiler assets. Missing, invalid, or empty target configuration is fatal.
-`AROS_HOST_COMPILER_DIR` and `AROS_HOST_COMPILER_URL` are the canonical local
-overrides; the former `AROS_HOST_TOOLS_DIR` and `AROS_HOST_TOOLS_URL` names
-remain compatibility fallbacks.
+`AROS_HOST_COMPILER_DIR` and `AROS_HOST_COMPILER_URL` are the explicit local
+overrides.
 Released cross-toolchains are selected exclusively through
 `aros-toolchains.lock.toml`; an explicit local toolchain remains an auditable
 override and is never silently copied into the immutable store.
+
+## Build-tool resolution
+
+All required Rust build tools must come from one directory. The CLI checks, in
+order, an explicit `AROS_BUILD_TOOLS_DIR`, the directory containing the running
+`aros` executable, and directories on `PATH`. It passes the verified directory
+to CMake as `AROS_RUST_TOOLS_DIR`; no ambient executable can replace an
+individual member of the set.
+
+Packaged installations ship the complete suite together. Developers who need
+`aros build-tools build` set `AROS_TOOLS_SOURCE_DIR` to an aros-tools checkout.
+The command builds the required packages into that checkout's
+`target/release`. An embedded `tools/aros-tools` workspace is recognized only
+as a temporary AROS-NG migration fallback.
 
 Raspberry Pi disk writes are a separate safety boundary. They require a fresh
 scan identity, whole/removable/unmounted-media validation, explicit apply

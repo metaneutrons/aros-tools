@@ -69,7 +69,7 @@ the "Board verification blockers" section of the repository's
 ## Directory layout
 
 ```text
-tools/rpi-debug/
+support/rpi-debug/
   README.md                  board-engine contract and operating rules
   firmware.lock.toml         pinned Pi firmware source revision and required files
   config.txt.in              SD boot-partition template for the Pi 4 U-Boot profile

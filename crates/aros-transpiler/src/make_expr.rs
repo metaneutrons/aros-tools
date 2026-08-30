@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     fn root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+        crate::testing::root()
     }
 
     fn evaluate(src: &str, expression: &str) -> Result<String, MakeExprError> {

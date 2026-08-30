@@ -1,3 +1,5 @@
+mod common;
+
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars, parse_mmakefile_with_dirs_and_context,
     parse_mmakefile_with_dirs_and_context_and_fetches, ModuleType, TargetContext,
@@ -9,10 +11,7 @@ use std::{
 use walkdir::WalkDir;
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 #[test]

@@ -421,7 +421,7 @@ AFILES := \
         // One mmakefile, three lanes, three different USER_CFLAGS. Read
         // file-wide instead of at the declaration, the SSE lane would get the
         // AVX flag or none, and rgbconv_avx.c does not compile without -mavx2.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+        let root = crate::testing::root();
         let rel = PathBuf::from("arch/i386-all/hidd/gfx");
         let content = aros_common::read_source(&root.join(&rel).join("mmakefile.src")).unwrap();
         let joined = crate::parser::join_continuations(&content);

@@ -602,7 +602,7 @@ mod tests {
             fs::create_dir_all(root.join(path)).unwrap();
         }
 
-        let mock_tool = include_bytes!("../../../../../scripts/toolchain/tests/mock-tool.sh");
+        let mock_tool = include_bytes!("../tests/fixtures/mock-tool.sh");
         for tool in [
             "clang",
             "clang++",
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn matches_language_neutral_tree_digest_vector() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../toolchains/tree-digest-v1.fixture.json"
+            "../tests/fixtures/tree-digest-v1.fixture.json"
         ))
         .unwrap();
         assert_eq!(

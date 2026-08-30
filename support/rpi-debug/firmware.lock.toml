@@ -30,7 +30,7 @@ status = "checksums-must-be-recorded-before-automated-fetch"
 
 # This lock deliberately does not pin U-Boot yet.  The first proof-of-concept
 # must record an upstream tag or immutable commit together with the reviewed
-# patch series in tools/rpi-debug/uboot/patches/ before a bootstrap builder is
+# patch series in support/rpi-debug/uboot/patches/ before a bootstrap builder is
 # added to the AROS CLI.
 [u_boot]
 repository = "https://source.denx.de/u-boot/u-boot.git"

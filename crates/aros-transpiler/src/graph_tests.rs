@@ -6,11 +6,10 @@ use crate::fetch::FetchDecl;
 use crate::packages::{PackageDecl, ResolvedPackageMember};
 use crate::{parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context, TargetContext};
 use std::collections::HashSet;
-use std::path::Path;
 use walkdir::WalkDir;
 
 fn root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    crate::testing::root()
 }
 
 #[test]

@@ -128,10 +128,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../..")
-            .canonicalize()
-            .unwrap()
+        crate::testing::root()
     }
 
     fn collect(rel: &str) -> (Vec<HiddStubsDecl>, Vec<String>) {

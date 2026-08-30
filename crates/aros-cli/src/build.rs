@@ -69,7 +69,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         options.input_policy.offline,
     )
     .await?;
-    build_tools::ensure(repo_root)?;
+    let build_tools = build_tools::ensure(repo_root)?;
 
     println!(
         "{ROCKET} {}Building AROS for target preset [{}]...",
@@ -124,6 +124,10 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     configure.arg(format!(
         "-DAROS_CROSS_TOOLCHAIN_ROOT={}",
         resolved.paths.root.display()
+    ));
+    configure.arg(format!(
+        "-DAROS_RUST_TOOLS_DIR={}",
+        build_tools.bin_dir.display()
     ));
     configure.arg(format!("-DAROS_TARGET_CPU={}", profile.arch));
     configure.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));

@@ -1,9 +1,11 @@
+mod common;
+
 use aros_transpiler::{
     collect_mmakefile_fetches_with_context, dirs::DirVars,
     parse_mmakefile_with_dirs_and_context_and_fetches, TargetContext,
 };
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const I915_BASENAMES: &[&str] = &[
     "i915_blit.c",
@@ -70,10 +72,7 @@ const SOFTPIPE_BASENAMES: &[&str] = &[
 ];
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

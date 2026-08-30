@@ -1,7 +1,9 @@
+mod common;
+
 use aros_transpiler::{
     dirs::DirVars, parse_mmakefile_with_dirs_and_context, ModuleType, TargetContext,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const LIBDRM_SOURCES: &[&str] = &[
     "libdrm/arosdrm",
@@ -13,10 +15,7 @@ const LIBDRM_SOURCES: &[&str] = &[
 ];
 
 fn source_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../..")
-        .canonicalize()
-        .unwrap()
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

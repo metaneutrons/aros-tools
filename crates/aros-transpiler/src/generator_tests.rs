@@ -8,10 +8,9 @@ use crate::graph::DependencyGraph;
 use crate::icons::IconTarget;
 use crate::packages::{PackageDecl, ResolvedPackageMember};
 use crate::parse_mmakefile_with_dirs;
-use std::path::Path;
 
 fn root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    crate::testing::root()
 }
 
 fn icon(name: &str) -> IconTarget {

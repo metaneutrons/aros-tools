@@ -1,12 +1,14 @@
+mod common;
+
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
     generate_cmake, parse_mmakefile_with_dirs_and_context, AhiBuildDecl, DependencyGraph,
     TargetContext,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+    common::source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

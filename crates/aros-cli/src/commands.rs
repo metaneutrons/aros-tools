@@ -67,7 +67,7 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
         ),
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
         Commands::Sync { transpile } => sync(transpile),
-        Commands::Golden { action } => golden_command(action),
+        Commands::Golden { action } => golden_command(action, repo_root),
         Commands::Info => info(),
     }
 }
@@ -378,14 +378,13 @@ fn sync(transpile: bool) -> Result<()> {
     Ok(())
 }
 
-fn golden_command(action: GoldenAction) -> Result<()> {
-    let transpiler = PathBuf::from("tools/aros-tools/target/release/aros-transpiler");
-    if !transpiler.is_file() {
-        miette::bail!(
-            "no {} -- build it with `cargo build --release -p aros-transpiler` in tools/aros-tools",
-            transpiler.display()
-        );
-    }
+fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
+    let tools = crate::build_tools::ensure(repo_root)?;
+    let transpiler = tools.bin_dir.join(if cfg!(windows) {
+        "aros-transpiler.exe"
+    } else {
+        "aros-transpiler"
+    });
     let build_root = PathBuf::from("build");
     let snapshot_root = build_root.join("golden");
     match action {

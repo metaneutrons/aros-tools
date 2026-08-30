@@ -282,7 +282,7 @@ mod tests {
     use std::path::Path;
 
     fn root() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..")
+        crate::testing::root()
     }
 
     fn scan(relative: &str) -> super::IlbmSourceScan {

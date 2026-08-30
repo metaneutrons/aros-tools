@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Typed physical-board profiles and safe lab workflows for AROS-NG"
+description = "Typed physical-board profiles and safe lab workflows for AROS"
 
 [lints]
 workspace = true

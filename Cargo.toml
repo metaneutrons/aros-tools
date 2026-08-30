@@ -20,7 +20,7 @@ edition = "2021"
 authors = ["AROS Development Team <core@aros.org>", "Fabian Schmieder <@metaneutrons>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://aros.org"
-repository = "https://github.com/metaneutrons/AROS-NG"
+repository = "https://github.com/metaneutrons/aros-tools"
 readme = "README.md"
 
 [workspace.lints.rust]
