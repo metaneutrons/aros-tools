@@ -7,7 +7,8 @@ description: Claims that are green and gates that remain open.
 
 - Complete Rust workspace tests and architecture boundaries on the extracted history.
 - No Claude or Anthropic attribution in the rewritten `aros-tools` history or source tree.
-- Translation against current upstream AROS source contracts.
+- Translation and differential verification against the immutable AROS-NX
+  source contract selected by CI.
 - A complete local AROS-NX `pc-x86_64` product build using the published RC3 cross-toolchain.
 
 ## Still required before 1.0

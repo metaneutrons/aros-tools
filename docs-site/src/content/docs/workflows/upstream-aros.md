@@ -7,16 +7,20 @@ description: What works without carrying AROS-NX patches, and where the compatib
 not infer a sibling directory, require the repository to be named `AROS-NX`,
 or expect the Rust workspace inside the operating-system tree.
 
-Use an absolute source path for development and verification gates:
+The independently supported component suites can be exercised without
+modifying a pristine checkout:
 
 ```sh
-export AROS_TEST_SOURCE_ROOT=/absolute/path/to/AROS
-cargo test --workspace --all-features
+cargo test --locked -p aros-collect -p aros-fetch -p aros-genmodule
 ```
 
-The individual parsers, verifiers, collector, fetcher and generators model
-upstream source contracts directly. The classic MetaMake/GNU Make build stays
-available in upstream AROS and is not replaced by a shell fallback.
+Repository discovery and installed-tool resolution do not require AROS-NX.
+Individual parsers, the collector, fetcher and generators model upstream
+source contracts directly. The complete workspace gate, however, currently
+uses the immutable AROS-NX checkout named by CI because its translation and
+verification tests require the consumer bridge and qualified denominators.
+The classic MetaMake/GNU Make build stays available in upstream AROS and is not
+replaced by a shell fallback.
 
 :::caution[Current build frontend boundary]
 The integrated `aros build` CMake path still requires the small consumer bridge

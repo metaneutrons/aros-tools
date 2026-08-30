@@ -28,8 +28,13 @@ Before installing a development build, run the same gates used by CI:
 cargo fmt --all -- --check
 sh scripts/check-architecture.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-AROS_TEST_SOURCE_ROOT=/absolute/path/to/AROS cargo test --workspace --all-features
+AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX cargo test --workspace --all-features
 ```
+
+The complete workspace gate currently uses the immutable AROS-NX source
+contract named by CI. Tests for components which already support pristine
+upstream remain part of that gate; a complete upstream-only product build is a
+separate release criterion and is not implied by this command.
 
 :::note[Binary packages]
 Native release archives, Debian packages, Homebrew and AUR installation will
