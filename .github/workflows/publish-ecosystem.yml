@@ -9,9 +9,6 @@ on:
       version:
         required: true
         type: string
-      source_commit:
-        required: true
-        type: string
       source_date_epoch:
         required: true
         type: string

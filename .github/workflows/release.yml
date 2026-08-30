@@ -811,7 +811,6 @@ jobs:
     with:
       tag: ${{ needs.metadata.outputs.tag }}
       version: ${{ needs.metadata.outputs.version }}
-      source_commit: ${{ needs.metadata.outputs.source_commit }}
       source_date_epoch: ${{ needs.metadata.outputs.source_date_epoch }}
 
   promote-stable:
