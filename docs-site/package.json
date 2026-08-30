@@ -15,5 +15,9 @@
   "devDependencies": {
     "@astrojs/check": "0.9.6",
     "typescript": "5.9.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
   }
 }

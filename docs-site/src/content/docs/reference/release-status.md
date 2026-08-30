@@ -14,10 +14,16 @@ description: Claims that are green and gates that remain open.
   verification and a clean-room smoke test on macOS ARM64.
 - A fail-closed four-host archive workflow with SPDX SBOM, keyless signatures,
   GitHub provenance and isolated draft verification.
+- Clean-room installation of both Debian packages, the measured Homebrew
+  formula on all four native hosts, and the AUR package on x86-64 and ARM64.
+- The Astro documentation build and GitHub Pages deployment at
+  `https://metaneutrons.github.io/aros-tools/`.
 
 ## Still required before 1.0
 
-- Clean-room installation tests for archives, Debian packages, Homebrew and AUR.
 - Signed APT repository publication and rollback-safe R2 staging.
-- SBOM, provenance, signature and checksum verification for every release artifact.
+- Credential-isolated publication to Homebrew and AUR followed by public
+  installation verification.
+- SBOM, provenance, signature and checksum verification for the first tagged
+  release artifact set.
 - A fully qualified GNU Make backend for pristine upstream product builds.
