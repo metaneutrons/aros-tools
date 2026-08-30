@@ -46,7 +46,7 @@ qualification runs must never receive publication credentials.
 | `AUR_SSH_PRIVATE_KEY` | Dedicated unencrypted CI key whose public half is registered in the AUR account |
 | `APT_GPG_PRIVATE_KEY` | Dedicated archive-signing private key |
 | `APT_GPG_PASSPHRASE` | Passphrase for that signing key |
-| `R2_ACCESS_KEY_ID` | R2 S3 credential with Object Read & Write on the single package bucket |
+| `R2_ACCESS_KEY_ID` | R2 S3 credential with Object Read & Write on the shared distribution bucket |
 | `R2_SECRET_ACCESS_KEY` | Secret half of the same bucket-scoped credential |
 
 The environment also supplies non-secret variables:
@@ -55,15 +55,19 @@ The environment also supplies non-secret variables:
 | --- | --- |
 | `AUR_SSH_KNOWN_HOSTS` | Reviewed `aur.archlinux.org` host-key entry; dynamic trust-on-first-use is rejected |
 | `APT_GPG_FINGERPRINT` | Full 40-hex primary-key fingerprint |
-| `APT_PUBLIC_BASE_URL` | Production HTTPS custom-domain URL ending in `/apt` |
-| `R2_ACCOUNT_ID` | Exact 32-hex Cloudflare account ID |
-| `R2_BUCKET_NAME` | Dedicated Standard-storage bucket, planned as `aros-packages` |
+| `APT_PUBLIC_BASE_URL` | `https://aros.metaneutrons.cc/tools/apt` |
+| `R2_ACCOUNT_ID` | Exact 32-hex Cloudflare account ID for the `lexICT` account |
+| `R2_BUCKET_NAME` | Dedicated Standard-storage bucket `aros-distributions` |
 
 The R2 bucket and its production custom domain are infrastructure prerequisites;
 the release workflow does not create, delete, or reconfigure Cloudflare
 resources. R2's S3 endpoint is used only for object access. Uploads never use a
 recursive delete: immutable package objects go first, mutable index files next,
 and the signed `InRelease` file is the final commit point.
+
+The bucket is namespaced by product. This workflow owns only `tools/`; the
+reserved `toolchains/` and `images/` prefixes can be published independently
+without changing existing package URLs.
 
 ## Failure contract
 
