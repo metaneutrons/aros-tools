@@ -35,6 +35,10 @@ asset.
 Create an environment named `release`. Keep the following credentials there,
 not in source or repository variables:
 
+Restrict the environment to custom deployment tag policies and allow only
+annotated release tags matching `v*`. Pull requests, branches, and manual
+qualification runs must never receive publication credentials.
+
 | Secret | Required scope |
 | --- | --- |
 | `PACKAGE_PUBLISH_TOKEN` | Fine-grained access only to `metaneutrons/homebrew-tap`, with Contents and Pull requests read/write |
