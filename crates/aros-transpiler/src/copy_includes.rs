@@ -817,12 +817,9 @@ fn parse_header_transform(
             (match_text, replacement, false, Vec::new())
         } else if literal_copy(&commands) {
             (String::new(), String::new(), true, Vec::new())
-        } else if let Some(substitutions) =
-            literal_template_substitutions(&commands, vars, external)
-        {
-            (String::new(), String::new(), false, substitutions)
         } else {
-            return None;
+            let substitutions = literal_template_substitutions(&commands, vars, external)?;
+            (String::new(), String::new(), false, substitutions)
         };
     let input = resolve_transform_path(raw_input, base, vars, external, false)?;
 

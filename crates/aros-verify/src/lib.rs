@@ -411,7 +411,7 @@ fn llvm_provisioning_context_matches_sources(
         && cmake_lines.contains("set(CMAKE_SYSTEM_NAME Generic)")
         && cmake_lines
             .iter()
-            .any(|line| line.starts_with("project(AROS-NG"))
+            .any(|line| line.starts_with("project(AROS-NG") || line.starts_with("project(AROS-NX"))
 }
 
 fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningContext {

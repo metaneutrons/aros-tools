@@ -329,10 +329,10 @@ fn current_architecture_denominators_are_pinned() {
     // The August 2026 upstream sync adds the LLVM runtimes umbrella and
     // new Bluetooth, Raspberry Pi and driver declarations while replacing
     // the split rtl8168/rtl8169 lanes with rtl816x.
-    assert_eq!(global.len(), 1211);
-    assert_eq!(ids(&x86, true).len(), 1088);
-    assert_eq!(ids(&arm, true).len(), 1082);
-    assert_eq!(ids(&aarch64, true).len(), 1082);
+    assert_eq!(global.len(), 1218);
+    assert_eq!(ids(&x86, true).len(), 1093);
+    assert_eq!(ids(&arm, true).len(), 1089);
+    assert_eq!(ids(&aarch64, true).len(), 1089);
     assert!(global.contains("test-library-dummytest_auto"));
     assert!(!global.contains("mesa3d-linklib-galliumvm"));
 
@@ -409,10 +409,10 @@ fn toolchain_provisioning_splits_the_target_obligations() {
         .map(|declaration| declaration.mmake.clone())
         .collect();
 
-    assert_eq!(global_target.len(), 1201);
-    assert_eq!(target_ids(&x86).len(), 1078);
-    assert_eq!(target_ids(&arm).len(), 1074);
-    assert_eq!(target_ids(&aarch64).len(), 1074);
+    assert_eq!(global_target.len(), 1208);
+    assert_eq!(target_ids(&x86).len(), 1083);
+    assert_eq!(target_ids(&arm).len(), 1081);
+    assert_eq!(target_ids(&aarch64).len(), 1081);
     let common_provisioning = BTreeSet::from([
         "crosstools-compiler-rt".to_owned(),
         "crosstools-compiler-rt-release".to_owned(),
@@ -454,9 +454,19 @@ fn llvm_provisioning_context_is_structural_not_pinned() {
         &cmake_lists,
     ));
     assert!(llvm_provisioning_context_matches_sources(
-        &(mmake + "\nUNRELATED_RELEASE_SETTING := changed\n"),
+        &format!("{mmake}\nUNRELATED_RELEASE_SETTING := changed\n"),
         &make_config,
         &cmake_lists,
+    ));
+    let alternate_product_name = if cmake_lists.contains("project(AROS-NX") {
+        cmake_lists.replace("project(AROS-NX", "project(AROS-NG")
+    } else {
+        cmake_lists.replace("project(AROS-NG", "project(AROS-NX")
+    };
+    assert!(llvm_provisioning_context_matches_sources(
+        &mmake,
+        &make_config,
+        &alternate_product_name,
     ));
 }
 
@@ -507,6 +517,13 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
             "set(CMAKE_SYSTEM_NAME Generic)",
             "set(CMAKE_SYSTEM_NAME Darwin)",
         ),
+    );
+    assert_context_rejected(
+        &mmake,
+        &make_config,
+        &cmake_lists
+            .replace("project(AROS-NG", "project(AROS-Other")
+            .replace("project(AROS-NX", "project(AROS-Other"),
     );
 
     let declarations = collect_declarations(

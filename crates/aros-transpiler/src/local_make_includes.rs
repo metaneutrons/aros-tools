@@ -1083,10 +1083,9 @@ fn parse_include_directive(line: &str) -> Option<IncludeDirective<'_>> {
     let line = line.trim_end();
     let (optional, tail) = if let Some(tail) = directive_tail(line, "-include") {
         (true, tail)
-    } else if let Some(tail) = directive_tail(line, "include") {
-        (false, tail)
     } else {
-        return None;
+        let tail = directive_tail(line, "include")?;
+        (false, tail)
     };
     Some(IncludeDirective {
         optional,

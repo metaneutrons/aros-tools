@@ -6,6 +6,10 @@ independent, upstream-compatible tool suite. The tools model existing MetaMake
 and build contracts and keep generated state outside authoritative upstream
 inputs.
 
+The versioned documentation source lives in `docs-site/` and is built with
+Astro Starlight. Its upstream-AROS and AROS-NX guides state the current support
+boundary explicitly; no unreleased package channel is advertised as available.
+
 Repository discovery and installed build-tool resolution already accept a
 pristine upstream checkout and do not depend on an embedded Rust workspace.
 The existing CMake build path still targets AROS-NX while the native GNU Make
@@ -86,13 +90,18 @@ Run from this directory:
 cargo fmt --all -- --check
 sh scripts/check-architecture.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-AROS_TEST_SOURCE_ROOT=/path/to/AROS cargo test --workspace --all-features
+AROS_TEST_SOURCE_ROOT=/path/to/qualified/AROS-NX cargo test --workspace --all-features
 ```
 
-Source-contract tests deliberately require an explicit AROS checkout. They do
-not infer one from the location of this repository. The selected tree must have
-its translation submodules initialized when running the full verification
-suite.
+Source-contract tests deliberately require an explicit, qualified AROS-NX
+checkout. They do not infer one from the location of this repository. The CI
+matrix pins that checkout to the same immutable source commit used by the
+toolchain producer; this prevents a moving upstream branch from changing the
+meaning of a tools commit. The selected tree must have its translation
+submodules initialized when running the full verification suite. Compatibility
+with pristine upstream is a separate product boundary: repository discovery
+and installed-tool resolution work today, while the complete native GNU Make
+build path is still explicitly pending.
 
 The architecture check caps production source files at 2,000 lines, requires
 module-level documentation throughout `aros-cli`, keeps the largest test
@@ -108,3 +117,23 @@ substantially smaller.
 Every user-facing component must keep human and JSON diagnostics on the shared
 `aros-tool-diagnostics-v1` contract. Local logging is opt-in, requires an
 explicit destination, and must never enter deterministic release archives.
+
+## Documentation
+
+Build the documentation locally with:
+
+```console
+cd docs-site
+npm ci
+npm run build
+```
+
+The checked-in lockfile is authoritative. GitHub Pages deployment uses the
+same `npm ci` build through Astro's official Pages action.
+
+## License
+
+Unless a file states otherwise, the Rust workspace and its documentation are
+available under either the [Apache License 2.0](LICENSE-APACHE) or the
+[MIT License](LICENSE-MIT), at your option. Vendored and AROS-derived inputs
+retain their own notices and licenses.
