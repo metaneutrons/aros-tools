@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use crate::contract::{require_regular, PackageArgs, VerifyArgs};
 use crate::{ReleaseFailure, ReleaseResult};
 
-const MANIFEST_SCHEMA: u32 = 1;
+pub const MANIFEST_SCHEMA: u32 = 1;
 const BINARIES: &[&str] = &[
     "aros",
     "aros-ahi-runner",
@@ -491,7 +491,7 @@ fn prepare_output_directory(path: &Path) -> ReleaseResult<()> {
     Ok(())
 }
 
-fn write_new_atomic(path: &Path, bytes: &[u8]) -> ReleaseResult<()> {
+pub(crate) fn write_new_atomic(path: &Path, bytes: &[u8]) -> ReleaseResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| publication_failure(path, "output path has no parent directory"))?;

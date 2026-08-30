@@ -322,6 +322,43 @@ jobs:
           for subject in release/*; do
             gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
           done
+      - name: Generate exact Homebrew and AUR metadata
+        shell: bash
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_id=${TAG:-qualification-${GITHUB_RUN_ID}}
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_id}"
+          target/release/aros-release generate \
+            --format homebrew \
+            --base-url "$base_url" \
+            --manifests release/*.manifest.json \
+            --output release/aros-tools.rb
+          target/release/aros-release generate \
+            --format aur \
+            --base-url "$base_url" \
+            --manifests release/*.manifest.json \
+            --output release/PKGBUILD
+          ruby -c release/aros-tools.rb
+          bash -n release/PKGBUILD
+      - name: Sign package-manager metadata
+        if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for subject in release/aros-tools.rb release/PKGBUILD; do
+            cosign sign-blob --yes --bundle "${subject}.sigstore.json" "$subject"
+          done
+      - name: Attest package-manager metadata
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            release/aros-tools.rb
+            release/aros-tools.rb.sigstore.json
+            release/PKGBUILD
+            release/PKGBUILD.sigstore.json
       - name: Write complete checksum inventory
         shell: bash
         run: |

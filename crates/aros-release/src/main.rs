@@ -4,11 +4,12 @@ use std::process::ExitCode;
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage};
 use aros_release::archive;
 use aros_release::contract::{Cli, Command};
+use aros_release::ecosystem;
 use aros_release::observability::{
     render, requested_diagnostic_format, DiagnosticFormat, LogLevel, Logger,
 };
 use aros_release::ReleaseFailure;
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, Parser, ValueEnum};
 
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
@@ -52,6 +53,18 @@ fn main() -> ExitCode {
             target: Some(args.archive.display().to_string()),
             ..DiagnosticContext::default()
         },
+        Command::Generate(args) => DiagnosticContext {
+            mode: Some("generate".into()),
+            target: Some(
+                args.format
+                    .to_possible_value()
+                    .expect("value enum")
+                    .get_name()
+                    .into(),
+            ),
+            output: Some(args.output.display().to_string()),
+            ..DiagnosticContext::default()
+        },
     };
     if let Err(error) = logger.event(
         LogLevel::Info,
@@ -64,6 +77,7 @@ fn main() -> ExitCode {
     let operation = match &cli.command {
         Command::Package(args) => archive::package(args).map(|_| ()),
         Command::Verify(args) => archive::verify(args).map(|_| ()),
+        Command::Generate(args) => ecosystem::generate(args),
     };
     if let Err(error) = operation {
         return render_logged_failure(error, &mut logger, cli.diagnostic_format);

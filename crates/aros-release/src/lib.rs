@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod contract;
+pub mod ecosystem;
 pub mod observability;
 
 use std::fmt;

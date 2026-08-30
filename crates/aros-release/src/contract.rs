@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticStage};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{ReleaseFailure, ReleaseResult};
 
@@ -32,6 +32,8 @@ pub enum Command {
     Package(PackageArgs),
     /// Verify an archive and its manifest without trusting filenames
     Verify(VerifyArgs),
+    /// Generate package-manager metadata from four verified manifests
+    Generate(GenerateArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -65,6 +67,26 @@ pub struct VerifyArgs {
     pub archive: PathBuf,
     #[arg(long)]
     pub manifest: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EcosystemFormat {
+    Homebrew,
+    Aur,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GenerateArgs {
+    #[arg(long, value_enum)]
+    pub format: EcosystemFormat,
+    /// Canonical release download directory, ending in the immutable tag
+    #[arg(long)]
+    pub base_url: String,
+    /// Four verified native archive manifests
+    #[arg(long, required = true, num_args = 4)]
+    pub manifests: Vec<PathBuf>,
+    #[arg(long)]
+    pub output: PathBuf,
 }
 
 impl PackageArgs {
@@ -119,7 +141,7 @@ impl PackageArgs {
     }
 }
 
-fn valid_version(value: &str) -> bool {
+pub(crate) fn valid_version(value: &str) -> bool {
     let (core, suffix) = value.split_once(['-', '+']).unwrap_or((value, ""));
     let mut numbers = core.split('.');
     let valid_number = |part: &str| {
