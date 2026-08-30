@@ -165,10 +165,11 @@ jobs:
           branch="release/aros-tools-${VERSION}-${GITHUB_RUN_ID}"
           git switch -c "$branch"
           install -m 0644 "$source_formula" Formula/aros-tools.rb
+          scripts/generate-readme.sh
           actor=$(gh api user --jq .login)
           git config user.name 'AROS release automation'
           git config user.email "${actor}@users.noreply.github.com"
-          git add Formula/aros-tools.rb
+          git add Formula/aros-tools.rb README.md
           git commit -m "aros-tools ${VERSION}"
           git push -u origin "$branch"
           pr=$(gh pr create --repo metaneutrons/homebrew-tap \
