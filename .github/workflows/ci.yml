@@ -51,17 +51,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: aros-tools
-      - name: Checkout pristine upstream AROS
+      - name: Checkout qualified AROS-NX source contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: aros-development-team/AROS
+          repository: metaneutrons/AROS-NX
+          ref: 5eda8ebd4da5412092528c2bb2323b90e19ef6d0
           path: aros-source
           submodules: recursive
       - name: Install Rust stable
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - name: Run complete workspace tests against upstream
+      - name: Run complete workspace tests against qualified source
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source

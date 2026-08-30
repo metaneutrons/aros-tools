@@ -90,13 +90,18 @@ Run from this directory:
 cargo fmt --all -- --check
 sh scripts/check-architecture.sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-AROS_TEST_SOURCE_ROOT=/path/to/AROS cargo test --workspace --all-features
+AROS_TEST_SOURCE_ROOT=/path/to/qualified/AROS-NX cargo test --workspace --all-features
 ```
 
-Source-contract tests deliberately require an explicit AROS checkout. They do
-not infer one from the location of this repository. The selected tree must have
-its translation submodules initialized when running the full verification
-suite.
+Source-contract tests deliberately require an explicit, qualified AROS-NX
+checkout. They do not infer one from the location of this repository. The CI
+matrix pins that checkout to the same immutable source commit used by the
+toolchain producer; this prevents a moving upstream branch from changing the
+meaning of a tools commit. The selected tree must have its translation
+submodules initialized when running the full verification suite. Compatibility
+with pristine upstream is a separate product boundary: repository discovery
+and installed-tool resolution work today, while the complete native GNU Make
+build path is still explicitly pending.
 
 The architecture check caps production source files at 2,000 lines, requires
 module-level documentation throughout `aros-cli`, keeps the largest test
