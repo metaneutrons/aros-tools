@@ -118,7 +118,7 @@ pub(super) fn substitute(
 }
 
 /// Finds the `)` matching the `$(` that starts at `open`, counting nesting.
-pub(super) fn matching_paren(text: &str, open: usize) -> Option<usize> {
+pub(super) const fn matching_paren(text: &str, open: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0usize;
     let mut i = open;

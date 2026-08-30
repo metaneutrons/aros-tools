@@ -122,10 +122,9 @@ fn decide_condition(
             }
             if let Some(local) = vars.get(name) {
                 out.push_str(&local.join(" "));
-            } else if let Some(value) = target.and_then(|target| target.value_of(name)) {
-                out.push_str(&value);
             } else {
-                return None;
+                let value = target.and_then(|target| target.value_of(name))?;
+                out.push_str(&value);
             }
             rest = &after[end + 1..];
         }
