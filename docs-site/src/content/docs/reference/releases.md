@@ -28,8 +28,10 @@ peeled commit and commit timestamp before building. Existing artifacts, tags
 and releases are never overwritten or retargeted; a failed candidate gets a
 new version.
 
-Pull requests exercise the same four archive lanes with a synthetic SemVer
-identity, but cannot sign or publish a release.
+Pull requests exercise the same four archive lanes with the workspace SemVer
+and an isolated run-scoped candidate identity, but cannot sign or publish a
+release. Package metadata and compiled `--version` output therefore remain
+identical during qualification.
 
 ## Producer contract
 
@@ -61,6 +63,15 @@ draft may become a release; a prerelease version remains marked as such.
 Debian packages, the signed APT repository, Homebrew formula and AUR package
 are additional mandatory gates before the first public tag. The APT repository
 uses its own R2 bucket and is not a second binary source for native archives.
+Each Debian lane installs its generated package, verifies the installed files
+with `dpkg`, starts all eight commands and compares every installed executable
+byte-for-byte with the corresponding canonical archive payload.
+The generated Homebrew formula is installed and tested natively on all four
+supported hosts. The AUR recipe is built for both Linux architectures; its
+packaged executables are compared with the canonical archive payloads, and the
+x86-64 package is additionally installed and exercised in an Arch Linux
+environment. These qualification copies substitute only a loopback download
+base while the immutable GitHub draft is still private.
 
 ## Release diagnostics
 

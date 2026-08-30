@@ -53,7 +53,7 @@ jobs:
           )
           is_release=false
           tag=''
-          version="${workspace_version}-ci.${GITHUB_RUN_ID}"
+          version="$workspace_version"
           if [[ "${GITHUB_REF_TYPE:-}" == tag ]]; then
             tag=${GITHUB_REF_NAME}
             if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -227,6 +227,13 @@ jobs:
           dpkg-deb --extract "$deb" "$deb_root"
           for binary in "$archive_root"/*/bin/*; do
             cmp "$binary" "$deb_root/usr/bin/$(basename "$binary")"
+          done
+          dpkg --install "$deb"
+          dpkg --verify aros-tools
+          for binary in \
+            aros aros-ahi-runner aros-collect aros-fetch \
+            aros-genmodule aros-romtool aros-transpiler aros-verify; do
+            "/usr/bin/${binary}" --help >/dev/null
           done
       - name: Generate SPDX SBOM for the exact archive
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -413,10 +420,150 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  homebrew:
+    name: Homebrew install (${{ matrix.name }})
+    needs: aggregate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: macos-x86_64
+            runner: macos-15-intel
+          - name: macos-aarch64
+            runner: macos-15
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@3cdb78d0f62ad29dd32de765782654f4eedea607
+        with:
+          core: false
+          cask: false
+      - name: Install and test the measured formula
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          set -euo pipefail
+          port=38080
+          tap=aros-tools/qualification
+          python3 -m http.server "$port" \
+            --bind 127.0.0.1 --directory candidate >"$RUNNER_TEMP/http.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            brew uninstall aros-tools >/dev/null 2>&1 || true
+            brew untap "$tap" >/dev/null 2>&1 || true
+            kill "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent "http://127.0.0.1:${port}/aros-tools.rb" >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              echo "::error::local candidate server did not become ready"
+              exit 1
+            fi
+            sleep 1
+          done
+          brew tap-new --no-git "$tap"
+          tap_root=$(brew --repository "$tap")
+          formula="$tap_root/Formula/aros-tools.rb"
+          sed -E \
+            "s#https://github.com/${GITHUB_REPOSITORY}/releases/download/[^/\"]+#http://127.0.0.1:${port}#g" \
+            candidate/aros-tools.rb > "$formula"
+          if [[ $(grep -c "url \"http://127.0.0.1:${port}/" "$formula") != 4 ]]; then
+            echo "::error::formula must retain exactly four host URLs"
+            exit 1
+          fi
+          ruby -c "$formula"
+          brew install "$tap/aros-tools"
+          brew test "$tap/aros-tools"
+          brew uninstall aros-tools
+          brew untap "$tap"
+
+  aur:
+    name: AUR package (${{ matrix.arch }})
+    needs: aggregate
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel@sha256:a26046b7363dad8e2614858f4313949ae9b05c9c5f31de343a54864b9e20806f
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Build and verify the measured PKGBUILD
+        shell: bash
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          useradd --create-home builder
+          work=/home/builder/package
+          install -d -o builder -g builder "$work"
+          archive=$(find candidate -maxdepth 1 -type f \
+            -name "aros-tools-v*-${TARGET}.tar.gz" -print -quit)
+          if [[ -z "$archive" ]]; then
+            echo "::error::canonical archive for ${TARGET} is missing"
+            exit 1
+          fi
+          archive_name=$(basename "$archive")
+          cp "$archive" "$work/$archive_name"
+          sed -E \
+            "s#https://github.com/${GITHUB_REPOSITORY}/releases/download/[^']+/${archive_name}#${archive_name}#" \
+            candidate/PKGBUILD > "$work/PKGBUILD"
+          if [[ $(grep -Fc "('${archive_name}')" "$work/PKGBUILD") != 1 ]]; then
+            echo "::error::PKGBUILD must select exactly one local architecture payload"
+            exit 1
+          fi
+          cp /etc/makepkg.conf "$work/makepkg.conf"
+          sed -i "s/^CARCH=.*/CARCH=${PACKAGE_ARCH}/" "$work/makepkg.conf"
+          chown -R builder:builder "$work"
+          su builder -c "cd '$work' && makepkg --config ./makepkg.conf --cleanbuild --noconfirm"
+          package=$(find "$work" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit)
+          if [[ -z "$package" ]]; then
+            echo "::error::makepkg did not produce a package"
+            exit 1
+          fi
+          archive_root=/tmp/archive-payload
+          package_root=/tmp/package-payload
+          mkdir "$archive_root" "$package_root"
+          tar -xzf "$archive" -C "$archive_root"
+          bsdtar -xf "$package" -C "$package_root"
+          for binary in "$archive_root"/*/bin/*; do
+            cmp "$binary" "$package_root/usr/bin/$(basename "$binary")"
+          done
+          if [[ "$PACKAGE_ARCH" == x86_64 ]]; then
+            pacman -U --noconfirm "$package"
+            for binary in \
+              aros aros-ahi-runner aros-collect aros-fetch \
+              aros-genmodule aros-romtool aros-transpiler aros-verify; do
+              "/usr/bin/${binary}" --help >/dev/null
+            done
+          fi
+
   publish:
     name: Publish verified GitHub prerelease or release
     if: needs.metadata.outputs.is_release == 'true'
-    needs: [metadata, aggregate]
+    needs: [metadata, aggregate, homebrew, aur]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
