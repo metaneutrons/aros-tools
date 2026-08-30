@@ -10,10 +10,13 @@ description: Claims that are green and gates that remain open.
 - Translation and differential verification against the immutable AROS-NX
   source contract selected by CI.
 - A complete local AROS-NX `pc-x86_64` product build using the published RC3 cross-toolchain.
+- Deterministic native archive production, byte-identity tests, strict read-back
+  verification and a clean-room smoke test on macOS ARM64.
+- A fail-closed four-host archive workflow with SPDX SBOM, keyless signatures,
+  GitHub provenance and isolated draft verification.
 
 ## Still required before 1.0
 
-- Four-host native archive matrix from one verified build per host.
 - Clean-room installation tests for archives, Debian packages, Homebrew and AUR.
 - Signed APT repository publication and rollback-safe R2 staging.
 - SBOM, provenance, signature and checksum verification for every release artifact.

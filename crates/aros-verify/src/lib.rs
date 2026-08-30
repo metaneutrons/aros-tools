@@ -34,6 +34,7 @@ use regex::Regex;
 #[derive(Parser, Debug)]
 #[command(
     name = "aros-verify",
+    version,
     about = "Compare transpiled CMake targets against the genmf reference expansion"
 )]
 struct Args {

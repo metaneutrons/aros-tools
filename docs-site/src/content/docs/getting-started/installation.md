@@ -39,4 +39,7 @@ separate release criterion and is not implied by this command.
 :::note[Binary packages]
 Native release archives, Debian packages, Homebrew and AUR installation will
 be documented here only after their public artifacts pass clean-room tests.
+The qualification and promotion contract is documented under
+[Release engineering](/aros-tools/reference/releases/); there is deliberately
+no provisional download URL or unmeasured package checksum.
 :::

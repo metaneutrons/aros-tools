@@ -1,0 +1,635 @@
+name: Release qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/**'
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  RUST_VERSION: 1.98.0
+
+jobs:
+  metadata:
+    name: Validate immutable release identity
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      source_commit: ${{ steps.metadata.outputs.source_commit }}
+      source_date_epoch: ${{ steps.metadata.outputs.source_date_epoch }}
+      is_release: ${{ steps.metadata.outputs.is_release }}
+      tag: ${{ steps.metadata.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Validate source and version
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=$(git rev-parse HEAD)
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          workspace_version=$(python3 - <<'PY'
+          import tomllib
+          with open('Cargo.toml', 'rb') as source:
+              print(tomllib.load(source)['workspace']['package']['version'])
+          PY
+          )
+          is_release=false
+          tag=''
+          version="$workspace_version"
+          if [[ "${GITHUB_REF_TYPE:-}" == tag ]]; then
+            tag=${GITHUB_REF_NAME}
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::release tags must be canonical SemVer names (vX.Y.Z)"
+              exit 1
+            fi
+            if [[ $(git cat-file -t "$tag") != tag ]]; then
+              echo "::error::release tag $tag is lightweight; an immutable annotated tag is required"
+              exit 1
+            fi
+            source_commit=$(git rev-parse "$tag^{}")
+            if [[ "$source_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::tag peels to $source_commit but the workflow source is $GITHUB_SHA"
+              exit 1
+            fi
+            version=${tag#v}
+            if [[ "$version" != "$workspace_version" ]]; then
+              echo "::error::tag version $version does not match workspace version $workspace_version"
+              exit 1
+            fi
+            source_date_epoch=$(git show -s --format=%ct "$source_commit")
+            is_release=true
+          fi
+          {
+            echo "version=$version"
+            echo "source_commit=$source_commit"
+            echo "source_date_epoch=$source_date_epoch"
+            echo "is_release=$is_release"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+  native:
+    name: Native archive (${{ matrix.name }})
+    needs: metadata
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
+            target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
+            target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
+          - name: macos-x86_64
+            runner: macos-15-intel
+            container: ''
+            target: x86_64-apple-darwin
+            deb_arch: ''
+          - name: macos-aarch64
+            runner: macos-15
+            container: ''
+            target: aarch64-apple-darwin
+            deb_arch: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install audited Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates dpkg-dev file git liblzma-dev pkg-config
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version --verbose
+      - name: Test the release producer
+        run: cargo test --locked -p aros-release
+      - name: Build the complete native suite once
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --workspace --all-features --target "$TARGET"
+      - name: Audit native dynamic linkage
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binaries=(
+            aros aros-ahi-runner aros-collect aros-fetch
+            aros-genmodule aros-romtool aros-transpiler aros-verify
+          )
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for binary in "${binaries[@]}"; do
+              otool -L "target/${TARGET}/release/${binary}"
+            done | tee "$RUNNER_TEMP/dynamic-linkage.txt"
+            if grep -Eq '/(opt/homebrew|usr/local|Users|Volumes)/' \
+              "$RUNNER_TEMP/dynamic-linkage.txt"; then
+              echo "::error::release binary contains a non-system absolute library path"
+              exit 1
+            fi
+          else
+            for binary in "${binaries[@]}"; do
+              ldd "target/${TARGET}/release/${binary}"
+            done | tee "$RUNNER_TEMP/dynamic-linkage.txt"
+            if grep -Fq 'not found' "$RUNNER_TEMP/dynamic-linkage.txt"; then
+              echo "::error::release binary has an unresolved dynamic dependency"
+              exit 1
+            fi
+          fi
+      - name: Produce and read back the normalized archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          "target/${TARGET}/release/aros-release" package \
+            --version "$VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --target "$TARGET" \
+            --bin-dir "target/${TARGET}/release" \
+            --repository-root . \
+            --output-dir dist
+      - name: Clean-room command smoke test
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          install_root="$RUNNER_TEMP/aros-tools-install"
+          mkdir "$install_root"
+          tar -xzf "dist/aros-tools-v${VERSION}-${TARGET}.tar.gz" -C "$install_root"
+          for binary in "$install_root"/*/bin/*; do
+            "$binary" --help >/dev/null
+          done
+          file "$install_root"/*/bin/*
+      - name: Package the same Linux binaries as a Debian package
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --version 3.7.0 --locked
+          deb="dist/aros-tools_${VERSION}_${DEB_ARCH}.deb"
+          cargo deb -p aros-cli \
+            --target "$TARGET" \
+            --no-build \
+            --no-strip \
+            --output "$deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          archive_root="$RUNNER_TEMP/archive-payload"
+          deb_root="$RUNNER_TEMP/deb-payload"
+          mkdir "$archive_root" "$deb_root"
+          tar -xzf "dist/aros-tools-v${VERSION}-${TARGET}.tar.gz" -C "$archive_root"
+          dpkg-deb --extract "$deb" "$deb_root"
+          for binary in "$archive_root"/*/bin/*; do
+            cmp "$binary" "$deb_root/usr/bin/$(basename "$binary")"
+          done
+          dpkg --install "$deb"
+          dpkg --verify aros-tools
+          for binary in \
+            aros aros-ahi-runner aros-collect aros-fetch \
+            aros-genmodule aros-romtool aros-transpiler aros-verify; do
+            "/usr/bin/${binary}" --help >/dev/null
+          done
+      - name: Generate SPDX SBOM for the exact archive
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.tar.gz
+          format: spdx-json
+          output-file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+      - name: Generate SPDX SBOM for the exact Debian package
+        if: runner.os == 'Linux'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.deb
+          format: spdx-json
+          output-file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.spdx.json
+          upload-artifact: false
+      - name: Install keyless signing client
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Sign every release subject
+        if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for subject in dist/*; do
+            cosign sign-blob --yes --bundle "${subject}.sigstore.json" "$subject"
+          done
+      - name: Attest every native release subject
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/*
+      - name: Upload qualified native artifact set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  aggregate:
+    name: Verify complete four-host inventory
+    needs: [metadata, native]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: native-*
+          path: release
+          merge-multiple: true
+      - name: Enforce inventory and verify every payload
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IS_RELEASE: ${{ needs.metadata.outputs.is_release }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p aros-release
+          expected_subjects=20
+          if [[ "$IS_RELEASE" == true ]]; then
+            expected_subjects=40
+          fi
+          measured=$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')
+          if [[ "$measured" != "$expected_subjects" ]]; then
+            echo "::error::release inventory has $measured files; expected $expected_subjects"
+            find release -maxdepth 1 -type f -print | sort
+            exit 1
+          fi
+          for target in \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin aarch64-apple-darwin; do
+            archive="release/aros-tools-v${VERSION}-${target}.tar.gz"
+            manifest="${archive}.manifest.json"
+            target/release/aros-release verify --archive "$archive" --manifest "$manifest"
+            (cd release && sha256sum -c "$(basename "${archive}.sha256")")
+            jq -e '.spdxVersion | startswith("SPDX-")' \
+              "release/aros-tools-v${VERSION}-${target}.spdx.json" >/dev/null
+          done
+          for arch in amd64 arm64; do
+            deb="release/aros-tools_${VERSION}_${arch}.deb"
+            dpkg-deb --info "$deb"
+            dpkg-deb --contents "$deb"
+            jq -e '.spdxVersion | startswith("SPDX-")' \
+              "release/aros-tools_${VERSION}_${arch}.spdx.json" >/dev/null
+          done
+      - name: Install keyless verification client
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Verify signed native subjects
+        if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          issuer="https://token.actions.githubusercontent.com"
+          for bundle in release/*.sigstore.json; do
+            subject=${bundle%.sigstore.json}
+            cosign verify-blob \
+              --bundle "$bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" \
+              "$subject"
+          done
+          for subject in release/*; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
+      - name: Generate exact Homebrew and AUR metadata
+        shell: bash
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_id=${TAG:-qualification-${GITHUB_RUN_ID}}
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_id}"
+          target/release/aros-release generate \
+            --format homebrew \
+            --base-url "$base_url" \
+            --manifests release/*.manifest.json \
+            --output release/aros-tools.rb
+          target/release/aros-release generate \
+            --format aur \
+            --base-url "$base_url" \
+            --manifests release/*.manifest.json \
+            --output release/PKGBUILD
+          ruby -c release/aros-tools.rb
+          bash -n release/PKGBUILD
+      - name: Sign package-manager metadata
+        if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for subject in release/aros-tools.rb release/PKGBUILD; do
+            cosign sign-blob --yes --bundle "${subject}.sigstore.json" "$subject"
+          done
+      - name: Attest package-manager metadata
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            release/aros-tools.rb
+            release/aros-tools.rb.sigstore.json
+            release/PKGBUILD
+            release/PKGBUILD.sigstore.json
+      - name: Write complete checksum inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          checksum_tmp="$RUNNER_TEMP/SHA256SUMS"
+          (cd release && find . -maxdepth 1 -type f -print0 | \
+            sort -z | xargs -0 sha256sum) > "$checksum_tmp"
+          mv "$checksum_tmp" release/SHA256SUMS
+      - name: Sign and attest checksum inventory
+        if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        run: cosign sign-blob --yes --bundle release/SHA256SUMS.sigstore.json release/SHA256SUMS
+      - name: Attest checksum inventory
+        if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            release/SHA256SUMS
+            release/SHA256SUMS.sigstore.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: complete-release-candidate
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  homebrew:
+    name: Homebrew install (${{ matrix.name }})
+    needs: aggregate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: macos-x86_64
+            runner: macos-15-intel
+          - name: macos-aarch64
+            runner: macos-15
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@3cdb78d0f62ad29dd32de765782654f4eedea607
+        with:
+          core: false
+          cask: false
+      - name: Install and test the measured formula
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          set -euo pipefail
+          port=38080
+          tap=aros-tools/qualification
+          python3 -m http.server "$port" \
+            --bind 127.0.0.1 --directory candidate >"$RUNNER_TEMP/http.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            brew uninstall aros-tools >/dev/null 2>&1 || true
+            brew untap "$tap" >/dev/null 2>&1 || true
+            kill "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent "http://127.0.0.1:${port}/aros-tools.rb" >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              echo "::error::local candidate server did not become ready"
+              exit 1
+            fi
+            sleep 1
+          done
+          brew tap-new --no-git "$tap"
+          tap_root=$(brew --repository "$tap")
+          formula="$tap_root/Formula/aros-tools.rb"
+          sed -E \
+            "s#https://github.com/${GITHUB_REPOSITORY}/releases/download/[^/\"]+#http://127.0.0.1:${port}#g" \
+            candidate/aros-tools.rb > "$formula"
+          if [[ $(grep -c "url \"http://127.0.0.1:${port}/" "$formula") != 4 ]]; then
+            echo "::error::formula must retain exactly four host URLs"
+            exit 1
+          fi
+          ruby -c "$formula"
+          brew install "$tap/aros-tools"
+          brew test "$tap/aros-tools"
+          brew uninstall aros-tools
+          brew untap "$tap"
+
+  aur:
+    name: AUR package (${{ matrix.arch }})
+    needs: aggregate
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel@sha256:a26046b7363dad8e2614858f4313949ae9b05c9c5f31de343a54864b9e20806f
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Build and verify the measured PKGBUILD
+        shell: bash
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          useradd --create-home builder
+          work=/home/builder/package
+          install -d -o builder -g builder "$work"
+          archive=$(find candidate -maxdepth 1 -type f \
+            -name "aros-tools-v*-${TARGET}.tar.gz" -print -quit)
+          if [[ -z "$archive" ]]; then
+            echo "::error::canonical archive for ${TARGET} is missing"
+            exit 1
+          fi
+          archive_name=$(basename "$archive")
+          cp "$archive" "$work/$archive_name"
+          sed -E \
+            "s#https://github.com/${GITHUB_REPOSITORY}/releases/download/[^']+/${archive_name}#${archive_name}#" \
+            candidate/PKGBUILD > "$work/PKGBUILD"
+          if [[ $(grep -Fc "('${archive_name}')" "$work/PKGBUILD") != 1 ]]; then
+            echo "::error::PKGBUILD must select exactly one local architecture payload"
+            exit 1
+          fi
+          cp /etc/makepkg.conf "$work/makepkg.conf"
+          sed -i "s/^CARCH=.*/CARCH=${PACKAGE_ARCH}/" "$work/makepkg.conf"
+          chown -R builder:builder "$work"
+          su builder -c "cd '$work' && makepkg --config ./makepkg.conf --cleanbuild --noconfirm"
+          package=$(find "$work" -maxdepth 1 -type f -name '*.pkg.tar.zst' -print -quit)
+          if [[ -z "$package" ]]; then
+            echo "::error::makepkg did not produce a package"
+            exit 1
+          fi
+          archive_root=/tmp/archive-payload
+          package_root=/tmp/package-payload
+          mkdir "$archive_root" "$package_root"
+          tar -xzf "$archive" -C "$archive_root"
+          bsdtar -xf "$package" -C "$package_root"
+          for binary in "$archive_root"/*/bin/*; do
+            cmp "$binary" "$package_root/usr/bin/$(basename "$binary")"
+          done
+          if [[ "$PACKAGE_ARCH" == x86_64 ]]; then
+            pacman -U --noconfirm "$package"
+            for binary in \
+              aros aros-ahi-runner aros-collect aros-fetch \
+              aros-genmodule aros-romtool aros-transpiler aros-verify; do
+              "/usr/bin/${binary}" --help >/dev/null
+            done
+          fi
+
+  publish:
+    name: Publish verified GitHub prerelease or release
+    if: needs.metadata.outputs.is_release == 'true'
+    needs: [metadata, aggregate, homebrew, aur]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Install keyless verification client
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Create immutable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists; refusing to replace or mutate it"
+            exit 1
+          fi
+          gh release create "$TAG" candidate/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "aros-tools $TAG"
+      - name: Download draft into an isolated directory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir isolated
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir isolated
+          (cd isolated && sha256sum -c SHA256SUMS)
+      - name: Verify downloaded signatures and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          issuer="https://token.actions.githubusercontent.com"
+          for bundle in isolated/*.sigstore.json; do
+            subject=${bundle%.sigstore.json}
+            cosign verify-blob \
+              --bundle "$bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" \
+              "$subject"
+          done
+          for subject in isolated/*; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+          done
+      - name: Promote the unchanged draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
