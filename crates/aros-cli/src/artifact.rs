@@ -660,10 +660,7 @@ mod tests {
             "../tests/fixtures/tree-digest-v1.fixture.json"
         ))
         .unwrap();
-        assert_eq!(
-            fixture["schema"],
-            "aros-toolchain-tree-digest-fixture-v1"
-        );
+        assert_eq!(fixture["schema"], "aros-toolchain-tree-digest-fixture-v1");
         let entries: Vec<ArosToolchainManifestEntry> =
             serde_json::from_value(fixture["entries"].clone()).unwrap();
         let expected = fixture["tree_sha256"].as_str().unwrap();
