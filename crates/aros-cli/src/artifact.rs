@@ -662,7 +662,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             fixture["schema"],
-            "aros-ng-toolchain-tree-digest-fixture-v1"
+            "aros-toolchain-tree-digest-fixture-v1"
         );
         let entries: Vec<ArosToolchainManifestEntry> =
             serde_json::from_value(fixture["entries"].clone()).unwrap();
