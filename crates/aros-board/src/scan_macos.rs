@@ -273,7 +273,9 @@ fn normalize_mac(value: &str) -> Option<String> {
     Some(
         digits
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| std::str::from_utf8(chunk).expect("MAC digits are ASCII"))
             .collect::<Vec<_>>()
             .join(":"),

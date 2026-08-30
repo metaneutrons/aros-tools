@@ -600,7 +600,7 @@ fn parse_options(packet: &[u8]) -> Option<DhcpOptions> {
     None
 }
 
-fn ipv4_from_packet(packet: &[u8], offset: usize) -> Ipv4Addr {
+const fn ipv4_from_packet(packet: &[u8], offset: usize) -> Ipv4Addr {
     Ipv4Addr::new(
         packet[offset],
         packet[offset + 1],

@@ -130,7 +130,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Entry>> {
         bail!("package is shorter than its {HEADER_LEN}-byte header");
     }
     if bytes[0..3] != MAGIC {
-        bail!("bad magic {:02x?}, expected {:02x?}", &bytes[0..3], &MAGIC);
+        bail!("bad magic {:02x?}, expected {:02x?}", &bytes[0..3], MAGIC);
     }
     if bytes[3] != VERSION {
         bail!(

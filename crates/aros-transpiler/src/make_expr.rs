@@ -1667,8 +1667,7 @@ mod tests {
             Command::new(candidate)
                 .arg("--version")
                 .output()
-                .ok()
-                .is_some_and(|output| {
+                .is_ok_and(|output| {
                     output.status.success()
                         && String::from_utf8_lossy(&output.stdout).contains("GNU Make")
                 })
