@@ -1,0 +1,38 @@
+---
+title: AROS tools
+description: Reproducible host-side tooling for upstream AROS and AROS-NX.
+template: splash
+hero:
+  tagline: Build, inspect and deploy AROS with explicit inputs, stable diagnostics and independently verifiable artifacts.
+  actions:
+    - text: Install from source
+      link: /aros-tools/getting-started/installation/
+      icon: right-arrow
+    - text: Use with upstream AROS
+      link: /aros-tools/workflows/upstream-aros/
+      variant: minimal
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Upstream first" icon="seti:git">
+    Repository discovery does not assume a checkout name or location. The
+    classic GNU Make path remains an explicit compatibility boundary.
+  </Card>
+  <Card title="Fail closed" icon="warning">
+    Unsupported build recipes, unverified downloads and ambiguous hardware
+    selections stop with stable diagnostics instead of silently guessing.
+  </Card>
+  <Card title="Reproducible" icon="approve-check-circle">
+    Toolchain locks, source inventories and transactional output publication
+    make inputs and results independently measurable.
+  </Card>
+</CardGrid>
+
+:::caution[Pre-release]
+`aros-tools` has not published its first stable release. Source builds are
+supported for contributors; Homebrew, APT and AUR channels remain release
+acceptance gates and must not be presented as available before they pass.
+:::

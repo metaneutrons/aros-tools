@@ -6,6 +6,10 @@ independent, upstream-compatible tool suite. The tools model existing MetaMake
 and build contracts and keep generated state outside authoritative upstream
 inputs.
 
+The versioned documentation source lives in `docs-site/` and is built with
+Astro Starlight. Its upstream-AROS and AROS-NX guides state the current support
+boundary explicitly; no unreleased package channel is advertised as available.
+
 Repository discovery and installed build-tool resolution already accept a
 pristine upstream checkout and do not depend on an embedded Rust workspace.
 The existing CMake build path still targets AROS-NX while the native GNU Make
@@ -108,3 +112,23 @@ substantially smaller.
 Every user-facing component must keep human and JSON diagnostics on the shared
 `aros-tool-diagnostics-v1` contract. Local logging is opt-in, requires an
 explicit destination, and must never enter deterministic release archives.
+
+## Documentation
+
+Build the documentation locally with:
+
+```console
+cd docs-site
+npm ci
+npm run build
+```
+
+The checked-in lockfile is authoritative. GitHub Pages deployment uses the
+same `npm ci` build through Astro's official Pages action.
+
+## License
+
+Unless a file states otherwise, the Rust workspace and its documentation are
+available under either the [Apache License 2.0](LICENSE-APACHE) or the
+[MIT License](LICENSE-MIT), at your option. Vendored and AROS-derived inputs
+retain their own notices and licenses.
