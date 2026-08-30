@@ -532,7 +532,7 @@ fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
     };
     vec![common(
         "linklibs-gallium_v3d-gen-v3dx",
-        "${AROS_BUILD_DIR}/gen/workbench/hidds/v3d",
+        super::V3D_AROS_BUILD_DIR,
         wrapper_inputs,
         wrapper_jobs,
     )]
@@ -546,7 +546,7 @@ pub(crate) fn parse_v3d(
     targets: &[TargetDefinition],
     fetches: &[FetchDecl],
 ) -> std::result::Result<Vec<PythonOutputsDecl>, String> {
-    if relative_dir != Path::new("workbench/hidds/v3d") {
+    if relative_dir != Path::new(super::V3D_RELATIVE_DIR) {
         return Ok(Vec::new());
     }
     let _ = current_profile(target)?;
@@ -559,7 +559,7 @@ pub(crate) fn parse_v3d(
         "linklibs-gallium_v3d: generator recipe block is missing; the transpiler capability must be reviewed and updated".to_owned()
     })?;
     require_text_fingerprint(
-        "workbench/hidds/v3d/mmakefile.src",
+        "arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src",
         &recipe_block,
         fingerprint("mesa20-v3d-recipe")?,
         "linklibs-gallium_v3d",

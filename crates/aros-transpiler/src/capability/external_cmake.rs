@@ -138,7 +138,6 @@ pub(crate) fn parse(
     const CUNIT_FETCH: &str = "cunit-fetch";
     const DECLARED_OPTIONS: &[&str] = &[
         "-DCUNIT_DISABLE_EXAMPLES=yes",
-        "-DCUNIT_DISABLE_TESTS=yes",
         "-DCMAKE_BUILD_TYPE=DEBUG",
         "-Wno-error=dev",
     ];
@@ -305,7 +304,6 @@ pub(crate) fn parse(
         public_include_dirs: vec![format!("{install_prefix}/include")],
         options: vec![
             "-DCUNIT_DISABLE_EXAMPLES=yes".to_owned(),
-            "-DCUNIT_DISABLE_TESTS=yes".to_owned(),
             "-DCMAKE_BUILD_TYPE=DEBUG".to_owned(),
             "-Wno-error=dev".to_owned(),
         ],
@@ -579,7 +577,6 @@ mod tests {
             declaration.options,
             [
                 "-DCUNIT_DISABLE_EXAMPLES=yes",
-                "-DCUNIT_DISABLE_TESTS=yes",
                 "-DCMAKE_BUILD_TYPE=DEBUG",
                 "-Wno-error=dev",
             ]

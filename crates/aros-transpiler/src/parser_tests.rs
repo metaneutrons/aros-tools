@@ -1580,7 +1580,7 @@ fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
             .unwrap_or_else(|| panic!("{cpu}-{platform}: {:#?}", parsed.skipped_programs));
         assert_eq!(btcore.module_type, ModuleType::LinkLib);
         assert_eq!(btcore.target_name, "btcore");
-        assert_eq!(btcore.source_files.len(), 28, "{cpu}-{platform}");
+        assert_eq!(btcore.source_files.len(), 30, "{cpu}-{platform}");
         assert!(btcore
             .source_files
             .iter()
@@ -1593,6 +1593,14 @@ fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
             .source_files
             .iter()
             .any(|source| source.ends_with("/aros/input_bridge")));
+        assert!(btcore
+            .source_files
+            .iter()
+            .any(|source| source.ends_with("/protocols/rfcomm/rfcomm")));
+        assert!(btcore
+            .source_files
+            .iter()
+            .any(|source| source.ends_with("/protocols/sdp/sdp_server")));
         assert!(parsed.skipped_local_make_includes.is_empty());
         assert!(parsed
             .skipped_programs
@@ -2926,8 +2934,19 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
     }
 
     assert!(output_errors.is_empty(), "{output_errors:#?}");
-    assert_eq!(install_dirs.len(), 60);
-    assert_eq!(suffixes.len(), 46);
+    assert_eq!(install_dirs.len(), 61);
+    assert!(install_dirs.iter().any(|(mmake, directory)| {
+        mmake == "workbench-devs-networks-bcmgenet" && directory == "Devs/Networks"
+    }));
+    assert_eq!(suffixes.len(), 48);
+    for expected in [
+        "kernel-bluetooth-classes-btserial",
+        "kernel-bluetooth-classes-btpan",
+    ] {
+        assert!(suffixes
+            .iter()
+            .any(|(mmake, suffix)| mmake == expected && suffix == "class"));
+    }
     assert_eq!(
         install_dirs
             .iter()

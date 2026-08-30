@@ -29,7 +29,7 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
     let root = source_root();
     let dirs = DirVars::load(&root);
     let fetch_file = root.join("workbench/libs/mesa/mmakefile.src");
-    let v3d_file = root.join("workbench/hidds/v3d/mmakefile.src");
+    let v3d_file = root.join("arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src");
 
     for (cpu, platform, float_abi) in [
         ("x86_64", "pc", ""),
@@ -73,7 +73,8 @@ fn production_v3d_has_a_closed_generator_graph_on_every_current_profile() {
         assert_eq!(target.undefines, ["HAVE_VALGRIND"], "{cpu}");
         assert!(
             target.include_dirs.iter().any(|directory| {
-                directory == "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen"
+                directory
+                    == "${CMAKE_BINARY_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen"
             }),
             "{cpu}: {:#?}",
             target.include_dirs

@@ -24,6 +24,15 @@ use std::path::Path;
 pub(crate) const SOURCE_ROOT: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8";
 pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
 pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
+pub(crate) const V3D_RELATIVE_DIR: &str = "arch/arm-native/soc/broadcom/2708/hidd/v3d";
+pub(crate) const V3D_SOURCE_DIR: &str =
+    "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d";
+pub(crate) const V3D_CLE_DIR: &str =
+    "${CMAKE_BINARY_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen";
+pub(crate) const V3D_CLE_BROADCOM_DIR: &str =
+    "${CMAKE_BINARY_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen/broadcom";
+pub(crate) const V3D_AROS_BUILD_DIR: &str =
+    "${AROS_BUILD_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d";
 
 pub(crate) fn inventory_stems(
     root: &Path,
@@ -151,7 +160,7 @@ pub(crate) fn compile_contract(
                 Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4"
             )
-            | (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d")
+            | (Some(V3D_RELATIVE_DIR), "linklibs-gallium_v3d")
     );
     if !supported {
         return Ok(None);
@@ -289,7 +298,7 @@ pub(crate) fn compile_contract(
                 vec!["-std=gnu99".to_owned(), "-fno-strict-aliasing".to_owned()],
             )
         }
-        (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d") => {
+        (Some(V3D_RELATIVE_DIR), "linklibs-gallium_v3d") => {
             let mut defines = base_defines(profile);
             defines.extend(
                 [
@@ -302,13 +311,13 @@ pub(crate) fn compile_contract(
             );
             (
                 defines,
-                std::iter::once("${CMAKE_SOURCE_DIR}/workbench/hidds/v3d/drm-stubs")
+                std::iter::once("${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d/drm-stubs")
                     .chain(base)
                     .chain([
                         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/galliumglue",
-                        "${CMAKE_SOURCE_DIR}/workbench/hidds/v3d",
-                        "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen",
-                        "${CMAKE_BINARY_DIR}/gen/workbench/hidds/v3d/cle-gen/broadcom",
+                        V3D_SOURCE_DIR,
+                        V3D_CLE_DIR,
+                        V3D_CLE_BROADCOM_DIR,
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom/cle",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/broadcom",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/v3d",
@@ -367,7 +376,7 @@ pub(crate) fn remaining_linklib_sources(
                 Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
                 "linklibs-gallium_vc4"
             )
-            | (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d")
+            | (Some(V3D_RELATIVE_DIR), "linklibs-gallium_v3d")
     );
     if !supported_declaration {
         return Ok(None);
@@ -487,7 +496,7 @@ pub(crate) fn remaining_linklib_sources(
                 &format!("{SOURCE_ROOT}/src/gallium/drivers/vc4"),
             )?;
         }
-        (Some("workbench/hidds/v3d"), "linklibs-gallium_v3d") => {
+        (Some(V3D_RELATIVE_DIR), "linklibs-gallium_v3d") => {
             for stem in [
                 "v3d_blit",
                 "v3d_bufmgr",
@@ -509,9 +518,9 @@ pub(crate) fn remaining_linklib_sources(
             }
             for version in ["33", "41"] {
                 for stem in ["draw", "emit", "format_table", "job", "rcl", "state"] {
-                    sources.c.push(format!(
-                        "${{AROS_BUILD_DIR}}/gen/workbench/hidds/v3d/v3dx-gen/v3d{version}_{stem}"
-                    ));
+                    sources
+                        .c
+                        .push(format!("{V3D_AROS_BUILD_DIR}/v3dx-gen/v3d{version}_{stem}"));
                 }
             }
             for stem in [

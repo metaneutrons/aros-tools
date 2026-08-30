@@ -456,7 +456,7 @@ fn non_local_include_families_are_left_for_their_existing_collectors() {
 }
 
 #[test]
-fn real_btcore_fragment_is_a_generic_28_source_assignment() {
+fn real_btcore_fragment_is_a_generic_30_source_assignment() {
     let root = common::source_root();
     let mmake = Path::new("rom/bluetooth/stack/mmakefile.src");
     let content = fs::read_to_string(root.join(mmake)).unwrap();
@@ -485,8 +485,10 @@ fn real_btcore_fragment_is_a_generic_28_source_assignment() {
         .map(|line| line.trim_end_matches('\\').trim())
         .filter(|line| !line.is_empty() && !line.contains(":="))
         .collect::<Vec<_>>();
-    assert_eq!(source_stems.len(), 28);
+    assert_eq!(source_stems.len(), 30);
     assert!(source_stems.contains(&"core/buffer/endian"));
+    assert!(source_stems.contains(&"protocols/rfcomm/rfcomm"));
+    assert!(source_stems.contains(&"protocols/sdp/sdp_server"));
     assert!(source_stems.contains(&"aros/input_bridge"));
 }
 

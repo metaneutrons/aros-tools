@@ -149,7 +149,7 @@ fn cunit_uselib_resolves_to_link_interface_and_generator_emits_it_first() {
     );
     assert!(!cmake.contains("    AUXILIARY_PRODUCTS"));
     assert!(cmake.contains(
-        "    OPTIONS \"-DCUNIT_DISABLE_EXAMPLES=yes\" \"-DCUNIT_DISABLE_TESTS=yes\" \"-DCMAKE_BUILD_TYPE=DEBUG\" \"-Wno-error=dev\""
+        "    OPTIONS \"-DCUNIT_DISABLE_EXAMPLES=yes\" \"-DCMAKE_BUILD_TYPE=DEBUG\" \"-Wno-error=dev\""
     ));
     assert!(
         !cmake.contains("add_custom_target(\"linklibs-yes-cunit\")"),

@@ -110,6 +110,10 @@ fn map_flag_var(name: &str) -> Option<&'static str> {
         // rom/exec needs this on x86_64: interrupt-context code must not touch
         // SSE registers.
         "CFLAGS_GENERAL_REGS_ONLY" => Some("-mgeneral-regs-only"),
+        // Current upstream spells Mesa's audited C language baseline through
+        // config/compiler.cfg.in instead of repeating the literal flag. Keep
+        // the semantic result stable without reading host-generated config.
+        "CFLAGS_GNU11" => Some("-std=gnu11"),
         // Mesa deliberately relies on type-punning. Keep the build-system
         // spelling instead of trusting a declaration-local reassignment of
         // this global toolchain variable.
@@ -124,6 +128,10 @@ fn map_cxx_flag_var(name: &str) -> Option<&'static str> {
         // declaration is the stable semantic contract; importing the host or
         // configure-time spelling would make the result toolchain-dependent.
         "CXXFLAGS_GNU20" => Some("-std=gnu++20"),
+        "CXXFLAGS_CXX20" => Some("-std=c++20"),
+        // Moira requires this exact compatibility diagnostic policy with
+        // current Clang while its integer if-constexpr conditions remain.
+        "NOWARN_NARROWING" => Some("-Wno-c++11-narrowing"),
         _ => None,
     }
 }
@@ -1197,7 +1205,8 @@ mod tests {
     fn mesa_keeps_only_the_audited_semantic_compile_options() {
         let flags = collect_flags(
             "CFLAGS_NO_STRICT_ALIASING := -fstrict-aliasing\n\
-             USER_CFLAGS := -std=gnu11 $(CFLAGS_NO_STRICT_ALIASING) \
+             CFLAGS_GNU11 := -std=gnu17\n\
+             USER_CFLAGS := $(CFLAGS_GNU11) $(CFLAGS_NO_STRICT_ALIASING) \
                  -Wno-unused-value -Wno-unused-variable -Wno-strict-aliasing \
                  -std=gnu17 -Wno-unused-parameter\n",
         );
@@ -1443,6 +1452,19 @@ USER_CPPFLAGS += -DINTUITION_INLINE_NEWOBJECT
             ["$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20>"]
         );
         assert_eq!(f.skipped, ["$(NOWARN_CXXFLAGS)"]);
+    }
+
+    #[test]
+    fn resolves_current_upstream_moira_cxx_contract() {
+        let flags = collect_flags("USER_CXXFLAGS := $(CXXFLAGS_CXX20) $(NOWARN_NARROWING)\n");
+        assert_eq!(
+            flags.compile_options,
+            [
+                "$<$<COMPILE_LANGUAGE:CXX>:-std=c++20>",
+                "$<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>",
+            ]
+        );
+        assert!(flags.skipped.is_empty());
     }
 
     #[test]

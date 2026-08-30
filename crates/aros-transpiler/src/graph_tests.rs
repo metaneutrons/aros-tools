@@ -1117,8 +1117,30 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             .iter()
             .map(|package| package.resolved.len())
             .sum::<usize>(),
-        397
+        401
     );
+    for (package_name, expected_members) in [
+        ("kernel-package-fs", &["pfs3-handler"][..]),
+        (
+            "kernel-bsp-opensbi-riscv64",
+            &["pfs3-handler", "security.library"][..],
+        ),
+        ("kernel-bsp-pc-x86_64", &["security.library"][..]),
+    ] {
+        let package = packages
+            .iter()
+            .find(|package| package.mmake == package_name)
+            .unwrap();
+        for expected in expected_members {
+            assert!(
+                package
+                    .resolved
+                    .iter()
+                    .any(|member| member.runtime_name == *expected),
+                "{package_name} must contain {expected}"
+            );
+        }
+    }
     assert_eq!(
         kickstarts
             .iter()
