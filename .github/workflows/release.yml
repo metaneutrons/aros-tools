@@ -651,8 +651,8 @@ jobs:
             echo "::error::AP7102 APT_GPG_FINGERPRINT must be a full 40-hex fingerprint"
             exit 1
           fi
-          if [[ ! "$APT_PUBLIC_BASE_URL" =~ ^https://[^[:space:]?#]+/apt$ ]]; then
-            echo "::error::AP7103 APT_PUBLIC_BASE_URL must be an HTTPS URL ending in /apt"
+          if [[ "$APT_PUBLIC_BASE_URL" != 'https://deb.metaneutrons.cc/aros-tools' ]]; then
+            echo "::error::AP7103 APT_PUBLIC_BASE_URL must be https://deb.metaneutrons.cc/aros-tools"
             exit 1
           fi
           if [[ ! "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
