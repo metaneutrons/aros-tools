@@ -1,0 +1,266 @@
+name: Publish stable package channels
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      source_commit:
+        required: true
+        type: string
+      source_date_epoch:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apt:
+    name: Publish and verify signed APT repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    env:
+      VERSION: ${{ inputs.version }}
+      SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_REGION: auto
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Install audited APT tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev gnupg
+          aws --version
+      - name: Build deterministic signed repository metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/apt-private.asc"
+          printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/apt-passphrase"
+          chmod 0600 "$RUNNER_TEMP/apt-private.asc" "$RUNNER_TEMP/apt-passphrase"
+          scripts/release/build-apt-repository.sh \
+            --candidate-dir candidate \
+            --output-dir "$RUNNER_TEMP/apt-repository" \
+            --version "$VERSION" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --private-key "$RUNNER_TEMP/apt-private.asc" \
+            --passphrase-file "$RUNNER_TEMP/apt-passphrase" \
+            --fingerprint "$APT_GPG_FINGERPRINT"
+          find "$RUNNER_TEMP/apt-repository" -type f -print | sort
+      - name: Publish objects with metadata last
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="$RUNNER_TEMP/apt-repository"
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          destination="s3://${R2_BUCKET_NAME}/apt"
+          aws s3 cp "$repository/pool" "$destination/pool" \
+            --endpoint-url "$endpoint" --recursive \
+            --cache-control 'public,max-age=31536000,immutable' \
+            --content-type 'application/vnd.debian.binary-package'
+          aws s3 cp "$repository/aros-tools-archive-keyring.asc" \
+            "$destination/aros-tools-archive-keyring.asc" \
+            --endpoint-url "$endpoint" --cache-control 'public,max-age=3600' \
+            --content-type 'application/pgp-keys'
+          for arch in amd64 arm64; do
+            prefix="dists/stable/main/binary-${arch}"
+            aws s3 cp "$repository/${prefix}/Packages" "$destination/${prefix}/Packages" \
+              --endpoint-url "$endpoint" --cache-control 'no-cache' \
+              --content-type 'text/plain; charset=utf-8'
+            aws s3 cp "$repository/${prefix}/Packages.gz" "$destination/${prefix}/Packages.gz" \
+              --endpoint-url "$endpoint" --cache-control 'no-cache' \
+              --content-type 'application/gzip'
+          done
+          aws s3 cp "$repository/dists/stable/Release" "$destination/dists/stable/Release" \
+            --endpoint-url "$endpoint" --cache-control 'no-cache' \
+            --content-type 'text/plain; charset=utf-8'
+          aws s3 cp "$repository/dists/stable/Release.gpg" \
+            "$destination/dists/stable/Release.gpg" \
+            --endpoint-url "$endpoint" --cache-control 'no-cache' \
+            --content-type 'application/pgp-signature'
+          aws s3 cp "$repository/dists/stable/InRelease" \
+            "$destination/dists/stable/InRelease" \
+            --endpoint-url "$endpoint" --cache-control 'no-cache' \
+            --content-type 'text/plain; charset=utf-8'
+      - name: Verify the public signed repository and exact packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          verification="$RUNNER_TEMP/apt-public"
+          install -d "$verification"
+          curl --fail --silent --show-error --location \
+            "$APT_PUBLIC_BASE_URL/aros-tools-archive-keyring.asc" \
+            --output "$verification/key.asc"
+          gpg --batch --dearmor < "$verification/key.asc" > "$verification/key.gpg"
+          curl --fail --silent --show-error --location \
+            "$APT_PUBLIC_BASE_URL/dists/stable/InRelease" \
+            --output "$verification/InRelease"
+          gpgv --keyring "$verification/key.gpg" "$verification/InRelease"
+          for arch in amd64 arm64; do
+            curl --fail --silent --show-error --location \
+              "$APT_PUBLIC_BASE_URL/dists/stable/main/binary-${arch}/Packages.gz" | \
+              gzip -dc > "$verification/Packages-${arch}"
+            filename=$(awk '/^Filename: / { print $2; exit }' "$verification/Packages-${arch}")
+            if [[ -z "$filename" ]]; then
+              echo "::error::AP7220 published Packages index for $arch is empty"
+              exit 1
+            fi
+            curl --fail --silent --show-error --location \
+              "$APT_PUBLIC_BASE_URL/$filename" --output "$verification/${arch}.deb"
+            cmp "$verification/${arch}.deb" "candidate/aros-tools_${VERSION}_${arch}.deb"
+          done
+
+  homebrew:
+    name: Publish and qualify Homebrew formula
+    needs: apt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    environment: release
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Open an exact formula update
+        id: update
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_formula="$GITHUB_WORKSPACE/candidate/aros-tools.rb"
+          ruby -c "$source_formula"
+          if [[ $(grep -Fc "/releases/download/${TAG}/" "$source_formula") != 4 ]]; then
+            echo "::error::AP7301 formula does not reference four exact staged-release URLs"
+            exit 1
+          fi
+          gh repo clone metaneutrons/homebrew-tap "$RUNNER_TEMP/homebrew-tap"
+          cd "$RUNNER_TEMP/homebrew-tap"
+          if [[ -f Formula/aros-tools.rb ]] && cmp -s "$source_formula" Formula/aros-tools.rb; then
+            echo 'pr=' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branch="release/aros-tools-${VERSION}-${GITHUB_RUN_ID}"
+          git switch -c "$branch"
+          install -m 0644 "$source_formula" Formula/aros-tools.rb
+          actor=$(gh api user --jq .login)
+          git config user.name 'AROS release automation'
+          git config user.email "${actor}@users.noreply.github.com"
+          git add Formula/aros-tools.rb
+          git commit -m "aros-tools ${VERSION}"
+          git push -u origin "$branch"
+          pr=$(gh pr create --repo metaneutrons/homebrew-tap \
+            --base main --head "$branch" \
+            --title "aros-tools ${VERSION}" \
+            --body "Automated update from the verified ${TAG} prerelease assets. The stable release remains blocked until every tap qualification lane passes.")
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+      - name: Require tap qualification and merge
+        if: steps.update.outputs.pr != ''
+        env:
+          PR: ${{ steps.update.outputs.pr }}
+        run: |
+          set -euo pipefail
+          gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
+            --watch --fail-fast --interval 20
+          gh pr merge "$PR" --repo metaneutrons/homebrew-tap \
+            --squash --delete-branch
+      - name: Verify the formula now on protected main
+        run: |
+          set -euo pipefail
+          encoded=$(gh api \
+            "repos/metaneutrons/homebrew-tap/contents/Formula/aros-tools.rb?ref=main" \
+            --jq .content)
+          printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/published-formula.rb"
+          cmp "$RUNNER_TEMP/published-formula.rb" candidate/aros-tools.rb
+
+  aur:
+    name: Publish and verify AUR package
+    needs: homebrew
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    env:
+      VERSION: ${{ inputs.version }}
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: complete-release-candidate
+          path: candidate
+      - name: Publish exact PKGBUILD and generated SRCINFO
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/ssh"
+          install -m 0600 /dev/null "$RUNNER_TEMP/ssh/aur"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/aur"
+          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/ssh/aur -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts"
+          git -c init.defaultBranch=master clone \
+            ssh://aur@aur.archlinux.org/aros-tools-bin.git "$RUNNER_TEMP/aur-package"
+          cd "$RUNNER_TEMP/aur-package"
+          install -m 0644 "$GITHUB_WORKSPACE/candidate/PKGBUILD" PKGBUILD
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --volume "$PWD:/pkg" \
+            --workdir /pkg \
+            archlinux:base-devel@sha256:a26046b7363dad8e2614858f4313949ae9b05c9c5f31de343a54864b9e20806f \
+            makepkg --printsrcinfo > .SRCINFO
+          if [[ -z $(git status --short) ]]; then
+            exit 0
+          fi
+          git config user.name 'AROS release automation'
+          git config user.email 'aros-release@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          git commit -m "aros-tools-bin ${VERSION}-1"
+          git push origin HEAD:master
+      - name: Verify AUR Git and public package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/ssh"
+          install -m 0600 /dev/null "$RUNNER_TEMP/ssh/aur"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/aur"
+          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/ssh/aur -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts"
+          git ls-remote --exit-code \
+            ssh://aur@aur.archlinux.org/aros-tools-bin.git refs/heads/master
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error --get \
+              --data-urlencode 'v=5' --data-urlencode 'type=info' \
+              --data-urlencode 'arg[]=aros-tools-bin' \
+              https://aur.archlinux.org/rpc | \
+              jq -e --arg version "${VERSION}-1" \
+                '.resultcount == 1 and .results[0].Version == $version' >/dev/null; then
+              exit 0
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              echo "::error::AP7420 AUR metadata did not converge to ${VERSION}-1"
+              exit 1
+            fi
+            sleep 15
+          done
