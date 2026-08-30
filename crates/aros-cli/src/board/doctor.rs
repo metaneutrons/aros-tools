@@ -74,7 +74,7 @@ pub fn inspect(board: &Board, repo_root: &Path) -> DoctorReport {
 
     check_command(&mut report, "cmake", "cmake");
     check_command(&mut report, "cargo", "cargo");
-    check_toolchain_profile(&mut report, board);
+    check_toolchain_profile(&mut report, board, repo_root);
     check_build_tools(&mut report, repo_root);
     check_artifacts(&mut report, board, repo_root);
     check_dtb(&mut report, board, repo_root);
@@ -140,8 +140,8 @@ fn check_command(report: &mut DoctorReport, label: &str, command: &str) {
     }
 }
 
-fn check_toolchain_profile(report: &mut DoctorReport, board: &Board) {
-    match toolchain::target_profile(&board.config.toolchain_preset) {
+fn check_toolchain_profile(report: &mut DoctorReport, board: &Board, repo_root: &Path) {
+    match toolchain::target_profile(repo_root, &board.config.toolchain_preset) {
         Ok(profile) => report.push(
             CheckStatus::Pass,
             "toolchain profile",

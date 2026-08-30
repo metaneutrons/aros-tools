@@ -75,10 +75,22 @@ pub struct ResolvedToolchain {
     pub source: ToolchainSource,
 }
 
-/// Resolve the toolchain lock-file path.
-pub fn lock_file_path() -> PathBuf {
-    std::env::var_os("AROS_TOOLCHAIN_LOCK")
-        .map_or_else(|| PathBuf::from("aros-toolchains.lock.toml"), PathBuf::from)
+/// Resolve the toolchain lock-file path inside the selected checkout.
+/// `AROS_TOOLCHAIN_LOCK` may replace the filename; relative overrides are
+/// deliberately rooted in the same checkout rather than the caller's current
+/// working directory.
+pub fn lock_file_path(repo_root: &Path) -> PathBuf {
+    std::env::var_os("AROS_TOOLCHAIN_LOCK").map_or_else(
+        || repo_root.join("aros-toolchains.lock.toml"),
+        |configured| {
+            let configured = PathBuf::from(configured);
+            if configured.is_absolute() {
+                configured
+            } else {
+                repo_root.join(configured)
+            }
+        },
+    )
 }
 
 /// Load and validate the deterministic toolchain release lock.
@@ -86,8 +98,8 @@ pub fn lock_file_path() -> PathBuf {
 /// # Errors
 ///
 /// Returns an error when the lock cannot be read or violates its schema.
-pub fn load_lock() -> Result<ArosToolchainLock> {
-    let path = lock_file_path();
+pub fn load_lock(repo_root: &Path) -> Result<ArosToolchainLock> {
+    let path = lock_file_path(repo_root);
     ArosToolchainLock::load(&path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load AROS toolchain lock '{}'", path.display()))
@@ -126,8 +138,8 @@ pub fn get_toolchain_paths(root: &Path) -> ToolchainPaths {
 /// # Errors
 ///
 /// Returns an error for invalid target configuration or an unknown profile.
-pub fn target_profile(name: &str) -> Result<TargetProfile> {
-    crate::repo::load_target_profiles()?
+pub fn target_profile(repo_root: &Path, name: &str) -> Result<TargetProfile> {
+    crate::repo::load_target_profiles(repo_root)?
         .into_iter()
         .find(|profile| profile.name == name)
         .ok_or_else(|| miette::miette!("unknown target preset '{name}' in aros-targets.toml"))
@@ -158,13 +170,14 @@ fn locked_store_envelope(lock: &ArosToolchainLock, artifact: &ArosToolchainArtif
 /// Returns an error for unsupported matrix entries, disabled artifacts,
 /// download or identity failures, invalid layouts, or unsafe destinations.
 pub async fn install(
+    repo_root: &Path,
     preset: &str,
     offline: bool,
     force: bool,
     local: Option<&Path>,
 ) -> Result<ResolvedToolchain> {
     if let Some(local) = explicit_local_override(local) {
-        let resolved = resolve_local(&local, preset)?;
+        let resolved = resolve_local(repo_root, &local, preset)?;
         println!(
             "{CHECK} Using local AROS toolchain without copying it: {}",
             local.display()
@@ -173,9 +186,9 @@ pub async fn install(
     }
 
     let host = host_platform_key()?;
-    let profile = target_profile(preset)?;
+    let profile = target_profile(repo_root, preset)?;
     let expected_triple = target_triple_for_profile(&profile);
-    let lock = load_lock()?;
+    let lock = load_lock(repo_root)?;
     let artifact = lock.resolve(host, preset).ok_or_else(|| {
         miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
     })?;
@@ -265,22 +278,23 @@ pub async fn install(
 /// Returns an error when neither an explicit local tree, accepted legacy
 /// prefix, nor verified locked release can satisfy the target profile.
 pub async fn resolve_for_build(
+    repo_root: &Path,
     preset: &str,
     local: Option<&Path>,
     offline: bool,
 ) -> Result<ResolvedToolchain> {
     if let Some(local) = explicit_local_override(local) {
-        return resolve_local(&local, preset);
+        return resolve_local(repo_root, &local, preset);
     }
 
     // An explicitly AROS-built legacy prefix remains usable without copying.
     // A plain host LLVM bundle cannot pass this marker-based check.
     let legacy = crate::host_compiler::default_host_compiler_dir();
-    if is_legacy_aros_prefix(&legacy, preset) {
-        return resolve_local(&legacy, preset);
+    if is_legacy_aros_prefix(repo_root, &legacy, preset) {
+        return resolve_local(repo_root, &legacy, preset);
     }
 
-    install(preset, offline, false, None).await
+    install(repo_root, preset, offline, false, None).await
 }
 
 /// Resolve an already installed target toolchain without downloading.
@@ -289,12 +303,12 @@ pub async fn resolve_for_build(
 ///
 /// Returns an error when the selected local or locked installation is absent
 /// or fails verification.
-pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
+pub fn path(repo_root: &Path, preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
     if let Some(local) = explicit_local_override(local) {
-        return resolve_local(&local, preset);
+        return resolve_local(repo_root, &local, preset);
     }
     let host = host_platform_key()?;
-    let lock = load_lock()?;
+    let lock = load_lock(repo_root)?;
     let artifact = lock.resolve(host, preset).ok_or_else(|| {
         miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
     })?;
@@ -308,8 +322,8 @@ pub fn path(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
 /// # Errors
 ///
 /// Returns an error for identity, inventory, layout, or executable failures.
-pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
-    let resolved = path(preset, local)?;
+pub fn verify(repo_root: &Path, preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
+    let resolved = path(repo_root, preset, local)?;
     smoke_toolchain_tools(&resolved.paths)?;
     println!(
         "{CHECK} Verified {} for {} ({})",
@@ -325,8 +339,8 @@ pub fn verify(preset: &str, local: Option<&Path>) -> Result<ResolvedToolchain> {
 /// # Errors
 ///
 /// Returns an error when host detection or lock-file validation fails.
-pub fn list() -> Result<()> {
-    let lock = load_lock()?;
+pub fn list(repo_root: &Path) -> Result<()> {
+    let lock = load_lock(repo_root)?;
     let current_host = host_platform_key()?;
     println!("Release: {}", style(&lock.release_id).cyan());
     for artifact in lock
@@ -350,12 +364,12 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
-fn resolve_local(root: &Path, preset: &str) -> Result<ResolvedToolchain> {
+fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<ResolvedToolchain> {
     let root = root
         .canonicalize()
         .into_diagnostic()
         .wrap_err_with(|| format!("local toolchain '{}' does not exist", root.display()))?;
-    let profile = target_profile(preset)?;
+    let profile = target_profile(repo_root, preset)?;
     let expected_triple = target_triple_for_profile(&profile);
     let manifest_path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
     if manifest_path.exists() {
@@ -395,7 +409,7 @@ fn resolve_local(root: &Path, preset: &str) -> Result<ResolvedToolchain> {
         });
     }
 
-    if !is_legacy_aros_prefix(&root, preset) {
+    if !is_legacy_aros_prefix(repo_root, &root, preset) {
         bail!(
             "local prefix '{}' has no manifest and does not look like an AROS-built {} cross-toolchain",
             root.display(),
@@ -484,8 +498,8 @@ fn resolved_locked(
     }
 }
 
-fn is_legacy_aros_prefix(root: &Path, preset: &str) -> bool {
-    let Ok(profile) = target_profile(preset) else {
+fn is_legacy_aros_prefix(repo_root: &Path, root: &Path, preset: &str) -> bool {
+    let Ok(profile) = target_profile(repo_root, preset) else {
         return false;
     };
     let Ok(entries) = fs::read_dir(root) else {

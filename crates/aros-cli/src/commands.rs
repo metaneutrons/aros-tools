@@ -20,10 +20,10 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             all,
             offline,
             local,
-        } => setup(force, preset, all, offline, local).await,
-        Commands::HostCompiler { command } => host_compiler_command(command).await,
+        } => setup(repo_root, force, preset, all, offline, local).await,
+        Commands::HostCompiler { command } => host_compiler_command(repo_root, command).await,
         Commands::BuildTools { command } => build_tools_command(command, repo_root),
-        Commands::Toolchain { command } => toolchain_command(command).await,
+        Commands::Toolchain { command } => toolchain_command(repo_root, command).await,
         Commands::Board { command } => board_command(command, repo_root).await,
         Commands::Build {
             preset,
@@ -68,11 +68,12 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
         Commands::Sync { transpile } => sync(transpile),
         Commands::Golden { action } => golden_command(action, repo_root),
-        Commands::Info => info(),
+        Commands::Info => info(repo_root),
     }
 }
 
 async fn setup(
+    repo_root: &Path,
     force: bool,
     preset: Option<String>,
     all: bool,
@@ -83,23 +84,23 @@ async fn setup(
         if local.is_some() {
             miette::bail!("--local cannot be combined with --all");
         }
-        for profile in repo::load_target_profiles()? {
-            toolchain::install(&profile.name, offline, force, None).await?;
+        for profile in repo::load_target_profiles(repo_root)? {
+            toolchain::install(repo_root, &profile.name, offline, force, None).await?;
         }
     } else if let Some(preset) = preset {
-        toolchain::install(&preset, offline, force, local.as_deref()).await?;
+        toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
     } else if local.is_some() {
         miette::bail!("--local requires --preset");
     } else {
-        host_compiler::install(force, offline).await?;
+        host_compiler::install(repo_root, force, offline).await?;
     }
     Ok(())
 }
 
-async fn host_compiler_command(command: HostCompilerCommands) -> Result<()> {
+async fn host_compiler_command(repo_root: &Path, command: HostCompilerCommands) -> Result<()> {
     match command {
         HostCompilerCommands::Install { force, offline } => {
-            crate::host_compiler::install(force, offline).await?;
+            crate::host_compiler::install(repo_root, force, offline).await?;
         }
     }
     Ok(())
@@ -112,7 +113,7 @@ fn build_tools_command(command: BuildToolsCommand, repo_root: &Path) -> Result<(
     }
 }
 
-async fn toolchain_command(command: ToolchainCommands) -> Result<()> {
+async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Result<()> {
     match command {
         ToolchainCommands::Install {
             preset,
@@ -120,14 +121,14 @@ async fn toolchain_command(command: ToolchainCommands) -> Result<()> {
             offline,
             local,
         } => {
-            crate::toolchain::install(&preset, offline, force, local.as_deref()).await?;
+            crate::toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
         }
-        ToolchainCommands::List => crate::toolchain::list()?,
+        ToolchainCommands::List => crate::toolchain::list(repo_root)?,
         ToolchainCommands::Verify { preset, local } => {
-            crate::toolchain::verify(&preset, local.as_deref())?;
+            crate::toolchain::verify(repo_root, &preset, local.as_deref())?;
         }
         ToolchainCommands::Path { preset, local } => {
-            let resolved = crate::toolchain::path(&preset, local.as_deref())?;
+            let resolved = crate::toolchain::path(repo_root, &preset, local.as_deref())?;
             println!("{}", resolved.paths.root.display());
         }
     }
@@ -449,7 +450,7 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn info() -> Result<()> {
+fn info(repo_root: &Path) -> Result<()> {
     println!(
         "{SPARKLES} {}",
         style("AROS Tools v0.1: Workspace Info").cyan().bold()
@@ -480,12 +481,12 @@ fn info() -> Result<()> {
             },
         )
     );
-    let target_names = repo::load_target_profiles()?
+    let target_names = repo::load_target_profiles(repo_root)?
         .into_iter()
         .map(|target| target.name)
         .collect::<Vec<_>>();
     println!("  • Configured Targets:     {}", target_names.join(", "));
-    match toolchain::load_lock() {
+    match toolchain::load_lock(repo_root) {
         Ok(lock) => println!(
             "  • AROS Toolchain Lock:    {} ({} assets)",
             lock.release_id,

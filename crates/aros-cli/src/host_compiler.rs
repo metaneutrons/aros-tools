@@ -77,9 +77,9 @@ pub fn host_platform_label(host_key: &str) -> &str {
 /// # Errors
 ///
 /// Returns an error for missing, malformed, or incomplete configuration.
-pub fn load_host_compiler_config() -> Result<HostCompilerConfig> {
+pub fn load_host_compiler_config(repo_root: &Path) -> Result<HostCompilerConfig> {
     let config =
-        TargetProfile::load_config(Path::new(crate::repo::TARGETS_FILE)).into_diagnostic()?;
+        TargetProfile::load_config(&crate::repo::targets_file(repo_root)).into_diagnostic()?;
     config.host_compiler.ok_or_else(|| {
         miette::miette!("aros-targets.toml has no required [host_compiler] configuration")
     })
@@ -132,8 +132,8 @@ pub fn is_host_compiler_installed(paths: &HostCompilerPaths) -> bool {
 ///
 /// Returns an error for invalid configuration, cache/download/verification
 /// failures, unsafe existing destinations, or incomplete extracted layouts.
-pub async fn install(force: bool, offline: bool) -> Result<HostCompilerPaths> {
-    let config = load_host_compiler_config()?;
+pub async fn install(repo_root: &Path, force: bool, offline: bool) -> Result<HostCompilerPaths> {
+    let config = load_host_compiler_config(repo_root)?;
     let selection = select_host_compiler(&config)?;
     let destination = default_host_compiler_dir();
     let paths = host_compiler_paths(&destination);
