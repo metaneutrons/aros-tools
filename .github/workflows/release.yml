@@ -103,18 +103,22 @@ jobs:
             runner: ubuntu-24.04
             container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
             target: x86_64-unknown-linux-gnu
+            deb_arch: amd64
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
             container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
             target: aarch64-unknown-linux-gnu
+            deb_arch: arm64
           - name: macos-x86_64
             runner: macos-15-intel
             container: ''
             target: x86_64-apple-darwin
+            deb_arch: ''
           - name: macos-aarch64
             runner: macos-15
             container: ''
             target: aarch64-apple-darwin
+            deb_arch: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install audited Linux prerequisites
@@ -123,7 +127,8 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates file git liblzma-dev pkg-config
+          apt-get install -y --no-install-recommends \
+            ca-certificates dpkg-dev file git liblzma-dev pkg-config
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
@@ -169,12 +174,46 @@ jobs:
             "$binary" --help >/dev/null
           done
           file "$install_root"/*/bin/*
+      - name: Package the same Linux binaries as a Debian package
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --version 3.7.0 --locked
+          deb="dist/aros-tools_${VERSION}_${DEB_ARCH}.deb"
+          cargo deb -p aros-cli \
+            --target "$TARGET" \
+            --no-build \
+            --no-strip \
+            --output "$deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          archive_root="$RUNNER_TEMP/archive-payload"
+          deb_root="$RUNNER_TEMP/deb-payload"
+          mkdir "$archive_root" "$deb_root"
+          tar -xzf "dist/aros-tools-v${VERSION}-${TARGET}.tar.gz" -C "$archive_root"
+          dpkg-deb --extract "$deb" "$deb_root"
+          for binary in "$archive_root"/*/bin/*; do
+            cmp "$binary" "$deb_root/usr/bin/$(basename "$binary")"
+          done
       - name: Generate SPDX SBOM for the exact archive
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.tar.gz
           format: spdx-json
           output-file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+      - name: Generate SPDX SBOM for the exact Debian package
+        if: runner.os == 'Linux'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.deb
+          format: spdx-json
+          output-file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.spdx.json
           upload-artifact: false
       - name: Install keyless signing client
         if: needs.metadata.outputs.is_release == 'true'
@@ -230,9 +269,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --locked -p aros-release
-          expected_subjects=16
+          expected_subjects=20
           if [[ "$IS_RELEASE" == true ]]; then
-            expected_subjects=32
+            expected_subjects=40
           fi
           measured=$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')
           if [[ "$measured" != "$expected_subjects" ]]; then
@@ -249,6 +288,13 @@ jobs:
             (cd release && sha256sum -c "$(basename "${archive}.sha256")")
             jq -e '.spdxVersion | startswith("SPDX-")' \
               "release/aros-tools-v${VERSION}-${target}.spdx.json" >/dev/null
+          done
+          for arch in amd64 arm64; do
+            deb="release/aros-tools_${VERSION}_${arch}.deb"
+            dpkg-deb --info "$deb"
+            dpkg-deb --contents "$deb"
+            jq -e '.spdxVersion | startswith("SPDX-")' \
+              "release/aros-tools_${VERSION}_${arch}.spdx.json" >/dev/null
           done
       - name: Install keyless verification client
         if: needs.metadata.outputs.is_release == 'true'
