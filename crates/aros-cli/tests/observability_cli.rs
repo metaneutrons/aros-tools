@@ -24,11 +24,16 @@ fn checkout() -> &'static Path {
     CHECKOUT
         .get_or_init(|| {
             let checkout = tempfile::tempdir().expect("temporary AROS checkout");
-            for directory in ["arch", "compiler", "rom"] {
+            for directory in ["arch", "compiler", "rom", "developer"] {
                 fs::create_dir_all(checkout.path().join(directory)).expect("checkout directory");
             }
             fs::write(checkout.path().join("configure"), "").expect("configure marker");
             fs::write(checkout.path().join("Makefile.in"), "").expect("make marker");
+            fs::write(
+                checkout.path().join("aros-targets.toml"),
+                "[[targets]]\nname='pc-x86_64'\narch='x86_64'\nplatform='pc'\nbsp='pc'\n",
+            )
+            .expect("target configuration");
             checkout
         })
         .path()
@@ -81,6 +86,21 @@ fn repository_discovery_has_its_own_stable_boundary() {
     assert_eq!(value["diagnostics"][0]["code"], "AR0101");
     assert_eq!(value["diagnostics"][0]["stage"], "repository_discovery");
     assert_eq!(value["diagnostics"][0]["context"]["mode"], "info");
+}
+
+#[test]
+fn repository_configuration_is_loaded_from_the_discovered_root() {
+    let output = command()
+        .current_dir(checkout().join("developer"))
+        .arg("info")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("Configured Targets:     pc-x86_64"));
 }
 
 #[test]

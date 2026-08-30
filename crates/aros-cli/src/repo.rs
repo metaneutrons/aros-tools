@@ -6,9 +6,15 @@ use std::path::{Path, PathBuf};
 /// Repository-relative target and host-compiler configuration.
 pub const TARGETS_FILE: &str = "aros-targets.toml";
 
+/// Return the target configuration inside the selected AROS checkout.
+#[must_use]
+pub fn targets_file(repo_root: &Path) -> PathBuf {
+    repo_root.join(TARGETS_FILE)
+}
+
 /// Load every configured target from the repository SSOT.
-pub fn load_target_profiles() -> Result<Vec<aros_common::TargetProfile>> {
-    aros_common::TargetProfile::load_from_file(Path::new(TARGETS_FILE)).into_diagnostic()
+pub fn load_target_profiles(repo_root: &Path) -> Result<Vec<aros_common::TargetProfile>> {
+    aros_common::TargetProfile::load_from_file(&targets_file(repo_root)).into_diagnostic()
 }
 
 /// Finds the repository root from a directory inside an AROS checkout.
@@ -51,7 +57,7 @@ fn is_repo_root(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::find_root_from;
+    use super::{find_root_from, load_target_profiles, targets_file};
 
     #[test]
     fn finds_checkout_root_from_a_nested_directory() {
@@ -62,11 +68,22 @@ mod tests {
         }
         std::fs::write(root.join("configure"), "").expect("configure marker");
         std::fs::write(root.join("Makefile.in"), "").expect("make marker");
+        std::fs::write(
+            targets_file(&root),
+            "[[targets]]\nname='pc-x86_64'\narch='x86_64'\nplatform='pc'\nbsp='pc'\n",
+        )
+        .expect("target configuration");
 
         let nested = root.join("developer");
+        let discovered = find_root_from(&nested).expect("root");
+        assert_eq!(discovered, root.canonicalize().unwrap());
         assert_eq!(
-            find_root_from(&nested).expect("root"),
-            root.canonicalize().unwrap()
+            load_target_profiles(&discovered)
+                .expect("profiles from discovered root")
+                .into_iter()
+                .map(|profile| profile.name)
+                .collect::<Vec<_>>(),
+            ["pc-x86_64"]
         );
     }
 }

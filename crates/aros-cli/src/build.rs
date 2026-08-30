@@ -62,8 +62,9 @@ pub struct CmakeDefinition {
 /// configuration failures, and compilation failures.
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let build_dir = build_dir(repo_root, &options.preset)?;
-    let profile = toolchain::target_profile(&options.toolchain_preset)?;
+    let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
     let resolved = toolchain::resolve_for_build(
+        repo_root,
         &options.toolchain_preset,
         options.toolchain_dir.as_deref(),
         options.input_policy.offline,
