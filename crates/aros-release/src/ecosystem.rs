@@ -180,7 +180,6 @@ fn render_homebrew(release: &NativeRelease) -> String {
         "  homepage \"https://github.com/metaneutrons/aros-tools\""
     )
     .unwrap();
-    writeln!(output, "  version \"{}\"", release.version).unwrap();
     writeln!(output, "  license any_of: [\"MIT\", \"Apache-2.0\"]").unwrap();
     writeln!(output).unwrap();
     write_homebrew_os(
@@ -258,7 +257,7 @@ fn render_aur(release: &NativeRelease) -> String {
     writeln!(output, "arch=('x86_64' 'aarch64')").unwrap();
     writeln!(output, "url='https://github.com/metaneutrons/aros-tools'").unwrap();
     writeln!(output, "license=('MIT' 'Apache-2.0')").unwrap();
-    writeln!(output, "depends=('glibc' 'gcc-libs' 'xz')").unwrap();
+    writeln!(output, "depends=('glibc' 'gcc-libs')").unwrap();
     writeln!(output, "provides=('aros-tools')").unwrap();
     writeln!(output, "conflicts=('aros-tools')").unwrap();
     writeln!(output, "options=('!strip')").unwrap();
@@ -391,6 +390,7 @@ mod tests {
         }
         assert!(rendered.contains("on_macos"));
         assert!(rendered.contains("on_linux"));
+        assert!(!rendered.contains("  version \""));
     }
 
     #[test]
@@ -408,6 +408,7 @@ mod tests {
         assert!(rendered.contains("source_x86_64"));
         assert!(rendered.contains("source_aarch64"));
         assert!(!rendered.contains("SKIP"));
+        assert!(!rendered.contains("'xz'"));
     }
 
     #[test]

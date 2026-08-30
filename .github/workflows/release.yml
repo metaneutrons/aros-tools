@@ -485,6 +485,7 @@ jobs:
             exit 1
           fi
           ruby -c "$formula"
+          brew audit --strict "$tap/aros-tools"
           brew install "$tap/aros-tools"
           brew test "$tap/aros-tools"
           brew uninstall aros-tools
