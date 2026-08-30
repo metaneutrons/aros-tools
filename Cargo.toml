@@ -70,7 +70,7 @@ toml = "0.8"
 # Network & Archives
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tar = "0.4"
-xz2 = "0.1"
+xz2 = { version = "0.1", features = ["static"] }
 futures-util = "0.3"
 flate2 = "1.0"
 bzip2 = "0.6"
@@ -83,6 +83,7 @@ which = "7.0"
 regex = "1.11"
 sha2 = "0.10"
 tempfile = "3.17"
+semver = "1.0"
 fs2 = "0.4"
 # The board service must verify an address on the exact USB-ECM interface;
 # this is a small native interface-enumeration crate, not an external command.

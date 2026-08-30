@@ -142,6 +142,34 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --workspace --all-features --target "$TARGET"
+      - name: Audit native dynamic linkage
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binaries=(
+            aros aros-ahi-runner aros-collect aros-fetch
+            aros-genmodule aros-romtool aros-transpiler aros-verify
+          )
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for binary in "${binaries[@]}"; do
+              otool -L "target/${TARGET}/release/${binary}"
+            done | tee "$RUNNER_TEMP/dynamic-linkage.txt"
+            if grep -Eq '/(opt/homebrew|usr/local|Users|Volumes)/' \
+              "$RUNNER_TEMP/dynamic-linkage.txt"; then
+              echo "::error::release binary contains a non-system absolute library path"
+              exit 1
+            fi
+          else
+            for binary in "${binaries[@]}"; do
+              ldd "target/${TARGET}/release/${binary}"
+            done | tee "$RUNNER_TEMP/dynamic-linkage.txt"
+            if grep -Fq 'not found' "$RUNNER_TEMP/dynamic-linkage.txt"; then
+              echo "::error::release binary has an unresolved dynamic dependency"
+              exit 1
+            fi
+          fi
       - name: Produce and read back the normalized archive
         shell: bash
         env:

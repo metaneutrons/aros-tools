@@ -142,20 +142,7 @@ impl PackageArgs {
 }
 
 pub(crate) fn valid_version(value: &str) -> bool {
-    let (core, suffix) = value.split_once(['-', '+']).unwrap_or((value, ""));
-    let mut numbers = core.split('.');
-    let valid_number = |part: &str| {
-        !part.is_empty()
-            && part.bytes().all(|byte| byte.is_ascii_digit())
-            && (part == "0" || !part.starts_with('0'))
-    };
-    valid_number(numbers.next().unwrap_or_default())
-        && valid_number(numbers.next().unwrap_or_default())
-        && valid_number(numbers.next().unwrap_or_default())
-        && numbers.next().is_none()
-        && suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+    semver::Version::parse(value).is_ok_and(|version| version.to_string() == value)
 }
 
 fn portable_token(value: &str) -> bool {
@@ -220,7 +207,9 @@ mod tests {
 
     #[test]
     fn rejects_noncanonical_versions_and_commits() {
-        for version in ["v1.2.3", "1.2", "01.2.3", "1.2.3/"] {
+        for version in [
+            "v1.2.3", "1.2", "01.2.3", "1.2.3/", "1.2.3-", "1.2.3+", "1.2.3-01",
+        ] {
             let mut args = valid();
             args.version = version.into();
             assert_eq!(
