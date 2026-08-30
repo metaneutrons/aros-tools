@@ -26,9 +26,10 @@ prerelease.
    and become the latest GitHub release.
 
 A prerelease tag remains a GitHub prerelease and deliberately does not update
-the stable package-manager channels. A failed stable publication remains a
-prerelease; reruns are idempotent and never retarget a tag or replace a release
-asset.
+the stable package-manager channels. It also never enters the `release`
+environment, so it cannot read stable publication credentials. A failed stable
+publication remains a prerelease; reruns are idempotent and never retarget a
+tag or replace a release asset.
 
 ## GitHub release environment
 

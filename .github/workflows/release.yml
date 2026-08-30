@@ -612,12 +612,13 @@ jobs:
 
   publication-preflight:
     name: Validate publication credentials
-    if: needs.metadata.outputs.is_release == 'true'
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      !contains(needs.metadata.outputs.tag, '-')
     needs: metadata
     environment: release
     runs-on: ubuntu-24.04
     env:
-      TAG: ${{ needs.metadata.outputs.tag }}
       PACKAGE_PUBLISH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
       APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
@@ -634,10 +635,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$TAG" == *-* ]]; then
-            echo "Prerelease tag: downstream stable package publication is intentionally skipped."
-            exit 0
-          fi
           required=(
             PACKAGE_PUBLISH_TOKEN AUR_SSH_PRIVATE_KEY APT_GPG_PRIVATE_KEY
             APT_GPG_PASSPHRASE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
@@ -667,7 +664,6 @@ jobs:
             exit 1
           fi
       - name: Verify the dedicated Homebrew tap credential
-        if: ${{ !contains(needs.metadata.outputs.tag, '-') }}
         env:
           GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
         run: |
@@ -678,7 +674,6 @@ jobs:
             exit 1
           fi
       - name: Verify the bucket-scoped R2 credential
-        if: ${{ !contains(needs.metadata.outputs.tag, '-') }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -690,7 +685,6 @@ jobs:
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           aws s3api head-bucket --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME"
       - name: Verify signing and AUR identities without publishing
-        if: ${{ !contains(needs.metadata.outputs.tag, '-') }}
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
@@ -728,7 +722,17 @@ jobs:
 
   stage:
     name: Stage verified public prerelease
-    if: needs.metadata.outputs.is_release == 'true'
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.aggregate.result == 'success' &&
+      needs.apt-metadata.result == 'success' &&
+      needs.homebrew.result == 'success' &&
+      needs.aur.result == 'success' &&
+      (
+        contains(needs.metadata.outputs.tag, '-') ||
+        needs.publication-preflight.result == 'success'
+      )
     needs: [metadata, aggregate, apt-metadata, homebrew, aur, publication-preflight]
     runs-on: ubuntu-24.04
     permissions:
