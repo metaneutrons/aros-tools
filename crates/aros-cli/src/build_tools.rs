@@ -322,17 +322,29 @@ mod tests {
 
     #[cfg(unix)]
     fn write_version_tool(path: &Path, name: &str, version: &str, extra: &str) {
+        use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        fs::write(
-            path,
+        // Publish the executable only after its writable handle is closed.
+        // Linux otherwise permits a narrow ETXTBSY race on busy CI filesystems.
+        let staged = path.with_extension("fixture-staged");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .expect("staged version fixture");
+        file.write_all(
             format!(
                 "#!/bin/sh\nset -eu\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  {extra}\n  printf '%s\\n' '{name} {version}'\n  exit 0\nfi\nexit 64\n"
-            ),
+            )
+            .as_bytes(),
         )
-        .expect("version fixture");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("version fixture contents");
+        file.sync_all().expect("version fixture synchronization");
+        drop(file);
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
             .expect("version fixture permissions");
+        fs::rename(&staged, path).expect("publish version fixture");
     }
 
     #[test]
