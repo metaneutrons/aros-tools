@@ -142,7 +142,7 @@ Verify the archive key fingerprint before installing it:
 ```sh
 set -eu
 BASE=https://deb.metaneutrons.cc/aros-tools
-EXPECTED_FINGERPRINT=E9B964BAB58EAFE97FD144437047FAC6F203DB7B
+EXPECTED_FINGERPRINT=D69E2F2FD93F55BD0EB3D02224DA82C3E25C0392
 KEY=$(mktemp)
 KEYRING=$(mktemp)
 CANONICAL_KEY=$(mktemp)

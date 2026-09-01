@@ -84,6 +84,14 @@ must cover that exact head.
 | `R2_ACCESS_KEY_ID` | R2 S3 credential with Object Read & Write on the shared distribution bucket |
 | `R2_SECRET_ACCESS_KEY` | Secret half of the same bucket-scoped credential |
 
+Treat the APT signing key as recoverable release infrastructure, not merely as
+a CI secret. Before the first stable tag, keep an operator-controlled encrypted
+backup of the private key, store its passphrase separately, and exercise a
+clean import, signature and verification round trip. A GitHub Actions secret
+cannot be exported and therefore does not count as a backup. Record only the
+public fingerprint in the repository; never commit the private key, its
+passphrase or an operator-specific backup path.
+
 Store the following non-secret values as repository variables. Credential-free
 preparation and verification jobs deliberately need them without entering a
 protected environment:
