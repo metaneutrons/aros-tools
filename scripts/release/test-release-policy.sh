@@ -1154,10 +1154,32 @@ expect_failure env PATH="$native_mock:$PATH" \
 grep -F 'install --source-bin ' "$work/native-installer-invocation" >/dev/null
 grep -F -- '--prefix /usr/local' "$work/native-installer-invocation" >/dev/null
 
-# This is a literal script marker, not a shell substitution.
+# These are literal script markers, not shell substitutions.
 # shellcheck disable=SC2016
-grep -F -- '--no-comments --export "$fingerprint"' \
+grep -F -- '--no-comments --export "$export_selector"' \
     "$root/scripts/release/build-apt-repository.sh" >/dev/null
+# Ohne abschliessendes Ausrufezeichen exportiert gpg alle Subkeys und waehlt
+# beim Signieren selbst einen aus. Beide Selektoren muessen daher gepinnt sein,
+# sobald ein Domain-Subkey genannt ist, und sonst auf den Primaer zurueckfallen.
+# shellcheck disable=SC2016
+grep -F -- 'export_selector="${signing_subkey}!"' \
+    "$root/scripts/release/build-apt-repository.sh" >/dev/null
+# shellcheck disable=SC2016
+grep -F -- 'local_user="${signing_subkey}!"' \
+    "$root/scripts/release/build-apt-repository.sh" >/dev/null
+# shellcheck disable=SC2016
+grep -F -- 'export_selector="$fingerprint"' \
+    "$root/scripts/release/build-apt-repository.sh" >/dev/null
+# Der Statuspruefer muss den signierenden Subkey und nicht nur den Primaer
+# vergleichen, sonst bleibt eine Fehlzuordnung von Subkey und Domain unsichtbar.
+# shellcheck disable=SC2016
+grep -F -- 'signer = toupper($3)' \
+    "$root/scripts/release/verify-gpgv-status.sh" >/dev/null
+# Feld 15 der sec-Zeile ist '#', wenn der geheime Primaerschluessel fehlt.
+# Diese Pruefung erzwingt "Primaer bleibt offline" maschinell.
+# shellcheck disable=SC2016
+grep -F -- 'primary_stub = ($15 == "#")' \
+    "$root/scripts/release/verify-apt-signing-key.sh" >/dev/null
 grep -F -- '--armor --no-emit-version --no-comments' \
     "$root/.github/workflows/refresh-apt-metadata.yml" >/dev/null
 grep -F 'verify-apt-public-key.sh' \
