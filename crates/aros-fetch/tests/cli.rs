@@ -5,7 +5,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aros_common::sha256_file;
+use aros_common::{sha256_bytes, sha256_file};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
@@ -784,12 +784,9 @@ fn compressed_patch_cache_publishes_payload_and_receipt_as_one_tree() {
         .unwrap()
         .unwrap()
         .path();
-    let payload_root = fs::read_dir(declaration_root.join("payloads"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let payload_root = declaration_root
+        .join("payloads")
+        .join(sha256_bytes(patch).to_string());
     let members = fs::read_dir(payload_root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
