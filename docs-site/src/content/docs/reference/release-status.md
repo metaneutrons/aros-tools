@@ -1,29 +1,49 @@
 ---
 title: Release status
-description: Claims that are green and gates that remain open.
+description: Current source state, published state, and remaining public-release gates.
 ---
 
-## Verified
+## Current source state
 
-- Complete Rust workspace tests and architecture boundaries on the extracted history.
-- No third-party assistant attribution in the rewritten `aros-tools` history or source tree.
-- Translation and differential verification against the immutable AROS-NX
-  source contract selected by CI.
-- A complete local AROS-NX `pc-x86_64` product build using the published RC3 cross-toolchain.
-- Deterministic native archive production, byte-identity tests, strict read-back
-  verification and a clean-room smoke test on macOS ARM64.
-- A fail-closed four-host archive workflow with SPDX SBOM, keyless signatures,
-  GitHub provenance and isolated draft verification.
-- Clean-room installation of both Debian packages, the measured Homebrew
-  formula on all four native hosts, and the AUR package on x86-64 and ARM64.
-- The Astro documentation build and GitHub Pages deployment at
-  `https://metaneutrons.github.io/aros-tools/`.
+The repository contains and continuously tests:
 
-## Still required before 1.0
+- complete Rust workspace, architecture, formatting, Clippy, Rustdoc,
+  dependency-advisory and license/source-policy gates;
+- an explicit AROS-NX/toolchain-producer source contract rather than a moving
+  branch or sibling-checkout assumption;
+- fail-closed diagnostics and transactional output for every shipped host
+  executable;
+- deterministic archive production, duplicate-production comparison, strict
+  read-back, clean-room smoke tests, SPDX validation, signatures, provenance
+  and isolated-draft verification in the release workflow; and
+- Debian, signed APT, Homebrew and AUR qualification paths that consume the
+  measured canonical archive payloads rather than rebuilding them.
 
-- Signed APT repository publication and rollback-safe R2 staging.
-- Credential-isolated publication to Homebrew and AUR followed by public
-  installation verification.
-- SBOM, provenance, signature and checksum verification for the first tagged
-  release artifact set.
-- A fully qualified GNU Make backend for pristine upstream product builds.
+Those are source and workflow capabilities. A workflow definition is not proof
+that a particular public release passed it.
+
+## Published state
+
+No stable `aros-tools` release has been published yet. Consequently there is
+no supported public archive, Homebrew formula, APT package or AUR package to
+claim. Build from source until a release and its measured evidence appear on
+GitHub. Documentation is configured for
+`https://aros.metaneutrons.cc/aros-tools/`; availability at that URL depends on
+the Pages deployment and DNS state.
+
+## Required for the first public release
+
+- Merge a Release Please version pull request, then create a separately
+  protected annotated tag on that exact qualified `main` commit.
+- Pass the complete four-host archive, ABI-floor, SBOM, checksum, signature,
+  provenance, isolated-download and clean-room verification matrix for that
+  immutable tag.
+- For a stable candidate, pass the credential-free APT, Homebrew and AUR
+  qualification gates before the one-time final GitHub publication. Then roll
+  the exact immutable release bytes forward to signed APT/R2, protected
+  Homebrew and AUR and verify every public channel.
+- Complete qualification of the GNU Make backend for pristine upstream product
+  builds before claiming that workflow as generally supported.
+
+The page is intentionally conservative: it records no release as verified
+until the immutable release inventory itself supplies the evidence.

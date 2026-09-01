@@ -51,6 +51,17 @@ impl Logger {
         message: &str,
         context: &DiagnosticContext,
     ) -> FetchResult<()> {
+        #[cfg(debug_assertions)]
+        if std::env::var("AROS_FETCH_TEST_LOG_FAIL_AT").as_deref() == Ok(event) {
+            return Err(FetchFailure::new(
+                Diagnostic::error(
+                    DiagnosticCode::FetchObservability,
+                    DiagnosticStage::FetchObservability,
+                    format!("injected fetch log failure at {event}"),
+                )
+                .with_context(context.clone()),
+            ));
+        }
         self.inner
             .event(level, event, message, context)
             .map_err(|error| FetchFailure::new(error.into_diagnostic()))

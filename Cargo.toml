@@ -18,9 +18,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.98"
 authors = ["AROS Development Team <core@aros.org>", "Fabian Schmieder <@metaneutrons>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://aros.org"
+homepage = "https://aros.metaneutrons.cc/aros-tools/"
 repository = "https://github.com/metaneutrons/aros-tools"
 readme = "README.md"
 
@@ -45,12 +46,13 @@ doc_markdown = "allow"
 [workspace.dependencies]
 aros-board = { path = "crates/aros-board" }
 aros-common = { path = "crates/aros-common" }
+aros-release = { path = "crates/aros-release" }
 aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
 
 # CLI & UX
 clap = { version = "4.5", features = ["derive", "env", "cargo", "color"] }
-indicatif = { version = "0.17", features = ["rayon"] }
-console = "0.15"
+indicatif = { version = "0.18.6", default-features = false, features = ["rayon", "unicode-width"] }
+console = "0.16.4"
 miette = { version = "7.4", features = ["fancy"] }
 thiserror = "2.0"
 anyhow = "1.0"
@@ -60,7 +62,7 @@ tracing = "0.1"
 
 # Concurrency & Async
 rayon = "1.10"
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.53", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 
 # Serialization & Data
 serde = { version = "1.0", features = ["derive"] }
@@ -69,6 +71,7 @@ toml = "0.8"
 
 # Network & Archives
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+url = "2.5"
 tar = "0.4"
 xz2 = { version = "0.1", features = ["static"] }
 futures-util = "0.3"
@@ -96,7 +99,7 @@ socket2 = { version = "0.6", features = ["all"] }
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 # Safe POSIX file-descriptor operations used by the Linux SD writer to open a
 # whole block device with O_EXCL | O_NOFOLLOW without local unsafe code.
-rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount", "process"] }
 # Minimal, typed bindings used by the macOS whole-disk claim RAII guard.
 # They are linked only on macOS by the guard crate.
 objc2-disk-arbitration = { version = "0.3.2", default-features = false, features = ["std", "DADisk", "DADissenter", "DASession", "libc"] }

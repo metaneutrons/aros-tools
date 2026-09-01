@@ -341,8 +341,7 @@ pub fn linux_inventory_command(absolute_names: bool) -> std::process::Command {
 #[cfg(target_os = "macos")]
 /// Execute `diskutil` and convert its binary/XML plist into structured JSON.
 pub fn diskutil_plist_json(arguments: &[&str]) -> Result<Value> {
-    use std::io::Write as _;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     let mut diskutil = Command::new(DISKUTIL_PATH);
     diskutil.args(arguments);
@@ -351,32 +350,11 @@ pub fn diskutil_plist_json(arguments: &[&str]) -> Result<Value> {
         "diskutil structured removable-media inventory",
     )?;
 
-    let mut child = Command::new("/usr/bin/plutil")
-        .args(["-convert", "json", "-o", "-", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| miette::miette!("Could not execute plutil: {error}"))?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| miette::miette!("Could not supply diskutil plist to plutil."))?;
-    input
-        .write_all(&output.stdout)
-        .map_err(|error| miette::miette!("Could not pass diskutil plist to plutil: {error}"))?;
-    drop(input);
-    let converted = child
-        .wait_with_output()
-        .map_err(|error| miette::miette!("Could not wait for plutil: {error}"))?;
-    if !converted.status.success() {
-        let stderr = String::from_utf8_lossy(&converted.stderr);
-        miette::bail!(
-            "plutil could not convert diskutil plist output to JSON ({}): {}",
-            converted.status,
-            stderr.trim()
-        );
-    }
+    let converted = crate::run_output_with_input(
+        Command::new("/usr/bin/plutil").args(["-convert", "json", "-o", "-", "-"]),
+        &output.stdout,
+        "plutil structured disk inventory conversion",
+    )?;
     serde_json::from_slice(&converted.stdout)
         .map_err(|error| miette::miette!("Could not parse converted diskutil plist: {error}"))
 }

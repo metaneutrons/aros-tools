@@ -50,6 +50,23 @@ pub struct TargetProfile {
     pub features: Vec<String>,
     #[serde(default)]
     pub float_abi: Option<String>,
+    /// Complete MetaMake selector context. New checkout contracts should
+    /// declare this directly; older AROS-NX checkouts may be bridged from a
+    /// separately validated CMake preset by the source orchestrator.
+    #[serde(default)]
+    pub transpiler: Option<TranspilerProfile>,
+}
+
+/// Checkout-owned MetaMake selectors that cannot be inferred from CPU and
+/// platform without silently changing target semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranspilerProfile {
+    pub family: String,
+    pub variant: String,
+    pub toolchain: String,
+    pub cpu32: String,
+    pub use_mmu: bool,
 }
 
 impl TargetProfile {
@@ -130,6 +147,22 @@ fn validate_config(path: &Path, config: &ArosConfig) -> Result<()> {
                 "target {:?} has an invalid float_abi token",
                 target.name
             )));
+        }
+        if let Some(transpiler) = &target.transpiler {
+            for (field, value, empty_allowed) in [
+                ("family", &transpiler.family, true),
+                ("variant", &transpiler.variant, true),
+                ("toolchain", &transpiler.toolchain, false),
+                ("cpu32", &transpiler.cpu32, true),
+            ] {
+                if (!empty_allowed && value.is_empty()) || (!value.is_empty() && !safe_token(value))
+                {
+                    return Err(invalid(format!(
+                        "target {:?} has an invalid transpiler.{field} token",
+                        target.name
+                    )));
+                }
+            }
         }
     }
     if let Some(host) = &config.host_compiler {
@@ -220,5 +253,31 @@ mod tests {
                 Err(crate::ArosError::Configuration { .. })
             ));
         }
+    }
+
+    #[test]
+    fn explicit_transpiler_context_is_typed_and_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("aros-targets.toml");
+        fs::write(
+            &path,
+            "[[targets]]\nname='pc-x86_64'\narch='x86_64'\nplatform='pc'\nbsp='generic'\n\
+             [targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='i386'\nuse_mmu=true\n",
+        )
+        .unwrap();
+        let profile = TargetProfile::load_from_file(&path).unwrap().remove(0);
+        let context = profile.transpiler.unwrap();
+        assert_eq!(context.toolchain, "llvm");
+        assert_eq!(context.cpu32, "i386");
+        assert!(context.use_mmu);
+
+        let unknown = directory.path().join("unknown.toml");
+        fs::write(
+            &unknown,
+            "[[targets]]\nname='pc'\narch='x86_64'\nplatform='pc'\nbsp='generic'\n\
+             [targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='i386'\nuse_mmu=true\ntypo=true\n",
+        )
+        .unwrap();
+        assert!(TargetProfile::load_from_file(&unknown).is_err());
     }
 }

@@ -47,7 +47,26 @@ pub fn find_root() -> Result<PathBuf> {
     find_root_from(&current_dir)
 }
 
-fn is_repo_root(path: &Path) -> bool {
+/// Return a discovered checkout when the current directory is inside one.
+///
+/// Unlike [`find_root`], absence is not an error. Filesystem failures while
+/// resolving the current directory remain explicit.
+pub fn find_root_optional() -> Result<Option<PathBuf>> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| miette::miette!("Could not determine the current directory: {error}"))?;
+    let start = current_dir.canonicalize().map_err(|error| {
+        miette::miette!(
+            "Could not resolve working directory '{}': {error}",
+            current_dir.display()
+        )
+    })?;
+    Ok(start
+        .ancestors()
+        .find(|candidate| is_repo_root(candidate))
+        .map(Path::to_path_buf))
+}
+
+pub fn is_repo_root(path: &Path) -> bool {
     path.join("configure").is_file()
         && path.join("Makefile.in").is_file()
         && path.join("arch").is_dir()

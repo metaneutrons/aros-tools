@@ -442,7 +442,9 @@ fn catalog_outputs(
     if matches.len() != 1 {
         return CatalogOutputs::default();
     }
-    let (destination, name, source_dir, languages) = matches.pop().expect("one catalog match");
+    let Some((destination, name, source_dir, languages)) = matches.pop() else {
+        return CatalogOutputs::default();
+    };
     CatalogOutputs {
         destination: Some(destination),
         name: Some(name),

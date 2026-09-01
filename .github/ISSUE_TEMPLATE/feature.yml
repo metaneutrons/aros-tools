@@ -1,0 +1,43 @@
+name: Feature proposal
+description: Propose a focused improvement to an upstream-compatible workflow or contract.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or developer problem without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Intended workflow
+      description: Show the command, inputs, output, and failure behavior you expect.
+    validations:
+      required: true
+  - type: dropdown
+    id: source_boundary
+    attributes:
+      label: Source compatibility boundary
+      options:
+        - Pristine upstream AROS
+        - AROS-NX extension
+        - Both
+        - Not source-specific
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: Explain current workarounds and any compatibility, safety, or maintenance cost.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or references
+      description: Link public upstream recipes, specifications, logs, or prior discussions where available.

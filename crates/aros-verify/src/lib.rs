@@ -20,22 +20,40 @@
 //! when something is missing, so this can gate a build.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::SystemTime;
+use std::process::ExitCode;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use aros_common::read_source;
-use clap::{Parser, ValueEnum};
+use anyhow::Result;
+use aros_common::{
+    read_source, render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode,
+    DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel,
+    Logger, ObservabilityPolicy, SourceLocation,
+};
+use clap::{error::ErrorKind, Parser, ValueEnum};
 use rayon::prelude::*;
 use regex::Regex;
+
+mod coverage_io;
+#[cfg(test)]
+use coverage_io::find_mmakefiles_with;
+use coverage_io::{
+    find_mmakefiles, read_optional_coverage_source, CoverageReadError, CoverageReadPhase,
+    CoverageReadResult,
+};
+mod genmf;
+use genmf::{expand_all, ExpansionFailure};
+#[cfg(test)]
+use genmf::{genmf_dependency_files, timestamps_are_fresh};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "aros-verify",
     version,
-    about = "Compare transpiled CMake targets against the genmf reference expansion"
+    about = "Compare transpiled CMake targets against the genmf reference expansion",
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_VERIFY_DIAGNOSTIC_FORMAT,\nAROS_VERIFY_LOG_LEVEL, AROS_VERIFY_LOG_FORMAT, and AROS_VERIFY_LOG_FILE.\nLogging is off by default and is written only to an explicitly selected local file."
 )]
 struct Args {
     /// Source tree root.
@@ -80,9 +98,83 @@ struct Args {
     #[arg(long)]
     refresh: bool,
 
+    /// Hard deadline in seconds for each independent genmf expansion.
+    #[arg(
+        long,
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=3600),
+        env = "AROS_VERIFY_GENMF_TIMEOUT_SECONDS"
+    )]
+    genmf_timeout_seconds: u64,
+
     /// Report only; exit 0 even when targets are missing.
     #[arg(long)]
     no_gate: bool,
+
+    /// Diagnostic renderer used for failures.
+    #[arg(long, value_enum, default_value_t = DiagnosticFormat::Human, env = "AROS_VERIFY_DIAGNOSTIC_FORMAT")]
+    diagnostic_format: DiagnosticFormat,
+
+    /// Minimum level written to the explicitly selected local log.
+    #[arg(long, value_enum, default_value_t = LogLevel::Off, env = "AROS_VERIFY_LOG_LEVEL")]
+    log_level: LogLevel,
+
+    /// Local log encoding.
+    #[arg(long, value_enum, default_value_t = LogFormat::Human, env = "AROS_VERIFY_LOG_FORMAT")]
+    log_format: LogFormat,
+
+    /// Local log destination; required whenever logging is enabled.
+    #[arg(long, env = "AROS_VERIFY_LOG_FILE")]
+    log_file: Option<PathBuf>,
+}
+
+const OBSERVABILITY_POLICY: ObservabilityPolicy = ObservabilityPolicy {
+    log_schema: "aros-verify-log-v1",
+    component: "AROS verifier",
+    include_invocation: false,
+    observability_code: DiagnosticCode::VerifyObservability,
+    observability_stage: DiagnosticStage::Observability,
+    internal_code: DiagnosticCode::VerifyInternal,
+    internal_stage: DiagnosticStage::Internal,
+    hint: "select an explicit writable local file or disable verifier logging",
+};
+
+#[derive(Debug)]
+struct VerifyFailure {
+    diagnostic: Box<Diagnostic>,
+}
+
+impl VerifyFailure {
+    fn new(code: DiagnosticCode, stage: DiagnosticStage, message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: Box::new(Diagnostic::error(code, stage, message)),
+        }
+    }
+
+    fn at_path(
+        code: DiagnosticCode,
+        stage: DiagnosticStage,
+        message: impl Into<String>,
+        path: &Path,
+    ) -> Self {
+        Self {
+            diagnostic: Box::new(
+                Diagnostic::error(code, stage, message)
+                    .with_location(SourceLocation::new(path.display().to_string())),
+            ),
+        }
+    }
+
+    fn into_diagnostic(self) -> Diagnostic {
+        *self.diagnostic
+    }
+}
+
+fn coverage_read_failure(error: CoverageReadError) -> VerifyFailure {
+    let stage = error.phase.diagnostic_stage();
+    let message = error.to_string();
+    let path = error.path;
+    VerifyFailure::at_path(DiagnosticCode::VerifyInput, stage, message, &path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -415,15 +507,22 @@ fn llvm_provisioning_context_matches_sources(
             .any(|line| line.starts_with("project(AROS-NG") || line.starts_with("project(AROS-NX"))
 }
 
-fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningContext {
-    let read = |relative: &str| read_source(&root.join(relative)).ok();
-    let llvm = read(LLVM_PROVISIONING_FILE)
-        .zip(read("config/make.cfg.in"))
-        .zip(read("CMakeLists.txt"))
+fn detect_toolchain_provisioning_context(
+    root: &Path,
+) -> CoverageReadResult<ToolchainProvisioningContext> {
+    let read = |relative: &str| {
+        read_optional_coverage_source(
+            &root.join(relative),
+            CoverageReadPhase::ProvisioningContextRead,
+        )
+    };
+    let llvm = read(LLVM_PROVISIONING_FILE)?
+        .zip(read("config/make.cfg.in")?)
+        .zip(read("CMakeLists.txt")?)
         .is_some_and(|((mmake, make_config), cmake_lists)| {
             llvm_provisioning_context_matches_sources(&mmake, &make_config, &cmake_lists)
         });
-    let gcc_libatomic = read(GCC_PROVISIONING_FILE).is_some_and(|gnu_mmake| {
+    let gcc_libatomic = read(GCC_PROVISIONING_FILE)?.is_some_and(|gnu_mmake| {
         let semantics = canonical_make_semantics(&gnu_mmake);
         let lines: BTreeSet<&str> = semantics.lines().collect();
         lines.contains(
@@ -434,10 +533,10 @@ fn detect_toolchain_provisioning_context(root: &Path) -> ToolchainProvisioningCo
             "#MM tools-crosstools-gcc-libatomic : crosstools-gcc--fetch tools-crosstools-autolibs linklibs-$(AROS_TARGET_CPU)",
         )
     });
-    ToolchainProvisioningContext {
+    Ok(ToolchainProvisioningContext {
         llvm,
         gcc_libatomic,
-    }
+    })
 }
 
 fn is_toolchain_provisioning_declaration(
@@ -492,10 +591,13 @@ fn split_inactive_profile<'a>(
         .partition(|declaration| is_inactive_profile_declaration(declaration, scope))
 }
 
-fn collect_manual_aggregate_declarations(root: &Path) -> Vec<Declaration> {
+fn collect_manual_aggregate_declarations(root: &Path) -> CoverageReadResult<Vec<Declaration>> {
     const FILE: &str = "compiler/libhiddstubs/mmakefile.src";
-    let Ok(content) = read_source(&root.join(FILE)) else {
-        return Vec::new();
+    let path = root.join(FILE);
+    let Some(content) =
+        read_optional_coverage_source(&path, CoverageReadPhase::ManualAggregateRead)?
+    else {
+        return Ok(Vec::new());
     };
     let semantics = canonical_make_semantics(&content);
     let lines: BTreeSet<&str> = semantics.lines().collect();
@@ -515,14 +617,14 @@ fn collect_manual_aggregate_declarations(root: &Path) -> Vec<Declaration> {
             .count()
             != 1
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    vec![Declaration {
+    Ok(vec![Declaration {
         mmake: "linklibs-hiddstubs".to_owned(),
         macro_name: "manual_archive".to_owned(),
         file: FILE.to_owned(),
         arguments: required.join(" | "),
-    }]
+    }])
 }
 
 /// What the reference expansion says about one target.
@@ -534,70 +636,211 @@ struct RefShape {
     is_module: bool,
 }
 
-#[derive(Debug)]
-struct ExpansionResult {
-    expanded: Vec<(String, PathBuf)>,
-    failures: Vec<ExpansionFailure>,
+/// Parse, execute, log, and render one verifier invocation.
+#[must_use]
+pub fn entry(arguments: Vec<OsString>) -> ExitCode {
+    let requested_format = requested_diagnostic_format(&arguments, "AROS_VERIFY_DIAGNOSTIC_FORMAT");
+    let args = match Args::try_parse_from(arguments) {
+        Ok(args) => args,
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            return match aros_common::write_stdout(&error.to_string()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(output_error) => {
+                    render_diagnostics(
+                        &DiagnosticSet::single(
+                            Diagnostic::error(
+                                DiagnosticCode::VerifyObservability,
+                                DiagnosticStage::Observability,
+                                format!("could not write command help: {output_error}"),
+                            )
+                            .with_hint("check the stdout destination and retry"),
+                        ),
+                        requested_format,
+                        OBSERVABILITY_POLICY,
+                    );
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::VerifyInvocation,
+                        DiagnosticStage::Invocation,
+                        error.to_string().trim().to_owned(),
+                    )
+                    .with_hint("run 'aros-verify --help' and provide --generated and --work paths"),
+                ),
+                requested_format,
+                OBSERVABILITY_POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let logger = match Logger::open(
+        args.log_level,
+        args.log_format,
+        args.log_file.clone(),
+        "aros-verify",
+        OBSERVABILITY_POLICY,
+    ) {
+        Ok(logger) => logger,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(error.into_diagnostic()),
+                args.diagnostic_format,
+                OBSERVABILITY_POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let context = DiagnosticContext {
+        target: Some(args.source.display().to_string()),
+        output: Some(args.work.display().to_string()),
+        ..DiagnosticContext::default()
+    };
+    if let Err(error) = logger.event(
+        LogLevel::Info,
+        "invocation.start",
+        "independent verifier invocation started",
+        &context,
+    ) {
+        render_diagnostics(
+            &DiagnosticSet::single(error.into_diagnostic()),
+            args.diagnostic_format,
+            OBSERVABILITY_POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = run(&args) {
+        let mut diagnostics = vec![error.into_diagnostic()];
+        if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
+            diagnostics.push(log_error.into_diagnostic());
+        }
+        render_diagnostics(
+            &DiagnosticSet::new(diagnostics),
+            args.diagnostic_format,
+            OBSERVABILITY_POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
+    if let Some(diagnostic) = aros_common::take_stdout_failure_diagnostic(
+        DiagnosticCode::VerifyObservability,
+        DiagnosticStage::Observability,
+    ) {
+        let mut diagnostics = vec![diagnostic];
+        if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
+            diagnostics.push(log_error.into_diagnostic());
+        }
+        render_diagnostics(
+            &DiagnosticSet::new(diagnostics),
+            args.diagnostic_format,
+            OBSERVABILITY_POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = logger.event(
+        LogLevel::Info,
+        "invocation.complete",
+        "independent verifier invocation completed",
+        &context,
+    ) {
+        render_diagnostics(
+            &DiagnosticSet::single(error.into_diagnostic()),
+            args.diagnostic_format,
+            OBSERVABILITY_POLICY,
+        );
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
-#[derive(Debug)]
-struct ExpansionFailure {
-    file: String,
-    message: String,
-}
+fn run(args: &Args) -> std::result::Result<(), VerifyFailure> {
+    validate_profile_arguments(args).map_err(|error| {
+        VerifyFailure::new(
+            DiagnosticCode::VerifyInput,
+            DiagnosticStage::Configuration,
+            format!("invalid verifier profile: {error:#}"),
+        )
+    })?;
+    let architecture = ArchitectureScope::from_args(args);
+    let root = args.source.canonicalize().map_err(|error| {
+        VerifyFailure::at_path(
+            DiagnosticCode::VerifyInput,
+            DiagnosticStage::RepositoryDiscovery,
+            format!("source tree cannot be opened: {error}"),
+            &args.source,
+        )
+    })?;
 
-/// Run the verifier command using the process arguments.
-///
-/// # Panics
-///
-/// Panics only when one of the verifier's compile-time regular expressions is
-/// invalid, which is an internal programming error covered by unit tests.
-///
-/// # Errors
-///
-/// Returns an error for invalid arguments, inaccessible inputs, failed legacy
-/// expansion, or a parity mismatch.
-pub fn run() -> Result<()> {
-    let args = Args::parse();
-    validate_profile_arguments(&args)?;
-    let architecture = ArchitectureScope::from_args(&args);
-    let root = args
-        .source
-        .canonicalize()
-        .with_context(|| format!("source tree not found: {}", args.source.display()))?;
-
-    fs::create_dir_all(&args.work)?;
+    fs::create_dir_all(&args.work).map_err(|error| {
+        VerifyFailure::at_path(
+            DiagnosticCode::VerifyPublication,
+            DiagnosticStage::OutputPublication,
+            format!("cannot create verifier work directory: {error}"),
+            &args.work,
+        )
+    })?;
     let cache = args.work.join("genmf");
-    fs::create_dir_all(&cache)?;
+    fs::create_dir_all(&cache).map_err(|error| {
+        VerifyFailure::at_path(
+            DiagnosticCode::VerifyPublication,
+            DiagnosticStage::OutputPublication,
+            format!("cannot create verifier expansion cache: {error}"),
+            &cache,
+        )
+    })?;
     let report_dir = architecture
         .as_ref()
         .map_or_else(|| args.work.clone(), |scope| args.work.join(scope.key()));
-    fs::create_dir_all(&report_dir)?;
+    fs::create_dir_all(&report_dir).map_err(|error| {
+        VerifyFailure::at_path(
+            DiagnosticCode::VerifyPublication,
+            DiagnosticStage::OutputPublication,
+            format!("cannot create verifier report directory: {error}"),
+            &report_dir,
+        )
+    })?;
 
-    let mmakefiles = find_mmakefiles(&root);
+    let mmakefiles = find_mmakefiles(&root).map_err(coverage_read_failure)?;
     if mmakefiles.is_empty() {
-        anyhow::bail!(
-            "no mmakefile or mmakefile.src found under {}",
-            root.display()
-        );
+        return Err(VerifyFailure::at_path(
+            DiagnosticCode::VerifyInput,
+            DiagnosticStage::SourceWalk,
+            "source tree contains no mmakefile or mmakefile.src",
+            &root,
+        ));
     }
 
     // 1. What the tree declares. Read straight from the mmakefiles, with line
     //    continuations joined, so this measure does not depend on the
     //    transpiler's own parser being right.
-    let mut declarations = collect_declarations(&root, &mmakefiles);
-    let manual_aggregates = collect_manual_aggregate_declarations(&root);
+    let mut declarations =
+        collect_declarations(&root, &mmakefiles).map_err(coverage_read_failure)?;
+    let manual_aggregates =
+        collect_manual_aggregate_declarations(&root).map_err(coverage_read_failure)?;
     declarations.extend(manual_aggregates.iter().cloned());
     // The global report deliberately remains a raw tree inventory.  A
     // concrete architecture report additionally evaluates Make conditionals
     // with the target values CMake supplied.  Directory filtering alone is
     // insufficient: several shared mmakefiles declare 32-bit companions only
     // when AROS_TARGET_CPU32 is non-empty.
-    let conditional_declarations = architecture.as_ref().map(|scope| {
-        let mut declarations = collect_declarations_for_profile(&root, &mmakefiles, scope);
-        declarations.extend(manual_aggregates.iter().cloned());
-        declarations
-    });
+    let conditional_declarations = architecture
+        .as_ref()
+        .map(|scope| {
+            collect_declarations_for_profile(&root, &mmakefiles, scope).map(|mut declarations| {
+                declarations.extend(manual_aggregates.iter().cloned());
+                declarations
+            })
+        })
+        .transpose()
+        .map_err(coverage_read_failure)?;
     let declaration_candidates = conditional_declarations
         .as_deref()
         .unwrap_or(declarations.as_slice());
@@ -609,15 +852,22 @@ pub fn run() -> Result<()> {
                 .is_none_or(|scope| scope.declaration_is_eligible(declaration))
         })
         .collect();
-    let provisioning_context = detect_toolchain_provisioning_context(&root);
+    let provisioning_context =
+        detect_toolchain_provisioning_context(&root).map_err(coverage_read_failure)?;
     let (toolchain_provisioning, target_candidates) =
         split_toolchain_provisioning(&scoped_inventory, provisioning_context);
     let (inactive_profile, scoped_declarations) =
         split_inactive_profile(&target_candidates, architecture.as_ref());
 
     // 2. What the historic build makes of it.
-    let expansion = expand_all(&root, &cache, &mmakefiles, args.refresh);
-    let shapes = collect_shapes(&expansion.expanded);
+    let expansion = expand_all(
+        &root,
+        &cache,
+        &mmakefiles,
+        args.refresh,
+        Duration::from_secs(args.genmf_timeout_seconds),
+    );
+    let shapes = collect_shapes(&expansion.expanded).map_err(coverage_read_failure)?;
     let expansion_failures: Vec<String> = expansion
         .failures
         .iter()
@@ -630,8 +880,14 @@ pub fn run() -> Result<()> {
         .collect();
 
     // 3. What we produced.
-    let generated = fs::read_to_string(&args.generated)
-        .with_context(|| format!("cannot read {}", args.generated.display()))?;
+    let generated = fs::read_to_string(&args.generated).map_err(|error| {
+        VerifyFailure::at_path(
+            DiagnosticCode::VerifyInput,
+            DiagnosticStage::Parsing,
+            format!("cannot read generated target graph: {error}"),
+            &args.generated,
+        )
+    })?;
     let ours = collect_ours(&generated);
 
     // ---- Coverage -------------------------------------------------------
@@ -760,28 +1016,30 @@ pub fn run() -> Result<()> {
         100.0 * (declared.len() - missing.len()) as f64 / declared.len() as f64
     };
 
-    println!("📐 aros-verify");
+    aros_common::outputln!("📐 aros-verify");
     if let Some(scope) = &architecture {
         let profile = args.profile.unwrap_or(Profile::Architecture);
-        println!(
+        aros_common::outputln!(
             "   scope         {} {}-{}",
             profile.as_str(),
             scope.cpu,
             scope.platform
         );
-        println!("   reachability  not filtered (no verified core/distribution roots available)");
+        aros_common::outputln!(
+            "   reachability  not filtered (no verified core/distribution roots available)"
+        );
     }
-    println!(
+    aros_common::outputln!(
         "   coverage      {}/{} declared targets ({pct:.1}%)",
         declared.len() - missing.len(),
         declared.len()
     );
-    println!(
+    aros_common::outputln!(
         "   provisioning  {} upstream toolchain target(s) tracked outside the target graph",
         toolchain_provisioning.len()
     );
     if !inactive_profile.is_empty() {
-        println!(
+        aros_common::outputln!(
             "   inactive      {} declaration(s) excluded by explicit target configuration",
             inactive_profile.len()
         );
@@ -794,11 +1052,11 @@ pub fn run() -> Result<()> {
     } else {
         shapes.len()
     };
-    println!("   reference     {reference_count} targets in the genmf expansion");
-    println!("   emitted       {} MMAKE_IDs", emitted.len());
+    aros_common::outputln!("   reference     {reference_count} targets in the genmf expansion");
+    aros_common::outputln!("   emitted       {} MMAKE_IDs", emitted.len());
     if args.build_dir.is_some() {
         let built = emitted.len().saturating_sub(unrealised.len());
-        println!(
+        aros_common::outputln!(
             "   realised      {built}/{} emitted became CMake targets",
             emitted.len()
         );
@@ -811,7 +1069,8 @@ pub fn run() -> Result<()> {
             "{} mmakefile(s) could not be expanded by genmf",
             expansion_failures.len()
         ),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_inventory_report(
         &report_dir.join("toolchain-provisioning-targets.txt"),
@@ -824,7 +1083,8 @@ pub fn run() -> Result<()> {
                 )
             })
             .collect(),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_named_inventory_report(
         &report_dir.join("inactive-profile-targets.txt"),
@@ -843,7 +1103,8 @@ pub fn run() -> Result<()> {
             })
             .collect(),
         "inactive target-profile inventory",
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_report(
         &report_dir.join("missing-targets.txt"),
@@ -852,7 +1113,8 @@ pub fn run() -> Result<()> {
             .map(|d| format!("{:32} %{:22} {}", d.mmake, d.macro_name, d.file))
             .collect(),
         &format!("{} declared target(s) not transpiled", missing.len()),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_report(
         &report_dir.join("undeclared-targets.txt"),
@@ -861,13 +1123,15 @@ pub fn run() -> Result<()> {
             "{} emitted target(s) the tree does not declare",
             undeclared.len()
         ),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_report(
         &report_dir.join("wrong-program-name.txt"),
         wrong_name.clone(),
         &format!("{} target(s) built under the wrong name", wrong_name.len()),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     write_report(
         &report_dir.join("unrealised-targets.txt"),
@@ -876,13 +1140,14 @@ pub fn run() -> Result<()> {
             "{} emitted declaration(s) never became a CMake target",
             unrealised.len()
         ),
-    )?;
+    )
+    .map_err(|error| report_failure(&report_dir, &error))?;
 
     if !by_macro.is_empty() {
-        println!("\n   {:24} {:>8} {:>8}", "macro", "declared", "missing");
+        aros_common::outputln!("\n   {:24} {:>8} {:>8}", "macro", "declared", "missing");
         for (m, (total, miss)) in &by_macro {
             if *miss > 0 {
-                println!("   %{m:23} {total:8} {miss:8}");
+                aros_common::outputln!("   %{m:23} {total:8} {miss:8}");
             }
         }
     }
@@ -893,24 +1158,64 @@ pub fn run() -> Result<()> {
         || !unrealised.is_empty()
         || !expansion_failures.is_empty();
     if failed && !args.no_gate {
-        anyhow::bail!(
-            "verification found gaps; see the reports in {}",
-            report_dir.display()
-        );
+        return Err(verification_gap_failure(&report_dir, &expansion.failures));
     }
     Ok(())
+}
+
+fn verification_gap_failure(
+    report_dir: &Path,
+    expansion_failures: &[ExpansionFailure],
+) -> VerifyFailure {
+    let timed_out = expansion_failures.iter().find(|failure| failure.timed_out);
+    let mut diagnostic = Diagnostic::error(
+        DiagnosticCode::VerifyParity,
+        DiagnosticStage::GraphValidation,
+        timed_out.map_or_else(
+            || "verification found gaps; inspect the deterministic reports".to_owned(),
+            |_| {
+                "verification found gaps after at least one genmf expansion timed out; inspect the deterministic reports"
+                    .to_owned()
+            },
+        ),
+    )
+    .with_location(SourceLocation::new(report_dir.display().to_string()))
+    .with_hint(
+        "inspect genmf-errors.txt; fix the hanging expansion or deliberately adjust --genmf-timeout-seconds before retrying",
+    );
+    if let Some(timeout) = timed_out {
+        diagnostic = diagnostic.with_context(DiagnosticContext {
+            tool: Some("python3 tools/genmf/genmf.py".to_owned()),
+            target: Some(timeout.file.clone()),
+            timed_out: Some(true),
+            timeout_ms: timeout.timeout_ms,
+            ..DiagnosticContext::default()
+        });
+    }
+    VerifyFailure {
+        diagnostic: Box::new(diagnostic),
+    }
+}
+
+fn report_failure(report_dir: &Path, error: &anyhow::Error) -> VerifyFailure {
+    VerifyFailure::at_path(
+        DiagnosticCode::VerifyPublication,
+        DiagnosticStage::OutputPublication,
+        format!("cannot publish verifier report: {error:#}"),
+        report_dir,
+    )
 }
 
 fn write_report(path: &Path, mut lines: Vec<String>, headline: &str) -> Result<()> {
     if lines.is_empty() {
         let _ = fs::remove_file(path);
-        println!("   ✅ {headline}");
+        aros_common::outputln!("   ✅ {headline}");
         return Ok(());
     }
     lines.sort_unstable();
     lines.dedup();
     fs::write(path, lines.join("\n") + "\n")?;
-    println!("   ⚠️  {headline} -> {}", path.display());
+    aros_common::outputln!("   ⚠️  {headline} -> {}", path.display());
     Ok(())
 }
 
@@ -924,7 +1229,7 @@ fn write_failure_report(path: &Path, mut lines: Vec<String>, headline: &str) -> 
     lines.sort_unstable();
     lines.dedup();
     fs::write(path, lines.join("\n") + "\n")?;
-    println!("   ⚠️  {headline} -> {}", path.display());
+    aros_common::outputln!("   ⚠️  {headline} -> {}", path.display());
     Ok(())
 }
 
@@ -943,35 +1248,8 @@ fn write_named_inventory_report(path: &Path, mut lines: Vec<String>, label: &str
     lines.sort_unstable();
     lines.dedup();
     fs::write(path, lines.join("\n") + "\n")?;
-    println!("   ℹ️  {label} -> {}", path.display());
+    aros_common::outputln!("   ℹ️  {label} -> {}", path.display());
     Ok(())
-}
-
-fn find_mmakefiles(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // The build directory holds generated copies, and .git is large.
-                if name == "build" || name == ".git" {
-                    continue;
-                }
-                stack.push(p);
-            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                if matches!(name, "mmakefile" | "mmakefile.src") {
-                    out.push(p);
-                }
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1444,7 +1722,7 @@ fn make_conditional_line_states(joined: &str, target: &ArchitectureScope) -> Vec
 ///
 /// Line continuations are joined first: most declarations spread their
 /// arguments over several lines, and `mmake=` is often not on the first one.
-fn collect_declarations(root: &Path, files: &[PathBuf]) -> Vec<Declaration> {
+fn collect_declarations(root: &Path, files: &[PathBuf]) -> CoverageReadResult<Vec<Declaration>> {
     collect_declarations_impl(root, files, None)
 }
 
@@ -1452,7 +1730,7 @@ fn collect_declarations_for_profile(
     root: &Path,
     files: &[PathBuf],
     target: &ArchitectureScope,
-) -> Vec<Declaration> {
+) -> CoverageReadResult<Vec<Declaration>> {
     collect_declarations_impl(root, files, Some(target))
 }
 
@@ -1460,7 +1738,7 @@ fn collect_declarations_impl(
     root: &Path,
     files: &[PathBuf],
     target: Option<&ArchitectureScope>,
-) -> Vec<Declaration> {
+) -> CoverageReadResult<Vec<Declaration>> {
     // genmf removes the backslash/newline pair and joins exactly the next
     // physical line, retaining its indentation. Do not let whitespace matching
     // cross an intervening blank line and consume the declaration after it.
@@ -1470,9 +1748,9 @@ fn collect_declarations_impl(
 
     let mut out = Vec::new();
     for file in files {
-        let Ok(text) = read_source(file) else {
-            continue;
-        };
+        let text = read_source(file).map_err(|error| {
+            CoverageReadError::new(CoverageReadPhase::DeclarationRead, file, error)
+        })?;
         let joined = cont.replace_all(&text, "");
         let states = target.map(|target| make_conditional_line_states(&joined, target));
         let relative = file
@@ -1502,158 +1780,29 @@ fn collect_declarations_impl(
             });
         }
     }
-    out
-}
-
-/// Runs genmf over each mmakefile, caching the result.
-///
-/// genmf is quick (about 20 ms per file) but there are over a thousand files,
-/// so the expansions are kept and only redone on request.
-fn expand_all(root: &Path, cache: &Path, files: &[PathBuf], refresh: bool) -> ExpansionResult {
-    let tmpl = root.join("config/make.tmpl");
-    let genmf = root.join("tools/genmf/genmf.py");
-    let genmf_dependencies = genmf_dependency_files(root);
-
-    let outcomes: Vec<std::result::Result<(String, PathBuf), ExpansionFailure>> = files
-        .par_iter()
-        .map(|f| {
-            let rel = f
-                .strip_prefix(root)
-                .unwrap_or(f)
-                .to_string_lossy()
-                .to_string();
-            let out = cache.join(format!("{}.mk", rel.replace('/', "%")));
-            let failure = |detail: String| ExpansionFailure {
-                file: rel.clone(),
-                message: format!("{rel}: {detail}"),
-            };
-            let mut inputs = Vec::with_capacity(genmf_dependencies.len() + 1);
-            inputs.push(f.as_path());
-            inputs.extend(genmf_dependencies.iter().map(PathBuf::as_path));
-            if refresh || !cache_is_fresh(&out, &inputs) {
-                // Never let a failed regeneration make a stale or partial
-                // output look fresh on the next run.
-                let _ = fs::remove_file(&out);
-                let mut command = Command::new("python3");
-                command.arg(&genmf).arg(&tmpl).arg(f).arg(&out);
-                let result = aros_common::run_output(&mut command);
-
-                let command_output = result
-                    .map_err(|error| failure(format!("could not start genmf: {error}")))?
-                    .output;
-                if !command_output.status.success() {
-                    let _ = fs::remove_file(&out);
-                    let detail = String::from_utf8_lossy(&command_output.stderr)
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let detail = if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {detail}")
-                    };
-                    return Err(failure(format!(
-                        "genmf exited with {}{detail}",
-                        command_output.status
-                    )));
-                }
-                if !out.is_file() {
-                    return Err(failure(
-                        "genmf succeeded without producing cache output".to_owned(),
-                    ));
-                }
-            }
-            Ok((rel, out))
-        })
-        .collect();
-
-    let mut expanded = Vec::new();
-    let mut failures = Vec::new();
-    for outcome in outcomes {
-        match outcome {
-            Ok(expansion) => expanded.push(expansion),
-            Err(failure) => failures.push(failure),
-        }
-    }
-    expanded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    failures.sort_unstable_by(|left, right| left.message.cmp(&right.message));
-    failures.dedup_by(|left, right| left.message == right.message);
-    ExpansionResult { expanded, failures }
-}
-
-/// Files whose contents affect every genmf expansion.
-///
-/// MetaMake's `genmakefiledeps` names the main template and its three current
-/// includes. Discover the includes from the template itself so adding another
-/// one cannot leave a previously cached reference expansion looking fresh.
-fn genmf_dependency_files(root: &Path) -> Vec<PathBuf> {
-    let mut dependencies = BTreeSet::from([root.join("tools/genmf/genmf.py")]);
-    let mut pending = vec![root.join("config/make.tmpl")];
-
-    while let Some(template) = pending.pop() {
-        if !dependencies.insert(template.clone()) {
-            continue;
-        }
-        let Ok(text) = read_source(&template) else {
-            continue;
-        };
-        let parent = template.parent().unwrap_or(root);
-        for line in text.lines() {
-            let Some(raw_include) = line.strip_prefix("%include") else {
-                continue;
-            };
-            if !raw_include.chars().next().is_some_and(char::is_whitespace) {
-                continue;
-            }
-            let mut include = raw_include.trim();
-            if include.len() > 1 && include.starts_with('"') && include.ends_with('"') {
-                include = &include[1..include.len() - 1];
-            }
-            if !include.is_empty() {
-                let include = Path::new(include);
-                pending.push(if include.is_absolute() {
-                    include.to_path_buf()
-                } else {
-                    parent.join(include)
-                });
-            }
-        }
-    }
-
-    dependencies.into_iter().collect()
-}
-
-fn cache_is_fresh(output: &Path, inputs: &[&Path]) -> bool {
-    let Ok(output_modified) = fs::metadata(output).and_then(|metadata| metadata.modified()) else {
-        return false;
-    };
-    let mut input_modified = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let Ok(modified) = fs::metadata(input).and_then(|metadata| metadata.modified()) else {
-            return false;
-        };
-        input_modified.push(modified);
-    }
-    timestamps_are_fresh(output_modified, &input_modified)
-}
-
-fn timestamps_are_fresh(output: SystemTime, inputs: &[SystemTime]) -> bool {
-    inputs.iter().all(|input| output > *input)
+    Ok(out)
 }
 
 /// Pulls the per-target facts out of the expansions.
-fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> {
+fn collect_shapes(
+    expanded: &[(String, PathBuf)],
+) -> CoverageReadResult<BTreeMap<String, RefShape>> {
     let re_prog = Regex::new(r"(?m)^([A-Za-z0-9_.][\w.-]*)_PROGNAME\s*:?=\s*(\S+)").unwrap();
     let re_mod = Regex::new(r"(?m)^([A-Za-z0-9_.][\w.-]*)_ALLTARGETS\b").unwrap();
 
-    let per_file: Vec<BTreeMap<String, RefShape>> = expanded
-        .par_iter()
+    let sources = expanded
+        .iter()
         .map(|(_, path)| {
+            read_source(path).map(|text| (path, text)).map_err(|error| {
+                CoverageReadError::new(CoverageReadPhase::ReferenceShapeRead, path, error)
+            })
+        })
+        .collect::<CoverageReadResult<Vec<_>>>()?;
+    let per_file: Vec<BTreeMap<String, RefShape>> = sources
+        .par_iter()
+        .map(|(_, text)| {
             let mut map: BTreeMap<String, RefShape> = BTreeMap::new();
-            let Ok(text) = read_source(path) else {
-                return map;
-            };
-            for c in re_prog.captures_iter(&text) {
+            for c in re_prog.captures_iter(text) {
                 let name = c[1].to_string();
                 let value = c[2].to_string();
                 // An unresolved Make variable tells us nothing.
@@ -1662,7 +1811,7 @@ fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> 
                 }
                 map.entry(name).or_default().progname = Some(value);
             }
-            for c in re_mod.captures_iter(&text) {
+            for c in re_mod.captures_iter(text) {
                 map.entry(c[1].to_string()).or_default().is_module = true;
             }
             map
@@ -1679,7 +1828,7 @@ fn collect_shapes(expanded: &[(String, PathBuf)]) -> BTreeMap<String, RefShape> 
             e.is_module |= v.is_module;
         }
     }
-    all
+    Ok(all)
 }
 
 /// Every mmake target the generated file declares, with the name it builds

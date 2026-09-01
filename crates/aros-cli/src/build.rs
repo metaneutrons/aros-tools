@@ -61,6 +61,9 @@ pub struct CmakeDefinition {
 /// Returns an error for invalid options, missing toolchains or build tools,
 /// configuration failures, and compilation failures.
 pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
+    if options.jobs == Some(0) {
+        miette::bail!("parallel job count must be greater than zero");
+    }
     let build_dir = build_dir(repo_root, &options.preset)?;
     let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
     let resolved = toolchain::resolve_for_build(
@@ -72,12 +75,12 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     .await?;
     let build_tools = build_tools::ensure(repo_root)?;
 
-    println!(
+    aros_common::outputln!(
         "{ROCKET} {}Building AROS for target preset [{}]...",
-        style("AROS-NG: ").cyan().bold(),
+        style("AROS: ").cyan().bold(),
         style(&options.preset).yellow().bold()
     );
-    println!(
+    aros_common::outputln!(
         "🔧 Cross toolchain: {} ({}, {:?})",
         resolved.paths.root.display(),
         resolved
@@ -89,7 +92,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     let start = Instant::now();
 
     if options.clean {
-        println!("🧹 Cleaning build directory for {}...", options.preset);
+        aros_common::outputln!("🧹 Cleaning build directory for {}...", options.preset);
         if build_dir.exists() {
             std::fs::remove_dir_all(&build_dir).map_err(|error| {
                 miette::miette!(
@@ -101,12 +104,12 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     }
 
     let launcher = detected_compiler_cache().map_or("none", CompilerCache::program);
-    println!(
+    aros_common::outputln!(
         "⚡ Compiler cache launcher: {}",
         style(launcher).green().bold()
     );
 
-    println!("{HAMMER} Configuring CMake build tree...");
+    aros_common::outputln!("{HAMMER} Configuring CMake build tree...");
     let cmake_toolchain = repo_root.join("cmake/toolchains/AROS.cmake");
     if !cmake_toolchain.is_file() {
         miette::bail!(
@@ -170,7 +173,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         },
     )?;
 
-    println!("{HAMMER} Compiling AROS modules with Ninja...");
+    aros_common::outputln!("{HAMMER} Compiling AROS modules with Ninja...");
     let mut build = Command::new("cmake");
     build.current_dir(repo_root).args(["--build"]);
     build.arg(&build_dir);
@@ -190,7 +193,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         },
     )?;
 
-    println!(
+    aros_common::outputln!(
         "{CHECK} {}Build completed successfully in {:.2?}!",
         style("SUCCESS: ").green().bold(),
         start.elapsed()
@@ -299,7 +302,10 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dir, validate_cmake_definition, validate_preset, CmakeDefinition};
+    use super::{
+        build_dir, run, validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions,
+        CmakeDefinition,
+    };
 
     #[test]
     fn build_directory_stays_inside_the_checkout() {
@@ -324,5 +330,29 @@ mod tests {
             value: "/tmp/board.dtb".to_string(),
         };
         assert!(validate_cmake_definition(&definition).is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_contract_rejects_zero_jobs_before_repository_access() {
+        let options = BuildOptions {
+            preset: "pc-x86_64".into(),
+            toolchain_preset: "pc-x86_64".into(),
+            target: None,
+            jobs: Some(0),
+            clean: false,
+            verbose: false,
+            input_policy: BuildInputPolicy {
+                offline: true,
+                require_fetch_checksums: true,
+            },
+            toolchain_dir: None,
+            cmake_definitions: Vec::new(),
+        };
+        let checkout = tempfile::tempdir().unwrap();
+        assert!(run(checkout.path(), &options)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("greater than zero"));
     }
 }

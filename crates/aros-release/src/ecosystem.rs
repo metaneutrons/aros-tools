@@ -29,7 +29,7 @@ pub fn generate(args: &GenerateArgs) -> ReleaseResult<()> {
     let bytes = match args.format {
         EcosystemFormat::Homebrew => render_homebrew(&release),
         EcosystemFormat::Aur => render_aur(&release),
-    };
+    }?;
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             generation_failure(
@@ -50,14 +50,18 @@ struct NativeRelease {
 }
 
 impl NativeRelease {
-    fn artifact(&self, target: &str) -> &ReleaseManifest {
-        self.manifests
-            .get(target)
-            .expect("complete native manifest set")
+    fn artifact(&self, target: &str) -> ReleaseResult<&ReleaseManifest> {
+        self.manifests.get(target).ok_or_else(|| {
+            internal_failure(format!("validated native matrix lost target {target:?}"))
+        })
     }
 
-    fn url(&self, target: &str) -> String {
-        format!("{}/{}", self.base_url, self.artifact(target).archive)
+    fn url(&self, target: &str) -> ReleaseResult<String> {
+        Ok(format!(
+            "{}/{}",
+            self.base_url,
+            self.artifact(target)?.archive
+        ))
     }
 }
 
@@ -108,7 +112,9 @@ fn load_release(args: &GenerateArgs) -> ReleaseResult<NativeRelease> {
             ),
         ));
     }
-    let first = manifests.values().next().expect("nonempty native matrix");
+    let first = manifests.values().next().ok_or_else(|| {
+        internal_failure("validated native manifest matrix unexpectedly became empty")
+    })?;
     let version = first.version.clone();
     let source_commit = first.source_commit.clone();
     let source_date_epoch = first.source_date_epoch;
@@ -163,57 +169,67 @@ fn validate_manifest(path: &Path, manifest: &ReleaseManifest) -> ReleaseResult<(
     Ok(())
 }
 
-fn render_homebrew(release: &NativeRelease) -> String {
-    let mac_arm = release.artifact("aarch64-apple-darwin");
-    let mac_x86 = release.artifact("x86_64-apple-darwin");
-    let linux_arm = release.artifact("aarch64-unknown-linux-gnu");
-    let linux_x86 = release.artifact("x86_64-unknown-linux-gnu");
+fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
+    let mac_arm = release.artifact("aarch64-apple-darwin")?;
+    let mac_x86 = release.artifact("x86_64-apple-darwin")?;
+    let linux_arm = release.artifact("aarch64-unknown-linux-gnu")?;
+    let linux_x86 = release.artifact("x86_64-unknown-linux-gnu")?;
+    let mac_arm_url = release.url("aarch64-apple-darwin")?;
+    let mac_x86_url = release.url("x86_64-apple-darwin")?;
+    let linux_arm_url = release.url("aarch64-unknown-linux-gnu")?;
+    let linux_x86_url = release.url("x86_64-unknown-linux-gnu")?;
     let mut output = String::new();
-    writeln!(output, "class ArosTools < Formula").unwrap();
-    writeln!(
-        output,
-        "  desc \"Reproducible host-side build and development tools for AROS\""
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "  homepage \"https://github.com/metaneutrons/aros-tools\""
-    )
-    .unwrap();
-    writeln!(output, "  license any_of: [\"MIT\", \"Apache-2.0\"]").unwrap();
-    writeln!(output).unwrap();
-    write_homebrew_os(
-        &mut output,
-        "macos",
-        &release.url("aarch64-apple-darwin"),
-        &mac_arm.archive_sha256,
-        &release.url("x86_64-apple-darwin"),
-        &mac_x86.archive_sha256,
-    );
-    writeln!(output).unwrap();
-    write_homebrew_os(
-        &mut output,
-        "linux",
-        &release.url("aarch64-unknown-linux-gnu"),
-        &linux_arm.archive_sha256,
-        &release.url("x86_64-unknown-linux-gnu"),
-        &linux_x86.archive_sha256,
-    );
-    writeln!(output).unwrap();
-    writeln!(output, "  def install").unwrap();
-    writeln!(output, "    bin.install Dir[\"bin/*\"]").unwrap();
-    writeln!(output, "  end").unwrap();
-    writeln!(output).unwrap();
-    writeln!(output, "  test do").unwrap();
-    writeln!(
-        output,
-        "    assert_match version.to_s, shell_output(\"#{{bin}}/aros --version\")"
-    )
-    .unwrap();
-    writeln!(output, "    system \"#{{bin}}/aros-collect\", \"--help\"").unwrap();
-    writeln!(output, "  end").unwrap();
-    writeln!(output, "end").unwrap();
-    output
+    let rendered: std::fmt::Result = (|| {
+        writeln!(output, "class ArosTools < Formula")?;
+        writeln!(
+            output,
+            "  desc \"Reproducible host-side build and development tools for AROS\""
+        )?;
+        writeln!(
+            output,
+            "  homepage \"https://github.com/metaneutrons/aros-tools\""
+        )?;
+        writeln!(output, "  license any_of: [\"MIT\", \"Apache-2.0\"]")?;
+        writeln!(output)?;
+        for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
+            writeln!(output, "  depends_on \"{dependency}\"")?;
+        }
+        writeln!(output)?;
+        write_homebrew_os(
+            &mut output,
+            "macos",
+            &mac_arm_url,
+            &mac_arm.archive_sha256,
+            &mac_x86_url,
+            &mac_x86.archive_sha256,
+        )?;
+        writeln!(output)?;
+        write_homebrew_os(
+            &mut output,
+            "linux",
+            &linux_arm_url,
+            &linux_arm.archive_sha256,
+            &linux_x86_url,
+            &linux_x86.archive_sha256,
+        )?;
+        writeln!(output)?;
+        writeln!(output, "  def install")?;
+        writeln!(output, "    bin.install Dir[\"bin/*\"]")?;
+        writeln!(output, "  end")?;
+        writeln!(output)?;
+        writeln!(output, "  test do")?;
+        writeln!(
+            output,
+            "    assert_match version.to_s, shell_output(\"#{{bin}}/aros --version\")"
+        )?;
+        writeln!(output, "    system \"#{{bin}}/aros-collect\", \"--help\"")?;
+        writeln!(output, "  end")?;
+        writeln!(output, "end")?;
+        Ok(())
+    })();
+    rendered
+        .map_err(|error| internal_failure(format!("cannot render Homebrew metadata: {error}")))?;
+    Ok(output)
 }
 
 fn write_homebrew_os(
@@ -223,79 +239,82 @@ fn write_homebrew_os(
     arm_sha: &str,
     x86_url: &str,
     x86_sha: &str,
-) {
-    writeln!(output, "  on_{os} do").unwrap();
-    writeln!(output, "    if Hardware::CPU.arm?").unwrap();
-    writeln!(output, "      url \"{arm_url}\"").unwrap();
-    writeln!(output, "      sha256 \"{arm_sha}\"").unwrap();
-    writeln!(output, "    else").unwrap();
-    writeln!(output, "      url \"{x86_url}\"").unwrap();
-    writeln!(output, "      sha256 \"{x86_sha}\"").unwrap();
-    writeln!(output, "    end").unwrap();
-    writeln!(output, "  end").unwrap();
+) -> std::fmt::Result {
+    writeln!(output, "  on_{os} do")?;
+    writeln!(output, "    if Hardware::CPU.arm?")?;
+    writeln!(output, "      url \"{arm_url}\"")?;
+    writeln!(output, "      sha256 \"{arm_sha}\"")?;
+    writeln!(output, "    else")?;
+    writeln!(output, "      url \"{x86_url}\"")?;
+    writeln!(output, "      sha256 \"{x86_sha}\"")?;
+    writeln!(output, "    end")?;
+    writeln!(output, "  end")
 }
 
-fn render_aur(release: &NativeRelease) -> String {
-    let arm = release.artifact("aarch64-unknown-linux-gnu");
-    let x86 = release.artifact("x86_64-unknown-linux-gnu");
+fn render_aur(release: &NativeRelease) -> ReleaseResult<String> {
+    let arm = release.artifact("aarch64-unknown-linux-gnu")?;
+    let x86 = release.artifact("x86_64-unknown-linux-gnu")?;
+    let arm_url = release.url(&arm.target)?;
+    let x86_url = release.url(&x86.target)?;
     let pkgver = release.version.replace('-', "_");
     let mut output = String::new();
-    writeln!(
-        output,
-        "# Generated from verified aros-tools release manifests."
-    )
-    .unwrap();
-    writeln!(output, "# Source commit: {}", release.source_commit).unwrap();
-    writeln!(output, "pkgname=aros-tools-bin").unwrap();
-    writeln!(output, "pkgver={pkgver}").unwrap();
-    writeln!(output, "pkgrel=1").unwrap();
-    writeln!(
-        output,
-        "pkgdesc='Reproducible host-side build and development tools for AROS'"
-    )
-    .unwrap();
-    writeln!(output, "arch=('x86_64' 'aarch64')").unwrap();
-    writeln!(output, "url='https://github.com/metaneutrons/aros-tools'").unwrap();
-    writeln!(output, "license=('MIT' 'Apache-2.0')").unwrap();
-    writeln!(output, "depends=('glibc' 'gcc-libs')").unwrap();
-    writeln!(output, "provides=('aros-tools')").unwrap();
-    writeln!(output, "conflicts=('aros-tools')").unwrap();
-    writeln!(output, "options=('!strip')").unwrap();
-    writeln!(output, "source_x86_64=('{}')", release.url(&x86.target)).unwrap();
-    writeln!(output, "sha256sums_x86_64=('{}')", x86.archive_sha256).unwrap();
-    writeln!(output, "source_aarch64=('{}')", release.url(&arm.target)).unwrap();
-    writeln!(output, "sha256sums_aarch64=('{}')", arm.archive_sha256).unwrap();
-    writeln!(output).unwrap();
-    writeln!(output, "package() {{").unwrap();
-    writeln!(output, "  local target").unwrap();
-    writeln!(output, "  case \"$CARCH\" in").unwrap();
-    writeln!(output, "    x86_64) target='{}' ;;", x86.target).unwrap();
-    writeln!(output, "    aarch64) target='{}' ;;", arm.target).unwrap();
-    writeln!(output, "    *) return 1 ;;").unwrap();
-    writeln!(output, "  esac").unwrap();
-    writeln!(
-        output,
-        "  local root=\"$srcdir/aros-tools-v{}-$target\"",
-        release.version
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "  install -Dm755 \"$root\"/bin/* -t \"$pkgdir/usr/bin\""
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "  install -Dm644 \"$root/README.md\" -t \"$pkgdir/usr/share/doc/aros-tools\""
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "  install -Dm644 \"$root\"/LICENSE-* -t \"$pkgdir/usr/share/licenses/aros-tools\""
-    )
-    .unwrap();
-    writeln!(output, "}}").unwrap();
-    output
+    let rendered: std::fmt::Result = (|| {
+        writeln!(
+            output,
+            "# Generated from verified aros-tools release manifests."
+        )?;
+        writeln!(output, "# Source commit: {}", release.source_commit)?;
+        writeln!(output, "pkgname=aros-tools-bin")?;
+        writeln!(output, "pkgver={pkgver}")?;
+        writeln!(output, "pkgrel=1")?;
+        writeln!(
+            output,
+            "pkgdesc='Reproducible host-side build and development tools for AROS'"
+        )?;
+        writeln!(output, "arch=('x86_64' 'aarch64')")?;
+        writeln!(output, "url='https://github.com/metaneutrons/aros-tools'")?;
+        writeln!(output, "license=('MIT' 'Apache-2.0')")?;
+        writeln!(
+            output,
+            "depends=('glibc' 'gcc-libs' 'ca-certificates' 'cmake' 'curl' 'git' 'ninja' 'patch' 'python')"
+        )?;
+        writeln!(output, "provides=('aros-tools')")?;
+        writeln!(output, "conflicts=('aros-tools')")?;
+        writeln!(output, "options=('!strip')")?;
+        writeln!(output, "source_x86_64=('{x86_url}')")?;
+        writeln!(output, "sha256sums_x86_64=('{}')", x86.archive_sha256)?;
+        writeln!(output, "source_aarch64=('{arm_url}')")?;
+        writeln!(output, "sha256sums_aarch64=('{}')", arm.archive_sha256)?;
+        writeln!(output)?;
+        writeln!(output, "package() {{")?;
+        writeln!(output, "  local target")?;
+        writeln!(output, "  case \"$CARCH\" in")?;
+        writeln!(output, "    x86_64) target='{}' ;;", x86.target)?;
+        writeln!(output, "    aarch64) target='{}' ;;", arm.target)?;
+        writeln!(output, "    *) return 1 ;;")?;
+        writeln!(output, "  esac")?;
+        writeln!(
+            output,
+            "  local root=\"$srcdir/aros-tools-v{}-$target\"",
+            release.version
+        )?;
+        writeln!(
+            output,
+            "  install -Dm755 \"$root\"/bin/* -t \"$pkgdir/usr/bin\""
+        )?;
+        writeln!(
+            output,
+            "  install -Dm644 \"$root/README.md\" -t \"$pkgdir/usr/share/doc/aros-tools\""
+        )?;
+        writeln!(
+            output,
+            "  install -Dm644 \"$root\"/LICENSE-* -t \"$pkgdir/usr/share/licenses/aros-tools\""
+        )?;
+        writeln!(output, "}}")?;
+        Ok(())
+    })();
+    rendered.map_err(|error| internal_failure(format!("cannot render AUR metadata: {error}")))?;
+    Ok(output)
 }
 
 fn contract_failure(path: &Path, message: impl Into<String>) -> ReleaseFailure {
@@ -324,6 +343,19 @@ fn generation_failure(path: &Path, message: impl Into<String>) -> ReleaseFailure
             output: Some(path.display().to_string()),
             ..DiagnosticContext::default()
         }),
+    )
+}
+
+fn internal_failure(message: impl Into<String>) -> ReleaseFailure {
+    ReleaseFailure::new(
+        Diagnostic::error(
+            DiagnosticCode::ReleaseInternal,
+            DiagnosticStage::Internal,
+            message,
+        )
+        .with_hint(
+            "stop publication and report the AP0999 diagnostic; never infer missing release bytes",
+        ),
     )
 }
 
@@ -390,6 +422,10 @@ mod tests {
         }
         assert!(rendered.contains("on_macos"));
         assert!(rendered.contains("on_linux"));
+        for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
+            assert!(rendered.contains(&format!("depends_on \"{dependency}\"")));
+        }
+        assert!(rendered.find("depends_on").unwrap() < rendered.find("on_macos").unwrap());
         assert!(!rendered.contains("  version \""));
     }
 
@@ -409,6 +445,37 @@ mod tests {
         assert!(rendered.contains("source_aarch64"));
         assert!(!rendered.contains("SKIP"));
         assert!(!rendered.contains("'xz'"));
+        for dependency in [
+            "ca-certificates",
+            "cmake",
+            "curl",
+            "git",
+            "ninja",
+            "patch",
+            "python",
+        ] {
+            assert!(rendered.contains(&format!("'{dependency}'")));
+        }
+    }
+
+    #[test]
+    fn debian_metadata_declares_public_runtime_tools() {
+        let metadata = include_str!("../../aros-cli/Cargo.toml");
+        let package: toml::Value = toml::from_str(metadata).unwrap();
+        let depends = package["package"]["metadata"]["deb"]["depends"]
+            .as_str()
+            .unwrap();
+        for dependency in [
+            "ca-certificates",
+            "cmake",
+            "curl",
+            "git",
+            "ninja-build",
+            "patch",
+            "python3",
+        ] {
+            assert!(depends.split(',').any(|item| item.trim() == dependency));
+        }
     }
 
     #[test]
@@ -427,5 +494,19 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(failure.diagnostic().code, DiagnosticCode::ReleaseContract);
+    }
+
+    #[test]
+    fn broken_validated_matrix_returns_internal_diagnostic_instead_of_panicking() {
+        let release = NativeRelease {
+            version: "1.2.3".into(),
+            source_commit: "a".repeat(40),
+            base_url: "https://example.invalid/v1.2.3".into(),
+            manifests: BTreeMap::new(),
+        };
+
+        let failure = render_homebrew(&release).unwrap_err();
+        assert_eq!(failure.diagnostic().code, DiagnosticCode::ReleaseInternal);
+        assert_eq!(failure.diagnostic().stage, DiagnosticStage::Internal);
     }
 }

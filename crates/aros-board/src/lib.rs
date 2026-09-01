@@ -1,14 +1,21 @@
-//! Physical-board profiles and fail-closed local lab workflows for AROS-NG.
+//! Physical-board profiles and fail-closed local lab workflows for AROS.
 //!
 //! Build targets remain in the checked-in `aros-targets.toml`. This crate owns
 //! the separate local identity of concrete boards and the hardware-facing
 //! operations behind the `aros board` frontend.
 
-use aros_common::{bounded_output_detail, DiagnosticContext, LogLevel};
+#[cfg(target_os = "macos")]
+use aros_common::run_output_with_input as execute_with_input;
+use aros_common::{
+    bounded_output_detail, run_output_with_limit as execute_with_limit, DiagnosticContext,
+    LogLevel, ProcessOutput,
+};
 use miette::Result;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+const STRUCTURED_PROCESS_LIMIT: usize = 4 * 1024 * 1024;
 
 pub mod config;
 pub mod deploy;
@@ -110,15 +117,44 @@ pub(crate) fn canonical_existing_directory(path: &Path, label: &str) -> Result<P
 }
 
 pub(crate) fn run_output(command: &mut Command, description: &str) -> Result<Output> {
-    let observed = aros_common::run_output(command)
+    let observed = execute_with_limit(command, STRUCTURED_PROCESS_LIMIT)
         .map_err(|error| miette::miette!("could not start {description}: {error}"))?;
-    if observed.output.status.success() {
-        return Ok(observed.output);
+    exact_process_output(&observed, description)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn run_output_with_input(
+    command: &mut Command,
+    input: &[u8],
+    description: &str,
+) -> Result<Output> {
+    let observed = execute_with_input(command, input, STRUCTURED_PROCESS_LIMIT)
+        .map_err(|error| miette::miette!("could not start {description}: {error}"))?;
+    exact_process_output(&observed, description)
+}
+
+fn exact_process_output(observed: &ProcessOutput, description: &str) -> Result<Output> {
+    if observed.status.success() {
+        let stdout = observed.stdout.exact_bytes().ok_or_else(|| {
+            miette::miette!(
+                "{description} stdout exceeded the {STRUCTURED_PROCESS_LIMIT}-byte structured-output limit"
+            )
+        })?;
+        let stderr = observed.stderr.exact_bytes().ok_or_else(|| {
+            miette::miette!(
+                "{description} stderr exceeded the {STRUCTURED_PROCESS_LIMIT}-byte structured-output limit"
+            )
+        })?;
+        return Ok(Output {
+            status: observed.status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        });
     }
-    let detail = bounded_output_detail(&observed.output.stdout, &observed.output.stderr, 64 * 1024);
+    let detail = bounded_output_detail(&observed.stdout, &observed.stderr);
     miette::bail!(
         "{description} failed with {}{}",
-        observed.output.status,
+        observed.status,
         if detail.is_empty() {
             String::new()
         } else {

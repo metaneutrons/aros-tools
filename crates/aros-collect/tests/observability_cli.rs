@@ -18,6 +18,9 @@ fn direct_mode_emits_one_versioned_json_diagnostic_document() {
     assert_eq!(value["schema"], "aros-tool-diagnostics-v1");
     assert_eq!(value["diagnostics"][0]["code"], "AC0001");
     assert_eq!(value["diagnostics"][0]["stage"], "invocation");
+    assert!(value["diagnostics"][0]["hint"]
+        .as_str()
+        .is_some_and(|hint| !hint.trim().is_empty()));
 }
 
 #[test]
@@ -33,6 +36,9 @@ fn json_selection_also_applies_to_later_observability_option_errors() {
     let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(value["schema"], "aros-tool-diagnostics-v1");
     assert_eq!(value["diagnostics"][0]["code"], "AC0001");
+    assert!(value["diagnostics"][0]["hint"]
+        .as_str()
+        .is_some_and(|hint| !hint.trim().is_empty()));
 }
 
 #[test]
@@ -99,4 +105,7 @@ fn collect_aros_alias_uses_the_same_json_diagnostic_contract() {
     assert_eq!(value["schema"], "aros-tool-diagnostics-v1");
     assert_eq!(value["diagnostics"][0]["code"], "AC0001");
     assert_eq!(value["diagnostics"][0]["stage"], "invocation");
+    assert!(value["diagnostics"][0]["hint"]
+        .as_str()
+        .is_some_and(|hint| !hint.trim().is_empty()));
 }

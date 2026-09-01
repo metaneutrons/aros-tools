@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fmt::{self, Write as _};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -118,16 +118,115 @@ pub fn render_diagnostics(
     format: DiagnosticFormat,
     policy: ObservabilityPolicy,
 ) {
-    match format {
-        DiagnosticFormat::Human => eprint!("{diagnostics}"),
-        DiagnosticFormat::Json => match serde_json::to_string(diagnostics) {
-            Ok(document) => eprintln!("{document}"),
-            Err(error) => eprintln!(
-                "error[{}] during {}: cannot serialize diagnostics: {error}",
-                policy.internal_code, policy.internal_stage
-            ),
-        },
+    let document = match format {
+        DiagnosticFormat::Human => diagnostics.to_string(),
+        DiagnosticFormat::Json => serde_json::to_string(diagnostics).unwrap_or_else(|error| {
+            serde_json::json!({
+                "schema": DiagnosticSet::SCHEMA,
+                "diagnostics": [{
+                    "code": policy.internal_code,
+                    "severity": DiagnosticSeverity::Error,
+                    "stage": policy.internal_stage,
+                    "message": format!("cannot serialize diagnostics: {error}"),
+                }],
+            })
+            .to_string()
+        }),
+    };
+    let mut stderr = std::io::stderr().lock();
+    // Diagnostic rendering is the terminal error boundary. A closed or broken
+    // stderr must not turn the original classified failure into a panic.
+    let _ = stderr.write_all(document.as_bytes());
+    if !document.ends_with('\n') {
+        let _ = stderr.write_all(b"\n");
     }
+    let _ = stderr.flush();
+}
+
+/// Write one complete user-facing document to standard output without
+/// panicking when a downstream pipe closes early.
+///
+/// # Errors
+///
+/// Returns non-broken-pipe output failures. A broken pipe is normal pipeline
+/// control flow and is treated as successful delivery termination.
+pub fn write_stdout(document: &str) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(document.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug)]
+struct StdoutState {
+    closed: bool,
+    failure: Option<(std::io::ErrorKind, String)>,
+}
+
+static STDOUT_STATE: Mutex<StdoutState> = Mutex::new(StdoutState {
+    closed: false,
+    failure: None,
+});
+
+/// Emit formatted user output without panicking or interleaving concurrent
+/// writers.
+///
+/// A closed downstream pipe suppresses the remainder of the invocation's
+/// output. Other write failures are retained until
+/// [`take_stdout_failure_diagnostic`] converts them at the executable's final
+/// error boundary.
+pub fn emit_stdout(arguments: fmt::Arguments<'_>, newline: bool) {
+    let mut stdout_state = STDOUT_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stdout_state.closed || stdout_state.failure.is_some() {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let result = stdout.write_fmt(arguments).and_then(|()| {
+        if newline {
+            stdout.write_all(b"\n")?;
+        }
+        stdout.flush()
+    });
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => stdout_state.closed = true,
+        Err(error) => stdout_state.failure = Some((error.kind(), error.to_string())),
+    }
+}
+
+/// Consume a retained stdout failure as one stable component diagnostic.
+///
+/// Broken pipes are ordinary pipeline control flow and therefore never yield
+/// a diagnostic. Calling this also resets the per-process closed-pipe state,
+/// which keeps direct library-entry tests isolated from one another.
+#[must_use]
+pub fn take_stdout_failure_diagnostic(
+    code: DiagnosticCode,
+    stage: DiagnosticStage,
+) -> Option<Diagnostic> {
+    let mut stdout_state = STDOUT_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    stdout_state.closed = false;
+    stdout_state.failure.take().map(|(kind, message)| {
+        Diagnostic::error(
+            code,
+            stage,
+            format!(
+                "standard output failed after command execution began ({kind:?}): {message}"
+            ),
+        )
+        .with_hint(
+            "check the stdout destination; inspect command state before retrying a mutating operation",
+        )
+    })
 }
 
 #[must_use]
@@ -227,17 +326,13 @@ impl Logger {
                     "enabled logger has no selected local file",
                 ));
             };
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(selected)
-                .map_err(|error| {
-                    observability_failure(
-                        policy,
-                        Some(selected),
-                        format!("cannot open {} log: {error}", policy.component),
-                    )
-                })?;
+            let file = open_log_file(selected).map_err(|error| {
+                observability_failure(
+                    policy,
+                    Some(selected),
+                    format!("cannot open {} log: {error}", policy.component),
+                )
+            })?;
             Some(Mutex::new(file))
         };
         Ok(Self {
@@ -367,6 +462,46 @@ impl Logger {
     }
 }
 
+#[cfg(unix)]
+fn open_log_file(path: &Path) -> std::io::Result<File> {
+    use rustix::fs::{fchmod, fstat, open, FileType, Mode, OFlags};
+
+    let descriptor = open(
+        path,
+        OFlags::WRONLY
+            | OFlags::APPEND
+            | OFlags::CREATE
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    let stat = fstat(&descriptor)?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("log destination '{}' is not a regular file", path.display()),
+        ));
+    }
+    fchmod(&descriptor, Mode::RUSR | Mode::WUSR)?;
+    Ok(descriptor.into())
+}
+
+#[cfg(not(unix))]
+fn open_log_file(path: &Path) -> std::io::Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("log destination '{}' is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
 fn append_context(line: &mut String, context: &DiagnosticContext) {
     if let Some(value) = &context.tool {
         let _ = write!(line, " tool={value}");
@@ -388,6 +523,12 @@ fn append_context(line: &mut String, context: &DiagnosticContext) {
     }
     if let Some(value) = context.signal {
         let _ = write!(line, " signal={value}");
+    }
+    if let Some(value) = context.timed_out {
+        let _ = write!(line, " timed_out={value}");
+    }
+    if let Some(value) = context.timeout_ms {
+        let _ = write!(line, " timeout_ms={value}");
     }
     if let Some(value) = &context.log_path {
         let _ = write!(line, " log_path={value}");
@@ -437,6 +578,33 @@ mod tests {
     }
 
     #[test]
+    fn retained_stdout_failure_becomes_one_resettable_diagnostic() {
+        {
+            let mut state = STDOUT_STATE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            state.failure = Some((
+                std::io::ErrorKind::PermissionDenied,
+                "fixture output denied".to_owned(),
+            ));
+        }
+        let diagnostic = take_stdout_failure_diagnostic(
+            DiagnosticCode::CliObservability,
+            DiagnosticStage::Observability,
+        )
+        .unwrap();
+        assert_eq!(diagnostic.code, DiagnosticCode::CliObservability);
+        assert!(diagnostic.message.contains("PermissionDenied"));
+        assert!(diagnostic.message.contains("fixture output denied"));
+        assert!(take_stdout_failure_diagnostic(
+            DiagnosticCode::CliObservability,
+            DiagnosticStage::Observability,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn jsonl_log_is_stable_and_contains_all_selected_context() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.jsonl");
@@ -467,5 +635,33 @@ mod tests {
         assert_eq!(value["target"], "pc-x86_64");
         assert!(value.get("timestamp").is_none());
         assert!(value.get("host").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_file_is_private_and_leaf_symlinks_are_rejected() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private.log");
+        let logger = Logger::open(
+            LogLevel::Info,
+            LogFormat::Human,
+            Some(path.clone()),
+            "test",
+            POLICY,
+        )
+        .unwrap();
+        drop(logger);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let link = directory.path().join("linked.log");
+        symlink(&path, &link).unwrap();
+        assert!(
+            Logger::open(LogLevel::Info, LogFormat::Human, Some(link), "test", POLICY,).is_err()
+        );
     }
 }

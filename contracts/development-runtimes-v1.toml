@@ -1,0 +1,3 @@
+schema_version = 1
+python_minimum = "3.11"
+node_minimum_major = 24

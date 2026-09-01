@@ -5,8 +5,8 @@ template: splash
 hero:
   tagline: Build, inspect and deploy AROS with explicit inputs, stable diagnostics and independently verifiable artifacts.
   actions:
-    - text: Install from source
-      link: /aros-tools/getting-started/installation/
+    - text: Get started
+      link: /aros-tools/getting-started/quick-start/
       icon: right-arrow
     - text: Use with upstream AROS
       link: /aros-tools/workflows/upstream-aros/
@@ -33,6 +33,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 :::caution[Pre-release]
 `aros-tools` has not published its first stable release. Source builds are
-supported for contributors; Homebrew, APT and AUR channels remain release
-acceptance gates and must not be presented as available before they pass.
+the currently supported installation path; GitHub archives, Homebrew, APT and
+AUR become public only after the first tagged candidate passes every release
+and package-channel gate.
 :::

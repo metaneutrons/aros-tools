@@ -1,0 +1,155 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Prepare version and changelog PR
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install the version-contract Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup show active-toolchain
+      - name: Require PR-only Release Please policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-version-contract.py
+      - name: Open or update the manifest release PR
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+          skip-github-release: true
+      - name: Dispatch every protected check for the exact release PR head
+        if: steps.release.outputs.prs_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          readarray -t identity < <(python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          try:
+              pull = json.loads(os.environ['PR_JSON'])
+          except (KeyError, json.JSONDecodeError) as error:
+              raise SystemExit(f'Release Please returned no valid PR identity: {error}')
+          number = pull.get('number')
+          head = pull.get('headBranchName')
+          base = pull.get('baseBranchName')
+          if not isinstance(number, int) or number <= 0:
+              raise SystemExit('Release Please returned an invalid PR number')
+          if base != 'main':
+              raise SystemExit(f'Release Please targeted unexpected base branch {base!r}')
+          if not isinstance(head, str) or re.fullmatch(r'release-please--[A-Za-z0-9._-]+', head) is None:
+              raise SystemExit(f'Release Please returned unsafe head branch {head!r}')
+          print(number)
+          print(head)
+          PY
+          )
+          number=${identity[0]}
+          head_ref=${identity[1]}
+
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}")
+          head_sha=$(STATE="$state" EXPECTED_REF="$head_ref" python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          pull = json.loads(os.environ['STATE'])
+          expected_repository = os.environ['GITHUB_REPOSITORY']
+          head_sha = pull.get('head', {}).get('sha')
+          title = pull.get('title')
+          release_title = re.compile(
+              r'^chore\(main\): release aros-tools '
+              r'(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)'
+              r'(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)'
+              r'(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?'
+              r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+          )
+          checks = {
+              'open state': pull.get('state') == 'open',
+              'main base': pull.get('base', {}).get('ref') == 'main',
+              'same-repository head': pull.get('head', {}).get('repo', {}).get('full_name') == expected_repository,
+              'head branch': pull.get('head', {}).get('ref') == os.environ['EXPECTED_REF'],
+              'head commit': isinstance(head_sha, str) and re.fullmatch(r'[0-9a-f]{40}', head_sha) is not None,
+              'versioned Conventional Commit title': isinstance(title, str) and release_title.fullmatch(title) is not None,
+          }
+          failed = [name for name, valid in checks.items() if not valid]
+          if failed:
+              raise SystemExit(f'Release PR identity validation failed: {", ".join(failed)}')
+          print(head_sha)
+          PY
+          )
+
+          files=$(gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/pulls/${number}/files?per_page=100" \
+            --jq '.[].filename')
+          FILES="$files" python3 - <<'PY'
+          import os
+
+          files = {line for line in os.environ['FILES'].splitlines() if line}
+          allowed = {
+              '.release-please-manifest.json',
+              'CHANGELOG.md',
+              'Cargo.lock',
+              'Cargo.toml',
+          }
+          unexpected = sorted(files - allowed)
+          if unexpected:
+              raise SystemExit(f'Release PR changes unexpected files: {unexpected}')
+          required = {'.release-please-manifest.json', 'CHANGELOG.md'}
+          missing = sorted(required - files)
+          if missing:
+              raise SystemExit(f'Release PR does not change required files: {missing}')
+          PY
+
+          # GITHUB_TOKEN-created PR events are intentionally suppressed by
+          # GitHub. Explicit workflow_dispatch events are the documented
+          # recursion-safe exception and avoid a long-lived PAT/App secret.
+          for workflow in ci.yml release.yml docs.yml codeql.yml; do
+            current_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
+            if [[ "$current_head" != "$head_sha" ]]; then
+              echo "::error::Release PR head changed before ${workflow} dispatch"
+              exit 1
+            fi
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$head_ref"
+          done
+          current_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
+          if [[ "$current_head" != "$head_sha" ]]; then
+            echo '::error::Release PR head changed during protected-check dispatch'
+            exit 1
+          fi
+          printf 'Dispatched protected checks for PR #%s at %s\n' "$number" "$head_sha"

@@ -1,5 +1,12 @@
 /target/
 .DS_Store
+.env
+.env.*
+!.env.example
+.direnv/
+*.log
+*.profraw
+/coverage/
 /docs-site/node_modules/
 /docs-site/dist/
 /docs-site/.astro/

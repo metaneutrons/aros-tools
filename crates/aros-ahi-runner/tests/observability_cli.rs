@@ -2,6 +2,46 @@ use std::fs;
 use std::process::Command;
 
 #[test]
+fn invalid_invocation_has_one_actionable_versioned_json_diagnostic() {
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-ahi-runner"))
+        .args(["--diagnostic-format=json", "--unknown-option"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["schema"], "aros-tool-diagnostics-v1");
+    assert_eq!(value["diagnostics"].as_array().unwrap().len(), 1);
+    assert_eq!(value["diagnostics"][0]["code"], "AH0001");
+    assert_eq!(value["diagnostics"][0]["stage"], "ahi_invocation");
+    assert!(value["diagnostics"][0]["hint"]
+        .as_str()
+        .is_some_and(|hint| !hint.trim().is_empty()));
+}
+
+#[test]
+fn help_is_nonempty_and_documents_the_closed_contract() {
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-ahi-runner"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(!help.trim().is_empty());
+    for required in [
+        "Usage: aros-ahi-runner",
+        "--contract <CONTRACT>",
+        "--validate-only",
+        "CLOSED CONTRACT:",
+        "OBSERVABILITY:",
+        "AROS_AHI_LOG_FILE",
+    ] {
+        assert!(help.contains(required), "help omits {required:?}:\n{help}");
+    }
+}
+
+#[test]
 fn arbitrary_cmake_is_reported_as_one_versioned_json_diagnostic() {
     let directory = tempfile::tempdir().unwrap();
     let contract = directory.path().join("contract.cmake");

@@ -16,19 +16,19 @@ pub fn initialize_template(
     apply: bool,
 ) -> Result<()> {
     let template = config::prepare_template(config_override, board_name)?;
-    println!("🧭 AROS board profile template");
-    println!("  • File:  {}", template.path().display());
-    println!("  • Board: {}", template.board_name());
+    aros_common::outputln!("🧭 AROS board profile template");
+    aros_common::outputln!("  • File:  {}", template.path().display());
+    aros_common::outputln!("  • Board: {}", template.board_name());
     if !apply {
-        println!("\n{}", template.contents());
-        println!(
+        aros_common::outputln!("\n{}", template.contents());
+        aros_common::outputln!(
             "Dry run: no file was created. Review the values, then rerun with `aros board init --board {board_name} --apply`."
         );
         return Ok(());
     }
 
     config::create_template(&template)?;
-    println!(
+    aros_common::outputln!(
         "✅ Created '{}'. Replace every REPLACE_ME value before serving a board.",
         template.path().display()
     );
@@ -82,35 +82,36 @@ pub fn create_sd_image(
 ) -> Result<()> {
     let expectation = sd_bundle_expectation(board)?;
     let bundle = sd::validate_boot_bundle(boot_bundle, &expectation)?;
-    println!("💾 AROS board SD image plan");
-    println!(
+    aros_common::outputln!("💾 AROS board SD image plan");
+    aros_common::outputln!(
         "  • Board:      {} ({})",
-        board.name, board.config.transport
+        board.name,
+        board.config.transport
     );
-    println!("  • Bundle:     {}", bundle.source_dir().display());
-    println!(
+    aros_common::outputln!("  • Bundle:     {}", bundle.source_dir().display());
+    aros_common::outputln!(
         "  • Partition:  {} {} bytes @ LBA {}",
         bundle.partition().filesystem,
         bundle.partition().size_bytes,
         bundle.partition().start_lba
     );
-    println!("  • Files:      {}", bundle.files().len());
-    println!("  • Output:     {}", output_dir.display());
+    aros_common::outputln!("  • Files:      {}", bundle.files().len());
+    aros_common::outputln!("  • Output:     {}", output_dir.display());
     if !apply {
-        println!(
+        aros_common::outputln!(
             "  Dry run: the external bundle validated; no image was written. Pass --apply to create the artifact."
         );
         return Ok(());
     }
 
     let artifact = sd::stage_boot_bundle(&bundle, output_dir)?;
-    println!(
+    aros_common::outputln!(
         "✅ Created verified SD artifact '{}'.",
         artifact.artifact_dir().display()
     );
-    println!("  • Image:      {}", artifact.image().path().display());
-    println!("  • SHA-256:    {}", artifact.image().sha256());
-    println!("  • Manifest:   {}", artifact.manifest_path().display());
+    aros_common::outputln!("  • Image:      {}", artifact.image().path().display());
+    aros_common::outputln!("  • SHA-256:    {}", artifact.image().sha256());
+    aros_common::outputln!("  • Manifest:   {}", artifact.manifest_path().display());
     Ok(())
 }
 
@@ -129,33 +130,33 @@ pub fn scan_sd_disks(artifact_dir: Option<&Path>) -> Result<()> {
         .transpose()?;
     let candidates = sd_disk::scan()?;
 
-    println!("💾 AROS board safe SD-card scan");
+    aros_common::outputln!("💾 AROS board safe SD-card scan");
     if let Some(artifact) = &artifact {
-        println!("  • Artifact:   {}", artifact.artifact_dir().display());
-        println!("  • Image:      {}", artifact.image_path().display());
-        println!("  • SHA-256:    {}", artifact.image_sha256());
+        aros_common::outputln!("  • Artifact:   {}", artifact.artifact_dir().display());
+        aros_common::outputln!("  • Image:      {}", artifact.image_path().display());
+        aros_common::outputln!("  • SHA-256:    {}", artifact.image_sha256());
     }
     if candidates.is_empty() {
-        println!("  No safe, unmounted removable whole-disk target was found.");
-        println!("  No disk was opened or changed.");
+        aros_common::outputln!("  No safe, unmounted removable whole-disk target was found.");
+        aros_common::outputln!("  No disk was opened or changed.");
         return Ok(());
     }
 
     for candidate in &candidates {
-        println!("  • {}", candidate.summary());
+        aros_common::outputln!("  • {}", candidate.summary());
         if let Some(artifact) = &artifact {
-            println!(
+            aros_common::outputln!(
                 "    Confirm token: {}",
                 sd_disk::confirmation_token(artifact, candidate)
             );
         }
     }
     if artifact.is_none() {
-        println!(
+        aros_common::outputln!(
             "  Pass --artifact <DIR> to verify an image and print its per-disk confirmation token."
         );
     }
-    println!("  No disk was opened or changed.");
+    aros_common::outputln!("  No disk was opened or changed.");
     Ok(())
 }
 
@@ -165,22 +166,22 @@ pub fn scan_sd_disks(artifact_dir: Option<&Path>) -> Result<()> {
 pub fn unmount_sd_disk(selected_scan_id: Option<&str>, apply: bool, dry_run: bool) -> Result<()> {
     let candidates = sd_unmount::scan()?;
 
-    println!("💾 AROS board safe SD-card unmount");
+    aros_common::outputln!("💾 AROS board safe SD-card unmount");
     let Some(selected_scan_id) = selected_scan_id else {
         if candidates.is_empty() {
-            println!("  No mounted removable whole-disk target was found.");
+            aros_common::outputln!("  No mounted removable whole-disk target was found.");
         } else {
             for candidate in &candidates {
-                println!("  • {}", candidate.summary());
+                aros_common::outputln!("  • {}", candidate.summary());
                 for mount_point in candidate.mount_points() {
-                    println!("    Mounted at: {}", mount_point.display());
+                    aros_common::outputln!("    Mounted at: {}", mount_point.display());
                 }
             }
-            println!(
+            aros_common::outputln!(
                 "  Select one current scan ID with --device <SCAN_ID>; add --apply only when it should be unmounted."
             );
         }
-        println!("  No disk was opened, unmounted, or changed.");
+        aros_common::outputln!("  No disk was opened, unmounted, or changed.");
         return Ok(());
     };
 
@@ -204,24 +205,28 @@ pub fn unmount_sd_disk(selected_scan_id: Option<&str>, apply: bool, dry_run: boo
         }
     };
 
-    println!("  • Target:     {}", candidate.summary());
+    aros_common::outputln!("  • Target:     {}", candidate.summary());
     for mount_point in candidate.mount_points() {
-        println!("  • Mount:      {}", mount_point.display());
+        aros_common::outputln!("  • Mount:      {}", mount_point.display());
     }
     if !apply || dry_run {
         if dry_run {
-            println!("  Dry run: the target was validated; nothing was unmounted or changed.");
+            aros_common::outputln!(
+                "  Dry run: the target was validated; nothing was unmounted or changed."
+            );
         } else {
-            println!("  Preview only: pass --apply with this --device selection to unmount it.");
+            aros_common::outputln!(
+                "  Preview only: pass --apply with this --device selection to unmount it."
+            );
         }
         return Ok(());
     }
 
     let report = sd_unmount::unmount(selected_scan_id)?;
-    println!("✅ Removable whole disk was unmounted.");
-    println!("  • Disk:       {}", report.scan_id);
+    aros_common::outputln!("✅ Removable whole disk was unmounted.");
+    aros_common::outputln!("  • Disk:       {}", report.scan_id);
     for mount_point in &report.unmounted_mount_points {
-        println!("  • Unmounted:  {}", mount_point.display());
+        aros_common::outputln!("  • Unmounted:  {}", mount_point.display());
     }
     Ok(())
 }
@@ -247,16 +252,17 @@ pub fn write_sd_image(
     let candidate = plan.candidate();
     let expected_token = plan.confirmation_token();
 
-    println!("💾 AROS board SD-card write plan");
-    println!(
+    aros_common::outputln!("💾 AROS board SD-card write plan");
+    aros_common::outputln!(
         "  • Board:      {} ({})",
-        board.name, board.config.transport
+        board.name,
+        board.config.transport
     );
-    println!("  • Artifact:   {}", artifact.artifact_dir().display());
-    println!("  • Image:      {}", artifact.image_path().display());
-    println!("  • SHA-256:    {}", artifact.image_sha256());
-    println!("  • Target:     {}", candidate.summary());
-    println!("  • Token:      {expected_token}");
+    aros_common::outputln!("  • Artifact:   {}", artifact.artifact_dir().display());
+    aros_common::outputln!("  • Image:      {}", artifact.image_path().display());
+    aros_common::outputln!("  • SHA-256:    {}", artifact.image_sha256());
+    aros_common::outputln!("  • Target:     {}", candidate.summary());
+    aros_common::outputln!("  • Token:      {expected_token}");
 
     if let Some(provided) = confirmation {
         if provided != expected_token {
@@ -268,25 +274,28 @@ pub fn write_sd_image(
     }
     if dry_run || confirmation.is_none() {
         if confirmation.is_none() {
-            println!(
+            aros_common::outputln!(
                 "  Preview only: pass the token above as --confirm to authorize this one write."
             );
         } else {
-            println!("  Dry run: the token and target validated; no disk was opened or changed.");
+            aros_common::outputln!(
+                "  Dry run: the token and target validated; no disk was opened or changed."
+            );
         }
         return Ok(());
     }
 
-    let report = sd_disk::write_verified_image_for_board(
-        artifact,
-        board,
-        selected_scan_id,
-        confirmation.expect("checked above"),
-    )?;
-    println!("✅ Verified SD image write completed.");
-    println!("  • Disk:       {}", report.scan_id);
-    println!("  • Bytes:      {}", report.bytes_written);
-    println!("  • Readback:   {}", report.readback_sha256);
+    let confirmation = confirmation.ok_or_else(|| {
+        miette::miette!(
+            "internal media-safety invariant failed: an applied write has no confirmation token"
+        )
+    })?;
+    let report =
+        sd_disk::write_verified_image_for_board(artifact, board, selected_scan_id, confirmation)?;
+    aros_common::outputln!("✅ Verified SD image write completed.");
+    aros_common::outputln!("  • Disk:       {}", report.scan_id);
+    aros_common::outputln!("  • Bytes:      {}", report.bytes_written);
+    aros_common::outputln!("  • Readback:   {}", report.readback_sha256);
     Ok(())
 }
 
@@ -294,11 +303,13 @@ pub fn write_sd_image(
 pub fn scan() -> Result<()> {
     let adapters = scan::adapters()?;
     if adapters.is_empty() {
-        println!("No USB CDC-ECM adapters found.");
-        println!("Connect and boot the board's USB-ECM profile, then run `aros board scan` again.");
+        aros_common::outputln!("No USB CDC-ECM adapters found.");
+        aros_common::outputln!(
+            "Connect and boot the board's USB-ECM profile, then run `aros board scan` again."
+        );
         return Ok(());
     }
-    print!("{}", scan::format_adapters(&adapters));
+    aros_common::output!("{}", scan::format_adapters(&adapters));
     Ok(())
 }
 
@@ -314,7 +325,7 @@ impl aros_board::EventSink for CliEventSink {
     ) -> Result<()> {
         crate::observability::log_event(level, event, message, context)?;
         if event.starts_with("board.tftp.") || event == "board.dhcp.response_failed" {
-            println!(
+            aros_common::outputln!(
                 "  {}: {message}",
                 context.tool.as_deref().unwrap_or("board")
             );
@@ -325,38 +336,39 @@ impl aros_board::EventSink for CliEventSink {
 
 pub async fn serve(board: &Board, dry_run: bool) -> Result<()> {
     let plan = aros_board::serve::resolve(board)?;
-    println!("🧭 AROS board service plan");
-    println!("  • Board:     {} ({})", plan.board_name, plan.transport);
-    println!("  • Interface: {}", plan.interface);
-    println!(
+    aros_common::outputln!("🧭 AROS board service plan");
+    aros_common::outputln!("  • Board:     {} ({})", plan.board_name, plan.transport);
+    aros_common::outputln!("  • Interface: {}", plan.interface);
+    aros_common::outputln!(
         "  • Address:   {} / {}",
-        plan.server_address, plan.subnet_mask
+        plan.server_address,
+        plan.subnet_mask
     );
-    println!(
+    aros_common::outputln!(
         "  • Board lease: {} for {}",
         plan.target_address,
         format_mac(plan.expected_target_mac)
     );
-    println!("  • TFTP root: {}", plan.tftp_root.display());
+    aros_common::outputln!("  • TFTP root: {}", plan.tftp_root.display());
     if dry_run {
-        println!("  Dry run: no DHCP or TFTP socket was opened.");
+        aros_common::outputln!("  Dry run: no DHCP or TFTP socket was opened.");
         return Ok(());
     }
 
-    println!("\n▶ Starting restricted board service. Press Ctrl-C to stop it.");
-    println!(
+    aros_common::outputln!("\n▶ Starting restricted board service. Press Ctrl-C to stop it.");
+    aros_common::outputln!(
         "  DHCP: {}:67 → {} ({})",
         plan.server_address,
         plan.target_address,
         format_mac(plan.expected_target_mac)
     );
-    println!(
+    aros_common::outputln!(
         "  TFTP: {}:69 (root {})",
         plan.server_address,
         plan.tftp_root.display()
     );
     let result = aros_board::serve::run(&plan, &CliEventSink).await;
-    println!("\nStopped board service.");
+    aros_common::outputln!("\nStopped board service.");
     result
 }
 
@@ -368,7 +380,7 @@ fn format_mac(mac: [u8; 6]) -> String {
 }
 
 pub fn doctor(board: &Board, repo_root: &Path) -> Result<()> {
-    println!("🩺 Checking AROS board profile '{}'...", board.name);
+    aros_common::outputln!("🩺 Checking AROS board profile '{}'...", board.name);
     let report = doctor::inspect(board, repo_root);
     report.print();
     if report.has_failures() {
@@ -387,9 +399,11 @@ pub async fn build(
     dtb_override: Option<&Path>,
     core_kobj_override: Option<&Path>,
 ) -> Result<()> {
-    println!(
+    aros_common::outputln!(
         "🧭 Building board '{}' ({}, transport {})...",
-        board.name, board.config.model, board.config.transport
+        board.name,
+        board.config.model,
+        board.config.transport
     );
     if let Some(dtb_path) = board.raspberry_pi_dtb_path(repo_root, dtb_override)? {
         options.cmake_definitions.push(build::CmakeDefinition {
@@ -420,29 +434,29 @@ pub fn deploy(
 ) -> Result<()> {
     let plan = deploy::DeploymentPlan::create(board, repo_root, artifact_override)?;
     let mode = if apply { "APPLY" } else { "DRY RUN" };
-    println!("📦 AROS board deployment ({mode})");
-    println!("  • Board:       {}", plan.board_name);
-    println!("  • Source:      {}", plan.source_dir.display());
-    println!("  • Destination: {}", plan.destination_dir.display());
-    println!(
+    aros_common::outputln!("📦 AROS board deployment ({mode})");
+    aros_common::outputln!("  • Board:       {}", plan.board_name);
+    aros_common::outputln!("  • Source:      {}", plan.source_dir.display());
+    aros_common::outputln!("  • Destination: {}", plan.destination_dir.display());
+    aros_common::outputln!(
         "  • Files:       {} ({})",
         plan.files.len(),
         format_bytes(plan.total_bytes())
     );
     for file in &plan.files {
-        println!(
+        aros_common::outputln!(
             "    - {} ({})",
             file.relative_path.display(),
             format_bytes(file.bytes)
         );
     }
     if !apply {
-        println!("  No files were changed. Pass --apply to publish this bundle.");
+        aros_common::outputln!("  No files were changed. Pass --apply to publish this bundle.");
         return Ok(());
     }
 
     deploy::publish(&plan)?;
-    println!(
+    aros_common::outputln!(
         "✅ Published '{}' into the local TFTP tree at {}.",
         board.name,
         plan.destination_dir.display()
@@ -475,9 +489,9 @@ pub fn console(
     };
     let baud = baud_override.unwrap_or(board.config.serial_baud);
     let plan = console::plan(requested_program, &device, baud)?;
-    println!("🖥️  Serial terminal: {}", plan.display());
+    aros_common::outputln!("🖥️  Serial terminal: {}", plan.display());
     if dry_run {
-        println!("  Dry run: serial terminal was not started.");
+        aros_common::outputln!("  Dry run: serial terminal was not started.");
         return Ok(());
     }
     console::run(&plan)

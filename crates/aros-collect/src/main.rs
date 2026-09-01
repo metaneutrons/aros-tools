@@ -126,27 +126,44 @@ fn main() -> ExitCode {
         run_direct(arguments, &logger, &mut diagnostics)
     };
     match result {
-        Ok(()) => match logger.event(
-            LogLevel::Info,
-            "invocation.complete",
-            "collector invocation completed",
-            &invocation_context,
-        ) {
-            Ok(()) => {
-                if !diagnostics.is_empty() {
+        Ok(()) => {
+            if let Some(diagnostic) = aros_common::take_stdout_failure_diagnostic(
+                DiagnosticCode::CollectorObservability,
+                DiagnosticStage::Observability,
+            ) {
+                let log_result = logger.diagnostic(&diagnostic);
+                diagnostics.push(diagnostic);
+                if let Err(log_error) = log_result {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
+                observability::render(&DiagnosticSet::new(diagnostics), options.diagnostic_format);
+                return ExitCode::FAILURE;
+            }
+            match logger.event(
+                LogLevel::Info,
+                "invocation.complete",
+                "collector invocation completed",
+                &invocation_context,
+            ) {
+                Ok(()) => {
+                    if !diagnostics.is_empty() {
+                        observability::render(
+                            &DiagnosticSet::new(diagnostics),
+                            options.diagnostic_format,
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    diagnostics.push(error.into_diagnostic());
                     observability::render(
                         &DiagnosticSet::new(diagnostics),
                         options.diagnostic_format,
                     );
+                    ExitCode::FAILURE
                 }
-                ExitCode::SUCCESS
             }
-            Err(error) => {
-                diagnostics.push(error.into_diagnostic());
-                observability::render(&DiagnosticSet::new(diagnostics), options.diagnostic_format);
-                ExitCode::FAILURE
-            }
-        },
+        }
         Err(error) => {
             let log_result = logger.diagnostic(error.diagnostic());
             diagnostics.push(error.into_diagnostic());
@@ -172,7 +189,14 @@ fn run_direct(
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            print!("{error}");
+            aros_common::write_stdout(&error.to_string()).map_err(|output_error| {
+                failure(
+                    DiagnosticCode::CollectorObservability,
+                    DiagnosticStage::Observability,
+                    format!("could not write command help: {output_error}"),
+                    DiagnosticContext::default(),
+                )
+            })?;
             return Ok(());
         }
         Err(error) => {

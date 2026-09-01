@@ -1,5 +1,5 @@
 //! Thin executable boundary for the independent AROS verifier.
 
-fn main() -> anyhow::Result<()> {
-    aros_verify::run()
+fn main() -> std::process::ExitCode {
+    aros_verify::entry(std::env::args_os().collect())
 }

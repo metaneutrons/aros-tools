@@ -97,7 +97,7 @@ pub fn run_entry(
         .iter()
         .any(|argument| argument == "--help" || argument == "-help")
     {
-        println!(
+        aros_common::outputln!(
             "{name}: AROS linker collector\n\
              usage: {name} [collector observability options] \
              [linker arguments including --sysroot=DIR and -o FILE]\n\
@@ -113,7 +113,7 @@ pub fn run_entry(
         return Ok(());
     }
     if raw.iter().any(|argument| argument == "--version") {
-        println!("{name} {}", env!("CARGO_PKG_VERSION"));
+        aros_common::outputln!("{name} {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -316,6 +316,18 @@ fn run(
     logger: &Logger,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> CollectorResult<()> {
+    run_with(request, logger, diagnostics, run_tool)
+}
+
+fn run_with<F>(
+    request: &EngineRequest,
+    logger: &Logger,
+    diagnostics: &mut Vec<Diagnostic>,
+    mut execute: F,
+) -> CollectorResult<()>
+where
+    F: FnMut(&Path, &[OsString]) -> Result<ExitStatus>,
+{
     let staged = adjacent(&request.output, ".collect-pre");
     let final_staged = adjacent(&request.output, ".collect-final");
     let script = request
@@ -365,7 +377,7 @@ fn run(
         "starting first relocatable link",
         &request_context(request),
     )?;
-    let status = run_tool(&request.linker, &first).map_err(|error| {
+    let status = execute(&request.linker, &first).map_err(|error| {
         failure(
             DiagnosticCode::CollectorFirstLink,
             DiagnosticStage::FirstLink,
@@ -518,7 +530,7 @@ fn run(
         "starting set-collection link",
         &request_context(request),
     )?;
-    let status = run_tool(&request.linker, &second).map_err(|error| {
+    let status = execute(&request.linker, &second).map_err(|error| {
         failure(
             DiagnosticCode::CollectorSecondLink,
             DiagnosticStage::SecondLink,
@@ -568,7 +580,7 @@ fn run(
                 request_context(request),
             )
         })?;
-        let status = run_tool(
+        let status = execute(
             strip,
             &[
                 OsString::from("--strip-unneeded"),
@@ -990,29 +1002,27 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_linker_that_fails_second_pass(linker: &Path, fixture: &Path, counter: &Path) {
-        let body = format!(
-            "#!/bin/sh\n\
-             count=0\n\
-             if [ -f \"{counter}\" ]; then count=$(sed -n '1p' \"{counter}\"); fi\n\
-             count=$((count + 1))\n\
-             printf '%s\\n' \"$count\" > \"{counter}\"\n\
-             out=\n\
-             while [ $# -gt 0 ]; do\n\
-               case $1 in\n\
-                 -o) shift; out=$1 ;;\n\
-                 -o*) out=${{1#-o}} ;;\n\
-               esac\n\
-               shift\n\
-             done\n\
-             if [ \"$count\" -eq 1 ]; then cp \"{fixture}\" \"$out\"; exit 0; fi\n\
-             printf 'incomplete second pass' > \"$out\"\n\
-             exit 23\n",
-            counter = counter.display(),
-            fixture = fixture.display(),
-        );
-        fs::write(linker, body).unwrap();
-        fs::set_permissions(linker, fs::Permissions::from_mode(0o755)).unwrap();
+    fn test_exit_status(code: i32) -> ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+
+        ExitStatus::from_raw(code << 8)
+    }
+
+    fn output_argument(arguments: &[OsString]) -> PathBuf {
+        arguments
+            .windows(2)
+            .find(|pair| pair[0] == "-o")
+            .map(|pair| PathBuf::from(&pair[1]))
+            .or_else(|| {
+                arguments.iter().find_map(|argument| {
+                    argument
+                        .to_string_lossy()
+                        .strip_prefix("-o")
+                        .filter(|value| !value.is_empty())
+                        .map(PathBuf::from)
+                })
+            })
+            .expect("linker output argument")
     }
 
     #[test]
@@ -1145,21 +1155,14 @@ mod tests {
     #[test]
     fn a_bad_first_link_never_replaces_the_existing_output() {
         let directory = tempfile::tempdir().unwrap();
-        let linker = directory.path().join("ld.lld");
-        fs::write(
-            &linker,
-            b"#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do\n  case $1 in\n    -o) shift; out=$1 ;;\n    -o*) out=${1#-o} ;;\n  esac\n  shift\ndone\nprintf 'not an ELF' > \"$out\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&linker, fs::Permissions::from_mode(0o755)).unwrap();
         let sysroot = directory.path().join("sysroot");
         fs::create_dir_all(sysroot.join("lib")).unwrap();
         let output = directory.path().join("output.o");
         fs::write(&output, b"previous good output").unwrap();
         let request = parse(
             "collect-aros".into(),
-            linker.clone(),
-            linker,
+            "test-linker".into(),
+            "test-strip".into(),
             vec![
                 OsString::from("--sysroot"),
                 sysroot.into_os_string(),
@@ -1174,7 +1177,12 @@ mod tests {
             "collect-aros",
         )
         .unwrap();
-        assert!(run(&request, &logger, &mut Vec::new()).is_err());
+        let execute = |_tool: &Path, arguments: &[OsString]| {
+            fs::write(output_argument(arguments), b"not an ELF")?;
+            Ok(test_exit_status(0))
+        };
+
+        assert!(run_with(&request, &logger, &mut Vec::new(), execute).is_err());
         assert_eq!(fs::read(output).unwrap(), b"previous good output");
     }
 
@@ -1182,37 +1190,45 @@ mod tests {
     #[test]
     fn direct_frontend_skips_an_empty_second_pass() {
         let directory = tempfile::tempdir().unwrap();
-        let linker = directory.path().join("ld.lld");
         let fixture = directory.path().join("fixture.o");
-        let counter = directory.path().join("calls");
         let output = directory.path().join("output.o");
         fs::write(&fixture, elf64_with_section(".text")).unwrap();
         fs::write(&output, b"previous output").unwrap();
-        write_linker_that_fails_second_pass(&linker, &fixture, &counter);
         let logger = Logger::open(
             &crate::observability::RuntimeOptions::default(),
             "aros-collect",
         )
         .unwrap();
-
-        run_direct(
-            linker,
-            vec![
+        let request = EngineRequest {
+            name: "aros-collect".into(),
+            linker: "test-linker".into(),
+            strip: None,
+            args: vec![
                 OsString::from("-r"),
                 OsString::from("-o"),
                 output.clone().into_os_string(),
                 OsString::from("input.o"),
             ],
-            output.clone(),
-            None,
-            None,
-            &logger,
-            &mut Vec::new(),
-        )
-        .unwrap();
+            output: output.clone(),
+            sysroot: None,
+            mode: LinkMode::CollectRelocatable,
+            strip_output: false,
+            ignore_undefined: true,
+            report: None,
+            keep_script: None,
+            frontend: Frontend::Direct,
+        };
+        let mut calls = 0;
+        let mut execute = |_tool: &Path, arguments: &[OsString]| {
+            calls += 1;
+            fs::copy(&fixture, output_argument(arguments))?;
+            Ok(test_exit_status(0))
+        };
+
+        run_with(&request, &logger, &mut Vec::new(), &mut execute).unwrap();
 
         assert_eq!(fs::read(&output).unwrap(), fs::read(&fixture).unwrap());
-        assert_eq!(fs::read_to_string(counter).unwrap().trim(), "1");
+        assert_eq!(calls, 1);
         assert!(!adjacent(&output, ".collect-pre").exists());
         assert!(!adjacent(&output, ".collect-final").exists());
         assert!(!adjacent(&output, ".collect-sets.ld").exists());
@@ -1222,35 +1238,49 @@ mod tests {
     #[test]
     fn direct_second_pass_failure_is_atomic_and_keeps_an_explicit_script() {
         let directory = tempfile::tempdir().unwrap();
-        let linker = directory.path().join("ld.lld");
         let fixture = directory.path().join("fixture.o");
-        let counter = directory.path().join("calls");
         let output = directory.path().join("output.o");
         let script = directory.path().join("sets.ld");
         fs::write(&fixture, elf64_with_section(".aros.set.INITLIB.10")).unwrap();
         fs::write(&output, b"previous good output").unwrap();
-        write_linker_that_fails_second_pass(&linker, &fixture, &counter);
         let logger = Logger::open(
             &crate::observability::RuntimeOptions::default(),
             "aros-collect",
         )
         .unwrap();
-
-        let error = run_direct(
-            linker,
-            vec![
+        let request = EngineRequest {
+            name: "aros-collect".into(),
+            linker: "test-linker".into(),
+            strip: None,
+            args: vec![
                 OsString::from("-r"),
                 OsString::from("-o"),
                 output.clone().into_os_string(),
                 OsString::from("input.o"),
             ],
-            output.clone(),
-            None,
-            Some(script.clone()),
-            &logger,
-            &mut Vec::new(),
-        )
-        .unwrap_err();
+            output: output.clone(),
+            sysroot: None,
+            mode: LinkMode::CollectRelocatable,
+            strip_output: false,
+            ignore_undefined: true,
+            report: None,
+            keep_script: Some(script.clone()),
+            frontend: Frontend::Direct,
+        };
+        let mut calls = 0;
+        let mut execute = |_tool: &Path, arguments: &[OsString]| {
+            calls += 1;
+            let target = output_argument(arguments);
+            if calls == 1 {
+                fs::copy(&fixture, target)?;
+                Ok(test_exit_status(0))
+            } else {
+                fs::write(target, b"incomplete second pass")?;
+                Ok(test_exit_status(23))
+            }
+        };
+
+        let error = run_with(&request, &logger, &mut Vec::new(), &mut execute).unwrap_err();
 
         assert_eq!(error.diagnostic().code, DiagnosticCode::CollectorSecondLink);
         assert_eq!(
@@ -1258,7 +1288,7 @@ mod tests {
             Some(23)
         );
         assert_eq!(fs::read(&output).unwrap(), b"previous good output");
-        assert_eq!(fs::read_to_string(counter).unwrap().trim(), "2");
+        assert_eq!(calls, 2);
         assert!(fs::read_to_string(script)
             .unwrap()
             .contains("__INITLIB_LIST__"));

@@ -39,7 +39,7 @@ impl DoctorReport {
                 CheckStatus::Warning => "⚠️ ",
                 CheckStatus::Failure => "❌",
             };
-            println!("{marker} {:<18} {}", check.label, check.detail);
+            aros_common::outputln!("{marker} {:<18} {}", check.label, check.detail);
         }
     }
 
@@ -159,7 +159,7 @@ fn check_toolchain_profile(report: &mut DoctorReport, board: &Board, repo_root: 
 }
 
 fn check_build_tools(report: &mut DoctorReport, repo_root: &Path) {
-    let build_tools = build_tools::check(repo_root);
+    let build_tools = build_tools::check(Some(repo_root));
     if build_tools.is_complete() {
         report.push(
             CheckStatus::Pass,
@@ -167,17 +167,13 @@ fn check_build_tools(report: &mut DoctorReport, repo_root: &Path) {
             build_tools.bin_dir.display().to_string(),
         );
     } else {
-        let missing = build_tools
-            .missing
-            .iter()
-            .filter_map(|path| path.file_name())
-            .map(|name| name.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(", ");
         report.push(
             CheckStatus::Warning,
             "build tools",
-            format!("missing {missing}; `aros board build` will build them automatically"),
+            format!(
+                "{}; `aros board build` will rebuild the suite when a tools workspace is configured",
+                build_tools.problem_summary()
+            ),
         );
     }
 }

@@ -175,13 +175,13 @@ impl EvaluatedSources {
         self.c.is_empty() && self.cxx.is_empty() && self.objc.is_empty() && self.asm.is_empty()
     }
 
-    fn lane_mut(&mut self, key: &str) -> &mut Vec<String> {
+    fn lane_mut(&mut self, key: &str) -> Option<&mut Vec<String>> {
         match key {
-            "files" => &mut self.c,
-            "cxxfiles" => &mut self.cxx,
-            "objcfiles" => &mut self.objc,
-            "asmfiles" => &mut self.asm,
-            _ => unreachable!(),
+            "files" => Some(&mut self.c),
+            "cxxfiles" => Some(&mut self.cxx),
+            "objcfiles" => Some(&mut self.objc),
+            "asmfiles" => Some(&mut self.asm),
+            _ => None,
         }
     }
 }
@@ -407,7 +407,9 @@ pub(crate) fn evaluate_macro_sources_with_files(
                 unresolved_lanes.push(error);
             }
         }
-        let lane = sources.lane_mut(key);
+        let lane = sources
+            .lane_mut(key)
+            .ok_or_else(|| format!("internal source-lane invariant failed for key `{key}`"))?;
         for value in values {
             if value.is_empty() || value.contains(';') {
                 return Err(format!("{key}={raw} produced an invalid source `{value}`"));

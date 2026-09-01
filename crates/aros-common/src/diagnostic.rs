@@ -1,4 +1,4 @@
-//! Stable, structured diagnostics shared by AROS-NG build tools.
+//! Stable, structured diagnostics shared by AROS build tools.
 
 use serde::Serialize;
 use std::fmt;
@@ -107,6 +107,18 @@ pub enum DiagnosticCode {
     CliObservability,
     #[serde(rename = "AR0101")]
     CliRepository,
+    #[serde(rename = "AR0111")]
+    CliSourceInput,
+    #[serde(rename = "AR0112")]
+    CliSourceTransport,
+    #[serde(rename = "AR0113")]
+    CliSourceLock,
+    #[serde(rename = "AR0114")]
+    CliSourceState,
+    #[serde(rename = "AR0115")]
+    CliSourceValidation,
+    #[serde(rename = "AR0116")]
+    CliSourcePublication,
     #[serde(rename = "AR0201")]
     CliConfiguration,
     #[serde(rename = "AR0301")]
@@ -145,6 +157,46 @@ pub enum DiagnosticCode {
     ReleasePublication,
     #[serde(rename = "AP0999")]
     ReleaseInternal,
+    #[serde(rename = "AG0001")]
+    GenmoduleInvocation,
+    #[serde(rename = "AG0002")]
+    GenmoduleObservability,
+    #[serde(rename = "AG0101")]
+    GenmoduleInput,
+    #[serde(rename = "AG0201")]
+    GenmodulePublication,
+    #[serde(rename = "AG0301")]
+    GenmoduleRollbackIncomplete,
+    #[serde(rename = "AG0999")]
+    GenmoduleInternal,
+    #[serde(rename = "RM0001")]
+    RomtoolInvocation,
+    #[serde(rename = "RM0002")]
+    RomtoolObservability,
+    #[serde(rename = "RM0101")]
+    RomtoolInput,
+    #[serde(rename = "RM0201")]
+    RomtoolValidation,
+    #[serde(rename = "RM0301")]
+    RomtoolPublication,
+    #[serde(rename = "RM0401")]
+    RomtoolRollbackIncomplete,
+    #[serde(rename = "RM0999")]
+    RomtoolInternal,
+    #[serde(rename = "AV0001")]
+    VerifyInvocation,
+    #[serde(rename = "AV0002")]
+    VerifyObservability,
+    #[serde(rename = "AV0101")]
+    VerifyInput,
+    #[serde(rename = "AV0201")]
+    VerifyExpansion,
+    #[serde(rename = "AV0301")]
+    VerifyParity,
+    #[serde(rename = "AV0401")]
+    VerifyPublication,
+    #[serde(rename = "AV0999")]
+    VerifyInternal,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -199,6 +251,12 @@ impl fmt::Display for DiagnosticCode {
             Self::CliInvocation => "AR0001",
             Self::CliObservability => "AR0002",
             Self::CliRepository => "AR0101",
+            Self::CliSourceInput => "AR0111",
+            Self::CliSourceTransport => "AR0112",
+            Self::CliSourceLock => "AR0113",
+            Self::CliSourceState => "AR0114",
+            Self::CliSourceValidation => "AR0115",
+            Self::CliSourcePublication => "AR0116",
             Self::CliConfiguration => "AR0201",
             Self::CliToolResolution => "AR0301",
             Self::CliToolchain => "AR0401",
@@ -218,6 +276,26 @@ impl fmt::Display for DiagnosticCode {
             Self::ReleaseIntegrity => "AP0401",
             Self::ReleasePublication => "AP0501",
             Self::ReleaseInternal => "AP0999",
+            Self::GenmoduleInvocation => "AG0001",
+            Self::GenmoduleObservability => "AG0002",
+            Self::GenmoduleInput => "AG0101",
+            Self::GenmodulePublication => "AG0201",
+            Self::GenmoduleRollbackIncomplete => "AG0301",
+            Self::GenmoduleInternal => "AG0999",
+            Self::RomtoolInvocation => "RM0001",
+            Self::RomtoolObservability => "RM0002",
+            Self::RomtoolInput => "RM0101",
+            Self::RomtoolValidation => "RM0201",
+            Self::RomtoolPublication => "RM0301",
+            Self::RomtoolRollbackIncomplete => "RM0401",
+            Self::RomtoolInternal => "RM0999",
+            Self::VerifyInvocation => "AV0001",
+            Self::VerifyObservability => "AV0002",
+            Self::VerifyInput => "AV0101",
+            Self::VerifyExpansion => "AV0201",
+            Self::VerifyParity => "AV0301",
+            Self::VerifyPublication => "AV0401",
+            Self::VerifyInternal => "AV0999",
         };
         formatter.write_str(value)
     }
@@ -358,6 +436,17 @@ impl fmt::Display for DiagnosticStage {
 ///
 /// These fields deliberately exclude timestamps, host names, and environment
 /// snapshots so a diagnostic emitted by a deterministic build remains stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitState {
+    /// The operation did not cross its publication boundary, or rollback was proven complete.
+    RolledBack,
+    /// The operation crossed its publication boundary and the new state is authoritative.
+    Committed,
+    /// Publication occurred but neither the committed nor rolled-back state can be proven.
+    Indeterminate,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct DiagnosticContext {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -375,7 +464,13 @@ pub struct DiagnosticContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub timed_out: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_state: Option<CommitState>,
 }
 
 impl DiagnosticContext {
@@ -427,6 +522,12 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// Construct a fatal diagnostic with a guaranteed actionable fallback.
+    ///
+    /// Domain boundaries should replace this fallback with a more specific
+    /// [`Self::with_hint`] whenever they can name the exact recovery action.
+    /// Keeping the fallback here makes the public diagnostics contract
+    /// fail-safe when a new error path is introduced without one.
     #[must_use]
     pub fn error(code: DiagnosticCode, stage: DiagnosticStage, message: impl Into<String>) -> Self {
         Self {
@@ -435,7 +536,10 @@ impl Diagnostic {
             stage,
             message: message.into(),
             location: None,
-            hint: None,
+            hint: Some(
+                "inspect the diagnostic message and context, correct the named input or environment, then retry; report the stable code if the failure persists"
+                    .to_owned(),
+            ),
             context: None,
         }
     }
@@ -571,6 +675,12 @@ impl fmt::Display for DiagnosticSet {
                 if let Some(value) = context.signal {
                     write!(formatter, " signal={value}")?;
                 }
+                if let Some(value) = context.timed_out {
+                    write!(formatter, " timed_out={value}")?;
+                }
+                if let Some(value) = context.timeout_ms {
+                    write!(formatter, " timeout_ms={value}")?;
+                }
                 if let Some(value) = &context.log_path {
                     write!(formatter, " log_path={value}")?;
                 }
@@ -601,6 +711,19 @@ mod tests {
         assert!(rendered.contains("error[AT0004]"));
         assert!(rendered.contains("compiler/mmakefile.src:12:4"));
         assert!(rendered.contains("help: update the transpiler capability"));
+    }
+
+    #[test]
+    fn every_error_has_an_actionable_fallback_hint() {
+        let diagnostic = Diagnostic::error(
+            DiagnosticCode::CliInternal,
+            DiagnosticStage::Internal,
+            "fixture failure",
+        );
+        assert!(diagnostic
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("retry") && hint.contains("stable code")));
     }
 
     #[test]
@@ -645,5 +768,31 @@ mod tests {
         let json = serde_json::to_value(set).unwrap();
         assert_eq!(json["diagnostics"][0]["code"], "AC0301");
         assert_eq!(json["diagnostics"][0]["context"]["exit_code"], 1);
+    }
+
+    #[test]
+    fn timeout_context_is_stable_in_human_and_json_output() {
+        let context = DiagnosticContext {
+            tool: Some("git".into()),
+            timed_out: Some(true),
+            timeout_ms: Some(30_000),
+            ..DiagnosticContext::default()
+        };
+        let set = DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::CliSourceTransport,
+                DiagnosticStage::NetworkTransfer,
+                "git fetch timed out",
+            )
+            .with_context(context),
+        );
+
+        let human = set.to_string();
+        assert!(human.contains("tool=git timed_out=true timeout_ms=30000"));
+
+        let json = serde_json::to_value(set).unwrap();
+        let context = &json["diagnostics"][0]["context"];
+        assert_eq!(context["timed_out"], true);
+        assert_eq!(context["timeout_ms"], 30_000);
     }
 }

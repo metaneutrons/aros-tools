@@ -34,6 +34,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// Generate package-manager metadata from four verified manifests
     Generate(GenerateArgs),
+    /// Install one verified native suite without replacing existing programs
+    Install(InstallArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -87,6 +89,47 @@ pub struct GenerateArgs {
     pub manifests: Vec<PathBuf>,
     #[arg(long)]
     pub output: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct InstallArgs {
+    /// Extracted archive directory containing exactly the eight release binaries
+    #[arg(long)]
+    pub source_bin: PathBuf,
+    /// Existing absolute installation prefix; a missing bin leaf is created
+    #[arg(long)]
+    pub prefix: PathBuf,
+}
+
+impl InstallArgs {
+    /// Validate the explicit source and installation path contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AP0101` for empty, relative, or traversing paths.
+    pub fn validate(&self) -> ReleaseResult<()> {
+        if self.source_bin.as_os_str().is_empty()
+            || self
+                .source_bin
+                .components()
+                .any(|part| part == Component::ParentDir)
+        {
+            return Err(contract_failure(
+                "source-bin must be a non-empty path without parent traversal",
+            ));
+        }
+        if !self.prefix.is_absolute()
+            || self
+                .prefix
+                .components()
+                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        {
+            return Err(contract_failure(
+                "prefix must be an absolute normalized path without parent traversal",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PackageArgs {

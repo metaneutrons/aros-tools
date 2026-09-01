@@ -2,6 +2,8 @@
 name = "aros-common"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+publish = false
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -22,6 +24,10 @@ anyhow.workspace = true
 tracing.workspace = true
 which.workspace = true
 sha2.workspace = true
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

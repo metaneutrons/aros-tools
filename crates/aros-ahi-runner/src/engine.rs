@@ -6,13 +6,17 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus};
 use std::time::SystemTime;
 
-use aros_common::{run_output, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage};
+use aros_common::{
+    bounded_output_detail, run_output, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticStage, ProcessOutput,
+};
 use sha2::{Digest, Sha256};
 
-use crate::contract::{Contract, Mode, ProductKind};
+use crate::contract::{Contract, Mode};
+use crate::installation;
 use crate::observability::{LogLevel, Logger};
 use crate::{AhiFailure, AhiResult};
 
@@ -60,26 +64,29 @@ pub fn run(contract: &Contract, logger: &mut Logger) -> AhiResult<()> {
     logger.event(
         LogLevel::Info,
         "build.start",
-        "AHI include preparation and install started",
+        "AHI include preparation and logical-prefix build started",
         &context,
     )?;
     build(contract)?;
     logger.event(
         LogLevel::Info,
         "build.complete",
-        "AHI include preparation and install completed",
+        "AHI logical-prefix build completed",
         &context,
     )?;
 
-    validate_products(contract)?;
+    let prepared = installation::prepare(contract)?;
     audit_sources(contract)?;
     logger.event(
         LogLevel::Info,
         "products.validated",
-        "AHI products and source immutability validated",
+        "AHI private install and source immutability validated; durable publication starting",
         &context,
     )?;
-    Ok(())
+    // Publication is deliberately the final fallible operation. Once the
+    // journalled set commits, a later logging failure must not misreport a
+    // successfully installed product set as a failed build.
+    installation::publish(contract, &prepared)
 }
 
 fn stage(contract: &Contract) -> AhiResult<()> {
@@ -207,11 +214,9 @@ fn config_cache(mode: Mode) -> String {
 fn check_sfdc(contract: &Contract) -> AhiResult<()> {
     let mut command = closed_command(&contract.host_perl);
     command.arg("-c").arg(&contract.host_sfdc);
-    let output = run_output(&mut command)
-        .map_err(|error| {
-            configure_failure(contract, format!("cannot start HOST_PERL: {error}"), None)
-        })?
-        .output;
+    let output = run_output(&mut command).map_err(|error| {
+        configure_failure(contract, format!("cannot start HOST_PERL: {error}"), None)
+    })?;
     require_success(
         &output,
         contract,
@@ -267,15 +272,13 @@ fn configure(contract: &Contract) -> AhiResult<()> {
             contract.target_ldflags.join(" ")
         ))
         .arg("--with-target-optflags=-O2");
-    let output = run_output(&mut command)
-        .map_err(|error| {
-            configure_failure(
-                contract,
-                format!("cannot start AHI configure: {error}"),
-                None,
-            )
-        })?
-        .output;
+    let output = run_output(&mut command).map_err(|error| {
+        configure_failure(
+            contract,
+            format!("cannot start AHI configure: {error}"),
+            None,
+        )
+    })?;
     require_success(
         &output,
         contract,
@@ -348,15 +351,13 @@ fn build(contract: &Contract) -> AhiResult<()> {
         .arg("-C")
         .arg(contract.stage_build.join("Include"))
         .arg("gcc-include");
-    let output = run_output(&mut include)
-        .map_err(|error| {
-            build_failure(
-                contract,
-                format!("cannot start gcc-include preparation: {error}"),
-                None,
-            )
-        })?
-        .output;
+    let output = run_output(&mut include).map_err(|error| {
+        build_failure(
+            contract,
+            format!("cannot start gcc-include preparation: {error}"),
+            None,
+        )
+    })?;
     require_success(
         &output,
         contract,
@@ -378,92 +379,26 @@ fn build(contract: &Contract) -> AhiResult<()> {
             "generated AHI include",
         )?;
     }
-    let mut install = closed_build_command(contract, &contract.make);
-    install.arg("-C").arg(&contract.stage_build).arg("install");
-    let output = run_output(&mut install)
-        .map_err(|error| {
-            build_failure(
-                contract,
-                format!("cannot start AHI make install: {error}"),
-                None,
-            )
-        })?
-        .output;
+    // Compile the complete graph while configure's logical live prefix remains
+    // authoritative. The later private install redirects only destination
+    // variables and therefore copies an already-built graph.
+    let mut build = closed_build_command(contract, &contract.make);
+    build.arg("-C").arg(&contract.stage_build).arg("all");
+    let output = run_output(&mut build).map_err(|error| {
+        build_failure(
+            contract,
+            format!("cannot start logical-prefix AHI build: {error}"),
+            None,
+        )
+    })?;
     require_success(
         &output,
         contract,
         &contract.make,
         DiagnosticCode::AhiBuild,
         DiagnosticStage::AhiBuild,
-        "AHI make install failed",
+        "logical-prefix AHI build failed",
     )
-}
-
-fn validate_products(contract: &Contract) -> AhiResult<()> {
-    reject_symlink(
-        &contract.install_prefix,
-        contract,
-        DiagnosticStage::AhiProductValidation,
-    )?;
-    for ((relative, kind), product) in contract
-        .product_relative
-        .iter()
-        .zip(&contract.product_kinds)
-        .zip(&contract.install_products)
-    {
-        let expected = contract.install_prefix.join(relative);
-        if product != &expected {
-            return Err(product_failure(
-                contract,
-                format!("installed product path differs for {}", relative.display()),
-            ));
-        }
-        require_regular_nonempty(
-            product,
-            contract,
-            DiagnosticCode::AhiProductValidation,
-            DiagnosticStage::AhiProductValidation,
-            "installed AHI product",
-        )?;
-        if *kind == ProductKind::Elf {
-            validate_elf(contract, product, relative)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_elf(contract: &Contract, product: &Path, relative: &Path) -> AhiResult<()> {
-    let mut file = fs::File::open(product).map_err(|error| {
-        product_failure(contract, format!("cannot inspect ELF product: {error}"))
-    })?;
-    let mut header = [0_u8; 20];
-    file.read_exact(&mut header).map_err(|error| {
-        product_failure(
-            contract,
-            format!("ELF product {} is truncated: {error}", relative.display()),
-        )
-    })?;
-    let expected_class = u8::from_str_radix(&contract.elf_class, 16).map_err(|error| {
-        product_failure(contract, format!("invalid ELF class contract: {error}"))
-    })?;
-    let expected_machine = [
-        u8::from_str_radix(&contract.elf_machine_hex[0..2], 16).map_err(|error| {
-            product_failure(contract, format!("invalid ELF machine contract: {error}"))
-        })?,
-        u8::from_str_radix(&contract.elf_machine_hex[2..4], 16).map_err(|error| {
-            product_failure(contract, format!("invalid ELF machine contract: {error}"))
-        })?,
-    ];
-    if header[0..4] != *b"\x7fELF"
-        || header[4] != expected_class
-        || header[18..20] != expected_machine
-    {
-        return Err(product_failure(
-            contract,
-            format!("ELF product {} has wrong format", relative.display()),
-        ));
-    }
-    Ok(())
 }
 
 fn audit_sources(contract: &Contract) -> AhiResult<()> {
@@ -493,7 +428,7 @@ fn closed_command(program: &Path) -> Command {
     command
 }
 
-fn closed_build_command(contract: &Contract, program: &Path) -> Command {
+pub(crate) fn closed_build_command(contract: &Contract, program: &Path) -> Command {
     let mut command = closed_command(program);
     command.envs(build_environment(contract));
     command
@@ -605,7 +540,7 @@ fn reject_symlink(path: &Path, contract: &Contract, stage: DiagnosticStage) -> A
 }
 
 fn require_success(
-    output: &Output,
+    output: &ProcessOutput,
     contract: &Contract,
     tool: &Path,
     code: DiagnosticCode,
@@ -615,7 +550,7 @@ fn require_success(
     if output.status.success() {
         return Ok(());
     }
-    let detail = process_detail(output);
+    let detail = bounded_output_detail(&output.stdout, &output.stderr);
     let rendered = if detail.is_empty() {
         message.to_owned()
     } else {
@@ -626,32 +561,8 @@ fn require_success(
         code,
         stage,
         rendered,
-        Some((tool, output)),
+        Some((tool, output.status)),
     ))
-}
-
-fn process_detail(output: &Output) -> String {
-    const LIMIT: usize = 64 * 1024;
-    fn part(bytes: &[u8]) -> String {
-        let selected = if bytes.len() > LIMIT {
-            &bytes[..LIMIT]
-        } else {
-            bytes
-        };
-        let mut text = String::from_utf8_lossy(selected).trim().to_owned();
-        if bytes.len() > LIMIT {
-            text.push_str("\n[output truncated by aros-ahi-runner]");
-        }
-        text
-    }
-    let stdout = part(&output.stdout);
-    let stderr = part(&output.stderr);
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => stdout,
-        (true, false) => stderr,
-        (false, false) => format!("{stdout}\n{stderr}"),
-    }
 }
 
 fn digest(path: &Path) -> std::io::Result<String> {
@@ -689,7 +600,7 @@ fn stage_failure(contract: &Contract, message: impl Into<String>) -> AhiFailure 
 fn configure_failure(
     contract: &Contract,
     message: impl Into<String>,
-    process: Option<(&Path, &Output)>,
+    process: Option<(&Path, ExitStatus)>,
 ) -> AhiFailure {
     failure(
         contract,
@@ -703,7 +614,7 @@ fn configure_failure(
 fn build_failure(
     contract: &Contract,
     message: impl Into<String>,
-    process: Option<(&Path, &Output)>,
+    process: Option<(&Path, ExitStatus)>,
 ) -> AhiFailure {
     failure(
         contract,
@@ -711,16 +622,6 @@ fn build_failure(
         DiagnosticStage::AhiBuild,
         message,
         process,
-    )
-}
-
-fn product_failure(contract: &Contract, message: impl Into<String>) -> AhiFailure {
-    failure(
-        contract,
-        DiagnosticCode::AhiProductValidation,
-        DiagnosticStage::AhiProductValidation,
-        message,
-        None,
     )
 }
 
@@ -739,13 +640,13 @@ fn failure(
     code: DiagnosticCode,
     stage: DiagnosticStage,
     message: impl Into<String>,
-    process: Option<(&Path, &Output)>,
+    process: Option<(&Path, ExitStatus)>,
 ) -> AhiFailure {
     let mut diagnostic_context = context(contract);
-    if let Some((tool, output)) = process {
+    if let Some((tool, status)) = process {
         diagnostic_context.tool = Some(tool.display().to_string());
-        diagnostic_context.exit_code = output.status.code();
-        diagnostic_context.signal = output.status.signal();
+        diagnostic_context.exit_code = status.code();
+        diagnostic_context.signal = status.signal();
     }
     AhiFailure::new(Diagnostic::error(code, stage, message).with_context(diagnostic_context))
 }

@@ -2,6 +2,8 @@
 name = "aros-romtool"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+publish = false
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -17,5 +19,10 @@ name = "aros-romtool"
 path = "src/main.rs"
 
 [dependencies]
+aros-common.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
