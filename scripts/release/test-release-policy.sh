@@ -798,6 +798,80 @@ for copy in a b; do
         --fingerprint "$apt_fingerprint"
 done
 diff --recursive --no-dereference "$work/apt-a" "$work/apt-b"
+
+# Ein Signing-Subkey je Archiv-Domain. Diese Fixture deckt den Pfad ab, den die
+# uebrigen Faelle nicht beruehren, weil sie ohne --signing-subkey aufrufen:
+# richtiger Subkey akzeptiert, fremder Subkey abgelehnt, und ein Bundle mit
+# vorhandenem geheimen Primaerschluessel abgelehnt.
+subkey_gnupg=$(mktemp -d /tmp/aros-subkey-gpg.XXXXXX)
+chmod 0700 "$subkey_gnupg"
+GNUPGHOME="$subkey_gnupg" gpg --batch --faked-system-time '1704067200!' \
+    --pinentry-mode loopback --passphrase '' --quick-generate-key \
+    'AROS subkey fixture <subkey@example.invalid>' ed25519 cert 0 >/dev/null
+subkey_primary=$(GNUPGHOME="$subkey_gnupg" gpg --batch --with-colons \
+    --list-keys --fingerprint | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+for _ in 1 2; do
+    GNUPGHOME="$subkey_gnupg" gpg --batch --faked-system-time '1704067200!' \
+        --pinentry-mode loopback --passphrase '' \
+        --quick-add-key "$subkey_primary" ed25519 sign 0 >/dev/null
+done
+mapfile -t subkeys < <(GNUPGHOME="$subkey_gnupg" gpg --batch --with-colons \
+    --list-keys --fingerprint | \
+    awk -F: '$1 == "sub" { want = 1; next } $1 == "fpr" && want { print toupper($10); want = 0 }')
+[[ ${#subkeys[@]} == 2 ]] || {
+    printf 'subkey fixture must expose exactly two signing subkeys\n' >&2
+    exit 1
+}
+subkey_a=${subkeys[0]}
+subkey_b=${subkeys[1]}
+GNUPGHOME="$subkey_gnupg" gpg --batch --armor --pinentry-mode loopback \
+    --passphrase '' --export-secret-subkeys "${subkey_a}!" > "$work/subkey-only.asc"
+GNUPGHOME="$subkey_gnupg" gpg --batch --armor --pinentry-mode loopback \
+    --passphrase '' --export-secret-keys "$subkey_primary" > "$work/subkey-full.asc"
+
+AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
+  "$root/scripts/release/build-apt-repository.sh" \
+    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey" \
+    --version 1.2.3 --source-date-epoch 1704067200 \
+    --private-key "$work/subkey-only.asc" \
+    --passphrase-file "$work/apt-passphrase" \
+    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
+
+# Das ausgelieferte Zertifikat muss auf genau diesen Subkey minimiert sein.
+[[ $(gpg --no-options --batch --with-colons --show-keys \
+        "$work/apt-subkey/aros-tools-archive-keyring.asc" | grep -c '^sub') == 1 ]] || {
+    printf 'domain keyring must carry exactly one signing subkey\n' >&2
+    exit 1
+}
+gpg --no-options --batch --dearmor \
+    < "$work/apt-subkey/aros-tools-archive-keyring.asc" > "$work/subkey-keyring.gpg"
+gpgv --keyring "$work/subkey-keyring.gpg" --status-fd 3 \
+    "$work/apt-subkey/dists/stable/Release.gpg" \
+    "$work/apt-subkey/dists/stable/Release" 3> "$work/subkey.status" 2>/dev/null
+"$root/scripts/release/verify-gpgv-status.sh" --status-file "$work/subkey.status" \
+    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
+# Derselbe Primaerschluessel, aber der Domain-Subkey passt nicht: ohne die
+# Pruefung von VALIDSIG-Feld 1 bliebe das unsichtbar.
+expect_failure "$root/scripts/release/verify-gpgv-status.sh" \
+    --status-file "$work/subkey.status" \
+    --fingerprint "$subkey_primary" --signing-subkey "$subkey_b"
+
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
+  "$root/scripts/release/build-apt-repository.sh" \
+    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey-wrong" \
+    --version 1.2.3 --source-date-epoch 1704067200 \
+    --private-key "$work/subkey-only.asc" \
+    --passphrase-file "$work/apt-passphrase" \
+    --fingerprint "$subkey_primary" --signing-subkey "$subkey_b"
+# Der geheime Primaerschluessel darf nie in der Signierumgebung liegen.
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
+  "$root/scripts/release/build-apt-repository.sh" \
+    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey-full" \
+    --version 1.2.3 --source-date-epoch 1704067200 \
+    --private-key "$work/subkey-full.asc" \
+    --passphrase-file "$work/apt-passphrase" \
+    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
+rm -rf -- "$subkey_gnupg"
 "$root/scripts/release/verify-apt-publication-inventory.sh" \
     --directory "$work/apt-a" --mode full --version 1.2.3 \
     --fingerprint "$apt_fingerprint" >/dev/null
