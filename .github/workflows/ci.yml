@@ -19,6 +19,87 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
+  commit-hygiene:
+    name: Commit hygiene
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the title, the body and every commit
+        shell: bash
+        # Title and body reach the script only through env, never by
+        # interpolation into the script text: otherwise a pull-request title
+        # would be a shell injection vector.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          status=0
+          cc='^((feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+|Revert ".+")'
+          # grep works line by line, hence .* rather than [^\n]: in ERE that
+          # class means "not a backslash and not an n" and would let through
+          # any name containing an n. In the RE2 rule of a ruleset [^\n] is
+          # the correct spelling.
+          ban='co-authored-by:.*(claude|anthropic)|generated with.*claude code'
+
+          # With squash merges the pull-request title becomes the subject line
+          # on main, and Release Please derives the next version from it.
+          if ! printf '%s' "$PR_TITLE" | grep -Eq "$cc"; then
+            echo "::error::pull-request title is not a Conventional Commit: $PR_TITLE"
+            status=1
+          fi
+
+          # squash_merge_commit_message is PR_BODY, so the body lands in the commit.
+          if printf '%s' "$PR_BODY" | grep -Eiq "$ban"; then
+            echo "::error::the pull-request body carries an AI attribution trailer"
+            status=1
+          fi
+
+          for sha in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
+            subject=$(git log -1 --format=%s "$sha")
+            if ! printf '%s' "$subject" | grep -Eq "$cc"; then
+              echo "::error::commit $sha is not a Conventional Commit: $subject"
+              status=1
+            fi
+            if git log -1 --format=%B "$sha" | grep -Eiq "$ban"; then
+              echo "::error::commit $sha carries an AI attribution trailer"
+              status=1
+            fi
+            if git log -1 --format='%ae%n%ce' "$sha" | grep -Fq 'noreply@anthropic.com'; then
+              echo "::error::commit $sha has an Anthropic address as author or committer"
+              status=1
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "::notice::silence the trailers for good in ~/.claude/settings.json: {\"attribution\":{\"commit\":\"\",\"pr\":\"\"}}"
+            exit 1
+          fi
+      - name: The hook definition must stay valid
+        # There is no lefthook action; evilmartians/lefthook is the tool repo.
+        # The binary comes from a pinned release asset and is checked against a
+        # pinned digest, because an unverified download would be the one
+        # unpinned dependency in this workflow.
+        env:
+          LEFTHOOK_VERSION: '2.1.12'
+          LEFTHOOK_SHA256: 'dad908593c859d139b886c14913a44401d95288aa7642d9bdf6f3bd36bd788ff'
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/lefthook.gz"
+          curl -sSfL --retry 3 \
+            "https://github.com/evilmartians/lefthook/releases/download/v${LEFTHOOK_VERSION}/lefthook_${LEFTHOOK_VERSION}_Linux_x86_64.gz" \
+            -o "$archive"
+          echo "${LEFTHOOK_SHA256}  ${archive}" | sha256sum --check --status
+          gzip -dc "$archive" > "$RUNNER_TEMP/lefthook"
+          chmod +x "$RUNNER_TEMP/lefthook"
+          "$RUNNER_TEMP/lefthook" validate
+
   quality:
     name: Formatting, architecture and Clippy
     runs-on: ubuntu-24.04
@@ -26,28 +107,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Require a Conventional Commit squash title
-        if: github.event_name == 'pull_request'
-        shell: bash
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os
-          import re
-
-          title = os.environ['PR_TITLE']
-          pattern = re.compile(
-              r'^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)'
-              r'(?:\([a-z0-9][a-z0-9._/-]*\))?!?: .\S(?:.*\S)?$'
-          )
-          if pattern.fullmatch(title) is None:
-              raise SystemExit(
-                  'pull-request title must be a Conventional Commit subject; '
-                  'it becomes the squash commit consumed by Release Please'
-              )
-          PY
       - name: Install pinned Rust toolchain and audit tools
         run: |
           set -euo pipefail

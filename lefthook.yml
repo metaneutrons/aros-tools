@@ -1,0 +1,43 @@
+# lefthook for this repository. Install with:
+#   brew install lefthook && lefthook install
+# The scripts under scripts/hooks/ are manager-independent, so the same checks
+# run from any hook runner or by hand.
+
+commit-msg:
+  commands:
+    conventional-commits:
+      # {1} is the path to the commit message file.
+      run: sh scripts/hooks/check-commit-message.sh {1}
+
+pre-commit:
+  parallel: true
+  commands:
+    staged-guards:
+      run: sh scripts/hooks/check-staged.sh
+    secrets:
+      run: gitleaks git --pre-commit --redact --staged --verbose
+    # Formatting only. Clippy compiles and would blow the pre-commit budget.
+    format:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+    toml-format:
+      glob: "*.toml"
+      run: taplo fmt --check
+      skip: true   # taplo is not installed for this project yet
+
+pre-push:
+  parallel: false
+  commands:
+    secrets:
+      run: sh scripts/hooks/check-push-secrets.sh
+    # Measured before enabling, as the standard requires: 20.5 s warm on an
+    # M-series host. That is inside the 30 s budget for a pre-push hook.
+    # --all-features is deliberately omitted; it forces a full rebuild, and the
+    # complete matrix runs in CI anyway.
+    clippy:
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    # Off by default. Runtime varies more than clippy's, so enable only after
+    # measuring on this repository.
+    tests:
+      run: cargo nextest run --workspace
+      skip: true
