@@ -14,7 +14,7 @@ on:
       - 'crates/**'
       - 'scripts/release/**'
       - 'README.md'
-      - 'LICENSE-*'
+      - 'LICENSE'
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'

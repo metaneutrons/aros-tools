@@ -189,7 +189,7 @@ fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
             output,
             "  homepage \"https://github.com/metaneutrons/aros-tools\""
         )?;
-        writeln!(output, "  license any_of: [\"MIT\", \"Apache-2.0\"]")?;
+        writeln!(output, "  license \"GPL-3.0-or-later\"")?;
         writeln!(output)?;
         for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
             writeln!(output, "  depends_on \"{dependency}\"")?;
@@ -273,7 +273,7 @@ fn render_aur(release: &NativeRelease) -> ReleaseResult<String> {
         )?;
         writeln!(output, "arch=('x86_64' 'aarch64')")?;
         writeln!(output, "url='https://github.com/metaneutrons/aros-tools'")?;
-        writeln!(output, "license=('MIT' 'Apache-2.0')")?;
+        writeln!(output, "license=('GPL-3.0-or-later')")?;
         writeln!(
             output,
             "depends=('glibc' 'gcc-libs' 'ca-certificates' 'cmake' 'curl' 'git' 'ninja' 'patch' 'python')"
@@ -308,7 +308,7 @@ fn render_aur(release: &NativeRelease) -> ReleaseResult<String> {
         )?;
         writeln!(
             output,
-            "  install -Dm644 \"$root\"/LICENSE-* -t \"$pkgdir/usr/share/licenses/aros-tools\""
+            "  install -Dm644 \"$root/LICENSE\" -t \"$pkgdir/usr/share/licenses/aros-tools\""
         )?;
         writeln!(output, "}}")?;
         Ok(())
@@ -427,6 +427,53 @@ mod tests {
         }
         assert!(rendered.find("depends_on").unwrap() < rendered.find("on_macos").unwrap());
         assert!(!rendered.contains("  version \""));
+    }
+
+    #[test]
+    fn both_ecosystem_formats_carry_the_workspace_license() {
+        // Ein falsches Lizenzfeld faellt erst bei `brew audit` oder im AUR auf.
+        // Und ein Glob auf den alten Namen `LICENSE-*` traf die konsolidierte
+        // Datei `LICENSE` nicht mehr und installierte still nichts.
+        let root = tempfile::tempdir().unwrap();
+        for (format, name, expected) in [
+            (
+                EcosystemFormat::Homebrew,
+                "aros-tools.rb",
+                "  license \"GPL-3.0-or-later\"",
+            ),
+            (
+                EcosystemFormat::Aur,
+                "PKGBUILD",
+                "license=('GPL-3.0-or-later')",
+            ),
+        ] {
+            let output = root.path().join(name);
+            generate(&GenerateArgs {
+                format,
+                base_url: "https://example.invalid/v1.2.3".into(),
+                manifests: inputs(root.path()),
+                output: output.clone(),
+            })
+            .unwrap();
+            let rendered = fs::read_to_string(output).unwrap();
+            assert!(
+                rendered.contains(expected),
+                "{name} is missing {expected:?}"
+            );
+            assert!(
+                !rendered.contains("LICENSE-"),
+                "{name} keeps a stale dual-license file name"
+            );
+            assert!(
+                !rendered.contains("Apache-2.0"),
+                "{name} keeps a stale license"
+            );
+        }
+        let pkgbuild = fs::read_to_string(root.path().join("PKGBUILD")).unwrap();
+        assert!(
+            pkgbuild.contains("install -Dm644 \"$root/LICENSE\" -t"),
+            "the PKGBUILD must install the single license file without a glob"
+        );
     }
 
     #[test]
