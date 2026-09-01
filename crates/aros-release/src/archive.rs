@@ -27,7 +27,7 @@ pub const BINARIES: &[&str] = &[
     "aros-transpiler",
     "aros-verify",
 ];
-const DOCUMENTS: &[&str] = &["LICENSE-APACHE", "LICENSE-MIT", "README.md"];
+const DOCUMENTS: &[&str] = &["LICENSE", "README.md"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

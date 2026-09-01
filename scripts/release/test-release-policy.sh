@@ -799,10 +799,10 @@ for copy in a b; do
 done
 diff --recursive --no-dereference "$work/apt-a" "$work/apt-b"
 
-# Ein Signing-Subkey je Archiv-Domain. Diese Fixture deckt den Pfad ab, den die
-# uebrigen Faelle nicht beruehren, weil sie ohne --signing-subkey aufrufen:
-# richtiger Subkey akzeptiert, fremder Subkey abgelehnt, und ein Bundle mit
-# vorhandenem geheimen Primaerschluessel abgelehnt.
+# One signing subkey per archive domain. This fixture covers the path the other
+# cases never touch, because they call without --signing-subkey: the right
+# subkey accepted, a foreign subkey rejected, and a bundle that still carries
+# the secret primary key rejected.
 subkey_gnupg=$(mktemp -d /tmp/aros-subkey-gpg.XXXXXX)
 chmod 0700 "$subkey_gnupg"
 GNUPGHOME="$subkey_gnupg" gpg --batch --faked-system-time '1704067200!' \
@@ -837,7 +837,7 @@ AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
     --passphrase-file "$work/apt-passphrase" \
     --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
 
-# Das ausgelieferte Zertifikat muss auf genau diesen Subkey minimiert sein.
+# The shipped certificate must be minimised to exactly this subkey.
 [[ $(gpg --no-options --batch --with-colons --show-keys \
         "$work/apt-subkey/aros-tools-archive-keyring.asc" | grep -c '^sub') == 1 ]] || {
     printf 'domain keyring must carry exactly one signing subkey\n' >&2
@@ -863,7 +863,7 @@ expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS
     --private-key "$work/subkey-only.asc" \
     --passphrase-file "$work/apt-passphrase" \
     --fingerprint "$subkey_primary" --signing-subkey "$subkey_b"
-# Der geheime Primaerschluessel darf nie in der Signierumgebung liegen.
+# The secret primary key must never sit in the signing environment.
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
   "$root/scripts/release/build-apt-repository.sh" \
     --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey-full" \
@@ -1232,9 +1232,9 @@ grep -F -- '--prefix /usr/local' "$work/native-installer-invocation" >/dev/null
 # shellcheck disable=SC2016
 grep -F -- '--no-comments --export "$export_selector"' \
     "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# Ohne abschliessendes Ausrufezeichen exportiert gpg alle Subkeys und waehlt
-# beim Signieren selbst einen aus. Beide Selektoren muessen daher gepinnt sein,
-# sobald ein Domain-Subkey genannt ist, und sonst auf den Primaer zurueckfallen.
+# Without a trailing exclamation mark gpg exports every subkey and picks one
+# itself when signing. Both selectors therefore have to be pinned once a domain
+# subkey is named, and fall back to the primary otherwise.
 # shellcheck disable=SC2016
 grep -F -- 'export_selector="${signing_subkey}!"' \
     "$root/scripts/release/build-apt-repository.sh" >/dev/null
@@ -1244,8 +1244,8 @@ grep -F -- 'local_user="${signing_subkey}!"' \
 # shellcheck disable=SC2016
 grep -F -- 'export_selector="$fingerprint"' \
     "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# Der Statuspruefer muss den signierenden Subkey und nicht nur den Primaer
-# vergleichen, sonst bleibt eine Fehlzuordnung von Subkey und Domain unsichtbar.
+# The status verifier has to compare the signing subkey, not just the primary,
+# or a subkey-to-domain mismatch stays invisible.
 # shellcheck disable=SC2016
 grep -F -- 'signer = toupper($3)' \
     "$root/scripts/release/verify-gpgv-status.sh" >/dev/null

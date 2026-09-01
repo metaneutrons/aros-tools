@@ -15,7 +15,7 @@ description = "Unified build, toolchain, test, and physical-board workflow for A
 name = "aros-tools"
 maintainer = "Fabian Schmieder <436979+metaneutrons@users.noreply.github.com>"
 copyright = "2026, AROS Development Team and Fabian Schmieder"
-license-file = ["../../LICENSE-MIT", "0"]
+license-file = ["../../LICENSE", "0"]
 extended-description = """\
 Native host-side build, translation, verification and board tooling for \
 pristine upstream AROS and AROS-NX source checkouts."""
@@ -32,8 +32,7 @@ assets = [
     ["target/release/aros-transpiler", "usr/bin/", "755"],
     ["target/release/aros-verify", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/aros-tools/README.md", "644"],
-    ["../../LICENSE-APACHE", "usr/share/doc/aros-tools/LICENSE-APACHE", "644"],
-    ["../../LICENSE-MIT", "usr/share/doc/aros-tools/LICENSE-MIT", "644"],
+    ["../../LICENSE", "usr/share/doc/aros-tools/LICENSE", "644"],
 ]
 
 [lints]

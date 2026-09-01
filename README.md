@@ -3,7 +3,7 @@
 [![Workspace CI](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml)
 [![Documentation](https://github.com/metaneutrons/aros-tools/actions/workflows/docs.yml/badge.svg)](https://aros.metaneutrons.cc/aros-tools/)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](#license)
 
 **A rigorous, upstream-compatible tool suite for building, verifying, and
 deploying AROS.**
@@ -226,9 +226,11 @@ checks exercise the same dependency graph.
 ## License
 
 Unless a file states otherwise, the Rust workspace and documentation are
-available under either the [Apache License 2.0](LICENSE-APACHE) or the
-[MIT License](LICENSE-MIT), at your option. Vendored and AROS-derived inputs
-retain their own notices and licenses.
+available under the [GNU General Public License, version 3 or later](LICENSE).
+
+That covers this tooling, not what it produces. AROS sources, AROS-NX sources
+and every build product keep the licenses of their own upstreams, and nothing
+here changes them.
 
 ## Contributing and security
 
