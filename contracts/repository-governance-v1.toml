@@ -1,0 +1,53 @@
+schema_version = 1
+
+[repositories."metaneutrons/aros-tools"]
+branch = "main"
+required_approving_review_count = 1
+dismiss_stale_reviews = true
+require_code_owner_reviews = false
+require_last_push_approval = true
+required_conversation_resolution = true
+enforce_admins = true
+required_linear_history = true
+allow_force_pushes = false
+allow_deletions = false
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Formatting, architecture and Clippy"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Tests (linux-x86_64)"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Tests (linux-aarch64)"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Tests (macos-x86_64)"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Tests (macos-aarch64)"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "build"
+app_id = 15368
+
+[repositories."metaneutrons/homebrew-tap"]
+branch = "main"
+required_approving_review_count = 1
+dismiss_stale_reviews = true
+require_code_owner_reviews = false
+require_last_push_approval = true
+required_conversation_resolution = true
+enforce_admins = true
+required_linear_history = true
+allow_force_pushes = false
+allow_deletions = false
+
+[[repositories."metaneutrons/homebrew-tap".required_status_checks]]
+context = "Formula qualification"
+app_id = 15368

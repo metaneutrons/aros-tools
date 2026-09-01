@@ -9,6 +9,30 @@ cd "$workspace"
 failed=0
 max_production_lines=2000
 
+# Process primitives are prohibited only in production Rust. Test-only source
+# files may use synchronization APIs such as Barrier::wait without bypassing
+# the shared subprocess boundary.
+production_process_calls() {
+    find "$1" -type f -name '*.rs' ! -name '*_tests.rs' \
+        -exec grep -H -n -E '\.(output|status|spawn|wait|wait_with_output|try_wait|kill)\(\)' {} + \
+        2>/dev/null || true
+}
+
+architecture_fixture=$(production_process_calls scripts/fixtures/architecture/process-wait)
+if ! printf '%s\n' "$architecture_fixture" | grep -q '/production.rs:' ||
+   printf '%s\n' "$architecture_fixture" | grep -q '/synchronization_tests.rs:'; then
+    echo "production subprocess scan must include production.rs and exclude only *_tests.rs" >&2
+    failed=1
+fi
+
+if ! python3 scripts/validate-source-contract.py; then
+    failed=1
+fi
+
+if ! python3 scripts/validate-version-contract.py; then
+    failed=1
+fi
+
 for source in $(find crates -path '*/src/*.rs' -type f ! -name '*_tests.rs' | sort); do
     lines=$(wc -l < "$source" | tr -d ' ')
     if [ "$lines" -gt "$max_production_lines" ]; then
@@ -40,7 +64,7 @@ if grep -R -n --include='*.rs' --include='Cargo.toml' '\banyhow\b' crates/aros-c
     failed=1
 fi
 
-direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' crates/aros-cli/src \
+direct_process=$(production_process_calls crates/aros-cli/src \
     | grep -v 'crates/aros-cli/src/observability.rs:' \
     | grep -v 'crates/aros-cli/src/artifact.rs:.*response\.status()' || true)
 if [ -n "$direct_process" ]; then
@@ -50,7 +74,7 @@ if [ -n "$direct_process" ]; then
 fi
 
 for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-verify; do
-    direct_process=$(grep -R -n --include='*.rs' -E '\.(output|status)\(\)' "crates/$component/src" \
+    direct_process=$(production_process_calls "crates/$component/src" \
         | grep -v ':.*response\.status()' || true)
     if [ -n "$direct_process" ]; then
         echo "$direct_process" >&2
@@ -58,6 +82,22 @@ for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-verify;
         failed=1
     fi
 done
+
+direct_stdout_macros=$(grep -R -n --include='*.rs' -E '(^|[^[:alnum:]_])(print|println)![[:space:]]*\(' crates/*/src || true)
+if [ -n "$direct_stdout_macros" ]; then
+    echo "$direct_stdout_macros" >&2
+    echo "production stdout must use aros_common::output! or aros_common::outputln!" >&2
+    failed=1
+fi
+
+direct_stdout_handles=$(grep -R -n --include='*.rs' -E '(std::io::|io::)?stdout\(\)' crates/*/src \
+    | grep -v 'crates/aros-common/src/observability.rs:' \
+    | grep -v 'crates/aros-cli/src/observability.rs:' || true)
+if [ -n "$direct_stdout_handles" ]; then
+    echo "$direct_stdout_handles" >&2
+    echo "production stdout handles must pass through the shared observable output boundary" >&2
+    failed=1
+fi
 
 write_sd_body=$(sed -n '/^pub fn write_sd_image(/,/^}/p' crates/aros-cli/src/board/mod.rs)
 if printf '%s\n' "$write_sd_body" | grep -Eq 'sd_disk::(scan|confirmation_token)'; then

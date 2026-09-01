@@ -2,6 +2,7 @@ name: Workspace CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
@@ -23,13 +24,44 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install Rust stable
+        with:
+          persist-credentials: false
+      - name: Require a Conventional Commit squash title
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-      - run: cargo fmt --all -- --check
-      - run: sh scripts/check-architecture.sh
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          title = os.environ['PR_TITLE']
+          pattern = re.compile(
+              r'^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)'
+              r'(?:\([a-z0-9][a-z0-9._/-]*\))?!?: .\S(?:.*\S)?$'
+          )
+          if pattern.fullmatch(title) is None:
+              raise SystemExit(
+                  'pull-request title must be a Conventional Commit subject; '
+                  'it becomes the squash commit consumed by Release Please'
+              )
+          PY
+      - name: Install pinned Rust toolchain and audit tools
+        run: |
+          set -euo pipefail
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
+          rustup show active-toolchain
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo install cargo-machete --version 0.9.2 --locked
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint -version
+          shellcheck --version
+      - name: Run canonical workspace quality gate
+        run: scripts/check-workspace.sh quality
 
   test:
     name: Tests (${{ matrix.name }})
@@ -39,31 +71,117 @@ jobs:
         include:
           - name: linux-x86_64
             runner: ubuntu-24.04
+            source_qualification: true
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
+            source_qualification: false
           - name: macos-x86_64
             runner: macos-15-intel
+            source_qualification: false
           - name: macos-aarch64
             runner: macos-15
+            source_qualification: false
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout aros-tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: aros-tools
-      - name: Checkout qualified AROS-NX source contract
+          persist-credentials: false
+      - name: Read the versioned source and producer contract
+        if: matrix.source_qualification
+        id: contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          import re
+          from pathlib import PurePosixPath
+
+          with open('aros-tools/contracts/aros-source-v1.toml', 'rb') as stream:
+              contract = tomllib.load(stream)
+          if contract.get('schema_version') != 1:
+              raise SystemExit('unsupported AROS source contract schema')
+          for section in ('source', 'producer'):
+              repository = contract[section]['repository']
+              commit = contract[section]['commit']
+              if re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) is None:
+                  raise SystemExit(f'malformed {section} repository')
+              if len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
+                  raise SystemExit(f'malformed {section} identity')
+              print(f'{section}_repository={repository}')
+              print(f'{section}_commit={commit}')
+          workflow = contract['producer']['workflow']
+          workflow_path = PurePosixPath(workflow)
+          if (
+              not workflow.startswith('.github/workflows/')
+              or '..' in workflow_path.parts
+              or workflow_path.suffix not in {'.yml', '.yaml'}
+              or any(character.isspace() for character in workflow)
+          ):
+              raise SystemExit('malformed producer workflow path')
+          print(f'producer_workflow={workflow}')
+          PY
+      - name: Checkout the qualified producer contract
+        if: matrix.source_qualification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: metaneutrons/AROS-NX
-          ref: 5eda8ebd4da5412092528c2bb2323b90e19ef6d0
+          repository: ${{ steps.contract.outputs.producer_repository }}
+          ref: ${{ steps.contract.outputs.producer_commit }}
+          path: aros-producer
+          sparse-checkout: ${{ steps.contract.outputs.producer_workflow }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Require producer and consumer source identities to agree
+        if: matrix.source_qualification
+        shell: bash
+        env:
+          PRODUCER_COMMIT: ${{ steps.contract.outputs.producer_commit }}
+          PRODUCER_WORKFLOW: ${{ steps.contract.outputs.producer_workflow }}
+        run: |
+          set -euo pipefail
+          if [[ $(git -C aros-producer rev-parse HEAD) != "$PRODUCER_COMMIT" ]]; then
+            echo '::error::qualified producer checkout does not match its contract commit'
+            exit 1
+          fi
+          python3 aros-tools/scripts/validate-source-contract.py \
+            --contract aros-tools/contracts/aros-source-v1.toml \
+            --producer-workflow "aros-producer/${PRODUCER_WORKFLOW}"
+      - name: Checkout qualified AROS-NX source contract
+        if: matrix.source_qualification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ steps.contract.outputs.source_repository }}
+          ref: ${{ steps.contract.outputs.source_commit }}
           path: aros-source
           submodules: recursive
-      - name: Install Rust stable
+          persist-credentials: false
+      - name: Require the exact qualified AROS-NX source identity
+        if: matrix.source_qualification
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.contract.outputs.source_commit }}
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          set -euo pipefail
+          if [[ $(git -C aros-source rev-parse HEAD) != "$SOURCE_COMMIT" ]]; then
+            echo '::error::qualified source checkout does not match its contract commit'
+            exit 1
+          fi
+      - name: Activate pinned Rust toolchain
+        working-directory: aros-tools
+        run: |
+          set -euo pipefail
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup show active-toolchain
       - name: Run complete workspace tests against qualified source
+        if: matrix.source_qualification
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
-        run: cargo test --workspace --all-features --locked
+        run: scripts/check-workspace.sh test
+      - name: Run portable workspace tests
+        if: ${{ !matrix.source_qualification }}
+        working-directory: aros-tools
+        run: scripts/check-workspace.sh portable-test

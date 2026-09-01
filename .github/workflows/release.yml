@@ -7,7 +7,14 @@ on:
       - '.github/workflows/publish-ecosystem.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - '.release-please-manifest.json'
+      - 'release-please-config.json'
+      - 'CHANGELOG.md'
+      - 'rust-toolchain.toml'
       - 'crates/**'
+      - 'scripts/release/**'
+      - 'README.md'
+      - 'LICENSE-*'
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
@@ -17,13 +24,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Every immutable tag shares one queue because stable publication mutates the
+  # same APT, Homebrew and AUR channels. Pull-request qualifications remain
+  # independent and retain their per-ref cancellation boundary.
+  group: ${{ github.ref_type == 'tag' && 'aros-tools-immutable-release' || format('release-{0}', github.ref) }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
-  RUST_VERSION: 1.98.0
 
 jobs:
   metadata:
@@ -35,13 +44,23 @@ jobs:
       source_date_epoch: ${{ steps.metadata.outputs.source_date_epoch }}
       is_release: ${{ steps.metadata.outputs.is_release }}
       tag: ${{ steps.metadata.outputs.tag }}
+      tag_object: ${{ steps.metadata.outputs.tag_object }}
+      tag_date_epoch: ${{ steps.metadata.outputs.tag_date_epoch }}
+      is_stable: ${{ steps.metadata.outputs.is_stable }}
+      protected_main: ${{ steps.metadata.outputs.protected_main }}
+      requires_ab: ${{ steps.metadata.outputs.requires_ab }}
+      ab_reason: ${{ steps.metadata.outputs.ab_reason }}
+      asset_contract: ${{ steps.metadata.outputs.asset_contract }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Validate source and version
         id: metadata
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           source_commit=$(git rev-parse HEAD)
@@ -54,37 +73,286 @@ jobs:
           )
           is_release=false
           tag=''
+          tag_object=''
+          tag_date_epoch=''
+          is_stable=false
+          protected_main=''
+          requires_ab=false
+          ab_reason=not-a-release
           version="$workspace_version"
           if [[ "${GITHUB_REF_TYPE:-}" == tag ]]; then
             tag=${GITHUB_REF_NAME}
-            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-              echo "::error::release tags must be canonical SemVer names (vX.Y.Z)"
-              exit 1
-            fi
-            if [[ $(git cat-file -t "$tag") != tag ]]; then
+            TAG="$tag" python3 - <<'PY'
+          import os
+          import re
+
+          identifier = r'(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)'
+          semver = re.compile(
+              rf'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)'
+              rf'(?:-({identifier}(?:\.{identifier})*))?'
+              r'(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+          )
+          tag = os.environ['TAG']
+          if not tag.startswith('v') or semver.fullmatch(tag[1:]) is None:
+              raise SystemExit(
+                  f'release tag {tag!r} is not a canonical SemVer name (vX.Y.Z)'
+              )
+          PY
+            if [[ $(git cat-file -t "refs/tags/${tag}") != tag ]]; then
               echo "::error::release tag $tag is lightweight; an immutable annotated tag is required"
               exit 1
             fi
-            source_commit=$(git rev-parse "$tag^{}")
+            tag_object=$(git rev-parse "refs/tags/${tag}")
+            tag_date_epoch=$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/${tag}")
+            if [[ ! "$tag_date_epoch" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::annotated tag has no valid tagger timestamp"
+              exit 1
+            fi
+            source_commit=$(git rev-parse "refs/tags/${tag}^{}")
             if [[ "$source_commit" != "$GITHUB_SHA" ]]; then
               echo "::error::tag peels to $source_commit but the workflow source is $GITHUB_SHA"
               exit 1
             fi
+            protected_main=$(scripts/release/verify-release-ref.sh \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$tag" \
+              --tag-object "$tag_object" \
+              --source-commit "$source_commit" \
+              --tag-date-epoch "$tag_date_epoch")
             version=${tag#v}
             if [[ "$version" != "$workspace_version" ]]; then
               echo "::error::tag version $version does not match workspace version $workspace_version"
               exit 1
             fi
+            manifest_version=$(python3 - <<'PY'
+          import json
+          with open('.release-please-manifest.json', encoding='utf-8') as source:
+              print(json.load(source).get('.', ''))
+          PY
+            )
+            if [[ "$manifest_version" != "$workspace_version" ]]; then
+              echo "::error::Release Please manifest version $manifest_version does not match workspace version $workspace_version"
+              exit 1
+            fi
+            VERSION="$version" python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = re.escape(os.environ['VERSION'])
+          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          heading = re.compile(
+              rf'^##\s+(?:\[{version}\](?:\([^\n)]+\))?|{version})(?:\s|$)',
+              re.MULTILINE,
+          )
+          if heading.search(changelog) is None:
+              raise SystemExit(f'CHANGELOG.md has no release section for {os.environ["VERSION"]}')
+          PY
             source_date_epoch=$(git show -s --format=%ct "$source_commit")
+            if [[ "$tag" == "v${version}" && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              is_stable=true
+            fi
+            if [[ "$is_stable" == true ]]; then
+              classification=$(scripts/release/classify-release-ab.py \
+                --repository "$GITHUB_REPOSITORY" \
+                --tag "$tag" --source-commit "$source_commit")
+              requires_ab=$(jq -er '.requires_ab | if . then "true" else "false" end' \
+                <<<"$classification")
+              ab_reason=$(jq -er '.reason | select(type == "string" and length > 0)' \
+                <<<"$classification")
+            fi
             is_release=true
           fi
+          asset_contract=$(python3 scripts/release/release-asset-metadata.py \
+            contract --version "$version")
           {
             echo "version=$version"
             echo "source_commit=$source_commit"
             echo "source_date_epoch=$source_date_epoch"
             echo "is_release=$is_release"
             echo "tag=$tag"
+            echo "tag_object=$tag_object"
+            echo "tag_date_epoch=$tag_date_epoch"
+            echo "is_stable=$is_stable"
+            echo "protected_main=$protected_main"
+            echo "requires_ab=$requires_ab"
+            echo "ab_reason=$ab_reason"
+            echo "asset_contract=$asset_contract"
           } >> "$GITHUB_OUTPUT"
+
+  release-recovery:
+    name: Resolve private draft recovery state by release ID
+    if: needs.metadata.outputs.is_release == 'true'
+    needs: metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Draft releases are visible only to a token with push access. Keep that
+    # permission in this OIDC-free, checkout-free resolver and hand only
+    # verified public bytes to the signing jobs through an immutable artifact.
+    permissions:
+      contents: write
+    outputs:
+      kind: ${{ steps.resolve.outputs.kind }}
+      release_id: ${{ steps.resolve.outputs.release_id }}
+    steps:
+      - name: Resolve and download the exact draft or immutable release
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          IS_STABLE: ${{ needs.metadata.outputs.is_stable }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          ASSET_CONTRACT: ${{ needs.metadata.outputs.asset_contract }}
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/recovered-release-state"
+          install -d "$handoff"
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$handoff/pages.json"
+          jq -e 'type == "array" and all(.[]; type == "array")' \
+            "$handoff/pages.json" >/dev/null || {
+              echo '::error::AP7060 paginated release response is malformed'; exit 1;
+            }
+          jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+            "$handoff/pages.json" > "$handoff/matches.json"
+          count=$(jq 'length' "$handoff/matches.json")
+          if ((count > 1)); then
+            echo '::error::AP7060 release tag resolves to multiple release IDs'
+            exit 1
+          fi
+          if ((count == 0)); then
+            jq -n --arg tag "$TAG" \
+              '{kind:"absent",tag_name:$tag,release_id:null,assets:[]}' \
+              > "$handoff/state.json"
+            kind=absent
+            release_id=''
+          else
+            jq -c '.[0]' "$handoff/matches.json" > "$handoff/release.json"
+            release_id=$(jq -er '.id | select(type == "number" and . > 0)' \
+              "$handoff/release.json")
+            draft=$(jq -er '.draft | select(type == "boolean")' "$handoff/release.json")
+            prerelease=$(jq -er '.prerelease | select(type == "boolean")' \
+              "$handoff/release.json")
+            immutable=$(jq -er '.immutable // false | select(type == "boolean")' \
+              "$handoff/release.json")
+            expected_prerelease=true
+            [[ "$IS_STABLE" == true ]] && expected_prerelease=false
+            if [[ "$prerelease" != "$expected_prerelease" ]]; then
+              echo '::error::AP7060 existing release has the wrong final channel status'
+              exit 1
+            fi
+            if [[ "$draft" == true && "$immutable" == false ]]; then
+              kind=draft
+            elif [[ "$draft" == false && "$immutable" == true ]]; then
+              kind=immutable
+            else
+              echo '::error::AP7061 existing release is neither a private draft nor immutable'
+              exit 1
+            fi
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$handoff/asset-pages.json"
+            jq -c '[.[][]]' "$handoff/asset-pages.json" > "$handoff/assets.json"
+            CONTRACT="$ASSET_CONTRACT" KIND="$kind" VERSION="$VERSION" \
+              python3 - "$handoff/assets.json" > "$handoff/assets.tsv" <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          try:
+              contract = json.loads(os.environ['CONTRACT'])
+              assets = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+          except (KeyError, json.JSONDecodeError, OSError, UnicodeError) as error:
+              raise SystemExit(f'::error::AP7062 release asset contract is malformed: {error}')
+          expected = contract.get('assets')
+          total_limit = contract.get('maximum_total_size')
+          if (
+              contract.get('schema_version') != 1
+              or contract.get('version') != os.environ['VERSION']
+              or not isinstance(expected, dict)
+              or len(expected) != 48
+              or not isinstance(total_limit, int)
+              or total_limit <= 0
+              or not isinstance(assets, list)
+          ):
+              raise SystemExit('::error::AP7062 release asset contract shape is invalid')
+          names: set[str] = set()
+          identifiers: set[int] = set()
+          rows: list[tuple[str, int, int, str]] = []
+          total = 0
+          for item in assets:
+              if not isinstance(item, dict):
+                  raise SystemExit('::error::AP7062 release asset metadata entry is not an object')
+              name = item.get('name')
+              identifier = item.get('id')
+              size = item.get('size')
+              digest = item.get('digest')
+              if (
+                  not isinstance(name, str)
+                  or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]*', name) is None
+                  or name not in expected
+                  or name in names
+                  or not isinstance(identifier, int)
+                  or isinstance(identifier, bool)
+                  or identifier <= 0
+                  or identifier in identifiers
+                  or item.get('state') != 'uploaded'
+                  or not isinstance(size, int)
+                  or isinstance(size, bool)
+                  or size <= 0
+                  or size > expected[name]
+                  or not isinstance(digest, str)
+                  or re.fullmatch(r'sha256:[0-9a-f]{64}', digest) is None
+              ):
+                  raise SystemExit(f'::error::AP7062 release asset metadata is invalid: {name!r}')
+              names.add(name)
+              identifiers.add(identifier)
+              total += size
+              rows.append((name, identifier, size, digest.removeprefix('sha256:')))
+          if total > total_limit or names - set(expected):
+              raise SystemExit('::error::AP7062 release asset inventory exceeds its closed bounds')
+          if os.environ['KIND'] == 'immutable' and names != set(expected):
+              raise SystemExit('::error::AP7062 immutable release asset inventory is incomplete')
+          for name, identifier, size, digest in sorted(rows):
+              print(f'{identifier}\t{name}\t{size}\t{digest}')
+          PY
+            install -d "$handoff/assets"
+            while IFS=$'\t' read -r asset_id name size digest; do
+              [[ -n "$asset_id" ]] || continue
+              curl --fail --silent --show-error --location \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --max-filesize "$size" \
+                --header 'Accept: application/octet-stream' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+                --output "$handoff/assets/$name"
+              measured_size=$(wc -c < "$handoff/assets/$name" | tr -d ' ')
+              measured_digest=$(sha256sum "$handoff/assets/$name" | awk '{ print $1 }')
+              [[ "$measured_size" == "$size" && "$measured_digest" == "$digest" ]] || {
+                echo "::error::AP7063 downloaded release asset differs: $name"; exit 1;
+              }
+            done < "$handoff/assets.tsv"
+            jq --arg kind "$kind" --argjson assets "$(cat "$handoff/assets.json")" \
+              '{kind:$kind,tag_name,release_id:.id,draft,prerelease,
+                immutable:(.immutable // false),name,body,assets:$assets}' \
+              "$handoff/release.json" > "$handoff/state.json"
+            rm "$handoff/release.json" "$handoff/matches.json" \
+              "$handoff/pages.json" "$handoff/asset-pages.json" \
+              "$handoff/assets.json" "$handoff/assets.tsv"
+          fi
+          rm -f "$handoff/pages.json" "$handoff/matches.json"
+          printf 'kind=%s\nrelease_id=%s\n' "$kind" "$release_id" >> "$GITHUB_OUTPUT"
+      - name: Seal verified recovery state
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: recovered-release-state
+          path: ${{ runner.temp }}/recovered-release-state/
+          if-no-files-found: error
+          retention-days: 1
 
   native:
     name: Native archive (${{ matrix.name }})
@@ -92,22 +360,22 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 90
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    env:
+      # lzma-sys otherwise probes mutable host packages. Compile its Cargo.lock
+      # vendored xz source so archive bytes never depend on apt or Homebrew.
+      LZMA_API_STATIC: '1'
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x86_64
             runner: ubuntu-24.04
-            container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
+            container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
             target: x86_64-unknown-linux-gnu
             deb_arch: amd64
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
-            container: rust:1.97.0-bookworm@sha256:7d0723df719e7f213b69dc7c8c595985c3f4b060cfbee4f7bc0e347a86fe3b6a
+            container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
             target: aarch64-unknown-linux-gnu
             deb_arch: arm64
           - name: macos-x86_64
@@ -122,27 +390,31 @@ jobs:
             deb_arch: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install audited Linux prerequisites
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates dpkg-dev file git liblzma-dev pkg-config
+        with:
+          persist-credentials: false
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          if [[ "$RUNNER_OS" == Linux && "${RUST_VERSION:-}" != "$toolchain" ]]; then
+            echo "::error::Bookworm producer Rust ${RUST_VERSION:-unknown} does not match rust-toolchain.toml $toolchain"
+            exit 1
+          fi
+          rustup toolchain install "$toolchain" --profile minimal
           rustc --version --verbose
       - name: Test the release producer
         run: cargo test --locked -p aros-release
       - name: Build the complete native suite once
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked --workspace --all-features --target "$TARGET"
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=13.0
+          fi
+          cargo build --release --locked --workspace --all-features --target "$TARGET"
       - name: Audit native dynamic linkage
         shell: bash
         env:
@@ -162,6 +434,19 @@ jobs:
               echo "::error::release binary contains a non-system absolute library path"
               exit 1
             fi
+            for binary in "${binaries[@]}"; do
+              path="target/${TARGET}/release/${binary}"
+              minimum=$(otool -l "$path" | awk '
+                $1 == "cmd" && $2 == "LC_BUILD_VERSION" { mode = "build"; next }
+                $1 == "cmd" && $2 == "LC_VERSION_MIN_MACOSX" { mode = "legacy"; next }
+                mode == "build" && $1 == "minos" { print $2; exit }
+                mode == "legacy" && $1 == "version" { print $2; exit }
+              ')
+              if [[ "$minimum" != 13.0 ]]; then
+                echo "::error::${binary} declares macOS ${minimum:-unknown}; expected 13.0"
+                exit 1
+              fi
+            done
           else
             for binary in "${binaries[@]}"; do
               ldd "target/${TARGET}/release/${binary}"
@@ -170,6 +455,21 @@ jobs:
               echo "::error::release binary has an unresolved dynamic dependency"
               exit 1
             fi
+            for binary in "${binaries[@]}"; do
+              path="target/${TARGET}/release/${binary}"
+              maximum=$(readelf --version-info "$path" | \
+                grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | \
+                sort -Vu | tail -1 || true)
+              if [[ -n "$maximum" && \
+                    $(printf '%s\n' "$maximum" 2.36 | sort -V | tail -1) != 2.36 ]]; then
+                echo "::error::${binary} requires GLIBC_${maximum}; maximum supported is GLIBC_2.36"
+                exit 1
+              fi
+            done
+          fi
+          if grep -Fiq liblzma "$RUNNER_TEMP/dynamic-linkage.txt"; then
+            echo '::error::release binary dynamically links host liblzma instead of vendored Cargo.lock source'
+            exit 1
           fi
       - name: Produce and read back the normalized archive
         shell: bash
@@ -199,8 +499,63 @@ jobs:
           install_root="$RUNNER_TEMP/aros-tools-install"
           mkdir "$install_root"
           tar -xzf "dist/aros-tools-v${VERSION}-${TARGET}.tar.gz" -C "$install_root"
-          for binary in "$install_root"/*/bin/*; do
+          payload_roots=("$install_root"/*)
+          if [[ ${#payload_roots[@]} -ne 1 || ! -d "${payload_roots[0]}/bin" ]]; then
+            echo "::error::archive must contain exactly one payload root with a bin directory"
+            exit 1
+          fi
+          bin_root="${payload_roots[0]}/bin"
+          expected_binaries=(
+            aros aros-ahi-runner aros-collect aros-fetch
+            aros-genmodule aros-romtool aros-transpiler aros-verify
+          )
+          if [[ $(find "$bin_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ') != 8 ]]; then
+            echo "::error::archive must deliver exactly eight regular executables"
+            find "$bin_root" -mindepth 1 -maxdepth 1 -print | sort
+            exit 1
+          fi
+          for name in "${expected_binaries[@]}"; do
+            binary="$bin_root/$name"
+            if [[ ! -f "$binary" || -L "$binary" || ! -x "$binary" ]]; then
+              echo "::error::archive executable is missing or unsafe: $name"
+              exit 1
+            fi
             "$binary" --help >/dev/null
+            reported_version=$("$binary" --version)
+            if [[ "$reported_version" != "$name $VERSION" ]]; then
+              echo "::error::$name reports version '$reported_version'; expected '$name $VERSION'"
+              exit 1
+            fi
+            description=$(file -b "$binary")
+            if [[ "$RUNNER_OS" == macOS ]]; then
+              if [[ "$description" != *Mach-O* ]]; then
+                echo "::error::delivered macOS executable is not Mach-O: $binary"
+                exit 1
+              fi
+              minimum=$(otool -l "$binary" | awk '
+                $1 == "cmd" && $2 == "LC_BUILD_VERSION" { mode = "build"; next }
+                $1 == "cmd" && $2 == "LC_VERSION_MIN_MACOSX" { mode = "legacy"; next }
+                mode == "build" && $1 == "minos" { print $2; exit }
+                mode == "legacy" && $1 == "version" { print $2; exit }
+              ')
+              if [[ "$minimum" != 13.0 ]]; then
+                echo "::error::delivered $(basename "$binary") declares macOS ${minimum:-unknown}; expected 13.0"
+                exit 1
+              fi
+            else
+              if [[ "$description" != *ELF* ]]; then
+                echo "::error::delivered Linux executable is not ELF: $binary"
+                exit 1
+              fi
+              maximum=$(readelf --version-info "$binary" | \
+                grep -Eo 'GLIBC_[0-9]+\.[0-9]+' | sed 's/^GLIBC_//' | \
+                sort -Vu | tail -1 || true)
+              if [[ -n "$maximum" && \
+                    $(printf '%s\n' "$maximum" 2.36 | sort -V | tail -1) != 2.36 ]]; then
+                echo "::error::delivered $(basename "$binary") requires GLIBC_${maximum}; maximum supported is GLIBC_2.36"
+                exit 1
+              fi
+            fi
           done
           file "$install_root"/*/bin/*
       - name: Package the same Linux binaries as a Debian package
@@ -235,40 +590,45 @@ jobs:
             aros aros-ahi-runner aros-collect aros-fetch \
             aros-genmodule aros-romtool aros-transpiler aros-verify; do
             "/usr/bin/${binary}" --help >/dev/null
+            reported_version=$("/usr/bin/${binary}" --version)
+            if [[ "$reported_version" != "$binary $VERSION" ]]; then
+              echo "::error::Debian $binary reports version '$reported_version'; expected '$binary $VERSION'"
+              exit 1
+            fi
           done
-      - name: Generate SPDX SBOM for the exact archive
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.tar.gz
-          format: spdx-json
-          output-file: dist/aros-tools-v${{ needs.metadata.outputs.version }}-${{ matrix.target }}.spdx.json
-          upload-artifact: false
-      - name: Generate SPDX SBOM for the exact Debian package
-        if: runner.os == 'Linux'
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.deb
-          format: spdx-json
-          output-file: dist/aros-tools_${{ needs.metadata.outputs.version }}_${{ matrix.deb_arch }}.spdx.json
-          upload-artifact: false
-      - name: Install keyless signing client
-        if: needs.metadata.outputs.is_release == 'true'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.1.1
-      - name: Sign every release subject
-        if: needs.metadata.outputs.is_release == 'true'
+      - name: Install the platform-specific digest-pinned Syft binary
+        id: syft
         shell: bash
         run: |
           set -euo pipefail
-          for subject in dist/*; do
-            cosign sign-blob --yes --bundle "${subject}.sigstore.json" "$subject"
-          done
-      - name: Attest every native release subject
-        if: needs.metadata.outputs.is_release == 'true'
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
-        with:
-          subject-path: dist/*
+          install -d "$RUNNER_TEMP/pinned-syft"
+          path=$(scripts/release/install-pinned-syft.sh \
+            --output-dir "$RUNNER_TEMP/pinned-syft")
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      - name: Generate semantically bound SPDX SBOMs
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+          SYFT: ${{ steps.syft.outputs.path }}
+        run: |
+          set -euo pipefail
+          archive="dist/aros-tools-v${VERSION}-${TARGET}.tar.gz"
+          scripts/release/generate-spdx-sbom.sh \
+            --artifact "$archive" \
+            --output "dist/aros-tools-v${VERSION}-${TARGET}.spdx.json" \
+            --kind archive --version "$VERSION" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --syft "$SYFT"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            deb="dist/aros-tools_${VERSION}_${DEB_ARCH}.deb"
+            scripts/release/generate-spdx-sbom.sh \
+              --artifact "$deb" \
+              --output "dist/aros-tools_${VERSION}_${DEB_ARCH}.spdx.json" \
+              --kind deb --version "$VERSION" \
+              --source-date-epoch "$SOURCE_DATE_EPOCH" --syft "$SYFT"
+          fi
       - name: Upload qualified native artifact set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -277,24 +637,211 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  aggregate:
-    name: Verify complete four-host inventory
+  native-ab:
+    name: Independent native A/B (${{ matrix.name }})
+    if: needs.metadata.outputs.requires_ab == 'true'
     needs: [metadata, native]
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 90
+    env:
+      LZMA_API_STATIC: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
+            target: aarch64-unknown-linux-gnu
+          - name: macos-x86_64
+            runner: macos-15-intel
+            container: ''
+            target: x86_64-apple-darwin
+          - name: macos-aarch64
+            runner: macos-15
+            container: ''
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install the exact producer toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          if [[ "$RUNNER_OS" == Linux && "${RUST_VERSION:-}" != "$toolchain" ]]; then
+            echo '::error::A/B container Rust differs from rust-toolchain.toml'
+            exit 1
+          fi
+          rustup toolchain install "$toolchain" --profile minimal
+      - name: Compile and package on an independent runner
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=13.0
+          fi
+          cargo build --release --locked --workspace --all-features --target "$TARGET"
+          mkdir reproduced
+          "target/${TARGET}/release/aros-release" package \
+            --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" --target "$TARGET" \
+            --bin-dir "target/${TARGET}/release" --repository-root . \
+            --output-dir reproduced
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: native-${{ matrix.name }}
+          path: original
+      - name: Require byte-identical independently compiled archives
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          AB_REASON: ${{ needs.metadata.outputs.ab_reason }}
+        run: |
+          set -euo pipefail
+          archive="aros-tools-v${VERSION}-${TARGET}.tar.gz"
+          for suffix in '' .manifest.json .sha256; do
+            cmp "original/${archive}${suffix}" "reproduced/${archive}${suffix}"
+          done
+          printf '%s\n' "independent A/B passed: $AB_REASON ($TARGET)"
+
+  sign-native:
+    name: Sign native archive (${{ matrix.name }})
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.native.result == 'success' &&
+      needs.release-recovery.result == 'success' &&
+      (
+        needs.metadata.outputs.requires_ab != 'true' ||
+        needs.native-ab.result == 'success'
+      )
+    needs: [metadata, release-recovery, native, native-ab]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
       attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: native-${{ matrix.name }}
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: recovered-release-state
+          path: recovered
+      - name: Install keyless signing client
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Recover verified bundles or sign previously unseen subjects
+        shell: bash
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovered/assets
+          [[ -f recovered/state.json && -d recovered/assets && \
+             -z $(find recovered/assets -mindepth 1 -maxdepth 1 ! -type f -print -quit) ]] || {
+            echo '::error::AP7064 recovery handoff is incomplete or unsafe'; exit 1;
+          }
+          kind=$(jq -er --arg tag "$TAG" \
+            'select(.tag_name == $tag) | .kind | select(. == "absent" or . == "draft" or . == "immutable")' \
+            recovered/state.json)
+          jq -r '.assets[].name' recovered/state.json | sort > "$RUNNER_TEMP/recovered-expected"
+          find recovered/assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | \
+            sort > "$RUNNER_TEMP/recovered-actual"
+          diff -u "$RUNNER_TEMP/recovered-expected" "$RUNNER_TEMP/recovered-actual"
+          allow_new=true
+          [[ "$kind" == immutable ]] && allow_new=false
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          scripts/release/reuse-sigstore-bundles.sh \
+            --candidate-dir dist --existing-dir recovered/assets \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            --allow-new "$allow_new"
+      - name: Attest every native release subject
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/*
+      - name: Upload signed native artifact set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: signed-native-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  aggregate:
+    name: Verify complete four-host inventory
+    if: >-
+      always() &&
+      needs.native.result == 'success' &&
+      (
+        needs.metadata.outputs.is_release != 'true' ||
+        needs.sign-native.result == 'success'
+      )
+    needs: [metadata, native, sign-native]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install pinned Rust toolchain
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+          toolchain=$(scripts/release/read-rust-toolchain.sh)
+          rustup toolchain install "$toolchain" --profile minimal
+      - if: needs.metadata.outputs.is_release != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: native-*
+          path: release
+          merge-multiple: true
+      - if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: signed-native-*
           path: release
           merge-multiple: true
       - name: Enforce inventory and verify every payload
@@ -322,15 +869,21 @@ jobs:
             manifest="${archive}.manifest.json"
             target/release/aros-release verify --archive "$archive" --manifest "$manifest"
             (cd release && sha256sum -c "$(basename "${archive}.sha256")")
-            jq -e '.spdxVersion | startswith("SPDX-")' \
-              "release/aros-tools-v${VERSION}-${target}.spdx.json" >/dev/null
+            scripts/release/verify-spdx-sbom.sh \
+              --artifact "$archive" \
+              --sbom "release/aros-tools-v${VERSION}-${target}.spdx.json" \
+              --expected-sha256 "$(awk '{ print $1 }' "${archive}.sha256")" \
+              --kind archive --version "$VERSION"
           done
           for arch in amd64 arm64; do
             deb="release/aros-tools_${VERSION}_${arch}.deb"
             dpkg-deb --info "$deb"
             dpkg-deb --contents "$deb"
-            jq -e '.spdxVersion | startswith("SPDX-")' \
-              "release/aros-tools_${VERSION}_${arch}.spdx.json" >/dev/null
+            scripts/release/verify-spdx-sbom.sh \
+              --artifact "$deb" \
+              --sbom "release/aros-tools_${VERSION}_${arch}.spdx.json" \
+              --expected-sha256 "$(sha256sum "$deb" | awk '{ print $1 }')" \
+              --kind deb --version "$VERSION"
           done
       - name: Install keyless verification client
         if: needs.metadata.outputs.is_release == 'true'
@@ -342,6 +895,7 @@ jobs:
         shell: bash
         env:
           TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -355,8 +909,14 @@ jobs:
               --certificate-oidc-issuer "$issuer" \
               "$subject"
           done
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
           for subject in release/*; do
-            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "$SOURCE_COMMIT" \
+              --deny-self-hosted-runners
           done
       - name: Generate exact Homebrew and AUR metadata
         shell: bash
@@ -378,16 +938,122 @@ jobs:
             --output release/PKGBUILD
           ruby -c release/aros-tools.rb
           bash -n release/PKGBUILD
-      - name: Sign package-manager metadata
+      - name: Render the deterministic signed release body
         if: needs.metadata.outputs.is_release == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release/render-release-notes.py \
+            --changelog CHANGELOG.md --version "$VERSION" \
+            --output release/RELEASE_NOTES.md
+      - name: Write complete checksum inventory
+        if: needs.metadata.outputs.is_release != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          for subject in release/aros-tools.rb release/PKGBUILD; do
-            cosign sign-blob --yes --bundle "${subject}.sigstore.json" "$subject"
-          done
+          checksum_tmp="$RUNNER_TEMP/SHA256SUMS"
+          (cd release && find . -maxdepth 1 -type f -print0 | \
+            sort -z | xargs -0 sha256sum) > "$checksum_tmp"
+          mv "$checksum_tmp" release/SHA256SUMS
+      - name: Verify the closed unsigned staging inventory
+        if: needs.metadata.outputs.is_release != 'true'
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: scripts/release/verify-candidate-inventory.sh --directory release --version "$VERSION" --signed false
+      - if: needs.metadata.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qualified-release-staging
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+      - if: needs.metadata.outputs.is_release == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aggregate-release-candidate
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  sign-aggregate:
+    name: Sign complete release inventory
+    if: needs.metadata.outputs.is_release == 'true'
+    needs: [metadata, release-recovery, aggregate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: aggregate-release-candidate
+          path: release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: recovered-release-state
+          path: recovered
+      - name: Install keyless signing client
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Recover verified bundles or sign package-manager metadata
+        shell: bash
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p recovered/assets
+          [[ -f recovered/state.json && -d recovered/assets && \
+             -z $(find recovered/assets -mindepth 1 -maxdepth 1 ! -type f -print -quit) ]] || {
+            echo '::error::AP7064 recovery handoff is incomplete or unsafe'; exit 1;
+          }
+          kind=$(jq -er --arg tag "$TAG" \
+            'select(.tag_name == $tag) | .kind | select(. == "absent" or . == "draft" or . == "immutable")' \
+            recovered/state.json)
+          jq -r '.assets[].name' recovered/state.json | sort > "$RUNNER_TEMP/recovered-expected"
+          find recovered/assets -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | \
+            sort > "$RUNNER_TEMP/recovered-actual"
+          diff -u "$RUNNER_TEMP/recovered-expected" "$RUNNER_TEMP/recovered-actual"
+          if [[ "$kind" != absent ]]; then
+            jq -e --arg title "aros-tools $TAG" \
+              --rawfile body release/RELEASE_NOTES.md \
+              '.name == $title and .body == $body' recovered/state.json >/dev/null || {
+                echo '::error::AP7064 recovered release title or signed body differs'; exit 1;
+              }
+          fi
+          allow_new=true
+          [[ "$kind" == immutable ]] && allow_new=false
+          printf '%s\n' "$allow_new" > "$RUNNER_TEMP/allow-new"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          scripts/release/reuse-sigstore-bundles.sh \
+            --candidate-dir release --existing-dir recovered/assets \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            --allow-new "$allow_new"
       - name: Attest package-manager metadata
-        if: needs.metadata.outputs.is_release == 'true'
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: |
@@ -395,6 +1061,8 @@ jobs:
             release/aros-tools.rb.sigstore.json
             release/PKGBUILD
             release/PKGBUILD.sigstore.json
+            release/RELEASE_NOTES.md
+            release/RELEASE_NOTES.md.sigstore.json
       - name: Write complete checksum inventory
         shell: bash
         run: |
@@ -403,50 +1071,66 @@ jobs:
           (cd release && find . -maxdepth 1 -type f -print0 | \
             sort -z | xargs -0 sha256sum) > "$checksum_tmp"
           mv "$checksum_tmp" release/SHA256SUMS
-      - name: Sign and attest checksum inventory
-        if: needs.metadata.outputs.is_release == 'true'
+      - name: Recover verified checksum bundle or sign once
         shell: bash
-        run: cosign sign-blob --yes --bundle release/SHA256SUMS.sigstore.json release/SHA256SUMS
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          scripts/release/reuse-sigstore-bundles.sh \
+            --candidate-dir release \
+            --existing-dir recovered/assets \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            --allow-new "$(cat "$RUNNER_TEMP/allow-new")"
       - name: Attest checksum inventory
-        if: needs.metadata.outputs.is_release == 'true'
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: |
             release/SHA256SUMS
             release/SHA256SUMS.sigstore.json
+      - name: Verify the closed signed staging inventory
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: scripts/release/verify-candidate-inventory.sh --directory release --version "$VERSION" --signed true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: release/*
           if-no-files-found: error
           retention-days: 14
 
   apt-metadata:
     name: Signed APT repository metadata
-    needs: [metadata, aggregate]
+    if: >-
+      always() &&
+      needs.aggregate.result == 'success' &&
+      (
+        needs.metadata.outputs.is_release != 'true' ||
+        needs.sign-aggregate.result == 'success'
+      )
+    needs: [metadata, aggregate, sign-aggregate]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
-      - name: Install audited APT tooling
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev gnupg
       - name: Generate a deterministic signed repository twice
         shell: bash
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
-          SOURCE_DATE_EPOCH: ${{ needs.metadata.outputs.source_date_epoch }}
+          REPOSITORY_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch || needs.metadata.outputs.source_date_epoch }}
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/qualification-gnupg"
           install -d -m 0700 "$GNUPGHOME"
-          gpg --batch --faked-system-time "${SOURCE_DATE_EPOCH}!" \
+          gpg --batch --faked-system-time "${REPOSITORY_DATE_EPOCH}!" \
             --pinentry-mode loopback --passphrase '' \
             --quick-generate-key 'AROS qualification <qualification@example.invalid>' \
             rsa2048 sign 1d
@@ -460,18 +1144,29 @@ jobs:
               --candidate-dir candidate \
               --output-dir "$RUNNER_TEMP/repository-${copy}" \
               --version "$VERSION" \
-              --source-date-epoch "$SOURCE_DATE_EPOCH" \
+              --source-date-epoch "$REPOSITORY_DATE_EPOCH" \
               --private-key "$RUNNER_TEMP/private.asc" \
               --passphrase-file "$RUNNER_TEMP/passphrase" \
               --fingerprint "$fingerprint"
           done
           diff --recursive --no-dereference \
             "$RUNNER_TEMP/repository-a" "$RUNNER_TEMP/repository-b"
-          test "$(find "$RUNNER_TEMP/repository-a" -type f | wc -l)" -eq 10
+          test "$(find "$RUNNER_TEMP/repository-a" -type f | wc -l)" -eq 14
+          grep -Fx 'Acquire-By-Hash: yes' \
+            "$RUNNER_TEMP/repository-a/dists/stable/Release"
+          grep -Eq '^Valid-Until: .+' \
+            "$RUNNER_TEMP/repository-a/dists/stable/Release"
 
   homebrew:
     name: Homebrew install (${{ matrix.name }})
-    needs: aggregate
+    if: >-
+      always() &&
+      needs.aggregate.result == 'success' &&
+      (
+        needs.metadata.outputs.is_release != 'true' ||
+        needs.sign-aggregate.result == 'success'
+      )
+    needs: [metadata, aggregate, sign-aggregate]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -489,7 +1184,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@3cdb78d0f62ad29dd32de765782654f4eedea607
@@ -500,6 +1195,7 @@ jobs:
         shell: bash
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
           port=38080
@@ -537,12 +1233,28 @@ jobs:
           brew audit --strict "$tap/aros-tools"
           brew install "$tap/aros-tools"
           brew test "$tap/aros-tools"
+          for binary in \
+            aros aros-ahi-runner aros-collect aros-fetch \
+            aros-genmodule aros-romtool aros-transpiler aros-verify; do
+            reported_version=$("$(brew --prefix aros-tools)/bin/${binary}" --version)
+            if [[ "$reported_version" != "$binary $VERSION" ]]; then
+              echo "::error::Homebrew $binary reports version '$reported_version'; expected '$binary $VERSION'"
+              exit 1
+            fi
+          done
           brew uninstall aros-tools
           brew untap "$tap"
 
   aur:
     name: AUR package (${{ matrix.arch }})
-    needs: aggregate
+    if: >-
+      always() &&
+      needs.aggregate.result == 'success' &&
+      (
+        needs.metadata.outputs.is_release != 'true' ||
+        needs.sign-aggregate.result == 'success'
+      )
+    needs: [metadata, aggregate, sign-aggregate]
     runs-on: ubuntu-24.04
     container: archlinux:base-devel@sha256:a26046b7363dad8e2614858f4313949ae9b05c9c5f31de343a54864b9e20806f
     timeout-minutes: 30
@@ -557,13 +1269,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
       - name: Build and verify the measured PKGBUILD
         shell: bash
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}
           TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
           useradd --create-home builder
@@ -607,121 +1320,342 @@ jobs:
               aros aros-ahi-runner aros-collect aros-fetch \
               aros-genmodule aros-romtool aros-transpiler aros-verify; do
               "/usr/bin/${binary}" --help >/dev/null
+              reported_version=$("/usr/bin/${binary}" --version)
+              if [[ "$reported_version" != "$binary $VERSION" ]]; then
+                echo "::error::AUR $binary reports version '$reported_version'; expected '$binary $VERSION'"
+                exit 1
+              fi
             done
           fi
 
-  publication-preflight:
-    name: Validate publication credentials
+  release-config-preflight:
+    name: Validate immutable-release policy and release configuration
     if: >-
+      always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      !contains(needs.metadata.outputs.tag, '-')
-    needs: metadata
+      needs.sign-aggregate.result == 'success' &&
+      needs.apt-metadata.result == 'success' &&
+      needs.homebrew.result == 'success' &&
+      needs.aur.result == 'success'
+    needs: [metadata, sign-aggregate, apt-metadata, homebrew, aur]
     environment: release
     runs-on: ubuntu-24.04
-    env:
-      PACKAGE_PUBLISH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
-      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
-      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
-      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
-      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
-      - name: Fail closed before any public mutation
+      - name: Read the administration-scoped immutable-release policy
         shell: bash
+        env:
+          # Fine-grained token: this repository only, Administration read-only.
+          # It is deliberately absent from checkout, build, signing and publish.
+          GH_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}
+          IS_STABLE: ${{ needs.metadata.outputs.is_stable }}
+          AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
         run: |
           set -euo pipefail
-          required=(
-            PACKAGE_PUBLISH_TOKEN AUR_SSH_PRIVATE_KEY APT_GPG_PRIVATE_KEY
-            APT_GPG_PASSPHRASE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
-            AUR_SSH_KNOWN_HOSTS APT_GPG_FINGERPRINT APT_PUBLIC_BASE_URL
-            R2_ACCOUNT_ID R2_BUCKET_NAME
-          )
-          for name in "${required[@]}"; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "::error::AP7101 required release environment value is missing: $name"
-              exit 1
-            fi
-          done
-          if [[ ! "$APT_GPG_FINGERPRINT" =~ ^[0-9A-Fa-f]{40}$ ]]; then
-            echo "::error::AP7102 APT_GPG_FINGERPRINT must be a full 40-hex fingerprint"
+          cleanup() { unset GH_TOKEN; }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$GH_TOKEN" ]] || {
+            echo '::error::AP7100 RELEASE_ADMIN_READ_TOKEN is missing'; exit 1;
+          }
+          policy=$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases")
+          if ! jq -e '.enabled == true' <<<"$policy" >/dev/null; then
+            echo '::error::AP7100 GitHub immutable releases are not enabled'
             exit 1
           fi
-          if [[ "$APT_PUBLIC_BASE_URL" != 'https://deb.metaneutrons.cc/aros-tools' ]]; then
-            echo "::error::AP7103 APT_PUBLIC_BASE_URL must be https://deb.metaneutrons.cc/aros-tools"
-            exit 1
+          # metaneutrons is a user account, so owner enforcement is unavailable;
+          # the repository-level enabled bit is the strongest supported policy.
+          if [[ "$IS_STABLE" == true ]]; then
+            required=(
+              AUR_SSH_KNOWN_HOSTS APT_GPG_FINGERPRINT APT_PUBLIC_BASE_URL
+              R2_ACCOUNT_ID R2_BUCKET_NAME
+            )
+            for name in "${required[@]}"; do
+              [[ -n "${!name:-}" ]] || {
+                echo "::error::AP7101 release variable is missing: $name"; exit 1;
+              }
+            done
+            [[ "$APT_GPG_FINGERPRINT" =~ ^[0-9A-Fa-f]{40}$ ]] || {
+              echo '::error::AP7102 APT fingerprint is malformed'; exit 1;
+            }
+            [[ "$APT_PUBLIC_BASE_URL" == 'https://deb.metaneutrons.cc/aros-tools' ]] || {
+              echo '::error::AP7103 APT public URL is not canonical'; exit 1;
+            }
+            [[ "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]] || {
+              echo '::error::AP7104 R2 account ID is malformed'; exit 1;
+            }
+            [[ "$R2_BUCKET_NAME" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || {
+              echo '::error::AP7105 R2 bucket name is malformed'; exit 1;
+            }
           fi
-          if [[ ! "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
-            echo "::error::AP7104 R2_ACCOUNT_ID must be a 32-hex Cloudflare account ID"
-            exit 1
-          fi
-          if [[ ! "$R2_BUCKET_NAME" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
-            echo "::error::AP7105 R2_BUCKET_NAME is malformed"
-            exit 1
-          fi
-      - name: Verify the dedicated Homebrew tap credential
+
+  channel-preflight:
+    name: Refuse downgrade or divergent public channel state
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.sign-aggregate.result == 'success' &&
+      needs.apt-metadata.result == 'success' &&
+      needs.homebrew.result == 'success' &&
+      needs.aur.result == 'success'
+    needs: [metadata, sign-aggregate, apt-metadata, homebrew, aur]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - name: Check all four public states before any exposure
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-candidate-inventory.sh \
+            --directory candidate --version "$VERSION" --signed true
+          scripts/release/verify-apt-trust-anchor.sh \
+            --fingerprint "$APT_GPG_FINGERPRINT"
+          scripts/release/verify-publication-channels.sh \
+            --mode preflight --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --candidate-dir candidate \
+            --apt-base-url "$APT_PUBLIC_BASE_URL" \
+            --apt-fingerprint "$APT_GPG_FINGERPRINT"
+
+  homebrew-credential-preflight:
+    name: Verify the isolated Homebrew credential
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.channel-preflight.result == 'success' &&
+      needs.release-config-preflight.result == 'success'
+    needs: [metadata, channel-preflight, release-config-preflight]
+    environment: homebrew-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify dedicated tap access
         env:
           GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
         run: |
           set -euo pipefail
-          permission=$(gh api repos/metaneutrons/homebrew-tap --jq '.permissions.push')
-          if [[ "$permission" != true ]]; then
-            echo "::error::AP7110 package credential cannot write metaneutrons/homebrew-tap"
-            exit 1
-          fi
-      - name: Verify the bucket-scoped R2 credential
+          cleanup() { unset GH_TOKEN; }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$GH_TOKEN" ]] || { echo '::error::AP7110 Homebrew credential is missing'; exit 1; }
+          [[ $(gh api repos/metaneutrons/homebrew-tap --jq '.permissions.push') == true ]] || {
+            echo '::error::AP7110 package credential cannot write the Homebrew tap'; exit 1;
+          }
+          scripts/release/verify-branch-protection.sh \
+            --repository metaneutrons/homebrew-tap >/dev/null || {
+              echo '::error::AP7110 Homebrew tap differs from the governance contract'; exit 1;
+            }
+
+  r2-credential-preflight:
+    name: Verify the isolated R2 credential
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.channel-preflight.result == 'success' &&
+      needs.release-config-preflight.result == 'success'
+    needs: [metadata, channel-preflight, release-config-preflight]
+    environment: apt-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify bucket-scoped read/write/delete access
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_REGION: auto
           AWS_DEFAULT_REGION: auto
           AWS_EC2_METADATA_DISABLED: 'true'
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          probe_key="aros-tools/.publication-probes/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" && \
+                  -n "${R2_ACCOUNT_ID:-}" && -n "${R2_BUCKET_NAME:-}" ]]; then
+              aws s3api delete-object --endpoint-url "$endpoint" \
+                --bucket "$R2_BUCKET_NAME" --key "$probe_key" >/dev/null || true
+            fi
+            rm -f -- "$RUNNER_TEMP/r2-write-probe" "$RUNNER_TEMP/r2-write-probe.readback"
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
+            echo '::error::AP7111 R2 credential is missing'; exit 1;
+          }
           aws s3api head-bucket --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME"
-      - name: Verify signing and AUR identities without publishing
+          printf '%s\n' "aros-tools release ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
+            > "$RUNNER_TEMP/r2-write-probe"
+          aws s3api put-object --endpoint-url "$endpoint" \
+            --bucket "$R2_BUCKET_NAME" --key "$probe_key" \
+            --body "$RUNNER_TEMP/r2-write-probe" --if-none-match '*' \
+            --cache-control no-store --content-type 'text/plain; charset=utf-8' >/dev/null
+          aws s3api get-object --endpoint-url "$endpoint" \
+            --bucket "$R2_BUCKET_NAME" --key "$probe_key" \
+            "$RUNNER_TEMP/r2-write-probe.readback" >/dev/null
+          cmp "$RUNNER_TEMP/r2-write-probe" "$RUNNER_TEMP/r2-write-probe.readback"
+          aws s3api delete-object --endpoint-url "$endpoint" \
+            --bucket "$R2_BUCKET_NAME" --key "$probe_key" >/dev/null
+
+  apt-credential-preflight:
+    name: Verify the isolated APT signing credential
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.channel-preflight.result == 'success' &&
+      needs.release-config-preflight.result == 'success'
+    needs: [metadata, channel-preflight, release-config-preflight]
+    environment: apt-signing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Import, match and exercise only the configured signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
           export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          cleanup() {
+            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+            rm -rf -- "$GNUPGHOME"
+            rm -f -- "$RUNNER_TEMP/apt-private.asc" \
+              "$RUNNER_TEMP/signing-probe" "$RUNNER_TEMP/signing-probe.sig"
+            unset APT_GPG_PRIVATE_KEY APT_GPG_PASSPHRASE
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$APT_GPG_PRIVATE_KEY" && -n "$APT_GPG_PASSPHRASE" ]] || {
+            echo '::error::AP7120 APT signing credential is missing'; exit 1;
+          }
           install -d -m 0700 "$GNUPGHOME"
+          install -m 0600 /dev/null "$RUNNER_TEMP/apt-private.asc"
           printf '%s\n' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/apt-private.asc"
           gpg --batch --import "$RUNNER_TEMP/apt-private.asc" >/dev/null 2>&1
           measured=$(gpg --batch --with-colons --list-secret-keys \
-            --fingerprint "$APT_GPG_FINGERPRINT" | \
-            awk -F: '$1 == "fpr" { print toupper($10); exit }')
-          if [[ "$measured" != "${APT_GPG_FINGERPRINT^^}" ]]; then
-            echo "::error::AP7120 imported APT key fingerprint does not match the release variable"
-            exit 1
-          fi
+            --fingerprint "$APT_GPG_FINGERPRINT" | awk -F: '
+              $1 == "sec" { secret_keys += 1; validity = $2; next }
+              $1 == "fpr" && secret_keys == 1 && !measured {
+                measured = toupper($10)
+              }
+              END {
+                if (secret_keys != 1 || length(measured) != 40 ||
+                    measured !~ /^[0-9A-F]+$/ || validity ~ /^[redi]$/) exit 1
+                print measured
+              }
+            ') || {
+              echo '::error::AP7120 APT bundle lacks one active primary secret key'; exit 1;
+            }
+          [[ "$measured" == "${APT_GPG_FINGERPRINT^^}" ]] || {
+            echo '::error::AP7120 imported APT key fingerprint differs'; exit 1;
+          }
           printf 'aros-tools publication preflight\n' > "$RUNNER_TEMP/signing-probe"
           printf '%s' "$APT_GPG_PASSPHRASE" | gpg \
             --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
             --local-user "$APT_GPG_FINGERPRINT" --detach-sign \
             --output "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
           gpg --batch --verify "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
-          install -m 0600 /dev/null "$RUNNER_TEMP/aur-key"
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/aur-key"
-          ssh-keygen -y -f "$RUNNER_TEMP/aur-key" >/dev/null
-          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
-          if ! ssh-keygen -F aur.archlinux.org -f "$RUNNER_TEMP/known_hosts" >/dev/null; then
-            echo "::error::AP7121 pinned AUR known_hosts data lacks aur.archlinux.org"
-            exit 1
-          fi
-          if ! ssh -i "$RUNNER_TEMP/aur-key" \
-            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
-            aur@aur.archlinux.org help >/dev/null; then
-            echo "::error::AP7122 AUR did not accept the dedicated release key"
-            exit 1
-          fi
 
-  stage:
-    name: Stage verified public prerelease
+  aur-credential-preflight:
+    name: Verify the isolated AUR SSH credential
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.channel-preflight.result == 'success' &&
+      needs.release-config-preflight.result == 'success'
+    needs: [metadata, channel-preflight, release-config-preflight]
+    environment: aur-publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify the pinned host and dedicated identity
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          secret_root="$RUNNER_TEMP/aur-preflight"
+          cleanup() {
+            rm -rf -- "$secret_root"
+            unset AUR_SSH_PRIVATE_KEY
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$AUR_SSH_PRIVATE_KEY" && -n "$AUR_SSH_KNOWN_HOSTS" ]] || {
+            echo '::error::AP7121 AUR identity or known-host policy is missing'; exit 1;
+          }
+          install -d -m 0700 "$secret_root"
+          install -m 0600 /dev/null "$secret_root/key"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$secret_root/key"
+          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$secret_root/known_hosts"
+          ssh-keygen -y -f "$secret_root/key" >/dev/null
+          ssh-keygen -F aur.archlinux.org -f "$secret_root/known_hosts" >/dev/null || {
+            echo '::error::AP7121 pinned AUR known_hosts entry is missing'; exit 1;
+          }
+          ssh -i "$secret_root/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$secret_root/known_hosts" \
+            aur@aur.archlinux.org help >/dev/null || {
+              echo '::error::AP7122 AUR rejected the dedicated release key'; exit 1;
+            }
+
+  publication-preflight:
+    name: Aggregate isolated publication preflights
+    if: >-
+      always() &&
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.release-config-preflight.result == 'success' &&
+      needs.channel-preflight.result == 'success' &&
+      needs.homebrew-credential-preflight.result == 'success' &&
+      needs.r2-credential-preflight.result == 'success' &&
+      needs.apt-credential-preflight.result == 'success' &&
+      needs.aur-credential-preflight.result == 'success'
+    needs: [metadata, release-config-preflight, channel-preflight, homebrew-credential-preflight, r2-credential-preflight, apt-credential-preflight, aur-credential-preflight]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm every isolated fail-closed gate
+        run: printf '%s\n' 'release configuration, public state and four credentials verified on separate runners'
+
+  publish:
+    name: Publish the immutable GitHub release exactly once
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
@@ -729,54 +1663,255 @@ jobs:
       needs.apt-metadata.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success' &&
+      needs.release-config-preflight.result == 'success' &&
       (
-        contains(needs.metadata.outputs.tag, '-') ||
-        needs.publication-preflight.result == 'success'
+        needs.metadata.outputs.is_stable != 'true' ||
+        (
+          needs.publication-preflight.result == 'success'
+        )
       )
-    needs: [metadata, aggregate, apt-metadata, homebrew, aur, publication-preflight]
+    needs: [metadata, release-recovery, aggregate, apt-metadata, homebrew, aur, release-config-preflight, channel-preflight, publication-preflight]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       attestations: read
-      id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
       - name: Install keyless verification client
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.1
-      - name: Create immutable draft
+      - name: Revalidate immutable tag and protected source branch
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::release $TAG already exists; refusing to replace or mutate it"
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - name: Create or resume the private exact-byte draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+          IS_STABLE: ${{ needs.metadata.outputs.is_stable }}
+          RECOVERED_KIND: ${{ needs.release-recovery.outputs.kind }}
+          RECOVERED_ID: ${{ needs.release-recovery.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          expected_prerelease=true
+          [[ "$IS_STABLE" == true ]] && expected_prerelease=false
+
+          resolve_by_tag() {
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"
+            jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+              "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/release-matches.json"
+            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") -le 1 ]] || {
+              echo '::error::AP7500 release tag resolves to multiple release IDs'; exit 1;
+            }
+          }
+          download_by_id() {
+            local release_id=$1 destination=$2 mode=$3
+            scripts/release/download-release-assets.sh \
+              --repository "$GITHUB_REPOSITORY" --release-id "$release_id" \
+              --version "${TAG#v}" --directory "$destination" \
+              --mode "$mode" --candidate-dir candidate
+          }
+          upload_by_id() {
+            local release_id=$1 name=$2 encoded size digest response
+            [[ "$release_id" =~ ^[1-9][0-9]*$ && \
+               "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || {
+              echo '::error::AP7500 refusing unsafe numeric-ID asset upload'; exit 1;
+            }
+            encoded=$(python3 - "$name" <<'PY'
+          import sys
+          import urllib.parse
+
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          PY
+            )
+            size=$(wc -c < "candidate/$name" | tr -d ' ')
+            digest=$(sha256sum "candidate/$name" | awk '{ print $1 }')
+            response=$(curl --fail --silent --show-error \
+              --proto '=https' --tlsv1.2 --request POST \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@candidate/$name" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded}")
+            jq -e --arg name "$name" --arg digest "sha256:$digest" \
+              --argjson size "$size" \
+              '.name == $name and .state == "uploaded" and .size == $size and
+               .digest == $digest and (.id | type == "number" and . > 0)' \
+              <<<"$response" >/dev/null || {
+                echo "::error::AP7500 uploaded asset metadata differs: $name"; exit 1;
+              }
+          }
+
+          resolve_by_tag
+          count=$(jq 'length' "$RUNNER_TEMP/release-matches.json")
+          if ((count == 0)); then
+            if [[ "$RECOVERED_KIND" != absent || -n "$RECOVERED_ID" ]]; then
+              echo '::error::AP7500 recovered release ID disappeared; refusing replacement'
+              exit 1
+            fi
+            scripts/release/verify-release-window.sh \
+              --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+            # Create metadata only. Subjects and keyless bundles are uploaded
+            # before the checksum inventory, so an interrupted draft can
+            # regenerate only evidence not yet covered by an uploaded checksum.
+            create=(gh release create "$TAG" --repo "$GITHUB_REPOSITORY"
+              --verify-tag --draft --notes-file candidate/RELEASE_NOTES.md
+              --title "aros-tools $TAG")
+            [[ "$IS_STABLE" == true ]] || create+=(--prerelease)
+            "${create[@]}"
+            resolve_by_tag
+            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]] || {
+              echo '::error::AP7500 newly created draft cannot be resolved'; exit 1;
+            }
+          elif [[ "$RECOVERED_KIND" == absent ]]; then
+            echo '::error::AP7500 release state appeared after recovery; rerun for verified recovery'
             exit 1
           fi
-          gh release create "$TAG" candidate/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --draft \
-            --generate-notes \
-            --title "aros-tools $TAG"
-      - name: Download draft into an isolated directory
+
+          state=$(jq -c '.[0]' "$RUNNER_TEMP/release-matches.json")
+          release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$state")
+          if [[ -n "$RECOVERED_ID" && "$release_id" != "$RECOVERED_ID" ]]; then
+            echo '::error::AP7500 release ID changed after recovery'
+            exit 1
+          fi
+          is_draft=$(jq -er '.draft | select(type == "boolean")' <<<"$state")
+          is_prerelease=$(jq -er '.prerelease | select(type == "boolean")' <<<"$state")
+          immutable=$(jq -er '.immutable // false | select(type == "boolean")' <<<"$state")
+          jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+            --rawfile body candidate/RELEASE_NOTES.md \
+            '.tag_name == $tag and .name == $title and .body == $body' \
+            <<<"$state" >/dev/null || {
+              echo '::error::AP7500 release tag, title or signed body differs'; exit 1;
+            }
+          [[ "$is_prerelease" == "$expected_prerelease" ]] || {
+            echo '::error::AP7502 release channel status differs from the SemVer tag'; exit 1;
+          }
+          if [[ "$is_draft" == true && "$immutable" == false ]]; then
+            :
+          elif [[ "$is_draft" == false && "$immutable" == true ]]; then
+            :
+          else
+            echo '::error::AP7501 release is neither a private draft nor immutable'
+            exit 1
+          fi
+          printf '%s\n' "$release_id" > "$RUNNER_TEMP/release-id"
+
+          existing="$RUNNER_TEMP/existing-release"
+          download_by_id "$release_id" "$existing" subset
+          if find candidate "$existing" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            echo '::error::AP7500 release candidates must contain regular files only'
+            exit 1
+          fi
+          candidate_names="$RUNNER_TEMP/candidate-names"
+          existing_names="$RUNNER_TEMP/existing-names"
+          find candidate -maxdepth 1 -type f -printf '%f\n' | sort > "$candidate_names"
+          find "$existing" -maxdepth 1 -type f -printf '%f\n' | sort > "$existing_names"
+          if [[ -n $(comm -13 "$candidate_names" "$existing_names") ]]; then
+            echo '::error::AP7500 release contains assets outside the qualified inventory'
+            comm -13 "$candidate_names" "$existing_names"
+            exit 1
+          fi
+          while IFS= read -r name; do
+            cmp "candidate/$name" "$existing/$name"
+          done < "$existing_names"
+          missing=$(comm -23 "$candidate_names" "$existing_names")
+          if [[ -n "$missing" && "$is_draft" != true ]]; then
+            echo '::error::AP7503 immutable release is incomplete and cannot be repaired'
+            printf '%s\n' "$missing"
+            exit 1
+          fi
+          if [[ -n "$missing" ]]; then
+            scripts/release/verify-release-window.sh \
+              --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+            upload_order="$RUNNER_TEMP/missing-upload-order"
+            grep -Ev '^SHA256SUMS(\.sigstore\.json)?$' <<<"$missing" \
+              > "$upload_order" || true
+            for checksum_name in SHA256SUMS SHA256SUMS.sigstore.json; do
+              if grep -Fxq "$checksum_name" <<<"$missing"; then
+                printf '%s\n' "$checksum_name" >> "$upload_order"
+              fi
+            done
+            while IFS= read -r name; do
+              [[ -n "$name" ]] || continue
+              current=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+              jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+                --argjson id "$release_id" \
+                --rawfile body candidate/RELEASE_NOTES.md \
+                '.id == $id and .tag_name == $tag and .draft == true and
+                 (.immutable // false) == false and .name == $title and .body == $body' \
+                <<<"$current" >/dev/null || {
+                  echo '::error::AP7500 draft changed during recovery upload'; exit 1;
+                }
+              scripts/release/verify-release-ref.sh \
+                --repository "$GITHUB_REPOSITORY" \
+                --tag "$TAG" --tag-object "$TAG_OBJECT" \
+                --source-commit "$SOURCE_COMMIT" \
+                --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+              scripts/release/verify-release-window.sh \
+                --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+              upload_by_id "$release_id" "$name"
+            done < "$upload_order"
+          fi
+          completed="$RUNNER_TEMP/completed-release"
+          download_by_id "$release_id" "$completed" exact
+          diff -u "$candidate_names" \
+            <(find "$completed" -maxdepth 1 -type f -printf '%f\n' | sort)
+          while IFS= read -r name; do
+            cmp "candidate/$name" "$completed/$name"
+          done < "$candidate_names"
+          echo "release ID $release_id is complete and byte-identical"
+      - name: Download the private draft or existing immutable release in isolation
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           set -euo pipefail
-          mkdir isolated
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir isolated
+          release_id=$(cat "$RUNNER_TEMP/release-id")
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || exit 1
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+          jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+            --argjson id "$release_id" --rawfile body candidate/RELEASE_NOTES.md \
+            '.id == $id and .tag_name == $tag and .name == $title and .body == $body' \
+            <<<"$state" >/dev/null || {
+              echo '::error::AP7500 release metadata changed after isolated download'; exit 1;
+            }
+          mv "$RUNNER_TEMP/completed-release" isolated
+          scripts/release/verify-candidate-inventory.sh \
+            --directory isolated --version "${TAG#v}" --signed true
           (cd isolated && sha256sum -c SHA256SUMS)
       - name: Verify downloaded signatures and attestations
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
         run: |
           set -euo pipefail
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
@@ -789,45 +1924,229 @@ jobs:
               --certificate-oidc-issuer "$issuer" \
               "$subject"
           done
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
           for subject in isolated/*; do
-            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "$SOURCE_COMMIT" \
+              --deny-self-hosted-runners
           done
-      - name: Expose the unchanged draft as a non-latest prerelease
+      - name: Publish once with the final release status and verify immutability
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+          IS_STABLE: ${{ needs.metadata.outputs.is_stable }}
         run: |
           set -euo pipefail
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --draft=false --prerelease --latest=false
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          release_id=$(cat "$RUNNER_TEMP/release-id")
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || exit 1
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+          jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+            --argjson id "$release_id" --rawfile body candidate/RELEASE_NOTES.md \
+            '.id == $id and .tag_name == $tag and .name == $title and .body == $body' \
+            <<<"$state" >/dev/null || {
+              echo '::error::AP7500 release identity changed before exposure'; exit 1;
+            }
+          if [[ $(jq -r '.draft' <<<"$state") == true ]]; then
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              > "$RUNNER_TEMP/pre-expose-asset-pages.json"
+            jq -c '[.[][]]' "$RUNNER_TEMP/pre-expose-asset-pages.json" \
+              > "$RUNNER_TEMP/pre-expose-assets.json"
+            python3 scripts/release/release-asset-metadata.py validate \
+              --version "${TAG#v}" \
+              --metadata-json "$RUNNER_TEMP/pre-expose-assets.json" \
+              --mode exact --candidate-dir candidate >/dev/null
+            scripts/release/verify-release-ref.sh \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$TAG" --tag-object "$TAG_OBJECT" \
+              --source-commit "$SOURCE_COMMIT" \
+              --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+            scripts/release/verify-release-window.sh \
+              --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+            if [[ "$IS_STABLE" == true ]]; then
+              gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+                -F draft=false -F prerelease=false -f make_latest=true >/dev/null
+            else
+              gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+                -F draft=false -F prerelease=true -f make_latest=false >/dev/null
+            fi
+          else
+            echo 'exact immutable release is already public; no mutation is permitted or needed'
+          fi
+          for attempt in {1..20}; do
+            state=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+            if [[ $(jq -r '.immutable // false' <<<"$state") == true ]]; then
+              break
+            fi
+            if [[ "$attempt" == 20 ]]; then
+              echo '::error::AP7505 GitHub did not finalize the immutable release'
+              exit 1
+            fi
+            sleep 3
+          done
+          if [[ $(jq -r '.draft' <<<"$state") != false ]]; then
+            echo '::error::AP7506 final release unexpectedly remains a draft'
+            exit 1
+          fi
+          if [[ "$IS_STABLE" == true && $(jq -r '.prerelease' <<<"$state") != false ]]; then
+            echo '::error::AP7507 stable release was not published with final stable status'
+            exit 1
+          fi
+          if [[ "$IS_STABLE" != true && $(jq -r '.prerelease' <<<"$state") != true ]]; then
+            echo '::error::AP7508 prerelease was not published with final prerelease status'
+            exit 1
+          fi
+          jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+            --argjson id "$release_id" --rawfile body candidate/RELEASE_NOTES.md \
+            '.id == $id and .tag_name == $tag and .name == $title and .body == $body' \
+            <<<"$state" >/dev/null || {
+              echo '::error::AP7509 final release title or signed body differs'; exit 1;
+            }
+          scripts/release/verify-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --candidate-dir candidate
 
   ecosystem:
-    name: Publish and verify stable package channels
+    name: Roll forward and verify stable package channels
     if: >-
       needs.metadata.outputs.is_release == 'true' &&
-      !contains(needs.metadata.outputs.tag, '-')
-    needs: [metadata, stage]
+      needs.metadata.outputs.is_stable == 'true'
+    needs: [metadata, publish]
     uses: ./.github/workflows/publish-ecosystem.yml
     with:
       tag: ${{ needs.metadata.outputs.tag }}
+      tag_object: ${{ needs.metadata.outputs.tag_object }}
       version: ${{ needs.metadata.outputs.version }}
-      source_date_epoch: ${{ needs.metadata.outputs.source_date_epoch }}
+      source_commit: ${{ needs.metadata.outputs.source_commit }}
+      tag_date_epoch: ${{ needs.metadata.outputs.tag_date_epoch }}
 
-  promote-stable:
-    name: Promote stable release after every package channel
+  final-audit:
+    name: Reverify immutable stable release after channel convergence
     if: >-
       needs.metadata.outputs.is_release == 'true' &&
-      !contains(needs.metadata.outputs.tag, '-')
+      needs.metadata.outputs.is_stable == 'true'
     needs: [metadata, ecosystem]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
+      attestations: read
     steps:
-      - name: Promote the already verified prerelease without changing assets
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - name: Install keyless verification client
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+      - name: Reverify every immutable final asset without mutation
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --prerelease=false --latest
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          state=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          if [[ $(jq -r '.tag_name' <<<"$state") != "$TAG" || \
+                $(jq -r '.draft' <<<"$state") != false || \
+                $(jq -r '.prerelease' <<<"$state") != false || \
+                $(jq -r '.immutable // false' <<<"$state") != true ]]; then
+            echo '::error::AP7510 final release is not immutable stable state'
+            exit 1
+          fi
+          jq -e --arg title "aros-tools $TAG" \
+            --rawfile body candidate/RELEASE_NOTES.md \
+            '.name == $title and .body == $body' <<<"$state" >/dev/null || {
+              echo '::error::AP7510 final release title or signed body differs'; exit 1;
+            }
+          final="$RUNNER_TEMP/final-release"
+          release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$state")
+          scripts/release/download-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" --release-id "$release_id" \
+            --version "$VERSION" --directory "$final" --mode exact \
+            --candidate-dir candidate
+          if find candidate "$final" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            echo '::error::AP7501 final release inventories must contain regular files only'
+            exit 1
+          fi
+          candidate_names="$RUNNER_TEMP/final-candidate-names"
+          release_names="$RUNNER_TEMP/final-release-names"
+          find candidate -maxdepth 1 -type f -printf '%f\n' | sort > "$candidate_names"
+          find "$final" -maxdepth 1 -type f -printf '%f\n' | sort > "$release_names"
+          diff -u "$candidate_names" "$release_names"
+          while IFS= read -r name; do
+            cmp "candidate/$name" "$final/$name"
+          done < "$candidate_names"
+          (cd "$final" && sha256sum -c SHA256SUMS)
+          for target in \
+            x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin aarch64-apple-darwin; do
+            archive="$final/aros-tools-v${VERSION}-${target}.tar.gz"
+            scripts/release/verify-spdx-sbom.sh \
+              --artifact "$archive" \
+              --sbom "$final/aros-tools-v${VERSION}-${target}.spdx.json" \
+              --expected-sha256 "$(awk '{ print $1 }' "${archive}.sha256")" \
+              --kind archive --version "$VERSION"
+          done
+          for arch in amd64 arm64; do
+            deb="$final/aros-tools_${VERSION}_${arch}.deb"
+            scripts/release/verify-spdx-sbom.sh \
+              --artifact "$deb" \
+              --sbom "$final/aros-tools_${VERSION}_${arch}.spdx.json" \
+              --expected-sha256 "$(sha256sum "$deb" | awk '{ print $1 }')" \
+              --kind deb --version "$VERSION"
+          done
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          issuer="https://token.actions.githubusercontent.com"
+          for bundle in "$final"/*.sigstore.json; do
+            subject=${bundle%.sigstore.json}
+            cosign verify-blob --bundle "$bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" "$subject"
+          done
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+          for subject in "$final"/*; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "$SOURCE_COMMIT" \
+              --deny-self-hosted-runners
+          done
+          scripts/release/verify-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --candidate-dir candidate
+          scripts/release/verify-publication-channels.sh \
+            --mode exact --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --candidate-dir candidate \
+            --apt-base-url "$APT_PUBLIC_BASE_URL" \
+            --apt-fingerprint "$APT_GPG_FINGERPRINT"
+          echo 'immutable stable release and every converged channel remain verified'

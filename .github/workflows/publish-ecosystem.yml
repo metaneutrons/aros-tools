@@ -6,185 +6,944 @@ on:
       tag:
         required: true
         type: string
+      tag_object:
+        required: true
+        type: string
       version:
         required: true
         type: string
-      source_date_epoch:
+      source_commit:
+        required: true
+        type: string
+      tag_date_epoch:
         required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: aros-tools-publication
+  cancel-in-progress: false
+
 jobs:
-  apt:
-    name: Publish and verify signed APT repository
+  apt-sign:
+    name: Sign closed APT publication handoff
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: release
+    environment: apt-signing
     env:
       VERSION: ${{ inputs.version }}
-      SOURCE_DATE_EPOCH: ${{ inputs.source_date_epoch }}
-      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+      TAG: ${{ inputs.tag }}
+      TAG_OBJECT: ${{ inputs.tag_object }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
       APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
-      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
-      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_REGION: auto
-      AWS_DEFAULT_REGION: auto
-      AWS_EC2_METADATA_DISABLED: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
-      - name: Install audited APT tooling
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev gnupg
-          aws --version
+      - name: Verify closed immutable staging inventory
+        run: scripts/release/verify-candidate-inventory.sh --directory candidate --version "$VERSION" --signed true
       - name: Build deterministic signed repository metadata
         shell: bash
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
+          cleanup() {
+            trap - EXIT
+            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+            rm -f -- "$RUNNER_TEMP/apt-private.asc" "$RUNNER_TEMP/apt-passphrase"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$APT_GPG_PRIVATE_KEY" && -n "$APT_GPG_PASSPHRASE" ]] || {
+            echo '::error::AP7200 APT signing credential is missing'; exit 1;
+          }
+          scripts/release/verify-apt-trust-anchor.sh \
+            --fingerprint "$APT_GPG_FINGERPRINT"
           printf '%s\n' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/apt-private.asc"
           printf '%s' "$APT_GPG_PASSPHRASE" > "$RUNNER_TEMP/apt-passphrase"
           chmod 0600 "$RUNNER_TEMP/apt-private.asc" "$RUNNER_TEMP/apt-passphrase"
+          metadata_epoch=$(date +%s)
+          [[ "$metadata_epoch" =~ ^[1-9][0-9]*$ ]] || {
+            echo '::error::AP7200 current APT metadata epoch is invalid'; exit 1;
+          }
           scripts/release/build-apt-repository.sh \
             --candidate-dir candidate \
             --output-dir "$RUNNER_TEMP/apt-repository" \
             --version "$VERSION" \
-            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --source-date-epoch "$metadata_epoch" \
             --private-key "$RUNNER_TEMP/apt-private.asc" \
             --passphrase-file "$RUNNER_TEMP/apt-passphrase" \
             --fingerprint "$APT_GPG_FINGERPRINT"
-          find "$RUNNER_TEMP/apt-repository" -type f -print | sort
-      - name: Publish objects with metadata last
-        shell: bash
+          cleanup
+          trap - EXIT HUP INT TERM
+      - name: Verify the closed public APT handoff without credentials
         run: |
           set -euo pipefail
+          scripts/release/verify-apt-publication-inventory.sh \
+            --directory "$RUNNER_TEMP/apt-repository" \
+            --mode full --version "$VERSION" \
+            --fingerprint "$APT_GPG_FINGERPRINT" --require-unexpired
+      - name: Seal the closed public APT object set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: signed-apt-publication
+          path: ${{ runner.temp }}/apt-repository/
+          if-no-files-found: error
+          retention-days: 1
+
+  apt:
+    name: Publish and verify signed APT repository
+    needs: apt-sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: apt-publication
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: ${{ inputs.tag }}
+      TAG_OBJECT: ${{ inputs.tag_object }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
+      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: signed-apt-publication
+          path: ${{ runner.temp }}/apt-repository
+      - name: Verify both closed public object sets
+        run: |
+          set -euo pipefail
+          scripts/release/verify-candidate-inventory.sh \
+            --directory candidate --version "$VERSION" --signed true
+          scripts/release/verify-apt-publication-inventory.sh \
+            --directory "$RUNNER_TEMP/apt-repository" \
+            --mode full --version "$VERSION" \
+            --fingerprint "$APT_GPG_FINGERPRINT" --require-unexpired
+      - name: Publish objects with metadata last
+        shell: bash
+        env:
+          SOURCE_REPOSITORY_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: 'true'
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/apt-publication-gnupg"
+          install -d -m 0700 "$GNUPGHOME"
+          cleanup() {
+            trap - EXIT
+            gpgconf --homedir "$GNUPGHOME" --kill gpg-agent >/dev/null 2>&1 || true
+            rm -rf -- "$GNUPGHOME"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
+            echo '::error::AP7200 R2 publication credential is missing'; exit 1;
+          }
+          aws --version
+          [[ "$TAG" == "v${VERSION}" && "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::AP7205 stable channel publication requires exact vX.Y.Z identity"
+            exit 1
+          }
+          GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          now=$(date +%s)
+          [[ "$now" =~ ^[1-9][0-9]*$ ]] || exit 1
           repository="$RUNNER_TEMP/apt-repository"
+          valid_until=$(sed -n 's/^Valid-Until: //p' \
+            "$repository/dists/stable/Release")
+          [[ -n "$valid_until" ]] || {
+            echo "::error::AP7206 APT Release has no Valid-Until"
+            exit 1
+          }
+          valid_until_epoch=$(date --date="$valid_until" +%s)
+          ((now < valid_until_epoch)) || {
+            echo "::error::AP7207 refusing to publish expired APT metadata"
+            exit 1
+          }
+          authorize_mutation() {
+            local current
+            GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" scripts/release/verify-release-ref.sh \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$TAG" --tag-object "$TAG_OBJECT" \
+              --source-commit "$SOURCE_COMMIT" \
+              --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+            GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+              scripts/release/verify-release-assets.sh \
+                --repository "$GITHUB_REPOSITORY" \
+                --tag "$TAG" --candidate-dir candidate >/dev/null
+            current=$(date +%s)
+            ((current < valid_until_epoch)) || {
+              echo "::error::AP7207 refusing to publish expired APT metadata"
+              exit 1
+            }
+          }
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          destination="s3://${R2_BUCKET_NAME}/aros-tools"
-          aws s3 cp "$repository/pool" "$destination/pool" \
-            --endpoint-url "$endpoint" --recursive \
-            --cache-control 'public,max-age=31536000,immutable' \
-            --content-type 'application/vnd.debian.binary-package'
-          aws s3 cp "$repository/aros-tools-archive-keyring.asc" \
-            "$destination/aros-tools-archive-keyring.asc" \
-            --endpoint-url "$endpoint" --cache-control 'public,max-age=3600' \
-            --content-type 'application/pgp-keys'
+          channel_version=
+          channel_committed=false
+          mutable_snapshot="$RUNNER_TEMP/apt-mutable-snapshot"
+          install -d "$mutable_snapshot"
+          declare -A mutable_state mutable_etag mutable_remote mutable_head
+          snapshot_mutable() {
+            local key=$1 label=$2 head error remote etag
+            head="$mutable_snapshot/${label}.head.json"
+            error="$mutable_snapshot/${label}.error"
+            remote="$mutable_snapshot/${label}.object"
+            if aws s3api head-object --endpoint-url "$endpoint" \
+              --bucket "$R2_BUCKET_NAME" --key "$key" > "$head" 2> "$error"; then
+              etag=$(jq -er '.ETag | select(type == "string" and length > 0)' "$head")
+              aws s3api get-object --endpoint-url "$endpoint" \
+                --bucket "$R2_BUCKET_NAME" --key "$key" --if-match "$etag" \
+                "$remote" >/dev/null
+              mutable_state["$key"]=present
+              mutable_etag["$key"]=$etag
+              mutable_remote["$key"]=$remote
+              mutable_head["$key"]=$head
+            elif grep -Eq '\(404\)|NoSuchKey|Not Found' "$error"; then
+              mutable_state["$key"]=absent
+            else
+              echo "::error::AP7216 unable to snapshot mutable R2 state for $key"
+              sed 's/^/  /' "$error" >&2
+              exit 1
+            fi
+          }
           for arch in amd64 arm64; do
             prefix="dists/stable/main/binary-${arch}"
-            aws s3 cp "$repository/${prefix}/Packages" "$destination/${prefix}/Packages" \
-              --endpoint-url "$endpoint" --cache-control 'no-cache' \
-              --content-type 'text/plain; charset=utf-8'
-            aws s3 cp "$repository/${prefix}/Packages.gz" "$destination/${prefix}/Packages.gz" \
-              --endpoint-url "$endpoint" --cache-control 'no-cache' \
-              --content-type 'application/gzip'
+            snapshot_mutable "aros-tools/${prefix}/Packages" "Packages-${arch}"
+            snapshot_mutable "aros-tools/${prefix}/Packages.gz" "Packages-gz-${arch}"
           done
-          aws s3 cp "$repository/dists/stable/Release" "$destination/dists/stable/Release" \
-            --endpoint-url "$endpoint" --cache-control 'no-cache' \
-            --content-type 'text/plain; charset=utf-8'
-          aws s3 cp "$repository/dists/stable/Release.gpg" \
-            "$destination/dists/stable/Release.gpg" \
-            --endpoint-url "$endpoint" --cache-control 'no-cache' \
-            --content-type 'application/pgp-signature'
-          aws s3 cp "$repository/dists/stable/InRelease" \
-            "$destination/dists/stable/InRelease" \
-            --endpoint-url "$endpoint" --cache-control 'no-cache' \
-            --content-type 'text/plain; charset=utf-8'
+          snapshot_mutable 'aros-tools/dists/stable/Release' Release
+          snapshot_mutable 'aros-tools/dists/stable/Release.gpg' Release-gpg
+          snapshot_mutable 'aros-tools/dists/stable/InRelease' InRelease
+          inrelease_key='aros-tools/dists/stable/InRelease'
+          if [[ ${mutable_state[$inrelease_key]} == present ]]; then
+            channel_inrelease=${mutable_remote[$inrelease_key]}
+            channel_release="$RUNNER_TEMP/channel-Release"
+            gpg --batch --dearmor \
+              < "$repository/aros-tools-archive-keyring.asc" \
+              > "$RUNNER_TEMP/channel-keyring.gpg"
+            gpgv --status-fd 3 \
+              --keyring "$RUNNER_TEMP/channel-keyring.gpg" \
+              --output "$channel_release" "$channel_inrelease" \
+              3> "$RUNNER_TEMP/channel-inrelease.status" 2>/dev/null || {
+              echo '::error::AP7213 committed APT InRelease signature is invalid'; exit 1;
+            }
+            scripts/release/verify-gpgv-status.sh \
+              --status-file "$RUNNER_TEMP/channel-inrelease.status" \
+              --fingerprint "$APT_GPG_FINGERPRINT" || {
+                echo '::error::AP7213 committed APT InRelease signer is not active and exact'; exit 1;
+              }
+            channel_inrelease_canonical=false
+            if [[ $(head -n 1 "$channel_inrelease") == \
+                   '-----BEGIN PGP SIGNED MESSAGE-----' && \
+                  $(tail -n 1 "$channel_inrelease") == \
+                   '-----END PGP SIGNATURE-----' && \
+                  $(grep -c '^-----BEGIN PGP SIGNATURE-----$' \
+                    "$channel_inrelease") == 1 && \
+                  $(grep -c '^-----END PGP SIGNATURE-----$' \
+                    "$channel_inrelease") == 1 ]]; then
+              channel_inrelease_canonical=true
+            fi
+            for arch in amd64 arm64; do
+              read -r committed_sha committed_size < <(
+                awk -v wanted="main/binary-${arch}/Packages.gz" '
+                  $1 == "SHA256:" { section = 1; next }
+                  section && $0 !~ /^ / { section = 0 }
+                  section && $3 == wanted { count += 1; digest = $1; size = $2 }
+                  END { if (count != 1) exit 1; print digest, size }
+                ' "$channel_release"
+              ) || true
+              if [[ ! "${committed_sha:-}" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "::error::AP7213 committed APT metadata lacks $arch Packages.gz"
+                exit 1
+              fi
+              committed_index="$RUNNER_TEMP/channel-Packages-${arch}.gz"
+              aws s3api get-object --endpoint-url "$endpoint" \
+                --bucket "$R2_BUCKET_NAME" \
+                --key "aros-tools/dists/stable/main/binary-${arch}/by-hash/SHA256/${committed_sha}" \
+                "$committed_index" >/dev/null
+              if [[ "$committed_sha" != "$(sha256sum "$committed_index" | awk '{ print $1 }')" || \
+                    "$committed_size" != "$(wc -c < "$committed_index" | tr -d ' ')" ]]; then
+                echo "::error::AP7213 committed APT by-hash index is corrupt for $arch"
+                exit 1
+              fi
+              measured_version=$(gzip -dc "$committed_index" | \
+                awk '$1 == "Version:" { print $2 }')
+              if [[ ! "$measured_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-1$ ]]; then
+                echo "::error::AP7213 committed APT version is malformed for $arch"
+                exit 1
+              fi
+              measured_version=${BASH_REMATCH[1]}
+              if [[ -n "$channel_version" && "$channel_version" != "$measured_version" ]]; then
+                echo '::error::AP7213 committed APT architectures disagree on version'
+                exit 1
+              fi
+              channel_version=$measured_version
+            done
+            if [[ "$channel_version" == "$VERSION" ]]; then
+              # A same-version replay may repair the complete mutable alias
+              # set only after both immutable index forms are proven equal to
+              # this release's deterministic reconstruction.
+              for arch in amd64 arm64; do
+                for index in Packages Packages.gz; do
+                  read -r committed_sha committed_size < <(
+                    awk -v wanted="main/binary-${arch}/${index}" '
+                      $1 == "SHA256:" { section = 1; next }
+                      section && $0 !~ /^ / { section = 0 }
+                      section && $3 == wanted { count += 1; digest = $1; size = $2 }
+                      END { if (count != 1) exit 1; print digest, size }
+                    ' "$channel_release"
+                  ) || true
+                  local_index="$repository/dists/stable/main/binary-${arch}/${index}"
+                  if [[ ! "${committed_sha:-}" =~ ^[0-9a-f]{64}$ || \
+                        "$committed_sha" != "$(sha256sum "$local_index" | awk '{ print $1 }')" || \
+                        "$committed_size" != "$(wc -c < "$local_index" | tr -d ' ')" ]]; then
+                    echo "::error::AP7215 committed APT $VERSION differs at $arch/$index"
+                    exit 1
+                  fi
+                  committed_index="$RUNNER_TEMP/committed-${index}-${arch}"
+                  aws s3api get-object --endpoint-url "$endpoint" \
+                    --bucket "$R2_BUCKET_NAME" \
+                    --key "aros-tools/dists/stable/main/binary-${arch}/by-hash/SHA256/${committed_sha}" \
+                    "$committed_index" >/dev/null
+                  cmp "$local_index" "$committed_index" || {
+                    echo "::error::AP7215 committed APT $VERSION has different $arch/$index bytes"
+                    exit 1
+                  }
+                done
+              done
+              channel_valid_until=$(sed -n 's/^Valid-Until: //p' "$channel_release")
+              channel_date=$(sed -n 's/^Date: //p' "$channel_release")
+              [[ $(grep -c '^Valid-Until: ' "$channel_release") == 1 && \
+                 $(grep -c '^Date: ' "$channel_release") == 1 ]] || {
+                echo "::error::AP7215 committed APT $VERSION has ambiguous dates"
+                exit 1
+              }
+              channel_valid_until_epoch=$(date --date="$channel_valid_until" +%s)
+              channel_date_epoch=$(date --date="$channel_date" +%s)
+              aliases_converged=$channel_inrelease_canonical
+              snapshot_exact() {
+                local key=$1 expected=$2 content_type=$3
+                [[ ${mutable_state[$key]} == present && \
+                   $(jq -r '.ContentType' "${mutable_head[$key]}") == "$content_type" && \
+                   $(jq -r '.CacheControl' "${mutable_head[$key]}") == no-cache && \
+                   $(jq -r '.ContentLength' "${mutable_head[$key]}") == \
+                     "$(wc -c < "$expected" | tr -d ' ')" ]] && \
+                  cmp -s "$expected" "${mutable_remote[$key]}"
+              }
+              for arch in amd64 arm64; do
+                prefix="dists/stable/main/binary-${arch}"
+                snapshot_exact "aros-tools/${prefix}/Packages" \
+                  "$repository/${prefix}/Packages" 'text/plain; charset=utf-8' || \
+                  aliases_converged=false
+                snapshot_exact "aros-tools/${prefix}/Packages.gz" \
+                  "$repository/${prefix}/Packages.gz" 'application/gzip' || \
+                  aliases_converged=false
+              done
+              release_key='aros-tools/dists/stable/Release'
+              release_gpg_key='aros-tools/dists/stable/Release.gpg'
+              snapshot_exact "$release_key" "$channel_release" \
+                'text/plain; charset=utf-8' || aliases_converged=false
+              if [[ ${mutable_state[$release_gpg_key]} == present ]]; then
+                detached=${mutable_remote[$release_gpg_key]}
+                detached_valid=false
+                if gpgv --status-fd 3 \
+                  --keyring "$RUNNER_TEMP/channel-keyring.gpg" \
+                  "$detached" "$channel_release" \
+                  3> "$RUNNER_TEMP/channel-detached.status" 2>/dev/null && \
+                   scripts/release/verify-gpgv-status.sh \
+                     --status-file "$RUNNER_TEMP/channel-detached.status" \
+                     --fingerprint "$APT_GPG_FINGERPRINT" >/dev/null 2>&1; then
+                  detached_valid=true
+                fi
+                [[ "$detached_valid" == true && \
+                   $(head -n 1 "$detached") == '-----BEGIN PGP SIGNATURE-----' && \
+                   $(tail -n 1 "$detached") == '-----END PGP SIGNATURE-----' && \
+                   $(grep -c '^-----BEGIN PGP SIGNATURE-----$' "$detached") == 1 && \
+                   $(grep -c '^-----END PGP SIGNATURE-----$' "$detached") == 1 && \
+                   $(jq -r '.ContentType' "${mutable_head[$release_gpg_key]}") == \
+                     'application/pgp-signature' && \
+                   $(jq -r '.CacheControl' "${mutable_head[$release_gpg_key]}") == no-cache ]] || \
+                  aliases_converged=false
+              else
+                aliases_converged=false
+              fi
+              [[ $(jq -r '.ContentType' "${mutable_head[$inrelease_key]}") == \
+                   'text/plain; charset=utf-8' && \
+                 $(jq -r '.CacheControl' "${mutable_head[$inrelease_key]}") == no-cache ]] || \
+                aliases_converged=false
+              if ((now < channel_valid_until_epoch)) && \
+                 [[ "$aliases_converged" == true ]]; then
+                channel_committed=true
+              else
+                local_date=$(sed -n 's/^Date: //p' "$repository/dists/stable/Release")
+                [[ $(grep -c '^Date: ' "$repository/dists/stable/Release") == 1 ]] || {
+                  echo '::error::AP7215 candidate APT Release has an ambiguous Date'; exit 1;
+                }
+                local_date_epoch=$(date --date="$local_date" +%s)
+                if ((local_date_epoch < channel_date_epoch || \
+                    valid_until_epoch < channel_valid_until_epoch)); then
+                  echo '::error::AP7215 refusing same-version signed-metadata rollback; run the protected refresh workflow'
+                  exit 1
+                fi
+                echo "APT $VERSION immutable bytes are exact; repairing the complete mutable set under snapshot CAS"
+              fi
+            elif [[ $(printf '%s\n' "$channel_version" "$VERSION" | sort -V | tail -1) != "$VERSION" ]]; then
+              echo "::error::AP7214 refusing to replace APT $channel_version with older $VERSION"
+              exit 1
+            fi
+          fi
+          absent="$RUNNER_TEMP/apt-immutable-uploads"
+          : > "$absent"
+          verify_immutable() {
+            local local_object=$1 key=$2 content_type=$3 cache_control=$4
+            local head error remote etag
+            head=$(mktemp "$RUNNER_TEMP/r2-head.XXXXXX")
+            error=$(mktemp "$RUNNER_TEMP/r2-error.XXXXXX")
+            if aws s3api head-object \
+              --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME" --key "$key" \
+              > "$head" 2> "$error"; then
+              if [[ $(jq -r '.ContentType' "$head") != "$content_type" || \
+                    $(jq -r '.CacheControl' "$head") != "$cache_control" || \
+                    $(jq -r '.ContentLength' "$head") != "$(wc -c < "$local_object" | tr -d ' ')" ]]; then
+                echo "::error::AP7210 immutable R2 metadata differs for $key"
+                exit 1
+              fi
+              etag=$(jq -er '.ETag | select(type == "string" and length > 0)' "$head")
+              remote=$(mktemp "$RUNNER_TEMP/r2-object.XXXXXX")
+              aws s3api get-object \
+                --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME" --key "$key" \
+                --if-match "$etag" "$remote" >/dev/null
+              if ! cmp "$local_object" "$remote"; then
+                echo "::error::AP7211 immutable R2 object already exists with different bytes: $key"
+                exit 1
+              fi
+            elif grep -Eq '\(404\)|NoSuchKey|Not Found' "$error"; then
+              printf '%s\t%s\t%s\t%s\n' \
+                "$local_object" "$key" "$content_type" "$cache_control" >> "$absent"
+            else
+              echo "::error::AP7212 unable to establish immutable R2 object state for $key"
+              sed 's/^/  /' "$error" >&2
+              exit 1
+            fi
+          }
+          while IFS= read -r local_object; do
+            relative=${local_object#"$repository/"}
+            verify_immutable "$local_object" "aros-tools/${relative}" \
+              'application/vnd.debian.binary-package' \
+              'public,max-age=31536000,immutable'
+          done < <(find "$repository/pool" -type f | sort)
+          while IFS= read -r local_object; do
+            relative=${local_object#"$repository/"}
+            verify_immutable "$local_object" "aros-tools/${relative}" \
+              'application/octet-stream' \
+              'public,max-age=31536000,immutable'
+          done < <(find "$repository/dists/stable/main" \
+            -type f -path '*/by-hash/SHA256/*' | sort)
+          verify_immutable "$repository/aros-tools-archive-keyring.asc" \
+            'aros-tools/aros-tools-archive-keyring.asc' \
+            'application/pgp-keys' 'public,max-age=31536000,immutable'
+          while IFS=$'\t' read -r local_object key content_type cache_control; do
+            [[ -n "$local_object" ]] || continue
+            authorize_mutation
+            aws s3api put-object \
+              --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME" --key "$key" \
+              --body "$local_object" --if-none-match '*' \
+              --cache-control "$cache_control" \
+              --content-type "$content_type" >/dev/null
+          done < "$absent"
+          publish_snapshot() {
+            local local_object=$1 key=$2 content_type=$3
+            local condition=()
+            if [[ ${mutable_state[$key]} == present ]]; then
+              if cmp -s "$local_object" "${mutable_remote[$key]}" && \
+                 [[ $(jq -r '.ContentType' "${mutable_head[$key]}") == "$content_type" && \
+                    $(jq -r '.CacheControl' "${mutable_head[$key]}") == no-cache && \
+                    $(jq -r '.ContentLength' "${mutable_head[$key]}") == \
+                      "$(wc -c < "$local_object" | tr -d ' ')" ]]; then
+                return
+              fi
+              condition=(--if-match "${mutable_etag[$key]}")
+            else
+              condition=(--if-none-match '*')
+            fi
+            authorize_mutation
+            aws s3api put-object --endpoint-url "$endpoint" \
+              --bucket "$R2_BUCKET_NAME" --key "$key" --body "$local_object" \
+              "${condition[@]}" --cache-control no-cache \
+              --content-type "$content_type" >/dev/null
+          }
+          if [[ "$channel_committed" != true ]]; then
+            for arch in amd64 arm64; do
+              prefix="dists/stable/main/binary-${arch}"
+              publish_snapshot "$repository/${prefix}/Packages" \
+                "aros-tools/${prefix}/Packages" 'text/plain; charset=utf-8'
+              publish_snapshot "$repository/${prefix}/Packages.gz" \
+                "aros-tools/${prefix}/Packages.gz" 'application/gzip'
+            done
+            publish_snapshot "$repository/dists/stable/Release" \
+              'aros-tools/dists/stable/Release' 'text/plain; charset=utf-8'
+            publish_snapshot "$repository/dists/stable/Release.gpg" \
+              'aros-tools/dists/stable/Release.gpg' 'application/pgp-signature'
+            # InRelease is the only commit point: clients that have fetched it can
+            # resolve its indexes through immutable by-hash objects.
+            publish_snapshot "$repository/dists/stable/InRelease" \
+              'aros-tools/dists/stable/InRelease' 'text/plain; charset=utf-8'
+          else
+            echo "APT $VERSION already has a complete exact public inventory; preserving its signed metadata"
+          fi
+          cleanup
+          trap - EXIT HUP INT TERM
+
+  apt-verify:
+    name: Verify the public signed APT repository without credentials
+    needs: apt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
       - name: Verify the public signed repository and exact packages
         shell: bash
         run: |
           set -euo pipefail
           verification="$RUNNER_TEMP/apt-public"
-          install -d "$verification"
-          curl --fail --silent --show-error --location \
-            "$APT_PUBLIC_BASE_URL/aros-tools-archive-keyring.asc" \
-            --output "$verification/key.asc"
-          gpg --batch --dearmor < "$verification/key.asc" > "$verification/key.gpg"
-          curl --fail --silent --show-error --location \
-            "$APT_PUBLIC_BASE_URL/dists/stable/InRelease" \
-            --output "$verification/InRelease"
-          gpgv --keyring "$verification/key.gpg" "$verification/InRelease"
+          verification_error="$RUNNER_TEMP/apt-public.error"
+          measured_version=
+          for attempt in {1..20}; do
+            rm -rf -- "$verification"
+            if measured_version=$(scripts/release/download-verify-apt-publication.sh \
+                --directory "$verification" --base-url "$APT_PUBLIC_BASE_URL" \
+                --fingerprint "$APT_GPG_FINGERPRINT" --version "$VERSION" \
+                2> "$verification_error"); then
+              break
+            fi
+            [[ "$attempt" != 20 ]] || {
+              cat "$verification_error" >&2
+              echo '::error::AP7220 complete public APT inventory did not converge'
+              exit 1
+            }
+            sleep 15
+          done
+          [[ "$measured_version" == "$VERSION" ]] || {
+            echo '::error::AP7220 public APT verifier returned the wrong version'; exit 1;
+          }
           for arch in amd64 arm64; do
-            curl --fail --silent --show-error --location \
-              "$APT_PUBLIC_BASE_URL/dists/stable/main/binary-${arch}/Packages.gz" | \
-              gzip -dc > "$verification/Packages-${arch}"
-            filename=$(awk '/^Filename: / { print $2; exit }' "$verification/Packages-${arch}")
-            if [[ -z "$filename" ]]; then
-              echo "::error::AP7220 published Packages index for $arch is empty"
+            package="$verification/pool/main/a/aros-tools/aros-tools_${VERSION}_${arch}.deb"
+            cmp "$package" "candidate/aros-tools_${VERSION}_${arch}.deb"
+            if [[ $(dpkg-deb --field "$package" Package) != aros-tools || \
+                  $(dpkg-deb --field "$package" Version) != "${VERSION}-1" || \
+                  $(dpkg-deb --field "$package" Architecture) != "$arch" ]]; then
+              echo "::error::AP7223 public Debian package identity mismatch for $arch"
               exit 1
             fi
-            curl --fail --silent --show-error --location \
-              "$APT_PUBLIC_BASE_URL/$filename" --output "$verification/${arch}.deb"
-            cmp "$verification/${arch}.deb" "candidate/aros-tools_${VERSION}_${arch}.deb"
+          done
+
+  apt-install:
+    name: Install public APT package (${{ matrix.arch }})
+    needs: apt-verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ inputs.version }}
+      APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
+      APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - name: Install through isolated signed APT configuration
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          public="$RUNNER_TEMP/apt-install-public"
+          measured=$(scripts/release/download-verify-apt-publication.sh \
+            --directory "$public" --base-url "$APT_PUBLIC_BASE_URL" \
+            --fingerprint "$APT_GPG_FINGERPRINT" --version "$VERSION")
+          [[ "$measured" == "$VERSION" ]] || {
+            echo '::error::AP7230 public APT verifier returned the wrong version'; exit 1;
+          }
+          key="$public/aros-tools-archive-keyring.asc"
+          gpg --batch --dearmor < "$key" | \
+            sudo tee /usr/share/keyrings/aros-tools-archive-keyring.gpg >/dev/null
+          printf 'deb [arch=%s signed-by=/usr/share/keyrings/aros-tools-archive-keyring.gpg] %s stable main\n' \
+            "$ARCH" "$APT_PUBLIC_BASE_URL" | \
+            sudo tee /etc/apt/sources.list.d/aros-tools.list >/dev/null
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/aros-tools.list
+            -o Dir::Etc::sourceparts=-
+            -o Acquire::Check-Valid-Until=true
+          )
+          sudo apt-get "${apt_options[@]}" update
+          candidate=$(apt-cache "${apt_options[@]}" policy aros-tools | \
+            awk '/Candidate:/ { print $2; exit }')
+          if [[ "$candidate" != "${VERSION}-1" ]]; then
+            echo "::error::AP7231 APT candidate is $candidate; expected ${VERSION}-1"
+            exit 1
+          fi
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+            "aros-tools=${VERSION}-1"
+          dpkg --verify aros-tools
+          for binary in \
+            aros aros-ahi-runner aros-collect aros-fetch \
+            aros-genmodule aros-romtool aros-transpiler aros-verify; do
+            "/usr/bin/${binary}" --help >/dev/null
+            reported_version=$("/usr/bin/${binary}" --version)
+            if [[ "$reported_version" != "$binary $VERSION" ]]; then
+              echo "::error::AP7232 public APT $binary reports version '$reported_version'; expected '$binary $VERSION'"
+              exit 1
+            fi
+          done
+          extracted="$RUNNER_TEMP/candidate-deb"
+          mkdir "$extracted"
+          dpkg-deb --extract "candidate/aros-tools_${VERSION}_${ARCH}.deb" "$extracted"
+          for binary in "$extracted"/usr/bin/*; do
+            cmp "$binary" "/usr/bin/$(basename "$binary")"
           done
 
   homebrew:
     name: Publish and qualify Homebrew formula
-    needs: apt
+    needs: apt-install
     runs-on: ubuntu-24.04
     timeout-minutes: 180
-    environment: release
+    environment: homebrew-publication
     env:
       VERSION: ${{ inputs.version }}
       TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+      TAG_OBJECT: ${{ inputs.tag_object }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: complete-release-candidate
+          name: qualified-release-staging
           path: candidate
+      - name: Verify closed immutable staging inventory
+        run: scripts/release/verify-candidate-inventory.sh --directory candidate --version "$VERSION" --signed true
       - name: Open an exact formula update
         id: update
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+          SOURCE_REPOSITORY_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          cleanup() {
+            trap - EXIT
+            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
           source_formula="$GITHUB_WORKSPACE/candidate/aros-tools.rb"
           ruby -c "$source_formula"
           if [[ $(grep -Fc "/releases/download/${TAG}/" "$source_formula") != 4 ]]; then
             echo "::error::AP7301 formula does not reference four exact staged-release URLs"
             exit 1
           fi
-          gh repo clone metaneutrons/homebrew-tap "$RUNNER_TEMP/homebrew-tap"
+          git -c http.followRedirects=false clone --no-tags --single-branch --branch main \
+            https://github.com/metaneutrons/homebrew-tap.git \
+            "$RUNNER_TEMP/homebrew-tap"
+          verify_tap_governance() {
+            local protected_tip cloned_tip
+            protected_tip=$("$GITHUB_WORKSPACE/scripts/release/verify-branch-protection.sh" \
+              --repository metaneutrons/homebrew-tap)
+            cloned_tip=$(git -C "$RUNNER_TEMP/homebrew-tap" \
+              rev-parse refs/remotes/origin/main)
+            [[ "$protected_tip" == "$cloned_tip" ]] || {
+              echo '::error::AP7300 protected tap main changed after its exact clone'; exit 1;
+            }
+          }
+          verify_tap_governance
           cd "$RUNNER_TEMP/homebrew-tap"
+          if find . -path ./.git -prune -o -type l -print -quit | grep -q .; then
+            echo '::error::AP7300 tap checkout contains a symbolic link'
+            exit 1
+          fi
           if [[ -f Formula/aros-tools.rb ]] && cmp -s "$source_formula" Formula/aros-tools.rb; then
             echo 'pr=' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          branch="release/aros-tools-${VERSION}-${GITHUB_RUN_ID}"
+          if [[ -f Formula/aros-tools.rb ]]; then
+            current_tag=$(grep -Eo '/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/' \
+              Formula/aros-tools.rb | sed -E 's#^.*/(v[0-9]+\.[0-9]+\.[0-9]+)/$#\1#' | \
+              sort -u || true)
+            if [[ ! "$current_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::AP7302 existing Homebrew formula has no singular stable version identity"
+              exit 1
+            fi
+            current_version=${current_tag#v}
+            if [[ "$current_version" == "$VERSION" ]]; then
+              echo "::error::AP7303 Homebrew version $VERSION already exists with different bytes"
+              exit 1
+            fi
+            if [[ $(printf '%s\n' "$current_version" "$VERSION" | sort -V | tail -1) != "$VERSION" ]]; then
+              echo "::error::AP7304 refusing to replace Homebrew $current_version with older $VERSION"
+              exit 1
+            fi
+          fi
+          branch="release/aros-tools-${VERSION}"
+          remote_branch=$(git ls-remote --heads origin "refs/heads/${branch}" | awk '{ print $1 }')
+          if [[ -n "$remote_branch" ]]; then
+            git fetch --no-tags origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git switch --create "$branch" --track "origin/$branch"
+            if ! cmp -s "$source_formula" Formula/aros-tools.rb; then
+              echo "::error::AP7305 existing release branch has different formula bytes"
+              exit 1
+            fi
+            "$GITHUB_WORKSPACE/scripts/release/generate-homebrew-readme.sh" "$PWD"
+            if [[ -n $(git status --short) ]]; then
+              echo "::error::AP7306 existing release branch has stale generated metadata"
+              exit 1
+            fi
+            branch_changes=$(git diff --name-only origin/main...HEAD | sort -u)
+            if ! grep -Fxq 'Formula/aros-tools.rb' <<<"$branch_changes" || \
+               grep -Evq '^(Formula/aros-tools\.rb|README\.md)$' \
+                 <<<"$branch_changes"; then
+              echo "::error::AP7306 existing release branch contains changes outside the exact formula update"
+              printf '%s\n' "$branch_changes"
+              exit 1
+            fi
+            pr_state=$(gh pr list --repo metaneutrons/homebrew-tap \
+              --state all --head "$branch" \
+              --json headRefOid,state,url --limit 2)
+            pr_count=$(jq 'length' <<<"$pr_state")
+            if ((pr_count > 1)); then
+              echo "::error::AP7307 release branch has multiple pull requests"
+              exit 1
+            fi
+            if ((pr_count == 0)); then
+              GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+                --repository "$GITHUB_REPOSITORY" \
+                --tag "$TAG" --tag-object "$TAG_OBJECT" \
+                --source-commit "$SOURCE_COMMIT" \
+                --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+              GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-assets.sh" \
+                  --repository "$GITHUB_REPOSITORY" \
+                  --tag "$TAG" --candidate-dir "$GITHUB_WORKSPACE/candidate" >/dev/null
+              verify_tap_governance
+              pr=$(gh pr create --repo metaneutrons/homebrew-tap \
+                --base main --head "$branch" \
+                --title "aros-tools ${VERSION}" \
+                --body "Automated roll-forward from the verified immutable ${TAG} release. The exact formula bytes were qualified in the release workflow before publication.")
+              echo "pr=$pr" >> "$GITHUB_OUTPUT"
+              echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            expected_head=$(git rev-parse HEAD)
+            if [[ $(jq -r '.[0].headRefOid' <<<"$pr_state") != "$expected_head" ]]; then
+              echo '::error::AP7307 release PR head differs from the validated branch commit'
+              exit 1
+            fi
+            state=$(jq -r '.[0].state' <<<"$pr_state")
+            if [[ "$state" == MERGED ]]; then
+              echo 'pr=' >> "$GITHUB_OUTPUT"
+            elif [[ "$state" == OPEN ]]; then
+              echo "pr=$(jq -r '.[0].url' <<<"$pr_state")" >> "$GITHUB_OUTPUT"
+              echo "head_sha=$expected_head" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::AP7308 exact Homebrew release PR is closed without merge"
+              exit 1
+            fi
+            exit 0
+          fi
           git switch -c "$branch"
           install -m 0644 "$source_formula" Formula/aros-tools.rb
-          scripts/generate-readme.sh
+          "$GITHUB_WORKSPACE/scripts/release/generate-homebrew-readme.sh" "$PWD"
+          pending_changes=$(git status --short | awk '{ print $2 }' | sort -u)
+          if ! grep -Fxq 'Formula/aros-tools.rb' <<<"$pending_changes" || \
+             grep -Evq '^(Formula/aros-tools\.rb|README\.md)$' \
+               <<<"$pending_changes"; then
+            echo "::error::AP7309 generated Homebrew update changed an unexpected path"
+            printf '%s\n' "$pending_changes"
+            exit 1
+          fi
           actor=$(gh api user --jq .login)
           git config user.name 'AROS release automation'
           git config user.email "${actor}@users.noreply.github.com"
           git add Formula/aros-tools.rb README.md
           git commit -m "aros-tools ${VERSION}"
+          GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-assets.sh" \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$TAG" --candidate-dir "$GITHUB_WORKSPACE/candidate" >/dev/null
+          verify_tap_governance
+          gh auth setup-git
           git push -u origin "$branch"
+          GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-assets.sh" \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$TAG" --candidate-dir "$GITHUB_WORKSPACE/candidate" >/dev/null
+          verify_tap_governance
           pr=$(gh pr create --repo metaneutrons/homebrew-tap \
             --base main --head "$branch" \
             --title "aros-tools ${VERSION}" \
-            --body "Automated update from the verified ${TAG} prerelease assets. The stable release remains blocked until every tap qualification lane passes.")
+            --body "Automated roll-forward from the verified immutable ${TAG} release. The exact formula bytes were qualified in the release workflow before publication.")
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          cleanup
+          trap - EXIT HUP INT TERM
       - name: Require tap qualification and merge
         if: steps.update.outputs.pr != ''
         env:
+          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
           PR: ${{ steps.update.outputs.pr }}
+          EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}
         run: |
           set -euo pipefail
+          cleanup() {
+            trap - EXIT
+            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
           gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
             --watch --fail-fast --interval 20
+          for attempt in {1..480}; do
+            review=$(gh pr view "$PR" --repo metaneutrons/homebrew-tap \
+              --json headRefOid,reviewDecision)
+            review_head=$(jq -r '.headRefOid' <<<"$review")
+            [[ "$review_head" == "$EXPECTED_HEAD" ]] || {
+              echo '::error::AP7310 Homebrew PR head changed while awaiting review'; exit 1;
+            }
+            if [[ $(jq -r '.reviewDecision' <<<"$review") == APPROVED ]]; then
+              break
+            fi
+            if [[ "$attempt" == 480 ]]; then
+              echo '::error::AP7311 independent approval of the exact Homebrew PR head did not arrive'
+              exit 1
+            fi
+            sleep 20
+          done
+          measured_head=$(gh pr view "$PR" --repo metaneutrons/homebrew-tap \
+            --json headRefOid --jq .headRefOid)
+          if [[ ! "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ || \
+                "$measured_head" != "$EXPECTED_HEAD" ]]; then
+            echo '::error::AP7310 Homebrew PR head changed after qualification'
+            exit 1
+          fi
+          GH_TOKEN="${{ github.token }}" scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          GH_TOKEN="${{ github.token }}" scripts/release/verify-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --candidate-dir candidate >/dev/null
+          scripts/release/verify-branch-protection.sh \
+            --repository metaneutrons/homebrew-tap >/dev/null
           gh pr merge "$PR" --repo metaneutrons/homebrew-tap \
-            --squash --delete-branch
+            --squash --delete-branch --match-head-commit "$EXPECTED_HEAD"
+          cleanup
+          trap - EXIT HUP INT TERM
       - name: Verify the formula now on protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           encoded=$(gh api \
@@ -193,25 +952,62 @@ jobs:
           printf '%s' "$encoded" | base64 --decode > "$RUNNER_TEMP/published-formula.rb"
           cmp "$RUNNER_TEMP/published-formula.rb" candidate/aros-tools.rb
 
-  aur:
-    name: Publish and verify AUR package
+  aur-publish:
+    name: Publish exact AUR package
     needs: homebrew
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: release
+    environment: aur-publication
     env:
       VERSION: ${{ inputs.version }}
-      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-      AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+      TAG: ${{ inputs.tag }}
+      TAG_OBJECT: ${{ inputs.tag_object }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          name: complete-release-candidate
-          path: candidate
-      - name: Publish exact PKGBUILD and generated SRCINFO
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
         run: |
           set -euo pipefail
+          scripts/release/verify-release-ref.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - name: Verify closed immutable staging inventory
+        run: scripts/release/verify-candidate-inventory.sh --directory candidate --version "$VERSION" --signed true
+      - name: Publish exact PKGBUILD and generated SRCINFO
+        shell: bash
+        env:
+          SOURCE_REPOSITORY_TOKEN: ${{ github.token }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            trap - EXIT
+            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+            rm -rf -- "$RUNNER_TEMP/ssh"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' HUP INT TERM
+          [[ -n "$AUR_SSH_PRIVATE_KEY" && -n "$AUR_SSH_KNOWN_HOSTS" ]] || {
+            echo '::error::AP7400 AUR publication identity is incomplete'; exit 1;
+          }
           install -d -m 0700 "$RUNNER_TEMP/ssh"
           install -m 0600 /dev/null "$RUNNER_TEMP/ssh/aur"
           printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/aur"
@@ -220,35 +1016,134 @@ jobs:
           git -c init.defaultBranch=master clone \
             ssh://aur@aur.archlinux.org/aros-tools-bin.git "$RUNNER_TEMP/aur-package"
           cd "$RUNNER_TEMP/aur-package"
-          install -m 0644 "$GITHUB_WORKSPACE/candidate/PKGBUILD" PKGBUILD
+          source_pkgbuild="$GITHUB_WORKSPACE/candidate/PKGBUILD"
+          same_pkgbuild=false
+          if [[ -f PKGBUILD ]] && cmp -s "$source_pkgbuild" PKGBUILD; then
+            same_pkgbuild=true
+          elif [[ -f PKGBUILD ]]; then
+            current_version=$(sed -n -E \
+              "s/^pkgver=['\"]?([0-9]+\.[0-9]+\.[0-9]+)['\"]?$/\\1/p" PKGBUILD)
+            if [[ ! "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::AP7401 existing AUR package has no stable version identity"
+              exit 1
+            fi
+            if [[ "$current_version" == "$VERSION" ]]; then
+              echo "::error::AP7402 AUR version $VERSION already exists with different bytes"
+              exit 1
+            fi
+            if [[ $(printf '%s\n' "$current_version" "$VERSION" | sort -V | tail -1) != "$VERSION" ]]; then
+              echo "::error::AP7403 refusing to replace AUR $current_version with older $VERSION"
+              exit 1
+            fi
+          fi
+          install -m 0644 "$source_pkgbuild" PKGBUILD
+          generated_srcinfo="$RUNNER_TEMP/aros-tools.SRCINFO"
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             --env HOME=/tmp \
             --volume "$PWD:/pkg" \
             --workdir /pkg \
             archlinux:base-devel@sha256:a26046b7363dad8e2614858f4313949ae9b05c9c5f31de343a54864b9e20806f \
-            makepkg --printsrcinfo > .SRCINFO
-          if [[ -z $(git status --short) ]]; then
-            exit 0
+            makepkg --printsrcinfo > "$generated_srcinfo"
+          if [[ "$same_pkgbuild" == true ]]; then
+            if [[ ! -f .SRCINFO ]] || ! cmp -s "$generated_srcinfo" .SRCINFO; then
+              echo "::error::AP7404 AUR version $VERSION already exists with different SRCINFO bytes"
+              exit 1
+            fi
+          else
+            install -m 0644 "$generated_srcinfo" .SRCINFO
+            if [[ -n $(git status --short) ]]; then
+              git config user.name 'AROS release automation'
+              git config user.email 'aros-release@users.noreply.github.com'
+              git add PKGBUILD .SRCINFO
+              git commit -m "aros-tools-bin ${VERSION}-1"
+              GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+                  --repository "$GITHUB_REPOSITORY" \
+                  --tag "$TAG" --tag-object "$TAG_OBJECT" \
+                  --source-commit "$SOURCE_COMMIT" \
+                  --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+              GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-assets.sh" \
+                  --repository "$GITHUB_REPOSITORY" \
+                  --tag "$TAG" --candidate-dir "$GITHUB_WORKSPACE/candidate" >/dev/null
+              git push origin HEAD:master
+            fi
           fi
-          git config user.name 'AROS release automation'
-          git config user.email 'aros-release@users.noreply.github.com'
-          git add PKGBUILD .SRCINFO
-          git commit -m "aros-tools-bin ${VERSION}-1"
-          git push origin HEAD:master
-      - name: Verify AUR Git and public package metadata
+          cleanup
+          trap - EXIT HUP INT TERM
+      - name: Seal public AUR verification evidence
         shell: bash
         run: |
           set -euo pipefail
-          install -d -m 0700 "$RUNNER_TEMP/ssh"
-          install -m 0600 /dev/null "$RUNNER_TEMP/ssh/aur"
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/aur"
-          printf '%s\n' "$AUR_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/ssh/aur -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts"
-          git ls-remote --exit-code \
-            ssh://aur@aur.archlinux.org/aros-tools-bin.git refs/heads/master
+          handoff="$RUNNER_TEMP/aur-publication"
+          install -d "$handoff"
+          install -m 0644 "$RUNNER_TEMP/aur-package/PKGBUILD" "$handoff/PKGBUILD"
+          install -m 0644 "$RUNNER_TEMP/aur-package/.SRCINFO" "$handoff/SRCINFO"
+          git -C "$RUNNER_TEMP/aur-package" rev-parse HEAD > "$handoff/commit"
+          if find "$handoff" -mindepth 1 -maxdepth 1 ! -type f \
+              -print -quit | grep -q .; then
+            echo '::error::AP7405 AUR verification handoff contains a non-regular entry'
+            exit 1
+          fi
+          [[ $(find "$handoff" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ') == 3 &&
+             $(cat "$handoff/commit") =~ ^[0-9a-f]{40}$ ]] || {
+            echo '::error::AP7405 AUR verification handoff is not closed'; exit 1;
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aur-publication-evidence
+          path: ${{ runner.temp }}/aur-publication/
+          if-no-files-found: error
+          retention-days: 1
+
+  aur-verify:
+    name: Verify public AUR package
+    needs: aur-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: qualified-release-staging
+          path: candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: aur-publication-evidence
+          path: ${{ runner.temp }}/aur-publication
+      - name: Verify closed handoff, AUR Git and public package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/aur-publication"
+          if find "$evidence" -mindepth 1 -maxdepth 1 ! -type f \
+              -print -quit | grep -q .; then
+            echo '::error::AP7410 AUR verification handoff contains a non-regular entry'
+            exit 1
+          fi
+          expected_names=$'PKGBUILD\nSRCINFO\ncommit'
+          actual_names=$(find "$evidence" -mindepth 1 -maxdepth 1 -type f \
+            -exec basename {} \; | sort)
+          [[ "$actual_names" == "$expected_names" &&
+             $(cat "$evidence/commit") =~ ^[0-9a-f]{40}$ ]] || {
+            echo '::error::AP7410 AUR verification handoff is not closed'; exit 1;
+          }
+          git -c http.followRedirects=false clone --branch master --single-branch \
+            https://aur.archlinux.org/aros-tools-bin.git "$RUNNER_TEMP/aur-public"
+          published="$RUNNER_TEMP/aur-public"
+          if [[ $(cat "$evidence/commit") != \
+                $(git -C "$published" rev-parse HEAD) ]]; then
+            echo "::error::AP7410 AUR master does not point to the published commit"
+            exit 1
+          fi
+          cmp "$GITHUB_WORKSPACE/candidate/PKGBUILD" "$published/PKGBUILD"
+          cmp "$evidence/PKGBUILD" "$published/PKGBUILD"
+          cmp "$evidence/SRCINFO" "$published/.SRCINFO"
           for attempt in {1..20}; do
             if curl --fail --silent --show-error --get \
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
               --data-urlencode 'v=5' --data-urlencode 'type=info' \
               --data-urlencode 'arg[]=aros-tools-bin' \
               https://aur.archlinux.org/rpc | \

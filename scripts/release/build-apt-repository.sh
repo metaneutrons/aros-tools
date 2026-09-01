@@ -38,9 +38,12 @@ while (($#)); do
     esac
 done
 
-for command in apt-ftparchive date dpkg-deb dpkg-scanpackages gpg gpgv gzip; do
+for command in gpg gpgv; do
     command -v "$command" >/dev/null || fail AP7200 "required command is missing: $command"
 done
+if [[ "${AROS_APT_RENDER_LOCAL_FOR_TESTS:-}" == 1 ]]; then
+    command -v python3 >/dev/null || fail AP7200 'python3 is required by the local policy fixture'
+fi
 
 [[ -d "$candidate_dir" && ! -L "$candidate_dir" ]] || \
     fail AP7200 'candidate-dir must be a real directory'
@@ -57,67 +60,43 @@ done
 [[ "$fingerprint" =~ ^[0-9A-Fa-f]{40}$ ]] || \
     fail AP7200 'fingerprint must be a full 40-hex primary-key fingerprint'
 
-output_parent=$(dirname "$output_dir")
-install -d "$output_parent"
+script_root=$(cd "$(dirname "$0")" && pwd)
+"$script_root/prepare-output-parent.sh" --path "$output_dir" --mode 0755
 stage=$(mktemp -d "${output_dir}.tmp.XXXXXX")
 cleanup() {
     rm -rf -- "$stage"
 }
 trap cleanup EXIT
 
-pool="$stage/pool/main/a/aros-tools"
-install -d "$pool"
-for arch in amd64 arm64; do
-    deb="$candidate_dir/aros-tools_${version}_${arch}.deb"
-    [[ -f "$deb" && ! -L "$deb" ]] || \
-        fail AP7201 "qualified Debian package is missing: $deb"
-    package_version=$(dpkg-deb --field "$deb" Version)
-    package_arch=$(dpkg-deb --field "$deb" Architecture)
-    if [[ "$package_version" != "${version}-1" || "$package_arch" != "$arch" ]]; then
-        fail AP7202 "Debian identity mismatch for $deb"
-    fi
-    install -m 0644 "$deb" "$pool/"
-done
+renderer="$script_root/run-apt-metadata-renderer.sh"
+[[ -x "$renderer" && ! -L "$renderer" ]] || fail AP7200 'APT metadata renderer is missing or unsafe'
+"$renderer" "$candidate_dir" "$stage" "$version" "$source_date_epoch"
 
-for arch in amd64 arm64; do
-    binary_dir="$stage/dists/stable/main/binary-${arch}"
-    install -d "$binary_dir"
-    (
-        cd "$stage"
-        dpkg-scanpackages --arch "$arch" pool/main/a/aros-tools /dev/null
-    ) > "$binary_dir/Packages"
-    gzip -n -9 -c "$binary_dir/Packages" > "$binary_dir/Packages.gz"
-done
-
-release_date=$(date --utc --date="@${source_date_epoch}" --rfc-email)
-(
-    cd "$stage"
-    apt-ftparchive \
-        -o APT::FTPArchive::Release::Origin='AROS tools' \
-        -o APT::FTPArchive::Release::Label='AROS tools' \
-        -o APT::FTPArchive::Release::Suite=stable \
-        -o APT::FTPArchive::Release::Codename=stable \
-        -o APT::FTPArchive::Release::Architectures='amd64 arm64' \
-        -o APT::FTPArchive::Release::Components=main \
-        -o APT::FTPArchive::Release::Description='Signed aros-tools packages' \
-        -o APT::FTPArchive::Release::Date="$release_date" \
-        release dists/stable
-) > "$stage/dists/stable/Release"
-
-gnupg_home=$(mktemp -d "${output_dir}.gnupg.XXXXXX")
+# Keep gpg-agent's Unix-domain socket below macOS' short sockaddr_un limit.
+# APT publication itself runs on Linux, but this also keeps the hermetic policy
+# fixture portable across supported developer hosts.
+gnupg_home=$(mktemp -d /tmp/aros-apt-gpg.XXXXXX)
 chmod 0700 "$gnupg_home"
 cleanup_gnupg() {
+    gpgconf --homedir "$gnupg_home" --kill gpg-agent >/dev/null 2>&1 || true
     rm -rf -- "$gnupg_home"
 }
-trap 'cleanup_gnupg; cleanup' EXIT
-gpg --batch --homedir "$gnupg_home" --import "$private_key" >/dev/null 2>&1
+cleanup_all() {
+    trap - EXIT
+    cleanup_gnupg
+    cleanup
+}
+trap cleanup_all EXIT
+trap 'exit 130' HUP INT TERM
+gpg --batch --homedir "$gnupg_home" --import "$private_key" >/dev/null
 fingerprint=${fingerprint^^}
-measured=$(gpg --batch --homedir "$gnupg_home" --with-colons \
-    --list-secret-keys --fingerprint "$fingerprint" | \
-    awk -F: '$1 == "fpr" { print toupper($10); exit }')
-[[ "$measured" == "$fingerprint" ]] || \
-    fail AP7203 'imported APT signing key has the wrong fingerprint'
-gpg --batch --homedir "$gnupg_home" --armor --export "$fingerprint" \
+signing_key_verifier="$script_root/verify-apt-signing-key.sh"
+[[ -x "$signing_key_verifier" && ! -L "$signing_key_verifier" ]] || \
+    fail AP7203 'canonical APT signing-key verifier is missing or unsafe'
+"$signing_key_verifier" --homedir "$gnupg_home" --fingerprint "$fingerprint" || \
+    fail AP7203 'imported APT signing key is not the one active required key'
+gpg --no-options --batch --homedir "$gnupg_home" --armor --no-emit-version \
+    --no-comments --export "$fingerprint" \
     > "$stage/aros-tools-archive-keyring.asc"
 gpg --batch --homedir "$gnupg_home" --yes --pinentry-mode loopback \
     --passphrase-file "$passphrase_file" --faked-system-time "${source_date_epoch}!" \
@@ -127,13 +106,12 @@ gpg --batch --homedir "$gnupg_home" --yes --pinentry-mode loopback \
     --passphrase-file "$passphrase_file" --faked-system-time "${source_date_epoch}!" \
     --local-user "$fingerprint" --armor --clearsign \
     --output "$stage/dists/stable/InRelease" "$stage/dists/stable/Release"
-gpg --batch --dearmor < "$stage/aros-tools-archive-keyring.asc" \
-    > "$stage/archive-keyring.gpg"
-gpgv --keyring "$stage/archive-keyring.gpg" "$stage/dists/stable/InRelease"
-gpgv --keyring "$stage/archive-keyring.gpg" \
-    "$stage/dists/stable/Release.gpg" "$stage/dists/stable/Release"
-rm "$stage/archive-keyring.gpg"
+inventory=$(cd "$(dirname "$0")" && pwd)/verify-apt-publication-inventory.sh
+[[ -x "$inventory" && ! -L "$inventory" ]] || \
+    fail AP7203 'APT publication inventory verifier is missing or unsafe'
+"$inventory" --directory "$stage" --mode full --version "$version" \
+    --fingerprint "$fingerprint" >/dev/null
 
 mv "$stage" "$output_dir"
-trap - EXIT
+trap - EXIT HUP INT TERM
 cleanup_gnupg

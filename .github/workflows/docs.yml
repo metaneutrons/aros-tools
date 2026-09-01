@@ -1,11 +1,10 @@
 name: Documentation
 
 on:
+  # `build` is a protected-branch check, so every pull request must produce it.
+  # Path-filtering a required workflow leaves unrelated pull requests blocked
+  # forever in GitHub's "Expected" state.
   pull_request:
-    paths:
-      - 'README.md'
-      - 'docs-site/**'
-      - '.github/workflows/docs.yml'
   push:
     branches: [main]
     paths:
@@ -23,17 +22,29 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: withastro/action@e84f40bd8d2caa9e768ec82ad30dd81f0b280853 # v6
         with:
-          path: docs-site
+          persist-credentials: false
+      - name: Install pinned Node runtime
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Run canonical documentation gate
+        run: scripts/check-workspace.sh docs
+      - name: Upload verified Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs-site/dist
+          include-hidden-files: true
 
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
