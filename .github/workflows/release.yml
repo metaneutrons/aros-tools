@@ -584,6 +584,9 @@ jobs:
           for binary in "$archive_root"/*/bin/*; do
             cmp "$binary" "$deb_root/usr/bin/$(basename "$binary")"
           done
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            ca-certificates cmake curl git ninja-build patch python3
           dpkg --install "$deb"
           dpkg --verify aros-tools
           for binary in \

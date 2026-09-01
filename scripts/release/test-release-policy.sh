@@ -37,6 +37,30 @@ expect_failure_matching() {
     }
 }
 
+# CI treats cross-repository contracts as bounded inert data, installs its
+# pinned action linter into an explicit path, and resolves declared Debian
+# runtime dependencies before exercising the package installation boundary.
+python3 - "$root/.github/workflows/ci.yml" \
+    "$root/.github/workflows/release.yml" <<'PY'
+import sys
+
+ci = open(sys.argv[1], encoding='utf-8').read()
+release = open(sys.argv[2], encoding='utf-8').read()
+required_ci = (
+    'Retrieve the exact producer workflow as bounded inert data',
+    'GOBIN="$actionlint_dir"',
+    '"$actionlint_dir/actionlint" -version',
+)
+if any(marker not in ci for marker in required_ci):
+    raise SystemExit('CI qualification hardening contract is incomplete')
+if 'repository: ${{ steps.contract.outputs.producer_repository }}' in ci:
+    raise SystemExit('CI executes a dynamic cross-repository producer checkout')
+dependency_install = 'apt-get install --yes --no-install-recommends'
+package_install = 'dpkg --install "$deb"'
+if dependency_install not in release or release.index(dependency_install) > release.index(package_install):
+    raise SystemExit('Debian runtime dependencies are not resolved before package installation')
+PY
+
 # Every public-output helper delegates parent creation to one no-follow policy.
 # Existing caller-owned modes are preserved exactly and a symlink parent is
 # rejected before any output is created.

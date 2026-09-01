@@ -1446,19 +1446,67 @@ fn real_aros_source_sync_runs_the_real_transpiler_when_explicitly_configured() {
         "{}",
         String::from_utf8_lossy(&initialized_upstream.stderr)
     );
-    let qualified_refspec = format!("{source_ref}:refs/heads/qualified");
+    // CI deliberately checks out the immutable source shallowly. Build a
+    // complete root commit around the exact qualified tree in an isolated
+    // repository rather than requiring or mutating the missing source
+    // history. Git alternates are confined to this process-local fixture.
+    let source_tree = git(
+        &source_root,
+        ["rev-parse", &format!("{source_ref}^{{tree}}")],
+    );
+    let source_objects = PathBuf::from(git(
+        &source_root,
+        [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ],
+    ))
+    .canonicalize()
+    .expect("qualified source object directory");
+    let mut alternate = source_objects.as_os_str().as_encoded_bytes().to_vec();
+    assert!(!alternate.contains(&b'\n') && !alternate.contains(&b'\r'));
+    alternate.push(b'\n');
+    fs::write(
+        qualified_upstream.join("objects/info/alternates"),
+        alternate,
+    )
+    .expect("qualified source alternate");
     let published_source = Command::new("git")
         .arg("-C")
-        .arg(&source_root)
-        .args(["push", "--no-verify"])
         .arg(&qualified_upstream)
-        .arg(&qualified_refspec)
+        .args(["commit-tree", &source_tree, "-m", "qualified source tree"])
+        .env("GIT_AUTHOR_NAME", "AROS qualification")
+        .env("GIT_AUTHOR_EMAIL", "aros-qualification@example.invalid")
+        .env("GIT_COMMITTER_NAME", "AROS qualification")
+        .env("GIT_COMMITTER_EMAIL", "aros-qualification@example.invalid")
         .output()
         .expect("qualified source publication");
     assert!(
         published_source.status.success(),
         "{}",
         String::from_utf8_lossy(&published_source.stderr)
+    );
+    let qualified_commit = String::from_utf8(published_source.stdout)
+        .expect("qualified source commit encoding")
+        .trim()
+        .to_owned();
+    assert_eq!(qualified_commit.len(), 40);
+    git(
+        &qualified_upstream,
+        [
+            "update-ref",
+            "refs/heads/qualified",
+            qualified_commit.as_str(),
+        ],
+    );
+    assert_eq!(
+        git(
+            &qualified_upstream,
+            ["rev-parse", "refs/heads/qualified^{tree}"],
+        ),
+        source_tree
     );
     let checkout = temporary.path().join("real-source-checkout");
     let initialized = run(Command::new(aros())
