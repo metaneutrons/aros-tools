@@ -990,6 +990,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_executable_fixture(path: &Path, body: impl AsRef<[u8]>) {
+        // Publish only after the writable handle is closed. Linux can reject
+        // an immediate exec with ETXTBSY on busy CI filesystems otherwise.
+        let staged = path.with_extension("fixture-staged");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .expect("staged linker fixture");
+        file.write_all(body.as_ref())
+            .expect("linker fixture contents");
+        file.sync_all().expect("linker fixture synchronization");
+        drop(file);
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
+            .expect("linker fixture permissions");
+        fs::rename(&staged, path).expect("publish linker fixture");
+    }
+
+    #[cfg(unix)]
     fn write_linker_that_fails_second_pass(linker: &Path, fixture: &Path, counter: &Path) {
         let body = format!(
             "#!/bin/sh\n\
@@ -1011,8 +1030,7 @@ mod tests {
             counter = counter.display(),
             fixture = fixture.display(),
         );
-        fs::write(linker, body).unwrap();
-        fs::set_permissions(linker, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_fixture(linker, body);
     }
 
     #[test]
@@ -1146,12 +1164,10 @@ mod tests {
     fn a_bad_first_link_never_replaces_the_existing_output() {
         let directory = tempfile::tempdir().unwrap();
         let linker = directory.path().join("ld.lld");
-        fs::write(
+        write_executable_fixture(
             &linker,
             b"#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do\n  case $1 in\n    -o) shift; out=$1 ;;\n    -o*) out=${1#-o} ;;\n  esac\n  shift\ndone\nprintf 'not an ELF' > \"$out\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&linker, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let sysroot = directory.path().join("sysroot");
         fs::create_dir_all(sysroot.join("lib")).unwrap();
         let output = directory.path().join("output.o");
