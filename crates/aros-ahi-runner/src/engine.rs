@@ -576,7 +576,7 @@ fn digest(path: &Path) -> std::io::Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(aros_common::finish_sha256(hasher).to_string())
 }
 
 fn context(contract: &Contract) -> DiagnosticContext {

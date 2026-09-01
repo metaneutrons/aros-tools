@@ -367,7 +367,7 @@ fn verify_digest(
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = aros_common::finish_sha256(hasher).to_string();
     if actual != expected {
         return Err(input_failure(
             contract_source,
