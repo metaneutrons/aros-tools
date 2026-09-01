@@ -49,16 +49,23 @@ release = open(sys.argv[2], encoding='utf-8').read()
 required_ci = (
     'Retrieve the exact producer workflow as bounded inert data',
     'GOBIN="$actionlint_dir"',
+    'github.com/rhysd/actionlint/cmd/actionlint@v1.7.12',
     '"$actionlint_dir/actionlint" -version',
 )
 if any(marker not in ci for marker in required_ci):
     raise SystemExit('CI qualification hardening contract is incomplete')
-if 'repository: ${{ steps.contract.outputs.producer_repository }}' in ci:
+if (
+    'repository: ${{ steps.contract.outputs.producer_repository }}' in ci
+    or 'git -C aros-producer' in ci
+):
     raise SystemExit('CI executes a dynamic cross-repository producer checkout')
 dependency_install = 'apt-get install --yes --no-install-recommends'
 package_install = 'dpkg --install "$deb"'
 if dependency_install not in release or release.index(dependency_install) > release.index(package_install):
     raise SystemExit('Debian runtime dependencies are not resolved before package installation')
+arch_dependencies = 'pacman --sync --refresh --sysupgrade --noconfirm --needed'
+if arch_dependencies not in release or release.index(arch_dependencies) > release.index('makepkg --config'):
+    raise SystemExit('Arch runtime dependencies are not resolved before package construction')
 PY
 
 # Every public-output helper delegates parent creation to one no-follow policy.

@@ -1282,6 +1282,8 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
+          pacman --sync --refresh --sysupgrade --noconfirm --needed \
+            ca-certificates cmake curl git ninja patch python
           useradd --create-home builder
           work=/home/builder/package
           install -d -o builder -g builder "$work"
@@ -1775,6 +1777,8 @@ jobs:
 
           resolve_by_tag
           count=$(jq 'length' "$RUNNER_TEMP/release-matches.json")
+          # RECOVERED_KIND is injected by the step-level env contract.
+          # shellcheck disable=SC2153
           if ((count == 0)); then
             if [[ "$RECOVERED_KIND" != absent || -n "$RECOVERED_ID" ]]; then
               echo '::error::AP7500 recovered release ID disappeared; refusing replacement'

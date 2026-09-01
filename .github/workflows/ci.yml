@@ -60,7 +60,7 @@ jobs:
           actionlint_dir="$RUNNER_TEMP/actionlint-bin"
           install -d -m 0755 "$actionlint_dir"
           GOBIN="$actionlint_dir" \
-            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           printf '%s\n' "$actionlint_dir" >> "$GITHUB_PATH"
           "$actionlint_dir/actionlint" -version
           shellcheck --version
@@ -191,15 +191,8 @@ jobs:
       - name: Require producer and consumer source identities to agree
         if: matrix.source_qualification
         shell: bash
-        env:
-          PRODUCER_COMMIT: ${{ steps.contract.outputs.producer_commit }}
-          PRODUCER_WORKFLOW: ${{ steps.contract.outputs.producer_workflow }}
         run: |
           set -euo pipefail
-          if [[ $(git -C aros-producer rev-parse HEAD) != "$PRODUCER_COMMIT" ]]; then
-            echo '::error::qualified producer checkout does not match its contract commit'
-            exit 1
-          fi
           python3 aros-tools/scripts/validate-source-contract.py \
             --contract aros-tools/contracts/aros-source-v1.toml \
             --producer-workflow "$RUNNER_TEMP/qualified-producer-workflow.yml"

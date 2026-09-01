@@ -191,6 +191,10 @@ fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
         )?;
         writeln!(output, "  license any_of: [\"MIT\", \"Apache-2.0\"]")?;
         writeln!(output)?;
+        for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
+            writeln!(output, "  depends_on \"{dependency}\"")?;
+        }
+        writeln!(output)?;
         write_homebrew_os(
             &mut output,
             "macos",
@@ -208,10 +212,6 @@ fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
             &linux_x86_url,
             &linux_x86.archive_sha256,
         )?;
-        writeln!(output)?;
-        for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
-            writeln!(output, "  depends_on \"{dependency}\"")?;
-        }
         writeln!(output)?;
         writeln!(output, "  def install")?;
         writeln!(output, "    bin.install Dir[\"bin/*\"]")?;
@@ -425,6 +425,7 @@ mod tests {
         for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
             assert!(rendered.contains(&format!("depends_on \"{dependency}\"")));
         }
+        assert!(rendered.find("depends_on").unwrap() < rendered.find("on_macos").unwrap());
         assert!(!rendered.contains("  version \""));
     }
 
