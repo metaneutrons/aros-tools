@@ -17,7 +17,7 @@ use crate::contract::{require_regular, PackageArgs, VerifyArgs};
 use crate::{ReleaseFailure, ReleaseResult};
 
 pub const MANIFEST_SCHEMA: u32 = 1;
-const BINARIES: &[&str] = &[
+pub const BINARIES: &[&str] = &[
     "aros",
     "aros-ahi-runner",
     "aros-collect",
@@ -30,6 +30,7 @@ const BINARIES: &[&str] = &[
 const DOCUMENTS: &[&str] = &["LICENSE-APACHE", "LICENSE-MIT", "README.md"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseManifest {
     pub schema: u32,
     pub package: String,
@@ -44,6 +45,7 @@ pub struct ReleaseManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseFile {
     pub path: String,
     pub mode: String,
@@ -636,6 +638,44 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(failure.diagnostic().code, DiagnosticCode::ReleaseIntegrity);
+    }
+
+    #[test]
+    fn release_manifest_rejects_unknown_top_level_and_file_fields() {
+        let top_level = serde_json::json!({
+            "schema": MANIFEST_SCHEMA,
+            "package": "aros-tools",
+            "version": "1.2.3",
+            "target": "x86_64-unknown-linux-gnu",
+            "source_commit": "a".repeat(40),
+            "source_date_epoch": 1_700_000_000_u64,
+            "archive": "archive.tar.gz",
+            "archive_sha256": "b".repeat(64),
+            "archive_size": 1,
+            "files": [],
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<ReleaseManifest>(top_level).is_err());
+
+        let nested = serde_json::json!({
+            "schema": MANIFEST_SCHEMA,
+            "package": "aros-tools",
+            "version": "1.2.3",
+            "target": "x86_64-unknown-linux-gnu",
+            "source_commit": "a".repeat(40),
+            "source_date_epoch": 1_700_000_000_u64,
+            "archive": "archive.tar.gz",
+            "archive_sha256": "b".repeat(64),
+            "archive_size": 1,
+            "files": [{
+                "path": "bin/aros",
+                "mode": "0755",
+                "sha256": "c".repeat(64),
+                "size": 1,
+                "unexpected": true
+            }]
+        });
+        assert!(serde_json::from_value::<ReleaseManifest>(nested).is_err());
     }
 
     #[cfg(unix)]

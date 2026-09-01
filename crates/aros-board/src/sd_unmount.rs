@@ -1351,7 +1351,7 @@ mod tests {
     fn linux_rejects_incomplete_tree_and_critical_or_relative_mounts() {
         for mount in [
             json!("/boot"),
-            json!("/Users/fabian"),
+            json!("/Users/example"),
             json!("/etc/aros"),
             json!("/opt/aros"),
             json!("/tmp/aros"),

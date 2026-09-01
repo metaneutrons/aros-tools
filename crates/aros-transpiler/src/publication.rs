@@ -1,14 +1,10 @@
 //! Transactional publication of a generated transpiler output set.
 
-use aros_common::DiagnosticSeverity;
+use aros_common::{publication_journal_path, DiagnosticSeverity, DurableFileSet};
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 enum ArtifactContent {
@@ -20,19 +16,6 @@ enum ArtifactContent {
 struct Artifact {
     destination: PathBuf,
     content: ArtifactContent,
-}
-
-#[derive(Debug)]
-struct StagedArtifact {
-    destination: PathBuf,
-    staged: Option<PathBuf>,
-}
-
-#[derive(Debug)]
-struct PublishedArtifact {
-    destination: PathBuf,
-    backup: Option<PathBuf>,
-    installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,14 +35,25 @@ struct CoverageDocument<'a> {
 
 /// A complete output generation which becomes visible only after every file
 /// has been rendered and staged successfully.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Publication {
+    commit_marker: PathBuf,
     artifacts: Vec<Artifact>,
     notices: Vec<String>,
     coverage: Vec<CoverageEntry>,
 }
 
 impl Publication {
+    /// Create one generation whose graph file is installed after every sidecar.
+    pub fn for_output(commit_marker: impl Into<PathBuf>) -> Self {
+        Self {
+            commit_marker: commit_marker.into(),
+            artifacts: Vec::new(),
+            notices: Vec::new(),
+            coverage: Vec::new(),
+        }
+    }
+
     pub fn present(&mut self, destination: PathBuf, content: impl Into<Vec<u8>>) {
         self.artifacts.push(Artifact {
             destination,
@@ -112,57 +106,33 @@ impl Publication {
 
     pub fn publish(self) -> io::Result<()> {
         let notices = self.notices.clone();
-        self.publish_impl(None)?;
+        self.publish_impl(|| {})?;
         for notice in notices {
-            println!("{notice}");
+            aros_common::outputln!("{notice}");
         }
         Ok(())
     }
 
-    fn publish_impl(self, fail_after: Option<usize>) -> io::Result<()> {
+    fn publish_impl(self, after_lock: impl FnOnce()) -> io::Result<()> {
         validate_coverage(&self.coverage)?;
         validate_unique_destinations(&self.artifacts)?;
-        let mut staged = stage_all(self.artifacts)?;
-        let mut published = Vec::with_capacity(staged.len());
+        let (artifacts, marker) = split_commit_marker(self.artifacts, &self.commit_marker)?;
+        let journal = publication_journal_path(&self.commit_marker, "transpiler")?;
+        let mut transaction = DurableFileSet::new(journal)?;
+        after_lock();
 
-        for (index, artifact) in staged.iter_mut().enumerate() {
-            let backup = match move_existing_to_backup(&artifact.destination) {
-                Ok(backup) => backup,
-                Err(error) => return Err(rollback_error(error, &published, &staged)),
-            };
-            published.push(PublishedArtifact {
-                destination: artifact.destination.clone(),
-                backup,
-                installed: false,
-            });
-
-            let result = if fail_after == Some(index) {
-                Err(io::Error::other("injected publication failure"))
-            } else if let Some(staged_path) = artifact.staged.take() {
-                fs::rename(staged_path, &artifact.destination)
-            } else {
-                Ok(())
-            };
-
-            if let Err(error) = result {
-                return Err(rollback_error(error, &published, &staged));
-            }
-            if let Some(last) = published.last_mut() {
-                last.installed = true;
+        for artifact in artifacts {
+            match artifact.content {
+                ArtifactContent::Present(content) => {
+                    transaction.stage_write(&artifact.destination, &content)?;
+                }
+                ArtifactContent::Absent => {
+                    transaction.stage_remove(&artifact.destination)?;
+                }
             }
         }
-
-        if let Err(error) = sync_parent_directories(&published) {
-            return Err(rollback_error(error, &published, &staged));
-        }
-        for artifact in &published {
-            if let Some(backup) = &artifact.backup {
-                // The generation is already durable and complete. A leftover
-                // hidden backup is recoverable housekeeping, not a reason to
-                // report that publication failed after the commit succeeded.
-                let _ = remove_any(backup);
-            }
-        }
+        transaction.stage_commit_marker(&self.commit_marker, &marker)?;
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -205,198 +175,159 @@ fn validate_unique_destinations(artifacts: &[Artifact]) -> io::Result<()> {
     Ok(())
 }
 
-fn stage_all(artifacts: Vec<Artifact>) -> io::Result<Vec<StagedArtifact>> {
-    let mut staged = Vec::with_capacity(artifacts.len());
+fn split_commit_marker(
+    artifacts: Vec<Artifact>,
+    commit_marker: &Path,
+) -> io::Result<(Vec<Artifact>, Vec<u8>)> {
+    let mut ordinary = Vec::with_capacity(artifacts.len().saturating_sub(1));
+    let mut marker = None;
     for artifact in artifacts {
-        let stage_result = match artifact.content {
-            ArtifactContent::Present(content) => {
-                stage_file(&artifact.destination, &content).map(Some)
+        if artifact.destination == commit_marker {
+            match artifact.content {
+                ArtifactContent::Present(content) => marker = Some(content),
+                ArtifactContent::Absent => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "transpiler graph commit marker '{}' cannot be absent",
+                            commit_marker.display()
+                        ),
+                    ));
+                }
             }
-            ArtifactContent::Absent => Ok(None),
-        };
-        match stage_result {
-            Ok(path) => staged.push(StagedArtifact {
-                destination: artifact.destination,
-                staged: path,
-            }),
-            Err(error) => {
-                cleanup_staged(&staged);
-                return Err(error);
-            }
+        } else {
+            ordinary.push(artifact);
         }
     }
-    Ok(staged)
-}
-
-fn stage_file(destination: &Path, content: &[u8]) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let staged = unused_sibling(destination, "stage")?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)?;
-    if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(&staged);
-        return Err(error);
-    }
-    Ok(staged)
-}
-
-fn move_existing_to_backup(destination: &Path) -> io::Result<Option<PathBuf>> {
-    match fs::symlink_metadata(destination) {
-        Ok(_) => {
-            let backup = unused_sibling(destination, "backup")?;
-            fs::rename(destination, &backup)?;
-            Ok(Some(backup))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn unused_sibling(destination: &Path, purpose: &str) -> io::Result<PathBuf> {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let name = destination.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("output path {} has no file name", destination.display()),
-        )
-    })?;
-    for _ in 0..100 {
-        let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".{}.aros-transpiler-{purpose}-{}-{id}",
-            name.to_string_lossy(),
-            std::process::id()
-        ));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!(
-            "cannot reserve a temporary sibling for {}",
-            destination.display()
-        ),
-    ))
-}
-
-fn rollback_error(
-    publication_error: io::Error,
-    published: &[PublishedArtifact],
-    staged: &[StagedArtifact],
-) -> io::Error {
-    let mut rollback_errors = Vec::new();
-    for artifact in published.iter().rev() {
-        if artifact.installed {
-            if let Err(error) = remove_any(&artifact.destination) {
-                rollback_errors.push(format!(
-                    "cannot remove replacement {}: {error}",
-                    artifact.destination.display()
-                ));
-            }
-        }
-        if let Some(backup) = &artifact.backup {
-            if let Err(error) = fs::rename(backup, &artifact.destination) {
-                rollback_errors.push(format!(
-                    "cannot restore {}: {error}",
-                    artifact.destination.display()
-                ));
-            }
-        }
-    }
-    cleanup_staged(staged);
-
-    if rollback_errors.is_empty() {
-        publication_error
-    } else {
-        io::Error::other(format!(
-            "{publication_error}; publication rollback also failed: {}",
-            rollback_errors.join("; ")
-        ))
-    }
-}
-
-fn cleanup_staged(staged: &[StagedArtifact]) {
-    for artifact in staged {
-        if let Some(path) = &artifact.staged {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-fn remove_any(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn sync_parent_directories(published: &[PublishedArtifact]) -> io::Result<()> {
-    let parents: BTreeSet<_> = published
-        .iter()
-        .filter_map(|artifact| artifact.destination.parent())
-        .collect();
-    for parent in parents {
-        OpenOptions::new().read(true).open(parent)?.sync_all()?;
-    }
-    Ok(())
+    marker.map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "publication does not contain graph commit marker '{}'",
+                    commit_marker.display()
+                ),
+            ))
+        },
+        |marker| Ok((ordinary, marker)),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
+    fn generation(output: &Path, sidecar: &Path, name: &str) -> Publication {
+        let mut publication = Publication::for_output(output);
+        publication.present(sidecar.to_path_buf(), format!("{name} sidecar"));
+        publication.present(output.to_path_buf(), format!("{name} graph"));
+        publication
+    }
+
+    #[cfg(unix)]
     #[test]
     fn staging_failure_leaves_the_previous_generation_untouched() {
         let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("first.txt");
-        fs::write(&first, "old first").unwrap();
+        let output = temp.path().join("generated.cmake");
+        fs::write(&output, "old graph").unwrap();
         let invalid_parent = temp.path().join("not-a-directory");
         fs::write(&invalid_parent, "plain file").unwrap();
 
-        let mut publication = Publication::default();
-        publication.present(first.clone(), "new first");
+        let mut publication = Publication::for_output(&output);
         publication.present(invalid_parent.join("second.txt"), "new second");
+        publication.present(output.clone(), "new graph");
         assert!(publication.publish().is_err());
-        assert_eq!(fs::read_to_string(first).unwrap(), "old first");
+        assert_eq!(fs::read_to_string(output).unwrap(), "old graph");
     }
 
+    #[cfg(unix)]
     #[test]
     fn commit_failure_restores_every_previous_artifact() {
         let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("first.txt");
-        let second = temp.path().join("second.txt");
-        fs::write(&first, "old first").unwrap();
-        fs::write(&second, "old second").unwrap();
+        let output = temp.path().join("generated.cmake");
+        let sidecar = temp.path().join("generated.report.txt");
+        fs::write(&output, "old graph").unwrap();
+        fs::write(&sidecar, "old sidecar").unwrap();
 
-        let mut publication = Publication::default();
-        publication.present(first.clone(), "new first");
-        publication.present(second.clone(), "new second");
-        assert!(publication.publish_impl(Some(1)).is_err());
-        assert_eq!(fs::read_to_string(first).unwrap(), "old first");
-        assert_eq!(fs::read_to_string(second).unwrap(), "old second");
+        let publication = generation(&output, &sidecar, "new");
+        let current = std::thread::current();
+        let thread = current.name().expect("Rust test threads have stable names");
+        std::env::set_var(
+            "AROS_PUBLICATION_TEST_FAIL_AT",
+            format!("before-committed-journal@{thread}"),
+        );
+        let result = publication.publish();
+        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(output).unwrap(), "old graph");
+        assert_eq!(fs::read_to_string(sidecar).unwrap(), "old sidecar");
     }
 
+    #[cfg(unix)]
     #[test]
     fn absent_artifact_removes_a_stale_report_on_commit() {
         let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("generated.cmake");
         let report = temp.path().join("report.txt");
+        fs::write(&output, "old graph").unwrap();
         fs::write(&report, "stale").unwrap();
 
-        let mut publication = Publication::default();
+        let mut publication = Publication::for_output(&output);
         publication.absent(report.clone());
+        publication.present(output.clone(), "new graph");
         publication.publish().unwrap();
         assert!(!report.exists());
+        assert_eq!(fs::read_to_string(output).unwrap(), "new graph");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_generations_are_serialized_without_mixing() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("generated.cmake");
+        let sidecar = temp.path().join("generated.report.txt");
+        fs::write(&output, "old graph").unwrap();
+        fs::write(&sidecar, "old sidecar").unwrap();
+
+        let first_locked = Arc::new(Barrier::new(2));
+        let release_first = Arc::new(Barrier::new(2));
+        let first = generation(&output, &sidecar, "first");
+        let locked = Arc::clone(&first_locked);
+        let release = Arc::clone(&release_first);
+        let first_worker = std::thread::Builder::new()
+            .name("transpiler-publisher-first".to_owned())
+            .spawn(move || {
+                first.publish_impl(|| {
+                    locked.wait();
+                    release.wait();
+                })
+            })
+            .unwrap();
+
+        // The first publisher holds the stable journal lock before the second
+        // one starts. The second generation must therefore become authoritative
+        // as one complete set after the first releases the namespace.
+        first_locked.wait();
+        let second = generation(&output, &sidecar, "second");
+        let second_worker = std::thread::Builder::new()
+            .name("transpiler-publisher-second".to_owned())
+            .spawn(move || second.publish())
+            .unwrap();
+        release_first.wait();
+
+        first_worker.join().unwrap().unwrap();
+        second_worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(output).unwrap(), "second graph");
+        assert_eq!(fs::read_to_string(sidecar).unwrap(), "second sidecar");
     }
 
     #[test]
     fn coverage_index_is_stable_and_does_not_expose_host_paths() {
-        let mut publication = Publication::default();
+        let mut publication = Publication::for_output("/private/build/generated.cmake");
         publication.record_coverage(
             "AT1002",
             DiagnosticSeverity::Warning,
@@ -426,7 +357,7 @@ mod tests {
         let output = temp.path().join("generated.cmake");
         fs::write(&output, "old generation").unwrap();
 
-        let mut publication = Publication::default();
+        let mut publication = Publication::for_output(&output);
         publication.present(output.clone(), "new generation");
         publication.record_coverage(
             "AT1099",
@@ -437,5 +368,20 @@ mod tests {
         );
         assert!(publication.publish().is_err());
         assert_eq!(fs::read_to_string(output).unwrap(), "old generation");
+    }
+
+    #[test]
+    fn graph_commit_marker_is_required_and_cannot_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("generated.cmake");
+
+        let mut missing = Publication::for_output(&output);
+        missing.present(temp.path().join("sidecar.txt"), "sidecar");
+        assert!(missing.publish().is_err());
+
+        let mut absent = Publication::for_output(&output);
+        absent.absent(output.clone());
+        assert!(absent.publish().is_err());
+        assert!(!output.exists());
     }
 }

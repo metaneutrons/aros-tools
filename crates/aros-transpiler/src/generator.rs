@@ -608,7 +608,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out, "else()").unwrap();
         writeln!(
             out,
-            "    message(STATUS \"⏭️  AROS-NG: audited GRUB2 host-tool lanes are unavailable on this build host\")"
+            "    message(STATUS \"⏭️  AROS: audited GRUB2 host-tool lanes are unavailable on this build host\")"
         )
         .unwrap();
         writeln!(out, "endif()\n").unwrap();

@@ -128,7 +128,11 @@ pub(crate) fn parse(
             )?;
             ("efi32", "efi-i386")
         }
-        _ => unreachable!("the GRUB2 identity was checked above"),
+        unsupported => {
+            return Err(format!(
+                "internal GRUB2 capability invariant failed for identity {unsupported:?}"
+            ));
+        }
     };
 
     Ok(Some(GrubBuildDecl {

@@ -97,7 +97,7 @@ pub fn run_entry(
         .iter()
         .any(|argument| argument == "--help" || argument == "-help")
     {
-        println!(
+        aros_common::outputln!(
             "{name}: AROS linker collector\n\
              usage: {name} [collector observability options] \
              [linker arguments including --sysroot=DIR and -o FILE]\n\
@@ -113,7 +113,7 @@ pub fn run_entry(
         return Ok(());
     }
     if raw.iter().any(|argument| argument == "--version") {
-        println!("{name} {}", env!("CARGO_PKG_VERSION"));
+        aros_common::outputln!("{name} {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 

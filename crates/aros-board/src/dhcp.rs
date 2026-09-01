@@ -350,7 +350,11 @@ fn index_for_name(interfaces: &[LocalInterface], name: &str) -> Result<NonZeroU3
 
     match indexes.len() {
         0 => bail!("selected DHCP interface '{name}' is not present"),
-        1 => Ok(*indexes.first().expect("one interface index")),
+        1 => indexes.iter().next().copied().ok_or_else(|| {
+            miette::miette!(
+                "internal DHCP invariant failed: one interface index was counted but none was retained"
+            )
+        }),
         _ => bail!(
             "selected DHCP interface '{name}' resolves to multiple OS interface indices; DHCP will not choose one"
         ),

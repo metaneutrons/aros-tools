@@ -40,7 +40,7 @@ pub struct BoardConfig {
     pub build_target: String,
     #[serde(default)]
     pub transport: Transport,
-    /// Relative paths are resolved against the AROS-NG checkout.
+    /// Relative paths are resolved against the selected AROS checkout.
     #[serde(default)]
     pub artifact_dir: Option<PathBuf>,
     /// Raspberry-Pi-only build inputs. They never apply to another backend.
@@ -829,7 +829,7 @@ pub fn default_config_path_from(
 fn board_template(board_name: &str) -> String {
     format!(
         r#"# Local AROS board profile. This file contains host-specific data;
-# do not commit it to AROS-NG.
+# do not commit it to the AROS source checkout.
 #
 # First: connect the Pi's U-Boot USB-ECM gadget, run `aros board scan`, then
 # replace the USB descriptor values and Pi-side gadget MAC below.

@@ -28,7 +28,7 @@ use publication::Publication;
 #[command(
     author,
     version,
-    about = "AROS-NG Parallel mmakefile Transpiler",
+    about = "Fail-closed AROS MetaMake-to-CMake transpiler",
     after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default and is written only to an\nexplicitly selected local file."
 )]
 struct Args {
@@ -120,8 +120,23 @@ fn main() -> ExitCode {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            print!("{error}");
-            return ExitCode::SUCCESS;
+            return match aros_common::write_stdout(&error.to_string()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(output_error) => {
+                    observability::render(
+                        &DiagnosticSet::single(
+                            Diagnostic::error(
+                                DiagnosticCode::TranspilerObservability,
+                                DiagnosticStage::Observability,
+                                format!("could not write command help: {output_error}"),
+                            )
+                            .with_hint("check the stdout destination and retry"),
+                        ),
+                        requested_format,
+                    );
+                    ExitCode::FAILURE
+                }
+            };
         }
         Err(error) => {
             observability::render(
@@ -166,21 +181,34 @@ fn main() -> ExitCode {
     }
 
     match run(&args, &logger) {
-        Ok(()) => match logger.event(
-            LogLevel::Info,
-            "invocation.complete",
-            "transpiler invocation completed",
-            &context,
-        ) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                observability::render(
-                    &DiagnosticSet::single(error.into_diagnostic()),
-                    args.diagnostic_format,
-                );
-                ExitCode::FAILURE
+        Ok(()) => {
+            if let Some(diagnostic) = aros_common::take_stdout_failure_diagnostic(
+                DiagnosticCode::TranspilerObservability,
+                DiagnosticStage::Observability,
+            ) {
+                let mut diagnostics = vec![diagnostic];
+                if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
+                observability::render(&DiagnosticSet::new(diagnostics), args.diagnostic_format);
+                return ExitCode::FAILURE;
             }
-        },
+            match logger.event(
+                LogLevel::Info,
+                "invocation.complete",
+                "transpiler invocation completed",
+                &context,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    observability::render(
+                        &DiagnosticSet::single(error.into_diagnostic()),
+                        args.diagnostic_format,
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             let mut diagnostics = error_to_diagnostics(error);
             for diagnostic in diagnostics.diagnostics.clone() {
@@ -213,8 +241,9 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             "repair the embedded registry and rebuild the transpiler binary",
         )]));
     }
-    println!(
-        "⚡ AROS Transpiler v0.1.0 — Scanning MetaMake inputs in {}...",
+    aros_common::outputln!(
+        "⚡ AROS Transpiler v{} — Scanning MetaMake inputs in {}...",
+        env!("CARGO_PKG_VERSION"),
         args.source_dir.display()
     );
 
@@ -257,7 +286,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // that choice while reporting conflicting later claims.
     files.sort();
 
-    println!(
+    aros_common::outputln!(
         "📦 Found {} MetaMake input files. Parsing in parallel...",
         files.len()
     );
@@ -605,13 +634,15 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // its shared external prerequisite closure and make that visible.
     let flattened_meta_cycles = graph.flatten_meta_cycles();
     let n_overrides: usize = graph.arch_sources.values().map(Vec::len).sum();
-    println!("🔧 {n_overrides} architecture source override(s) from %build_archspecific");
-    println!(
+    aros_common::outputln!(
+        "🔧 {n_overrides} architecture source override(s) from %build_archspecific"
+    );
+    aros_common::outputln!(
         "🌐 {} third-party source fetch rule(s) from %fetch",
         graph.fetches.len()
     );
 
-    let mut publication = Publication::default();
+    let mut publication = Publication::for_output(&args.output);
     write_report(
         &mut publication,
         &args.output,
@@ -761,7 +792,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         "cyclic #MM component(s) flattened to shared dependencies",
     );
 
-    println!(
+    aros_common::outputln!(
         "📥 {} SDK header staging rule(s) from %copy_includes",
         graph.copy_includes.len()
     );
@@ -774,7 +805,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         skipped_headers,
         "%copy_includes declaration(s) skipped (out-of-tree or unresolved)",
     );
-    println!(
+    aros_common::outputln!(
         "📂 {} recursive directory staging rule(s) from %copy_dir_recursive",
         graph.copy_directories.len()
     );
@@ -804,7 +835,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     );
     if !graph.packages.is_empty() {
         let members: usize = graph.packages.iter().map(|p| p.resolved.len()).sum();
-        println!(
+        aros_common::outputln!(
             "📦 {} package/kickstart declaration(s) with {members} member(s)",
             graph.packages.len()
         );
@@ -878,16 +909,16 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         "include path(s) reference unmapped Make variables and were skipped",
     );
 
-    println!(
+    aros_common::outputln!(
         "🖼️  {} resolved icon declaration variant(s), {} unique icon target(s)",
         graph.icons.len(),
         graph.icon_targets.len()
     );
-    println!(
+    aros_common::outputln!(
         "🌐 {} resolved catalog declaration(s)",
         graph.catalogs.len()
     );
-    println!(
+    aros_common::outputln!(
         "🔨 Assembling Dependency Graph with {} concrete targets, {} external CMake targets, {} configure-style targets, {} GRUB2 host-tool lanes, {} AHI subsystem builds, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets...",
         graph.targets.len(),
         graph.external_cmake.len(),
@@ -910,7 +941,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         )
         .map_err(|error| diagnostics_error(vec![error.into_diagnostic()]))?;
 
-    println!(
+    aros_common::outputln!(
         "📝 Generating CMake target definitions -> {}...",
         args.output.display()
     );
@@ -967,7 +998,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         )])
     })?;
 
-    println!(
+    aros_common::outputln!(
         "✅ Successfully generated {} concrete targets, {} external CMake targets, {} configure-style targets, {} GRUB2 host-tool lanes, {} AHI subsystem builds, {} Python output groups, {} icon targets, {} catalog targets and {} meta-targets in {}!",
         graph.targets.len(),
         graph.external_cmake.len(),
@@ -1016,6 +1047,14 @@ fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
                 DiagnosticCode::InternalInvariant,
                 DiagnosticStage::Internal,
                 format!("unexpected configuration error in `{file}`: {message}"),
+            )
+            .with_location(SourceLocation::new(file)),
+        ),
+        ArosError::ToolchainManifest { file, message } => DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::InternalInvariant,
+                DiagnosticStage::Internal,
+                format!("unexpected toolchain manifest error in `{file}`: {message}"),
             )
             .with_location(SourceLocation::new(file)),
         ),
@@ -1161,5 +1200,33 @@ fn report_metadata(extension: &str) -> (&'static str, DiagnosticSeverity) {
         // Adding a report without assigning a stable code is an internal
         // contract error. Publication rejects Error-severity coverage entries.
         _ => ("AT1099", Error),
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn unexpected_toolchain_manifest_error_has_a_stable_diagnostic() {
+        let diagnostics = error_to_diagnostics(ArosError::ToolchainManifest {
+            file: "toolchain-manifest.json".to_owned(),
+            message: "unknown field".to_owned(),
+        });
+
+        assert_eq!(diagnostics.diagnostics.len(), 1);
+        let diagnostic = &diagnostics.diagnostics[0];
+        assert_eq!(diagnostic.code, DiagnosticCode::InternalInvariant);
+        assert_eq!(diagnostic.stage, DiagnosticStage::Internal);
+        assert_eq!(
+            diagnostic
+                .location
+                .as_ref()
+                .map(|location| location.path.as_str()),
+            Some("toolchain-manifest.json")
+        );
+        assert!(diagnostic
+            .message
+            .contains("unexpected toolchain manifest error"));
     }
 }

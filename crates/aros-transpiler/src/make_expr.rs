@@ -534,7 +534,11 @@ impl<'a> Evaluator<'a> {
                         .collect(),
                     "filter" => filter_words(&make_words(&first), &words, true),
                     "filter-out" => filter_words(&make_words(&first), &words, false),
-                    _ => unreachable!(),
+                    unsupported => {
+                        return Err(MakeExprError::UnsupportedFunction {
+                            name: unsupported.to_owned(),
+                        });
+                    }
                 };
                 Ok(join_words(&output))
             }
@@ -675,7 +679,9 @@ impl<'a> Evaluator<'a> {
                     }
                     "strip" => Ok(join_words(&make_words(&expanded))),
                     "wildcard" => Ok(join_words(&self.wildcard(&expanded, false)?)),
-                    _ => unreachable!(),
+                    unsupported => Err(MakeExprError::UnsupportedFunction {
+                        name: unsupported.to_owned(),
+                    }),
                 }
             }
             "firstword" | "lastword" | "words" => {
@@ -685,7 +691,9 @@ impl<'a> Evaluator<'a> {
                     "firstword" => Ok(words.first().cloned().unwrap_or_default()),
                     "lastword" => Ok(words.last().cloned().unwrap_or_default()),
                     "words" => Ok(words.len().to_string()),
-                    _ => unreachable!(),
+                    unsupported => Err(MakeExprError::UnsupportedFunction {
+                        name: unsupported.to_owned(),
+                    }),
                 }
             }
             "value" => {

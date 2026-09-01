@@ -12,4 +12,8 @@ making the same defect authoritative on both sides.
 The library owns collection, cache validation, reference expansion,
 comparison, and report generation. The binary is a thin argument/exit
 boundary. Run `aros-verify --help` for profile, architecture, cache, and report
-options.
+options. Every `genmf.py` expansion has a 30-second process-group deadline by
+default. `--genmf-timeout-seconds` (or
+`AROS_VERIFY_GENMF_TIMEOUT_SECONDS`) can set an explicit 1–3600 second budget;
+a timeout is reported with stable `timed_out` and `timeout_ms` diagnostic
+context and never leaves a partial cache entry authoritative.

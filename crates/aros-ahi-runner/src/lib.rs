@@ -2,6 +2,7 @@
 
 pub mod contract;
 pub mod engine;
+mod installation;
 pub mod observability;
 pub mod validation;
 

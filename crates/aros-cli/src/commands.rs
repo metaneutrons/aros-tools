@@ -4,15 +4,16 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    board, boot, build, golden, host_compiler, observability, repo, style, toolchain, BoardCommand,
-    BoardSelection, BuildToolsCommand, Commands, GoldenAction, HostCompilerCommands, SdCommand,
-    ToolchainCommands, CHECK, SPARKLES,
+    artifact, board, boot, build, golden, host_compiler, observability, repo, source, style,
+    toolchain, BoardCommand, BoardSelection, BuildToolsCommand, Commands, GoldenAction,
+    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands, CHECK, SPARKLES,
 };
 use miette::Result;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
+pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
     match command {
         Commands::Setup {
             force,
@@ -20,11 +21,27 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             all,
             offline,
             local,
-        } => setup(repo_root, force, preset, all, offline, local).await,
-        Commands::HostCompiler { command } => host_compiler_command(repo_root, command).await,
+        } => {
+            setup(
+                required_repo(repo_root)?,
+                force,
+                preset,
+                all,
+                offline,
+                local,
+            )
+            .await
+        }
+        Commands::HostCompiler { command } => {
+            host_compiler_command(required_repo(repo_root)?, command).await
+        }
         Commands::BuildTools { command } => build_tools_command(command, repo_root),
-        Commands::Toolchain { command } => toolchain_command(repo_root, command).await,
+        Commands::Toolchain { command } => {
+            toolchain_command(required_repo(repo_root)?, command).await
+        }
         Commands::Board { command } => board_command(command, repo_root).await,
+        Commands::Source { command } => source_command(command, repo_root),
+        Commands::Install { source_bin, prefix } => install_suite(source_bin, prefix),
         Commands::Build {
             preset,
             target,
@@ -36,7 +53,7 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             toolchain_dir,
         } => {
             build::run(
-                repo_root,
+                required_repo(repo_root)?,
                 &build::BuildOptions {
                     toolchain_preset: preset.clone(),
                     preset,
@@ -54,7 +71,7 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             )
             .await
         }
-        Commands::Clean { preset } => clean(repo_root, preset),
+        Commands::Clean { preset } => clean(required_repo(repo_root)?, preset),
         Commands::Test {
             preset,
             timeout,
@@ -63,13 +80,47 @@ pub async fn run(command: Commands, repo_root: &Path) -> Result<()> {
             evidence,
             memory,
         } => test(
-            repo_root, &preset, timeout, packages, modules, evidence, memory,
+            required_repo(repo_root)?,
+            &preset,
+            timeout,
+            packages,
+            modules,
+            evidence,
+            memory,
         ),
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
-        Commands::Sync { transpile } => sync(transpile),
-        Commands::Golden { action } => golden_command(action, repo_root),
+        Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Info => info(repo_root),
     }
+}
+
+fn install_suite(source_bin: PathBuf, prefix: PathBuf) -> Result<()> {
+    let args = aros_release::contract::InstallArgs { source_bin, prefix };
+    match aros_release::install::install(&args) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let state = error
+                .diagnostic()
+                .context
+                .as_ref()
+                .and_then(|context| context.commit_state);
+            let result = Err(miette::miette!("{error}"));
+            match state {
+                Some(state) => {
+                    observability::commit_state(result, state, "native suite publication state")
+                }
+                None => result,
+            }
+        }
+    }
+}
+
+fn required_repo(repo_root: Option<&Path>) -> Result<&Path> {
+    repo_root.ok_or_else(|| {
+        miette::miette!(
+            "This command requires an AROS source checkout, but repository discovery returned no checkout."
+        )
+    })
 }
 
 async fn setup(
@@ -80,19 +131,21 @@ async fn setup(
     offline: bool,
     local: Option<PathBuf>,
 ) -> Result<()> {
-    if all {
-        if local.is_some() {
-            miette::bail!("--local cannot be combined with --all");
+    match (all, preset, local) {
+        (true, Some(_), _) => miette::bail!("--all cannot be combined with --preset"),
+        (true, None, Some(_)) => miette::bail!("--all cannot be combined with --local"),
+        (true, None, None) => {
+            for profile in repo::load_target_profiles(repo_root)? {
+                toolchain::install(repo_root, &profile.name, offline, force, None).await?;
+            }
         }
-        for profile in repo::load_target_profiles(repo_root)? {
-            toolchain::install(repo_root, &profile.name, offline, force, None).await?;
+        (false, Some(preset), local) => {
+            toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
         }
-    } else if let Some(preset) = preset {
-        toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
-    } else if local.is_some() {
-        miette::bail!("--local requires --preset");
-    } else {
-        host_compiler::install(repo_root, force, offline).await?;
+        (false, None, Some(_)) => miette::bail!("--local requires --preset"),
+        (false, None, None) => {
+            host_compiler::install(repo_root, force, offline).await?;
+        }
     }
     Ok(())
 }
@@ -106,7 +159,7 @@ async fn host_compiler_command(repo_root: &Path, command: HostCompilerCommands) 
     Ok(())
 }
 
-fn build_tools_command(command: BuildToolsCommand, repo_root: &Path) -> Result<()> {
+fn build_tools_command(command: BuildToolsCommand, repo_root: Option<&Path>) -> Result<()> {
     match command {
         BuildToolsCommand::Build => crate::build_tools::build(repo_root).map(|_| ()),
         BuildToolsCommand::Check => crate::build_tools::print_check(repo_root),
@@ -129,13 +182,13 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
         }
         ToolchainCommands::Path { preset, local } => {
             let resolved = crate::toolchain::path(repo_root, &preset, local.as_deref())?;
-            println!("{}", resolved.paths.root.display());
+            aros_common::outputln!("{}", resolved.paths.root.display());
         }
     }
     Ok(())
 }
 
-async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
+async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Result<()> {
     match command {
         BoardCommand::Init {
             board,
@@ -145,7 +198,7 @@ async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
         BoardCommand::Scan => crate::board::scan(),
         BoardCommand::Doctor(selection) => {
             let board = load_board(&selection)?;
-            crate::board::doctor(&board, repo_root)
+            crate::board::doctor(&board, required_repo(repo_root)?)
         }
         BoardCommand::Build {
             board: selection,
@@ -162,7 +215,7 @@ async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
             let board = load_board(&selection)?;
             crate::board::build(
                 &board,
-                repo_root,
+                required_repo(repo_root)?,
                 build::BuildOptions {
                     preset: board.config.preset.clone(),
                     toolchain_preset: board.config.toolchain_preset.clone(),
@@ -190,7 +243,12 @@ async fn board_command(command: BoardCommand, repo_root: &Path) -> Result<()> {
         } => {
             exclusive_apply_dry_run(apply, dry_run)?;
             let board = load_board(&selection)?;
-            crate::board::deploy(&board, repo_root, artifact_dir.as_deref(), apply)
+            crate::board::deploy(
+                &board,
+                required_repo(repo_root)?,
+                artifact_dir.as_deref(),
+                apply,
+            )
         }
         BoardCommand::Serve {
             board: selection,
@@ -245,6 +303,32 @@ fn sd(command: SdCommand) -> Result<()> {
     }
 }
 
+fn source_command(command: SourceCommand, repo_root: Option<&Path>) -> Result<()> {
+    match command {
+        SourceCommand::Init {
+            path,
+            upstream,
+            fork,
+            source_ref,
+        } => source::initialize(&source::InitOptions {
+            destination: path,
+            upstream_url: upstream,
+            origin_url: fork,
+            source_ref,
+        }),
+        SourceCommand::Sync {
+            upstream,
+            upstream_ref,
+            transpile,
+        } => source::sync(
+            required_repo(repo_root)?,
+            &upstream,
+            &upstream_ref,
+            transpile,
+        ),
+    }
+}
+
 fn exclusive_apply_dry_run(apply: bool, dry_run: bool) -> Result<()> {
     if apply && dry_run {
         miette::bail!("--apply and --dry-run cannot be used together.");
@@ -257,7 +341,7 @@ fn clean(repo_root: &Path, preset: Option<String>) -> Result<()> {
         Some(preset) => build::build_dir(repo_root, &preset)?,
         None => repo_root.join("build"),
     };
-    println!("🧹 Removing directory {}...", target_dir.display());
+    aros_common::outputln!("🧹 Removing directory {}...", target_dir.display());
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir).map_err(|error| {
             miette::miette!(
@@ -266,7 +350,7 @@ fn clean(repo_root: &Path, preset: Option<String>) -> Result<()> {
             )
         })?;
     }
-    println!("{CHECK} Clean complete.");
+    aros_common::outputln!("{CHECK} Clean complete.");
     Ok(())
 }
 
@@ -291,15 +375,33 @@ fn test(
     let mut missing_packages = Vec::new();
     if packages {
         for dir in ["SYS/boot", "SYS/boot/pc"] {
-            let Ok(entries) = std::fs::read_dir(build_dir.join(dir)) else {
-                missing_packages.push(dir.to_owned());
-                continue;
+            let package_directory = build_dir.join(dir);
+            let entries = match std::fs::read_dir(&package_directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    missing_packages.push(dir.to_owned());
+                    continue;
+                }
+                Err(error) => {
+                    return Err(miette::miette!(
+                        "cannot enumerate boot packages in {}: {error}",
+                        package_directory.display()
+                    ));
+                }
             };
-            let mut found: Vec<PathBuf> = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|extension| extension == "pkg"))
-                .collect();
+            let mut found = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    miette::miette!(
+                        "cannot enumerate an entry in {}: {error}",
+                        package_directory.display()
+                    )
+                })?;
+                let path = entry.path();
+                if path.extension().is_some_and(|extension| extension == "pkg") {
+                    found.push(path);
+                }
+            }
             found.sort();
             module_list.extend(found);
         }
@@ -313,7 +415,7 @@ fn test(
         evidence,
         memory_mb: memory,
     };
-    println!(
+    aros_common::outputln!(
         "Booting [{}] with {} multiboot module(s) for {}s...",
         style(&preset).yellow().bold(),
         request.modules.len() + 1,
@@ -326,10 +428,10 @@ fn test(
             .untested
             .push(format!("{dir} holds no packages in this build"));
     }
-    print!("{}", boot::render(&report));
+    aros_common::output!("{}", boot::render(&report));
     if report.is_success() {
-        println!(
-            "{CHECK} {}the boot produced no failure and no exception.",
+        aros_common::outputln!(
+            "{CHECK} {}the boot reached a positive milestone without a failure or exception.",
             style("PASS: ").green().bold()
         );
         Ok(())
@@ -351,30 +453,13 @@ fn compiler_cache(stats: bool, clear: bool) -> Result<()> {
             Command::new(cache.program()).arg(cache.clear_argument()),
             "compiler cache clear",
         )?;
-        println!("{CHECK} Compiler cache cleared.");
+        aros_common::outputln!("{CHECK} Compiler cache cleared.");
     }
     if stats {
         observability::run_command(
             Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
             "compiler cache statistics query",
         )?;
-    }
-    Ok(())
-}
-
-fn sync(transpile: bool) -> Result<()> {
-    println!("🔄 Fetching latest commits from upstream (aros-development-team/AROS)...");
-    observability::run_command(
-        Command::new("git").args(["fetch", "upstream", "master"]),
-        "Git fetch from upstream/master",
-    )?;
-    observability::run_command(
-        Command::new("git").args(["merge", "upstream/master", "--no-edit"]),
-        "Git merge of upstream/master",
-    )?;
-    if transpile {
-        println!("⚡ Regenerating dynamic CMake target tree...");
-        println!("{CHECK} Sync and target regeneration complete!");
     }
     Ok(())
 }
@@ -392,21 +477,21 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
         GoldenAction::Capture { presets } => {
             for subject in golden::subjects(&build_root, &presets)? {
                 let capture = golden::capture(&transpiler, &subject, &snapshot_root)?;
-                println!(
+                aros_common::outputln!(
                     "{CHECK} {}: {} products captured to {}",
                     subject.name,
                     capture.products,
                     capture.destination.display()
                 );
                 match capture.reproduces_build_tree {
-                    Some(true) => println!(
+                    Some(true) => aros_common::outputln!(
                         "  the recorded invocation reproduces the build tree's own output"
                     ),
-                    Some(false) => println!(
+                    Some(false) => aros_common::outputln!(
                         "  note: it does not reproduce {} -- that tree may predate a source change; the baseline itself is fine",
                         subject.build_output.display()
                     ),
-                    None => println!(
+                    None => aros_common::outputln!(
                         "  note: {} is absent, so the record was not cross-checked",
                         subject.build_output.display()
                     ),
@@ -419,23 +504,28 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
             for subject in &subjects {
                 if update {
                     let capture = golden::capture(&transpiler, subject, &snapshot_root)?;
-                    println!(
+                    aros_common::outputln!(
                         "{CHECK} {}: baseline replaced, {} products",
-                        subject.name, capture.products
+                        subject.name,
+                        capture.products
                     );
                     continue;
                 }
                 let (comparison, baseline) = golden::verify(&transpiler, subject, &snapshot_root)?;
                 if comparison.is_clean() {
-                    println!(
+                    aros_common::outputln!(
                         "{CHECK} {}: identical to {} ({} products)",
                         subject.name,
                         baseline.display(),
                         comparison.identical
                     );
                 } else {
-                    println!("❌ {}: differs from {}", subject.name, baseline.display());
-                    print!("{}", golden::render(&comparison));
+                    aros_common::outputln!(
+                        "❌ {}: differs from {}",
+                        subject.name,
+                        baseline.display()
+                    );
+                    aros_common::output!("{}", golden::render(&comparison));
                     differing.push(subject.name.clone());
                 }
             }
@@ -450,26 +540,110 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn info(repo_root: &Path) -> Result<()> {
-    println!(
-        "{SPARKLES} {}",
-        style("AROS Tools v0.1: Workspace Info").cyan().bold()
-    );
-    println!("  • Toolchain Architecture: Multi-Target Modern CMake + Ninja");
-    let host_dir = host_compiler::default_host_compiler_dir();
+fn info(repo_root: Option<&Path>) -> Result<()> {
+    let repository_configuration = repo_root
+        .map(|repo_root| {
+            let targets_path = repo::targets_file(repo_root);
+            let profiles = if path_entry_exists(&targets_path)? {
+                Some(repo::load_target_profiles(repo_root)?)
+            } else {
+                None
+            };
+            let lock_path = toolchain::lock_file_path(repo_root);
+            let lock = if path_entry_exists(&lock_path)? {
+                Some(toolchain::load_lock(repo_root)?)
+            } else {
+                None
+            };
+            Ok::<_, miette::Report>((profiles, lock))
+        })
+        .transpose()?;
+
+    let state_home = artifact::aros_home()?;
+    let archive_cache = artifact::archive_cache_root()?;
+    let cross_store = toolchain::default_store_root()?;
+    let host_dir = host_compiler::default_host_compiler_dir()?;
     let host_paths = host_compiler::host_compiler_paths(&host_dir);
-    let status = if host_compiler::is_host_compiler_installed(&host_paths) {
-        format!("Pinned host LLVM ({})", host_paths.clang.display())
+    let expected_host = repo_root.and_then(|root| {
+        host_compiler::load_host_compiler_config(root)
+            .ok()
+            .and_then(|config| host_compiler::select_host_compiler(&config).ok())
+    });
+    let managed_host_entry_exists = path_entry_exists(&host_dir)?;
+    let (status, status_kind) = if managed_host_entry_exists {
+        if expected_host.as_ref().is_some_and(|selection| {
+            selection.sha256.as_deref().is_some_and(|digest| {
+                host_compiler::verify_host_compiler_install(&host_dir, digest, &selection.version)
+                    .is_ok()
+            })
+        }) {
+            (
+                format!(
+                    "Verified pinned host LLVM inventory and version ({})",
+                    host_paths.clang.display()
+                ),
+                InfoStatus::Verified,
+            )
+        } else if expected_host
+            .as_ref()
+            .is_some_and(|selection| selection.sha256.is_some())
+        {
+            (
+                format!(
+                    "Invalid managed LLVM inventory, identity, or version ({})",
+                    host_paths.clang.display()
+                ),
+                InfoStatus::Invalid,
+            )
+        } else {
+            (
+                format!(
+                    "Unverified managed LLVM; no checkout pin available ({})",
+                    host_paths.clang.display()
+                ),
+                InfoStatus::Unverified,
+            )
+        }
     } else if let Ok(clang) = which::which("clang") {
-        format!("Unmanaged system LLVM ({})", clang.display())
+        (
+            format!("Unmanaged system LLVM ({})", clang.display()),
+            InfoStatus::Unverified,
+        )
     } else {
-        "Not found (run `aros host-compiler install`)".to_string()
+        (
+            "Not found (run `aros host-compiler install`)".to_string(),
+            InfoStatus::Invalid,
+        )
     };
-    println!(
-        "  • Active C/C++ Compiler:  {}",
-        style(status).green().bold()
+    aros_common::outputln!(
+        "{SPARKLES} {}",
+        style(format!(
+            "AROS tools {}: environment information",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .cyan()
+        .bold()
     );
-    println!(
+    aros_common::outputln!(
+        "  • Build frontend:         CMake + Ninja with explicit target profiles"
+    );
+    match status_kind {
+        InfoStatus::Verified => aros_common::outputln!(
+            "  • Host C/C++ compiler:    {}",
+            style(status).green().bold()
+        ),
+        InfoStatus::Unverified => aros_common::outputln!(
+            "  • Host C/C++ compiler:    {}",
+            style(status).yellow().bold()
+        ),
+        InfoStatus::Invalid => {
+            aros_common::outputln!("  • Host C/C++ compiler:    {}", style(status).red().bold());
+        }
+    }
+    aros_common::outputln!("  • AROS state root:        {}", state_home.display());
+    aros_common::outputln!("  • Archive cache:          {}", archive_cache.display());
+    aros_common::outputln!("  • Cross-toolchain store:  {}", cross_store.display());
+    aros_common::outputln!(
         "  • C/C++ Compiler Launcher: {}",
         build::detected_compiler_cache().map_or_else(
             || "none".into(),
@@ -481,20 +655,53 @@ fn info(repo_root: &Path) -> Result<()> {
             },
         )
     );
-    let target_names = repo::load_target_profiles(repo_root)?
-        .into_iter()
-        .map(|target| target.name)
-        .collect::<Vec<_>>();
-    println!("  • Configured Targets:     {}", target_names.join(", "));
-    match toolchain::load_lock(repo_root) {
-        Ok(lock) => println!(
-            "  • AROS Toolchain Lock:    {} ({} assets)",
-            lock.release_id,
-            lock.artifacts.len()
-        ),
-        Err(error) => println!("  • AROS Toolchain Lock:    invalid ({error})"),
+    if let Some((repo_root, (profiles, lock))) = repo_root.zip(repository_configuration) {
+        aros_common::outputln!("  • Source checkout:        {}", repo_root.display());
+        match profiles {
+            Some(profiles) => {
+                let target_names = profiles
+                    .into_iter()
+                    .map(|target| target.name)
+                    .collect::<Vec<_>>();
+                aros_common::outputln!("  • Configured targets:     {}", target_names.join(", "));
+            }
+            None => aros_common::outputln!(
+                "  • Configured targets:     none (pristine upstream checkout)"
+            ),
+        }
+        match lock {
+            Some(lock) => aros_common::outputln!(
+                "  • AROS toolchain lock:    {} ({} assets)",
+                lock.release_id,
+                lock.artifacts.len()
+            ),
+            None => aros_common::outputln!("  • AROS toolchain lock:    not configured"),
+        }
+    } else {
+        aros_common::outputln!("  • Source checkout:        none discovered");
+        aros_common::outputln!(
+            "    Create one with `aros source init PATH`, or run inside an existing checkout."
+        );
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InfoStatus {
+    Verified,
+    Unverified,
+    Invalid,
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(miette::miette!(
+            "Could not inspect configuration path '{}': {error}",
+            path.display()
+        )),
+    }
 }
 
 fn load_board(selection: &BoardSelection) -> Result<board::config::Board> {

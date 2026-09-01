@@ -27,7 +27,7 @@
 //!
 //! `verify_image_artifact` accepts a canonical artifact directory and two
 //! relative paths below it: the JSON manifest and the raw image. The manifest
-//! must match the exact, unknown-field-denying [`ImageManifest`] v1 schema
+//! must match the exact, unknown-field-denying `ImageManifest` v1 schema
 //! shared with the image producer. It includes board and optional USB-ECM
 //! identity, partition layout, source-manifest identity, image identity,
 //! minimum device size, and the complete staged payload inventory.

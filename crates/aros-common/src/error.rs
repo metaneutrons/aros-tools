@@ -19,6 +19,9 @@ pub enum ArosError {
     #[error("Invalid AROS configuration in '{file}': {message}")]
     Configuration { file: String, message: String },
 
+    #[error("Invalid AROS toolchain manifest in '{file}': {message}")]
+    ToolchainManifest { file: String, message: String },
+
     #[error("{0}")]
     Diagnostics(DiagnosticSet),
 

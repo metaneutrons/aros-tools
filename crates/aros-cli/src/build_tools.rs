@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 // aros-collect and aros-ahi-runner belong here even though they run during the
 // build rather than at configure time. Generated build rules require these
@@ -19,22 +20,50 @@ const REQUIRED_BUILD_TOOLS: &[&str] = &[
     "aros-ahi-runner",
     "aros-fetch",
 ];
+const BUILD_TOOL_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildToolIssue {
+    path: PathBuf,
+    detail: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildToolsCheck {
     pub bin_dir: PathBuf,
     pub missing: Vec<PathBuf>,
+    incompatible: Vec<BuildToolIssue>,
 }
 
 impl BuildToolsCheck {
     #[must_use]
     pub const fn is_complete(&self) -> bool {
-        self.missing.is_empty()
+        self.missing.is_empty() && self.incompatible.is_empty()
+    }
+
+    /// Render every missing or incompatible suite member for diagnostics.
+    #[must_use]
+    pub fn problem_summary(&self) -> String {
+        let mut problems = Vec::new();
+        if !self.missing.is_empty() {
+            problems.push(format!("missing {}", format_missing(&self.missing)));
+        }
+        if !self.incompatible.is_empty() {
+            problems.push(format!(
+                "incompatible {}",
+                self.incompatible
+                    .iter()
+                    .map(|issue| format!("{} ({})", issue.path.display(), issue.detail))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        problems.join("; ")
     }
 }
 
 #[must_use]
-pub fn check(repo_root: &Path) -> BuildToolsCheck {
+pub fn check(repo_root: Option<&Path>) -> BuildToolsCheck {
     if let Some(explicit) = std::env::var_os("AROS_BUILD_TOOLS_DIR") {
         return check_directory(PathBuf::from(explicit));
     }
@@ -47,25 +76,60 @@ pub fn check(repo_root: &Path) -> BuildToolsCheck {
         }
     }
 
-    check_directory(
-        candidates
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| repo_root.join("tools/aros-tools/target/release")),
-    )
+    check_directory(candidates.into_iter().next().unwrap_or_else(|| {
+        repo_root.map_or_else(
+            || PathBuf::from("target/release"),
+            |root| root.join("tools/aros-tools/target/release"),
+        )
+    }))
 }
 
 fn check_directory(bin_dir: PathBuf) -> BuildToolsCheck {
-    let missing = REQUIRED_BUILD_TOOLS
-        .iter()
-        .map(|name| bin_dir.join(executable_name(name)))
-        .filter(|path| !is_executable(path))
-        .collect();
+    let mut missing = Vec::new();
+    let mut incompatible = Vec::new();
+    for name in REQUIRED_BUILD_TOOLS {
+        let path = bin_dir.join(executable_name(name));
+        if !is_executable(&path) {
+            missing.push(path);
+            continue;
+        }
+        if let Err(detail) = validate_tool_version(name, &path) {
+            incompatible.push(BuildToolIssue { path, detail });
+        }
+    }
 
-    BuildToolsCheck { bin_dir, missing }
+    BuildToolsCheck {
+        bin_dir,
+        missing,
+        incompatible,
+    }
 }
 
-fn candidate_directories(repo_root: &Path) -> Vec<PathBuf> {
+fn validate_tool_version(name: &str, path: &Path) -> std::result::Result<(), String> {
+    validate_tool_version_with_timeout(name, path, BUILD_TOOL_VERSION_TIMEOUT)
+}
+
+fn validate_tool_version_with_timeout(
+    name: &str,
+    path: &Path,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let observed = crate::observability::capture_stdout_with_timeout(
+        Command::new(path).arg("--version"),
+        &format!("{name} suite-version probe at '{}'", path.display()),
+        timeout,
+    )
+    .map_err(|error| error.to_string())?;
+    let expected = format!("{name} {}", env!("CARGO_PKG_VERSION"));
+    if observed != expected {
+        return Err(format!(
+            "reported version {observed:?}; expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn candidate_directories(repo_root: Option<&Path>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(executable) = std::env::current_exe() {
         if let Some(parent) = executable.parent() {
@@ -84,24 +148,26 @@ fn candidate_directories(repo_root: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn source_workspace(repo_root: &Path) -> Option<PathBuf> {
+fn source_workspace(repo_root: Option<&Path>) -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("AROS_TOOLS_SOURCE_DIR") {
         return Some(PathBuf::from(explicit));
     }
-    let transitional = repo_root.join("tools/aros-tools");
-    transitional
-        .join("Cargo.toml")
-        .is_file()
-        .then_some(transitional)
+    repo_root.and_then(|repo_root| {
+        let transitional = repo_root.join("tools/aros-tools");
+        transitional
+            .join("Cargo.toml")
+            .is_file()
+            .then_some(transitional)
+    })
 }
 
 /// Builds the Rust programs which CMake consumes at configure time.
 ///
 /// Standalone installations normally ship all binaries together and do not
 /// need this command. Source builds select the workspace explicitly with
-/// `AROS_TOOLS_SOURCE_DIR`; the embedded AROS-NG path remains a transitional
+/// `AROS_TOOLS_SOURCE_DIR`; an embedded legacy path remains a transitional
 /// fallback until the old repository is retired.
-pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
+pub fn build(repo_root: Option<&Path>) -> Result<BuildToolsCheck> {
     let workspace = source_workspace(repo_root).ok_or_else(|| {
         miette::miette!(
             "No AROS tools source workspace is configured. Install the complete aros-tools package, or set AROS_TOOLS_SOURCE_DIR to a checkout of the aros-tools repository."
@@ -116,7 +182,7 @@ pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
 
     let target_dir = workspace.join("target");
     let args = cargo_build_args();
-    println!(
+    aros_common::outputln!(
         "🔧 Building AROS build tools in {}...",
         style(target_dir.display()).cyan()
     );
@@ -132,12 +198,12 @@ pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
     let result = check_directory(target_dir.join("release"));
     if !result.is_complete() {
         miette::bail!(
-            "Cargo completed, but required AROS build tools are still missing: {}",
-            format_missing(&result.missing)
+            "Cargo completed, but the required AROS build-tool suite is invalid: {}",
+            result.problem_summary()
         );
     }
 
-    println!(
+    aros_common::outputln!(
         "✅ AROS build tools are ready in {}.",
         result.bin_dir.display()
     );
@@ -147,41 +213,41 @@ pub fn build(repo_root: &Path) -> Result<BuildToolsCheck> {
 /// Ensures the CMake configure-time Rust helpers exist, building them only
 /// when they are absent or no longer executable.
 pub fn ensure(repo_root: &Path) -> Result<BuildToolsCheck> {
-    let result = check(repo_root);
+    let result = check(Some(repo_root));
     if result.is_complete() {
         return Ok(result);
     }
 
-    if source_workspace(repo_root).is_some() {
-        println!(
-            "ℹ️ Required AROS build tools are missing: {}",
-            format_missing(&result.missing)
+    if source_workspace(Some(repo_root)).is_some() {
+        aros_common::outputln!(
+            "ℹ️ Required AROS build tools are unavailable: {}",
+            result.problem_summary()
         );
-        return build(repo_root);
+        return build(Some(repo_root));
     }
 
     miette::bail!(
-        "Required AROS build tools are unavailable from '{}': {}. Install the complete aros-tools package, add its binary directory to PATH, or set AROS_BUILD_TOOLS_DIR.",
+        "Required AROS build tools are unavailable or incompatible in '{}': {}. Install one complete aros-tools version, add its binary directory to PATH, or set AROS_BUILD_TOOLS_DIR.",
         result.bin_dir.display(),
-        format_missing(&result.missing)
+        result.problem_summary()
     );
 }
 
-pub fn print_check(repo_root: &Path) -> Result<()> {
+pub fn print_check(repo_root: Option<&Path>) -> Result<()> {
     let result = check(repo_root);
     if result.is_complete() {
-        println!(
+        aros_common::outputln!(
             "✅ AROS build tools are ready in {}.",
             result.bin_dir.display()
         );
         return Ok(());
     }
 
-    println!(
-        "❌ Missing AROS build tools: {}",
-        format_missing(&result.missing)
+    aros_common::outputln!(
+        "❌ Invalid AROS build-tool suite: {}",
+        result.problem_summary()
     );
-    println!(
+    aros_common::outputln!(
         "   Install the complete aros-tools package, add its binary directory to PATH, or set AROS_BUILD_TOOLS_DIR."
     );
     miette::bail!("Required AROS build tools are unavailable.");
@@ -247,7 +313,27 @@ fn format_missing(paths: &[PathBuf]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_build_args, check_directory, REQUIRED_BUILD_TOOLS};
+    use super::{
+        cargo_build_args, check_directory, validate_tool_version_with_timeout, REQUIRED_BUILD_TOOLS,
+    };
+    use std::fs;
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[cfg(unix)]
+    fn write_version_tool(path: &Path, name: &str, version: &str, extra: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  printf '%s\\n' '{name} {version}'\n  exit 0\nfi\n{extra}\n"
+            ),
+        )
+        .expect("version fixture");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .expect("version fixture permissions");
+    }
 
     #[test]
     fn cargo_build_plan_builds_every_required_tool_in_release_mode() {
@@ -270,5 +356,57 @@ mod tests {
 
         assert_eq!(result.bin_dir, temp.path());
         assert_eq!(result.missing.len(), REQUIRED_BUILD_TOOLS.len());
+        assert!(result.incompatible.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_accepts_only_one_exact_workspace_version() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        for tool in REQUIRED_BUILD_TOOLS {
+            write_version_tool(
+                temp.path().join(tool).as_path(),
+                tool,
+                env!("CARGO_PKG_VERSION"),
+                "exit 0",
+            );
+        }
+
+        let result = check_directory(temp.path().to_path_buf());
+        assert!(result.is_complete(), "{}", result.problem_summary());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_rejects_a_mixed_version_suite() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        for tool in REQUIRED_BUILD_TOOLS {
+            let version = if *tool == "aros-fetch" {
+                "99.0.0"
+            } else {
+                env!("CARGO_PKG_VERSION")
+            };
+            write_version_tool(temp.path().join(tool).as_path(), tool, version, "exit 0");
+        }
+
+        let result = check_directory(temp.path().to_path_buf());
+        assert!(!result.is_complete());
+        assert!(result.missing.is_empty());
+        assert_eq!(result.incompatible.len(), 1);
+        assert!(result.problem_summary().contains("aros-fetch"));
+        assert!(result.problem_summary().contains("99.0.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_has_a_hard_process_group_deadline() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let tool = temp.path().join("aros-fetch");
+        write_version_tool(&tool, "aros-fetch", env!("CARGO_PKG_VERSION"), "sleep 10");
+
+        let error =
+            validate_tool_version_with_timeout("aros-fetch", &tool, Duration::from_millis(50))
+                .expect_err("hanging version probe must fail");
+        assert!(error.contains("timed out"), "{error}");
     }
 }

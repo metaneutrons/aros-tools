@@ -1,9 +1,9 @@
-//! User-facing orchestration for AROS-NG builds, toolchains, tests, and boards.
+//! User-facing orchestration for AROS builds, toolchains, tests, and boards.
 
 #![warn(missing_docs)]
 
 use aros_common::{
-    render_diagnostics, requested_diagnostic_format, DiagnosticCode, DiagnosticContext,
+    render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode, DiagnosticContext,
     DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
 };
 use clap::{error::ErrorKind, Args, Parser, Subcommand};
@@ -23,6 +23,7 @@ mod golden;
 mod host_compiler;
 mod observability;
 mod repo;
+mod source;
 mod toolchain;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
@@ -32,9 +33,9 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 #[command(
     name = "aros",
     author = "AROS Development Team & Fabian Schmieder (@metaneutrons)",
-    version = "0.1.0",
-    about = "AROS Tools v0.1: Next-Generation Build System & Tooling Engine",
-    long_about = "Modern, ultra-fast, multi-platform build orchestrator and upstream sync pipeline for AROS.",
+    version,
+    about = "Build, verify, and deploy AROS with explicit source and toolchain inputs",
+    long_about = "Upstream-compatible host tooling for reproducible AROS and AROS-NX development workflows.",
     after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default and is written\nonly to an explicitly selected local file."
 )]
 struct Cli {
@@ -76,18 +77,18 @@ impl ObservabilityArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Download and configure hermetic LLVM/LLD toolchain
+    /// Install the declared host compiler or verified AROS cross-toolchains
     Setup {
-        /// Force re-download even if already installed
+        /// Re-download the archive cache; never overwrite an installed tree
         #[arg(short, long)]
         force: bool,
 
         /// Install the AROS cross-toolchain for this target preset
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "all")]
         preset: Option<String>,
 
         /// Install cross-toolchains for every configured target preset
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["preset", "local"])]
         all: bool,
 
         /// Never access the network; use only verified cache/store content
@@ -95,7 +96,7 @@ enum Commands {
         offline: bool,
 
         /// Use and verify an existing AROS-built prefix without copying it
-        #[arg(long)]
+        #[arg(long, requires = "preset", conflicts_with = "all")]
         local: Option<PathBuf>,
     },
 
@@ -125,6 +126,23 @@ enum Commands {
         command: BoardCommand,
     },
 
+    /// Create and configure an AROS source checkout
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
+
+    /// Install one verified extracted native aros-tools suite atomically
+    Install {
+        /// Extracted archive directory containing exactly the eight programs
+        #[arg(long, value_name = "DIR")]
+        source_bin: PathBuf,
+
+        /// Existing absolute installation prefix; a missing bin leaf is created
+        #[arg(long, value_name = "DIR")]
+        prefix: PathBuf,
+    },
+
     /// Build AROS for a target preset (pc-x86_64, rpi-aarch64, arm-raspi, opensbi-riscv64)
     Build {
         /// Target preset (e.g. pc-x86_64, rpi-aarch64, arm-raspi, opensbi-riscv64)
@@ -136,7 +154,7 @@ enum Commands {
         target: Option<String>,
 
         /// Number of parallel jobs
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = parse_positive_usize)]
         jobs: Option<usize>,
 
         /// Clean build directory before building
@@ -190,7 +208,7 @@ enum Commands {
         #[arg(long = "module")]
         modules: Vec<PathBuf>,
 
-        /// Where to keep the run's evidence
+        /// Root below which each invocation keeps one private evidence directory
         #[arg(long)]
         evidence: Option<PathBuf>,
 
@@ -210,13 +228,6 @@ enum Commands {
         clear: bool,
     },
 
-    /// Sync upstream changes from `aros-development-team/AROS`
-    Sync {
-        /// Automatically regenerate `CMake` target graphs after sync
-        #[arg(long, default_value_t = true)]
-        transpile: bool,
-    },
-
     /// Capture or check a baseline of the transpiler's generated output
     Golden {
         #[command(subcommand)]
@@ -225,6 +236,52 @@ enum Commands {
 
     /// Print system and toolchain information
     Info,
+}
+
+#[derive(Subcommand)]
+enum SourceCommand {
+    /// Clone and configure a new AROS checkout atomically
+    Init {
+        /// New checkout path; an existing path is never reused or overwritten
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// Canonical upstream AROS repository URL
+        #[arg(
+            long,
+            value_name = "URL",
+            default_value = source::DEFAULT_UPSTREAM_URL
+        )]
+        upstream: String,
+
+        /// Optional fork URL to configure as `origin`
+        #[arg(long, value_name = "URL")]
+        fork: Option<String>,
+
+        /// Optional refs/heads/NAME, refs/tags/NAME, or exact commit OID
+        #[arg(long = "ref", value_name = "REF")]
+        source_ref: Option<String>,
+    },
+
+    /// Safely fast-forward a clean branch from a reviewed upstream remote
+    Sync {
+        /// Expected URL of the `upstream` remote
+        #[arg(
+            long,
+            value_name = "URL",
+            env = "AROS_UPSTREAM_URL",
+            default_value = source::DEFAULT_UPSTREAM_URL
+        )]
+        upstream: String,
+
+        /// Exact upstream branch name under refs/heads/
+        #[arg(long = "ref", value_name = "BRANCH", default_value = "master")]
+        upstream_ref: String,
+
+        /// Skip standalone-candidate target-graph validation
+        #[arg(long = "no-transpile", action = clap::ArgAction::SetFalse)]
+        transpile: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -252,8 +309,11 @@ enum GoldenAction {
 enum HostCompilerCommands {
     /// Download and install the pinned host LLVM tools
     Install {
+        /// Re-download the archive cache; never overwrite an installed tree
         #[arg(short, long)]
         force: bool,
+
+        /// Never access the network; use only verified cached content
         #[arg(long, env = "AROS_OFFLINE")]
         offline: bool,
     },
@@ -263,12 +323,19 @@ enum HostCompilerCommands {
 enum ToolchainCommands {
     /// Install the exact host + target artifact selected by the lock file
     Install {
+        /// Target profile whose locked artifact should be installed
         #[arg(short, long)]
         preset: String,
+
+        /// Re-download the archive cache; never overwrite an installed tree
         #[arg(short, long)]
         force: bool,
+
+        /// Never access the network; use only verified cached content
         #[arg(long, env = "AROS_OFFLINE")]
         offline: bool,
+
+        /// Verify and use an existing AROS-built prefix without copying it
         #[arg(long)]
         local: Option<PathBuf>,
     },
@@ -276,15 +343,21 @@ enum ToolchainCommands {
     List,
     /// Verify an installed or explicitly local AROS toolchain
     Verify {
+        /// Target profile whose locked contract should be verified
         #[arg(short, long)]
         preset: String,
+
+        /// Verify this existing AROS-built prefix instead of the installed one
         #[arg(long)]
         local: Option<PathBuf>,
     },
     /// Print the verified toolchain prefix for a target preset
     Path {
+        /// Target profile whose verified prefix should be printed
         #[arg(short, long)]
         preset: String,
+
+        /// Print this verified AROS-built prefix instead of the installed one
         #[arg(long)]
         local: Option<PathBuf>,
     },
@@ -331,7 +404,7 @@ enum BoardCommand {
         target: Option<String>,
 
         /// Number of parallel build jobs
-        #[arg(short, long)]
+        #[arg(short, long, value_parser = parse_positive_usize)]
         jobs: Option<usize>,
 
         /// Clean the board preset's build directory first
@@ -510,6 +583,65 @@ struct BoardSelection {
     config: Option<PathBuf>,
 }
 
+/// Repository context needed before a command may run.
+///
+/// Keeping this policy beside the command model prevents a new global command
+/// from accidentally inheriting checkout discovery merely because most build
+/// commands need it.
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("'{value}' is not a valid positive integer"))?;
+    if parsed == 0 {
+        return Err("parallel job count must be greater than zero".to_owned());
+    }
+    Ok(parsed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepositoryRequirement {
+    /// The command is independent of an AROS source checkout.
+    Global,
+    /// Use a checkout when one is discoverable, but remain useful without one.
+    Optional,
+    /// Refuse to run until an AROS source checkout has been discovered.
+    Required,
+}
+
+impl Commands {
+    const fn repository_requirement(&self) -> RepositoryRequirement {
+        match self {
+            Self::Source { command } => match command {
+                SourceCommand::Init { .. } => RepositoryRequirement::Global,
+                SourceCommand::Sync { .. } => RepositoryRequirement::Required,
+            },
+            Self::Ccache { .. } | Self::Install { .. } => RepositoryRequirement::Global,
+            Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
+            Self::Board { command } => match command {
+                BoardCommand::Init { .. }
+                | BoardCommand::Scan
+                | BoardCommand::Serve { .. }
+                | BoardCommand::Sd { .. }
+                | BoardCommand::Console { .. } => RepositoryRequirement::Global,
+                BoardCommand::Doctor(_)
+                | BoardCommand::Build { .. }
+                | BoardCommand::Deploy { .. } => RepositoryRequirement::Required,
+            },
+            Self::Setup { .. }
+            | Self::HostCompiler { .. }
+            | Self::Toolchain { .. }
+            | Self::Build { .. }
+            | Self::Clean { .. }
+            | Self::Test { .. }
+            | Self::Golden { .. } => RepositoryRequirement::Required,
+        }
+    }
+
+    const fn commits_on_success(&self) -> bool {
+        matches!(self, Self::Install { .. })
+    }
+}
+
 fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, DiagnosticContext) {
     let (code, stage, mode, target, hint) = match command {
         Commands::Setup { preset, .. } => (
@@ -606,6 +738,29 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 "verify the local USB network interface and platform discovery tools",
             ),
         },
+        Commands::Source { command } => match command {
+            SourceCommand::Init { path, .. } => (
+                DiagnosticCode::CliSourceInput,
+                DiagnosticStage::Configuration,
+                "source.init",
+                Some(path.display().to_string()),
+                "verify Git, the source URLs and ref, and select a new destination path",
+            ),
+            SourceCommand::Sync { upstream_ref, .. } => (
+                DiagnosticCode::CliSourceState,
+                DiagnosticStage::RepositoryDiscovery,
+                "source.sync",
+                Some(upstream_ref.clone()),
+                "inspect the stable source diagnostic code, reviewed upstream, branch state, and candidate-validation failure",
+            ),
+        },
+        Commands::Install { source_bin, prefix } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "install",
+            Some(format!("{} -> {}", source_bin.display(), prefix.display())),
+            "preserve an indeterminate journal; otherwise remove an existing suite through the documented workflow and retry",
+        ),
         Commands::Build { preset, .. } => (
             DiagnosticCode::CliBuild,
             DiagnosticStage::BuildExecution,
@@ -633,13 +788,6 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             "ccache",
             None,
             "install ccache or sccache and verify that the selected executable can be started",
-        ),
-        Commands::Sync { .. } => (
-            DiagnosticCode::CliNetwork,
-            DiagnosticStage::NetworkTransfer,
-            "sync",
-            None,
-            "inspect the upstream Git failure and verify repository and network state",
         ),
         Commands::Golden { .. } => (
             DiagnosticCode::CliPublication,
@@ -678,8 +826,24 @@ async fn main() -> ExitCode {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            print!("{error}");
-            return ExitCode::SUCCESS;
+            return match aros_common::write_stdout(&error.to_string()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(output_error) => {
+                    render_diagnostics(
+                        &DiagnosticSet::single(
+                            Diagnostic::error(
+                                DiagnosticCode::CliObservability,
+                                DiagnosticStage::Observability,
+                                format!("could not write command help: {output_error}"),
+                            )
+                            .with_hint("check the stdout destination and retry"),
+                        ),
+                        requested_format,
+                        observability::POLICY,
+                    );
+                    ExitCode::FAILURE
+                }
+            };
         }
         Err(error) => {
             render_diagnostics(
@@ -708,7 +872,26 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let logger = observability::install_runtime(logger, format);
+    let logger = match observability::install_runtime(logger, format) {
+        Ok(logger) => logger,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::CliInternal,
+                        DiagnosticStage::Internal,
+                        error,
+                    )
+                    .with_hint(
+                        "restart the aros process; process-wide runtime state was inconsistent",
+                    ),
+                ),
+                format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let (boundary, context) = command_boundary(&cli.command);
     if let Err(error) = logger.event(
         LogLevel::Info,
@@ -724,53 +907,83 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let repo_root = match repo::find_root().and_then(|repo_root| {
-        std::env::set_current_dir(&repo_root).map_err(|error| {
-            miette::miette!(
-                "Could not enter AROS-NG checkout '{}': {error}",
-                repo_root.display()
-            )
-        })?;
-        Ok(repo_root)
-    }) {
-        Ok(repo_root) => repo_root,
-        Err(error) => {
-            let diagnostic = observability::report_diagnostic(
-                &error,
-                observability::ErrorBoundary::REPOSITORY,
-                context,
-            );
-            let mut diagnostics = vec![diagnostic.clone()];
-            if let Err(log_error) = logger.diagnostic(&diagnostic) {
-                diagnostics.push(log_error.into_diagnostic());
+    let repo_root =
+        match resolve_repository(cli.command.repository_requirement()).and_then(|repo_root| {
+            if let Some(path) = &repo_root {
+                std::env::set_current_dir(path).map_err(|error| {
+                    miette::miette!(
+                        "Could not enter AROS checkout '{}': {error}",
+                        path.display()
+                    )
+                })?;
             }
-            render_diagnostics(
-                &observability::set(diagnostics),
-                format,
-                observability::POLICY,
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let result = run(cli, repo_root).await;
-    match result {
-        Ok(()) => match logger.event(
-            LogLevel::Info,
-            "invocation.complete",
-            "aros command completed",
-            &context,
-        ) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(repo_root)
+        }) {
+            Ok(repo_root) => repo_root,
             Err(error) => {
+                let diagnostic = observability::report_diagnostic(
+                    &error,
+                    observability::ErrorBoundary::REPOSITORY,
+                    context,
+                );
+                let mut diagnostics = vec![diagnostic.clone()];
+                if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
                 render_diagnostics(
-                    &DiagnosticSet::single(error.into_diagnostic()),
+                    &observability::set(diagnostics),
                     format,
                     observability::POLICY,
                 );
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
-        },
+        };
+
+    let commits_on_success = cli.command.commits_on_success();
+    let result = run(cli, repo_root).await;
+    match result {
+        Ok(()) => {
+            if let Some(diagnostic) = aros_common::take_stdout_failure_diagnostic(
+                DiagnosticCode::CliObservability,
+                DiagnosticStage::Observability,
+            ) {
+                let mut diagnostics = vec![diagnostic];
+                if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
+                render_diagnostics(
+                    &DiagnosticSet::new(diagnostics),
+                    format,
+                    observability::POLICY,
+                );
+                return ExitCode::FAILURE;
+            }
+            match logger.event(
+                LogLevel::Info,
+                "invocation.complete",
+                "aros command completed",
+                &context,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    let mut diagnostic = error.into_diagnostic();
+                    if commits_on_success {
+                        let mut committed = context.clone();
+                        committed.commit_state = Some(aros_common::CommitState::Committed);
+                        if let Some(error_context) = diagnostic.context.take() {
+                            committed.log_path = error_context.log_path;
+                        }
+                        diagnostic.context = Some(committed);
+                    }
+                    render_diagnostics(
+                        &DiagnosticSet::single(diagnostic),
+                        format,
+                        observability::POLICY,
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             let diagnostic = observability::report_diagnostic(&error, boundary, context);
             let mut diagnostics = vec![diagnostic.clone()];
@@ -787,6 +1000,100 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli, repo_root: PathBuf) -> Result<()> {
-    commands::run(cli.command, &repo_root).await
+fn resolve_repository(requirement: RepositoryRequirement) -> Result<Option<PathBuf>> {
+    match requirement {
+        RepositoryRequirement::Global => Ok(None),
+        RepositoryRequirement::Optional => repo::find_root_optional(),
+        RepositoryRequirement::Required => repo::find_root().map(Some),
+    }
+}
+
+async fn run(cli: Cli, repo_root: Option<PathBuf>) -> Result<()> {
+    commands::run(cli.command, repo_root.as_deref()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Parser, RepositoryRequirement};
+    use clap::error::ErrorKind;
+
+    fn requirement(arguments: &[&str]) -> RepositoryRequirement {
+        Cli::try_parse_from(arguments)
+            .expect("valid command line")
+            .command
+            .repository_requirement()
+    }
+
+    #[test]
+    fn repository_policy_is_explicit_for_each_command_class() {
+        assert_eq!(
+            requirement(&["aros", "source", "init", "AROS"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
+            requirement(&["aros", "board", "scan"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
+            requirement(&["aros", "info"]),
+            RepositoryRequirement::Optional
+        );
+        assert_eq!(
+            requirement(&["aros", "clean"]),
+            RepositoryRequirement::Required
+        );
+        assert_eq!(
+            requirement(&["aros", "source", "sync"]),
+            RepositoryRequirement::Required
+        );
+    }
+
+    fn parse_error(arguments: &[&str]) -> ErrorKind {
+        match Cli::try_parse_from(arguments) {
+            Ok(_) => panic!("command line unexpectedly parsed: {arguments:?}"),
+            Err(error) => error.kind(),
+        }
+    }
+
+    #[test]
+    fn setup_modes_are_mutually_exclusive_at_the_cli_boundary() {
+        assert_eq!(
+            parse_error(&["aros", "setup", "--all", "--preset", "pc-x86_64"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse_error(&["aros", "setup", "--all", "--local", "/opt/aros"]),
+            ErrorKind::ArgumentConflict
+        );
+    }
+
+    #[test]
+    fn setup_local_override_requires_one_preset() {
+        assert_eq!(
+            parse_error(&["aros", "setup", "--local", "/opt/aros"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert!(Cli::try_parse_from([
+            "aros",
+            "setup",
+            "--preset",
+            "pc-x86_64",
+            "--local",
+            "/opt/aros",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn build_job_limits_reject_zero_at_the_cli_boundary() {
+        assert_eq!(
+            parse_error(&["aros", "build", "--jobs", "0"]),
+            ErrorKind::ValueValidation
+        );
+        assert_eq!(
+            parse_error(&["aros", "board", "build", "--jobs", "0"]),
+            ErrorKind::ValueValidation
+        );
+        assert!(Cli::try_parse_from(["aros", "build", "--jobs", "1"]).is_ok());
+    }
 }

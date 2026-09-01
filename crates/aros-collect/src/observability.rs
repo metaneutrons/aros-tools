@@ -22,6 +22,8 @@ const POLICY: ObservabilityPolicy = ObservabilityPolicy {
     hint: "pass --log-file PATH or set AROS_COLLECT_LOG_FILE, or disable logging",
 };
 
+const INVOCATION_HINT: &str = "run 'aros-collect --help' for direct mode; collector aliases require linker arguments including --sysroot=DIR and -o FILE";
+
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     pub diagnostic_format: DiagnosticFormat,
@@ -177,7 +179,8 @@ fn invocation_failure(
         .with_context(DiagnosticContext {
             argument_index,
             ..DiagnosticContext::default()
-        }),
+        })
+        .with_hint(INVOCATION_HINT),
     )
 }
 
@@ -237,7 +240,12 @@ pub fn failure(
     message: impl Into<String>,
     context: DiagnosticContext,
 ) -> CollectorFailure {
-    CollectorFailure::new(Diagnostic::error(code, stage, message).with_context(context))
+    let diagnostic = Diagnostic::error(code, stage, message).with_context(context);
+    CollectorFailure::new(if code == DiagnosticCode::CollectorInvocation {
+        diagnostic.with_hint(INVOCATION_HINT)
+    } else {
+        diagnostic
+    })
 }
 
 pub fn render(diagnostics: &DiagnosticSet, format: DiagnosticFormat) {

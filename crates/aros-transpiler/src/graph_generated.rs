@@ -352,9 +352,9 @@ impl DependencyGraph {
     /// directory rather than on the target:
     ///
     ///   config/make.tmpl:3296  %build_archspecific writes its objects to
-    ///                          $(GENDIR)/<maindir>/<modname>/arch
+    ///                          `$(GENDIR)/<maindir>/<modname>/arch`
     ///   config/make.tmpl:2921  %build_linklib picks them up with
-    ///                          $(wildcard $(OBJDIR)/arch/*.o) and filters the
+    ///                          `$(wildcard $(OBJDIR)/arch/*.o)` and filters the
     ///                          same basenames out of its own file list
     ///
     /// compiler/crt/stdc is the case in the tree: `linklibs-romhack` declares

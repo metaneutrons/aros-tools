@@ -13,31 +13,56 @@ use crate::{FetchFailure, FetchResult};
 #[command(
     author,
     version,
-    about = "Fetch, verify, extract, and patch AROS third-party sources"
+    about = "Fetch, verify, extract, and patch AROS third-party sources",
+    long_about = "Fetch one declared AROS source archive into a local cache, verify every declared SHA-256 digest before use, extract without path escape, and apply a closed patch contract without shell evaluation.",
+    after_help = "CHECKSUM CONTRACT:\n  --checksums accepts whitespace-separated filename=sha256:<64-hex-digest> entries.\n  --require-checksums requires complete archive coverage and remote patch coverage.\n  A digest mismatch is fatal; aros-fetch never rewrites or infers a pin.\n\nPATCH CONTRACT:\n  --patches accepts whitespace-separated name[:subdirectory[:option,...]] entries.\n  Supported options are -p0 through -p9, -f, -N, and --forward.\n\nOBSERVABILITY:\n  Diagnostics are written to stderr; --diagnostic-format=json selects the stable JSON contract.\n  Logging is off by default. A non-off --log-level requires an explicit --log-file.\n  --log-format selects human or jsonl.\n  Environment: AROS_FETCH_DIAGNOSTIC_FORMAT, AROS_FETCH_LOG_LEVEL,\n  AROS_FETCH_LOG_FORMAT, AROS_FETCH_LOG_FILE, AROS_FETCH_OFFLINE,\n  AROS_FETCH_REQUIRE_CHECKSUMS."
 )]
 pub struct Cli {
+    /// Whitespace-separated local paths or supported remote origin prefixes.
     #[arg(long = "archive-origins", default_value = ".")]
     pub archive_origins: String,
+
+    /// Exact portable archive basename without a suffix.
     #[arg(long)]
     pub archive: String,
+
+    /// Whitespace-separated candidate suffixes, tried in declaration order.
     #[arg(long, default_value = "")]
     pub suffixes: String,
+
+    /// Directory below which the verified archive is extracted.
     #[arg(long, default_value = ".")]
     pub destination: PathBuf,
+
+    /// Whitespace-separated origins used only for declared patch payloads.
     #[arg(long = "patch-origins", default_value = ".")]
     pub patch_origins: String,
+
+    /// Closed patch declarations: name[:subdirectory[:option,...]].
     #[arg(long, default_value = "")]
     pub patches: String,
+
+    /// Containment base for patch application; defaults to destination.
     #[arg(long)]
     pub base: Option<PathBuf>,
+
+    /// Local verified-payload cache directory.
     #[arg(long, default_value = ".")]
     pub location: PathBuf,
+
+    /// Historical compatibility option; nonempty values are rejected safely.
     #[arg(long = "rename-directory")]
     pub rename_directory: Option<String>,
+
+    /// Whitespace-separated `filename=sha256:<digest>` declarations.
     #[arg(long, default_value = "")]
     pub checksums: String,
+
+    /// Replace an existing extraction only through the validated publication path.
     #[arg(long)]
     pub force: bool,
+
+    /// Use only already verified local cache payloads; never access the network.
     #[arg(
         long,
         env = "AROS_FETCH_OFFLINE",
@@ -45,6 +70,8 @@ pub struct Cli {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub offline: bool,
+
+    /// Reject incomplete archive or remote-patch checksum coverage.
     #[arg(
         long = "require-checksums",
         env = "AROS_FETCH_REQUIRE_CHECKSUMS",
@@ -52,12 +79,20 @@ pub struct Cli {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub require_checksums: bool,
+
+    /// Failure renderer: human text or one stable JSON diagnostic document.
     #[arg(long, value_enum, default_value_t = aros_common::DiagnosticFormat::Human, env = "AROS_FETCH_DIAGNOSTIC_FORMAT")]
     pub diagnostic_format: aros_common::DiagnosticFormat,
+
+    /// Minimum level for the explicit local log; non-off requires --log-file.
     #[arg(long, value_enum, default_value_t = aros_common::LogLevel::Off, env = "AROS_FETCH_LOG_LEVEL")]
     pub log_level: aros_common::LogLevel,
+
+    /// Explicit local log encoding.
     #[arg(long, value_enum, default_value_t = aros_common::LogFormat::Human, env = "AROS_FETCH_LOG_FORMAT")]
     pub log_format: aros_common::LogFormat,
+
+    /// Explicit local log file; no log is written while --log-level is off.
     #[arg(long, env = "AROS_FETCH_LOG_FILE")]
     pub log_file: Option<PathBuf>,
 }

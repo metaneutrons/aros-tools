@@ -414,7 +414,12 @@ pub(super) fn parse_mmakefile_impl(
     let mut source_inventory_patterns: Vec<String> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
-    let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).unwrap();
+    let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("internal uselibs matcher is invalid: {error}"),
+        )
+    })?;
 
     // 1. Extract module definitions
     for inv in invocations.iter().filter(|i| {

@@ -188,7 +188,7 @@ fn manual_hiddstubs_contract_is_admitted_and_drift_fails_closed() {
                       $(HIDD_LIB) : $(HIDD_STUBS_OBJ)\n\
                       \t%mklib_q from=$^\n";
     fs::write(compiler.join("mmakefile.src"), source).unwrap();
-    let declarations = collect_manual_aggregate_declarations(&dir);
+    let declarations = collect_manual_aggregate_declarations(&dir).unwrap();
     assert_eq!(declarations.len(), 1);
     assert_eq!(declarations[0].mmake, "linklibs-hiddstubs");
 
@@ -197,7 +197,9 @@ fn manual_hiddstubs_contract_is_admitted_and_drift_fails_closed() {
         source.replace("%mklib_q from=$^", "%mklib_q from=$^ extra=yes"),
     )
     .unwrap();
-    assert!(collect_manual_aggregate_declarations(&dir).is_empty());
+    assert!(collect_manual_aggregate_declarations(&dir)
+        .unwrap()
+        .is_empty());
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -231,6 +233,7 @@ fn profile_declarations_follow_make_conditionals_without_guessing_unknowns() {
 
     let ids = |scope: &ArchitectureScope| -> BTreeSet<String> {
         collect_declarations_for_profile(&dir, std::slice::from_ref(&file), scope)
+            .unwrap()
             .into_iter()
             .map(|declaration| declaration.mmake)
             .collect()
@@ -258,7 +261,7 @@ fn profile_declarations_follow_make_conditionals_without_guessing_unknowns() {
 
     // No profile means the historic global inventory: every textual
     // declaration remains visible, including mutually exclusive branches.
-    assert_eq!(collect_declarations(&dir, &[file]).len(), 5);
+    assert_eq!(collect_declarations(&dir, &[file]).unwrap().len(), 5);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -283,7 +286,8 @@ fn eligible_declarations(
         collect_declarations_for_profile(root, files, scope)
     } else {
         collect_declarations(root, files)
-    };
+    }
+    .unwrap();
     declarations
         .into_iter()
         .filter(|declaration| scope.declaration_is_eligible(declaration))
@@ -313,7 +317,7 @@ fn eligible_ids(
 fn current_architecture_denominators_are_pinned() {
     let root = source_root();
     require_translation_submodules(&root);
-    let files = find_mmakefiles(&root);
+    let files = find_mmakefiles(&root).unwrap();
     let ids = |scope: &ArchitectureScope, conditional: bool| -> BTreeSet<String> {
         eligible_ids(&root, &files, scope, conditional)
     };
@@ -322,6 +326,7 @@ fn current_architecture_denominators_are_pinned() {
     let arm = ArchitectureScope::new("arm", "raspi");
     let aarch64 = ArchitectureScope::new("aarch64", "raspi");
     let global: BTreeSet<String> = collect_declarations(&root, &files)
+        .unwrap()
         .into_iter()
         .map(|declaration| declaration.mmake)
         .collect();
@@ -367,8 +372,8 @@ fn current_architecture_denominators_are_pinned() {
 fn toolchain_provisioning_splits_the_target_obligations() {
     let root = source_root();
     require_translation_submodules(&root);
-    let files = find_mmakefiles(&root);
-    let context = detect_toolchain_provisioning_context(&root);
+    let files = find_mmakefiles(&root).unwrap();
+    let context = detect_toolchain_provisioning_context(&root).unwrap();
     assert!(
         context.llvm,
         "the LLVM provisioning boundary is no longer structurally valid; \
@@ -397,7 +402,7 @@ fn toolchain_provisioning_splits_the_target_obligations() {
     let x86 = ArchitectureScope::new("x86_64", "pc");
     let arm = ArchitectureScope::new("arm", "raspi");
     let aarch64 = ArchitectureScope::new("aarch64", "raspi");
-    let global_declarations = collect_declarations(&root, &files);
+    let global_declarations = collect_declarations(&root, &files).unwrap();
     let global_target: BTreeSet<String> = global_declarations
         .iter()
         .filter(|declaration| !is_toolchain_provisioning_declaration(declaration, context))
@@ -529,7 +534,8 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
     let declarations = collect_declarations(
         &root,
         std::slice::from_ref(&root.join(LLVM_PROVISIONING_FILE)),
-    );
+    )
+    .unwrap();
     let context = ToolchainProvisioningContext {
         llvm: true,
         gcc_libatomic: true,
@@ -563,7 +569,8 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
     let gnu_declarations = collect_declarations(
         &root,
         std::slice::from_ref(&root.join(GCC_PROVISIONING_FILE)),
-    );
+    )
+    .unwrap();
     let libatomic = gnu_declarations
         .iter()
         .find(|declaration| declaration.mmake == "tools-crosstools-gcc-libatomic")
@@ -586,7 +593,7 @@ fn finds_and_scans_both_mmakefile_names() {
     fs::write(nested.join("mmakefile.src"), "%build_prog mmake=with-src\n").unwrap();
     fs::write(dir.join("mmakefile.txt"), "%build_prog mmake=ignored\n").unwrap();
 
-    let files = find_mmakefiles(&dir);
+    let files = find_mmakefiles(&dir).unwrap();
     let relative: Vec<String> = files
         .iter()
         .map(|file| {
@@ -598,7 +605,7 @@ fn finds_and_scans_both_mmakefile_names() {
         .collect();
     assert_eq!(relative, ["mmakefile", "nested/mmakefile.src"]);
 
-    let declarations = collect_declarations(&dir, &files);
+    let declarations = collect_declarations(&dir, &files).unwrap();
     let ids: BTreeSet<&str> = declarations
         .iter()
         .map(|declaration| declaration.mmake.as_str())
@@ -608,8 +615,79 @@ fn finds_and_scans_both_mmakefile_names() {
 }
 
 #[test]
+fn source_walk_read_dir_failure_is_not_an_empty_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    let error = find_mmakefiles_with(root.path(), |_directory| {
+        Err::<fs::ReadDir, _>(std::io::Error::other("injected read_dir failure"))
+    })
+    .unwrap_err();
+
+    assert_eq!(error.phase, CoverageReadPhase::DirectoryRead);
+    assert_eq!(error.path, root.path());
+    assert!(error.to_string().contains("injected read_dir failure"));
+}
+
+#[test]
+fn source_walk_dir_entry_failure_is_not_discarded() {
+    let root = tempfile::tempdir().unwrap();
+    let error = find_mmakefiles_with(root.path(), |_directory| {
+        Ok(vec![Err::<fs::DirEntry, _>(std::io::Error::other(
+            "injected directory entry failure",
+        ))])
+    })
+    .unwrap_err();
+
+    assert_eq!(error.phase, CoverageReadPhase::DirectoryEntryRead);
+    assert_eq!(error.path, root.path());
+    assert!(error
+        .to_string()
+        .contains("injected directory entry failure"));
+}
+
+#[cfg(unix)]
+#[test]
+fn source_walk_rejects_a_symlinked_mmakefile_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    fs::write(&target, "%build_prog mmake=hidden\n").unwrap();
+    let link = root.path().join("mmakefile.src");
+    symlink(&target, &link).unwrap();
+
+    let error = find_mmakefiles(root.path()).unwrap_err();
+    assert_eq!(error.phase, CoverageReadPhase::UnsafeNode);
+    assert_eq!(error.path, link);
+}
+
+#[test]
+fn declaration_read_failure_cannot_remove_a_discovered_source_from_coverage() {
+    let root = tempfile::tempdir().unwrap();
+    let mmakefile = root.path().join("mmakefile.src");
+    fs::write(&mmakefile, "%build_prog mmake=expected\n").unwrap();
+    let files = find_mmakefiles(root.path()).unwrap();
+    fs::remove_file(&mmakefile).unwrap();
+    fs::create_dir(&mmakefile).unwrap();
+
+    let error = collect_declarations(root.path(), &files).unwrap_err();
+    assert_eq!(error.phase, CoverageReadPhase::DeclarationRead);
+    assert_eq!(error.path, mmakefile);
+}
+
+#[test]
+fn reference_shape_read_failure_cannot_become_an_empty_shape_map() {
+    let root = tempfile::tempdir().unwrap();
+    let expansion = root.path().join("expanded.mk");
+    fs::create_dir(&expansion).unwrap();
+
+    let error = collect_shapes(&[("expected".to_owned(), expansion.clone())]).unwrap_err();
+    assert_eq!(error.phase, CoverageReadPhase::ReferenceShapeRead);
+    assert_eq!(error.path, expansion);
+}
+
+#[test]
 fn cache_timestamp_must_be_newer_than_every_input() {
-    let base = SystemTime::UNIX_EPOCH;
+    let base = std::time::SystemTime::UNIX_EPOCH;
     let one = base + std::time::Duration::from_secs(1);
     let two = base + std::time::Duration::from_secs(2);
     let three = base + std::time::Duration::from_secs(3);
@@ -708,7 +786,7 @@ fn records_a_failed_genmf_expansion_instead_of_dropping_it() {
     let mmakefile = dir.join("mmakefile");
     fs::write(&mmakefile, "").unwrap();
 
-    let result = expand_all(&dir, &cache, &[mmakefile], true);
+    let result = expand_all(&dir, &cache, &[mmakefile], true, Duration::from_secs(30));
     assert!(result.expanded.is_empty());
     assert_eq!(result.failures.len(), 1);
     assert_eq!(result.failures[0].file, "mmakefile");
@@ -733,7 +811,7 @@ fn reads_a_declaration_spread_over_several_lines() {
         "%build_module mmake=kernel-dos \\\n  modname=dos modtype=library \\\n  files=$(FILES)\n",
     )
     .unwrap();
-    let decls = collect_declarations(&dir, &[f]);
+    let decls = collect_declarations(&dir, &[f]).unwrap();
     assert_eq!(decls.len(), 1);
     assert_eq!(decls[0].mmake, "kernel-dos");
     assert_eq!(decls[0].macro_name, "build_module");
@@ -750,7 +828,7 @@ fn a_trailing_continuation_does_not_swallow_the_next_declaration() {
         "%build_prog mmake=first files=first \\\n\n%build_prog mmake=second files=second\n",
     )
     .unwrap();
-    let decls = collect_declarations(&dir, &[f]);
+    let decls = collect_declarations(&dir, &[f]).unwrap();
     let names: Vec<&str> = decls.iter().map(|d| d.mmake.as_str()).collect();
     assert_eq!(names, vec!["first", "second"]);
     fs::remove_dir_all(&dir).ok();
@@ -771,7 +849,7 @@ fn reads_every_declaration_in_one_file() {
              %common\n",
     )
     .unwrap();
-    let decls = collect_declarations(&dir, &[f]);
+    let decls = collect_declarations(&dir, &[f]).unwrap();
     let names: Vec<&str> = decls.iter().map(|d| d.mmake.as_str()).collect();
     assert_eq!(names, vec!["a", "b", "c"]);
     fs::remove_dir_all(&dir).ok();
@@ -854,6 +932,62 @@ fn a_declaration_without_a_name_is_skipped() {
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("mmakefile.src");
     fs::write(&f, "%build_icons dir=images\n").unwrap();
-    assert!(collect_declarations(&dir, &[f]).is_empty());
+    assert!(collect_declarations(&dir, &[f]).unwrap().is_empty());
     fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn genmf_expansion_has_a_hard_process_group_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("source");
+    let cache = directory.path().join("cache");
+    let mmake = root.join("rom/test/mmakefile.src");
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::create_dir_all(root.join("tools/genmf")).unwrap();
+    fs::create_dir_all(mmake.parent().unwrap()).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(root.join("config/make.tmpl"), "").unwrap();
+    fs::write(
+        root.join("tools/genmf/genmf.py"),
+        "import time\ntime.sleep(60)\n",
+    )
+    .unwrap();
+    fs::write(&mmake, "%build_prog mmake=test files=test\n").unwrap();
+
+    let result = expand_all(
+        &root,
+        &cache,
+        std::slice::from_ref(&mmake),
+        true,
+        Duration::from_millis(100),
+    );
+
+    assert!(result.expanded.is_empty());
+    assert_eq!(result.failures.len(), 1);
+    assert!(result.failures[0].timed_out);
+    assert_eq!(result.failures[0].timeout_ms, Some(100));
+    assert!(result.failures[0]
+        .message
+        .contains("timed out after 100 ms"));
+    assert!(!cache.join("rom%test%mmakefile.src.mk").exists());
+}
+
+#[test]
+fn genmf_timeout_is_preserved_as_machine_readable_failure_context() {
+    let failure = verification_gap_failure(
+        Path::new("verify-reports"),
+        &[ExpansionFailure {
+            file: "rom/test/mmakefile.src".to_owned(),
+            message: "fixture timeout".to_owned(),
+            timed_out: true,
+            timeout_ms: Some(12_345),
+        }],
+    )
+    .into_diagnostic();
+
+    let context = failure.context.unwrap();
+    assert_eq!(context.timed_out, Some(true));
+    assert_eq!(context.timeout_ms, Some(12_345));
+    assert_eq!(context.target.as_deref(), Some("rom/test/mmakefile.src"));
+    assert!(failure.hint.is_some());
 }

@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -109,7 +110,7 @@ pub struct BootReport {
 impl BootReport {
     #[must_use]
     pub const fn is_success(&self) -> bool {
-        self.failures.is_empty() && self.faults.is_empty()
+        self.reached.is_some() && self.failures.is_empty() && self.faults.is_empty()
     }
 }
 
@@ -120,6 +121,7 @@ pub struct BootRequest {
     /// Multiboot modules. Empty means the kickstart alone.
     pub modules: Vec<PathBuf>,
     pub seconds: u64,
+    /// Root below which this invocation creates one private retained run.
     pub evidence: PathBuf,
     pub memory_mb: u32,
 }
@@ -135,13 +137,27 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
         }
     }
 
-    std::fs::create_dir_all(&request.evidence)
-        .map_err(|error| miette!("cannot create {}: {error}", request.evidence.display()))?;
+    std::fs::create_dir_all(&request.evidence).map_err(|error| {
+        miette!(
+            "cannot create boot-evidence root {}: {error}",
+            request.evidence.display()
+        )
+    })?;
+    let run_directory = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&request.evidence)
+        .map_err(|error| {
+            miette!(
+                "cannot create a private run below boot-evidence root {}: {error}",
+                request.evidence.display()
+            )
+        })?
+        .keep();
 
     let mut modules = vec![kickstart.clone()];
     modules.extend(request.modules.iter().cloned());
     let mut report = BootReport {
-        evidence: request.evidence.clone(),
+        evidence: run_directory,
         ..BootReport::default()
     };
     if request.modules.is_empty() {
@@ -152,22 +168,57 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
         );
     }
 
-    let serial = request.evidence.join("serial.log");
-    let trace = request.evidence.join("exceptions.log");
-    run_qemu(request, &bootstrap, &modules, &serial, &trace, false)?;
+    let serial = report.evidence.join("serial.log");
+    let trace = report.evidence.join("exceptions.log");
+    create_evidence_file(&serial)?;
+    create_evidence_file(&trace)?;
+    let observed = run_qemu(
+        request,
+        &report.evidence,
+        &bootstrap,
+        &modules,
+        &serial,
+        &trace,
+        false,
+    )?;
 
-    let serial_text = read_lossy(&serial);
-    let trace_text = read_lossy(&trace);
+    let serial_text = read_evidence(&serial)?;
+    let trace_text = read_evidence(&trace)?;
     report.reached = furthest_milestone(&serial_text, &trace_text);
     report.failures = read_failures(&serial_text, &trace_text);
     report.faults = read_faults(&trace_text);
+    if !observed.timed_out
+        && !observed.status.success()
+        && report.failures.is_empty()
+        && report.faults.is_empty()
+    {
+        return Err(crate::observability::unexpected_observed_exit(
+            observed,
+            &format!(
+                "QEMU exited before the evidence deadline without producing a classified guest failure; retained evidence: {}",
+                report.evidence.display()
+            ),
+        )
+        .into());
+    }
 
     // The second pass exists only to name the fault. An instruction trace is
     // large and slows the guest, so it is not paid for on a clean boot.
     if !report.faults.is_empty() {
-        let asm = request.evidence.join("instructions.log");
-        run_qemu(request, &bootstrap, &modules, &serial, &asm, true)?;
-        let asm_text = read_lossy(&asm);
+        let asm_serial = report.evidence.join("instructions-serial.log");
+        let asm = report.evidence.join("instructions.log");
+        create_evidence_file(&asm_serial)?;
+        create_evidence_file(&asm)?;
+        run_qemu(
+            request,
+            &report.evidence,
+            &bootstrap,
+            &modules,
+            &asm_serial,
+            &asm,
+            true,
+        )?;
+        let asm_text = read_evidence(&asm)?;
         match locate(
             &kickstart,
             &bootstrap,
@@ -185,24 +236,43 @@ pub fn check(request: &BootRequest) -> Result<BootReport> {
     Ok(report)
 }
 
-fn read_lossy(path: &Path) -> String {
+fn create_evidence_file(path: &Path) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| {
+            miette!(
+                "cannot create boot-evidence file {}: {error}",
+                path.display()
+            )
+        })
+}
+
+fn read_evidence(path: &Path) -> Result<String> {
     std::fs::read(path)
         .map(|bytes| String::from_utf8_lossy(&bytes).replace('\u{0}', ""))
-        .unwrap_or_default()
+        .map_err(|error| miette!("cannot read boot-evidence file {}: {error}", path.display()))
 }
 
 /// Runs QEMU once, deterministically.
 fn run_qemu(
     request: &BootRequest,
+    evidence: &Path,
     bootstrap: &Path,
     modules: &[PathBuf],
     serial: &Path,
     trace: &Path,
     instructions: bool,
-) -> Result<()> {
+) -> Result<aros_common::TimedProcessStatus> {
     let qemu = which::which("qemu-system-x86_64")
         .map_err(|_| miette!("qemu-system-x86_64 is not on PATH"))?;
-    let ram = request.evidence.join("guest-ram.bin");
+    let ram = evidence.join(if instructions {
+        "instructions-guest-ram.bin"
+    } else {
+        "guest-ram.bin"
+    });
     let list = modules
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -246,27 +316,16 @@ fn run_qemu(
         .arg("-D")
         .arg(trace);
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| miette!("cannot start qemu: {error}"))?;
     // A guest that resets exits on its own; one that keeps running is stopped
-    // when its time is up. Either way the logs are what is read afterwards.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(request.seconds);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(error) => return Err(miette!("cannot wait for qemu: {error}")),
-        }
-    }
-    Ok(())
+    // with its complete process group when time is up. Either way, the reaped
+    // process status is only execution metadata: the logs determine the boot
+    // verdict below.
+    crate::observability::observe_until_timeout(
+        &mut command,
+        "bounded QEMU boot evidence run",
+        std::time::Duration::from_secs(request.seconds),
+    )
+    .map_err(Into::into)
 }
 
 /// The furthest milestone the evidence proves.
@@ -1133,5 +1192,19 @@ mod tests {
             ..BootReport::default()
         };
         assert!(!report.is_success());
+    }
+
+    #[test]
+    fn an_empty_evidence_set_is_not_a_success() {
+        assert!(!BootReport::default().is_success());
+    }
+
+    #[test]
+    fn success_requires_a_positive_milestone_without_findings() {
+        let report = BootReport {
+            reached: Some(Milestone::KickstartRunning),
+            ..BootReport::default()
+        };
+        assert!(report.is_success());
     }
 }

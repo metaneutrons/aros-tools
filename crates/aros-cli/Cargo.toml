@@ -2,6 +2,8 @@
 name = "aros-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+publish = false
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -17,7 +19,7 @@ license-file = ["../../LICENSE-MIT", "0"]
 extended-description = """\
 Native host-side build, translation, verification and board tooling for \
 pristine upstream AROS and AROS-NX source checkouts."""
-depends = "$auto"
+depends = "$auto, ca-certificates, cmake, curl, git, ninja-build, patch, python3"
 section = "devel"
 priority = "optional"
 assets = [
@@ -44,6 +46,7 @@ path = "src/main.rs"
 [dependencies]
 aros-board.workspace = true
 aros-common.workspace = true
+aros-release.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true
@@ -56,5 +59,7 @@ tar.workspace = true
 xz2.workspace = true
 futures-util.workspace = true
 sha2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+rustix.workspace = true
