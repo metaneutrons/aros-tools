@@ -66,6 +66,8 @@ if dependency_install not in release or release.index(dependency_install) > rele
 arch_dependencies = 'pacman --sync --refresh --sysupgrade --noconfirm --needed'
 if arch_dependencies not in release or release.index(arch_dependencies) > release.index('makepkg --config'):
     raise SystemExit('Arch runtime dependencies are not resolved before package construction')
+if "cancel-in-progress: ${{ github.ref_type != 'tag' }}" not in release:
+    raise SystemExit('release qualification does not cancel superseded non-tag runs')
 PY
 
 # Every public-output helper delegates parent creation to one no-follow policy.

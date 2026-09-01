@@ -28,7 +28,7 @@ concurrency:
   # same APT, Homebrew and AUR channels. Pull-request qualifications remain
   # independent and retain their per-ref cancellation boundary.
   group: ${{ github.ref_type == 'tag' && 'aros-tools-immutable-release' || format('release-{0}', github.ref) }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   CARGO_TERM_COLOR: always
