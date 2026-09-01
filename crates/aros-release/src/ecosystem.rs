@@ -431,9 +431,9 @@ mod tests {
 
     #[test]
     fn both_ecosystem_formats_carry_the_workspace_license() {
-        // Ein falsches Lizenzfeld faellt erst bei `brew audit` oder im AUR auf.
-        // Und ein Glob auf den alten Namen `LICENSE-*` traf die konsolidierte
-        // Datei `LICENSE` nicht mehr und installierte still nichts.
+        // A wrong licence field surfaces only at `brew audit` or in the AUR.
+        // And a glob on the old name `LICENSE-*` stopped matching the
+        // consolidated `LICENSE` file and silently installed nothing.
         let root = tempfile::tempdir().unwrap();
         for (format, name, expected) in [
             (

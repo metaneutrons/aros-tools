@@ -101,9 +101,9 @@ signer_args=(--homedir "$gnupg_home" --fingerprint "$fingerprint")
 "$signing_key_verifier" "${signer_args[@]}" || \
     fail AP7203 'imported APT signing key is not the one active required key'
 
-# Ohne das abschliessende Ausrufezeichen waehlt gpg bei mehreren Signing-Subkeys
-# selbst einen aus, und der Export liefert alle Subkeys statt des einen, der zu
-# dieser Archiv-Domain gehoert. Beides muss gepinnt sein.
+# Without the trailing exclamation mark gpg picks a signing subkey itself when
+# several exist, and the export carries every subkey instead of the one that
+# belongs to this archive domain. Both selectors have to be pinned.
 if [[ -n "$signing_subkey" ]]; then
     [[ "$signing_subkey" =~ ^[0-9A-Fa-f]{40}$ ]] || \
         fail AP7200 'signing-subkey must be a full 40-hex fingerprint'
