@@ -91,8 +91,11 @@ jobs:
           expected_repository = os.environ['GITHUB_REPOSITORY']
           head_sha = pull.get('head', {}).get('sha')
           title = pull.get('title')
+          # A single grouped manifest release has no group component. With the
+          # checked-in title pattern, Release Please therefore emits
+          # `chore(main): release <version>`.
           release_title = re.compile(
-              r'^chore\(main\): release aros-tools '
+              r'^chore\(main\): release '
               r'(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)'
               r'(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)'
               r'(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?'
