@@ -13,10 +13,12 @@ fail() {
 
 status_file=
 fingerprint=
+signing_subkey=
 while (($#)); do
     case "$1" in
         --status-file) status_file=${2:-}; shift 2 ;;
         --fingerprint) fingerprint=${2:-}; shift 2 ;;
+        --signing-subkey) signing_subkey=${2:-}; shift 2 ;;
         *) fail "unknown gpgv-status argument: $1" ;;
     esac
 done
@@ -27,12 +29,23 @@ done
     fail 'gpgv status requires a full 40-hex primary fingerprint'
 fingerprint=${fingerprint^^}
 
-awk -v expected="$fingerprint" '
+# The last VALIDSIG field is the primary fingerprint; the first is the key that
+# actually made the signature. With one signing subkey per archive domain the
+# primary alone cannot tell a correct signer from a subkey used for the wrong
+# domain, so the subkey is checked separately when the caller names one.
+if [[ -n "$signing_subkey" ]]; then
+    [[ "$signing_subkey" =~ ^[0-9A-Fa-f]{40}$ ]] || \
+        fail 'gpgv status requires a full 40-hex signing subkey fingerprint'
+    signing_subkey=${signing_subkey^^}
+fi
+
+awk -v expected="$fingerprint" -v expected_subkey="$signing_subkey" '
     $1 != "[GNUPG:]" { next }
     $2 == "NEWSIG" { newsig += 1; next }
     $2 == "GOODSIG" { goodsig += 1; next }
     $2 == "VALIDSIG" {
         validsig += 1
+        signer = toupper($3)
         primary = toupper($NF)
         next
     }
@@ -52,6 +65,12 @@ awk -v expected="$fingerprint" '
         if (length(primary) != 40 || primary !~ /^[0-9A-F]+$/ || primary != expected) {
             print "::error::AP7242 gpgv transcript has the wrong primary signer" > "/dev/stderr"
             exit 1
+        }
+        if (expected_subkey != "") {
+            if (length(signer) != 40 || signer !~ /^[0-9A-F]+$/ || signer != expected_subkey) {
+                print "::error::AP7242 gpgv transcript was signed by the wrong subkey" > "/dev/stderr"
+                exit 1
+            }
         }
     }
 ' "$status_file"
