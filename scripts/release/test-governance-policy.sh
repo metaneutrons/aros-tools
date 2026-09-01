@@ -58,7 +58,7 @@ run_verifier() {
         BRANCH_FIXTURE="$work/branch.json" \
         PROTECTION_FIXTURE="$work/protection.json" \
         "$script_root/verify-branch-protection.sh" \
-        --repository "$repository" >/dev/null
+        --repository "$repository" "$@" >/dev/null
 }
 
 mutate_and_reject() {
@@ -74,15 +74,37 @@ mutate_and_reject() {
 
 write_baseline
 run_verifier
-mutate_and_reject approvals-zero \
-    '.required_pull_request_reviews.required_approving_review_count = 0'
-mutate_and_reject last-push-disabled \
-    '.required_pull_request_reviews.require_last_push_approval = false'
+mutate_and_reject approvals-enabled \
+    '.required_pull_request_reviews.required_approving_review_count = 1'
+mutate_and_reject last-push-enabled \
+    '.required_pull_request_reviews.require_last_push_approval = true'
 mutate_and_reject conversations-disabled \
     '.required_conversation_resolution.enabled = false'
 mutate_and_reject missing-app-id \
     'del(.required_status_checks.checks[0].app_id)'
 mutate_and_reject wrong-app-id \
     '.required_status_checks.checks[0].app_id = 1'
+
+python3 - "$repository_root/contracts/repository-governance-v1.toml" \
+    "$work/boolean-app-id.toml" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+marker = '[repositories."metaneutrons/homebrew-tap"]'
+prefix, separator, policy = source.partition(marker)
+if not separator:
+    raise SystemExit('could not find homebrew-tap governance fixture')
+policy, replacements = re.subn(r'app_id = [1-9][0-9]*', 'app_id = true', policy, count=1)
+if replacements != 1:
+    raise SystemExit('could not create boolean app_id governance fixture')
+pathlib.Path(sys.argv[2]).write_text(prefix + separator + policy, encoding='utf-8')
+PY
+write_baseline
+if run_verifier --contract "$work/boolean-app-id.toml" 2>/dev/null; then
+    printf '%s\n' 'governance verifier accepted boolean app_id in contract' >&2
+    exit 1
+fi
 
 printf '%s\n' 'repository governance policy fixtures passed'
