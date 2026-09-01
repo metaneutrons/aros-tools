@@ -680,6 +680,11 @@ pub(super) fn measure_tree_content_at(
         let child_display = display_path.join(&name);
         let stat_before = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
         let prepared = prepared_snapshot(&stat_before)?;
+        #[allow(
+            clippy::useless_conversion,
+            reason = "rustix mode_t width differs between supported Unix targets"
+        )]
+        let mode = u32::from(stat_before.st_mode);
         let snapshot = TreeNodeSnapshot {
             identity: prepared.identity,
             kind: match prepared.kind {
@@ -687,7 +692,7 @@ pub(super) fn measure_tree_content_at(
                 PreparedNodeKind::Directory => 2,
                 PreparedNodeKind::Symlink => 3,
             },
-            mode: u32::from(stat_before.st_mode),
+            mode,
             size: prepared.size,
             mtime: prepared.mtime,
             mtime_nsec: prepared.mtime_nsec,

@@ -763,7 +763,12 @@ mod unix {
             && before.st_mode == after.st_mode
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::unnecessary_cast,
+        reason = "rustix mode_t width differs between supported Unix targets"
+    )]
     const fn permission_mode_from_stat(stat: &rfs::Stat) -> u16 {
         (stat.st_mode as u32 & 0o7777) as u16
     }

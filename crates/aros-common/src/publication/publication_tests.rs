@@ -5,6 +5,31 @@ use super::*;
 static FAULT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
+struct FaultEnvironmentGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(unix)]
+impl Drop for FaultEnvironmentGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+        std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
+        std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
+    }
+}
+
+#[cfg(unix)]
+fn lock_fault_environment() -> FaultEnvironmentGuard {
+    let lock = FAULT_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+    std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
+    std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
+    FaultEnvironmentGuard { _lock: lock }
+}
+
+#[cfg(unix)]
 fn scoped_test_point(point: &str) -> String {
     format!(
         "{point}@{}",
@@ -219,7 +244,7 @@ fn casefold_collisions_fail_before_commit() {
 #[cfg(unix)]
 #[test]
 fn no_clobber_file_set_rejects_existing_and_rolls_back_mid_apply() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let journal = root.path().join("install.journal");
     let existing = root.path().join("existing");
@@ -335,7 +360,7 @@ fn flat_tree_is_complete_and_casefold_safe() {
 #[cfg(unix)]
 #[test]
 fn flat_tree_post_rename_failure_preserves_complete_destination() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("tree");
     std::env::set_var(
@@ -376,7 +401,7 @@ fn flat_tree_post_rename_failure_preserves_complete_destination() {
 #[cfg(unix)]
 #[test]
 fn file_post_rename_failure_preserves_target_and_committed_recovery_marker() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("output");
     std::env::set_var(
@@ -600,7 +625,7 @@ fn prepared_tree_exchange_is_atomic_and_retains_the_previous_tree() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_exchange_post_commit_failure_is_typed_and_retains_both_trees() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let staging = root.path().join("staging");
     let destination = root.path().join("published");
@@ -652,7 +677,7 @@ fn prepared_tree_rejects_nested_casefold_collisions_before_rename() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_post_rename_failure_reports_uncertain_and_preserves_tree() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let staging = root.path().join("staging");
     let destination = root.path().join("published");
@@ -679,7 +704,7 @@ fn prepared_tree_post_rename_failure_reports_uncertain_and_preserves_tree() {
 fn committed_journal_cleanup_failure_is_recovered_observably() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let journal = root.path().join("journal");
     let target = root.path().join("target");
@@ -727,7 +752,7 @@ fn committed_journal_cleanup_failure_is_recovered_observably() {
 fn committed_marker_prewrite_failure_rolls_back_complete_set() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let journal = root.path().join("journal");
     let first = root.path().join("first");
@@ -759,7 +784,7 @@ fn committed_marker_prewrite_failure_rolls_back_complete_set() {
 #[cfg(unix)]
 #[test]
 fn stable_reader_rejects_in_place_concurrent_write() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("target");
     std::fs::write(&target, vec![b'a'; 1024 * 1024]).unwrap();
@@ -783,7 +808,7 @@ fn stable_reader_rejects_in_place_concurrent_write() {
 #[cfg(unix)]
 #[test]
 fn staged_digest_race_never_publishes_or_deletes_the_changed_stage() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let journal = root.path().join("journal");
     let target = root.path().join("target");
@@ -841,7 +866,7 @@ fn staged_digest_race_never_publishes_or_deletes_the_changed_stage() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_content_cas_rejects_concurrent_in_place_mutation() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("destination");
     let staging = root.path().join("staging");
@@ -875,7 +900,7 @@ fn prepared_tree_content_cas_rejects_concurrent_in_place_mutation() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_staging_content_cas_rejects_mutation_before_sync() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("destination");
     let staging = root.path().join("staging");
@@ -909,7 +934,7 @@ fn prepared_tree_staging_content_cas_rejects_mutation_before_sync() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_post_exchange_content_race_is_compensated() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("destination");
     let staging = root.path().join("staging");
@@ -922,11 +947,21 @@ fn prepared_tree_post_exchange_content_race_is_compensated() {
         "AROS_PUBLICATION_TEST_PAUSE_AT",
         scoped_test_point("prepared-tree-after-exchange-before-content-cas"),
     );
-    std::env::set_var("AROS_PUBLICATION_TEST_PAUSE_MS", "300");
+    std::env::set_var("AROS_PUBLICATION_TEST_PAUSE_MS", "1000");
     let raced = destination.join("value");
     let writer = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        std::fs::write(raced, b"raced-installed-tree").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::fs::read(&raced).is_ok_and(|contents| contents == b"intended") {
+                std::fs::write(&raced, b"raced-installed-tree").unwrap();
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "atomic exchange never exposed the prepared tree"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     });
     let result = exchange_prepared_tree_if_unchanged(&staging, &destination, &expected);
     writer.join().unwrap();
@@ -964,7 +999,7 @@ fn uncertain_incomplete_rollback_has_typed_class_flag_and_recovery_guidance() {
 #[cfg(unix)]
 #[test]
 fn prepared_tree_foreign_staging_binding_never_triggers_compensating_exchange() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("destination");
     let staging = root.path().join("staging");
@@ -1014,7 +1049,7 @@ fn prepared_tree_foreign_staging_binding_never_triggers_compensating_exchange() 
 #[cfg(unix)]
 #[test]
 fn prepared_tree_compensation_sync_failure_is_uncertain_and_incomplete() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("destination");
     let staging = root.path().join("staging");
@@ -1055,7 +1090,7 @@ fn prepared_tree_compensation_sync_failure_is_uncertain_and_incomplete() {
 #[cfg(unix)]
 #[test]
 fn tree_content_cas_double_pass_rejects_early_entry_race() {
-    let _environment = FAULT_ENV_LOCK.lock().unwrap();
+    let _environment = lock_fault_environment();
     let root = tempfile::tempdir().unwrap();
     let tree = root.path().join("tree");
     std::fs::create_dir(&tree).unwrap();
