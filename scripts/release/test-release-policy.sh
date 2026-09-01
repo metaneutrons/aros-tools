@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/../.." && pwd)
+root=$(unset CDPATH; cd -- "$(dirname -- "$0")/../.." && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/aros-release-policy.XXXXXX")
 fixture_gnupg=
 revoked_gnupg=
@@ -41,7 +41,10 @@ expect_failure_matching() {
 # pinned action linter into an explicit path, and resolves declared Debian
 # runtime dependencies before exercising the package installation boundary.
 python3 - "$root/.github/workflows/ci.yml" \
-    "$root/.github/workflows/release.yml" <<'PY'
+    "$root/.github/workflows/release.yml" \
+    "$root/scripts/release" <<'PY'
+import pathlib
+import re
 import sys
 
 ci = open(sys.argv[1], encoding='utf-8').read()
@@ -68,6 +71,19 @@ if arch_dependencies not in release or release.index(arch_dependencies) > releas
     raise SystemExit('Arch runtime dependencies are not resolved before package construction')
 if "cancel-in-progress: ${{ github.ref_type != 'tag' }}" not in release:
     raise SystemExit('release qualification does not cancel superseded non-tag runs')
+
+release_scripts = pathlib.Path(sys.argv[3])
+for script in release_scripts.glob('*.sh'):
+    for number, line in enumerate(script.read_text(encoding='utf-8').splitlines(), 1):
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=\$\(', line) is None:
+            continue
+        if 'dirname' not in line or '$0' not in line or 'pwd' not in line:
+            continue
+        cdpath_free = 'CDPATH= cd --' in line or 'unset CDPATH; cd --' in line
+        if not cdpath_free or 'dirname --' not in line or 'pwd -P' not in line:
+            raise SystemExit(
+                f'{script.name}:{number}: script-root derivation is not physical and CDPATH-free'
+            )
 PY
 
 # Every public-output helper delegates parent creation to one no-follow policy.

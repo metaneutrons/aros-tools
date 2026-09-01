@@ -11,7 +11,8 @@ candidate_dir=${1:-}
 repository_dir=${2:-}
 version=${3:-}
 metadata_epoch=${4:-}
-renderer=$(cd "$(dirname "$0")" && pwd)/render-apt-metadata.py
+script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
+renderer="$script_root/render-apt-metadata.py"
 
 [[ -d "$candidate_dir" && ! -L "$candidate_dir" ]] || fail 'candidate directory is unsafe'
 [[ -d "$repository_dir" && ! -L "$repository_dir" ]] || fail 'repository directory is unsafe'

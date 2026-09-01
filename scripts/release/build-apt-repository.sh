@@ -60,7 +60,7 @@ fi
 [[ "$fingerprint" =~ ^[0-9A-Fa-f]{40}$ ]] || \
     fail AP7200 'fingerprint must be a full 40-hex primary-key fingerprint'
 
-script_root=$(cd "$(dirname "$0")" && pwd)
+script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
 "$script_root/prepare-output-parent.sh" --path "$output_dir" --mode 0755
 stage=$(mktemp -d "${output_dir}.tmp.XXXXXX")
 cleanup() {
@@ -106,7 +106,7 @@ gpg --batch --homedir "$gnupg_home" --yes --pinentry-mode loopback \
     --passphrase-file "$passphrase_file" --faked-system-time "${source_date_epoch}!" \
     --local-user "$fingerprint" --armor --clearsign \
     --output "$stage/dists/stable/InRelease" "$stage/dists/stable/Release"
-inventory=$(cd "$(dirname "$0")" && pwd)/verify-apt-publication-inventory.sh
+inventory="$script_root/verify-apt-publication-inventory.sh"
 [[ -x "$inventory" && ! -L "$inventory" ]] || \
     fail AP7203 'APT publication inventory verifier is missing or unsafe'
 "$inventory" --directory "$stage" --mode full --version "$version" \

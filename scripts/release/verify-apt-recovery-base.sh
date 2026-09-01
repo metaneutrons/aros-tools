@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/../.." && pwd)
+root=$(unset CDPATH; cd -- "$(dirname -- "$0")/../.." && pwd -P)
 
 fail() {
     printf '::error::AP7237 %s\n' "$*" >&2

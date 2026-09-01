@@ -43,7 +43,7 @@ if [[ -n "$expected_bytes" ]]; then
         fail "expected size is outside the $class ceiling"
 fi
 
-script_root=$(cd "$(dirname "$0")" && pwd)
+script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
 "$script_root/prepare-output-parent.sh" --path "$output" --mode 0755
 temporary=$(mktemp "${output}.tmp.XXXXXX")
 cleanup() {

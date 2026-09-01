@@ -134,8 +134,9 @@ install -d -m 0700 "$work/gnupg"
    $(grep -c '^-----END PGP SIGNATURE-----$' \
       "$directory/dists/stable/Release.gpg") == 1 ]] || \
     fail AP7224 'Release.gpg has a non-canonical signature envelope'
-key_verifier=$(cd "$(dirname "$0")" && pwd)/verify-apt-public-key.sh
-status_verifier=$(cd "$(dirname "$0")" && pwd)/verify-gpgv-status.sh
+script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
+key_verifier="$script_root/verify-apt-public-key.sh"
+status_verifier="$script_root/verify-gpgv-status.sh"
 [[ -x "$key_verifier" && ! -L "$key_verifier" ]] || \
     fail AP7224 'canonical APT public-key verifier is missing or unsafe'
 [[ -x "$status_verifier" && ! -L "$status_verifier" ]] || \

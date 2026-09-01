@@ -44,7 +44,7 @@ fingerprint=${fingerprint^^}
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/aros-apt-key.XXXXXX")
 chmod 0700 "$work"
-script_root=$(cd "$(dirname "$0")" && pwd)
+script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
 "$script_root/prepare-output-parent.sh" --path "$keyring_output" --mode 0755
 temporary=$(mktemp "${keyring_output}.tmp.XXXXXX")
 cleanup() {
