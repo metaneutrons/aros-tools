@@ -1,13 +1,17 @@
-/target/
+# Unanchored patterns only. A leading slash binds a pattern to the repository
+# root, so a second subproject falls outside it. That is how node_modules ends
+# up committed.
+target/
+coverage/
+node_modules/
+dist/
+.astro/
+**/__pycache__/
+
 .DS_Store
+.direnv/
 .env
 .env.*
 !.env.example
-.direnv/
 *.log
 *.profraw
-/coverage/
-/docs-site/node_modules/
-/docs-site/dist/
-/docs-site/.astro/
-**/__pycache__/
