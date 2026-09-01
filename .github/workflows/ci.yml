@@ -46,7 +46,9 @@ jobs:
           # class means "not a backslash and not an n" and would let through
           # any name containing an n. In the RE2 rule of a ruleset [^\n] is
           # the correct spelling.
-          ban='co-authored-by:.*(claude|anthropic)|generated with.*claude code'
+          # Identisch zu scripts/hooks/check-commit-message.sh. Weicht die
+          # Regel ab, blockiert die eine Schicht, was die andere durchlaesst.
+          ban='co-authored-by:.*(claude|anthropic)|generated with.*claude code|🤖 generated with'
 
           # With squash merges the pull-request title becomes the subject line
           # on main, and Release Please derives the next version from it.

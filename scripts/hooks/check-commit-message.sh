@@ -12,7 +12,11 @@ msg=$(cat "$msg_file")
 
 # Kommentarzeilen und diff-Anhang von `git commit -v` entfernen.
 body=$(printf '%s\n' "$msg" | sed -e '/^#/d' -e '/^diff --git /,$d')
-subject=$(printf '%s\n' "$body" | sed -e '/^[[:space:]]*$/d' -e 1q)
+# Erste nicht-leere Zeile. Mit `sed -e '/^[[:space:]]*$/d' -e 1q` waere das
+# falsch: loescht `d` die erste Eingabezeile, beginnt sofort der naechste
+# Zyklus, `1q` kommt nie zur Ausfuehrung, und subject wird die ganze Nachricht.
+# Die Laengenpruefung misst dann den Body und lehnt gueltige Commits ab.
+subject=$(printf '%s\n' "$body" | awk 'NF { print; exit }')
 
 fail() {
     printf '\033[31mCommit abgelehnt:\033[0m %s\n' "$1" >&2
