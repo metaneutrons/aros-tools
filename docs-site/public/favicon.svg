@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AROS tools">
+  <rect width="64" height="64" rx="12" fill="#111827"/>
+  <path d="M13 45 29.5 17 46 45M21 34h17" fill="none" stroke="#38bdf8" stroke-linecap="round" stroke-linejoin="round" stroke-width="6"/>
+  <path d="M44 47h8" fill="none" stroke="#f8fafc" stroke-linecap="round" stroke-width="5"/>
+</svg>

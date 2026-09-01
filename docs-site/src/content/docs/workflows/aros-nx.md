@@ -6,6 +6,14 @@ description: Use the optional translated build engine and locked cross-toolchain
 AROS-NX adds a consumer bridge around upstream AROS. The operating-system tree
 selects target and toolchain policy; `aros-tools` provides the host executables.
 
+Create a checkout explicitly, or enter an existing one:
+
+```sh
+aros source init ./AROS-NX \
+  --upstream https://github.com/metaneutrons/AROS-NX.git
+cd ./AROS-NX
+```
+
 From the AROS-NX checkout:
 
 ```sh
@@ -17,7 +25,13 @@ The build frontend verifies its toolchain lock, translates current MetaMake
 contracts transactionally and leaves caches and generated build state outside
 authoritative sources by default.
 
-The first local migration qualification completed the complete `pc-x86_64`
-graph with the published deterministic RC3 toolchain: 14,204 Ninja steps,
-including C++ runtimes, Mesa, external CMake projects, AHI and the final kernel
-bootstrap. This is build evidence, not physical-board boot evidence.
+The repository contract in `contracts/aros-source-v1.toml` records the exact
+AROS-NX source revision and toolchain-producer revision used by this tools
+commit. CI validates that contract before tests; it does not silently follow a
+moving `main` branch. Product qualification evidence belongs to the producer
+run and release inventory for the selected toolchain, not to an undocumented
+local build claim.
+
+AROS-NX can therefore carry reviewed build integration while `aros-tools`
+remains usable as a standalone suite. Board support is a separate boundary:
+successful product compilation is not UART or physical-boot evidence.

@@ -1,0 +1,6 @@
+* @metaneutrons
+
+# Release and security boundaries are explicitly routed to the maintainer.
+/.github/workflows/ @metaneutrons
+/scripts/release/ @metaneutrons
+/SECURITY.md @metaneutrons

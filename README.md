@@ -1,5 +1,10 @@
 # AROS tools
 
+[![Workspace CI](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml/badge.svg)](https://github.com/metaneutrons/aros-tools/actions/workflows/codeql.yml)
+[![Documentation](https://github.com/metaneutrons/aros-tools/actions/workflows/docs.yml/badge.svg)](https://aros.metaneutrons.cc/aros-tools/)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 **A rigorous, upstream-compatible tool suite for building, verifying, and
 deploying AROS.**
 
@@ -8,10 +13,11 @@ reviewable Rust workspace with explicit contracts for source inputs, build
 execution, diagnostics, releases, and physical-board workflows. It is designed
 to work beside an AROS checkout rather than modify or own it.
 
-Documentation: [start here](https://metaneutrons.github.io/aros-tools/) ·
-[installation](https://metaneutrons.github.io/aros-tools/getting-started/installation/) ·
-[release status](https://metaneutrons.github.io/aros-tools/reference/release-status/) ·
-[architecture](https://metaneutrons.github.io/aros-tools/reference/architecture/)
+Documentation: [start here](https://aros.metaneutrons.cc/aros-tools/) ·
+[installation](https://aros.metaneutrons.cc/aros-tools/getting-started/installation/) ·
+[first build](https://aros.metaneutrons.cc/aros-tools/getting-started/quick-start/) ·
+[command reference](https://aros.metaneutrons.cc/aros-tools/reference/cli/) ·
+[release status](https://aros.metaneutrons.cc/aros-tools/reference/release-status/)
 
 > **Project status:** the workspace and its release engineering are under
 > active qualification. Build from source is the supported installation path.
@@ -43,33 +49,50 @@ experience.
 
 ### Prerequisites
 
-- Rust stable and Cargo
-- Git
-- CMake and Ninja for the translated CMake build path
+- Rust 1.98.0 and Cargo (selected by `rust-toolchain.toml`)
+- Git, CMake and Ninja
+- Python 3.11 or newer, curl, a POSIX `patch`, and platform CA certificates used by public
+  source-fetch, verification, and build workflows
 - host packages required by the AROS target you intend to build
 
 ```console
 git clone https://github.com/metaneutrons/aros-tools.git
 cd aros-tools
-cargo build --release --workspace --all-features
+cargo build --release --workspace --all-features --locked
 ./target/release/aros --help
 ```
 
-The resulting executables live in `target/release`. Keep them together: the
-`aros` frontend deliberately invokes the specialised tools as separate
-processes, so their command contracts, logs and failure boundaries remain
-independent.
+The resulting executables live in `target/release`. Keep the eight public
+executables together: the `aros` frontend deliberately invokes the specialised
+tools as separate processes, so their command contracts, logs and failure
+boundaries remain independent. A workspace build also creates the internal
+`aros-release` qualification producer; it is not part of an installation.
 
 For an AROS checkout, begin with the workflow guide that matches your source:
 
 | Source tree | Guide | Current boundary |
 | --- | --- | --- |
-| Pristine upstream AROS | [Upstream AROS workflow](https://metaneutrons.github.io/aros-tools/workflows/upstream-aros/) | checkout discovery and installed-tool resolution work; complete native GNU Make support is still being qualified |
-| AROS-NX | [AROS-NX workflow](https://metaneutrons.github.io/aros-tools/workflows/aros-nx/) | reviewed target and release contracts are available through the selected checkout |
+| Pristine upstream AROS | [Upstream AROS workflow](https://aros.metaneutrons.cc/aros-tools/workflows/upstream-aros/) | source initialization and independent component tools work; complete native GNU Make support is still being qualified |
+| AROS-NX | [AROS-NX workflow](https://aros.metaneutrons.cc/aros-tools/workflows/aros-nx/) | reviewed target and release contracts are available through the selected checkout |
 
 Do not use an unpublished release URL as a shortcut. The
-[installation guide](https://metaneutrons.github.io/aros-tools/getting-started/installation/)
+[installation guide](https://aros.metaneutrons.cc/aros-tools/getting-started/installation/)
 is the source of truth for supported installation paths.
+
+Create a new explicit checkout with the just-built local frontend, without
+relying on `PATH` contents or sibling-directory naming:
+
+```console
+./target/release/aros source init ~/Source/AROS
+cd ~/Source/AROS
+```
+
+Use `--fork`, `--upstream` and an unambiguous `--ref` on that same local binary
+to select a fork, a different canonical source or an immutable revision. A ref
+must be a full `refs/heads/NAME`, full `refs/tags/NAME`, or exact 40/64-digit
+commit OID; for example, `--ref refs/heads/master` is directly copyable while
+the short name `--ref master` is deliberately rejected. Initialization is
+staged and never reuses an existing destination.
 
 ## What is included
 
@@ -105,28 +128,49 @@ The project is deliberately strict about what it may infer:
   isolated-download verification.
 - **Useful errors:** every user-facing command provides human diagnostics and
   a stable JSON alternative on the shared `aros-tool-diagnostics-v1` contract.
-  Local logging is opt-in and requires both a level and destination.
+  Diagnostics go to `stderr`; intentional command output goes to `stdout`.
+  Local logging is off by default and writes only to an explicit `--log-file`.
+  A non-off `--log-level` without that destination fails. Portable invocations
+  should pass both options: the `aros` frontend promotes file-only logging to
+  `info`, while specialised tools leave their explicit `off` level unchanged.
+  Logs never replace the terminal diagnostic or determine command success.
 
-See [diagnostics](https://metaneutrons.github.io/aros-tools/reference/diagnostics/),
-[architecture](https://metaneutrons.github.io/aros-tools/reference/architecture/),
-and [release engineering](https://metaneutrons.github.io/aros-tools/reference/releases/)
+See [diagnostics](https://aros.metaneutrons.cc/aros-tools/reference/diagnostics/),
+[architecture](https://aros.metaneutrons.cc/aros-tools/reference/architecture/),
+and [release engineering](https://aros.metaneutrons.cc/aros-tools/reference/releases/)
 for the exact contracts.
 
 ## Development
 
-Use an explicit, qualified AROS-NX checkout for the complete workspace gate:
+Install the three pinned Cargo audit tools once, then use the canonical gate
+script with Node.js 24 or newer, npm, actionlint, ShellCheck, and an explicit, qualified
+AROS-NX checkout:
 
 ```console
-cargo fmt --all -- --check
-sh scripts/check-architecture.sh
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo install cargo-audit --version 0.22.2 --locked
+cargo install cargo-deny --version 0.20.2 --locked
+cargo install cargo-machete --version 0.9.2 --locked
+# Also install actionlint and ShellCheck from your platform package manager.
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
-  cargo test --workspace --all-features
+  scripts/check-workspace.sh
 ```
 
 The source path is intentionally never inferred from a neighbouring directory.
 CI pins the exact AROS-NX revision used by the toolchain producer, which keeps
 a moving upstream branch from changing the meaning of a tools commit.
+
+`scripts/check-workspace.sh` is the single source of truth used locally and by
+CI. The default `all` mode also performs actionlint, ShellCheck and the locked
+Astro documentation build. Its `quality`, `docs`, `test`, and `portable-test`
+modes split runner responsibilities without changing that complete local
+contract. The closed portable crate suite runs on all four supported hosts and
+compiles every transpiler/verifier test target there. One Linux lane alone
+executes the source-coupled transpiler/verifier tests against the large
+recursive checkout and exact AROS-NX source qualification; they are never
+silently run or skipped without that oracle.
+The separate
+documentation workflow calls `docs` directly and then uploads the verified
+`dist` tree through a separately pinned Pages action.
 
 The architecture gate protects the long-term shape of the workspace: it
 enforces one-way crate dependencies, keeps production modules bounded, requires
@@ -139,6 +183,11 @@ GitHub Releases are the canonical source for native archives. Package channels
 are consumers of those immutable, measured artifacts – never independent binary
 builds.
 
+Release Please derives the workspace SemVer and changelog from Conventional
+Commits. It opens a reviewable release pull request but never creates a tag or
+GitHub Release. Only a separately protected annotated tag on qualified `main`
+starts release production and promotion.
+
 Before the first stable tag, every supported native archive and downstream
 package path must pass its own gate:
 
@@ -146,15 +195,17 @@ package path must pass its own gate:
    tests;
 2. archive manifests, checksums, SPDX SBOMs, Sigstore evidence and GitHub
    provenance;
-3. isolated download and verification of an immutable GitHub draft;
+3. an immutable private Actions staging set, followed by isolated draft
+   verification and one-time GitHub publication with final status;
 4. byte-for-byte Debian package installation checks, signed APT verification,
    Homebrew installation on all supported hosts, and AUR qualification on both
    Linux architectures; and
-5. promotion only after every public channel verifies its measured bytes.
+5. explicit roll-forward and public verification of APT, Homebrew and AUR from
+   the canonical immutable GitHub release.
 
 The definitive details, including failure and credential boundaries, live in
-[release engineering](https://metaneutrons.github.io/aros-tools/reference/releases/)
-and [package publication](https://metaneutrons.github.io/aros-tools/reference/publication/).
+[release engineering](https://aros.metaneutrons.cc/aros-tools/reference/releases/)
+and [package publication](https://aros.metaneutrons.cc/aros-tools/reference/publication/).
 
 ## Documentation
 
@@ -162,12 +213,14 @@ The documentation is versioned with the source and built with Astro Starlight:
 
 ```console
 cd docs-site
-npm ci
+npm ci --ignore-scripts
+npm audit --audit-level=high
 npm run build
 ```
 
-The checked-in lockfile is authoritative. The same `npm ci` build is used for
-the GitHub Pages deployment, so the published documentation and pull-request
+The checked-in lockfile is authoritative. Lifecycle scripts are disabled and
+the locked graph must pass the high-severity audit before Astro runs. The same
+gate is used for GitHub Pages, so the published documentation and pull-request
 checks exercise the same dependency graph.
 
 ## License
@@ -176,3 +229,10 @@ Unless a file states otherwise, the Rust workspace and documentation are
 available under either the [Apache License 2.0](LICENSE-APACHE) or the
 [MIT License](LICENSE-MIT), at your option. Vendored and AROS-derived inputs
 retain their own notices and licenses.
+
+## Contributing and security
+
+Development and review rules are in [CONTRIBUTING.md](CONTRIBUTING.md), the
+two-stage release procedure in [RELEASING.md](RELEASING.md), and private
+vulnerability reporting in [SECURITY.md](SECURITY.md). Participation is subject
+to the [community code of conduct](CODE_OF_CONDUCT.md).

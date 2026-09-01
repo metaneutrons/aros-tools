@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible defect in a supported aros-tools workflow.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private source URLs, personal data, or raw destructive-device identifiers. Security issues belong in private vulnerability reporting.
+  - type: input
+    id: version
+    attributes:
+      label: aros-tools version
+      description: Paste `aros --version`, or the full commit ID for a source build.
+      placeholder: aros 0.1.0 or 0123456789abcdef…
+    validations:
+      required: true
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host platform
+      options:
+        - Linux x86_64
+        - Linux AArch64
+        - macOS x86_64
+        - macOS Apple Silicon
+        - Other or unsupported
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: AROS source identity
+      description: Repository and full commit ID; use a synthetic/private-safe identifier when necessary.
+      placeholder: aros-development-team/AROS@0123456789abcdef…
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and explicit inputs
+      description: Include the exact command after removing secrets. State the selected preset, board, or toolchain where relevant.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include the stable diagnostic code, exit status, and a sanitized JSON diagnostic if available.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Describe the smallest synthetic or public fixture that reproduces the defect.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, personal data, and sensitive device identifiers.
+          required: true
+        - label: This is not a privately reportable security vulnerability.
+          required: true

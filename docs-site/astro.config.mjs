@@ -2,7 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://metaneutrons.github.io',
+  site: 'https://aros.metaneutrons.cc',
   base: '/aros-tools',
   integrations: [
     starlight({
@@ -21,7 +21,10 @@ export default defineConfig({
           label: 'Start here',
           items: [
             { label: 'Overview', slug: 'index' },
+            { label: 'Prerequisites', slug: 'getting-started/prerequisites' },
             { label: 'Installation', slug: 'getting-started/installation' },
+            { label: 'First checkout and build', slug: 'getting-started/quick-start' },
+            { label: 'Update and uninstall', slug: 'getting-started/update-uninstall' },
           ],
         },
         {
@@ -29,11 +32,17 @@ export default defineConfig({
           items: [
             { label: 'Pristine upstream AROS', slug: 'workflows/upstream-aros' },
             { label: 'AROS-NX', slug: 'workflows/aros-nx' },
+            { label: 'Cross-development', slug: 'workflows/cross-development' },
+            { label: 'Physical boards', slug: 'workflows/boards' },
           ],
         },
         {
           label: 'Reference',
           items: [
+            { label: 'Command reference', slug: 'reference/cli' },
+            { label: 'Configuration', slug: 'reference/configuration' },
+            { label: 'Platform support', slug: 'reference/platform-support' },
+            { label: 'Troubleshooting', slug: 'reference/troubleshooting' },
             { label: 'Architecture', slug: 'reference/architecture' },
             { label: 'Diagnostics and logs', slug: 'reference/diagnostics' },
             { label: 'Release engineering', slug: 'reference/releases' },
