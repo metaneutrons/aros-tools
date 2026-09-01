@@ -343,6 +343,14 @@ if (root / 'publish-ecosystem.yml').exists() and (
         f'{root / "publish-ecosystem.yml"}: Homebrew mutation and merge do not revalidate the governance SSOT'
     )
 if homebrew_job:
+    if 'reviewDecision' in homebrew_job or 'independent approval' in homebrew_job:
+        errors.append(
+            f'{root / "publish-ecosystem.yml"}: solo-maintainer Homebrew publication must not wait for a self-review'
+        )
+    if '--match-head-commit "$EXPECTED_HEAD"' not in homebrew_job:
+        errors.append(
+            f'{root / "publish-ecosystem.yml"}: Homebrew merge lacks the exact-head precondition'
+        )
     for mutation in ('git push ', 'gh pr create'):
         for match in re.finditer(re.escape(mutation), homebrew_job):
             verifier = homebrew_job.rfind('verify_tap_governance', 0, match.start())

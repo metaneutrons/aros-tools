@@ -74,10 +74,10 @@ mutate_and_reject() {
 
 write_baseline
 run_verifier
-mutate_and_reject approvals-zero \
-    '.required_pull_request_reviews.required_approving_review_count = 0'
-mutate_and_reject last-push-disabled \
-    '.required_pull_request_reviews.require_last_push_approval = false'
+mutate_and_reject approvals-enabled \
+    '.required_pull_request_reviews.required_approving_review_count = 1'
+mutate_and_reject last-push-enabled \
+    '.required_pull_request_reviews.require_last_push_approval = true'
 mutate_and_reject conversations-disabled \
     '.required_conversation_resolution.enabled = false'
 mutate_and_reject missing-app-id \

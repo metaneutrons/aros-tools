@@ -122,17 +122,14 @@ repository helper is executed while a write PAT is present. Every private-key
 step removes its credential files through an EXIT trap and terminates GnuPG
 agents before a later step can run.
 
-Homebrew promotion requires two distinct human gates. Approval of the
-`homebrew-publication` environment admits the isolated credential, but it does
-not approve the generated tap pull request. After the workflow prints that PR,
-an independent maintainer must review and approve its exact, final head commit;
-the protected `Formula qualification` check must also be green. The publication
-job waits for at most 180 minutes and then merges only that recorded head through
-GitHub's `match-head-commit` precondition. Do not push a follow-up commit, merge
-the PR manually, or approve an earlier head. If the window expires, rerun only
-the unchanged release tag: recovery must reuse the same version branch, pull
-request and byte-identical head, and the independent approval must still apply
-to that exact head.
+The deliberate creation and push of the immutable annotated release tag is the
+single human promotion gate. Homebrew adds no redundant self-review ceremony:
+the protected `Formula qualification` check must pass on all four hosts, the
+publication job remeasures the exact final head and revalidates both repositories,
+then merges only that recorded SHA through GitHub's `match-head-commit`
+precondition. Do not push a follow-up commit or merge the PR manually. If the
+job stops, rerun only the unchanged release tag: recovery must reuse the same
+version branch, pull request and byte-identical head.
 
 Before stable exposure, a credential-free gate examines GitHub, signed APT
 (including by-hash), Homebrew and AUR. A newer public version rejects the run;
@@ -184,7 +181,8 @@ The renderer runs in a digest-pinned, network-disabled Python container. A
 downgrade, package change, index change, mutable release or race fails closed.
 Refresh signing and R2 mutation also run on different runners under the shared
 `apt-signing` and `apt-publication` environments. Configure both environments
-to admit only annotated `v*` release tags and protected `main`, require review,
-and retain the workflows' independent exact-ref checks. Put the non-secret
-APT/R2 identity values in repository variables so preparation and final
-verification remain credential-free.
+to admit only annotated `v*` release tags and protected `main`, without a second
+approval after the deliberate release tag, and retain the workflows'
+independent exact-ref checks. Put the non-secret APT/R2 identity values in
+repository variables so preparation and final verification remain
+credential-free.

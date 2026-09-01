@@ -678,7 +678,7 @@ jobs:
     name: Publish and qualify Homebrew formula
     needs: apt-install
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 60
     environment: homebrew-publication
     env:
       VERSION: ${{ inputs.version }}
@@ -904,22 +904,6 @@ jobs:
           trap 'exit 130' HUP INT TERM
           gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
             --watch --fail-fast --interval 20
-          for attempt in {1..480}; do
-            review=$(gh pr view "$PR" --repo metaneutrons/homebrew-tap \
-              --json headRefOid,reviewDecision)
-            review_head=$(jq -r '.headRefOid' <<<"$review")
-            [[ "$review_head" == "$EXPECTED_HEAD" ]] || {
-              echo '::error::AP7310 Homebrew PR head changed while awaiting review'; exit 1;
-            }
-            if [[ $(jq -r '.reviewDecision' <<<"$review") == APPROVED ]]; then
-              break
-            fi
-            if [[ "$attempt" == 480 ]]; then
-              echo '::error::AP7311 independent approval of the exact Homebrew PR head did not arrive'
-              exit 1
-            fi
-            sleep 20
-          done
           measured_head=$(gh pr view "$PR" --repo metaneutrons/homebrew-tap \
             --json headRefOid --jq .headRefOid)
           if [[ ! "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ || \

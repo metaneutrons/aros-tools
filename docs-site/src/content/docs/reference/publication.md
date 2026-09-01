@@ -27,9 +27,8 @@ staging object set; it is not a public prerelease or package source.
 6. Open a formula PR in `metaneutrons/homebrew-tap`; its protected
    `Formula qualification` gate installs and tests the measured formula on
    Intel and ARM macOS plus x86-64 and ARM64 Linux. Recheck its exact head SHA
-   and require one independent maintainer to approve that exact final head.
-   Merge with GitHub's `match-head-commit` precondition. Tap `main` must enforce
-   strict checks for administrators and forbid force-pushes/deletion.
+   and merge with GitHub's `match-head-commit` precondition. Tap `main` must
+   enforce strict checks for administrators and forbid force-pushes/deletion.
 7. Push the measured `PKGBUILD` and freshly generated `.SRCINFO` to
    `aros-tools-bin` from an AUR-key-only runner. A new credential-free runner
    consumes a closed `PKGBUILD`/`SRCINFO`/commit evidence handoff and verifies
@@ -60,19 +59,20 @@ stay in their one named environment:
 | `homebrew-publication` | annotated release tags matching `v*` | `PACKAGE_PUBLISH_TOKEN` |
 | `aur-publication` | annotated release tags matching `v*` | `AUR_SSH_PRIVATE_KEY` |
 
-Require review for every environment. Pull requests and ordinary qualification
-jobs receive none of them. The refresh workflow independently refuses every ref
-except the current remote `main` tip, so manual dispatch cannot select an older
-branch or tag even if an environment policy is misconfigured.
+The deliberate creation and push of an immutable annotated release tag is the
+single human promotion decision. Environment policies restrict which exact refs
+may read each credential, but do not add repetitive approval prompts after that
+decision. Pull requests and ordinary qualification jobs receive no release
+credentials. The refresh workflow independently refuses every ref except the
+current remote `main` tip, so manual dispatch cannot select an older branch or
+tag even if an environment policy is misconfigured.
 
-Environment review and pull-request review are separate controls. Once the
-Homebrew job exposes its generated tap PR, an independent maintainer must
-approve the exact recorded head after the final push and allow the protected
-`Formula qualification` check to finish. The job waits for no more than 180
-minutes. Never amend that branch or merge it manually. If the wait expires,
-rerun only the same immutable release tag; the workflow must reuse the same
-version branch, PR and byte-identical head before it may merge, and the approval
-must cover that exact head.
+The Homebrew PR is a machine-verifiable handoff rather than a second human
+approval point. Its four protected `Formula qualification` lanes must pass, the
+workflow remeasures the final head, revalidates source release and tap
+governance, and merges only that SHA with `match-head-commit`. Never amend or
+merge the branch manually. A rerun of the unchanged release tag must reuse the
+same version branch, PR and byte-identical head.
 
 | Secret | Required scope |
 | --- | --- |
