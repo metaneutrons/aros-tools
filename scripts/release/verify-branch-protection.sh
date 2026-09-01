@@ -70,7 +70,7 @@ if any(not isinstance(context, str) or not context for context in contexts):
     raise SystemExit('governance status-check context is malformed')
 if len(contexts) != len(set(contexts)):
     raise SystemExit('governance status-check contexts are not unique')
-if any(not isinstance(check.get('app_id'), int) or check['app_id'] <= 0 for check in checks):
+if any(type(check.get('app_id')) is not int or check['app_id'] <= 0 for check in checks):
     raise SystemExit('every governance status check requires a positive app_id')
 approval_count = policy['required_approving_review_count']
 if type(approval_count) is not int or not 0 <= approval_count <= 6:
