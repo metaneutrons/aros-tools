@@ -13,6 +13,7 @@ usage() {
     printf '%s\n' \
         'usage: verify-apt-publication-inventory.sh --directory DIR' \
         '       --mode full|metadata --fingerprint HEX [--version X.Y.Z]' \
+        '       [--signing-subkey HEX]' \
         '       [--require-unexpired] [--now-epoch EPOCH]'
 }
 
@@ -20,6 +21,7 @@ directory=
 mode=
 version=
 fingerprint=
+signing_subkey=
 require_unexpired=false
 now_epoch=
 while (($#)); do
@@ -28,6 +30,7 @@ while (($#)); do
         --mode) mode=${2:-}; shift 2 ;;
         --version) version=${2:-}; shift 2 ;;
         --fingerprint) fingerprint=${2:-}; shift 2 ;;
+        --signing-subkey) signing_subkey=${2:-}; shift 2 ;;
         --require-unexpired) require_unexpired=true; shift ;;
         --now-epoch) now_epoch=${2:-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
@@ -147,8 +150,9 @@ status_verifier="$script_root/verify-gpgv-status.sh"
 gpgv --status-fd 3 --keyring "$work/keyring.gpg" \
     "$directory/dists/stable/InRelease" 3> "$work/inrelease.status" 2>/dev/null || \
     fail AP7224 'InRelease signature verification failed'
-"$status_verifier" --status-file "$work/inrelease.status" \
-    --fingerprint "$fingerprint" || \
+status_args=(--fingerprint "$fingerprint")
+[[ -n "$signing_subkey" ]] && status_args+=(--signing-subkey "$signing_subkey")
+"$status_verifier" --status-file "$work/inrelease.status" "${status_args[@]}" || \
     fail AP7224 'InRelease does not have one active required signature'
 gpg --batch --homedir "$work/gnupg" --no-default-keyring \
     --keyring "$work/keyring.gpg" --decrypt \
@@ -159,8 +163,7 @@ gpgv --status-fd 3 --keyring "$work/keyring.gpg" \
     "$directory/dists/stable/Release.gpg" \
     "$directory/dists/stable/Release" 3> "$work/release.status" 2>/dev/null || \
     fail AP7224 'Release.gpg signature verification failed'
-"$status_verifier" --status-file "$work/release.status" \
-    --fingerprint "$fingerprint" || \
+"$status_verifier" --status-file "$work/release.status" "${status_args[@]}" || \
     fail AP7224 'Release.gpg does not have one active required signature'
 
 [[ $(grep -c '^Acquire-By-Hash: yes$' \

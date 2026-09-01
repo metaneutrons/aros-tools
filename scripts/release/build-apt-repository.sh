@@ -13,7 +13,8 @@ usage() {
     printf '%s\n' \
         'usage: build-apt-repository.sh --candidate-dir DIR --output-dir DIR' \
         '       --version VERSION --source-date-epoch EPOCH' \
-        '       --private-key FILE --passphrase-file FILE --fingerprint HEX'
+        '       --private-key FILE --passphrase-file FILE --fingerprint HEX' \
+        '       [--signing-subkey HEX]'
 }
 
 candidate_dir=
@@ -23,6 +24,7 @@ source_date_epoch=
 private_key=
 passphrase_file=
 fingerprint=
+signing_subkey=
 
 while (($#)); do
     case "$1" in
@@ -33,6 +35,7 @@ while (($#)); do
         --private-key) private_key=${2:-}; shift 2 ;;
         --passphrase-file) passphrase_file=${2:-}; shift 2 ;;
         --fingerprint) fingerprint=${2:-}; shift 2 ;;
+        --signing-subkey) signing_subkey=${2:-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; fail AP7200 "unknown APT builder argument: $1" ;;
     esac
@@ -93,24 +96,42 @@ fingerprint=${fingerprint^^}
 signing_key_verifier="$script_root/verify-apt-signing-key.sh"
 [[ -x "$signing_key_verifier" && ! -L "$signing_key_verifier" ]] || \
     fail AP7203 'canonical APT signing-key verifier is missing or unsafe'
-"$signing_key_verifier" --homedir "$gnupg_home" --fingerprint "$fingerprint" || \
+signer_args=(--homedir "$gnupg_home" --fingerprint "$fingerprint")
+[[ -n "$signing_subkey" ]] && signer_args+=(--signing-subkey "$signing_subkey")
+"$signing_key_verifier" "${signer_args[@]}" || \
     fail AP7203 'imported APT signing key is not the one active required key'
+
+# Ohne das abschliessende Ausrufezeichen waehlt gpg bei mehreren Signing-Subkeys
+# selbst einen aus, und der Export liefert alle Subkeys statt des einen, der zu
+# dieser Archiv-Domain gehoert. Beides muss gepinnt sein.
+if [[ -n "$signing_subkey" ]]; then
+    [[ "$signing_subkey" =~ ^[0-9A-Fa-f]{40}$ ]] || \
+        fail AP7200 'signing-subkey must be a full 40-hex fingerprint'
+    signing_subkey=${signing_subkey^^}
+    local_user="${signing_subkey}!"
+    export_selector="${signing_subkey}!"
+else
+    local_user="$fingerprint"
+    export_selector="$fingerprint"
+fi
 gpg --no-options --batch --homedir "$gnupg_home" --armor --no-emit-version \
-    --no-comments --export "$fingerprint" \
+    --no-comments --export "$export_selector" \
     > "$stage/aros-tools-archive-keyring.asc"
 gpg --batch --homedir "$gnupg_home" --yes --pinentry-mode loopback \
     --passphrase-file "$passphrase_file" --faked-system-time "${source_date_epoch}!" \
-    --local-user "$fingerprint" --armor --detach-sign \
+    --local-user "$local_user" --armor --detach-sign \
     --output "$stage/dists/stable/Release.gpg" "$stage/dists/stable/Release"
 gpg --batch --homedir "$gnupg_home" --yes --pinentry-mode loopback \
     --passphrase-file "$passphrase_file" --faked-system-time "${source_date_epoch}!" \
-    --local-user "$fingerprint" --armor --clearsign \
+    --local-user "$local_user" --armor --clearsign \
     --output "$stage/dists/stable/InRelease" "$stage/dists/stable/Release"
 inventory="$script_root/verify-apt-publication-inventory.sh"
 [[ -x "$inventory" && ! -L "$inventory" ]] || \
     fail AP7203 'APT publication inventory verifier is missing or unsafe'
-"$inventory" --directory "$stage" --mode full --version "$version" \
-    --fingerprint "$fingerprint" >/dev/null
+inventory_args=(--directory "$stage" --mode full --version "$version"
+    --fingerprint "$fingerprint")
+[[ -n "$signing_subkey" ]] && inventory_args+=(--signing-subkey "$signing_subkey")
+"$inventory" "${inventory_args[@]}" >/dev/null
 
 mv "$stage" "$output_dir"
 trap - EXIT HUP INT TERM
