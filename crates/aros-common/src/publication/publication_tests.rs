@@ -1017,7 +1017,21 @@ fn prepared_tree_foreign_staging_binding_never_triggers_compensating_exchange() 
     let raced_destination = destination.clone();
     let raced_staging = staging.clone();
     let writer = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let installed_tree_is_visible = std::fs::read(raced_destination.join("value"))
+                .is_ok_and(|contents| contents == b"intended");
+            let previous_tree_is_staged = std::fs::read(raced_staging.join("value"))
+                .is_ok_and(|contents| contents == b"before");
+            if installed_tree_is_visible && previous_tree_is_staged {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "atomic exchange never exposed both exchanged trees"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         std::fs::rename(&raced_staging, &saved).unwrap();
         std::fs::create_dir(&raced_staging).unwrap();
         std::fs::write(raced_staging.join("value"), b"foreign").unwrap();

@@ -4,9 +4,11 @@
 //! the separate local identity of concrete boards and the hardware-facing
 //! operations behind the `aros board` frontend.
 
+#[cfg(target_os = "macos")]
+use aros_common::run_output_with_input as execute_with_input;
 use aros_common::{
-    bounded_output_detail, run_output_with_input as execute_with_input,
-    run_output_with_limit as execute_with_limit, DiagnosticContext, LogLevel, ProcessOutput,
+    bounded_output_detail, run_output_with_limit as execute_with_limit, DiagnosticContext,
+    LogLevel, ProcessOutput,
 };
 use miette::Result;
 use std::net::Ipv4Addr;
@@ -120,6 +122,7 @@ pub(crate) fn run_output(command: &mut Command, description: &str) -> Result<Out
     exact_process_output(&observed, description)
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn run_output_with_input(
     command: &mut Command,
     input: &[u8],
