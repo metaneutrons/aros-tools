@@ -10,12 +10,20 @@ pub(super) fn write_new_file_mode(
     contents: &[u8],
     mode: u16,
 ) -> std::io::Result<FileIdentity> {
+    // `rustix::fs::RawMode` is `u16` on Darwin and `u32` on Linux. The
+    // conversion is intentionally target-dependent even though Clippy sees an
+    // identity conversion on the current host.
+    #[allow(
+        clippy::useless_conversion,
+        reason = "rustix RawMode width differs between supported Unix targets"
+    )]
+    let raw_mode = mode.into();
     let parent = open_parent(path, true)?;
     let fd = rfs::openat(
         &parent.fd,
         Path::new(&parent.leaf),
         OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(mode),
+        Mode::from_raw_mode(raw_mode),
     )?;
     let identity = identity_from_stat(&rfs::fstat(&fd)?);
     let mut file = std::fs::File::from(fd);

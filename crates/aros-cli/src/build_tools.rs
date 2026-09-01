@@ -327,7 +327,7 @@ mod tests {
         fs::write(
             path,
             format!(
-                "#!/bin/sh\nset -eu\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  printf '%s\\n' '{name} {version}'\n  exit 0\nfi\n{extra}\n"
+                "#!/bin/sh\nset -eu\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  {extra}\n  printf '%s\\n' '{name} {version}'\n  exit 0\nfi\nexit 64\n"
             ),
         )
         .expect("version fixture");
@@ -368,7 +368,7 @@ mod tests {
                 temp.path().join(tool).as_path(),
                 tool,
                 env!("CARGO_PKG_VERSION"),
-                "exit 0",
+                "",
             );
         }
 
@@ -386,7 +386,7 @@ mod tests {
             } else {
                 env!("CARGO_PKG_VERSION")
             };
-            write_version_tool(temp.path().join(tool).as_path(), tool, version, "exit 0");
+            write_version_tool(temp.path().join(tool).as_path(), tool, version, "");
         }
 
         let result = check_directory(temp.path().to_path_buf());

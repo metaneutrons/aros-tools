@@ -30,7 +30,7 @@ jobs:
           - language: actions
             build_mode: none
           - language: rust
-            build_mode: manual
+            build_mode: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,15 +40,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build_mode }}
-      - name: Build Rust workspace under CodeQL tracing
-        if: matrix.language == 'rust'
-        shell: bash
-        run: |
-          set -euo pipefail
-          toolchain=$(scripts/release/read-rust-toolchain.sh)
-          rustup toolchain install "$toolchain" --profile minimal
-          rustup show active-toolchain
-          cargo build --workspace --all-features --locked
       - name: Analyze
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:

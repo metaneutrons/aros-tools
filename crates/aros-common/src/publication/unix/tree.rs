@@ -629,14 +629,29 @@ fn prepared_snapshot(stat: &rfs::Stat) -> std::io::Result<PreparedNodeSnapshot> 
             "prepared tree contains an unsupported special filesystem object",
         ));
     };
+    // Darwin exposes signed nanosecond fields while Linux exposes unsigned
+    // fields through rustix. Keep the persisted snapshot signed and reject a
+    // theoretical Linux value that cannot be represented.
+    #[allow(
+        clippy::useless_conversion,
+        reason = "rustix timestamp signedness differs between supported Unix targets"
+    )]
+    let mtime_nsec = i64::try_from(stat.st_mtime_nsec)
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "mtime nanoseconds exceed i64"))?;
+    #[allow(
+        clippy::useless_conversion,
+        reason = "rustix timestamp signedness differs between supported Unix targets"
+    )]
+    let ctime_nsec = i64::try_from(stat.st_ctime_nsec)
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "ctime nanoseconds exceed i64"))?;
     Ok(PreparedNodeSnapshot {
         identity: identity_from_stat(stat),
         kind,
         size: stat.st_size,
         mtime: stat.st_mtime,
-        mtime_nsec: stat.st_mtime_nsec,
+        mtime_nsec,
         ctime: stat.st_ctime,
-        ctime_nsec: stat.st_ctime_nsec,
+        ctime_nsec,
     })
 }
 
