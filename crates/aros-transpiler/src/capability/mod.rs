@@ -25,7 +25,6 @@ pub mod nouveau;
 use crate::make_vars::{collect_vars, strip_make_comment};
 use crate::parser::{join_continuations, macro_arg, macro_argument_names, Invocation};
 use aros_common::read_source;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Verifies an input whose exact bytes are inseparable from a hard-coded
@@ -45,7 +44,7 @@ pub(crate) fn require_file_fingerprint(
     let path = root.join(relative);
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("{capability}: cannot read {}: {error}", path.display()))?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = aros_common::sha256_bytes(&bytes).to_string();
     if actual == expected {
         return Ok(());
     }
@@ -60,7 +59,7 @@ pub(crate) fn require_text_fingerprint(
     expected: &str,
     capability: &str,
 ) -> std::result::Result<(), String> {
-    let actual = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let actual = aros_common::sha256_bytes(text.as_bytes()).to_string();
     if actual == expected {
         return Ok(());
     }

@@ -563,7 +563,7 @@ fn inventory_sha256(entries: &[ArosToolchainManifestEntry]) -> Result<String> {
         tree.update(serde_json::to_vec(&canonical_entry(entry)).into_diagnostic()?);
         tree.update(b"\n");
     }
-    Ok(format!("{:x}", tree.finalize()))
+    Ok(aros_common::finish_sha256(tree).to_string())
 }
 
 fn collect_tree_entries(

@@ -405,7 +405,7 @@ fn hash_parts(parts: &[&str]) -> String {
         digest.update((part.len() as u64).to_be_bytes());
         digest.update(part.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    aros_common::finish_sha256(digest).to_string()
 }
 
 fn safe_absolute_mount_path(path: &Path) -> bool {
