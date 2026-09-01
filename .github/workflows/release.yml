@@ -1181,7 +1181,13 @@ jobs:
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
           - name: macos-x86_64
-            runner: macos-15-intel
+            # Homebrew classifies Intel Sequoia as Tier 3 and currently builds
+            # openssl@3 from source there; the hosted image's pre-existing
+            # OpenSSL state makes that unrelated post-install fail after this
+            # formula is already installed. Sonoma is the supported Intel
+            # package-manager baseline. The archive itself is still produced
+            # and smoke-tested independently on macos-15-intel above.
+            runner: macos-14
           - name: macos-aarch64
             runner: macos-15
     steps:
