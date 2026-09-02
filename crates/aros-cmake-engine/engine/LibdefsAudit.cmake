@@ -36,7 +36,7 @@ function(aros_add_libdefs_audit_target)
         COMMAND "${CMAKE_COMMAND}"
             -DAROS_LIBDEFS_AUDIT_MANIFEST=${_manifest}
             -DAROS_LIBDEFS_AUDIT_REPORT=${_report}
-            -P "${CMAKE_SOURCE_DIR}/cmake/RunLibdefsAudit.cmake"
+            -P "${AROS_CMAKE_ENGINE_DIR}/RunLibdefsAudit.cmake"
         DEPENDS ${_references}
         COMMENT "Comparing Rust and upstream genmodule FUNCTIONS_COUNT values"
         VERBATIM)

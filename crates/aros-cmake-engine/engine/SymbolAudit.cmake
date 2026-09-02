@@ -14,14 +14,14 @@
 #   ninja symbol-audit-baseline   re-pin deliberately after an intended change
 
 find_program(AROS_AUDIT_PYTHON3 NAMES python3)
-set(AROS_SYMBOL_AUDIT_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/symbols/audit-symbols.py")
+set(AROS_SYMBOL_AUDIT_SCRIPT "${AROS_SOURCE_DIR}/scripts/symbols/audit-symbols.py")
 # Written by aros-genmodule at configure time. A relocatable module leaves its
 # library bases undefined on purpose, so without this list the audit conflates
 # "the loader will fill this in" with "nothing provides this": 1882 of 9268
 # references were library bases.
 set(AROS_SYMBOL_AUDIT_LIBBASES "${CMAKE_BINARY_DIR}/symbol-audit/libbases.txt")
 set(AROS_SYMBOL_AUDIT_BASELINE
-    "${CMAKE_SOURCE_DIR}/scripts/symbols/baseline-${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}.json")
+    "${AROS_SOURCE_DIR}/scripts/symbols/baseline-${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}.json")
 
 # llvm-nm has to be one that understands the target objects. Searched rather
 # than derived: deriving it from CMAKE_C_COMPILER's directory produced

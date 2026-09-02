@@ -59,7 +59,7 @@ set(AROS_ARCH_PACKAGE_DIRS
     "${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}")
 list(REMOVE_DUPLICATES AROS_ARCH_PACKAGE_DIRS)
 
-include("${CMAKE_SOURCE_DIR}/cmake/BootstrapSDK.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/BootstrapSDK.cmake")
 
 # Target output directories.  These mirror config/make.cfg.in:97-124 and the
 # effective defaults written by genmodule; keeping the complete module layout
@@ -414,8 +414,8 @@ include_directories(
     "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc"
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc"
     "${CMAKE_BINARY_DIR}/SDK/include"
-    "${CMAKE_SOURCE_DIR}/compiler/include"
-    "${CMAKE_SOURCE_DIR}/arch/all-native/include"
+    "${AROS_SOURCE_DIR}/compiler/include"
+    "${AROS_SOURCE_DIR}/arch/all-native/include"
 )
 
 # Closed local-source runners for the audited `%build_with_configure`
@@ -533,7 +533,7 @@ function(aros_arch_path_matches out_var path)
     # Works on the raw string: staging sources arrive relative to the source
     # tree, target directories absolute, and file(RELATIVE_PATH) rejects a
     # relative input.
-    string(REPLACE "${CMAKE_SOURCE_DIR}/" "" _rel "${path}")
+    string(REPLACE "${AROS_SOURCE_DIR}/" "" _rel "${path}")
     if(NOT _rel MATCHES "^arch/([^/]+)")
         set(${out_var} TRUE PARENT_SCOPE)
         return()
@@ -578,7 +578,7 @@ function(aros_copy_includes)
     if(IS_ABSOLUTE "${CI_SOURCE}")
         set(SRC_ABS "${CI_SOURCE}")
     else()
-        set(SRC_ABS "${CMAKE_SOURCE_DIR}/${CI_SOURCE}")
+        set(SRC_ABS "${AROS_SOURCE_DIR}/${CI_SOURCE}")
     endif()
     if(NOT IS_DIRECTORY "${SRC_ABS}")
         # A cache-empty fetched port cannot be globbed at configure time.  An
@@ -764,7 +764,7 @@ function(aros_copy_dir_recursive)
     if(IS_ABSOLUTE "${CDR_SOURCE}")
         set(_source "${CDR_SOURCE}")
     else()
-        set(_source "${CMAKE_SOURCE_DIR}/${CDR_SOURCE}")
+        set(_source "${AROS_SOURCE_DIR}/${CDR_SOURCE}")
     endif()
     cmake_path(NORMAL_PATH _source)
 
@@ -860,7 +860,7 @@ function(aros_copy_dir_recursive)
                 "-DAROS_COPY_DIR_SOURCE=${_source}"
                 "-DAROS_COPY_DIR_DESTINATION=${_destination}"
                 "-DAROS_COPY_DIR_STAMP=${_stamp}"
-                -P "${CMAKE_SOURCE_DIR}/cmake/CopyDirRecursive.cmake"
+                -P "${AROS_CMAKE_ENGINE_DIR}/CopyDirRecursive.cmake"
             DEPENDS ${_dependencies}
             COMMENT "Staging recursive directory ${CDR_NAME}"
             VERBATIM)
@@ -1158,7 +1158,7 @@ function(aros_stage_header)
     if(NOT SH_SOURCE OR NOT SH_DEST)
         return()
     endif()
-    set(src "${CMAKE_SOURCE_DIR}/${SH_SOURCE}")
+    set(src "${AROS_SOURCE_DIR}/${SH_SOURCE}")
     if(NOT EXISTS "${src}")
         return()
     endif()
@@ -1385,7 +1385,7 @@ function(aros_gate_arch target directory)
     if(NOT directory OR NOT TARGET ${target})
         return()
     endif()
-    file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${directory}")
+    file(RELATIVE_PATH _rel "${AROS_SOURCE_DIR}" "${directory}")
     if(NOT _rel MATCHES "^arch/([^/]+)")
         return()
     endif()
@@ -1453,7 +1453,7 @@ function(aros_apply_includes target_name)
     set(FALLBACK_DIRS "")
 
     if(INC_MODULE_DIR AND IS_DIRECTORY "${INC_MODULE_DIR}")
-        file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${INC_MODULE_DIR}")
+        file(RELATIVE_PATH _rel "${AROS_SOURCE_DIR}" "${INC_MODULE_DIR}")
         if(_rel AND NOT _rel MATCHES "^\\.\\.")
             set(_gen "${CMAKE_BINARY_DIR}/gen/${_rel}")
             if(IS_DIRECTORY "${_gen}")
@@ -2366,9 +2366,9 @@ function(aros_fetch_archive)
             endif()
             set(_patch "${_raw_patch}")
             cmake_path(ABSOLUTE_PATH _patch
-                BASE_DIRECTORY "${CMAKE_SOURCE_DIR}" NORMALIZE
+                BASE_DIRECTORY "${AROS_SOURCE_DIR}" NORMALIZE
                 OUTPUT_VARIABLE _patch)
-            cmake_path(ABSOLUTE_PATH CMAKE_SOURCE_DIR NORMALIZE
+            cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE
                 OUTPUT_VARIABLE _source_root)
             cmake_path(IS_PREFIX _source_root "${_patch}" NORMALIZE
                 _patch_owned)
@@ -2906,7 +2906,7 @@ function(aros_generate_defines_header)
     set(_dependencies "")
     foreach(_dependency IN LISTS DH_DEPENDS)
         cmake_path(ABSOLUTE_PATH _dependency
-            BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            BASE_DIRECTORY "${AROS_SOURCE_DIR}"
             NORMALIZE OUTPUT_VARIABLE _dependency_abs)
         if(NOT EXISTS "${_dependency_abs}" OR IS_DIRECTORY "${_dependency_abs}")
             message(FATAL_ERROR
@@ -2970,7 +2970,7 @@ function(aros_generate_bison_output)
     endif()
     cmake_path(ABSOLUTE_PATH BO_INPUT NORMALIZE OUTPUT_VARIABLE _input)
     cmake_path(ABSOLUTE_PATH BO_OUTPUT NORMALIZE OUTPUT_VARIABLE _output)
-    cmake_path(ABSOLUTE_PATH CMAKE_SOURCE_DIR NORMALIZE OUTPUT_VARIABLE _source_root)
+    cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE OUTPUT_VARIABLE _source_root)
     cmake_path(ABSOLUTE_PATH CMAKE_BINARY_DIR NORMALIZE OUTPUT_VARIABLE _build_root)
     cmake_path(IS_PREFIX _source_root "${_input}" NORMALIZE _input_allowed)
     cmake_path(IS_PREFIX _build_root "${_output}" NORMALIZE _output_allowed)
@@ -3069,7 +3069,11 @@ function(aros_transform_header)
     endif()
 
     set(_input_allowed FALSE)
-    foreach(_root IN ITEMS "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}")
+    # Three roots, not two: with the engine placed in a build directory the
+    # project root is the engine, so the AROS tree has to be named separately or
+    # every input read from it would be rejected as an escape.
+    foreach(_root IN ITEMS
+            "${AROS_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}")
         cmake_path(ABSOLUTE_PATH _root NORMALIZE OUTPUT_VARIABLE _allowed_root)
         cmake_path(IS_PREFIX _allowed_root "${_input}" NORMALIZE _inside)
         if(_inside)
@@ -3093,9 +3097,9 @@ function(aros_transform_header)
 
     set(_dep_files "")
     if(TH_SUBSTITUTIONS)
-        list(APPEND _dep_files "${CMAKE_SOURCE_DIR}/cmake/SubstituteHeader.cmake")
+        list(APPEND _dep_files "${AROS_CMAKE_ENGINE_DIR}/SubstituteHeader.cmake")
     elseif(NOT TH_COPY_ONLY)
-        list(APPEND _dep_files "${CMAKE_SOURCE_DIR}/cmake/TransformHeader.cmake")
+        list(APPEND _dep_files "${AROS_CMAKE_ENGINE_DIR}/TransformHeader.cmake")
     endif()
     set(_input_fetch_owner "")
     foreach(_dependency IN LISTS TH_DEPENDS)
@@ -3158,7 +3162,7 @@ function(aros_transform_header)
                 "-DINPUT=${_input}"
                 "-DOUTPUT=${_output}"
                 "-DSUBSTITUTIONS=${TH_SUBSTITUTIONS}"
-                -P "${CMAKE_SOURCE_DIR}/cmake/SubstituteHeader.cmake"
+                -P "${AROS_CMAKE_ENGINE_DIR}/SubstituteHeader.cmake"
             DEPENDS ${_dep_files}
             COMMENT "Substituting generated header ${_output}"
             VERBATIM)
@@ -3171,7 +3175,7 @@ function(aros_transform_header)
                 "-DOUTPUT=${_output}"
                 "-DMATCH_TEXT=${TH_MATCH}"
                 "-DREPLACEMENT=${TH_REPLACEMENT}"
-                -P "${CMAKE_SOURCE_DIR}/cmake/TransformHeader.cmake"
+                -P "${AROS_CMAKE_ENGINE_DIR}/TransformHeader.cmake"
             DEPENDS ${_dep_files}
             COMMENT "Generating transformed header ${_output}"
             VERBATIM)
@@ -3302,7 +3306,7 @@ function(aros_resolve_arch_sources out_sources out_dropped module_dir)
                 continue()
             endif()
 
-            set(abs_dir "${CMAKE_SOURCE_DIR}/${dir}")
+            set(abs_dir "${AROS_SOURCE_DIR}/${dir}")
             if(NOT IS_DIRECTORY "${abs_dir}")
                 continue()
             endif()
@@ -3558,7 +3562,7 @@ function(_aros_generate_module_support out_prefix)
         message(FATAL_ERROR "${GM_MMAKE_ID}: missing genmodule config ${_conf}")
     endif()
 
-    file(RELATIVE_PATH _module_rel "${CMAKE_SOURCE_DIR}" "${_module_dir}")
+    file(RELATIVE_PATH _module_rel "${AROS_SOURCE_DIR}" "${_module_dir}")
     if(_module_rel MATCHES "^\\.\\." OR IS_ABSOLUTE "${_module_rel}")
         string(SHA256 _module_rel "${_module_dir}")
     endif()
@@ -3656,7 +3660,7 @@ function(_aros_generate_module_support out_prefix)
     aros_arch_path_matches(_audit_arch_ok "${_module_dir}")
     if(_audit_arch_ok)
         get_filename_component(_conf_dir "${_conf}" DIRECTORY)
-        file(RELATIVE_PATH _conf_rel "${CMAKE_SOURCE_DIR}" "${_conf_dir}")
+        file(RELATIVE_PATH _conf_rel "${AROS_SOURCE_DIR}" "${_conf_dir}")
         set(_rust_candidates
             "${AROS_GEN_DIR}/${_module_rel}/${GM_TARGET}_libdefs.h"
             "${AROS_GEN_DIR}/${_conf_rel}/${GM_TARGET}_libdefs.h")
@@ -4201,7 +4205,7 @@ function(aros_add_library)
         # nostartup=yes adds compiler/libinit/libentry.o in make.tmpl:2684-2688;
         # compile its source into this otherwise generator-only module.
         add_executable("${ARG_MMAKE_ID}"
-            "${CMAKE_SOURCE_DIR}/compiler/libinit/libentry.c"
+            "${AROS_SOURCE_DIR}/compiler/libinit/libentry.c"
             "${_gm_START}"
             "${_gm_END}")
         target_compile_definitions("${ARG_MMAKE_ID}" PRIVATE
@@ -5582,7 +5586,7 @@ set(AROS_BOOT_ISO "${CMAKE_BINARY_DIR}/aros-${AROS_TARGET_CPU}-${AROS_TARGET_PLA
 if(MKISOFS_BIN)
     add_custom_target(boot-iso
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/SYS/S"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
         COMMAND ${MKISOFS_BIN} -o "${AROS_BOOT_ISO}"
                 -V "AROS Live CD"
                 -p "The AROS Dev Team"
@@ -5594,7 +5598,7 @@ if(MKISOFS_BIN)
 elseif(HDIUTIL_BIN)
     add_custom_target(boot-iso
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/SYS/S"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
         COMMAND ${HDIUTIL_BIN} makehybrid -iso -joliet -o "${AROS_BOOT_ISO}" "${CMAKE_BINARY_DIR}/SYS"
         DEPENDS workbench-c
         COMMENT "💿 Packaging AROS-NX Bootable ISO Disk Image via hdiutil -> ${AROS_BOOT_ISO}"
@@ -5819,7 +5823,7 @@ function(aros_program_output_dir out_var directory requested_directory)
         return()
     endif()
 
-    file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${directory}")
+    file(RELATIVE_PATH _rel "${AROS_SOURCE_DIR}" "${directory}")
     if(NOT _rel OR _rel MATCHES "^\\.\\.")
         set(${out_var} "${AROS_C_DIR}" PARENT_SCOPE)
     else()

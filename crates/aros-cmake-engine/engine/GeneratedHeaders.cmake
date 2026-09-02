@@ -44,14 +44,14 @@ else()
 endif()
 
 aros_ilbm_header(
-    ILBM "${CMAKE_SOURCE_DIR}/rom/dosboot/nomedia.ilbm"
+    ILBM "${AROS_SOURCE_DIR}/rom/dosboot/nomedia.ilbm"
     OUTPUT "${_gen}/rom/dosboot/dosboot/nomedia_image.h"
     FLAGS ${_ilbm_flags})
 _aros_needs_header(kernel-dosboot "${_gen}/rom/dosboot/dosboot/nomedia_image.h")
 
 # cgxbootpic asks for -I$(GENDIR)/$(CURDIR), without the extra segment.
 aros_ilbm_header(
-    ILBM "${CMAKE_SOURCE_DIR}/rom/cgxbootpic/bootpic.ilbm"
+    ILBM "${AROS_SOURCE_DIR}/rom/cgxbootpic/bootpic.ilbm"
     OUTPUT "${_gen}/rom/cgxbootpic/bootpic_image.h")
 _aros_needs_header(kernel-cgxbootpic "${_gen}/rom/cgxbootpic/bootpic_image.h")
 
@@ -76,7 +76,7 @@ aros_generate_defines_header(
     OWNER linklibs-softfloat-genfiles
     OUTPUT "${_softfloat_platform_h}"
     DEFINES "LITTLEENDIAN ${_softfloat_littleendian}"
-    DEPENDS "${CMAKE_SOURCE_DIR}/compiler/softfloat/mmakefile.src")
+    DEPENDS "${AROS_SOURCE_DIR}/compiler/softfloat/mmakefile.src")
 _aros_needs_header(linklibs-softfloat "${_softfloat_platform_h}")
 
 # -----------------------------------------------------------------------------
@@ -95,7 +95,7 @@ _aros_needs_header(linklibs-softfloat "${_softfloat_platform_h}")
 # trade-off is the same one BootstrapSDK.cmake makes: editing a muimaster class
 # header needs a re-configure.
 set(_mui_header "${CMAKE_BINARY_DIR}/GENINCDIR/libraries/mui.h")
-set(_mui_dir "${CMAKE_SOURCE_DIR}/workbench/libs/muimaster")
+set(_mui_dir "${AROS_SOURCE_DIR}/workbench/libs/muimaster")
 if(EXISTS "${_mui_dir}/buildincludes.c" AND NOT EXISTS "${_mui_header}")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/GENINCDIR/libraries")
     set(_mui_tool "${AROS_HOST_TOOL_DIR}/buildincludes")
@@ -162,7 +162,7 @@ aros_copy_includes(
 # custom command would cost far more than one copy. MetaMake stages the same
 # files through compiler-boost-subset-includes-copy, which is reachable from
 # sdk-includes-1 and therefore covers the producer's route.
-set(_boost_subset "${CMAKE_SOURCE_DIR}/compiler/boost/include/boost")
+set(_boost_subset "${AROS_SOURCE_DIR}/compiler/boost/include/boost")
 if(IS_DIRECTORY "${_boost_subset}")
     foreach(_root "${AROS_SDK_INCLUDE_DIR}" "${AROS_GENINC_DIR}")
         # Unconditional: file(COPY) is copy-if-different, and guarding on the
@@ -195,7 +195,7 @@ endif()
 #
 # arch/all-native/acpica/include/acpica carries them; see the README there.
 # Copied at configure time for the same reason the Boost subset above is.
-set(_acpica_subset "${CMAKE_SOURCE_DIR}/arch/all-native/acpica/include/acpica")
+set(_acpica_subset "${AROS_SOURCE_DIR}/arch/all-native/acpica/include/acpica")
 if(IS_DIRECTORY "${_acpica_subset}")
     foreach(_root "${AROS_SDK_INCLUDE_DIR}" "${AROS_GENINC_DIR}")
         # Unconditional: file(COPY) is copy-if-different, and guarding on the

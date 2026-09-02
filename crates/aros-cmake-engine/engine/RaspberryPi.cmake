@@ -14,7 +14,7 @@
 # itself is not part of this target: provisioning it is a separate, pinned
 # operation and a normal AROS build must never download it implicitly.
 
-include("${CMAKE_SOURCE_DIR}/cmake/BoardCore.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/BoardCore.cmake")
 
 if(NOT AROS_TARGET_PLATFORM STREQUAL "raspi")
     return()
@@ -33,9 +33,9 @@ endif()
 if(AROS_RPI_MODEL STREQUAL "rpi3" AND AROS_TARGET_CPU STREQUAL "arm")
     set(_rpi_cpu arm)
     set(_rpi_cpu_label ARM32)
-    set(_rpi_boot_source_dir "${CMAKE_SOURCE_DIR}/arch/arm-raspi/boot")
-    set(_rpi_core_linker_script "${CMAKE_SOURCE_DIR}/arch/arm-native/kernel/ldscript.lds")
-    set(_rpi_boot_linker_script "${CMAKE_SOURCE_DIR}/arch/arm-raspi/boot/ldscript-le.lds")
+    set(_rpi_boot_source_dir "${AROS_SOURCE_DIR}/arch/arm-raspi/boot")
+    set(_rpi_core_linker_script "${AROS_SOURCE_DIR}/arch/arm-native/kernel/ldscript.lds")
+    set(_rpi_boot_linker_script "${AROS_SOURCE_DIR}/arch/arm-raspi/boot/ldscript-le.lds")
     set(_rpi_boot_image_name "aros-arm-raspi.img")
     set(_rpi_boot_elf_name "aros-arm-raspi.debug.elf")
     set(_rpi_boot_map_name "aros-arm-raspi.map")
@@ -59,9 +59,9 @@ elseif((AROS_RPI_MODEL STREQUAL "rpi4" OR AROS_RPI_MODEL STREQUAL "rpi5") AND
        AROS_TARGET_CPU STREQUAL "aarch64")
     set(_rpi_cpu aarch64)
     set(_rpi_cpu_label AArch64)
-    set(_rpi_boot_source_dir "${CMAKE_SOURCE_DIR}/arch/aarch64-raspi/boot")
-    set(_rpi_core_linker_script "${CMAKE_SOURCE_DIR}/arch/aarch64-native/kernel/ldscript.lds")
-    set(_rpi_boot_linker_script "${CMAKE_SOURCE_DIR}/arch/aarch64-raspi/boot/ldscript.lds")
+    set(_rpi_boot_source_dir "${AROS_SOURCE_DIR}/arch/aarch64-raspi/boot")
+    set(_rpi_core_linker_script "${AROS_SOURCE_DIR}/arch/aarch64-native/kernel/ldscript.lds")
+    set(_rpi_boot_linker_script "${AROS_SOURCE_DIR}/arch/aarch64-raspi/boot/ldscript.lds")
     set(_rpi_boot_image_name "aros-aarch64-raspi.img")
     set(_rpi_boot_elf_name "aros-aarch64-raspi.debug.elf")
     set(_rpi_boot_map_name "aros-aarch64-raspi.map")
@@ -113,7 +113,7 @@ set(_rpi_boot_img "${_rpi_bootstrap_dir}/${_rpi_boot_image_name}")
 set(_rpi_bsp_rom "${CMAKE_BINARY_DIR}/${_rpi_bsp_name}")
 set(_rpi_config "${_rpi_bootstrap_dir}/config.txt")
 set(_rpi_bundle_stamp "${_rpi_bundle_dir}/.rpi-artifacts.stamp")
-set(_rpi_verify_script "${CMAKE_SOURCE_DIR}/cmake/scripts/VerifyRpiBundle.cmake")
+set(_rpi_verify_script "${AROS_CMAKE_ENGINE_DIR}/scripts/VerifyRpiBundle.cmake")
 
 # A normal host objcopy can normally create an ELF binary-input wrapper, but
 # llvm-objcopy is deliberately preferred: it is part of the pinned LLVM
@@ -280,7 +280,7 @@ endif()
 add_library(rpi-bootstrap-objects OBJECT ${_rpi_bootstrap_sources})
 target_include_directories(rpi-bootstrap-objects PRIVATE
     "${_rpi_boot_source_dir}/include"
-    "${CMAKE_SOURCE_DIR}/rom/openfirmware")
+    "${AROS_SOURCE_DIR}/rom/openfirmware")
 target_compile_definitions(rpi-bootstrap-objects PRIVATE
     "TARGET_SECTION_COMMENT=\"\""
     USE_UBOOT)

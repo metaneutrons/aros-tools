@@ -39,7 +39,7 @@ pub struct FlexCatSourceDecl {
     pub source: String,
     /// Generated C header name, relative to `declaring_dir`.
     pub header: String,
-    /// FlexCat catalog description, as `${CMAKE_SOURCE_DIR}/<relative>`.
+    /// FlexCat catalog description, as `${AROS_SOURCE_DIR}/<relative>`.
     pub description: String,
     /// Header source-description template, in the same form.
     pub header_template: String,
@@ -545,7 +545,7 @@ fn cmake_source_path(path: &Path, root: &Path) -> Option<String> {
     if relative.is_empty() {
         return None;
     }
-    Some(format!("${{CMAKE_SOURCE_DIR}}/{relative}"))
+    Some(format!("${{AROS_SOURCE_DIR}}/{relative}"))
 }
 
 #[cfg(test)]
@@ -613,11 +613,11 @@ mod tests {
         assert_eq!(header.header, "locale.h");
         assert_eq!(
             header.description,
-            "${CMAKE_SOURCE_DIR}/external/openurl/locale/OpenURL.pot"
+            "${AROS_SOURCE_DIR}/external/openurl/locale/OpenURL.pot"
         );
         assert_eq!(
             header.header_template,
-            "${CMAKE_SOURCE_DIR}/external/openurl/prefs/locale_h.sd"
+            "${AROS_SOURCE_DIR}/external/openurl/prefs/locale_h.sd"
         );
     }
 

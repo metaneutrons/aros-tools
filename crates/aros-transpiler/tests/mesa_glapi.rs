@@ -161,7 +161,7 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(
             generated.local_patch_files,
-            ["${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
+            ["${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
             "{cpu}"
         );
         assert_eq!(generated.consumers, ["mesa3d-linklib-glapi"], "{cpu}");
@@ -212,7 +212,7 @@ fn production_glapi_is_cold_fetch_exact_for_all_current_architectures() {
         assert!(target_at < binding_at, "{cpu}");
         assert!(cmake.contains(
             "    SOURCE_DIR \"${AROS_PORTS_DIR}/mesa/mesa-20.0.8\"\n\
-             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff\""
+             \x20   LOCAL_PATCH_FILES \"${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff\""
         ));
         assert!(!cmake.contains("SOURCE_SHA256"));
         assert!(!cmake.contains("LOCAL_PATCH_SHA256"));

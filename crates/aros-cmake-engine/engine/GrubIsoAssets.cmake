@@ -183,7 +183,7 @@ function(aros_stage_grub2_iso_assets)
     if(DEFINED AROS_GRUB_SOURCE_ROOT)
         set(_source_root_input "${AROS_GRUB_SOURCE_ROOT}")
     else()
-        set(_source_root_input "${CMAKE_SOURCE_DIR}")
+        set(_source_root_input "${AROS_SOURCE_DIR}")
     endif()
     _aros_grub_iso_assets_safe_value("GRUB2 ISO source root" "${_source_root_input}")
 

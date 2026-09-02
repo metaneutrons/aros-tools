@@ -94,12 +94,12 @@ fn production_nouveau_libdrm_is_exact_for_all_current_architectures() {
             [
                 "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
                 "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
-                "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
+                "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
             ],
             "{cpu}"
         );

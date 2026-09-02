@@ -4,7 +4,7 @@ if(NOT AROS_TARGET_PLATFORM STREQUAL "opensbi")
     return()
 endif()
 
-include("${CMAKE_SOURCE_DIR}/cmake/BoardCore.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/BoardCore.cmake")
 
 set(AROS_OPENSBI_MODEL "" CACHE STRING "Reviewed OpenSBI/UEFI board model")
 set_property(CACHE AROS_OPENSBI_MODEL PROPERTY STRINGS milk-v-titan)
@@ -41,9 +41,9 @@ set(_opensbi_command_line "${_opensbi_work_dir}/aros.cmd")
 set(_opensbi_startup "${_opensbi_work_dir}/startup.nsh")
 set(_opensbi_stamp "${_opensbi_bundle_dir}/.opensbi-uefi-artifacts.stamp")
 set(_opensbi_linker_script
-    "${CMAKE_SOURCE_DIR}/arch/riscv64-opensbi/kernel/ldscript.lds")
+    "${AROS_SOURCE_DIR}/arch/riscv64-opensbi/kernel/ldscript.lds")
 set(_opensbi_verify_script
-    "${CMAKE_SOURCE_DIR}/cmake/scripts/VerifyOpenSbiUefiBundle.cmake")
+    "${AROS_CMAKE_ENGINE_DIR}/scripts/VerifyOpenSbiUefiBundle.cmake")
 
 function(_aros_opensbi_unavailable target reason)
     add_custom_target(${target}

@@ -299,7 +299,7 @@ pub(crate) fn validate(
         || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
         || fetch.destination != "${AROS_PORTS_DIR}/mesa"
         || !fetch.base.is_empty()
-        || fetch.patch_origins != "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+        || fetch.patch_origins != "${AROS_SOURCE_DIR}/workbench/libs/mesa"
         || fetch.patches != "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
         || fetch.dir != "workbench/libs/mesa"
     {

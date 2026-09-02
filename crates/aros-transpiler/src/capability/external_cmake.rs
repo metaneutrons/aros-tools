@@ -249,7 +249,7 @@ pub(crate) fn parse(
         (
             "patches_origins",
             fetch.patch_origins.as_str(),
-            "${CMAKE_SOURCE_DIR}/compiler/cunit",
+            "${AROS_SOURCE_DIR}/compiler/cunit",
         ),
         ("base", fetch.base.as_str(), ""),
         ("declaring directory", fetch.dir.as_str(), "compiler/cunit"),
@@ -268,7 +268,7 @@ pub(crate) fn parse(
         install_prefix: install_prefix.clone(),
         fetch_target: CUNIT_FETCH.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff".to_owned()
+            "${AROS_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff".to_owned()
         ],
         provided_library: "cunit".to_owned(),
         provider_target: "linklibs-yes-cunit-external-cunit".to_owned(),
@@ -437,7 +437,7 @@ pub(crate) fn parse_aom(
         (
             "patches_origins",
             fetch.patch_origins.as_str(),
-            "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic",
+            "${AROS_SOURCE_DIR}/workbench/classes/datatypes/heic",
         ),
         ("base", fetch.base.as_str(), ""),
         (
@@ -461,7 +461,7 @@ pub(crate) fn parse_aom(
         install_prefix: install_prefix.clone(),
         fetch_target: AOM_FETCH.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"
+            "${AROS_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"
                 .to_owned(),
         ],
         provided_library: "aom".to_owned(),

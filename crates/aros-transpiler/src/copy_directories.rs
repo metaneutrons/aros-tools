@@ -19,7 +19,7 @@ use std::path::{Component, Path};
 /// accepting an arbitrary host path here would make the generated graph both
 /// non-reproducible and unsafe to configure.
 const COPY_DIRECTORY_CMAKE_ROOTS: &[&str] = &[
-    "${CMAKE_SOURCE_DIR}",
+    "${AROS_SOURCE_DIR}",
     "${CMAKE_BINARY_DIR}",
     "${AROS_BUILD_DIR}",
     "${AROS_PORTS_DIR}",
@@ -115,9 +115,9 @@ fn normalize_relative_copy_directory_path(raw: &str, relative_dir: &Path) -> Opt
         }
     }
     if components.is_empty() {
-        Some("${CMAKE_SOURCE_DIR}".to_owned())
+        Some("${AROS_SOURCE_DIR}".to_owned())
     } else {
-        Some(format!("${{CMAKE_SOURCE_DIR}}/{}", components.join("/")))
+        Some(format!("${{AROS_SOURCE_DIR}}/{}", components.join("/")))
     }
 }
 
@@ -145,7 +145,7 @@ fn render_copy_directory_path(
 }
 
 fn copy_directory_source_is_owned_path(path: &str) -> bool {
-    ["${CMAKE_SOURCE_DIR}", "${AROS_PORTS_DIR}"]
+    ["${AROS_SOURCE_DIR}", "${AROS_PORTS_DIR}"]
         .iter()
         .any(|root| {
             path == *root
@@ -159,7 +159,7 @@ fn copy_directory_source_is_owned_path(path: &str) -> bool {
 /// out tree.  Port paths deliberately cannot be tested here: their owner is
 /// fetched at build time and may be absent during a clean configure.
 fn in_tree_copy_directory_source_is_safe(path: &str, source_root: &Path) -> bool {
-    let Some(tail) = path.strip_prefix("${CMAKE_SOURCE_DIR}") else {
+    let Some(tail) = path.strip_prefix("${AROS_SOURCE_DIR}") else {
         return true;
     };
     if !tail.is_empty() && !tail.starts_with('/') {

@@ -41,7 +41,7 @@ find_program(AROS_KICKSTART_NM
     HINTS "${AROS_CROSS_TOOLCHAIN_ROOT}/bin" "${_aros_kickstart_cc_dir}"
           "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin")
 set(AROS_KICKSTART_LOCALISE_SCRIPT
-    "${CMAKE_SOURCE_DIR}/scripts/kickstart/localise-symbols.py")
+    "${AROS_SOURCE_DIR}/scripts/kickstart/localise-symbols.py")
 
 # The kobj's own default library set, by name (config/make.tmpl:2743).
 set(AROS_KICKSTART_AUTOLIBS

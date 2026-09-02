@@ -273,7 +273,7 @@ fn production_mesautil_is_cold_fetch_exact_for_all_current_architectures() {
         );
         assert_eq!(
             generated.local_patch_files,
-            ["${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
+            ["${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff"],
             "{cpu}"
         );
         assert_eq!(

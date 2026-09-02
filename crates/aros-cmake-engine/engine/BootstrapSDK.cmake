@@ -10,26 +10,26 @@ include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 # The token differs by toolchain: GNU as emits .asciz, LLVM emits .ascii
 # (see compiler/include/mmakefile.src:160).
 function(aros_generate_asm_header sdk_inc geninc)
-    set(_src "${CMAKE_SOURCE_DIR}/compiler/include/asm.c")
+    set(_src "${AROS_SOURCE_DIR}/compiler/include/asm.c")
     if(NOT EXISTS "${_src}")
         return()
     endif()
 
     set(_asm "${CMAKE_BINARY_DIR}/asm.s")
     set(_incs
-        "-I${CMAKE_SOURCE_DIR}/compiler/include"
-        "-I${CMAKE_SOURCE_DIR}/arch/all-native/include"
+        "-I${AROS_SOURCE_DIR}/compiler/include"
+        "-I${AROS_SOURCE_DIR}/arch/all-native/include"
         "-I${geninc}"
         "-I${sdk_inc}"
-        "-I${CMAKE_SOURCE_DIR}/rom/exec"
-        "-I${CMAKE_SOURCE_DIR}/rom/kernel"
+        "-I${AROS_SOURCE_DIR}/rom/exec"
+        "-I${AROS_SOURCE_DIR}/rom/kernel"
     )
     # The architecture directories that apply, same selection as the includes.
     foreach(d "${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}" "all-${AROS_TARGET_PLATFORM}"
               "${AROS_TARGET_CPU}-all" "all-native")
         foreach(m exec kernel)
-            if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/arch/${d}/${m}")
-                list(APPEND _incs "-I${CMAKE_SOURCE_DIR}/arch/${d}/${m}")
+            if(IS_DIRECTORY "${AROS_SOURCE_DIR}/arch/${d}/${m}")
+                list(APPEND _incs "-I${AROS_SOURCE_DIR}/arch/${d}/${m}")
             endif()
         endforeach()
     endforeach()
@@ -87,7 +87,7 @@ function(aros_bootstrap_sdk_includes)
     file(MAKE_DIRECTORY "${SDK_INC}/aros")
 
     # 1. Copy core system headers from compiler/include/
-    file(COPY "${CMAKE_SOURCE_DIR}/compiler/include/"
+    file(COPY "${AROS_SOURCE_DIR}/compiler/include/"
          DESTINATION "${SDK_INC}"
     )
     # The historic compiler-includes target publishes this architecture
@@ -97,7 +97,7 @@ function(aros_bootstrap_sdk_includes)
     # before the freshly bootstrapped SDK.
     file(MAKE_DIRECTORY "${GEN_INC}/asm")
     file(COPY_FILE
-        "${CMAKE_SOURCE_DIR}/compiler/include/asm/cpu.h"
+        "${AROS_SOURCE_DIR}/compiler/include/asm/cpu.h"
         "${GEN_INC}/asm/cpu.h"
         ONLY_IF_DIFFERENT)
     if(EXISTS "${SDK_INC}/exec/execbase.inc")
@@ -106,76 +106,76 @@ function(aros_bootstrap_sdk_includes)
     endif()
 
     # 2. Copy AROS support headers into aros/
-    file(COPY "${CMAKE_SOURCE_DIR}/compiler/arossupport/include/"
+    file(COPY "${AROS_SOURCE_DIR}/compiler/arossupport/include/"
          DESTINATION "${SDK_INC}/aros"
     )
-    if(EXISTS "${CMAKE_SOURCE_DIR}/compiler/autoinit/autoinit.h")
-        file(COPY_FILE "${CMAKE_SOURCE_DIR}/compiler/autoinit/autoinit.h"
+    if(EXISTS "${AROS_SOURCE_DIR}/compiler/autoinit/autoinit.h")
+        file(COPY_FILE "${AROS_SOURCE_DIR}/compiler/autoinit/autoinit.h"
             "${SDK_INC}/aros/autoinit.h" ONLY_IF_DIFFERENT)
     endif()
 
     # 3. Copy CRT and POSIX headers (stdio.h, stdlib.h, string.h, alloca.h, unistd.h, etc.)
-    if(EXISTS "${CMAKE_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/")
-        file(COPY "${CMAKE_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/"
+    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/")
+        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/aros/stdc/"
              DESTINATION "${SDK_INC}"
         )
     endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/")
-        file(COPY "${CMAKE_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/"
+    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/")
+        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/aros/posixc/"
              DESTINATION "${SDK_INC}"
         )
     endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/compiler/crt/posixc/include/")
-        file(COPY "${CMAKE_SOURCE_DIR}/compiler/crt/posixc/include/"
+    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/")
+        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/posixc/include/"
              DESTINATION "${SDK_INC}"
         )
     endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/compiler/crt/stdc/include/")
-        file(COPY "${CMAKE_SOURCE_DIR}/compiler/crt/stdc/include/"
+    if(EXISTS "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/")
+        file(COPY "${AROS_SOURCE_DIR}/compiler/crt/stdc/include/"
              DESTINATION "${SDK_INC}"
         )
     endif()
 
     # 4. Copy Architecture-specific headers into their expected subdirectories
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/x86_64-all/include/aros/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/x86_64-all/include/aros/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/x86_64-all/include/aros/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/x86_64-all/include/aros/"
              DESTINATION "${SDK_INC}/aros/x86_64"
         )
     endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/i386-all/include/aros/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/i386-all/include/aros/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/i386-all/include/aros/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/i386-all/include/aros/"
              DESTINATION "${SDK_INC}/aros/i386"
         )
     endif()
 
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/aarch64-all/include/aros/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/aarch64-all/include/aros/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/aarch64-all/include/aros/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/aarch64-all/include/aros/"
              DESTINATION "${SDK_INC}/aros/aarch64"
         )
     endif()
 
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/arm-all/include/aros/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/arm-all/include/aros/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/arm-all/include/aros/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/arm-all/include/aros/"
              DESTINATION "${SDK_INC}/aros/arm"
         )
     endif()
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/arm-all/include/aros-armel/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/arm-all/include/aros-armel/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/arm-all/include/aros-armel/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/arm-all/include/aros-armel/"
              DESTINATION "${SDK_INC}/aros/arm"
         )
     endif()
 
-    if(EXISTS "${CMAKE_SOURCE_DIR}/arch/riscv64-all/include/aros/")
-        file(COPY "${CMAKE_SOURCE_DIR}/arch/riscv64-all/include/aros/"
+    if(EXISTS "${AROS_SOURCE_DIR}/arch/riscv64-all/include/aros/")
+        file(COPY "${AROS_SOURCE_DIR}/arch/riscv64-all/include/aros/"
              DESTINATION "${SDK_INC}/aros/riscv64"
         )
     endif()
 
     # IRQ types header
     if(AROS_TARGET_CPU STREQUAL "x86_64" OR AROS_TARGET_CPU STREQUAL "i386")
-        if(EXISTS "${CMAKE_SOURCE_DIR}/arch/i386-all/include/irqtypes.h")
+        if(EXISTS "${AROS_SOURCE_DIR}/arch/i386-all/include/irqtypes.h")
             file(COPY_FILE
-                "${CMAKE_SOURCE_DIR}/arch/i386-all/include/irqtypes.h"
+                "${AROS_SOURCE_DIR}/arch/i386-all/include/irqtypes.h"
                 "${SDK_INC}/aros/irqtypes.h" ONLY_IF_DIFFERENT)
         endif()
     else()
@@ -287,7 +287,7 @@ function(aros_bootstrap_sdk_includes)
     endif()
     execute_process(
         COMMAND "${AROS_GENMODULE_BIN}"
-                "--scan-dir" "${CMAKE_SOURCE_DIR}"
+                "--scan-dir" "${AROS_SOURCE_DIR}"
                 "--output-inc" "${SDK_INC}"
                 "--output-gen" "${AROS_GEN_DIR}"
                 # The library bases this tree declares, for `ninja symbol-audit`.

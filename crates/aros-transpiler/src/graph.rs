@@ -198,7 +198,7 @@ fn resolve_logical_target_source(directory: &Path, source: &str) -> Option<PathB
     if source.is_empty() || source.contains(['$', ';', '\\']) {
         return None;
     }
-    let source = if let Some(relative) = source.strip_prefix("${CMAKE_SOURCE_DIR}/") {
+    let source = if let Some(relative) = source.strip_prefix("${AROS_SOURCE_DIR}/") {
         PathBuf::from(relative)
     } else {
         let source = Path::new(source);

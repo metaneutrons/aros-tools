@@ -189,10 +189,10 @@ pub(crate) fn parse(
         return Ok(ConfigureBuildDecl {
             mmake_name: mmake,
             mode: "adflib-host".to_owned(),
-            source_dir: "${CMAKE_SOURCE_DIR}/tools/ADFlib".to_owned(),
+            source_dir: "${AROS_SOURCE_DIR}/tools/ADFlib".to_owned(),
             binary_dir: binary_dir.clone(),
             install_prefix,
-            input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
+            input_manifest: "${AROS_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -228,10 +228,10 @@ pub(crate) fn parse(
         return Ok(ConfigureBuildDecl {
             mmake_name: mmake,
             mode: "adflib-target".to_owned(),
-            source_dir: "${CMAKE_SOURCE_DIR}/tools/ADFlib".to_owned(),
+            source_dir: "${AROS_SOURCE_DIR}/tools/ADFlib".to_owned(),
             binary_dir: binary_dir.clone(),
             install_prefix,
-            input_manifest: "${CMAKE_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
+            input_manifest: "${AROS_SOURCE_DIR}/tools/ADFlib/adflib-configure.inputs".to_owned(),
             private_products: vec![format!("{binary_dir}/build/libadf.a")],
             install_products,
             dependency_targets: Vec::new(),
@@ -264,10 +264,10 @@ pub(crate) fn parse(
             mmake_name: mmake,
             mode: "wirelessmanager".to_owned(),
             source_dir:
-                "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager".to_owned(),
+                "${AROS_SOURCE_DIR}/workbench/network/WirelessManager".to_owned(),
             binary_dir,
             install_prefix: "${AROS_BUILD_DIR}/SYS".to_owned(),
-            input_manifest: "${CMAKE_SOURCE_DIR}/workbench/network/WirelessManager/wirelessmanager-configure.inputs".to_owned(),
+            input_manifest: "${AROS_SOURCE_DIR}/workbench/network/WirelessManager/wirelessmanager-configure.inputs".to_owned(),
             private_products: ["wpa_supplicant", "wpa_passphrase", "wpa_cli"]
                 .into_iter()
                 .map(|product| format!("{private_root}/{product}"))

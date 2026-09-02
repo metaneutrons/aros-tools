@@ -59,7 +59,7 @@ pub struct IncludeSet {
 /// Make variables that carry an include path we can map onto a CMake location.
 fn map_known_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${AROS_SOURCE_DIR}"),
         "TOP" => Some("${AROS_BUILD_DIR}"),
         "GENINCDIR" => Some("${CMAKE_BINARY_DIR}/GENINCDIR"),
         // Third-party sources fetched via %fetch. Modules that build against
@@ -285,11 +285,11 @@ fn to_cmake_path(raw: &str, rel_dir: &Path) -> Result<String, String> {
     let path = if resolved.starts_with("${") || resolved.starts_with('/') {
         resolved
     } else if resolved == "." {
-        format!("${{CMAKE_SOURCE_DIR}}/{dir}")
+        format!("${{AROS_SOURCE_DIR}}/{dir}")
     } else if let Some(stripped) = resolved.strip_prefix("./") {
-        format!("${{CMAKE_SOURCE_DIR}}/{dir}/{stripped}")
+        format!("${{AROS_SOURCE_DIR}}/{dir}/{stripped}")
     } else {
-        format!("${{CMAKE_SOURCE_DIR}}/{dir}/{resolved}")
+        format!("${{AROS_SOURCE_DIR}}/{dir}/{resolved}")
     };
 
     Ok(collapse_dot_dot(&path))
@@ -681,15 +681,13 @@ PRIV_EXEC_INCLUDES = \
 USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
 ";
         let set = collect_includes(src, &dir("rom/exec"));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/exec".to_owned()));
         assert!(set
             .dirs
-            .contains(&"${CMAKE_SOURCE_DIR}/rom/exec".to_owned()));
+            .contains(&"${AROS_SOURCE_DIR}/rom/kernel".to_owned()));
         assert!(set
             .dirs
-            .contains(&"${CMAKE_SOURCE_DIR}/rom/kernel".to_owned()));
-        assert!(set
-            .dirs
-            .contains(&"${CMAKE_SOURCE_DIR}/rom/debug".to_owned()));
+            .contains(&"${AROS_SOURCE_DIR}/rom/debug".to_owned()));
         assert!(set.arch_modules.contains(&"exec".to_owned()));
         assert!(set.arch_modules.contains(&"kernel".to_owned()));
         assert!(
@@ -712,7 +710,7 @@ USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
         assert_eq!(decls[0].modname, "exec");
         assert_eq!(decls[0].pri, 7);
         assert_eq!(decls[0].tag, "pc");
-        assert_eq!(decls[0].dir, "${CMAKE_SOURCE_DIR}/arch/all-pc/exec");
+        assert_eq!(decls[0].dir, "${AROS_SOURCE_DIR}/arch/all-pc/exec");
     }
 
     #[test]
@@ -721,8 +719,8 @@ USER_INCLUDES += $(PRIV_EXEC_INCLUDES) -I$(SRCDIR)/rom/debug
         let set = collect_includes(src, &dir("rom/dos"));
         assert!(set
             .dirs
-            .contains(&"${CMAKE_SOURCE_DIR}/rom/dos/include".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/dos".to_owned()));
+            .contains(&"${AROS_SOURCE_DIR}/rom/dos/include".to_owned()));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/dos".to_owned()));
         assert!(set
             .dirs
             .contains(&"${CMAKE_BINARY_DIR}/GENINCDIR".to_owned()));
@@ -749,10 +747,10 @@ USER_INCLUDES := -iquote $(CLE_GENROOT) -iquote $(CLE_GENROOT)/broadcom\n\
     fn handles_separate_flag_forms() {
         let src = "USER_INCLUDES := -I $(SRCDIR)/rom/a -isystem $(SRCDIR)/rom/b -idirafter $(SRCDIR)/rom/c -iquote $(SRCDIR)/rom/d\n";
         let set = collect_includes(src, &dir("x"));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/a".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/b".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/c".to_owned()));
-        assert!(set.dirs.contains(&"${CMAKE_SOURCE_DIR}/rom/d".to_owned()));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/a".to_owned()));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/b".to_owned()));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/c".to_owned()));
+        assert!(set.dirs.contains(&"${AROS_SOURCE_DIR}/rom/d".to_owned()));
     }
 
     #[test]
@@ -764,9 +762,9 @@ USER_CFLAGS := -I $(SRCDIR)/c -isystem $(SRCDIR)/system\n";
         assert_eq!(
             set.dirs,
             vec![
-                "${CMAKE_SOURCE_DIR}/cpp",
-                "${CMAKE_SOURCE_DIR}/c",
-                "${CMAKE_SOURCE_DIR}/system",
+                "${AROS_SOURCE_DIR}/cpp",
+                "${AROS_SOURCE_DIR}/c",
+                "${AROS_SOURCE_DIR}/system",
             ]
         );
     }
@@ -779,21 +777,21 @@ USER_CFLAGS := -I$(SRCDIR)/first\n\
 USER_CFLAGS := -I$(SRCDIR)/later\n";
         let scope = crate::make_vars::collect_vars(src);
         let set = collect_includes_at(src, &scope, 1, &dir("x"));
-        assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/first"]);
+        assert_eq!(set.dirs, vec!["${AROS_SOURCE_DIR}/first"]);
     }
 
     #[test]
     fn collapses_parent_references() {
         let src = "USER_INCLUDES := -I$(SRCDIR)/$(CURDIR)/../include\n";
         let set = collect_includes(src, &dir("workbench/libs/foo"));
-        assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/workbench/libs/include"]);
+        assert_eq!(set.dirs, vec!["${AROS_SOURCE_DIR}/workbench/libs/include"]);
     }
 
     #[test]
     fn reports_unresolved_variables_instead_of_guessing() {
         let src = "USER_INCLUDES := -I$(AROS_CONTRIB_INCLUDES) -I$(SRCDIR)/rom/ok\n";
         let set = collect_includes(src, &dir("x"));
-        assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/rom/ok"]);
+        assert_eq!(set.dirs, vec!["${AROS_SOURCE_DIR}/rom/ok"]);
         assert_eq!(set.unresolved, vec!["$(AROS_CONTRIB_INCLUDES)"]);
     }
 
@@ -801,7 +799,7 @@ USER_CFLAGS := -I$(SRCDIR)/later\n";
     fn self_reference_does_not_recurse() {
         let src = "USER_INCLUDES := -I$(SRCDIR)/a $(USER_INCLUDES)\n";
         let set = collect_includes(src, &dir("x"));
-        assert_eq!(set.dirs, vec!["${CMAKE_SOURCE_DIR}/a"]);
+        assert_eq!(set.dirs, vec!["${AROS_SOURCE_DIR}/a"]);
     }
 
     #[test]
@@ -810,7 +808,7 @@ USER_CFLAGS := -I$(SRCDIR)/later\n";
         let set = collect_includes(src, &dir("x"));
         assert_eq!(
             set.dirs,
-            vec!["${CMAKE_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}/include"]
+            vec!["${AROS_SOURCE_DIR}/arch/${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}/include"]
         );
     }
 }

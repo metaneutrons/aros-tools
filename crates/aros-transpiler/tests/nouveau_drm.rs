@@ -7,7 +7,7 @@ use aros_transpiler::{
 use std::path::PathBuf;
 
 const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
-const SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
+const SOURCE_PREFIX: &str = "${AROS_SOURCE_DIR}/workbench/hidds/nouveau";
 
 fn source_root() -> PathBuf {
     common::source_root()
@@ -44,14 +44,14 @@ fn production_nouveau_drm_is_closed_and_canonical_for_all_current_architectures(
     let expected_includes = [
         "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
         "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include/nvkm",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/gsp",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include/nvkm",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/gsp",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -113,17 +113,17 @@ fn production_nouveau_drm_is_closed_and_canonical_for_all_current_architectures(
         assert_eq!(target.source_files.len(), 825, "{cpu}");
         assert_eq!(
             target.source_files.first().map(String::as_str),
-            Some("${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/display/drm_dp_helper"),
+            Some("${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/display/drm_dp_helper"),
             "{cpu}"
         );
         assert_eq!(
             target.source_files.get(66).map(String::as_str),
-            Some("${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm-aros/nouveau/nouveau_aros_stubs"),
+            Some("${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm-aros/nouveau/nouveau_aros_stubs"),
             "{cpu}"
         );
         assert_eq!(
             target.source_files.last().map(String::as_str),
-            Some("${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/volt/nv40"),
+            Some("${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/volt/nv40"),
             "{cpu}"
         );
         let missing_sources = target
@@ -181,7 +181,7 @@ fn production_nouveau_drm_is_closed_and_canonical_for_all_current_architectures(
         );
         assert!(
             target_block
-                .contains("${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/display/drm_dp_helper"),
+                .contains("${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/display/drm_dp_helper"),
             "{cpu}: {target_block}"
         );
     }

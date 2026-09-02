@@ -483,11 +483,11 @@ fn arg(args: &str, key: &str) -> Option<String> {
 }
 
 fn rendered_source_path(rendered: &str, root: &Path, rel_dir: &Path) -> PathBuf {
-    const SOURCE_ROOT: &str = "${CMAKE_SOURCE_DIR}";
+    const SOURCE_ROOT: &str = "${AROS_SOURCE_DIR}";
     if rendered == SOURCE_ROOT {
         return root.to_path_buf();
     }
-    if let Some(relative) = rendered.strip_prefix("${CMAKE_SOURCE_DIR}/") {
+    if let Some(relative) = rendered.strip_prefix("${AROS_SOURCE_DIR}/") {
         return root.join(relative);
     }
     let path = Path::new(rendered);
@@ -571,7 +571,7 @@ mod tests {
         assert!(catalog.catalogs.contains(&"polish".to_owned()));
         assert!(catalog.catalogs.contains(&"russian".to_owned()));
         assert_eq!(catalog.dir, "${AROS_BUILD_DIR}/SYS/Locale/Catalogs");
-        assert_eq!(catalog.srcdir, "${CMAKE_SOURCE_DIR}/rom/dos/catalogs");
+        assert_eq!(catalog.srcdir, "${AROS_SOURCE_DIR}/rom/dos/catalogs");
         assert_eq!(
             catalog.source_description,
             "${AROS_BUILD_DIR}/hosttools/C_h_aros"

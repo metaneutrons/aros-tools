@@ -1173,7 +1173,7 @@ mod tests {
         assert!(!is_driver_link_option("-Wl,-T,$(SRCDIR)/x.lds"));
         assert!(!is_driver_link_option("-Wl,-Map,`date`"));
         // The rendered CMake form is expected and accepted.
-        assert!(is_driver_link_option("-Wl,-T,${CMAKE_SOURCE_DIR}/x.lds"));
+        assert!(is_driver_link_option("-Wl,-T,${AROS_SOURCE_DIR}/x.lds"));
     }
 
     #[test]

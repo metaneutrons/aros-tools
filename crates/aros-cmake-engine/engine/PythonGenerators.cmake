@@ -112,7 +112,7 @@ function(aros_generate_python_outputs)
             message(FATAL_ERROR
                 "${PG_OWNER}: unsafe Python-generator driver path '${PG_DRIVER_SCRIPT}'")
         endif()
-        cmake_path(ABSOLUTE_PATH CMAKE_SOURCE_DIR NORMALIZE
+        cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE
             OUTPUT_VARIABLE _repository_root)
         cmake_path(ABSOLUTE_PATH PG_DRIVER_SCRIPT
             BASE_DIRECTORY "${_repository_root}" NORMALIZE

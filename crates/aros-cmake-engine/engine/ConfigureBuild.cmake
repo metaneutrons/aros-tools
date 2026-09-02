@@ -83,7 +83,7 @@ function(aros_build_configure)
     if(DEFINED AROS_CONFIGURE_SOURCE_ROOT)
         set(_source_root_raw "${AROS_CONFIGURE_SOURCE_ROOT}")
     else()
-        set(_source_root_raw "${CMAKE_SOURCE_DIR}")
+        set(_source_root_raw "${AROS_SOURCE_DIR}")
     endif()
     cmake_path(ABSOLUTE_PATH _source_root_raw NORMALIZE
         OUTPUT_VARIABLE _source_root_lexical)

@@ -74,7 +74,7 @@ endfunction()
 # locale_other.c replaces locale.c, openlibs.c opens Amiga libraries and is not
 # needed, vastubs.c refuses to compile off m68k, and getft.c is replaced by
 # cmake/hosttools/flexcat_getft.c.
-file(GLOB _flexcat_all "${CMAKE_SOURCE_DIR}/tools/flexcat/src/*.c")
+file(GLOB _flexcat_all "${AROS_SOURCE_DIR}/tools/flexcat/src/*.c")
 set(_flexcat_srcs "")
 foreach(f IN LISTS _flexcat_all)
     get_filename_component(_n "${f}" NAME)
@@ -82,7 +82,7 @@ foreach(f IN LISTS _flexcat_all)
         list(APPEND _flexcat_srcs "${f}")
     endif()
 endforeach()
-list(APPEND _flexcat_srcs "${CMAKE_SOURCE_DIR}/cmake/hosttools/flexcat_getft.c")
+list(APPEND _flexcat_srcs "${AROS_CMAKE_ENGINE_DIR}/hosttools/flexcat_getft.c")
 
 # FlexCat is a host executable, so probe iconv with exactly the compiler that
 # will build it rather than using CMake's target-side checks.  glibc supplies
@@ -127,7 +127,7 @@ endif()
 aros_host_tool(NAME flexcat
     SOURCES ${_flexcat_srcs}
     DEFINES _GNU_SOURCE NO_INLINE_STDARG
-    INCLUDES "${CMAKE_SOURCE_DIR}/tools/flexcat/src"
+    INCLUDES "${AROS_SOURCE_DIR}/tools/flexcat/src"
     RAW_LDFLAGS ${_flexcat_iconv_ldflags})
 
 # aros_build_catalogs(
@@ -185,7 +185,7 @@ function(aros_build_catalogs)
         if(IS_ABSOLUTE "${CAT_${_path_var}}")
             set(_${_path_var} "${CAT_${_path_var}}")
         else()
-            set(_${_path_var} "${CMAKE_SOURCE_DIR}/${CAT_${_path_var}}")
+            set(_${_path_var} "${AROS_SOURCE_DIR}/${CAT_${_path_var}}")
         endif()
         cmake_path(NORMAL_PATH _${_path_var})
     endforeach()
@@ -218,7 +218,7 @@ function(aros_build_catalogs)
     if(NOT EXISTS "${_source_description}")
         get_filename_component(_sd_name "${_source_description}" NAME)
         set(_bundled_sd
-            "${CMAKE_SOURCE_DIR}/tools/flexcat/src/sd/${_sd_name}")
+            "${AROS_SOURCE_DIR}/tools/flexcat/src/sd/${_sd_name}")
         if(EXISTS "${_bundled_sd}")
             set(_source_description "${_bundled_sd}")
         endif()
@@ -278,10 +278,10 @@ function(aros_build_catalogs)
                     "-DDESCRIPTION=${_description}"
                     "-DTRANSLATION=${_translation}"
                     "-DOUTPUT=${_output}"
-                    -P "${CMAKE_SOURCE_DIR}/cmake/RunFlexCat.cmake"
+                    -P "${AROS_CMAKE_ENGINE_DIR}/RunFlexCat.cmake"
                 DEPENDS
                     "${AROS_HOST_FLEXCAT}" "${_description}" "${_translation}"
-                    "${CMAKE_SOURCE_DIR}/cmake/RunFlexCat.cmake"
+                    "${AROS_CMAKE_ENGINE_DIR}/RunFlexCat.cmake"
                 COMMENT "Creating ${CAT_NAME} catalog for ${_language}"
                 VERBATIM)
             set_property(GLOBAL APPEND PROPERTY AROS_CATALOG_OUTPUTS "${_output}")
@@ -296,7 +296,7 @@ function(aros_build_catalogs)
             set(_generated_root "${CMAKE_BINARY_DIR}/gen")
             cmake_path(NORMAL_PATH _generated_root)
             file(RELATIVE_PATH _declaring_rel
-                "${CMAKE_SOURCE_DIR}" "${_DIRECTORY}")
+                "${AROS_SOURCE_DIR}" "${_DIRECTORY}")
             if(_declaring_rel MATCHES "^\\.\\.")
                 message(FATAL_ERROR
                     "aros_build_catalogs: relative SOURCE requires DIRECTORY below the source tree")
@@ -383,7 +383,7 @@ function(aros_build_catalogs)
 endfunction()
 
 aros_host_tool(NAME ilbmtoc
-    SOURCES "${CMAKE_SOURCE_DIR}/tools/ilbmtoc/ilbmtoc.c")
+    SOURCES "${AROS_SOURCE_DIR}/tools/ilbmtoc/ilbmtoc.c")
 
 # -----------------------------------------------------------------------------
 # genmodule
@@ -395,16 +395,16 @@ aros_host_tool(NAME ilbmtoc
 # Build the reference generator as a host executable so those products retain
 # the semantics of config/make.tmpl without inheriting the target toolchain.
 file(GLOB _genmodule_srcs CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/tools/genmodule/*.c")
+    "${AROS_SOURCE_DIR}/tools/genmodule/*.c")
 file(GLOB _genmodule_headers CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/tools/genmodule/*.h")
+    "${AROS_SOURCE_DIR}/tools/genmodule/*.h")
 list(SORT _genmodule_srcs)
 list(SORT _genmodule_headers)
 
 aros_host_tool(NAME genmodule
     SOURCES ${_genmodule_srcs}
     DEPENDS ${_genmodule_headers}
-    INCLUDES "${CMAKE_SOURCE_DIR}/tools/genmodule")
+    INCLUDES "${AROS_SOURCE_DIR}/tools/genmodule")
 
 # -----------------------------------------------------------------------------
 # ilbmtoicon
@@ -473,7 +473,7 @@ if(_host_png_ready)
     list(REMOVE_DUPLICATES _png_cflags)
     list(REMOVE_DUPLICATES _png_ldflags)
     aros_host_tool(NAME ilbmtoicon
-        SOURCES "${CMAKE_SOURCE_DIR}/tools/ilbmtoicon/ilbmtoicon.c"
+        SOURCES "${AROS_SOURCE_DIR}/tools/ilbmtoicon/ilbmtoicon.c"
         RAW_CFLAGS ${_png_cflags}
         RAW_LDFLAGS ${_png_ldflags})
     set(AROS_HOST_HAVE_ILBMTOICON TRUE)
@@ -567,7 +567,7 @@ function(aros_tool_header)
 
     set(_wd "${TH_WORKDIR}")
     if(NOT _wd)
-        set(_wd "${CMAKE_SOURCE_DIR}")
+        set(_wd "${AROS_SOURCE_DIR}")
     endif()
 
     add_custom_command(

@@ -73,7 +73,7 @@ fn cunit_external_contract_is_exact_for_every_current_architecture() {
     );
     assert_eq!(
         declaration.local_patch_files,
-        ["${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff"]
+        ["${AROS_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff"]
     );
     assert_eq!(declaration.header_products.len(), 19);
     assert!(declaration.auxiliary_products.is_empty());
@@ -137,7 +137,7 @@ fn cunit_uselib_resolves_to_link_interface_and_generator_emits_it_first() {
     assert!(cmake.contains("    LIBS \"linklibs-yes-cunit-external-cunit\""));
     assert!(cmake.contains(
         "    SOURCE_DIR \"${AROS_PORTS_DIR}/cunit/cunit-3.5.5\"\n\
-         \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff\""
+         \x20   LOCAL_PATCH_FILES \"${AROS_SOURCE_DIR}/compiler/cunit/cunit-3.5.5-aros.diff\""
     ));
     assert!(!cmake.contains("SOURCE_SHA256"));
     assert!(!cmake.contains("LOCAL_PATCH_SHA256"));
@@ -189,7 +189,7 @@ fn aom_external_contract_and_fetch_patch_are_profile_exact() {
         assert_eq!(declaration.mmake_name, "datatypes-heic-linklibs-aom");
         assert_eq!(
             declaration.local_patch_files,
-            ["${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"]
+            ["${AROS_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff"]
         );
         assert!(declaration.options.starts_with(&[
             "-DBUILD_SHARED_LIBS=OFF".to_owned(),
@@ -213,7 +213,7 @@ fn aom_external_contract_and_fetch_patch_are_profile_exact() {
         let cmake = generate_cmake(&graph);
         assert!(cmake.contains(
             "    SOURCE_DIR \"${AROS_PORTS_DIR}/libaom/libaom-3.12.1\"\n\
-             \x20   LOCAL_PATCH_FILES \"${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff\""
+             \x20   LOCAL_PATCH_FILES \"${AROS_SOURCE_DIR}/workbench/classes/datatypes/heic/libaom-3.12.1-aros.diff\""
         ));
         assert!(!cmake.contains("SOURCE_SHA256"));
         assert!(!cmake.contains("LOCAL_PATCH_SHA256"));

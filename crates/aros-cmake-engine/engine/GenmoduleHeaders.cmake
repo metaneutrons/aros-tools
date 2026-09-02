@@ -49,7 +49,7 @@ function(aros_materialize_genmodule_headers)
     if(IS_ABSOLUTE "${GMH_CONFIG}")
         set(_config "${GMH_CONFIG}")
     else()
-        set(_config "${CMAKE_SOURCE_DIR}/${GMH_CONFIG}")
+        set(_config "${AROS_SOURCE_DIR}/${GMH_CONFIG}")
     endif()
     cmake_path(NORMAL_PATH _config)
     if(NOT EXISTS "${_config}" OR IS_DIRECTORY "${_config}" OR

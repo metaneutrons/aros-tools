@@ -111,7 +111,7 @@ fn split_assignment(line: &str) -> Option<(&str, &str, bool)> {
 /// Make variables that map onto a CMake location.
 fn map_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${AROS_SOURCE_DIR}"),
         "TOP" => Some("${AROS_BUILD_DIR}"),
         // The reference puts unpacked ports under $(TARGETDIR)/Ports and keeps
         // downloaded archives in a separate, configure-chosen directory.
@@ -318,7 +318,7 @@ fn collect_fetches_with_lookup(
             destination: get("destination").unwrap_or_else(|| ".".to_owned()),
             base: get("base").unwrap_or_default(),
             patch_origins: get("patches_origins")
-                .unwrap_or_else(|| format!("${{CMAKE_SOURCE_DIR}}/{dir}")),
+                .unwrap_or_else(|| format!("${{AROS_SOURCE_DIR}}/{dir}")),
             patches: get("patches_specs")
                 .filter(|value| {
                     let trimmed = value.trim();
@@ -469,7 +469,7 @@ ACPICAPSPECS := $(ACPICAARCHBASE)-aros.diff:$(ACPICAARCHBASE):-f,-p1
         let (decls, _) = collect_fetches(ACPICA, &PathBuf::from("arch/all-native/acpica"));
         assert_eq!(
             decls[0].patch_origins,
-            "${CMAKE_SOURCE_DIR}/arch/all-native/acpica"
+            "${AROS_SOURCE_DIR}/arch/all-native/acpica"
         );
     }
 

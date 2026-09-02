@@ -459,7 +459,7 @@ impl<'a> Evaluator<'a> {
 
     fn context_value(&self, name: &str) -> Option<String> {
         match name {
-            "SRCDIR" => Some("${CMAKE_SOURCE_DIR}".to_owned()),
+            "SRCDIR" => Some("${AROS_SOURCE_DIR}".to_owned()),
             "TOP" => Some("${AROS_BUILD_DIR}".to_owned()),
             "CURDIR" => Some(self.relative_text.clone()),
             _ => None,
@@ -758,7 +758,7 @@ impl<'a> Evaluator<'a> {
 
         for original_pattern in expanded_patterns.split_whitespace() {
             let (materialized_pattern, glob_pattern, backing) =
-                if let Some(suffix) = original_pattern.strip_prefix("${CMAKE_SOURCE_DIR}") {
+                if let Some(suffix) = original_pattern.strip_prefix("${AROS_SOURCE_DIR}") {
                     if suffix.contains("${") {
                         return Err(MakeExprError::DeferredWildcard {
                             pattern: original_pattern.to_owned(),
@@ -767,7 +767,7 @@ impl<'a> Evaluator<'a> {
                     (
                         concatenate_path_prefix(&self.source_text, suffix),
                         concatenate_path_prefix(&escaped_source, suffix),
-                        Some((self.source_text.clone(), "${CMAKE_SOURCE_DIR}".to_owned())),
+                        Some((self.source_text.clone(), "${AROS_SOURCE_DIR}".to_owned())),
                     )
                 } else if let Some(suffix) = original_pattern.strip_prefix("${AROS_PORTS_DIR}") {
                     if suffix.contains("${") {
@@ -1163,7 +1163,7 @@ fn suffix(word: &str) -> Option<String> {
 fn is_deferred_cmake_reference(name: &str) -> bool {
     matches!(
         name,
-        "CMAKE_SOURCE_DIR"
+        "AROS_SOURCE_DIR"
             | "CMAKE_BINARY_DIR"
             | "AROS_BUILD_DIR"
             | "AROS_SYS_DIR"
@@ -1437,7 +1437,7 @@ mod tests {
         let context = MakeExprContext::new(&scope, &dirs, usize::MAX, &tree.0, rel);
 
         let rendered_source = evaluate_make_expr("$(SRCDIR)/$(CURDIR)/a.po", &context).unwrap();
-        assert_eq!(rendered_source, "${CMAKE_SOURCE_DIR}/locale/a.po");
+        assert_eq!(rendered_source, "${AROS_SOURCE_DIR}/locale/a.po");
         assert!(!rendered_source.contains(&tree.0.display().to_string()));
 
         assert_eq!(
@@ -1453,8 +1453,8 @@ mod tests {
         assert_eq!(
             source_matches,
             vec![
-                "${CMAKE_SOURCE_DIR}/locale/a.po",
-                "${CMAKE_SOURCE_DIR}/locale/z.po"
+                "${AROS_SOURCE_DIR}/locale/a.po",
+                "${AROS_SOURCE_DIR}/locale/z.po"
             ]
         );
         assert!(!source_matches

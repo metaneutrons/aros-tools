@@ -14,6 +14,51 @@ project(AROS-NX
     LANGUAGES C CXX ASM
 )
 
+# Where this engine's own modules are.
+#
+# Every module addresses its siblings through this rather than through the
+# project root, so the engine works whether it sits in a checkout or in a build
+# directory. CMAKE_CURRENT_LIST_DIR is the engine's directory at the moment this
+# file is read, which is exactly what is wanted and cannot be affected by a
+# later add_subdirectory.
+# Two layouts are supported while the engine is being moved out of the source
+# tree: placed on its own, where the modules sit beside this file, and still
+# inside a checkout, where they sit in `cmake/`. AROS.cmake is the marker,
+# because it is the module every configuration loads.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/AROS.cmake")
+    set(_aros_engine_dir "${CMAKE_CURRENT_LIST_DIR}")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/cmake/AROS.cmake")
+    set(_aros_engine_dir "${CMAKE_CURRENT_LIST_DIR}/cmake")
+else()
+    message(FATAL_ERROR
+        "no AROS CMake engine beside ${CMAKE_CURRENT_LIST_DIR} or in its cmake/ "
+        "subdirectory")
+endif()
+set(AROS_CMAKE_ENGINE_DIR "${_aros_engine_dir}" CACHE INTERNAL
+    "Directory holding the AROS CMake engine modules")
+unset(_aros_engine_dir)
+include("${AROS_CMAKE_ENGINE_DIR}/EngineVersion.cmake")
+
+# Where the AROS source tree is.
+#
+# The engine describes how any tree is built, not one tree, so the tree is an
+# input rather than the project. While the engine still ships inside a checkout
+# this defaults to that checkout and nothing changes; once the engine is placed
+# in a build directory the caller passes -DAROS_SOURCE_DIR explicitly.
+#
+# It is resolved once, here, and every module reads it. CMAKE_SOURCE_DIR keeps
+# its own meaning of "the project being configured" and is used only where that
+# is what is meant, such as walking BUILDSYSTEM_TARGETS.
+if(NOT DEFINED AROS_SOURCE_DIR OR "${AROS_SOURCE_DIR}" STREQUAL "")
+    set(AROS_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
+endif()
+cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE OUTPUT_VARIABLE AROS_SOURCE_DIR)
+if(NOT IS_DIRECTORY "${AROS_SOURCE_DIR}")
+    message(FATAL_ERROR
+        "AROS_SOURCE_DIR does not name a directory: ${AROS_SOURCE_DIR}")
+endif()
+
+
 # libc++ deliberately ships C-compatible wrapper headers such as math.h.
 # They must precede the target SDK's C headers for C++ compilations so the
 # wrapper can add the standard overloads and then reach AROS via include_next.
@@ -54,13 +99,13 @@ if(AROS_CROSS_TOOLCHAIN_ROOT)
     cmake_language(DEFER CALL _aros_finalize_cxx_wrapper_order)
 endif()
 
-include("${CMAKE_SOURCE_DIR}/cmake/ToolchainIdentity.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/Executable.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/ArosTools.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/ToolchainIdentity.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/Executable.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/ArosTools.cmake")
 aros_configure_rust_tools()
 aros_lock_build_tree_toolchain()
 
-include("${CMAKE_SOURCE_DIR}/cmake/EnableLLVMObjectiveC.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/EnableLLVMObjectiveC.cmake")
 
 message(STATUS "🚀 Initializing AROS-NX (v0.1.0) Build Engine...")
 message(STATUS "Target: ${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}")
@@ -132,15 +177,15 @@ set(AROS_TARGET_LEGACY_PLATFORM
     "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}")
 
 # 1. Compiler Cache Integration (sccache / ccache)
-include("${CMAKE_SOURCE_DIR}/cmake/CompilerCache.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/CompilerCache.cmake")
 
 # 2. Target Platform Setup & Core Macros
-include("${CMAKE_SOURCE_DIR}/cmake/AROS.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/AROS.cmake")
 
 # 3. Tools that run on the build machine, and the header rules using them.
-include("${CMAKE_SOURCE_DIR}/cmake/HostTools.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/FlexCatSources.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/IlbmSources.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/HostTools.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/FlexCatSources.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/IlbmSources.cmake")
 
 # AHI is admitted only for the three audited LLVM target profiles.  Its
 # configure-style build needs the historical Perl SFD compiler, which is
@@ -171,13 +216,13 @@ if(_aros_ahi_supported_profile)
         message(FATAL_ERROR
             "AHI requires the explicit executable Perl interpreter ${AROS_HOST_PERL}")
     endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/SfdcHostTool.cmake")
-    include("${CMAKE_SOURCE_DIR}/cmake/AhiBuild.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/SfdcHostTool.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/AhiBuild.cmake")
     aros_build_host_sfdc(PERL "${AROS_HOST_PERL}")
 endif()
 
-include("${CMAKE_SOURCE_DIR}/cmake/Icons.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/GeneratedHeaders.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/Icons.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/GeneratedHeaders.cmake")
 
 # 4. Dynamic Target Transpilation
 set(TRANSPILER_BIN "${AROS_TRANSPILER_BIN}")
@@ -199,7 +244,7 @@ else()
 endif()
 execute_process(
     COMMAND "${TRANSPILER_BIN}"
-            "--source-dir" "${CMAKE_SOURCE_DIR}"
+            "--source-dir" "${AROS_SOURCE_DIR}"
             "--output" "${GENERATED_TARGETS_CMAKE}"
             "--ports-dir" "${AROS_PORTS_DIR}"
             "--cpu" "${AROS_TARGET_CPU}"
@@ -246,7 +291,7 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
     endforeach()
     execute_process(
         COMMAND "${TRANSPILER_BIN}"
-                "--source-dir" "${CMAKE_SOURCE_DIR}"
+                "--source-dir" "${AROS_SOURCE_DIR}"
                 "--output" "${GENERATED_TARGETS_CMAKE}"
                 "--ports-dir" "${AROS_PORTS_DIR}"
                 "--cpu" "${AROS_TARGET_CPU}"
@@ -285,7 +330,7 @@ endif()
 # this run just wrote, so a record that drifts from the call is reported rather
 # than trusted.
 set(_aros_transpiler_record
-    "--source-dir" "${CMAKE_SOURCE_DIR}"
+    "--source-dir" "${AROS_SOURCE_DIR}"
     "--output" "${GENERATED_TARGETS_CMAKE}"
     "--ports-dir" "${AROS_PORTS_DIR}"
     "--cpu" "${AROS_TARGET_CPU}"
@@ -299,11 +344,11 @@ set(_aros_transpiler_record
 string(REPLACE ";" "\n" _aros_transpiler_invocation "${_aros_transpiler_record}")
 file(WRITE "${GENERATED_TARGETS_CMAKE}.invocation"
     "${_aros_transpiler_invocation}\n")
-include("${CMAKE_SOURCE_DIR}/cmake/DefaultLinkSet.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/BinaryObjects.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/KickstartObjects.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/StandaloneLink.cmake")
-include("${CMAKE_SOURCE_DIR}/cmake/HostGeneratedHeaders.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/DefaultLinkSet.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/BinaryObjects.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/KickstartObjects.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/StandaloneLink.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/HostGeneratedHeaders.cmake")
 include("${GENERATED_TARGETS_CMAKE}")
 
 # Compiler depfiles cannot express the producer of a header which was absent
@@ -377,7 +422,7 @@ if(TARGET "workbench-libs-icon-includes" AND
     aros_materialize_genmodule_headers(
         NAME workbench-libs-icon-includes-generated
         OWNER workbench-libs-icon-includes
-        CONFIG "${CMAKE_SOURCE_DIR}/workbench/libs/icon/icon.conf"
+        CONFIG "${AROS_SOURCE_DIR}/workbench/libs/icon/icon.conf"
         MODULE icon
         MODTYPE library
         INCLUDE_NAME icon)
@@ -392,7 +437,7 @@ if(TARGET "libpng-fetch" OR TARGET "workbench-libs-png-generated")
         message(FATAL_ERROR
             "libpng pnglibconf staging requires both generated targets")
     endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/PngLibconf.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/PngLibconf.cmake")
     aros_stage_pnglibconf(
         NAME workbench-libs-png-generated-pnglibconf
         FETCH_TARGET libpng-fetch
@@ -412,7 +457,7 @@ if(TARGET "freetype2-fetch" OR TARGET "workbench-libs-freetype-genincludes")
         message(FATAL_ERROR
             "FreeType option staging requires both generated targets")
     endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/FreetypeOptions.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/FreetypeOptions.cmake")
     # The ordinary and module FreeType link libraries compile the configured
     # FreeType sources directly.  The demos' ftcommon library independently
     # includes freetype/freetype.h before either final demo program exists.
@@ -442,7 +487,7 @@ if(TARGET "linklibs-de265-fetch" OR
         message(FATAL_ERROR
             "libde265 version-header staging requires its fetch and genfiles targets")
     endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/HeicVersionHeaders.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/HeicVersionHeaders.cmake")
     aros_stage_heic_version_header(
         NAME datatypes-heic-linklibs-de265-version-header
         FETCH_TARGET linklibs-de265-fetch
@@ -459,7 +504,7 @@ if(TARGET "linklibs-heif-fetch" OR
         message(FATAL_ERROR
             "libheif version-header staging requires its fetch and genfiles targets")
     endif()
-    include("${CMAKE_SOURCE_DIR}/cmake/HeicVersionHeaders.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/HeicVersionHeaders.cmake")
     aros_stage_heic_version_header(
         NAME datatypes-heic-linklibs-heif-version-header
         FETCH_TARGET linklibs-heif-fetch
@@ -486,7 +531,7 @@ if(AROS_TOOLCHAIN STREQUAL "llvm" AND
                 "GRUB2 ISO asset staging requires ${_aros_grub_host_lane}")
         endif()
     endforeach()
-    include("${CMAKE_SOURCE_DIR}/cmake/GrubIsoAssets.cmake")
+    include("${AROS_CMAKE_ENGINE_DIR}/GrubIsoAssets.cmake")
     aros_stage_grub2_iso_assets(
         MODE x86_64
         BINARY_DIR "${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64"
@@ -640,10 +685,10 @@ endif()
 #     undeclared MSG_STRING_* identifier, which says nothing about its cause,
 #     hence the check here.
 find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.gitmodules")
+if(GIT_FOUND AND EXISTS "${AROS_SOURCE_DIR}/.gitmodules")
     execute_process(
         COMMAND "${GIT_EXECUTABLE}" submodule status
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        WORKING_DIRECTORY "${AROS_SOURCE_DIR}"
         OUTPUT_VARIABLE _submodule_status
         ERROR_QUIET
         OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -690,7 +735,7 @@ find_program(AROS_PYTHON3 NAMES python3)
 if(AROS_PYTHON3 AND EXISTS "${AROS_VERIFY_BIN}")
     add_custom_target(verify
         COMMAND "${AROS_VERIFY_BIN}"
-                --source "${CMAKE_SOURCE_DIR}"
+                --source "${AROS_SOURCE_DIR}"
                 --generated "${GENERATED_TARGETS_CMAKE}"
                 --work "${CMAKE_BINARY_DIR}/verify"
                 --build-dir "${CMAKE_BINARY_DIR}"
@@ -703,7 +748,7 @@ if(AROS_PYTHON3 AND EXISTS "${AROS_VERIFY_BIN}")
         VERBATIM)
     add_custom_target(verify-report
         COMMAND "${AROS_VERIFY_BIN}"
-                --source "${CMAKE_SOURCE_DIR}"
+                --source "${AROS_SOURCE_DIR}"
                 --generated "${GENERATED_TARGETS_CMAKE}"
                 --work "${CMAKE_BINARY_DIR}/verify"
                 --build-dir "${CMAKE_BINARY_DIR}"
@@ -728,24 +773,24 @@ endif()
 
 # 7. Kickstart packages. Must come after generated_targets.cmake, because the
 #    package definitions reference the transpiled module targets.
-include("${CMAKE_SOURCE_DIR}/cmake/Kickstart.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/Kickstart.cmake")
 
 # 8. Symbol audit. Answers the one question a green build cannot: whether a
 #    module has any undefined symbols left, and so any chance of loading.
-include("${CMAKE_SOURCE_DIR}/cmake/SymbolAudit.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/SymbolAudit.cmake")
 
 # 8. Explicit, opt-in roots for the boot core and distribution closure. These
 #    are deliberately separate from `all`: broadening the default build would
 #    hide rather than expose the remaining direct-recipe/output gaps.
-include("${CMAKE_SOURCE_DIR}/cmake/RootTargets.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/RootTargets.cmake")
 
 # 9. Raspberry Pi boot payload. This is deliberately after Kickstart: the
 #    Pi image embeds the core ELF and the Pi BSP package generated from the
 #    transpiled target graph.
-include("${CMAKE_SOURCE_DIR}/cmake/RaspberryPi.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/RaspberryPi.cmake")
 
 # 10. OpenSBI/UEFI removable-media payload for reviewed RISC-V boards.
-include("${CMAKE_SOURCE_DIR}/cmake/OpenSbiUefi.cmake")
+include("${AROS_CMAKE_ENGINE_DIR}/OpenSbiUefi.cmake")
 
 # Compare every concrete declaration against a freshly generated upstream
 # libdefs header. This is a build target rather than a configure-time glob: in

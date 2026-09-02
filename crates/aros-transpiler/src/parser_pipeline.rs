@@ -665,7 +665,7 @@ pub(super) fn parse_mmakefile_impl(
                     } else {
                         // Relative to the declaring directory, as Make reads it.
                         Some(format!(
-                            "${{CMAKE_SOURCE_DIR}}/{}/{value}",
+                            "${{AROS_SOURCE_DIR}}/{}/{value}",
                             rel_dir.display()
                         ))
                     }

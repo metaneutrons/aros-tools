@@ -67,7 +67,7 @@ function(aros_build_host_sfdc)
     if(DEFINED AROS_SFDC_SOURCE_ROOT)
         set(_source_root_raw "${AROS_SFDC_SOURCE_ROOT}")
     else()
-        set(_source_root_raw "${CMAKE_SOURCE_DIR}")
+        set(_source_root_raw "${AROS_SOURCE_DIR}")
     endif()
     set(_build_root_raw "${CMAKE_BINARY_DIR}")
     foreach(_pair IN ITEMS

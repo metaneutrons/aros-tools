@@ -239,7 +239,7 @@ function(aros_build_grub2)
     if(DEFINED AROS_GRUB_SOURCE_ROOT)
         set(_source_root_raw "${AROS_GRUB_SOURCE_ROOT}")
     else()
-        set(_source_root_raw "${CMAKE_SOURCE_DIR}")
+        set(_source_root_raw "${AROS_SOURCE_DIR}")
     endif()
     _aros_grub_safe_value("${GB_MMAKE_ID}: source root" "${_source_root_raw}")
     cmake_path(ABSOLUTE_PATH _source_root_raw NORMALIZE

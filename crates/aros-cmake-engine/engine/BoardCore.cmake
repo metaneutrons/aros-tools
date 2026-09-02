@@ -8,23 +8,23 @@ function(aros_add_board_autoinit target)
     endif()
 
     set(_sources
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/functions.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/libraries_nolibs.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/libraries.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/__showerror.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/commandline.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/commandname.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/_programname.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/__stdiowin.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/stdiowin.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/fromwb.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/initexitsets.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/startupvars.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/programentries.c"
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit/detach.c")
+        "${AROS_SOURCE_DIR}/compiler/autoinit/functions.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/libraries_nolibs.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/libraries.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/__showerror.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/commandline.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/commandname.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/_programname.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/__stdiowin.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/stdiowin.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/fromwb.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/initexitsets.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/startupvars.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/programentries.c"
+        "${AROS_SOURCE_DIR}/compiler/autoinit/detach.c")
     add_library("${target}" STATIC ${_sources})
     target_include_directories("${target}" PRIVATE
-        "${CMAKE_SOURCE_DIR}/compiler/autoinit"
-        "${CMAKE_SOURCE_DIR}/rom/exec")
+        "${AROS_SOURCE_DIR}/compiler/autoinit"
+        "${AROS_SOURCE_DIR}/rom/exec")
     target_compile_options("${target}" PRIVATE -fno-stack-protector)
 endfunction()

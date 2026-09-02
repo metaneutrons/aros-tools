@@ -35,7 +35,7 @@ const SEEDS: &[(&str, &str)] = &[
     // config/make.cfg.in:17 builds TARGETDIR from $(TOP)/bin/<arch>-<cpu>; the
     // CMake binary directory is its counterpart.
     ("TOP", "${AROS_BUILD_DIR}"),
-    ("SRCDIR", "${CMAKE_SOURCE_DIR}"),
+    ("SRCDIR", "${AROS_SOURCE_DIR}"),
     ("TARGETDIR", "${AROS_BUILD_DIR}"),
     ("GENDIR", "${AROS_BUILD_DIR}/gen"),
     ("HOSTDIR", "${AROS_BUILD_DIR}/hosttools"),
