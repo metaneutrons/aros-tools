@@ -1,5 +1,15 @@
 version: 2
 
+# Grouping is deliberately split by update type. A group of `patterns: ['*']`
+# over every update type bundles breaking changes with harmless ones, and one
+# broken dependency then blocks the whole batch. That is exactly what happened:
+# #11 carried toml 0.8 -> 1.1, which 7 -> 8 and sha2 0.10 -> 0.11 in one pull
+# request, sha2 changed its digest type, and nine checks went red at once.
+#
+# Minor and patch stay grouped, because reviewing them one by one buys nothing.
+# Majors are left ungrouped on purpose, so each arrives alone and can be judged,
+# adapted or held on its own.
+
 updates:
   - package-ecosystem: cargo
     directory: /
@@ -9,9 +19,33 @@ updates:
       time: '05:00'
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    # A release that is yanked hours after publication should never reach a
+    # pull request. Majors wait longer because their fallout is larger.
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
     groups:
-      rust-dependencies:
-        patterns: ['*']
+      rust-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  # The toolchain governs the whole build, so it never shares a pull request
+  # with anything else. `rust-toolchain` is a valid package-ecosystem value;
+  # the GitHub docs table omits it, but the published dependabot-2.0 schema
+  # lists it.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '05:05'
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 14
 
   - package-ecosystem: github-actions
     directory: /
@@ -21,9 +55,16 @@ updates:
       time: '05:15'
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
     groups:
-      github-actions:
-        patterns: ['*']
+      github-actions-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: /docs-site
@@ -33,6 +74,20 @@ updates:
       time: '05:30'
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
     groups:
-      documentation-dependencies:
-        patterns: ['*']
+      docs-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # @astrojs/check 0.9.10 declares `typescript: ^5.0.0 || ^6.0.0`. With 7.x
+      # `npm ci` aborts with ERESOLVE, which is how #10 was broken. Version 6
+      # stays allowed; the bound lifts once the peer range names 7.
+      - dependency-name: typescript
+        versions:
+          - '>=7'
