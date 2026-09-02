@@ -1,0 +1,1 @@
+int always_cxx_link_fixture;

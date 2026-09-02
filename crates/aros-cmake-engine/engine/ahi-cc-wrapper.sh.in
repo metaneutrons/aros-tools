@@ -1,0 +1,186 @@
+#!/bin/sh
+# Generated closed AHI cross-link adapter.  Compile-only invocations stay on
+# Clang; link invocations become a direct relocatable ld.lld call so a Darwin
+# Clang configuration cannot delegate to the host linker.
+set -eu
+
+compiler=@AROS_AHI_WRAPPER_COMPILER_QUOTED@
+collector=@AROS_AHI_WRAPPER_COLLECTOR_QUOTED@
+linker=@AROS_AHI_WRAPPER_LINKER_QUOTED@
+emulation=@AROS_AHI_WRAPPER_EMULATION_QUOTED@
+
+compile_only=
+compiler_probe=
+stdin_input=
+language_selected=
+for argument do
+    case "$argument" in
+        -c|-S|-E|-M|-MM|-MD|-MMD)
+            compile_only=1
+            ;;
+        --version|-v|-V|-qversion|-version|-print-*)
+            compiler_probe=1
+            ;;
+        -)
+            stdin_input=1
+            ;;
+        -x|-x?*)
+            language_selected=1
+            ;;
+    esac
+done
+if [ -n "$compile_only" ] || [ -n "$compiler_probe" ]; then
+    # Drivers build MODEFILE.o by concatenating two .s files into stdin.  The
+    # historic target compiler treated that as preprocessed assembler; Clang
+    # needs the language stated explicitly because stdin has no suffix.
+    if [ -n "$stdin_input" ] && [ -z "$language_selected" ]; then
+        exec "$compiler" -x assembler-with-cpp "$@"
+    fi
+    exec "$compiler" "$@"
+fi
+
+source_count=0
+link_input=
+output=
+expect_output=
+for argument do
+    if [ -n "$expect_output" ]; then
+        output=$argument
+        expect_output=
+        continue
+    fi
+    case "$argument" in
+        -o)
+            expect_output=1
+            ;;
+        -o?*)
+            output=${argument#-o}
+            ;;
+        *.c|*.cc|*.cpp|*.cxx|*.s|*.S)
+            source_count=$((source_count + 1))
+            link_input=1
+            ;;
+        *.o|*.a)
+            link_input=1
+            ;;
+    esac
+done
+if [ -n "$expect_output" ]; then
+    echo "AHI compiler wrapper: missing argument after -o" >&2
+    exit 2
+fi
+if [ "$source_count" -gt 1 ]; then
+    echo "AHI compiler wrapper: multiple link-time sources are unsupported" >&2
+    exit 2
+fi
+if [ "$source_count" -eq 0 ] && [ -z "$link_input" ] && [ -z "$output" ]; then
+    exec "$compiler" "$@"
+fi
+if [ -z "$output" ]; then
+    output=a.out
+fi
+
+tmpdir=$(/usr/bin/mktemp -d /tmp/aros-ahi-cc.XXXXXX)
+cleanup() {
+    /bin/rm -f "$tmpdir/conftest.o" "$tmpdir/compile.args" "$tmpdir/link.args"
+    /bin/rmdir "$tmpdir" 2>/dev/null || :
+}
+trap cleanup 0
+trap 'exit 1' 1 2 15
+
+if [ "$source_count" -eq 1 ]; then
+    compile_args="$tmpdir/compile.args"
+    skip=
+    for argument do
+        if [ -n "$skip" ]; then
+            skip=
+            continue
+        fi
+        case "$argument" in
+            -o|-L|-l|-u|-T|--script|--undefined)
+                skip=1
+                ;;
+            -o?*|-L?*|-l?*|-u?*|-T?*|--script=*|--undefined=*|\
+            -Wl,*|-static|-nostartfiles|-noixemul)
+                ;;
+            *)
+                printf '%s\n' "$argument" >> "$compile_args"
+                ;;
+        esac
+    done
+    set --
+    while IFS= read -r argument || [ -n "$argument" ]; do
+        set -- "$@" "$argument"
+    done < "$compile_args"
+    "$compiler" -c "$@" -o "$tmpdir/conftest.o"
+fi
+
+link_args="$tmpdir/link.args"
+printf '%s\n' -m "$emulation" -r -o "$output" > "$link_args"
+if [ "$source_count" -eq 1 ]; then
+    printf '%s\n' "$tmpdir/conftest.o" >> "$link_args"
+fi
+pending=
+for argument do
+    if [ "$pending" = link-value ]; then
+        printf '%s\n' "$argument" >> "$link_args"
+        pending=
+        continue
+    fi
+    if [ -n "$pending" ]; then
+        pending=
+        continue
+    fi
+    case "$argument" in
+        -o)
+            pending=output-value
+            ;;
+        -L|-l|-u|-T|--script|--undefined|-e|-z)
+            printf '%s\n' "$argument" >> "$link_args"
+            pending=link-value
+            ;;
+        -o?*)
+            ;;
+        *.c|*.cc|*.cpp|*.cxx|*.s|*.S)
+            ;;
+        *.o|*.a|*.so)
+            printf '%s\n' "$argument" >> "$link_args"
+            ;;
+        -L?*|-l?*|-u?*|-T?*|--script=*|--undefined=*|-e?*|-z?*|\
+        --whole-archive|--no-whole-archive|--start-group|--end-group)
+            printf '%s\n' "$argument" >> "$link_args"
+            ;;
+        -Wl,*)
+            linker_words=${argument#-Wl,}
+            (
+                IFS=,
+                set -f
+                set -- $linker_words
+                for linker_word do
+                    if [ "$linker_word" != -r ]; then
+                        printf '%s\n' "$linker_word"
+                    fi
+                done
+            ) >> "$link_args"
+            ;;
+        -target|-arch|-isystem|-m|-include|-Xclang)
+            pending=compiler-value
+            ;;
+        --target=*|-m*|-f*|-D*|-I*|-g|-O*|-W*|-Q*|-std=*|-pthread|-pipe|\
+        -static|-nostartfiles|-noixemul|-r)
+            ;;
+        *)
+            echo "AHI compiler wrapper: unsupported link argument '$argument'" >&2
+            exit 2
+            ;;
+    esac
+done
+if [ -n "$pending" ]; then
+    echo "AHI compiler wrapper: missing argument after linker/compiler option" >&2
+    exit 2
+fi
+set --
+while IFS= read -r argument || [ -n "$argument" ]; do
+    set -- "$@" "$argument"
+done < "$link_args"
+"$collector" --ld "$linker" -- "$@"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Generated AHI archiver adapter.  AHI's Autoconf era Makefiles pass GNU ar's
+# legacy leading-dash operation form (-ru); llvm-ar accepts the same operation
+# only without that dash.
+set -eu
+
+tool=@AROS_AHI_WRAPPER_AR_QUOTED@
+if [ "${1-}" = "-ru" ]; then
+    shift
+    exec "$tool" ru "$@"
+fi
+exec "$tool" "$@"

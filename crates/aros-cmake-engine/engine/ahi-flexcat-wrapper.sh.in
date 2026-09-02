@@ -1,0 +1,13 @@
+#!/bin/sh
+# Generated AHI FlexCat adapter.  AROS' MetaMake catalog rule accepts the
+# utility's documented warning statuses below 10; upstream AHI Makefiles do
+# not express that distinction and would otherwise reject valid catalogs.
+set -u
+
+tool=@AROS_AHI_WRAPPER_FLEXCAT_QUOTED@
+"$tool" "$@"
+status=$?
+if [ "$status" -lt 10 ]; then
+    exit 0
+fi
+exit "$status"

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aros-common",
+    "crates/aros-cmake-engine",
     "crates/aros-board",
     "crates/aros-ahi-runner",
     "crates/aros-fetch",
