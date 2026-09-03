@@ -157,7 +157,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
             )
 
         secret_domains = {
-            'homebrew': ('secrets.PACKAGE_PUBLISH_TOKEN',),
+            'homebrew': ('secrets.HOMEBREW_TAP_TOKEN',),
             'r2': ('secrets.R2_ACCESS_KEY_ID', 'secrets.R2_SECRET_ACCESS_KEY'),
             'apt': ('secrets.APT_GPG_PRIVATE_KEY', 'secrets.APT_GPG_PASSPHRASE'),
             'aur': ('secrets.AUR_SSH_PRIVATE_KEY',),
@@ -264,7 +264,7 @@ secret_patterns = {
     'apt-signing': re.compile(r"\$\{\{\s*secrets\.APT_GPG_"),
     'r2-publication': re.compile(r"\$\{\{\s*secrets\.R2_"),
     'aur-publication': re.compile(r"\$\{\{\s*secrets\.AUR_"),
-    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.PACKAGE_PUBLISH_TOKEN"),
+    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_TAP_TOKEN"),
 }
 
 def workflow_jobs(path: Path) -> dict[str, str]:

@@ -716,7 +716,7 @@ jobs:
         id: update
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           SOURCE_REPOSITORY_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -891,7 +891,7 @@ jobs:
       - name: Require tap qualification and merge
         if: steps.update.outputs.pr != ''
         env:
-          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PR: ${{ steps.update.outputs.pr }}
           EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}
         run: |
