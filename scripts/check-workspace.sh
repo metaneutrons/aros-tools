@@ -177,6 +177,50 @@ PY
         return 1
     fi
     cargo test --workspace --all-features --locked
+
+    # The engine's CMake fixtures are product-contract tests, not Rust unit
+    # tests. Build the normal executables they drive, then execute every
+    # host-compatible fixture against the same exact source identity validated
+    # above. Keeping discovery in the canonical gate prevents a newly added
+    # fixture from existing only as a manually remembered test.
+    local command_name discovered_count executed_count host_machine host_system
+    local skipped_count test_case test_name tools_directory
+    for command_name in cmake ninja; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            printf 'error: %s is required by the exact-source engine tests; see CONTRIBUTING.md\n' \
+                "$command_name" >&2
+            return 1
+        fi
+    done
+    cargo build --workspace --all-features --locked
+    tools_directory="$repository_root/target/debug"
+    host_system=$(uname -s)
+    host_machine=$(uname -m)
+    discovered_count=0
+    executed_count=0
+    skipped_count=0
+    while IFS= read -r test_case; do
+        discovered_count=$((discovered_count + 1))
+        test_name=${test_case##*/}
+        if [[ "$test_name" == 'GrubBuildTest.cmake' ]] &&
+            [[ "$host_system" != 'Darwin' || "$host_machine" != 'arm64' ]]; then
+            skipped_count=$((skipped_count + 1))
+            printf 'engine test omitted: %s requires Darwin/arm64; current host is %s/%s\n' \
+                "$test_name" "$host_system" "$host_machine"
+            continue
+        fi
+        executed_count=$((executed_count + 1))
+        printf 'engine test %d: %s\n' "$executed_count" "$test_name"
+        AROS_TEST_TOOLS_DIR="$tools_directory" \
+            cmake -P "$test_case"
+    done < <(find "$repository_root/crates/aros-cmake-engine/engine/tests" \
+        -maxdepth 1 -type f -name '*Test.cmake' -print | sort)
+    if [[ "$discovered_count" -eq 0 ]]; then
+        printf '%s\n' 'error: no CMake engine contract tests were discovered' >&2
+        return 1
+    fi
+    printf 'engine tests passed: %d executed, %d host-qualified omission(s), %d discovered\n' \
+        "$executed_count" "$skipped_count" "$discovered_count"
 }
 
 run_portable_tests() {

@@ -53,6 +53,10 @@ cd ~/Source/AROS
 aros info
 ```
 
+`aros info` reports the four embedded target defaults and labels them as the
+pristine-upstream contract. It does not create `aros-targets.toml` or any other
+file in the checkout.
+
 To develop through your own fork while retaining the canonical project as the
 reviewed `upstream` remote, create the checkout this way instead:
 
@@ -65,8 +69,10 @@ aros info
 ```
 
 Use upstream's own configure/MetaMake instructions for a complete product
-build. The standalone helpers remain directly useful in this checkout; inspect
-their closed contracts before invoking one:
+build. The embedded profiles let `aros source sync` validate a candidate graph
+without checkout-owned tools metadata, but they do not invent a cross-toolchain
+lock or source compatibility patches. The standalone helpers remain directly
+useful in this checkout; inspect their closed contracts before invoking one:
 
 ```sh
 aros-transpiler --help
@@ -76,9 +82,9 @@ aros-collect --help
 aros-verify --help
 ```
 
-The integrated `aros setup`, locked cross-toolchain and translated-CMake
-product flow require the reviewed consumer metadata carried by AROS-NX; they
-are not presented as pristine-upstream commands. See the
+The integrated locked cross-toolchain and translated-CMake product flow still
+require the reviewed consumer metadata and source compatibility carried by
+AROS-NX; they are not presented as pristine-upstream product commands. See the
 [upstream workflow](/aros-tools/workflows/upstream-aros/) for component examples
 and the current qualification boundary.
 

@@ -72,7 +72,7 @@ For an AROS checkout, begin with the workflow guide that matches your source:
 
 | Source tree | Guide | Current boundary |
 | --- | --- | --- |
-| Pristine upstream AROS | [Upstream AROS workflow](https://aros.metaneutrons.cc/aros-tools/workflows/upstream-aros/) | source initialization and independent component tools work; complete native GNU Make support is still being qualified |
+| Pristine upstream AROS | [Upstream AROS workflow](https://aros.metaneutrons.cc/aros-tools/workflows/upstream-aros/) | source initialization, graph validation and independent component tools use built-in target defaults; a complete product still needs the reviewed source compatibility layer |
 | AROS-NX | [AROS-NX workflow](https://aros.metaneutrons.cc/aros-tools/workflows/aros-nx/) | reviewed target and release contracts are available through the selected checkout |
 
 Do not use an unpublished release URL as a shortcut. The
@@ -114,9 +114,11 @@ cannot validate itself.
 
 The project is deliberately strict about what it may infer:
 
-- **Explicit inputs:** target profiles and host-compiler declarations belong to
-  the selected AROS checkout. Released cross-toolchains are selected through
-  that checkout's `aros-toolchains.lock.toml` and release manifests.
+- **Explicit inputs:** a checkout's `aros-targets.toml`, when present, is the
+  complete authoritative override. A pristine checkout uses the documented
+  target and host-compiler contract embedded in the installed tools; a broken
+  override never falls back silently. Released cross-toolchains are selected
+  through that checkout's `aros-toolchains.lock.toml` and release manifests.
 - **No hidden dependency pins:** ordinary packages and sources are not silently
   pinned. The transpiler only records documented capability fingerprints for
   genuinely opaque recipe inputs, and fails with a precise diagnostic when it
@@ -168,6 +170,11 @@ compiles every transpiler/verifier test target there. One Linux lane alone
 executes the source-coupled transpiler/verifier tests against the large
 recursive checkout and exact AROS-NX source qualification; they are never
 silently run or skipped without that oracle.
+That exact-source lane also discovers every checked-in CMake-engine fixture and
+executes every host-compatible one; the real GRUB host-build fixture is an
+explicit Darwin/arm64 release qualification and is visibly omitted elsewhere.
+Adding a fixture therefore broadens the gate rather than creating a manual test
+convention.
 The separate
 documentation workflow calls `docs` directly and then uploads the verified
 `dist` tree through a separately pinned Pages action.

@@ -15,7 +15,7 @@ build system cannot be expected to hold it.
 
 ## What is done
 
-**The engine is a crate.** `aros-cmake-engine` embeds all 158 files through a
+**The engine is a crate.** `aros-cmake-engine` embeds all 160 files through a
 build script that walks them into one sorted table and pins a SHA-256 over path,
 length and content. `materialize()` places them in a build directory and makes
 that directory hold exactly the engine, removing anything foreign, because a
@@ -63,15 +63,17 @@ reports the digest, file count and API version in use, and the generated graph
 opens with `aros_require_engine_api_version(N)` so a mismatch is named rather
 than surfacing as an unknown function.
 
-**Measured**: `aros build --preset pc-x86_64 --target kernel-exec --clean`
-reaches step 22 of 3291 and stops on nine `AF0501` fetch errors. The unchanged
-tools on `main` reach the same step and stop on the same nine. The path is
-behaviour-equal and those failures are pre-existing, in `aros-fetch`, unrelated
-to this work.
+**Measured**: in an isolated AROS-NX worktree at
+`9f15d22ee680247db490af1ca20a7994f7152509`, using the locked
+`toolchain-v1-20260831-rc3` macOS/AArch64 `pc-x86_64` payload,
+`aros build --preset pc-x86_64 --target kernel-exec --jobs 12 --clean`
+configures 1,235 MetaMake files into 923 concrete targets and completes all
+3,291 Ninja steps. `SYS/boot/pc/Libs/exec.library` links successfully. A second
+non-clean invocation also completes successfully.
 
 AROS-NX PR #28 removes the 159 files from that tree.
 
-## What is left
+## Qualification and remaining boundary
 
 **The fixtures are done.** All 35 engine tests pass.
 
@@ -119,13 +121,36 @@ incomplete set untouched.
 
 `AhiBuildTest` passes in 22 seconds, matching the pre-move measurement.
 
-**The sweep is 35 of 35.** `GrubBuildTest` depends on reaching
-`ftpmirror.gnu.org` for grub-2.12 and will fail without that.
+**The local Darwin/arm64 sweep is 35 of 35.** `GrubBuildTest` builds the real PC,
+EFI64 and EFI32 host-tool lanes. It downloads grub-2.12 from the canonical GNU
+origin with the GNU mirror redirector as a fallback; both origins share the
+same required SHA-256 identity. The canonical exact-source workspace gate now
+discovers every `*Test.cmake` file and executes every host-compatible fixture.
+The GRUB test is reported as an explicit host-qualified omission elsewhere, so
+the suite remains a visible CI contract rather than a manual list.
 
-**Built-in profiles.** `aros-targets.toml` holds nothing tree-specific, so the
-same profiles can serve as defaults for a checkout without one. That is what
-makes a pristine upstream tree configurable, and it is not written yet.
+**Built-in profiles are complete.** The four current target profiles and the
+host LLVM declaration are embedded in `aros-common`, including explicit
+MetaMake selectors. An absent checkout file selects them without writing into
+the tree. An existing file remains an authoritative complete override and a
+malformed or unreadable override fails closed. Both `aros info` and isolated
+`source sync` qualification cover the pristine-checkout path.
 
-**The nine AF0501 fetch failures** are pre-existing and worth their own look:
-`aros-fetch` refuses to publish into a temporary directory it just created, in a
-freshly cleaned build tree.
+**The nine AF0501 fetch failures are closed at their owner.** Configure-time
+source-inventory fetching formerly wrote `.<archive>-fetched` inside the source
+tree whose contents are protected by the `aros-fetch` receipt. The first Ninja
+invocation therefore correctly saw an external mutation, attempted a safe
+replacement, and then correctly refused to clobber the existing source. The
+engine now stores completion state below `CMakeFiles/aros-fetch`, outside the
+payload. It removes only its exact obsolete in-payload marker when upgrading an
+old build tree; the fetcher's receipt and no-clobber rules remain unchanged.
+`FetchArchivePatchTest` covers clean fetch, legacy migration, patch refresh and
+final Ninja no-op, while `SourceInventoryReconfigureTest` covers the
+configure-time path.
+
+The remaining upstream boundary is no longer engine placement or target
+configuration. A complete translated product from an entirely pristine
+upstream checkout still needs the source-side compatibility changes and an
+explicit released-toolchain selection currently carried by AROS-NX. Component
+tools, checkout lifecycle and target-graph validation remain usable without
+copying tools-owned files into upstream AROS.

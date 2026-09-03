@@ -48,8 +48,13 @@ ShellCheck, locked strict Clippy, locked rustdoc, audit, deny, machete, the
 locked Astro build, and locked workspace tests. CI uses the closed
 source-independent `portable-test` suite on all
 four supported hosts and reserves the recursive exact-source `test` gate for
-one Linux lane. The default local `all` contract remains complete. The separate
-documentation workflow calls `docs` directly and uploads only its
+one Linux lane. That lane also builds the ordinary workspace executables,
+discovers every CMake-engine fixture and runs each host-compatible fixture
+against the same source identity; `cmake` and `ninja` are required. The real
+GRUB host-build fixture is an explicit Darwin/arm64 release qualification and
+is visibly omitted on other hosts. The default local `all` contract remains
+complete. The
+separate documentation workflow calls `docs` directly and uploads only its
 verified output through a separately pinned Pages action.
 
 Setting `AROS_TEST_SOURCE_ROOT` opts into a real source-init/sync/transpiler

@@ -42,8 +42,9 @@ the Pages deployment and DNS state.
   qualification gates before the one-time final GitHub publication. Then roll
   the exact immutable release bytes forward to signed APT/R2, protected
   Homebrew and AUR and verify every public channel.
-- Complete qualification of the GNU Make backend for pristine upstream product
-  builds before claiming that workflow as generally supported.
+- Complete qualification of the remaining source compatibility and
+  released-toolchain-selection boundary before claiming translated product
+  builds from an entirely pristine upstream checkout as generally supported.
 
 The page is intentionally conservative: it records no release as verified
 until the immutable release inventory itself supplies the evidence.
