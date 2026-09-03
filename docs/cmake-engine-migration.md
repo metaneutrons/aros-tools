@@ -73,8 +73,7 @@ AROS-NX PR #28 removes the 159 files from that tree.
 
 ## What is left
 
-**The fixtures are done.** 33 of 35 engine tests pass, and the two that do not
-are outside this work.
+**The fixtures are done.** All 35 engine tests pass.
 
 Sixteen places had been loading engine modules through the source tree, so they
 were measuring the engine in the checkout while reporting on this one. They
@@ -93,18 +92,35 @@ Every child that test starts now has a three-minute bound. A wedged tool used to
 hang the whole sweep, and a hang reports nothing while blocking everything behind
 it. The slowest healthy run measured here is 22 seconds.
 
-**`AhiBuildTest` found a defect in `aros-ahi-runner`.** Measured four ways: the
-old engine with the current runner hangs; the old engine with the runner
-AROS-NG's in-tree workspace built passes in 22 seconds; the current runner hangs
-in both debug and release. So it is the runner's code, not optimisation and not
-this engine. The test used to point at a binary nobody builds any more, which is
-why nobody saw it. The shared process primitives are not the cause: stdin is
-null and both streams are drained to EOF on their own threads. The hang sits in
-`RunSfdcHostTool.cmake`'s `perl -c`, reached from the AHI fixture but not from
-`SfdcHostToolTest`, which passes.
+**`AhiBuildTest` found a real defect, and it was not where the symptom pointed.**
+The test hung, so the first reading was a hang in the runner. Two things were
+wrong, one in the test's own infrastructure and one in the runner.
 
-**`GrubBuildTest`** cannot download grub-2.12 and fails the same way in the
-untouched AROS-NG tree.
+The mock make knew only `install`. The runner had been changed to compile with
+`make all` while configure's logical prefix is authoritative and then install
+into a private staging root, and the mock delegated everything that was not
+`install` to the real make -- which ran the real AHI build under a mock
+compiler and did not converge. That was the hang. `--version` and
+`gcc-include` still go to the real make, the first because the engine probes
+for GNU make and the second because it generates the three headers the runner
+inspects from checked-in SFD descriptions and needs no compiler.
+
+With the hang gone the actual defect surfaced in seconds.
+`measure_live_set` classified the installed product set as wholly absent or
+wholly present and rejected anything between as "partial; refusing a mixed
+replacement". A deleted product is the ordinary reason a build runs again, so
+that refusal left the only repair as deleting the rest by hand. The snapshot now
+records absence per product. Publication never distinguished the two cases: the
+snapshot exists to be measured again before and after the commit, so a
+concurrent writer cannot slip in, and recording absence keeps that comparison
+exact. The test that pinned the old behaviour is replaced by the guarantee that
+matters -- a partial set is repaired, and a failed install still leaves an
+incomplete set untouched.
+
+`AhiBuildTest` passes in 22 seconds, matching the pre-move measurement.
+
+**The sweep is 35 of 35.** `GrubBuildTest` depends on reaching
+`ftpmirror.gnu.org` for grub-2.12 and will fail without that.
 
 **Built-in profiles.** `aros-targets.toml` holds nothing tree-specific, so the
 same profiles can serve as defaults for a checkout without one. That is what
