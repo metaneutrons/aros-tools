@@ -73,18 +73,38 @@ AROS-NX PR #28 removes the 159 files from that tree.
 
 ## What is left
 
-**Two engine fixtures.** The engine's own CMake tests used to inherit the tree
-and the tool paths from the checkout they sat in. `EngineTestTree.cmake` now
-supplies both and fails loudly rather than skipping, and `AROS.cmake` reaches
-BootstrapSDK through `CMAKE_MODULE_PATH` so a fixture can still substitute its
-stub, which it previously did by relying on `CMAKE_SOURCE_DIR` naming the
-fixture.
+**The fixtures are done.** 33 of 35 engine tests pass, and the two that do not
+are outside this work.
 
-33 of 35 pass. `FetchArchivePatchTest` builds its fixture inline and does not
-give it a compiler, which the real `BootstrapSDK` now needs. `AhiBuildTest` used
-to fail immediately because it could not find `aros-ahi-runner`; it now finds it
-and runs a real AHI build, which takes long enough that its result is not yet
-recorded here.
+Sixteen places had been loading engine modules through the source tree, so they
+were measuring the engine in the checkout while reporting on this one. They
+passed only because AROS-NX still carries a copy. `AROS_TEST_ENGINE_DIR` now
+names the engine beside the tests, and every driver passes it down with the tree
+and the tool paths.
+
+`FetchArchivePatchTest` generates its own CMakeLists and stubs BootstrapSDK
+beside it, which worked while `CMAKE_SOURCE_DIR` named the fixture; it now puts
+its own directory first in `CMAKE_MODULE_PATH` and declares itself as its
+`AROS_SOURCE_DIR`, because the patch it tests lives beside that generated file.
+`AhiBuildTest` runs on mock tools, so it receives only the engine location:
+handing a mock fixture real executable paths makes it build for real.
+
+Every child that test starts now has a three-minute bound. A wedged tool used to
+hang the whole sweep, and a hang reports nothing while blocking everything behind
+it. The slowest healthy run measured here is 22 seconds.
+
+**`AhiBuildTest` found a defect in `aros-ahi-runner`.** Measured four ways: the
+old engine with the current runner hangs; the old engine with the runner
+AROS-NG's in-tree workspace built passes in 22 seconds; the current runner hangs
+in both debug and release. So it is the runner's code, not optimisation and not
+this engine. The test used to point at a binary nobody builds any more, which is
+why nobody saw it. The shared process primitives are not the cause: stdin is
+null and both streams are drained to EOF on their own threads. The hang sits in
+`RunSfdcHostTool.cmake`'s `perl -c`, reached from the AHI fixture but not from
+`SfdcHostToolTest`, which passes.
+
+**`GrubBuildTest`** cannot download grub-2.12 and fails the same way in the
+untouched AROS-NG tree.
 
 **Built-in profiles.** `aros-targets.toml` holds nothing tree-specific, so the
 same profiles can serve as defaults for a checkout without one. That is what
