@@ -109,11 +109,21 @@ struct FileSnapshot {
     mode: u16,
 }
 
+/// The live product set as it stood, one entry per declared product, in the
+/// contract's own order.
+///
+/// A missing product is a legitimate state: a build has to be able to restore
+/// one that was deleted, and refusing to act on a set that is merely incomplete
+/// leaves the only repair as deleting the rest by hand. Absence is therefore
+/// recorded per product rather than rejected.
+///
+/// What the snapshot is for does not change. It is measured again before and
+/// after publication, so a concurrent writer cannot slip between the private
+/// install and the commit; recording absence keeps that comparison exact,
+/// because a product that reappears while the install was prepared is a
+/// difference like any other.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum LiveSnapshot {
-    Absent,
-    Complete(Vec<FileSnapshot>),
-}
+struct LiveSnapshot(Vec<Option<FileSnapshot>>);
 
 #[derive(Clone, Debug)]
 struct PreparedProduct {
@@ -377,16 +387,15 @@ fn validate_elf(contract: &Contract, relative: &Path, contents: &[u8]) -> AhiRes
 }
 
 fn measure_live_set(contract: &Contract) -> AhiResult<LiveSnapshot> {
-    let mut present = Vec::with_capacity(contract.install_products.len());
-    let mut absent = 0_usize;
+    let mut entries = Vec::with_capacity(contract.install_products.len());
     for target in &contract.install_products {
         match measure_optional_file_with_mode(target) {
             Ok(Some((identity, contents, mode))) if matches!(mode, 0o644 | 0o755) => {
-                present.push(FileSnapshot {
+                entries.push(Some(FileSnapshot {
                     identity,
                     contents,
                     mode,
-                });
+                }));
             }
             Ok(Some((_, _, mode))) => {
                 return Err(product_failure(
@@ -397,7 +406,7 @@ fn measure_live_set(contract: &Contract) -> AhiResult<LiveSnapshot> {
                     ),
                 ));
             }
-            Ok(None) => absent += 1,
+            Ok(None) => entries.push(None),
             Err(error) => {
                 return Err(product_failure(
                     contract,
@@ -409,16 +418,7 @@ fn measure_live_set(contract: &Contract) -> AhiResult<LiveSnapshot> {
             }
         }
     }
-    if absent == contract.install_products.len() {
-        Ok(LiveSnapshot::Absent)
-    } else if absent == 0 {
-        Ok(LiveSnapshot::Complete(present))
-    } else {
-        Err(product_failure(
-            contract,
-            "live AHI product set is partial; refusing a mixed replacement",
-        ))
-    }
+    Ok(LiveSnapshot(entries))
 }
 
 fn measure_file_with_mode(path: &Path) -> std::io::Result<(FileIdentity, Vec<u8>, u16)> {

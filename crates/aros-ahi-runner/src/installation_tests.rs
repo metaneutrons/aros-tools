@@ -272,7 +272,40 @@ printf safe >"$prefix/Libs/two"
 }
 
 #[test]
-fn partial_live_set_is_rejected_without_changes() {
+fn a_partial_live_set_is_repaired_rather_than_refused() {
+    // A deleted product is the ordinary reason a build runs again. Refusing to
+    // act on a set that is merely incomplete left the only repair as deleting
+    // the rest by hand, so this is the behaviour that matters: the missing
+    // product comes back and the surviving one is replaced from the same
+    // validated set.
+    let temp = TempDir::new().unwrap();
+    let contract = test_contract(
+        temp.path(),
+        r#"#!/bin/sh
+set -eu
+prefix=
+for argument in "$@"; do
+  case "$argument" in PREFIX=*) prefix=${argument#PREFIX=} ;; esac
+done
+/bin/mkdir -p "$prefix/C" "$prefix/Libs"
+printf repaired-one >"$prefix/C/one"
+printf repaired-two >"$prefix/Libs/two"
+"#,
+    );
+    install_complete_live(&contract, b"old-one", b"old-two");
+    fs::remove_file(&contract.install_products[1]).unwrap();
+
+    let prepared = prepare(&contract).unwrap();
+    publish(&contract, &prepared).unwrap();
+
+    assert_live(&contract, b"repaired-one", b"repaired-two");
+    assert_no_private_stages(&contract);
+}
+
+#[test]
+fn a_failed_install_leaves_a_partial_live_set_alone() {
+    // The concurrency guard still has to hold over an incomplete set: what was
+    // present stays byte-for-byte, and what was missing stays missing.
     let temp = TempDir::new().unwrap();
     let contract = test_contract(temp.path(), "#!/bin/sh\nexit 99\n");
     let target = &contract.install_products[0];
@@ -281,10 +314,7 @@ fn partial_live_set_is_rejected_without_changes() {
 
     let error = prepare(&contract).unwrap_err();
 
-    assert_eq!(
-        error.diagnostic().code,
-        DiagnosticCode::AhiProductValidation
-    );
+    assert_eq!(error.diagnostic().code, DiagnosticCode::AhiBuild);
     assert_eq!(fs::read(target).unwrap(), b"existing");
     assert!(!contract.install_products[1].exists());
 }
