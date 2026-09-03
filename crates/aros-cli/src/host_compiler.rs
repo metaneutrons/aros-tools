@@ -4,7 +4,7 @@ use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive,
     require_absolute_state_path, require_sha256, tree_inventory_excluding,
 };
-use aros_common::target::{HostCompilerConfig, TargetProfile};
+use aros_common::target::HostCompilerConfig;
 use aros_common::toolchain_manifest::ArosToolchainManifestEntry;
 use console::{style, Emoji};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
@@ -108,10 +108,11 @@ pub fn host_platform_label(host_key: &str) -> &str {
 ///
 /// Returns an error for missing, malformed, or incomplete configuration.
 pub fn load_host_compiler_config(repo_root: &Path) -> Result<HostCompilerConfig> {
-    let config =
-        TargetProfile::load_config(&crate::repo::targets_file(repo_root)).into_diagnostic()?;
+    let config = crate::repo::load_target_config(repo_root)?;
     config.host_compiler.ok_or_else(|| {
-        miette::miette!("aros-targets.toml has no required [host_compiler] configuration")
+        miette::miette!(
+            "the effective target contract has no required [host_compiler] configuration"
+        )
     })
 }
 

@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+const BUILT_IN_CONFIG_PATH: &str = "<built-in aros-targets.toml>";
+const BUILT_IN_CONFIG: &str = include_str!("../config/aros-targets.toml");
+
 /// Host compiler asset declaration per host platform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,19 +114,46 @@ impl TargetProfile {
                 file: path.display().to_string(),
                 message: format!("cannot read configuration: {error}"),
             })?;
-        let config: ArosConfig =
-            toml::from_str(&content).map_err(|error| crate::error::ArosError::Configuration {
+        parse_config(&content, &path.display().to_string())
+    }
+
+    /// Load a checkout override when present, otherwise use the profiles and
+    /// host-compiler contract embedded in this aros-tools build.
+    ///
+    /// A malformed or unreadable checkout override never falls back silently:
+    /// only an absent `aros-targets.toml` selects the built-in contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an existing override cannot be read, parsed, or
+    /// validated, or when the built-in contract is invalid.
+    pub fn load_config_or_builtin(path: &Path) -> Result<ArosConfig> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Self::load_config(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                parse_config(BUILT_IN_CONFIG, BUILT_IN_CONFIG_PATH)
+            }
+            Err(error) => Err(crate::error::ArosError::Configuration {
                 file: path.display().to_string(),
-                message: error.to_string(),
-            })?;
-        validate_config(path, &config)?;
-        Ok(config)
+                message: format!("cannot inspect configuration: {error}"),
+            }),
+        }
     }
 }
 
-fn validate_config(path: &Path, config: &ArosConfig) -> Result<()> {
+fn parse_config(content: &str, label: &str) -> Result<ArosConfig> {
+    let config: ArosConfig =
+        toml::from_str(content).map_err(|error| crate::error::ArosError::Configuration {
+            file: label.to_owned(),
+            message: error.to_string(),
+        })?;
+    validate_config(label, &config)?;
+    Ok(config)
+}
+
+fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
     let invalid = |message: String| crate::error::ArosError::Configuration {
-        file: path.display().to_string(),
+        file: label.to_owned(),
         message,
     };
     if config.targets.is_empty() {
@@ -248,6 +278,39 @@ mod tests {
         let error =
             TargetProfile::load_from_file(&directory.path().join("missing.toml")).unwrap_err();
         assert!(matches!(error, crate::ArosError::Configuration { .. }));
+    }
+
+    #[test]
+    fn absent_checkout_configuration_uses_complete_built_in_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let config =
+            TargetProfile::load_config_or_builtin(&directory.path().join("aros-targets.toml"))
+                .unwrap();
+
+        assert!(config.host_compiler.is_some());
+        assert_eq!(
+            config
+                .targets
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>(),
+            ["pc-x86_64", "rpi-aarch64", "arm-raspi", "opensbi-riscv64"]
+        );
+        assert!(config
+            .targets
+            .iter()
+            .all(|profile| profile.transpiler.is_some()));
+    }
+
+    #[test]
+    fn malformed_checkout_override_never_falls_back_to_built_ins() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("aros-targets.toml");
+        fs::write(&path, "not valid toml = [").unwrap();
+
+        let error = TargetProfile::load_config_or_builtin(&path).unwrap_err();
+        assert!(matches!(error, crate::ArosError::Configuration { .. }));
+        assert!(error.to_string().contains(&path.display().to_string()));
     }
 
     #[test]

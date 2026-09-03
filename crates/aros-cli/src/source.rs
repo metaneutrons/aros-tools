@@ -952,9 +952,8 @@ fn validate_candidate(
 fn validate_target_graphs(repo_root: &Path, checkout: &Path, output_root: &Path) -> Result<usize> {
     let tools = build_tools::ensure(repo_root)?;
     let transpiler = tools.bin_dir.join(executable_name("aros-transpiler"));
-    let profiles = repo::load_target_profiles(checkout).wrap_err(
-        "candidate graph validation requires checkout-owned aros-targets.toml; use --no-transpile only when intentionally synchronizing pristine upstream",
-    )?;
+    let profiles = repo::load_target_profiles(checkout)
+        .wrap_err("candidate graph validation could not resolve the effective target profiles")?;
     let outputs = output_root.join("graphs");
     fs::create_dir_all(&outputs)
         .into_diagnostic()

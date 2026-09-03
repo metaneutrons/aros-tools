@@ -111,6 +111,16 @@ impl Upstream {
         git(&self.seed, ["push", "origin", "master"]);
         git(&self.seed, ["rev-parse", "HEAD"])
     }
+
+    fn remove_and_push(&self, name: &str) -> String {
+        git(&self.seed, ["rm", name]);
+        git(
+            &self.seed,
+            ["commit", "-m", "remove checkout-owned tools configuration"],
+        );
+        git(&self.seed, ["push", "origin", "master"]);
+        git(&self.seed, ["rev-parse", "HEAD"])
+    }
 }
 
 fn add_component(upstream: &Upstream) -> PathBuf {
@@ -657,6 +667,40 @@ fn sync_fast_forwards_only_after_real_target_graph_validation() {
     assert_ne!(Path::new(source), checkout);
     assert!(Path::new(source).join(common).starts_with(source));
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 declared target profile"));
+}
+
+#[test]
+fn sync_qualifies_a_pristine_upstream_candidate_with_built_in_profiles() {
+    let upstream = Upstream::new();
+    let checkout = upstream.root.path().join("checkout");
+    assert!(source_init(&upstream, &checkout).status.success());
+    let expected = upstream.remove_and_push("aros-targets.toml");
+    let tools = install_fake_tools(upstream.root.path());
+    let log = upstream.root.path().join("transpiler.log");
+
+    let output = run(Command::new(aros())
+        .current_dir(&checkout)
+        .env("AROS_BUILD_TOOLS_DIR", &tools)
+        .env("AROS_FAKE_TRANSPILE_LOG", &log)
+        .args(["source", "sync", "--upstream"])
+        .arg(&upstream.remote));
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git(&checkout, ["rev-parse", "HEAD"]), expected);
+    assert!(!checkout.join("aros-targets.toml").exists());
+    assert_eq!(
+        fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "validated")
+            .count(),
+        4
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("4 declared target profile(s)"));
 }
 
 #[test]

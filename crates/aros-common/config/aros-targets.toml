@@ -1,0 +1,79 @@
+# Built-in AROS target and host-compiler defaults.
+#
+# A checkout may override this complete contract with its own
+# aros-targets.toml.  The explicit transpiler selector blocks are required so
+# pristine upstream checkouts need neither CMakePresets.json nor tools-owned
+# files in their source tree.
+
+[host_compiler]
+llvm_version = "18.1.8"
+base_url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}"
+
+[host_compiler.hosts.macos-aarch64]
+asset = "clang+llvm-{version}-arm64-apple-macos11.tar.xz"
+
+[host_compiler.hosts.macos-x86_64]
+asset = "clang+llvm-{version}-x86_64-apple-darwin.tar.xz"
+
+[host_compiler.hosts.linux-x86_64]
+asset = "clang+llvm-{version}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+
+[host_compiler.hosts.linux-aarch64]
+asset = "clang+llvm-{version}-aarch64-linux-gnu.tar.xz"
+
+[[targets]]
+name = "pc-x86_64"
+arch = "x86_64"
+platform = "pc"
+bsp = "generic"
+features = ["smp", "acpi", "hdaudio", "ahci"]
+
+[targets.transpiler]
+family = ""
+variant = ""
+toolchain = "llvm"
+cpu32 = "i386"
+use_mmu = true
+
+[[targets]]
+name = "rpi-aarch64"
+arch = "aarch64"
+platform = "raspi"
+bsp = "bcm2711-bcm2712"
+features = ["smp", "genet", "rp1", "i2s", "hdmi-audio"]
+
+[targets.transpiler]
+family = ""
+variant = ""
+toolchain = "llvm"
+cpu32 = ""
+use_mmu = true
+
+[[targets]]
+name = "arm-raspi"
+arch = "arm"
+platform = "raspi"
+bsp = "bcm2835"
+features = ["pwm-audio", "sdhost"]
+float_abi = "hard"
+
+[targets.transpiler]
+family = ""
+variant = ""
+toolchain = "llvm"
+cpu32 = ""
+use_mmu = true
+
+[[targets]]
+name = "opensbi-riscv64"
+arch = "riscv64"
+platform = "opensbi"
+bsp = "uefi-opensbi"
+features = ["smp", "uefi", "acpi", "pci", "nvme", "xhci"]
+
+[targets.transpiler]
+family = ""
+variant = ""
+toolchain = "llvm"
+cpu32 = ""
+use_mmu = true

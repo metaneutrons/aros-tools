@@ -12,9 +12,18 @@ pub fn targets_file(repo_root: &Path) -> PathBuf {
     repo_root.join(TARGETS_FILE)
 }
 
-/// Load every configured target from the repository SSOT.
+/// Load every target from a checkout override or the built-in tools SSOT.
 pub fn load_target_profiles(repo_root: &Path) -> Result<Vec<aros_common::TargetProfile>> {
-    aros_common::TargetProfile::load_from_file(&targets_file(repo_root)).into_diagnostic()
+    Ok(load_target_config(repo_root)?.targets)
+}
+
+/// Load the full target and host-compiler contract.
+///
+/// An existing checkout file is authoritative and fail-closed. A pristine
+/// upstream checkout without that tools-owned file uses the contract embedded
+/// in aros-tools.
+pub fn load_target_config(repo_root: &Path) -> Result<aros_common::target::ArosConfig> {
+    aros_common::TargetProfile::load_config_or_builtin(&targets_file(repo_root)).into_diagnostic()
 }
 
 /// Finds the repository root from a directory inside an AROS checkout.
@@ -104,5 +113,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["pc-x86_64"]
         );
+    }
+
+    #[test]
+    fn pristine_upstream_layout_uses_built_in_profiles() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("AROS");
+        for directory in ["arch", "compiler", "rom"] {
+            std::fs::create_dir_all(root.join(directory)).expect("checkout layout");
+        }
+        std::fs::write(root.join("configure"), "").expect("configure marker");
+        std::fs::write(root.join("Makefile.in"), "").expect("make marker");
+
+        assert_eq!(
+            load_target_profiles(&root)
+                .expect("built-in profiles")
+                .into_iter()
+                .map(|profile| profile.name)
+                .collect::<Vec<_>>(),
+            ["pc-x86_64", "rpi-aarch64", "arm-raspi", "opensbi-riscv64"]
+        );
+        assert!(!targets_file(&root).exists());
     }
 }
