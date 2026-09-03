@@ -34,10 +34,13 @@ if(NOT _build_result EQUAL 0)
         "source-inventory ordered rebuild failed (${_build_result})\n"
         "${_build_stdout}\n${_build_stderr}")
 endif()
-if(NOT EXISTS "${_build}/Ports/fixture/.fixture-fetched" OR
+file(GLOB _fetch_stamps "${_build}/CMakeFiles/aros-fetch/*.stamp")
+list(LENGTH _fetch_stamps _fetch_stamp_count)
+if(NOT _fetch_stamp_count EQUAL 1 OR
+   EXISTS "${_build}/Ports/fixture/.fixture-fetched" OR
    NOT EXISTS "${_build}/reconfigured.txt")
     message(FATAL_ERROR
-        "fetch completion did not trigger the required CMake regeneration\n"
+        "fetch completion was not isolated from its source payload\n"
         "${_build_stdout}\n${_build_stderr}")
 endif()
 

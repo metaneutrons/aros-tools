@@ -4,8 +4,11 @@ project(SourceInventoryReconfigureFixture LANGUAGES NONE)
 include("${CMAKE_CURRENT_LIST_DIR}/../../SourceInventory.cmake")
 
 set(_destination "${CMAKE_BINARY_DIR}/Ports/fixture")
-set(_stamp "${_destination}/.fixture-fetched")
+aros_fetch_completion_stamp(_stamp fixture-fetch)
 set(_inventory "${_destination}/package/source.c")
+set(_legacy_stamp "${_destination}/.fixture-fetched")
+file(MAKE_DIRECTORY "${_destination}")
+file(TOUCH "${_legacy_stamp}")
 
 set(AROS_FETCH_BIN "${CMAKE_BINARY_DIR}/fake-aros-fetch")
 file(WRITE "${AROS_FETCH_BIN}" [=[#!/bin/sh
@@ -39,7 +42,8 @@ aros_fetch_source_inventory(
     BASE "${_destination}"
     PATCH_ORIGINS ""
     PATCHES "::")
-if(NOT EXISTS "${_inventory}" OR NOT EXISTS "${_stamp}")
+if(NOT EXISTS "${_inventory}" OR NOT EXISTS "${_stamp}" OR
+   EXISTS "${_legacy_stamp}")
     message(FATAL_ERROR "configure-time source inventory was not materialised")
 endif()
 file(WRITE "${CMAKE_BINARY_DIR}/reconfigured.txt" "complete source inventory\n")

@@ -2285,10 +2285,10 @@ set_property(GLOBAL PROPERTY AROS_FETCH_TARGETS "")
 #                     LOCAL_PATCH_FILES <files...>])
 #
 # Declares a fetch target. The recipe mirrors the %fetch macro's invocation of
-# aros-fetch. The completion stamp lives in the concrete unpack
-# destination rather than the optionally shared archive cache: an archive may
-# be shared by several profiles, but each profile still has to unpack and patch
-# its own Ports tree.
+# aros-fetch. The completion stamp is keyed by the concrete target but lives in
+# CMakeFiles, outside both the optionally shared archive cache and the
+# receipt-protected source tree. An archive may be shared by several profiles,
+# but each profile still has to unpack and patch its own Ports tree.
 function(aros_fetch_archive)
     set(oneValueArgs NAME ARCHIVE SUFFIXES ORIGINS CHECKSUMS LOCATION DESTINATION BASE
         PATCH_ORIGINS PATCHES SOURCE_DIR)
@@ -2325,7 +2325,9 @@ function(aros_fetch_archive)
     if(NOT _base)
         set(_base "${FA_DESTINATION}")
     endif()
-    set(_stamp "${FA_DESTINATION}/.${FA_ARCHIVE}-fetched")
+    aros_fetch_completion_stamp(_stamp "${FA_NAME}")
+    cmake_path(GET _stamp PARENT_PATH _stamp_directory)
+    set(_legacy_stamp "${FA_DESTINATION}/.${FA_ARCHIVE}-fetched")
 
     # Strict external-CMake profiles track their in-tree patches directly.
     # aros-fetch deliberately caches both the copied patch and an `.applied` marker, so a
@@ -2454,9 +2456,14 @@ function(aros_fetch_archive)
 
     add_custom_command(
         OUTPUT "${_stamp}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_stamp_directory}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_loc}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_base}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FA_DESTINATION}"
+        # Remove only the completion marker written by older engine versions.
+        # It was CMake state, not fetched payload, and invalidates aros-fetch's
+        # receipt when left inside the destination during an engine upgrade.
+        COMMAND ${CMAKE_COMMAND} -E rm -f "${_legacy_stamp}"
         ${_patch_refresh_commands}
         COMMAND "${AROS_FETCH_BIN}"
                 --archive-origins "${FA_ORIGINS}"

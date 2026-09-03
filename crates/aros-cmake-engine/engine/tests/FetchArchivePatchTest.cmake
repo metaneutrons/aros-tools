@@ -15,6 +15,7 @@ set(_archive_origin "${_root}/archive-origin")
 set(_patch "${_source}/patches/value.patch")
 set(_product "${_build}/product.txt")
 set(_fetched_source "${_build}/ports/fixture-src/value.txt")
+set(_legacy_fetch_stamp "${_build}/ports/.fixture-fetched")
 
 file(MAKE_DIRECTORY
     "${_source}/cmake"
@@ -86,6 +87,11 @@ aros_fetch_archive(
     LOCAL_PATCH_FILES "${_patch}")
 
 get_target_property(_fetch_stamp fixture-fetch AROS_FETCH_COMPLETION_STAMP)
+cmake_path(IS_PREFIX _ports "${_fetch_stamp}" NORMALIZE _stamp_in_payload)
+if(_stamp_in_payload)
+    message(FATAL_ERROR
+        "fetch completion stamp must not mutate the receipt-protected source tree")
+endif()
 add_custom_command(
     OUTPUT "${CMAKE_BINARY_DIR}/product.txt"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
@@ -161,6 +167,26 @@ _configure_fixture(initial)
 _build_fixture(initial TRUE)
 _assert_contents("${_fetched_source}" "first\n" "initial patched source")
 _assert_contents("${_product}" "first\n" "initial product")
+
+# Simulate a build tree produced by the former engine. The marker was owned by
+# CMake but lived inside the receipt-protected destination. Removing the new
+# completion stamp forces the fetch rule to run and prove that it migrates the
+# obsolete marker before aros-fetch validates its receipt.
+file(TOUCH "${_legacy_fetch_stamp}")
+file(REMOVE "${_build}/product.txt")
+file(GLOB _completion_stamps "${_build}/CMakeFiles/aros-fetch/*.stamp")
+list(LENGTH _completion_stamps _completion_stamp_count)
+if(NOT _completion_stamp_count EQUAL 1)
+    message(FATAL_ERROR
+        "expected exactly one external fetch completion stamp before migration")
+endif()
+file(REMOVE ${_completion_stamps})
+_build_fixture(migrated TRUE)
+if(EXISTS "${_legacy_fetch_stamp}")
+    message(FATAL_ERROR "legacy in-payload fetch completion stamp survived migration")
+endif()
+_assert_contents("${_fetched_source}" "first\n" "migrated patched source")
+_assert_contents("${_product}" "first\n" "migrated product")
 
 # Ensure Ninja observes the patch as newer than the successful fetch stamp even
 # on filesystems with coarse timestamp resolution.
