@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(DefineHeaderBuild NONE)
+# This fixture stubs BootstrapSDK; its directory has to come first.
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 if(NOT TEST_DEPENDENCY OR NOT EXISTS "${TEST_DEPENDENCY}")
     message(FATAL_ERROR "TEST_DEPENDENCY must name the fixture input")

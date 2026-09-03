@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -18,6 +19,9 @@ foreach(_mode IN ITEMS development locked)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}"
             -B "${_build}-${_mode}" -G Ninja
+            "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+            "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+            ${AROS_TEST_TOOL_ARGS}
             "-DTEST_LOCKED_TOOLCHAIN=${_locked}"
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout

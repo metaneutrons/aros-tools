@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
-get_filename_component(_repository "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(_repository "${AROS_TEST_TREE}")
 set(_module "${_repository}/cmake/ArosTools.cmake")
 
 if(DEFINED TEST_CASE)

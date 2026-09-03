@@ -143,6 +143,18 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
     writeln!(out, "# this file -- which is what `aros golden` does.").unwrap();
     writeln!(out, "{rule}").unwrap();
     writeln!(out).unwrap();
+
+    // First statement, before anything can call into the engine. The calls
+    // below are a contract, and a graph meeting an engine that does not
+    // implement it should say so rather than fail as an unknown function
+    // eighty thousand lines further down.
+    writeln!(
+        out,
+        "aros_require_engine_api_version({})",
+        aros_cmake_engine::api_version()
+    )
+    .unwrap();
+    writeln!(out).unwrap();
     out
 }
 

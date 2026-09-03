@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -94,6 +95,9 @@ file(WRITE "${_dependency}" "literal recipe input\n")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_build_source}" -B "${_build}"
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         -G Ninja "-DTEST_DEPENDENCY=${_dependency}"
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout
@@ -166,6 +170,9 @@ file(MAKE_DIRECTORY "${_make_root}")
 file(WRITE "${_make_dependency}" "literal recipe input\n")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_build_source}" -B "${_make_build}"
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         -G "Unix Makefiles" "-DTEST_DEPENDENCY=${_make_dependency}"
     RESULT_VARIABLE _make_configure_result
     OUTPUT_VARIABLE _make_configure_stdout

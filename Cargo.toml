@@ -46,6 +46,7 @@ doc_markdown = "allow"
 
 [workspace.dependencies]
 aros-board = { path = "crates/aros-board" }
+aros-cmake-engine = { path = "crates/aros-cmake-engine" }
 aros-common = { path = "crates/aros-common" }
 aros-release = { path = "crates/aros-release" }
 aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }

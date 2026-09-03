@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 find_program(_cxx NAMES clang++ g++ c++)
 if(NOT _cxx)
@@ -13,8 +14,8 @@ endif()
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_root "${_temp_root}/aros-cxx-runtime-headers-${_suffix}")
 set(_fake "${_root}/include")
-set(_stdc "${CMAKE_CURRENT_LIST_DIR}/../../compiler/crt/stdc/include")
-set(_posixc "${CMAKE_CURRENT_LIST_DIR}/../../compiler/crt/posixc/include")
+set(_stdc "${AROS_TEST_TREE}/compiler/crt/stdc/include")
+set(_posixc "${AROS_TEST_TREE}/compiler/crt/posixc/include")
 
 file(MAKE_DIRECTORY "${_fake}/aros/stdc" "${_fake}/aros/types")
 file(WRITE "${_fake}/aros/features.h" "/* fixture */\n")

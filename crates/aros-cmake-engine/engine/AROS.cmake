@@ -1,3 +1,9 @@
+# Where this engine's modules are. Set by the engine's CMakeLists.txt in a
+# normal configure; derived here so a module included on its own -- which the
+# focused CMake fixtures do -- still resolves its siblings.
+if(NOT DEFINED AROS_CMAKE_ENGINE_DIR OR "${AROS_CMAKE_ENGINE_DIR}" STREQUAL "")
+    set(AROS_CMAKE_ENGINE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+endif()
 # AROS-NX Core CMake Module (v0.1.0)
 # Modern Multi-Platform Build System for AROS
 
@@ -59,7 +65,12 @@ set(AROS_ARCH_PACKAGE_DIRS
     "${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}")
 list(REMOVE_DUPLICATES AROS_ARCH_PACKAGE_DIRS)
 
-include("${AROS_CMAKE_ENGINE_DIR}/BootstrapSDK.cmake")
+# Through the module path, not a fixed path: a focused fixture supplies its own
+# BootstrapSDK stub by putting its directory first in CMAKE_MODULE_PATH. That
+# used to work because CMAKE_SOURCE_DIR named the fixture; with the engine
+# outside any tree the module path is what expresses it.
+list(APPEND CMAKE_MODULE_PATH "${AROS_CMAKE_ENGINE_DIR}")
+include(BootstrapSDK)
 
 # Target output directories.  These mirror config/make.cfg.in:97-124 and the
 # effective defaults written by genmodule; keeping the complete module layout
@@ -126,12 +137,12 @@ aros_bootstrap_sdk_includes()
 # consumers deliberately use the prefix-owned ld.lld directly, so the
 # transpiled graph must publish and name that equivalent input explicitly.
 # The historic make graph produces it under AROS_LIB, but the CMake graph has
-# no concrete owner for compiler/startup's raw object rules.  Its source is
-# deliberately located relative to this module so the focused CMake fixture
-# exercises the real source rather than maintaining a copy.
+# no concrete owner for compiler/startup's raw object rules.  The source is
+# named against the AROS tree: it used to be reached relative to this module,
+# which worked only while the module sat inside the checkout.
 if(AROS_CROSS_TOOLCHAIN_ROOT)
     set(_aros_cxx_startup_source
-        "${CMAKE_CURRENT_LIST_DIR}/../compiler/startup/cxx-startup.c")
+        "${AROS_SOURCE_DIR}/compiler/startup/cxx-startup.c")
     if(NOT EXISTS "${_aros_cxx_startup_source}")
         message(FATAL_ERROR
             "Locked AROS C++ consumer cannot find cxx-startup source: "

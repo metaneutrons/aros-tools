@@ -50,6 +50,13 @@ pub struct TargetProfile {
     pub features: Vec<String>,
     #[serde(default)]
     pub float_abi: Option<String>,
+    /// Bootloader the target images are built for.
+    ///
+    /// Absent means "derive it from the platform", which is what every current
+    /// profile wants: only `pc` takes one. Declaring it explicitly stays
+    /// possible so a future platform is not forced through this default.
+    #[serde(default)]
+    pub bootloader: Option<String>,
     /// Complete MetaMake selector context. New checkout contracts should
     /// declare this directly; older AROS-NX checkouts may be bridged from a
     /// separately validated CMake preset by the source orchestrator.
@@ -70,6 +77,20 @@ pub struct TranspilerProfile {
 }
 
 impl TargetProfile {
+    /// The bootloader this profile builds for.
+    ///
+    /// `CMakePresets.json` set `AROS_TARGET_BOOTLOADER` to `grub2gfx` for the
+    /// `pc` platform and to the empty string everywhere else, so the default is
+    /// exactly that rule rather than a new decision.
+    #[must_use]
+    pub fn bootloader(&self) -> &str {
+        match self.bootloader.as_deref() {
+            Some(explicit) => explicit,
+            None if self.platform == "pc" => "grub2gfx",
+            None => "",
+        }
+    }
+
     /// Load targets from the authoritative configuration file.
     ///
     /// # Errors

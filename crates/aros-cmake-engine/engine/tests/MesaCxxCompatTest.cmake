@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 find_program(MESA_CXX_COMPAT_COMPILER NAMES clang++ REQUIRED)
 
-cmake_path(GET CMAKE_CURRENT_LIST_DIR PARENT_PATH _cmake_dir)
-cmake_path(GET _cmake_dir PARENT_PATH _source_dir)
+set(_source_dir "${AROS_TEST_TREE}")
 set(_compat_dir
     "${_source_dir}/workbench/libs/mesa/libcompiler/cxx-compat")
 set(_compat_header "${_compat_dir}/new")

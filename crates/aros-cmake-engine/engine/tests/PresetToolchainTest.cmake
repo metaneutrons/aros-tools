@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
-get_filename_component(_root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(_root "${AROS_TEST_TREE}")
 file(READ "${_root}/CMakePresets.json" _presets)
 string(JSON _count LENGTH "${_presets}" configurePresets)
 if(_count LESS 1)

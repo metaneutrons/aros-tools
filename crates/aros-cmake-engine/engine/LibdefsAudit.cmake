@@ -1,4 +1,10 @@
 include_guard(GLOBAL)
+# Where this engine's modules are. Set by the engine's CMakeLists.txt in a
+# normal configure; derived here so a module included on its own -- which the
+# focused CMake fixtures do -- still resolves its siblings.
+if(NOT DEFINED AROS_CMAKE_ENGINE_DIR OR "${AROS_CMAKE_ENGINE_DIR}" STREQUAL "")
+    set(AROS_CMAKE_ENGINE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+endif()
 
 # Registers one concrete MetaMake declaration where a broad Rust bootstrap
 # header can shadow the exact upstream genmodule header.

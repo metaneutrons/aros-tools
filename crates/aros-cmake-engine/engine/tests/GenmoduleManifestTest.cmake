@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 include("${CMAKE_CURRENT_LIST_DIR}/../GenmoduleManifest.cmake")
 
-get_filename_component(_source_root
-    "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(_source_root "${AROS_TEST_TREE}")
 
 function(_assert_list_length list_var expected label)
     list(LENGTH ${list_var} _actual)

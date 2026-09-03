@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
-get_filename_component(_repo "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(_repo "${AROS_TEST_TREE}")
 set(_fixture "${CMAKE_CURRENT_LIST_DIR}/host-generated-header-dependency")
 
 # The producer registration lives in AROS.cmake, while the dependency

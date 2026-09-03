@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -13,7 +14,13 @@ set(_archive "${_origin}/fixture.tar.gz")
 if(DEFINED ENV{AROS_FETCH_BIN} AND NOT "$ENV{AROS_FETCH_BIN}" STREQUAL "")
     set(_fetch "$ENV{AROS_FETCH_BIN}")
 else()
-    find_program(_fetch NAMES aros-fetch)
+    # The workspace's own build, which is where the other engine tests take
+    # their executables from. PATH is a fallback, not the first answer: a
+    # differently versioned aros-fetch on PATH would test the wrong binary.
+    set(_fetch "${AROS_TEST_TOOLS_DIR}/aros-fetch")
+    if(NOT EXISTS "${_fetch}")
+        find_program(_fetch NAMES aros-fetch)
+    endif()
 endif()
 if(NOT EXISTS "${_fetch}" OR IS_DIRECTORY "${_fetch}")
     message(FATAL_ERROR

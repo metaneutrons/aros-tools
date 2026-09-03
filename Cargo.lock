@@ -119,6 +119,7 @@ name = "aros-cli"
 version = "0.1.0"
 dependencies = [
  "aros-board",
+ "aros-cmake-engine",
  "aros-common",
  "aros-release",
  "clap",
@@ -249,6 +250,7 @@ dependencies = [
 name = "aros-transpiler"
 version = "0.1.0"
 dependencies = [
+ "aros-cmake-engine",
  "aros-common",
  "clap",
  "glob",

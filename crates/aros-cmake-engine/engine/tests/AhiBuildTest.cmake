@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
-get_filename_component(_repo "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+set(_repo "${AROS_TEST_TREE}")
 include("${_repo}/cmake/Executable.cmake")
 set(_fixture "${CMAKE_CURRENT_LIST_DIR}/ahi-build")
 set(_perl "/usr/bin/perl")
@@ -11,7 +12,10 @@ if(DEFINED ENV{AROS_AHI_RUNNER_BIN} AND
    NOT "$ENV{AROS_AHI_RUNNER_BIN}" STREQUAL "")
     set(_ahi_runner "$ENV{AROS_AHI_RUNNER_BIN}")
 else()
-    find_program(_ahi_runner NAMES aros-ahi-runner)
+    set(_ahi_runner "${AROS_TEST_TOOLS_DIR}/aros-ahi-runner")
+    if(NOT EXISTS "${_ahi_runner}")
+        find_program(_ahi_runner NAMES aros-ahi-runner)
+    endif()
 endif()
 aros_path_is_executable("${_ahi_runner}" _ahi_runner_executable)
 if(NOT _ahi_runner_executable)
@@ -28,7 +32,10 @@ function(_ahi_configure mode case expect_success expected)
         set(_build "${_root}/${mode} build")
     endif()
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}"
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS} -G Ninja
             "-DAROS_REPO_ROOT=${_repo}" "-DHOST_PERL=${_perl}"
             "-DAROS_AHI_RUNNER_BIN=${_ahi_runner}"
             "-DAHI_FIXTURE_MODE=${mode}" "-DAHI_FIXTURE_CASE=${case}"
