@@ -9,6 +9,12 @@ endif()
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_root "${_temp_root}/aros external cmake ${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/external-cmake")
+find_program(_external_test_clang NAMES clang)
+if(NOT _external_test_clang)
+    message(FATAL_ERROR
+        "ExternalCMakeTest requires Clang because its target contract uses "
+        "Clang's -target option")
+endif()
 
 function(_configure case expect_success expected_message)
     set(_build "${_root}/${case}")
@@ -17,6 +23,7 @@ function(_configure case expect_success expected_message)
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
+            "-DCMAKE_C_COMPILER=${_external_test_clang}"
             "-DEXTERNAL_CMAKE_CASE=${case}"
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout

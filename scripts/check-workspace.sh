@@ -185,7 +185,7 @@ PY
     # fixture from existing only as a manually remembered test.
     local command_name discovered_count executed_count host_machine host_system
     local skipped_count test_case test_name tools_directory
-    for command_name in cmake ninja; do
+    for command_name in clang cmake ninja; do
         if ! command -v "$command_name" >/dev/null 2>&1; then
             printf 'error: %s is required by the exact-source engine tests; see CONTRIBUTING.md\n' \
                 "$command_name" >&2

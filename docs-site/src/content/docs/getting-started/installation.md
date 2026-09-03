@@ -50,7 +50,7 @@ source-independent `portable-test` suite on all
 four supported hosts and reserves the recursive exact-source `test` gate for
 one Linux lane. That lane also builds the ordinary workspace executables,
 discovers every CMake-engine fixture and runs each host-compatible fixture
-against the same source identity; `cmake` and `ninja` are required. The real
+against the same source identity; `clang`, `cmake` and `ninja` are required. The real
 GRUB host-build fixture is an explicit Darwin/arm64 release qualification and
 is visibly omitted on other hosts. The default local `all` contract remains
 complete. The

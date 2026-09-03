@@ -41,7 +41,7 @@ four supported hosts and the recursive exact-source `test` gate on one Linux
 lane. This reduces runner work without weakening the default local `all`
 contract. The exact-source gate also builds the workspace executables and runs
 every host-compatible `aros-cmake-engine` CMake fixture against that same
-qualified checkout; `cmake` and `ninja` are therefore required for this gate.
+qualified checkout; `clang`, `cmake` and `ninja` are therefore required for this gate.
 The real GRUB host-build fixture is an explicit Darwin/arm64 release
 qualification and is reported as an omission on other hosts. The separate
 documentation workflow runs the same locked npm/Astro
