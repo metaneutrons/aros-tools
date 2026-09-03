@@ -10,11 +10,16 @@ string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_build "${_temp_root}/aros-always-cxx-link-${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/always-cxx-link")
 
-foreach(_mode IN ITEMS development locked)
+foreach(_mode IN ITEMS development-no-lld development-lld locked)
     if(_mode STREQUAL "locked")
         set(_locked ON)
+        set(_development_lld OFF)
+    elseif(_mode STREQUAL "development-lld")
+        set(_locked OFF)
+        set(_development_lld ON)
     else()
         set(_locked OFF)
+        set(_development_lld OFF)
     endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}"
@@ -23,6 +28,7 @@ foreach(_mode IN ITEMS development locked)
             "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
             ${AROS_TEST_TOOL_ARGS}
             "-DTEST_LOCKED_TOOLCHAIN=${_locked}"
+            "-DTEST_DEVELOPMENT_LLD=${_development_lld}"
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
         ERROR_VARIABLE _stderr)
@@ -53,5 +59,8 @@ if(NOT EXISTS "${_build}-locked/SYS/Developer/lib/cxx-startup.o")
         "always-cxx-link locked fixture did not publish Developer/lib/cxx-startup.o")
 endif()
 
-file(REMOVE_RECURSE "${_build}-development" "${_build}-locked")
+file(REMOVE_RECURSE
+    "${_build}-development-no-lld"
+    "${_build}-development-lld"
+    "${_build}-locked")
 message(STATUS "always C++ linker contract test passed")

@@ -18,6 +18,16 @@ if(TEST_LOCKED_TOOLCHAIN)
     set(AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES
         ${_expected_cxx_runtime_libraries})
     add_custom_target(linklibs-startup)
+elseif(TEST_DEVELOPMENT_LLD)
+    # Select a known executable without depending on which LLVM packages the
+    # host image happens to install. The fixture inspects the generated link
+    # template and never invokes this spelling as a linker.
+    set(AROS_LLD_BIN "${CMAKE_COMMAND}")
+else()
+    # A defined CMake false constant suppresses find_program while remaining
+    # false in the engine's feature branch. This makes the no-LLD fallback a
+    # deterministic contract on hosts that do happen to provide ld.lld.
+    set(AROS_LLD_BIN FALSE)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
 
@@ -90,10 +100,25 @@ if(TEST_LOCKED_TOOLCHAIN)
         message(FATAL_ERROR
             "locked release did not pass its consumer-owned Developer sysroot")
     endif()
-else()
+elseif(TEST_DEVELOPMENT_LLD)
     if(CMAKE_CXX_LINK_EXECUTABLE MATCHES "<CMAKE_CXX_COMPILER>")
         message(FATAL_ERROR
-            "development fallback unexpectedly selected the AROS C++ driver")
+            "development LLD path unexpectedly retained the C++ driver")
+    endif()
+    set(_expected_development_link_prefix
+        "\"${AROS_COLLECT_BIN}\" --ld \"${CMAKE_COMMAND}\" -- -r")
+    string(FIND "${CMAKE_CXX_LINK_EXECUTABLE}"
+        "${_expected_development_link_prefix}"
+        _development_link_prefix_index)
+    if(NOT _development_link_prefix_index EQUAL 0)
+        message(FATAL_ERROR
+            "development LLD path did not select the collector contract: "
+            "${CMAKE_CXX_LINK_EXECUTABLE}")
+    endif()
+else()
+    if(NOT CMAKE_CXX_LINK_EXECUTABLE MATCHES "<CMAKE_CXX_COMPILER>")
+        message(FATAL_ERROR
+            "development no-LLD fallback did not retain the host C++ driver")
     endif()
 endif()
 
