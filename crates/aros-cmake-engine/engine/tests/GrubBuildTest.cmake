@@ -61,10 +61,18 @@ foreach(_contract_spec IN ITEMS
     file(READ "${_contract}" _contract_content)
     string(FIND "${_contract_content}"
         "set(GB_HOST_PATH [==[${_closed_host_path}]==])" _host_path_position)
+    string(FIND "${_contract_content}"
+        "set(GB_SOURCE_URL_PRIMARY [==[https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz]==])"
+        _primary_source_position)
+    string(FIND "${_contract_content}"
+        "set(GB_SOURCE_URL_FALLBACK [==[https://ftpmirror.gnu.org/grub/grub-2.12.tar.xz]==])"
+        _fallback_source_position)
     if(NOT _actual_contract_count EQUAL _contract_count OR
-       _host_path_position LESS 0)
+       _host_path_position LESS 0 OR
+       _primary_source_position LESS 0 OR
+       _fallback_source_position LESS 0)
         message(FATAL_ERROR
-            "${_contract_target} omitted its complete products or closed host PATH")
+            "${_contract_target} omitted its products, sources or closed host PATH")
     endif()
 endforeach()
 

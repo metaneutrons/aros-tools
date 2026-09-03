@@ -488,8 +488,8 @@ function(aros_build_grub2)
     endforeach()
     set_property(GLOBAL PROPERTY AROS_GRUB2_REGISTERED_OUTPUTS "${_registered_outputs}")
 
-    # Fetch is shared between lanes, but its contract still fixes the one
-    # permitted source URL, archive SHA and output location.  Preserve the
+    # Fetch is shared between lanes, but its contract still fixes the two
+    # permitted official source URLs, archive SHA and output location. Preserve the
     # logical CMake spelling for Ninja, and use the physical spelling only in
     # the runner's containment checks.
     get_property(_fetch_declared GLOBAL PROPERTY AROS_GRUB2_FETCH_DECLARED)
@@ -503,7 +503,8 @@ function(aros_build_grub2)
             "# Generated closed GRUB2 fetch contract.  Do not edit.\n"
             "set(GB_BUILD_ROOT [==[${_build_root}]==])\n"
             "set(GB_ARCHIVE [==[${_archive}]==])\n"
-            "set(GB_SOURCE_URL [==[${_AROS_GRUB2_SOURCE_URL}]==])\n"
+            "set(GB_SOURCE_URL_PRIMARY [==[${_AROS_GRUB2_SOURCE_URL_PRIMARY}]==])\n"
+            "set(GB_SOURCE_URL_FALLBACK [==[${_AROS_GRUB2_SOURCE_URL_FALLBACK}]==])\n"
             "set(GB_ARCHIVE_SHA256 [==[${_AROS_GRUB2_ARCHIVE_SHA256}]==])\n")
         _aros_grub_write_if_changed("${_fetch_contract}" "${_fetch_content}")
         add_custom_command(
@@ -548,7 +549,10 @@ function(aros_build_grub2)
     _aros_grub_contract_set(GB_ARCHIVE "${_archive}")
     _aros_grub_contract_set(GB_PATCH "${_patch}")
     _aros_grub_contract_set(GB_INSTALL_MANIFEST "${_install_manifest}")
-    _aros_grub_contract_set(GB_SOURCE_URL "${_AROS_GRUB2_SOURCE_URL}")
+    _aros_grub_contract_set(GB_SOURCE_URL_PRIMARY
+        "${_AROS_GRUB2_SOURCE_URL_PRIMARY}")
+    _aros_grub_contract_set(GB_SOURCE_URL_FALLBACK
+        "${_AROS_GRUB2_SOURCE_URL_FALLBACK}")
     _aros_grub_contract_set(GB_ARCHIVE_SHA256 "${_AROS_GRUB2_ARCHIVE_SHA256}")
     _aros_grub_contract_set(GB_PATCH_SHA256 "${_actual_patch_sha256}")
     # Keep the audited /opt/homebrew/opt spellings in the environment and

@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 
 include("${CMAKE_CURRENT_LIST_DIR}/GrubSourceLock.cmake")
 set(_GB_ARCHIVE_SHA256 "${_AROS_GRUB2_ARCHIVE_SHA256}")
-set(_GB_SOURCE_URL "${_AROS_GRUB2_SOURCE_URL}")
+set(_GB_SOURCE_URL_PRIMARY "${_AROS_GRUB2_SOURCE_URL_PRIMARY}")
+set(_GB_SOURCE_URL_FALLBACK "${_AROS_GRUB2_SOURCE_URL_FALLBACK}")
 set(_GB_PATCH_RELATIVE "arch/all-pc/boot/grub2-aros/grub-2.12-aros.diff")
 
 function(_gb_real_path path output)
@@ -231,12 +232,14 @@ endif()
 include("${CONTRACT}")
 
 if(GB_ACTION STREQUAL "fetch")
-    foreach(_required IN ITEMS GB_BUILD_ROOT GB_ARCHIVE GB_SOURCE_URL GB_ARCHIVE_SHA256)
+    foreach(_required IN ITEMS GB_BUILD_ROOT GB_ARCHIVE
+            GB_SOURCE_URL_PRIMARY GB_SOURCE_URL_FALLBACK GB_ARCHIVE_SHA256)
         if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
             message(FATAL_ERROR "GRUB2 fetch contract omits ${_required}")
         endif()
     endforeach()
-    if(NOT GB_SOURCE_URL STREQUAL _GB_SOURCE_URL OR
+    if(NOT GB_SOURCE_URL_PRIMARY STREQUAL _GB_SOURCE_URL_PRIMARY OR
+       NOT GB_SOURCE_URL_FALLBACK STREQUAL _GB_SOURCE_URL_FALLBACK OR
        NOT GB_ARCHIVE_SHA256 STREQUAL _GB_ARCHIVE_SHA256)
         message(FATAL_ERROR "GRUB2 fetch contract differs from the audited source identity")
     endif()
@@ -274,17 +277,36 @@ if(GB_ACTION STREQUAL "fetch")
     if(EXISTS "${_partial}")
         file(REMOVE "${_partial}")
     endif()
-    file(DOWNLOAD "${_GB_SOURCE_URL}" "${_partial}"
-        EXPECTED_HASH "SHA256=${_GB_ARCHIVE_SHA256}"
-        TLS_VERIFY ON
-        STATUS _status
-        LOG _log)
-    list(GET _status 0 _status_code)
-    if(NOT _status_code EQUAL 0)
+    set(_downloaded FALSE)
+    set(_download_failures "")
+    foreach(_source_url IN ITEMS
+            "${_GB_SOURCE_URL_PRIMARY}"
+            "${_GB_SOURCE_URL_FALLBACK}")
+        file(DOWNLOAD "${_source_url}" "${_partial}"
+            TLS_VERIFY ON
+            TIMEOUT 120
+            STATUS _status)
+        list(GET _status 0 _status_code)
+        if(_status_code EQUAL 0)
+            set(_downloaded TRUE)
+            break()
+        endif()
+        list(GET _status 1 _status_message)
         file(REMOVE "${_partial}")
-        message(FATAL_ERROR "downloading audited GRUB2 source failed: ${_status}; ${_log}")
+        string(APPEND _download_failures
+            "\n  ${_source_url}: [${_status_code}] ${_status_message}")
+    endforeach()
+    if(NOT _downloaded)
+        message(FATAL_ERROR
+            "downloading audited GRUB2 source failed at every declared "
+            "official origin:${_download_failures}")
     endif()
     _gb_require_regular_file("${_partial}" "downloaded GRUB2 archive")
+    file(SHA256 "${_partial}" _actual_sha256)
+    if(NOT _actual_sha256 STREQUAL _GB_ARCHIVE_SHA256)
+        file(REMOVE "${_partial}")
+        message(FATAL_ERROR "downloaded GRUB2 archive differs from audited SHA-256")
+    endif()
     file(RENAME "${_partial}" "${_archive}")
     _gb_require_regular_file("${_archive}" "downloaded GRUB2 archive")
     file(SHA256 "${_archive}" _actual_sha256)
@@ -295,7 +317,8 @@ if(GB_ACTION STREQUAL "fetch")
 endif()
 
 set(_required GB_MODE GB_MMAKE_ID GB_SOURCE_ROOT GB_BUILD_ROOT GB_BINARY_DIR
-    GB_INSTALL_PREFIX GB_ARCHIVE GB_PATCH GB_INSTALL_MANIFEST GB_SOURCE_URL
+    GB_INSTALL_PREFIX GB_ARCHIVE GB_PATCH GB_INSTALL_MANIFEST
+    GB_SOURCE_URL_PRIMARY GB_SOURCE_URL_FALLBACK
     GB_ARCHIVE_SHA256 GB_PATCH_SHA256 GB_XZ_PREFIX GB_HOST_PATH GB_HOST_CC
     GB_HOST_CXX GB_PATCH_TOOL GB_MAKE GB_FILE GB_OTOOL GB_INSTALL_TOOL
     GB_MKDIR_TOOL GB_AWK GB_PKG_CONFIG GB_YACC GB_LEX GB_MAKEINFO GB_PYTHON
@@ -333,7 +356,8 @@ if(NOT "${GB_MMAKE_ID}" STREQUAL "${GB_EXPECTED_id}" OR
         "directory=${GB_PLATFORM_DIR}/${GB_EXPECTED_platform_dir}; "
         "count=${GB_EXPECTED_FILE_COUNT}/${GB_EXPECTED_file_count}")
 endif()
-if(NOT GB_SOURCE_URL STREQUAL _GB_SOURCE_URL OR
+if(NOT GB_SOURCE_URL_PRIMARY STREQUAL _GB_SOURCE_URL_PRIMARY OR
+   NOT GB_SOURCE_URL_FALLBACK STREQUAL _GB_SOURCE_URL_FALLBACK OR
    NOT GB_ARCHIVE_SHA256 STREQUAL _GB_ARCHIVE_SHA256)
     message(FATAL_ERROR "GRUB2 build contract differs from audited source identity")
 endif()
