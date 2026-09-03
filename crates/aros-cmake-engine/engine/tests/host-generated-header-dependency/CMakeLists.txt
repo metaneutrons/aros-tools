@@ -4,7 +4,7 @@ project(HostGeneratedHeaderDependency C)
 if(NOT AROS_REPO_ROOT)
     message(FATAL_ERROR "AROS_REPO_ROOT is required")
 endif()
-include("${AROS_REPO_ROOT}/cmake/HostGeneratedHeaders.cmake")
+include("${AROS_TEST_ENGINE_DIR}/HostGeneratedHeaders.cmake")
 
 set(_header "${CMAKE_BINARY_DIR}/generated/aros/i386/libcall.h")
 add_custom_command(

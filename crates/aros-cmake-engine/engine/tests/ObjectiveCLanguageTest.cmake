@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -29,6 +30,9 @@ foreach(_profile IN LISTS _profiles)
 
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DCMAKE_SYSTEM_NAME=Generic"
             "-DCMAKE_SYSTEM_PROCESSOR=${_processor}"
             "-DCMAKE_C_COMPILER=${_clang}"
@@ -76,6 +80,9 @@ endforeach()
 set(_split_build "${_root}/split-compiler")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_split_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         "-DCMAKE_SYSTEM_NAME=Generic"
         "-DCMAKE_SYSTEM_PROCESSOR=x86_64"
         "-DCMAKE_C_COMPILER=${_clang}"

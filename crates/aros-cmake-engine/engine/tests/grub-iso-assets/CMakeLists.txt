@@ -66,7 +66,7 @@ elseif(GRUB_ISO_ASSETS_CASE STREQUAL "symlink-contract")
         "${CMAKE_BINARY_DIR}/.aros-grub2-iso-assets-contract.cmake" SYMBOLIC)
 endif()
 
-include("${AROS_REPO_ROOT}/cmake/GrubIsoAssets.cmake")
+include("${AROS_TEST_ENGINE_DIR}/GrubIsoAssets.cmake")
 aros_stage_grub2_iso_assets(
     MODE x86_64
     BINARY_DIR "${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64"

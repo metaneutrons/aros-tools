@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 set(_repo "${AROS_TEST_TREE}")
-include("${_repo}/cmake/Executable.cmake")
+include("${AROS_TEST_ENGINE_DIR}/Executable.cmake")
 set(_fixture "${CMAKE_CURRENT_LIST_DIR}/sfdc-host-tool")
 set(_perl "/usr/bin/perl")
 if(NOT EXISTS "${_perl}")
@@ -18,6 +18,9 @@ function(_sfdc_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DAROS_REPO_ROOT=${_repo}"
             "-DHOST_PERL=${_perl}"
             "-DSFDC_HOST_TOOL_CASE=${name}"

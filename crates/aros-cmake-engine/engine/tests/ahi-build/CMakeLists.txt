@@ -87,8 +87,8 @@ set(AROS_AHI_MAKE "${_tools}/mock-gmake.sh")
 set(AROS_AHI_FLEXCAT "${CMAKE_BINARY_DIR}/hosttools/flexcat")
 set(AROS_AHI_BUILD_TRIPLET "aarch64-apple-darwin")
 
-include("${AROS_REPO_ROOT}/cmake/SfdcHostTool.cmake")
-include("${AROS_REPO_ROOT}/cmake/AhiBuild.cmake")
+include("${AROS_TEST_ENGINE_DIR}/SfdcHostTool.cmake")
+include("${AROS_TEST_ENGINE_DIR}/AhiBuild.cmake")
 aros_build_host_sfdc(PERL "${HOST_PERL}")
 aros_build_ahi(
     MMAKE_ID workbench-devs-AHI-subsystem

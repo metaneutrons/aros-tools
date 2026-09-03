@@ -63,6 +63,8 @@ project(FetchArchivePatchFixture NONE)
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
 set(AROS_FETCH_BIN "@FETCH_BIN@")
+# This fixture stubs BootstrapSDK; its directory has to be searched first.
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include("@AROS_CMAKE@")
 
 set(_patch "${CMAKE_CURRENT_SOURCE_DIR}/patches/value.patch")
@@ -112,7 +114,10 @@ file(WRITE "${_source}/CMakeLists.txt" "${_fixture_cmake}")
 function(_configure_fixture label)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}"
-        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        # This fixture is its own source tree: the patch it declares lives
+        # beside its generated CMakeLists, not in an AROS checkout, and the
+        # engine's containment check is measured against whatever is named here.
+        "-DAROS_SOURCE_DIR=${_source}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
         RESULT_VARIABLE _result

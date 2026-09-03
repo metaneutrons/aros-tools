@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -155,6 +156,9 @@ function(_configure case expect_success expected_message)
     set(_build "${_root}/${case}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DPYTHON_GENERATOR_CASE=${case}" ${ARGN}
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout

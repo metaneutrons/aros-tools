@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -71,6 +72,9 @@ file(WRITE "${_source}/CMakeLists.txt" "${_fixture}")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout
     ERROR_VARIABLE _configure_stderr)

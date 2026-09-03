@@ -34,7 +34,7 @@ set(CMAKE_RANLIB "${_fixture_tools}/mock-tool.sh")
 set(AROS_LLD_BIN "${_fixture_tools}/mock-linker.sh")
 set(AROS_SDK_INCLUDE_DIR "${CMAKE_BINARY_DIR}/fixture-sdk")
 set(AROS_CONFIGURE_SOURCE_ROOT "${AROS_REPO_ROOT}")
-include("${AROS_REPO_ROOT}/cmake/ConfigureBuild.cmake")
+include("${AROS_TEST_ENGINE_DIR}/ConfigureBuild.cmake")
 
 set(_source_root "${AROS_REPO_ROOT}")
 if(CONFIGURE_BUILD_CASE STREQUAL "symlink-input" OR

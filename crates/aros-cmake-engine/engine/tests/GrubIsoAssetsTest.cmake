@@ -13,6 +13,9 @@ function(_assets_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DAROS_REPO_ROOT=${_repo}"
             "-DGRUB_ISO_ASSETS_CASE=${name}"
         RESULT_VARIABLE _result
@@ -48,9 +51,9 @@ function(_append_platform_outputs manifest platform sys_root include_images outp
 endfunction()
 
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _source_before)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-pc.install" _pc_manifest_before)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-efi64.install" _efi64_manifest_before)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-efi32.install" _efi32_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-pc.install" _pc_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi64.install" _efi64_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi32.install" _efi32_manifest_before)
 
 _assets_configure("" TRUE "")
 set(_build "${CONFIGURED_BUILD}")
@@ -139,9 +142,9 @@ _assets_configure("symlink-contract" FALSE
     "contract path contains a symlinked path component")
 
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _source_after)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-pc.install" _pc_manifest_after)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-efi64.install" _efi64_manifest_after)
-file(SHA256 "${_repo}/cmake/manifests/grub-2.12-efi32.install" _efi32_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-pc.install" _pc_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi64.install" _efi64_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi32.install" _efi32_manifest_after)
 if(NOT _source_before STREQUAL _source_after OR
    NOT _pc_manifest_before STREQUAL _pc_manifest_after OR
    NOT _efi64_manifest_before STREQUAL _efi64_manifest_after OR

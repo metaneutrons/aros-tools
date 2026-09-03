@@ -7,7 +7,7 @@ set(_fixture "${CMAKE_CURRENT_LIST_DIR}/host-generated-header-dependency")
 # The producer registration lives in AROS.cmake, while the dependency
 # finalizer is independently exercisable in this focused project. Keep both
 # halves under one regression contract.
-file(READ "${_repo}/cmake/AROS.cmake" _aros_module)
+file(READ "${AROS_TEST_ENGINE_DIR}/AROS.cmake" _aros_module)
 string(FIND "${_aros_module}"
     "set_property(GLOBAL APPEND PROPERTY AROS_32BIT_TARGETS \"\${target}\")"
     _registration)
@@ -25,6 +25,9 @@ set(_build "${_root}/aros-host-header-${_suffix}")
 file(REMOVE_RECURSE "${_build}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         "-DAROS_REPO_ROOT=${_repo}"
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout

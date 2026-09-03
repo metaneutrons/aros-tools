@@ -61,3 +61,26 @@ foreach(_pair
     list(APPEND AROS_TEST_TOOL_ARGS
         "-D${_variable}=${AROS_TEST_TOOLS_DIR}/${_executable}")
 endforeach()
+
+# This engine's own directory.
+#
+# A fixture loads engine modules from here, never from the tree: the tree may
+# still carry an older copy during the migration, and a test that reads that one
+# is testing the wrong engine while reporting success.
+get_filename_component(AROS_TEST_ENGINE_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+if(NOT EXISTS "${AROS_TEST_ENGINE_DIR}/AROS.cmake")
+    message(FATAL_ERROR
+        "No engine beside these tests: ${AROS_TEST_ENGINE_DIR}")
+endif()
+list(APPEND AROS_TEST_TOOL_ARGS
+    "-DAROS_TEST_ENGINE_DIR=${AROS_TEST_ENGINE_DIR}")
+
+# An upper bound on any child a test starts.
+#
+# A wedged tool used to hang the whole sweep, which is worse than a failure: a
+# hang reports nothing and blocks everything behind it. Three minutes is far
+# above the slowest healthy run measured here (the AHI fixture takes 22 seconds
+# against a working runner) and far below the point where a person gives up.
+if(NOT DEFINED AROS_TEST_CHILD_TIMEOUT)
+    set(AROS_TEST_CHILD_TIMEOUT 180)
+endif()

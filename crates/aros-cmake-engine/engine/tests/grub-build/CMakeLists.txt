@@ -19,7 +19,7 @@ if(GRUB_BUILD_CASE STREQUAL "symlink-binary")
     file(CREATE_LINK "${_escaped}" "${CMAKE_BINARY_DIR}/gen/configure" SYMBOLIC)
 endif()
 
-include("${AROS_REPO_ROOT}/cmake/GrubBuild.cmake")
+include("${AROS_TEST_ENGINE_DIR}/GrubBuild.cmake")
 
 set(_binary_root "${CMAKE_BINARY_DIR}/gen/configure/arch/all-pc/boot/grub2-host")
 set(_install_root "${CMAKE_BINARY_DIR}/hosttools/grub2")

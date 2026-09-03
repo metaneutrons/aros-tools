@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 string(RANDOM LENGTH 12 ALPHABET 0123456789abcdef _suffix)
 set(_root "$ENV{TMPDIR}/aros-full-genmodule-abi-${_suffix}")
@@ -10,6 +11,9 @@ set(_build "${_root}/build")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout
     ERROR_VARIABLE _configure_stderr)

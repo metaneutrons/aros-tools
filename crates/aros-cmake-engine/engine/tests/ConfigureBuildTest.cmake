@@ -23,6 +23,9 @@ function(_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DAROS_REPO_ROOT=${_repo}"
             "-DCONFIGURE_BUILD_CASE=${name}"
         RESULT_VARIABLE _result

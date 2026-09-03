@@ -14,6 +14,9 @@ set(_aros_source "${AROS_TEST_TREE}")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         "-DAROS_SOURCE_DIR=${_aros_source}"
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout

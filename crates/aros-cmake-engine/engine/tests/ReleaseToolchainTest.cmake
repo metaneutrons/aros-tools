@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
     set(_temp_root "$ENV{TMPDIR}")
@@ -65,6 +66,9 @@ foreach(_profile IN LISTS _profiles)
 
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
             "-DCMAKE_TOOLCHAIN_FILE=${_toolchain}"
             "-DAROS_CROSS_TOOLCHAIN_ROOT=${_prefix}"
             "-DAROS_TARGET_CPU=${_cpu}"
@@ -89,6 +93,9 @@ string(REPLACE "fixture-v1" "fixture-v2" _x86_manifest_v2 "${_x86_manifest}")
 file(WRITE "${_root}/prefix-x86_64/toolchain-manifest.json" "${_x86_manifest_v2}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_root}/build-x86_64"
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         "-DCMAKE_TOOLCHAIN_FILE=${_toolchain}"
         "-DAROS_CROSS_TOOLCHAIN_ROOT=${_root}/prefix-x86_64"
         "-DAROS_TARGET_CPU=x86_64"
@@ -109,6 +116,9 @@ endif()
 # A release for one profile must never be silently accepted for another.
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_root}/mismatch" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
         "-DCMAKE_TOOLCHAIN_FILE=${_toolchain}"
         "-DAROS_CROSS_TOOLCHAIN_ROOT=${_root}/prefix-x86_64"
         "-DAROS_TARGET_CPU=arm"

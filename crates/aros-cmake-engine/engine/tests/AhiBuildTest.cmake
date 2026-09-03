@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 include("${CMAKE_CURRENT_LIST_DIR}/EngineTestTree.cmake")
 
 set(_repo "${AROS_TEST_TREE}")
-include("${_repo}/cmake/Executable.cmake")
+include("${AROS_TEST_ENGINE_DIR}/Executable.cmake")
 set(_fixture "${CMAKE_CURRENT_LIST_DIR}/ahi-build")
 set(_perl "/usr/bin/perl")
 if(NOT EXISTS "${_perl}")
@@ -33,12 +33,15 @@ function(_ahi_configure mode case expect_success expected)
     endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}"
-        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
-        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
-        ${AROS_TEST_TOOL_ARGS} -G Ninja
+        # Only the engine location. This fixture deliberately runs on mock
+        # tools -- a mock compiler, archiver and make -- so handing it the real
+        # executable paths would have it build for real, which is what it exists
+        # to avoid.
+        "-DAROS_TEST_ENGINE_DIR=${AROS_TEST_ENGINE_DIR}" -G Ninja
             "-DAROS_REPO_ROOT=${_repo}" "-DHOST_PERL=${_perl}"
             "-DAROS_AHI_RUNNER_BIN=${_ahi_runner}"
             "-DAHI_FIXTURE_MODE=${mode}" "-DAHI_FIXTURE_CASE=${case}"
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
         RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
     set(_log "${_stdout}${_stderr}")
     if(expect_success AND NOT _result EQUAL 0)
@@ -103,6 +106,7 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile}" ${_closed_environment}
             "${CMAKE_COMMAND}" --build "${_build}" --target "${_target}"
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
         RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
     if(NOT _result EQUAL 0)
         message(FATAL_ERROR "AHI ${_mode} fixture build failed\n${_stdout}${_stderr}")
@@ -122,6 +126,7 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile}"
             "${CMAKE_COMMAND}" --build "${_build}" --target "${_target}"
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
         RESULT_VARIABLE _noop_result OUTPUT_VARIABLE _noop_stdout ERROR_VARIABLE _noop_stderr)
     set(_noop_log "${_noop_stdout}${_noop_stderr}")
     if(NOT _noop_result EQUAL 0 OR NOT _noop_log MATCHES "no work to do")
@@ -131,6 +136,7 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile}"
             "${CMAKE_COMMAND}" --build "${_build}" --target "${_target}"
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
         RESULT_VARIABLE _repair_result
         OUTPUT_VARIABLE _repair_stdout ERROR_VARIABLE _repair_stderr)
     if(NOT _repair_result EQUAL 0 OR NOT EXISTS "${_repair}")
@@ -140,6 +146,7 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile}"
             "${CMAKE_COMMAND}" --build "${AHI_BUILD}" --target "${_target}"
+        TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
         RESULT_VARIABLE _reconfigure_result
         OUTPUT_VARIABLE _reconfigure_stdout ERROR_VARIABLE _reconfigure_stderr)
     set(_reconfigure_log "${_reconfigure_stdout}${_reconfigure_stderr}")
@@ -154,7 +161,8 @@ foreach(_mode IN ITEMS x86_64 arm aarch64)
         execute_process(
             COMMAND "${CMAKE_COMMAND}" -E env "PATH=${_hostile}"
                 "${CMAKE_COMMAND}" --build "${_build}" --target "${_target}"
-            RESULT_VARIABLE _symlink_result
+            TIMEOUT ${AROS_TEST_CHILD_TIMEOUT}
+        RESULT_VARIABLE _symlink_result
             OUTPUT_VARIABLE _symlink_stdout ERROR_VARIABLE _symlink_stderr)
         set(_symlink_log "${_symlink_stdout}${_symlink_stderr}")
         if(_symlink_result EQUAL 0 OR

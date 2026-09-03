@@ -38,7 +38,7 @@ elseif(SFDC_HOST_TOOL_CASE STREQUAL "relative-perl")
     set(HOST_PERL perl)
 endif()
 
-include("${AROS_REPO_ROOT}/cmake/SfdcHostTool.cmake")
+include("${AROS_TEST_ENGINE_DIR}/SfdcHostTool.cmake")
 aros_build_host_sfdc(PERL "${HOST_PERL}")
 if(NOT AROS_HOST_SFDC STREQUAL "${CMAKE_BINARY_DIR}/hosttools/sfdc")
     message(FATAL_ERROR "host-sfdc did not export its private output path")
