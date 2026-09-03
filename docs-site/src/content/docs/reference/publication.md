@@ -56,7 +56,7 @@ stay in their one named environment:
 | `release` | annotated release tags matching `v*` | `RELEASE_ADMIN_READ_TOKEN` (this repository only, Administration read-only) |
 | `apt-signing` | annotated release tags matching `v*` and protected `main` | `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` |
 | `apt-publication` | annotated release tags matching `v*` and protected `main` | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` |
-| `homebrew-publication` | annotated release tags matching `v*` | `PACKAGE_PUBLISH_TOKEN` |
+| `homebrew-publication` | annotated release tags matching `v*` | `HOMEBREW_TAP_TOKEN` |
 | `aur-publication` | annotated release tags matching `v*` | `AUR_SSH_PRIVATE_KEY` |
 
 The deliberate creation and push of an immutable annotated release tag is the
@@ -77,7 +77,7 @@ same version branch, PR and byte-identical head.
 | Secret | Required scope |
 | --- | --- |
 | `RELEASE_ADMIN_READ_TOKEN` | Fine-grained access only to this repository, Administration read-only; used by one checkout-free preflight to read immutable-release policy |
-| `PACKAGE_PUBLISH_TOKEN` | Fine-grained access only to `metaneutrons/homebrew-tap`, with Contents and Pull requests read/write plus Administration read for the branch-protection preflight |
+| `HOMEBREW_TAP_TOKEN` | Fine-grained access only to `metaneutrons/homebrew-tap`, with Contents and Pull requests read/write plus Administration read for the branch-protection preflight |
 | `AUR_SSH_PRIVATE_KEY` | Dedicated unencrypted CI key whose public half is registered in the AUR account |
 | `APT_GPG_PRIVATE_KEY` | Dedicated archive-signing private key |
 | `APT_GPG_PASSPHRASE` | Passphrase for that signing key |

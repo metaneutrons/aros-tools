@@ -1468,7 +1468,7 @@ jobs:
           persist-credentials: false
       - name: Verify dedicated tap access
         env:
-          GH_TOKEN: ${{ secrets.PACKAGE_PUBLISH_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           cleanup() { unset GH_TOKEN; }
