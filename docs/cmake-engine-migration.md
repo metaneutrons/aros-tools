@@ -43,35 +43,53 @@ configures from outside a checkout and writes 77,456 targets. The generated grap
 holds 1,484 `AROS_SOURCE_DIR` references and no `CMAKE_SOURCE_DIR`, and the
 source tree ends the run with no modified paths.
 
+## The CLI configures from the engine
+
+`aros build` no longer names a preset. It places the embedded engine in
+`<build>/cmake-engine` and configures `-S <engine> -B <build>
+-DAROS_SOURCE_DIR=<checkout>`, so nothing is written into the checkout.
+
+The ten cache variables a preset carried are derived from the target profile,
+because none is a free choice: the system name is fixed for a bare-metal target,
+the processor is the architecture, the compilers are the LLVM path the target
+graph assumes, and the bootloader follows the platform. `bootloader` became
+profile data with that rule as its default. Build type and board model, the only
+other things the debug presets varied, are `--debug` and the model the board
+configuration already holds.
+
+`--engine-dir` replaces the embedded engine and is honoured only when given.
+An engine lying in the checkout is never preferred on its own. `aros info`
+reports the digest, file count and API version in use, and the generated graph
+opens with `aros_require_engine_api_version(N)` so a mismatch is named rather
+than surfacing as an unknown function.
+
+**Measured**: `aros build --preset pc-x86_64 --target kernel-exec --clean`
+reaches step 22 of 3291 and stops on nine `AF0501` fetch errors. The unchanged
+tools on `main` reach the same step and stop on the same nine. The path is
+behaviour-equal and those failures are pre-existing, in `aros-fetch`, unrelated
+to this work.
+
+AROS-NX PR #28 removes the 159 files from that tree.
+
 ## What is left
 
-**The CLI still configures through `--preset` inside the checkout.** That is the
-last thing tying a build to a tree that holds the engine, and it is not a rename:
+**Two engine fixtures.** The engine's own CMake tests used to inherit the tree
+and the tool paths from the checkout they sat in. `EngineTestTree.cmake` now
+supplies both and fails loudly rather than skipping, and `AROS.cmake` reaches
+BootstrapSDK through `CMAKE_MODULE_PATH` so a fixture can still substitute its
+stub, which it previously did by relying on `CMAKE_SOURCE_DIR` naming the
+fixture.
 
-- `CMakePresets.json` binds to the tree only through
-  `binaryDir: "${sourceDir}/build/<preset>"`. With the engine placed elsewhere
-  that would put build output inside the placed engine, and `--preset` cannot be
-  combined with an explicit `-B`.
-- The presets carry ten cache variables per profile. Seven are the same
-  everywhere (`CMAKE_SYSTEM_NAME`, the three compilers, `AROS_TOOLCHAIN`,
-  `CMAKE_BUILD_TYPE`, `CMAKE_EXPORT_COMPILE_COMMANDS`), two follow the profile
-  and are already in `aros-targets.toml` (`AROS_TARGET_CPU`,
-  `AROS_TARGET_PLATFORM`, plus `CMAKE_SYSTEM_PROCESSOR` which equals the arch),
-  and one is profile data we do not carry yet: `AROS_TARGET_BOOTLOADER`.
+33 of 35 pass. `FetchArchivePatchTest` builds its fixture inline and does not
+give it a compiler, which the real `BootstrapSDK` now needs. `AhiBuildTest` used
+to fail immediately because it could not find `aros-ahi-runner`; it now finds it
+and runs a real AHI build, which takes long enough that its result is not yet
+recorded here.
 
-So the step is: add `bootloader` to the target profiles, have the CLI set the
-cache variables from the profile instead of naming a preset, and pass `-S`, `-B`
-and `-DAROS_SOURCE_DIR` explicitly. `aros-targets.toml` holds nothing
-tree-specific, so the same profiles work as built-in defaults for a checkout that
-has no such file.
+**Built-in profiles.** `aros-targets.toml` holds nothing tree-specific, so the
+same profiles can serve as defaults for a checkout without one. That is what
+makes a pristine upstream tree configurable, and it is not written yet.
 
-**Then the rest follows**: an `--engine-dir` override that is honoured only when
-given explicitly, never inferred from a directory that happens to sit in the
-tree; `aros info` reporting which engine is in use and its digest; a
-configure-time check that the generated graph's required API version matches the
-engine's; and finally removing `cmake/` and `CMakeLists.txt` from AROS-NX.
-
-The override must stay explicit. A `cmake/` directory found in a checkout and
-silently preferred is the same failure this project already had once, when a
-stale generated header outranked the current one and a wrong `FUNCTIONS_COUNT`
-sized a jump table short.
+**The nine AF0501 fetch failures** are pre-existing and worth their own look:
+`aros-fetch` refuses to publish into a temporary directory it just created, in a
+freshly cleaned build tree.
