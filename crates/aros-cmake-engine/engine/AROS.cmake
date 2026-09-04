@@ -1693,11 +1693,19 @@ function(_aros_bind_link_libraries target_name)
     endif()
     if(CLEAN_LIBS)
         # MetaMake's link_module_q rescans the explicit uselibs/rellibs as a
-        # group.  Keep the marker tokens in the link-item lane: the canonical
-        # AROS rule invokes ld.lld directly, so compiler-driver LINKER:
-        # translation would be incorrect here.
+        # group. Keep the marker tokens in the link-item lane. The canonical
+        # AROS rule invokes ld.lld directly, while a development host without
+        # LLD retains CMake's compiler-driver rule and must forward the same
+        # tokens through that driver explicitly.
+        if(AROS_LLD_BIN)
+            set(_group_start --start-group)
+            set(_group_end --end-group)
+        else()
+            set(_group_start -Wl,--start-group)
+            set(_group_end -Wl,--end-group)
+        endif()
         target_link_libraries(${target_name} PRIVATE
-            --start-group ${CLEAN_LIBS} --end-group)
+            ${_group_start} ${CLEAN_LIBS} ${_group_end})
     endif()
 endfunction()
 

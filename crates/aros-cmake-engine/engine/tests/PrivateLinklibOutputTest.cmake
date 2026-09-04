@@ -16,6 +16,13 @@ find_program(_archiver NAMES llvm-ar ar
 find_program(_ranlib NAMES llvm-ranlib ranlib
     HINTS "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin"
     REQUIRED)
+set(_linker_args "")
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    # Linux can exercise the supported compiler-driver fallback with the host
+    # ELF linker. A false CMake value suppresses AROS.cmake's LLD discovery so
+    # this contract remains covered even on development hosts that install it.
+    list(APPEND _linker_args "-DAROS_LLD_BIN=FALSE")
+endif()
 
 function(_configure case expect_success expected_message)
     set(_build "${_root}/${case}")
@@ -28,6 +35,7 @@ function(_configure case expect_success expected_message)
             "-DCMAKE_C_COMPILER=${_clang}"
             "-DCMAKE_AR=${_archiver}"
             "-DCMAKE_RANLIB=${_ranlib}"
+            ${_linker_args}
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
         ERROR_VARIABLE _stderr)
