@@ -9,6 +9,7 @@ endif()
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_root "${_temp_root}/aros-private-linklib-${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/private-linklib-output")
+find_program(_clang NAMES clang REQUIRED)
 find_program(_archiver NAMES llvm-ar ar
     HINTS "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin"
     REQUIRED)
@@ -24,6 +25,7 @@ function(_configure case expect_success expected_message)
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
             "-DPRIVATE_LINKLIB_CASE=${case}"
+            "-DCMAKE_C_COMPILER=${_clang}"
             "-DCMAKE_AR=${_archiver}"
             "-DCMAKE_RANLIB=${_ranlib}"
         RESULT_VARIABLE _result
