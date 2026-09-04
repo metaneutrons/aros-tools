@@ -21,7 +21,9 @@ Rosetta and QEMU user emulation are not substitutes for a native release lane.
 The host matrix does not limit the AROS CPU being built. The current source and
 toolchain contracts include x86, ARM, AArch64 and RISC-V profiles, including
 `pc-x86_64`, `arm-raspi`, `rpi-aarch64` and `opensbi-riscv64` where the selected
-checkout declares them.
+checkout declares them. A pristine checkout without `aros-targets.toml` gets
+those same four profiles from the embedded tools contract; a checkout file,
+when present, replaces that contract completely.
 
 An available compiler is not a boot-support claim. Physical-board support,
 legacy KOBJ inputs, DTBs and UART evidence are tracked separately by the board
@@ -34,7 +36,8 @@ profile and AROS source project.
   build from source on that host if its Rust toolchain and dependencies permit.
 - macOS older than 13 is outside the release contract.
 - A complete translated product build from an entirely pristine upstream AROS
-  checkout remains pending the native GNU Make frontend qualification.
+  checkout remains pending qualification of the source-side compatibility
+  patches and a released-toolchain selection contract.
 
 Support means the exact tagged release passed its documented lane. It does not
 mean every AROS target or third-party package is buildable on every host.

@@ -236,6 +236,7 @@ mod tests {
             features: Vec::new(),
             float_abi: None,
             transpiler,
+            bootloader: None,
         }
     }
 

@@ -1,0 +1,41 @@
+cmake_minimum_required(VERSION 3.22)
+
+if(NOT DEFINED INPUT OR NOT DEFINED OUTPUT OR NOT DEFINED SUBSTITUTIONS)
+    message(FATAL_ERROR
+        "SubstituteHeader.cmake requires INPUT, OUTPUT and SUBSTITUTIONS")
+endif()
+if(NOT EXISTS "${INPUT}")
+    message(FATAL_ERROR "template input does not exist: ${INPUT}")
+endif()
+
+list(LENGTH SUBSTITUTIONS _count)
+math(EXPR _remainder "${_count} % 2")
+if(_remainder OR _count LESS 2)
+    message(FATAL_ERROR "SUBSTITUTIONS must contain token/replacement pairs")
+endif()
+
+file(READ "${INPUT}" _content)
+math(EXPR _last "${_count} - 2")
+foreach(_index RANGE 0 ${_last} 2)
+    math(EXPR _replacement_index "${_index} + 1")
+    list(GET SUBSTITUTIONS ${_index} _token)
+    list(GET SUBSTITUTIONS ${_replacement_index} _replacement)
+    if(_token STREQUAL "")
+        message(FATAL_ERROR "template substitution token must not be empty")
+    endif()
+    string(FIND "${_content}" "${_token}" _found)
+    if(_found LESS 0)
+        message(FATAL_ERROR "template input ${INPUT} does not contain ${_token}")
+    endif()
+    string(REPLACE "${_token}" "${_replacement}" _content "${_content}")
+endforeach()
+
+get_filename_component(_output_dir "${OUTPUT}" DIRECTORY)
+file(MAKE_DIRECTORY "${_output_dir}")
+string(SHA256 _temp_key "${OUTPUT}")
+set(_temporary "${OUTPUT}.${_temp_key}.tmp")
+file(WRITE "${_temporary}" "${_content}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_temporary}" "${OUTPUT}"
+    COMMAND_ERROR_IS_FATAL ANY)
+file(REMOVE "${_temporary}")

@@ -34,6 +34,14 @@ pub struct BuildOptions {
     pub toolchain_dir: Option<PathBuf>,
     /// Additional strictly named CMake cache definitions.
     pub cmake_definitions: Vec<CmakeDefinition>,
+    /// `Debug` or `Release`; the presets carried this per build tree.
+    pub build_type: BuildType,
+    /// An explicitly nominated CMake engine, replacing the embedded one.
+    ///
+    /// Only ever set from an explicit request. An engine found lying in the
+    /// checkout is never preferred on its own: a stale copy silently outranking
+    /// the current one is a failure this project has already paid for once.
+    pub engine_dir: Option<PathBuf>,
 }
 
 /// Acquisition and integrity policy shared by toolchains and port sources.
@@ -53,6 +61,109 @@ pub struct CmakeDefinition {
     /// Non-empty value passed without shell interpretation.
     pub value: String,
 }
+
+/// Optimisation and assertion policy for one build tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildType {
+    /// Optimised, assertions off. What every product build uses.
+    #[default]
+    Release,
+    /// Unoptimised with debug information, for board bring-up.
+    Debug,
+}
+
+impl BuildType {
+    /// The `CMAKE_BUILD_TYPE` value.
+    #[must_use]
+    pub const fn cmake_value(self) -> &'static str {
+        match self {
+            Self::Release => "Release",
+            Self::Debug => "Debug",
+        }
+    }
+}
+
+/// The cache variables a CMake preset used to carry.
+///
+/// They are derived rather than named because none of them is a free choice:
+/// the system name is fixed for a bare-metal target, the processor is the
+/// profile's architecture, the compilers are the LLVM path the target graph
+/// assumes, and the bootloader follows the platform. Deriving them is what
+/// removes the last reason for a checkout to carry `CMakePresets.json`, and it
+/// is what lets a tree without one be built from built-in profiles.
+fn profile_cache_variables(
+    profile: &aros_common::TargetProfile,
+    options: &BuildOptions,
+) -> Vec<(String, String)> {
+    vec![
+        ("CMAKE_SYSTEM_NAME".to_owned(), "Generic".to_owned()),
+        (
+            "CMAKE_SYSTEM_PROCESSOR".to_owned(),
+            profile.arch.to_string(),
+        ),
+        ("CMAKE_C_COMPILER".to_owned(), "clang".to_owned()),
+        ("CMAKE_CXX_COMPILER".to_owned(), "clang++".to_owned()),
+        ("CMAKE_ASM_COMPILER".to_owned(), "clang".to_owned()),
+        ("AROS_TOOLCHAIN".to_owned(), "llvm".to_owned()),
+        (
+            "AROS_TARGET_BOOTLOADER".to_owned(),
+            profile.bootloader().to_owned(),
+        ),
+        (
+            "CMAKE_BUILD_TYPE".to_owned(),
+            options.build_type.cmake_value().to_owned(),
+        ),
+        ("CMAKE_EXPORT_COMPILE_COMMANDS".to_owned(), "ON".to_owned()),
+    ]
+}
+
+/// Puts the CMake engine where this build will read it from.
+///
+/// The embedded engine is placed inside the build tree, so nothing is written
+/// into the checkout and a pristine upstream tree stays pristine. An explicit
+/// override replaces it wholesale and is reported, because a build running
+/// against modules other than the ones this binary was built with is exactly
+/// the thing a reader needs told.
+///
+/// # Errors
+///
+/// When the engine cannot be written, or a nominated directory does not hold
+/// one.
+fn place_engine(build_dir: &Path, override_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Some(directory) = override_dir {
+        let root = directory.canonicalize().map_err(|error| {
+            miette::miette!(
+                "Could not resolve --engine-dir '{}': {error}",
+                directory.display()
+            )
+        })?;
+        if !root.join("AROS.cmake").is_file() {
+            miette::bail!(
+                "No CMake engine at '{}': AROS.cmake is missing.",
+                root.display()
+            );
+        }
+        aros_common::outputln!("🔧 CMake engine: {} (explicit override)", root.display());
+        return Ok(root);
+    }
+
+    let root = build_dir.join(ENGINE_SUBDIRECTORY);
+    let placement = aros_cmake_engine::materialize(&root).map_err(|error| {
+        miette::miette!(
+            "Could not place the CMake engine in '{}': {error}",
+            root.display()
+        )
+    })?;
+    aros_common::outputln!(
+        "🔧 CMake engine: embedded {} (api {})",
+        &placement.digest[..12],
+        aros_cmake_engine::api_version()
+    );
+    Ok(placement.root)
+}
+
+/// Directory inside a build tree that holds the placed engine.
+const ENGINE_SUBDIRECTORY: &str = "cmake-engine";
 
 /// Resolve tools and execute one complete CMake configure/build transaction.
 ///
@@ -110,7 +221,8 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     );
 
     aros_common::outputln!("{HAMMER} Configuring CMake build tree...");
-    let cmake_toolchain = repo_root.join("cmake/toolchains/AROS.cmake");
+    let engine = place_engine(&build_dir, options.engine_dir.as_deref())?;
+    let cmake_toolchain = engine.join("toolchains/AROS.cmake");
     if !cmake_toolchain.is_file() {
         miette::bail!(
             "Required CMake toolchain file is missing: {}",
@@ -118,9 +230,21 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         );
     }
     let mut configure = Command::new("cmake");
+    // The engine is the project and the checkout is an input, which is what
+    // lets a tree that does not carry a build system be built at all. A preset
+    // cannot express this: it fixes the binary directory relative to its own
+    // source directory and refuses an explicit -B.
     configure
         .current_dir(repo_root)
-        .args(["--preset", &options.preset]);
+        .arg("-S")
+        .arg(&engine)
+        .arg("-B")
+        .arg(&build_dir)
+        .args(["-G", "Ninja"]);
+    configure.arg(format!("-DAROS_SOURCE_DIR={}", repo_root.display()));
+    for (key, value) in profile_cache_variables(&profile, options) {
+        configure.arg(format!("-D{key}={value}"));
+    }
     configure.arg(format!(
         "-DCMAKE_TOOLCHAIN_FILE={}",
         cmake_toolchain.display()
@@ -347,6 +471,8 @@ mod tests {
             },
             toolchain_dir: None,
             cmake_definitions: Vec::new(),
+            build_type: super::BuildType::Release,
+            engine_dir: None,
         };
         let checkout = tempfile::tempdir().unwrap();
         assert!(run(checkout.path(), &options)

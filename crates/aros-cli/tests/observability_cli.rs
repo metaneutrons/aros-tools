@@ -266,6 +266,25 @@ fn repository_configuration_is_loaded_from_the_discovered_root() {
 }
 
 #[test]
+fn pristine_upstream_info_reports_built_in_target_contract() {
+    let checkout = temporary_checkout(
+        "[[targets]]\nname='temporary'\narch='x86_64'\nplatform='pc'\nbsp='pc'\n",
+    );
+    fs::remove_file(checkout.path().join("aros-targets.toml")).unwrap();
+
+    let output = command()
+        .current_dir(checkout.path())
+        .arg("info")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("pc-x86_64, rpi-aarch64, arm-raspi, opensbi-riscv64"));
+    assert!(stdout.contains("built into aros-tools; pristine upstream checkout"));
+}
+
+#[test]
 fn info_fails_closed_before_output_for_an_invalid_target_configuration() {
     let checkout = temporary_checkout(
         "[[targets]]\nname='pc-x86_64'\narch='x86_64'\nplatform='pc'\nbsp='pc'\nenabled_typo=true\n",

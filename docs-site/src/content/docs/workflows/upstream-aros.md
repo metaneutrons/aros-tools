@@ -56,14 +56,17 @@ A persistent kernel-backed repository lock serializes tool-driven syncs; its
 identity and the captured branch, index, worktree, submodules and local Git
 semantics are rechecked so a concurrent change is refused rather than reset.
 The lock's owner-record file remains after the process exits and must not be
-deleted. For a pristine tree without the AROS-NX
-CMake bridge, select `--no-transpile` explicitly; the omitted validation is
-reported as a deliberate skip.
+deleted. A missing `aros-targets.toml` is not a reason to skip validation:
+`aros source sync` uses the four complete profiles embedded in `aros-tools`
+without writing them into the candidate. Use `--no-transpile` only for an
+intentional, explicitly reported validation skip.
 
 :::caution[Current build frontend boundary]
-The integrated `aros build` CMake path still requires the small consumer bridge
-carried by AROS-NX. A native GNU Make backend for an entirely pristine upstream
-checkout is not yet a completed release claim. Until its acceptance tests are
-green, use upstream's documented configure/MetaMake path for full products and
-use `aros-tools` for the independently supported component workflows.
+The CMake engine and its target defaults now live wholly in `aros-tools`, but a
+complete product still depends on reviewed source compatibility patches and a
+released-toolchain lock carried by AROS-NX. An entirely pristine upstream
+product is therefore not yet a completed release claim. Until its acceptance
+tests are green, use upstream's documented configure/MetaMake path for full
+products and use `aros-tools` for the independently supported component
+workflows.
 :::

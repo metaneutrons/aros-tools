@@ -143,6 +143,18 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
     writeln!(out, "# this file -- which is what `aros golden` does.").unwrap();
     writeln!(out, "{rule}").unwrap();
     writeln!(out).unwrap();
+
+    // First statement, before anything can call into the engine. The calls
+    // below are a contract, and a graph meeting an engine that does not
+    // implement it should say so rather than fail as an unknown function
+    // eighty thousand lines further down.
+    writeln!(
+        out,
+        "aros_require_engine_api_version({})",
+        aros_cmake_engine::api_version()
+    )
+    .unwrap();
+    writeln!(out).unwrap();
     out
 }
 
@@ -1156,7 +1168,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
         writeln!(
             out,
-            "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",
+            "    DIRECTORY \"${{AROS_SOURCE_DIR}}/{}\"",
             target.dir_path.display()
         )
         .unwrap();
@@ -1763,12 +1775,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         for header in &graph.host_generated_headers {
             writeln!(out, "aros_host_generated_header(").unwrap();
             writeln!(out, "    TOOL {}", cmake_arg(&header.tool)).unwrap();
-            writeln!(
-                out,
-                "    SOURCE \"${{CMAKE_SOURCE_DIR}}/{}\"",
-                header.source
-            )
-            .unwrap();
+            writeln!(out, "    SOURCE \"${{AROS_SOURCE_DIR}}/{}\"", header.source).unwrap();
             writeln!(out, "    HEADER {}", cmake_arg(&header.header)).unwrap();
             if !header.arguments.is_empty() {
                 let args: Vec<String> = header.arguments.iter().map(|a| cmake_arg(a)).collect();
@@ -1795,7 +1802,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "    OUTPUT {}", cmake_arg(&decl.output)).unwrap();
             writeln!(
                 out,
-                "    DIRECTORY \"${{CMAKE_SOURCE_DIR}}/{}\"",
+                "    DIRECTORY \"${{AROS_SOURCE_DIR}}/{}\"",
                 decl.directory
             )
             .unwrap();

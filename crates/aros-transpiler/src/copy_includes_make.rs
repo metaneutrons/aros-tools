@@ -66,7 +66,7 @@ pub(super) fn collect_local_assignments(lines: &[&str], vars: &mut HashMap<Strin
 /// SDK, which is what the ACPI-dependent drivers fail on.
 pub(super) fn map_var(name: &str) -> Option<&'static str> {
     match name {
-        "SRCDIR" => Some("${CMAKE_SOURCE_DIR}"),
+        "SRCDIR" => Some("${AROS_SOURCE_DIR}"),
         "TOP" => Some("${AROS_BUILD_DIR}"),
         "PORTSDIR" => Some("${AROS_PORTS_DIR}"),
         "PORTSSOURCEDIR" => Some("${AROS_PORTS_SOURCE_DIR}"),

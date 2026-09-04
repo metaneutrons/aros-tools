@@ -120,7 +120,7 @@ pub(crate) fn parse_glapi(
         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mapi",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi",
         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/src/mapi/glapi",
-        "${CMAKE_SOURCE_DIR}/workbench/libs/mesa",
+        "${AROS_SOURCE_DIR}/workbench/libs/mesa",
     ];
     if x86_64 {
         expected_includes.push("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa");
@@ -183,7 +183,7 @@ pub(crate) fn parse_glapi(
         || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
         || fetch.destination != "${AROS_PORTS_DIR}/mesa"
         || !fetch.base.is_empty()
-        || fetch.patch_origins != "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+        || fetch.patch_origins != "${AROS_SOURCE_DIR}/workbench/libs/mesa"
         || fetch.patches != "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
         || fetch.dir != "workbench/libs/mesa"
     {
@@ -229,7 +229,7 @@ pub(crate) fn parse_glapi(
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         consumers: vec![GLAPI_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -467,7 +467,7 @@ pub(crate) fn parse_mesautil(
         || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
         || fetch.destination != "${AROS_PORTS_DIR}/mesa"
         || !fetch.base.is_empty()
-        || fetch.patch_origins != "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+        || fetch.patch_origins != "${AROS_SOURCE_DIR}/workbench/libs/mesa"
         || fetch.patches != "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
         || fetch.dir != "workbench/libs/mesa"
     {
@@ -503,7 +503,7 @@ pub(crate) fn parse_mesautil(
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         consumers: vec![MESAUTIL_MMAKE.to_owned(), MESADEVUTIL_MMAKE.to_owned()],
         dir_path: relative_dir.to_path_buf(),

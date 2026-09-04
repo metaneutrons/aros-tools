@@ -1,0 +1,18 @@
+# AROS-NX: Compiler Cache Setup (sccache / ccache)
+
+find_program(SCCACHE_BIN sccache)
+find_program(CCACHE_BIN ccache)
+
+if(SCCACHE_BIN)
+    message(STATUS "⚡ AROS-NX: Using sccache compiler launcher -> ${SCCACHE_BIN}")
+    set(CMAKE_C_COMPILER_LAUNCHER   "${SCCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+    set(CMAKE_ASM_COMPILER_LAUNCHER "${SCCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+elseif(CCACHE_BIN)
+    message(STATUS "⚡ AROS-NX: Using ccache compiler launcher -> ${CCACHE_BIN}")
+    set(CMAKE_C_COMPILER_LAUNCHER   "${CCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+    set(CMAKE_ASM_COMPILER_LAUNCHER "${CCACHE_BIN}" CACHE STRING "Compiler launcher" FORCE)
+else()
+    message(STATUS "ℹ️ AROS-NX: Neither sccache nor ccache found; using standard compiler")
+endif()

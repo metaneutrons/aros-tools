@@ -176,6 +176,17 @@ enum Commands {
         /// Use an existing AROS-built cross-toolchain prefix
         #[arg(long)]
         toolchain_dir: Option<PathBuf>,
+
+        /// Build unoptimised with debug information
+        #[arg(long)]
+        debug: bool,
+
+        /// Use the CMake engine in this directory instead of the embedded one
+        ///
+        /// Only ever honoured when given here. An engine that happens to sit in
+        /// the checkout is not preferred on its own.
+        #[arg(long, value_name = "DIR")]
+        engine_dir: Option<PathBuf>,
     },
 
     /// Clean build directory
@@ -426,6 +437,17 @@ enum BoardCommand {
         /// Use an existing AROS-built cross-toolchain prefix
         #[arg(long)]
         toolchain_dir: Option<PathBuf>,
+
+        /// Build unoptimised with debug information
+        #[arg(long)]
+        debug: bool,
+
+        /// Use the CMake engine in this directory instead of the embedded one
+        ///
+        /// Only ever honoured when given here. An engine that happens to sit in
+        /// the checkout is not preferred on its own.
+        #[arg(long, value_name = "DIR")]
+        engine_dir: Option<PathBuf>,
 
         /// Override a Raspberry Pi board profile's exact model DTB for this build
         #[arg(long, value_name = "PATH")]

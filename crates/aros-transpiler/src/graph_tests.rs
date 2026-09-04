@@ -747,7 +747,7 @@ fn define_header_without_a_concrete_provider_stays_unresolved() {
         line: 7,
         output: "${AROS_BUILD_DIR}/example/options.h".to_owned(),
         definitions: vec!["EXAMPLE 1".to_owned()],
-        dependencies: vec!["${CMAKE_SOURCE_DIR}/example/options.mk".to_owned()],
+        dependencies: vec!["${AROS_SOURCE_DIR}/example/options.mk".to_owned()],
         provider: "missing-provider".to_owned(),
         consumers: Vec::new(),
     }]);

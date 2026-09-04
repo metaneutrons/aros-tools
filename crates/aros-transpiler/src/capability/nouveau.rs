@@ -23,7 +23,7 @@ const NOUVEAU_DRM_CORE_SOURCE_COUNT: usize = 67;
 const NOUVEAU_DRM_NVIDIA_SOURCE_COUNT: usize = 758;
 const NOUVEAU_DRM_TOTAL_SOURCE_COUNT: usize =
     NOUVEAU_DRM_CORE_SOURCE_COUNT + NOUVEAU_DRM_NVIDIA_SOURCE_COUNT;
-const NOUVEAU_DRM_SOURCE_PREFIX: &str = "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau";
+const NOUVEAU_DRM_SOURCE_PREFIX: &str = "${AROS_SOURCE_DIR}/workbench/hidds/nouveau";
 pub(crate) const GALLIUM_MMAKE: &str = "hidd-nouveau-gallium";
 const NOUVEAU_GALLIUM_SOURCE_MANIFEST: &str =
     "workbench/hidds/nouveau/nouveau-gallium-20.0.8.sources";
@@ -160,14 +160,14 @@ pub(crate) fn drm_compile_contract(
         includes: [
             "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc",
             "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include/nvkm",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/gsp",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/include/nvkm",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/drm/nouveau/nvkm/subdev/gsp",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -338,11 +338,11 @@ pub(crate) fn gallium_compile_contract(
             "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
             "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/nouveau",
             "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
-            "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
+            "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
         ]
         .into_iter()
         .map(str::to_owned)

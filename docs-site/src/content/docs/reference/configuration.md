@@ -11,13 +11,22 @@ hardware and storage but must not redefine release integrity.
 
 | File | Owner | Purpose |
 | --- | --- | --- |
-| `aros-targets.toml` | selected AROS checkout | Target presets, architectures and build paths |
+| `aros-targets.toml` | optional selected-checkout override | Target profiles, MetaMake selectors and host-compiler transport |
 | `aros-toolchains.lock.toml` | selected AROS checkout | Exact release archive, host/profile, size and SHA-256 |
 | generated CMake graph | configured build | Transactional output of the selected transpiler version |
 
 Unknown fields and unsupported schema versions fail closed. Relative paths are
 resolved against the discovered checkout, not the caller's arbitrary working
 directory.
+
+When `aros-targets.toml` is absent, `aros-tools` uses its embedded four-profile
+contract for `pc-x86_64`, `rpi-aarch64`, `arm-raspi` and
+`opensbi-riscv64`, including the complete MetaMake selector context and host
+LLVM declaration. This is the documented default for a pristine upstream
+checkout and is never written into it. An existing file is a complete,
+authoritative override: unreadable, malformed or incomplete content fails
+instead of falling back to the embedded contract. `aros info` reports which
+source supplied the effective profiles.
 
 Each target may declare the complete MetaMake selector set directly:
 
@@ -144,8 +153,9 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_PUBLICATION_TEST_FAIL_AT`, `AROS_PUBLICATION_TEST_PAUSE_AT`, `AROS_PUBLICATION_TEST_PAUSE_MS`, `AROS_PUBLICATION_TEST_CRASH_AT`
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
 
-The host LLVM version comes exclusively from the selected checkout's
-`[host_compiler]` contract; no ambient version variable overrides it.
+The host LLVM version comes exclusively from the effective `[host_compiler]`
+contract (checkout override or embedded pristine-upstream default); no ambient
+version variable overrides it.
 The toolchain lock is always `<checkout>/aros-toolchains.lock.toml`, and an
 unlocked local cross-toolchain is selected only with the explicit `--local` or
 `--toolchain-dir` command-line option. There are no hidden environment

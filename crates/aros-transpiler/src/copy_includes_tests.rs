@@ -202,7 +202,7 @@ $(GENDIR)/$(CURDIR)/src/webp/config.h : $(SRCDIR)/$(CURDIR)/config.h $(SRCDIR)/$
     assert_eq!(transform.name, "webp-generated");
     assert_eq!(
         transform.input,
-        "${CMAKE_SOURCE_DIR}/workbench/classes/datatypes/webp/config.h"
+        "${AROS_SOURCE_DIR}/workbench/classes/datatypes/webp/config.h"
     );
     assert_eq!(
         transform.output,
@@ -307,7 +307,7 @@ $(workbench-c-eval_DEPS) : $(OBJDIR)/evalParser.tab.c
     assert_eq!(scan.bison_outputs.len(), 1, "{:?}", scan.bison_outputs);
     let output = &scan.bison_outputs[0];
     assert_eq!(output.owner, "workbench-c-eval");
-    assert_eq!(output.input, "${CMAKE_SOURCE_DIR}/workbench/c/evalParser.y");
+    assert_eq!(output.input, "${AROS_SOURCE_DIR}/workbench/c/evalParser.y");
     assert_eq!(
         output.output,
         "${CMAKE_BINARY_DIR}/gen/workbench/c/evalParser.tab.c"

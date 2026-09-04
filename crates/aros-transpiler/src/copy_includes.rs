@@ -524,7 +524,7 @@ fn resolve_transform_path(
         .replace("$(AROS_INCLUDES)", "${AROS_SDK_INCLUDE_DIR}")
         .replace("$(GENINCDIR)", "${AROS_GENINC_DIR}")
         .replace("$(GENDIR)", "${CMAKE_BINARY_DIR}/gen")
-        .replace("$(SRCDIR)", "${CMAKE_SOURCE_DIR}")
+        .replace("$(SRCDIR)", "${AROS_SOURCE_DIR}")
         .replace("$(PORTSDIR)", "${AROS_PORTS_DIR}");
     if rendered.contains("$(") || rendered.contains(';') || rendered.contains('\n') {
         return None;
@@ -539,9 +539,9 @@ fn resolve_transform_path(
         }
     } else if !rendered.starts_with("${") && !rendered.starts_with('/') {
         rendered = if base.is_empty() {
-            format!("${{CMAKE_SOURCE_DIR}}/{rendered}")
+            format!("${{AROS_SOURCE_DIR}}/{rendered}")
         } else {
-            format!("${{CMAKE_SOURCE_DIR}}/{base}/{rendered}")
+            format!("${{AROS_SOURCE_DIR}}/{base}/{rendered}")
         };
     }
     Some(rendered)

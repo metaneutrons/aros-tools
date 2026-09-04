@@ -19,6 +19,7 @@ name = "aros-transpiler"
 path = "src/main.rs"
 
 [dependencies]
+aros-cmake-engine.workspace = true
 aros-common.workspace = true
 clap.workspace = true
 indicatif.workspace = true

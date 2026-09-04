@@ -248,7 +248,7 @@ pub(crate) fn in_tree_c_source_exists(root: &Path, relative_dir: &Path, source: 
     if source.is_empty() || source.contains('$') || source.contains(';') || source.contains('\\') {
         return false;
     }
-    let source_relative = if let Some(relative) = source.strip_prefix("${CMAKE_SOURCE_DIR}/") {
+    let source_relative = if let Some(relative) = source.strip_prefix("${AROS_SOURCE_DIR}/") {
         PathBuf::from(relative)
     } else {
         let path = Path::new(source);
@@ -663,8 +663,8 @@ pub(crate) fn owned_scope(
         }
     }
     let mut dependencies = vec![
-        format!("${{CMAKE_SOURCE_DIR}}/{}", fragment.path.display()),
-        format!("${{CMAKE_SOURCE_DIR}}/{}", relative_path.display()),
+        format!("${{AROS_SOURCE_DIR}}/{}", fragment.path.display()),
+        format!("${{AROS_SOURCE_DIR}}/{}", relative_path.display()),
     ];
     dependencies.sort();
     dependencies.dedup();

@@ -1,7 +1,7 @@
 //! The transpiler's output must not name the checkout it was run in.
 //!
 //! `generated_targets.cmake` is meant to depend only on the source tree, with
-//! every location written as `${CMAKE_SOURCE_DIR}/...` or one of the other
+//! every location written as `${AROS_SOURCE_DIR}/...` or one of the other
 //! CMake variables. Twelve lines did not: FlexCat's DESCRIPTION,
 //! HEADER_TEMPLATE and SOURCE_TEMPLATE carried the absolute host path, because
 //! the helper that was supposed to render them normalised separators and never

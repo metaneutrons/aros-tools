@@ -26,7 +26,7 @@ use crate::fingerprints::fingerprint;
 use crate::parser::TargetContext;
 use std::path::Path;
 
-pub(crate) const DRIVER: &str = "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py";
+pub(crate) const DRIVER: &str = "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa20_generate.py";
 
 pub(crate) fn generator_job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
     PythonGeneratorJob {
@@ -67,7 +67,7 @@ pub(crate) fn fetch_is_exact(fetch: &FetchDecl, name: &str) -> bool {
                 && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
                 && fetch.destination == "${AROS_PORTS_DIR}/mesa"
                 && fetch.base.is_empty()
-                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patch_origins == "${AROS_SOURCE_DIR}/workbench/libs/mesa"
                 && fetch.patches == "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1"
                 && fetch.dir == "workbench/libs/mesa"
         }
@@ -79,7 +79,7 @@ pub(crate) fn fetch_is_exact(fetch: &FetchDecl, name: &str) -> bool {
                 && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
                 && fetch.destination == "${AROS_PORTS_DIR}/mesa-python"
                 && fetch.base.is_empty()
-                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patch_origins == "${AROS_SOURCE_DIR}/workbench/libs/mesa"
                 && fetch.patches == "::"
                 && fetch.dir == "workbench/libs/mesa"
         }
@@ -91,7 +91,7 @@ pub(crate) fn fetch_is_exact(fetch: &FetchDecl, name: &str) -> bool {
                 && fetch.location == "${AROS_PORTS_SOURCE_DIR}"
                 && fetch.destination == "${AROS_PORTS_DIR}/mesa-python"
                 && fetch.base.is_empty()
-                && fetch.patch_origins == "${CMAKE_SOURCE_DIR}/workbench/libs/mesa"
+                && fetch.patch_origins == "${AROS_SOURCE_DIR}/workbench/libs/mesa"
                 && fetch.patches == "::"
                 && fetch.dir == "workbench/libs/mesa"
         }
@@ -525,7 +525,7 @@ fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         consumers: vec!["linklibs-gallium_v3d".to_owned()],
         dir_path: dir_path.to_path_buf(),
@@ -714,7 +714,7 @@ pub(crate) fn parse_remaining(
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
-            "${CMAKE_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
+            "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-20.0.8-aros.diff".to_owned(),
         ],
         consumers: vec![mmake.to_owned()],
         dir_path: relative_dir.to_path_buf(),
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn mesa20_placement_new_shim_is_limited_to_two_cxx_lanes() {
         let profile = target_context("x86_64", "pc", "");
-        let shim = "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>";
+        let shim = "$<$<COMPILE_LANGUAGE:CXX>:-I${AROS_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>";
         for (relative_dir, mmake, expects_shim) in [
             (
                 "workbench/libs/mesa/libcompiler",

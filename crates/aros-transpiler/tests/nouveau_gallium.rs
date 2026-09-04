@@ -44,11 +44,11 @@ fn production_nouveau_gallium_is_closed_and_canonical_for_all_current_architectu
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mesa",
         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/nouveau",
         "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
-        "${CMAKE_SOURCE_DIR}/workbench/hidds/nouveau/include",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/libdrm/nouveau",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/libdrm/nouveau",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include/uapi/drm",
+        "${AROS_SOURCE_DIR}/workbench/hidds/nouveau/include",
     ]
     .into_iter()
     .map(str::to_owned)

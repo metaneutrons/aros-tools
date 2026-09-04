@@ -50,7 +50,7 @@ fn a_catalog_is_a_real_mmake_target_with_all_outputs_described() {
         description: "sample".to_owned(),
         dir: "${AROS_BUILD_DIR}/SYS/Locale/Catalogs".to_owned(),
         source_description: "${AROS_BUILD_DIR}/hosttools/C_h_aros".to_owned(),
-        srcdir: "${CMAKE_SOURCE_DIR}/workbench/tools/sample/catalogs".to_owned(),
+        srcdir: "${AROS_SOURCE_DIR}/workbench/tools/sample/catalogs".to_owned(),
         declaring_dir: "workbench/tools/sample/catalogs".to_owned(),
         line: 12,
         consumers: vec![
@@ -151,7 +151,7 @@ fn header_only_flexcat_owner_is_concrete_before_openurl() {
             "OWNER \"external-openurl-prefs-setup\"\n    DIRECTORY \"external/openurl/prefs\"\n    HEADER \"locale.h\""
         ));
     assert!(
-        cmake.contains("DESCRIPTION \"${CMAKE_SOURCE_DIR}/external/openurl/locale/OpenURL.pot\"")
+        cmake.contains("DESCRIPTION \"${AROS_SOURCE_DIR}/external/openurl/locale/OpenURL.pot\"")
     );
     assert!(
         !cmake.contains("if(NOT TARGET \"external-openurl-prefs-setup\")\n    add_custom_target")
@@ -628,7 +628,7 @@ fn atheros_define_header_is_a_real_owner_after_both_compile_consumers() {
             "    DEFINES \"AH_HAS_RF 1\" \"AH_SUPPORT_AR5211 1\" \"AH_SUPPORT_AR5212 1\" \"AH_SUPPORT_AR5416 1\" \"AH_SUPPORT_2316 1\" \"AH_SUPPORT_2317 1\" \"AH_SUPPORT_2133 1\" \"AH_SUPPORT_2413 1\" \"AH_SUPPORT_2417 1\" \"AH_SUPPORT_2425 1\" \"AH_SUPPORT_5111 1\" \"AH_SUPPORT_5112 1\" \"AH_SUPPORT_5413 1\" \"AH_ENABLE_FORCEBIAS 1\""
         ));
     assert!(header.contains(
-            "    DEPENDS \"${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/Makefile.inc\" \"${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/mmakefile.src\""
+            "    DEPENDS \"${AROS_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/Makefile.inc\" \"${AROS_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/mmakefile.src\""
         ));
     assert!(header.contains(
             "    CONSUMERS \"workbench-devs-networks-atheros5000\" \"workbench-devs-networks-atheros5000-hal\""
@@ -741,7 +741,7 @@ fn abi_and_genmodule_only_targets_use_their_dedicated_cmake_contracts() {
     let abi = &cmake[abi_start..abi_end];
     assert!(abi.contains("    MMAKE_ID kernel-bluetooth-btclass"));
     assert!(abi.contains("    MODTYPE \"library\""));
-    assert!(abi.contains("    DIRECTORY \"${CMAKE_SOURCE_DIR}/rom/bluetooth/classes\""));
+    assert!(abi.contains("    DIRECTORY \"${AROS_SOURCE_DIR}/rom/bluetooth/classes\""));
     assert!(!abi.contains("SOURCES"), "{abi}");
     assert!(!abi.contains("GENMODULE_ONLY"), "{abi}");
     assert!(!abi.contains("CONFFILE"), "{abi}");

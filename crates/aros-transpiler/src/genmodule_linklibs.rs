@@ -199,7 +199,7 @@ fn marker_config(config: &str, relative_dir: &Path) -> Result<String, String> {
             return valid_marker_field(local, "config");
         }
         let from_root = valid_marker_field(from_root, "config")?;
-        return Ok(format!("${{CMAKE_SOURCE_DIR}}/{from_root}"));
+        return Ok(format!("${{AROS_SOURCE_DIR}}/{from_root}"));
     }
 
     valid_marker_field(config, "config")
@@ -433,7 +433,7 @@ GL_LIB_SOURCES := gl_funcs.c $(wildcard $(GENDIR)/$(CURDIR)/*_stub.c) \
                 Path::new("workbench/libs/gl")
             )
             .unwrap(),
-            "${CMAKE_SOURCE_DIR}/compiler/crt/stdc/stdc.conf"
+            "${AROS_SOURCE_DIR}/compiler/crt/stdc/stdc.conf"
         );
     }
 }

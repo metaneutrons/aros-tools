@@ -601,7 +601,7 @@ fn boost_recursive_copies_render_sdk_roots_and_port_source() {
         .expect("subset GENINCDIR staging declaration");
     assert_eq!(
         subset_geninc.source,
-        "${CMAKE_SOURCE_DIR}/compiler/boost/include/boost"
+        "${AROS_SOURCE_DIR}/compiler/boost/include/boost"
     );
     assert_eq!(subset_geninc.destination, geninc.destination);
     let subset_sdk = parsed
@@ -640,7 +640,7 @@ fn recursive_copy_collector_rejects_host_paths_and_unaudited_excludes() {
     assert_eq!(parsed.copy_directories[0].name, "safe-copy");
     assert_eq!(
         parsed.copy_directories[0].source,
-        "${CMAKE_SOURCE_DIR}/module/assets"
+        "${AROS_SOURCE_DIR}/module/assets"
     );
     assert_eq!(
         parsed.copy_directories[0].destination,
@@ -1584,7 +1584,7 @@ fn btcore_plain_local_source_inventory_is_real_in_all_current_profiles() {
         assert!(btcore
             .source_files
             .iter()
-            .all(|source| source.starts_with("${CMAKE_SOURCE_DIR}/rom/bluetooth/stack/")));
+            .all(|source| source.starts_with("${AROS_SOURCE_DIR}/rom/bluetooth/stack/")));
         assert!(btcore
             .source_files
             .iter()
@@ -1683,7 +1683,7 @@ fn zstd_plain_source_inventory_is_cold_fetch_exact_in_all_current_profiles() {
             );
             assert_eq!(
                 target.include_dirs,
-                ["${CMAKE_SOURCE_DIR}/workbench/libs/zstd"],
+                ["${AROS_SOURCE_DIR}/workbench/libs/zstd"],
                 "{cpu}: {}",
                 target.mmake_name
             );
@@ -1874,8 +1874,8 @@ fn atheros_hal_literal_fragment_is_exact_in_all_current_profiles() {
         assert_eq!(
             header.dependencies,
             [
-                "${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/Makefile.inc",
-                "${CMAKE_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/mmakefile.src",
+                "${AROS_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/Makefile.inc",
+                "${AROS_SOURCE_DIR}/workbench/devs/networks/atheros5000/hal/mmakefile.src",
             ],
             "{cpu}"
         );

@@ -40,10 +40,11 @@ paths and board identifiers may be present.
 
 Commands classified as checkout-required search upward for the canonical AROS
 source layout: `configure`, `Makefile.in`, and the `arch/`, `compiler/` and
-`rom/` directories. `aros-targets.toml` is optional in a pristine upstream
-checkout and is loaded only by workflows that require target metadata. The CLI
-does not infer a sibling directory. Use `aros source init PATH`, enter an
-existing AROS checkout, or choose a command that is explicitly global.
+`rom/` directories. `aros-targets.toml` is optional: a pristine checkout uses
+the target contract embedded in `aros-tools`, while an existing file is an
+authoritative override and must validate completely. The CLI does not infer a
+sibling directory. Use `aros source init PATH`, enter an existing AROS
+checkout, or choose a command that is explicitly global.
 
 ## Offline or checksum failure
 

@@ -445,7 +445,7 @@ impl DependencyGraph {
             });
             if let Some((fetch, _)) = owner {
                 transform.dependencies.push(fetch.clone());
-            } else if !transform.input.starts_with("${CMAKE_SOURCE_DIR}/") {
+            } else if !transform.input.starts_with("${AROS_SOURCE_DIR}/") {
                 // Repository-owned inputs are already present when CMake
                 // configures. Ports inputs, on the other hand, must have an
                 // exact fetch owner or a cache-empty Ninja build could race or

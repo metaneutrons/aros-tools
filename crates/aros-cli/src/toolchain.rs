@@ -861,6 +861,7 @@ mod tests {
                 features: Vec::new(),
                 float_abi: None,
                 transpiler: None,
+                bootloader: None,
             };
             assert_eq!(target_triple_for_profile(&profile), triple);
         }

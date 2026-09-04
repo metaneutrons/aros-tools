@@ -39,7 +39,12 @@ locked Astro build, and locked workspace tests. CI runs the closed
 source-independent `portable-test` suite on all
 four supported hosts and the recursive exact-source `test` gate on one Linux
 lane. This reduces runner work without weakening the default local `all`
-contract. The separate documentation workflow runs the same locked npm/Astro
+contract. The exact-source gate also builds the workspace executables and runs
+every host-compatible `aros-cmake-engine` CMake fixture against that same
+qualified checkout; `clang`, `cmake` and `ninja` are therefore required for this gate.
+The real GRUB host-build fixture is an explicit Darwin/arm64 release
+qualification and is reported as an omission on other hosts. The separate
+documentation workflow runs the same locked npm/Astro
 contract through `docs`, then uploads the verified output through a separately
 pinned Pages action.
 

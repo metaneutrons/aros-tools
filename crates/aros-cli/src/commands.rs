@@ -51,6 +51,8 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             offline,
             require_fetch_checksums,
             toolchain_dir,
+            debug,
+            engine_dir,
         } => {
             build::run(
                 required_repo(repo_root)?,
@@ -67,6 +69,12 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
                     },
                     toolchain_dir,
                     cmake_definitions: Vec::new(),
+                    build_type: if debug {
+                        build::BuildType::Debug
+                    } else {
+                        build::BuildType::Release
+                    },
+                    engine_dir: engine_dir.clone(),
                 },
             )
             .await
@@ -211,6 +219,8 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
             toolchain_dir,
             dtb_path,
             core_kobj_dir,
+            debug,
+            engine_dir,
         } => {
             let board = load_board(&selection)?;
             crate::board::build(
@@ -229,6 +239,12 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
                     },
                     toolchain_dir,
                     cmake_definitions: Vec::new(),
+                    build_type: if debug {
+                        build::BuildType::Debug
+                    } else {
+                        build::BuildType::Release
+                    },
+                    engine_dir: engine_dir.clone(),
                 },
                 dtb_path.as_deref(),
                 core_kobj_dir.as_deref(),
@@ -544,18 +560,15 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
     let repository_configuration = repo_root
         .map(|repo_root| {
             let targets_path = repo::targets_file(repo_root);
-            let profiles = if path_entry_exists(&targets_path)? {
-                Some(repo::load_target_profiles(repo_root)?)
-            } else {
-                None
-            };
+            let profiles_from_builtin = !path_entry_exists(&targets_path)?;
+            let profiles = repo::load_target_profiles(repo_root)?;
             let lock_path = toolchain::lock_file_path(repo_root);
             let lock = if path_entry_exists(&lock_path)? {
                 Some(toolchain::load_lock(repo_root)?)
             } else {
                 None
             };
-            Ok::<_, miette::Report>((profiles, lock))
+            Ok::<_, miette::Report>((profiles, profiles_from_builtin, lock))
         })
         .transpose()?;
 
@@ -643,6 +656,15 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
     aros_common::outputln!("  • AROS state root:        {}", state_home.display());
     aros_common::outputln!("  • Archive cache:          {}", archive_cache.display());
     aros_common::outputln!("  • Cross-toolchain store:  {}", cross_store.display());
+    // Which engine a build will use, and its identity. A reader debugging a
+    // configure failure needs this before anything else: the modules are not in
+    // the checkout any more, so there is nowhere else to look them up.
+    aros_common::outputln!(
+        "  • CMake engine:           embedded {} ({} files, api {})",
+        &aros_cmake_engine::digest()[..12],
+        aros_cmake_engine::file_count(),
+        aros_cmake_engine::api_version()
+    );
     aros_common::outputln!(
         "  • C/C++ Compiler Launcher: {}",
         build::detected_compiler_cache().map_or_else(
@@ -655,20 +677,24 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
             },
         )
     );
-    if let Some((repo_root, (profiles, lock))) = repo_root.zip(repository_configuration) {
+    if let Some((repo_root, (profiles, profiles_from_builtin, lock))) =
+        repo_root.zip(repository_configuration)
+    {
         aros_common::outputln!("  • Source checkout:        {}", repo_root.display());
-        match profiles {
-            Some(profiles) => {
-                let target_names = profiles
-                    .into_iter()
-                    .map(|target| target.name)
-                    .collect::<Vec<_>>();
-                aros_common::outputln!("  • Configured targets:     {}", target_names.join(", "));
-            }
-            None => aros_common::outputln!(
-                "  • Configured targets:     none (pristine upstream checkout)"
-            ),
-        }
+        let target_names = profiles
+            .into_iter()
+            .map(|target| target.name)
+            .collect::<Vec<_>>();
+        let target_source = if profiles_from_builtin {
+            " (built into aros-tools; pristine upstream checkout)"
+        } else {
+            " (checkout override)"
+        };
+        aros_common::outputln!(
+            "  • Configured targets:     {}{}",
+            target_names.join(", "),
+            target_source
+        );
         match lock {
             Some(lock) => aros_common::outputln!(
                 "  • AROS toolchain lock:    {} ({} assets)",

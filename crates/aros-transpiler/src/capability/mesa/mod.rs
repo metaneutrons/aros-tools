@@ -26,7 +26,7 @@ pub(crate) const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/2
 pub(crate) const PRIVATE_LIBDIR: &str = "${AROS_BUILD_DIR}/gen/lib/mesa20.0.8";
 pub(crate) const V3D_RELATIVE_DIR: &str = "arch/arm-native/soc/broadcom/2708/hidd/v3d";
 pub(crate) const V3D_SOURCE_DIR: &str =
-    "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d";
+    "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d";
 pub(crate) const V3D_CLE_DIR: &str =
     "${CMAKE_BINARY_DIR}/gen/arch/arm-native/soc/broadcom/2708/hidd/v3d/cle-gen";
 pub(crate) const V3D_CLE_BROADCOM_DIR: &str =
@@ -198,7 +198,7 @@ pub(crate) fn compile_contract(
             vec![
                 "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
                 "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-I${AROS_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
                 "-fno-strict-aliasing".to_owned(),
             ],
         ),
@@ -245,7 +245,7 @@ pub(crate) fn compile_contract(
             vec![
                 "$<$<COMPILE_LANGUAGE:C>:-std=gnu11>".to_owned(),
                 "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++14>".to_owned(),
-                "$<$<COMPILE_LANGUAGE:CXX>:-I${CMAKE_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
+                "$<$<COMPILE_LANGUAGE:CXX>:-I${AROS_SOURCE_DIR}/workbench/libs/mesa/libcompiler/cxx-compat>".to_owned(),
                 "-fno-strict-aliasing".to_owned(),
             ],
         ),
@@ -280,8 +280,8 @@ pub(crate) fn compile_contract(
                 defines,
                 base.into_iter()
                     .chain([
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/drm_compat",
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
+                        "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/drm_compat",
+                        "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/vc4gallium",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/drivers/vc4",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium/include",
@@ -291,7 +291,7 @@ pub(crate) fn compile_contract(
                         "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/broadcom",
                         "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/compiler/nir",
                         "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8/src/compiler/nir",
-                        "${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
+                        "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
                     ])
                     .map(str::to_owned)
                     .collect(),
@@ -311,7 +311,7 @@ pub(crate) fn compile_contract(
             );
             (
                 defines,
-                std::iter::once("${CMAKE_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d/drm-stubs")
+                std::iter::once("${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/hidd/v3d/drm-stubs")
                     .chain(base)
                     .chain([
                         "${CMAKE_BINARY_DIR}/gen/workbench/libs/mesa/20.0.8/galliumglue",
