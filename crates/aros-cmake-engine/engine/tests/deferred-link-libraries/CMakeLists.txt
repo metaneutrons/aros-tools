@@ -5,6 +5,17 @@ list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
+if(DEFERRED_LINK_MODE STREQUAL "direct-lld")
+    # The fixture inspects generated link items and never executes this path,
+    # so a known executable is sufficient to select the direct-link contract.
+    set(AROS_LLD_BIN "${CMAKE_COMMAND}")
+elseif(DEFERRED_LINK_MODE STREQUAL "compiler-driver")
+    # Suppress host discovery so the fallback remains covered on machines that
+    # happen to install ld.lld.
+    set(AROS_LLD_BIN FALSE)
+else()
+    message(FATAL_ERROR "unknown deferred link mode: ${DEFERRED_LINK_MODE}")
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
 
 get_directory_property(_compile_options COMPILE_OPTIONS)
@@ -42,7 +53,11 @@ aros_finalize_link_libraries()
 
 
 get_target_property(_consumer_links consumer LINK_LIBRARIES)
-set(_expected_links "--start-group;provider;--end-group")
+if(AROS_LLD_BIN)
+    set(_expected_links "--start-group;provider;--end-group")
+else()
+    set(_expected_links "-Wl,--start-group;provider;-Wl,--end-group")
+endif()
 if(NOT _consumer_links STREQUAL _expected_links)
     message(FATAL_ERROR
         "forward provider was not bound as one filtered group:\n"
