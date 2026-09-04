@@ -9,10 +9,10 @@ endif()
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_root "${_temp_root}/aros-private-linklib-${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/private-linklib-output")
-find_program(_llvm_ar NAMES llvm-ar
+find_program(_archiver NAMES llvm-ar ar
     HINTS "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin"
     REQUIRED)
-find_program(_llvm_ranlib NAMES llvm-ranlib
+find_program(_ranlib NAMES llvm-ranlib ranlib
     HINTS "/opt/homebrew/opt/llvm/bin" "/usr/local/opt/llvm/bin"
     REQUIRED)
 
@@ -24,8 +24,8 @@ function(_configure case expect_success expected_message)
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS} -G Ninja
             "-DPRIVATE_LINKLIB_CASE=${case}"
-            "-DCMAKE_AR=${_llvm_ar}"
-            "-DCMAKE_RANLIB=${_llvm_ranlib}"
+            "-DCMAKE_AR=${_archiver}"
+            "-DCMAKE_RANLIB=${_ranlib}"
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
         ERROR_VARIABLE _stderr)
@@ -70,7 +70,7 @@ if(NOT EXISTS "${_empty_archive}" OR IS_DIRECTORY "${_empty_archive}")
     message(FATAL_ERROR "empty private archive was not created at ${_empty_archive}")
 endif()
 execute_process(
-    COMMAND "${_llvm_ar}" t "${_empty_archive}"
+    COMMAND "${_archiver}" t "${_empty_archive}"
     RESULT_VARIABLE _archive_list_result
     OUTPUT_VARIABLE _archive_members
     ERROR_VARIABLE _archive_list_stderr)
@@ -96,7 +96,7 @@ if(NOT _repair_result EQUAL 0 OR NOT EXISTS "${_empty_archive}")
         "${_repair_stdout}\n${_repair_stderr}")
 endif()
 execute_process(
-    COMMAND "${_llvm_ar}" t "${_empty_archive}"
+    COMMAND "${_archiver}" t "${_empty_archive}"
     RESULT_VARIABLE _repaired_list_result
     OUTPUT_VARIABLE _repaired_members
     ERROR_VARIABLE _repaired_list_stderr)
