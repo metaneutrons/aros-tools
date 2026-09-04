@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "aros-tools-docs",
+  "account_id": "9122b44fa4c05b23985d6a0b779caa01",
+  "compatibility_date": "2026-09-04",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "aros.metaneutrons.cc/aros-tools",
+      "zone_name": "metaneutrons.cc"
+    },
+    {
+      "pattern": "aros.metaneutrons.cc/aros-tools/*",
+      "zone_name": "metaneutrons.cc"
+    }
+  ],
+  "assets": {
+    "directory": "./worker-dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}

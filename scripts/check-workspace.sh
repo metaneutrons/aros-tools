@@ -122,6 +122,7 @@ run_docs() {
         npm run build
         python3 ../scripts/check-doc-links.py \
             --directory dist --base /aros-tools/
+        npm run worker:check
     )
 }
 

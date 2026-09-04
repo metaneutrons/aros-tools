@@ -1593,4 +1593,36 @@ sed -i.bak \
 rm "$work/policy/.github/workflows/release.yml.bak"
 expect_failure "$root/scripts/release/check-actions-policy.sh" "$work/policy"
 
+# Documentation deployment is a separate one-secret trust domain. The build
+# remains credential-free, and only the exact protected environment may deploy.
+rm -f "$work/policy/.github/workflows"/*
+cp "$root/.github/workflows/docs.yml" \
+    "$work/policy/.github/workflows/docs.yml"
+"$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null
+sed -i.bak 's/environment: docs-publication/environment: apt-publication/' \
+    "$work/policy/.github/workflows/docs.yml"
+rm "$work/policy/.github/workflows/docs.yml.bak"
+expect_failure "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+cp "$root/.github/workflows/docs.yml" \
+    "$work/policy/.github/workflows/docs.yml"
+python3 - "$work/policy/.github/workflows/docs.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding='utf-8')
+needle = '          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}\n'
+if text.count(needle) != 1:
+    raise SystemExit('fixture cannot locate singular documentation credential')
+path.write_text(
+    text.replace(
+        needle,
+        needle + '          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}\n',
+        1,
+    ),
+    encoding='utf-8',
+)
+PY
+expect_failure "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+
 printf '%s\n' 'release policy fixtures passed'
