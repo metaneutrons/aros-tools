@@ -32,9 +32,12 @@ existing environment gate and its regression test pass.
   `aros-tool-diagnostics-v1` envelope with a `diagnostics` array.
 - `scripts/check-workspace.sh docs`: passed; zero npm vulnerabilities,
   Astro check with zero errors/warnings/hints, 25 generated pages and
-  1,647 checked links. The Astro build emits no route warnings.
+  1,648 checked links. The Astro build emits no route warnings.
 - `python3 scripts/check-environment-contract.py` and
   `python3 scripts/environment_contract_test.py`: passed.
+- `scripts/release/test-release-policy.sh`: passed. Its maintainer-tooling
+  documentation assertion follows the moved installation instructions into the
+  contributor guide without relaxing the expected tooling contract.
 - Chrome production-preview sweep: all 24 content pages at 390, 768, 1280,
   1440 and 1920 pixels, dark and light themes — 240 page checks, no page-level
   horizontal overflow, missing selected navigation or JavaScript/console errors.

@@ -1260,8 +1260,10 @@ grep -F 'verify-apt-public-key.sh' \
     "$root/scripts/release/verify-apt-publication-inventory.sh" >/dev/null
 grep -F 'verify-apt-public-key.sh' \
     "$root/scripts/release/verify-apt-recovery-base.sh" >/dev/null
+# The complete maintainer environment belongs in the contributor guide, not
+# the minimal user prerequisite list. Preserve the installable tooling contract.
 grep -F 'brew install actionlint cmake coreutils cosign curl dpkg gh git' \
-    "$root/docs-site/src/content/docs/getting-started/prerequisites.md" >/dev/null
+    "$root/docs-site/src/content/docs/contributing/development.md" >/dev/null
 
 cp -R "$work/apt-a" "$work/apt-missing-release-signature"
 unlink "$work/apt-missing-release-signature/dists/stable/Release.gpg"

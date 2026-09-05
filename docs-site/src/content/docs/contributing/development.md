@@ -14,6 +14,27 @@ and `rust-toolchain.toml`. In addition to the user prerequisites, install
 Node.js 24 or newer with npm, Python 3.11 or newer, actionlint, ShellCheck,
 jq, GnuPG, dpkg-deb and the archive utilities named in CONTRIBUTING.
 
+On macOS, after installing the Xcode Command Line Tools:
+
+```sh
+brew install actionlint cmake coreutils cosign curl dpkg gh git gnupg jq ninja node pkg-config python@3.14 shellcheck
+```
+
+On Debian or Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install --yes build-essential ca-certificates cmake curl dpkg-dev gh git gnupg golang-go jq ninja-build patch pkg-config python3 shellcheck
+go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+```
+
+Install Node.js 24 or newer through your normal distribution or version manager;
+do not assume the distribution's default version meets the runtime contract.
+Ensure Go's binary directory is on PATH after installing actionlint. Confirm
+`node --version`, `python3 --version` and `actionlint -version` before running
+the quality gate. Release-signature verification additionally needs a recent
+cosign and GitHub CLI, as described in [prerequisites](/aros-tools/getting-started/prerequisites/).
+
 Install the pinned Rust audit helpers:
 
 ```sh
