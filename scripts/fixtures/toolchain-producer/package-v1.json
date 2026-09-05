@@ -1,0 +1,97 @@
+{
+  "archive_base64": "/Td6WFoAAATm1rRGAgAhARwAAAAQz1jM4Cf/AxBdADob7NhkbFj7jywls01ZdKItf5gQb0aSR90IFmnwbm6G84kumMGpiJ22e7xTs1IuH+S2E4ti0336GRUXWCvMveUXiqU3+5kccPgeP534Pcem+eANBuErjdbX11fNnCh1vcTuQbjwGzkNmgNOjFidlPVmnLw+AEkYhIT6Q5YmzB3YOw6JF5m6qWlqpMR5ony319Wn8uB9XjwWDXzKfXW3lKvUhFCHUh7teNmS3JFSxf3wtyoqGA1TFqGqPl90lNqzUkvKzF1zSneyNF92vaStgrt31y3QvMDBp0eYfsnhNdgBoVP2wIeWxl6qtx3UJnqQTCQhUFuYEriPW2DcEDuL3FyJVfc6ab+pti34+Vu7tTyGVMC84ViWGLyZlTrr1KnnU2PYr83GNv4Q8sKqjfxdoRLa9eWe0EV7DMbowc4kJTrLFT9X0XrWhAvg0D9aDsKoROVqSiXI6nyuxxN6BN7ZsZXFTABy6PCr8JEels4lOE0TY57YFkAxpCuGwwG2IZAQJTNfxwvJKzpZZYOkOdWlmZqHu66loQJ5IH/soHfsW6LjRbbgmvisguX/JLUgZdZL/pgYdt2S/IpR7WKdQlspKfkrWqwzaBn+z2q4OTCQkTXMBrrAd2A/47tRedpJSaXJh7uDnXavAn0rC9i5oCegfD4QoL7ymb7brvklUvsvbtDRZsP1CXzb/Ppzoa1cSX82H6JduvN/8Zu/RxS8tite6XFJ5gHvNO1MxIcNRicLjNU0FAXFZjd7n29ixqxtl0avCQKfzW5WqfCuICSKp4IvIxDwa0Hj8qLZm3jqa5W7tiPCKOALba6zgpOdrKrR9m+H0Gyja0bim68ZStqB/att1gmqPiR7HqySUQh0rb4TjlKQk/FQxDGAzp14ZtYhTS7ds5vnJWx0PDwqdbu0VW5or3Umv9Er7M5qdhpco3o45hEUsgJuCL0i4IOy8lW0Jv3raKtj93FePM0rvcRL3qr7kD/lTFB0nrHGNJaDODcZ3LDDgwfYc6CCihr/eD3hBTsL9b4jCjL/xMEJ1QqTYm7t+gAAbCkQppguTxwAAawGgFAAAGNoLqOxxGf7AgAAAAAEWVo=",
+  "archive_sha256": "555c7ff6340d9ddfc704e8a1a64f3b8a88d41afe444bfc3972b6bae532b2f01c",
+  "archive_size": 848,
+  "canonical_entry_sha256": "353a9efae144261fc0aa72bbdea152a18386656008a8fa596a71d66a833a84fd",
+  "canonical_entry_utf8": "{\"mode\":\"0644\",\"path\":\"share/Größe/marker-ä.txt\",\"sha256\":\"4ccf1e6a82136c5751f427f09855c182be7173dfe5c68b1c197901b587544287\",\"size\":18,\"type\":\"file\"}\n",
+  "legacy_manifest_cases": 16,
+  "manifest": {
+    "build_environment": {},
+    "capabilities": [
+      "c"
+    ],
+    "files": [
+      {
+        "mode": "0755",
+        "path": "share",
+        "type": "directory"
+      },
+      {
+        "mode": "0755",
+        "path": "share/Größe",
+        "type": "directory"
+      },
+      {
+        "mode": "0644",
+        "path": "share/Größe/marker-ä.txt",
+        "sha256": "4ccf1e6a82136c5751f427f09855c182be7173dfe5c68b1c197901b587544287",
+        "size": 18,
+        "type": "file"
+      },
+      {
+        "mode": "0777",
+        "path": "share/vector-link",
+        "target": "Größe/marker-ä.txt",
+        "type": "symlink"
+      }
+    ],
+    "host": "linux-x86_64",
+    "llvm_version": "11.0.0",
+    "producer_commit": "2222222222222222222222222222222222222222",
+    "profiles_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "release_id": "fixture-only",
+    "schema": 1,
+    "source_commit": "1111111111111111111111111111111111111111",
+    "source_date_epoch": 946684800,
+    "source_lock_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "target_profile": "pc-x86_64",
+    "target_triple": "x86_64-unknown-aros",
+    "tools_commit": "3333333333333333333333333333333333333333",
+    "tree_sha256": "11cbd45962f89c54c02fc9c1ae55eb283774b76425c08564da060bd5ca9c840b"
+  },
+  "manifest_sha256": "09f095c5c2292c53363c50b85471cc968d4075c31c2c58e53207d99ac1573a61",
+  "producer_commit": "c8039cf2b7291097ad62c6750bd7367e91a068f4",
+  "producer_functions": [
+    "fail",
+    "json_bytes",
+    "read_json",
+    "sha256_file",
+    "files_equal",
+    "canonical_asset_name",
+    "validate_manifest",
+    "validate_source_lock",
+    "validate_host_python_packages",
+    "validate_recipe",
+    "required_paths",
+    "verify_source",
+    "command_prefetch",
+    "command_verify_source_usage",
+    "git",
+    "repository_identity",
+    "command_recipe",
+    "command_verify_checkout",
+    "profile_by_name",
+    "normalized_mode",
+    "normalize_tree",
+    "scan_prefixes",
+    "tree_inventory",
+    "add_tar_entry",
+    "write_spdx",
+    "command_package",
+    "command_repackage",
+    "safe_extract",
+    "executable",
+    "run_probe",
+    "verify_tree",
+    "command_verify",
+    "command_compare",
+    "command_index",
+    "parser",
+    "main"
+  ],
+  "producer_script_sha256": "c9f954f47dfa89dca2767e550d3f0561e91151b05355def9333ddf5df69a46d5",
+  "schema": "aros-toolchain-package-baseline-v1",
+  "scope": "synthetic-envelope-not-an-installable-toolchain",
+  "tree_fixture_sha256": "b8472bdf29379d2956995cf60d90503c8581615cc0f80aa90e6d44f11758dbb7"
+}
