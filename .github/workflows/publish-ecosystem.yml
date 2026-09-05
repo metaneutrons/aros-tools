@@ -407,8 +407,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}
           PR: ${{ steps.update.outputs.pr }}
+          EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}
         run: |
           set -euo pipefail
+          python3 scripts/release/wait-homebrew-checks.py
           gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
             --watch --fail-fast --interval 20
       # A token lasts one hour. Late mutations must not reuse the pre-wait token.

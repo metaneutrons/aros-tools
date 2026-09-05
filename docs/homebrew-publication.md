@@ -38,7 +38,11 @@ to authenticate source-release checks, never tap writes.
 2. Create or reuse the exact formula branch/PR using the measured App bot
    identity. Preserve version rollback, path, source-release and tap-governance
    guards. This step has a ten-minute bound.
-3. Wait at most 35 minutes for tap qualification. A timeout stops the job.
+3. Within a 35-minute qualification step, first wait at most five minutes for
+   every required check from the governance contract to register on the exact
+   PR head. Empty or incomplete inventories are pending, never green. API
+   failures, a changed/closed/draft PR and failed checks abort immediately.
+   Then watch all registered checks; a timeout stops the job.
 4. Issue and verify a **new** token, then recheck CI, exact PR head, source
    identity/assets and effective tap protection. Merge with the exact-head guard
    in a bounded ten-minute step; never bypass protections.
@@ -62,6 +66,10 @@ run may be resumed only through the existing exact-byte roll-forward rules.
 | AP7115 | Bot identity mismatch |
 | AP7116 | Verified bot outputs could not be recorded |
 | AP7030 | Effective protection differs from the governance contract |
+| AP7310–AP7311 | PR identity changed or exact-head/check contract missing |
+| AP7312 | Check API, response or state is invalid; no retry as empty inventory |
+| AP7313 | A check failed while others were still registering |
+| AP7314 | Required checks did not register within five minutes |
 
 API error bodies and credential values are not logged by the verifier. A
 local successful preflight proves access and protection, not a completed

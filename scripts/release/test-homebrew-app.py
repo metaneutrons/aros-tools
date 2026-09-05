@@ -2,6 +2,7 @@
 """Offline positive/negative contracts for Homebrew App publication."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -184,9 +185,80 @@ class WorkflowPolicy(unittest.TestCase):
         self.replace(self.publish, "timeout-minutes: 35", "timeout-minutes: 90")
         self.check("must be bounded")
 
+    def test_no_registration_wait(self):
+        self.replace(self.publish, "python3 scripts/release/wait-homebrew-checks.py", "true")
+        self.check("must be bounded")
+
     def test_wrong_environment(self):
         self.replace(self.publish, "environment: homebrew-publication", "environment: release")
         self.check("must stay inside homebrew-publication")
+
+
+class CheckRegistration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("wait_checks", ROOT / "scripts/release/wait-homebrew-checks.py")
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def setUp(self):
+        self.head = "a" * 40
+        self.data = dict(state="OPEN", isDraft=False, headRefOid=self.head, statusCheckRollup=[])
+        self.row = dict(__typename="CheckRun", name="CI success", status="QUEUED", conclusion=None)
+        self.now = 0
+        self.reads = 0
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def wait(self, read):
+        self.module.wait("123", self.head, {"CI success"}, read=read,
+                         clock=lambda: self.now, sleep=self.sleep)
+
+    def test_empty_then_unrelated_then_required(self):
+        def read(_):
+            self.reads += 1
+            if self.reads == 2:
+                self.data["statusCheckRollup"] = [dict(self.row, name="lint")]
+            if self.reads == 3:
+                self.data["statusCheckRollup"].append(self.row)
+            return self.data
+        self.wait(read)
+        self.assertEqual((self.reads, self.now), (3, 40))
+
+    def test_never_registered_is_bounded_failure(self):
+        with self.assertRaisesRegex(self.module.CheckError, "AP7314"):
+            self.wait(lambda _: self.data)
+        self.assertEqual(self.now, 300)
+
+    def test_api_failure_not_retried(self):
+        def read(_):
+            raise self.module.CheckError("AP7312")
+        with self.assertRaisesRegex(self.module.CheckError, "AP7312"):
+            self.wait(read)
+        self.assertEqual(self.now, 0)
+
+    def test_changed_head_closed_or_draft(self):
+        for change in (dict(headRefOid="b" * 40), dict(state="CLOSED"), dict(isDraft=True)):
+            with self.subTest(change=change), self.assertRaisesRegex(self.module.CheckError, "AP7310"):
+                self.module.registered(dict(self.data, **change), self.head, {"CI success"})
+
+    def test_failures_even_before_required_check_registered(self):
+        for result in ("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"):
+            self.data["statusCheckRollup"] = [dict(self.row, name="lint", status="COMPLETED", conclusion=result)]
+            with self.subTest(result=result), self.assertRaisesRegex(self.module.CheckError, "AP7313"):
+                self.wait(lambda _: self.data)
+
+    def test_malformed_or_unknown_check(self):
+        for rows in (None, [None], [dict(self.row, status="invented")], [dict(__typename="Other")]):
+            self.data["statusCheckRollup"] = rows
+            with self.subTest(rows=rows), self.assertRaisesRegex(self.module.CheckError, "AP7312"):
+                self.wait(lambda _: self.data)
+
+    def test_pending_legacy_status_registered(self):
+        self.data["statusCheckRollup"] = [dict(__typename="StatusContext", context="CI success", state="PENDING")]
+        self.wait(lambda _: self.data)
+        self.assertEqual(self.now, 0)
 
 
 if __name__ == "__main__":

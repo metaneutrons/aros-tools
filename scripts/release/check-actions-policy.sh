@@ -471,6 +471,8 @@ if homebrew_job:
         errors.append('Homebrew must renew its App token between qualification wait and merge')
     else:
         if ('timeout-minutes: 35' not in steps[wait]
+                or 'python3 scripts/release/wait-homebrew-checks.py' not in steps[wait]
+                or 'EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}' not in steps[wait]
                 or 'timeout-minutes: 10' not in steps[merge_step]
                 or 'gh pr checks' not in steps[merge_step]
                 or 'GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}' not in steps[merge_step]
