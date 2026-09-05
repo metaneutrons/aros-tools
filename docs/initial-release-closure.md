@@ -43,8 +43,9 @@ package release; it does not advance the native toolchain producer roadmap.
   companion-header test from the selected engine after building its tools, and
   uses their locked Rust toolchain. Local release build, fixture and actionlint
   pass; remote qualification follows PR #25 to avoid a redundant matrix.
-- [ ] Resume the fail-closed upstream synchronizer after the mirrored upstream
-  head is contained in main; qualify its next proposal normally.
+- [ ] Verify the fail-closed upstream synchronizer after the mirrored upstream
+  head is contained in main; qualify its next proposal normally. The workflow
+  is already active (verified 2026-09-05); no reactivation is necessary.
 - [ ] Remove the tools-owned APT publisher and qualify central archive
   consumption, trust, by-hash metadata, retained versions and negative cases.
   Shared-root implementation: 33 signed-archive tests and 18 dispatch/manifest
@@ -77,7 +78,9 @@ package release; it does not advance the native toolchain producer roadmap.
   configured in the existing tag-only `homebrew-publication` environment.
   Local regression gates cover scope, identity, token renewal and legacy PAT
   rejection. The check-registration race is bounded to five minutes and covered
-  by 33 tests in total. No protection rule or bypass changed.
+  by 33 App/publication tests, with 11 additional native-host and installed-byte
+  counter-probes (44 Homebrew tests in total). No tap protection rule or bypass
+  changed.
 - [ ] Qualify the App-authenticated formula PR, four-host tap CI, exact-head
   merge and final byte read-back in the first release. No release was triggered
   by credential setup. The old PAT secret is retained for explicit cleanup,
@@ -86,8 +89,17 @@ package release; it does not advance the native toolchain producer roadmap.
   all four Homebrew labels green, but its `macos-x86_64` job used the ARM
   `macos-14` runner. That result is not Intel evidence. The correction selects
   `macos-15-intel` and verifies real host identity plus installed native bytes
-  against the selected staging manifest. A fresh complete run must pass;
-  dependency/post-install errors remain blocking.
+  against the selected staging manifest. Run `33987257343` on `3ed80c5` passed
+  every other package host but failed at OpenSSL's Intel post-install; the
+  installer returned nonzero and the new `AP7322` gate rejected it. The tools
+  archive was installed, but its Intel byte verification did not run. The
+  job-only debug replay (attempt 2, job `101367689886`) reproduced the failure
+  and exposed its cause: Homebrew 6.0.22 rejects its own API-cache formula path
+  in `FormulaInstaller#post_install_formula_path`, before OpenSSL's hook runs.
+  A current Git-backed core tap is a documented alternative source mode, but
+  adopting it would need aligned Intel qualification, tap CI and installation
+  instructions; it has not been implemented or qualified. Dependency/post-install
+  errors remain blocking. See the [debug evidence](https://github.com/metaneutrons/aros-tools/actions/runs/33987257343/job/101367689886).
 - [x] Release Please App preflight and main-only environment configured on
   2026-09-05 at 17:36 UTC. Exact repository grant, configuration/PR/label
   reads, key fingerprint and secret/variable metadata verified. No App rights
