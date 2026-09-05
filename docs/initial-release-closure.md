@@ -10,13 +10,21 @@ package release; it does not advance the native toolchain producer roadmap.
 - Release Please owns the tools version. The untagged 0.1.0 candidate in PR #9
   was superseded before publication; PR #38 now proposes 0.1.1 from current
   reviewed history. Do not merge or tag it before the closure changes pass.
+- Release Please authenticates with its existing dedicated App, through the
+  separate `release-please` environment restricted to branch `main`.
+  The issued token reaches only this repository with Contents/Pull requests
+  write. The existing tag-only `release` environment remains unchanged.
+  Normal App-authored PR events replace the old explicit check dispatches;
+  `skip-github-release: true` and the reviewed version/tag gates remain.
 - Fabian confirmed on 2026-09-05 that APT belongs exclusively to
   `metaneutrons/apt-archive`. The tools release provides attestations and `.deb`
   payloads, not an archive signing key or storage credentials. The central
   archive owns signing, retention, metadata refresh and publication.
-- The public installation contract is `https://deb.metaneutrons.cc/aros-tools`,
-  suite `rolling`, component `main`, with the central domain keyring. Publication
-  is incomplete until both architectures install the exact released bytes.
+- The intended public installation contract is the shared root
+  `https://deb.metaneutrons.cc`, suite `rolling`, component `main`, with the
+  central domain keyring. The current per-project consumer contract still
+  needs that migration. Publication is incomplete until both architectures
+  install the exact released bytes.
 - Fabian also approved a separate, account-private `metaneutrons-apt-dispatch`
   GitHub App instead of widening Release Please. It has only Actions write,
   Contents read and mandatory Metadata read; installation must be restricted to
@@ -28,8 +36,9 @@ package release; it does not advance the native toolchain producer roadmap.
 
 - [x] AROS-NX PR #27: twelve product checks and filename checks passed; merged
   normally as `909df75879f278eec08a88c3f0a4aa3e963d888f`.
-- [ ] AROS-NX PR #25: refreshed onto current main as
+- [ ] AROS-NX PR #25: twelve product checks and filename checks passed on
   `a2698c5e3e8e2bc8cf8934777bccbac081c9a42c`; matrix run `33960448985`.
+  Still open, not merged (2026-09-05).
 - [ ] AROS-NX PR #28: follow-up `e6ca85381f` updates the tools input, runs the
   companion-header test from the selected engine after building its tools, and
   uses their locked Rust toolchain. Local release build, fixture and actionlint
@@ -42,11 +51,11 @@ package release; it does not advance the native toolchain producer roadmap.
   manifest tests, the entire workspace quality gate and the documentation gate
   pass. GitHub qualification and merge are still required.
 - [ ] Verify publication credentials and environment isolation without exposing
-  secret values. No archive signing or storage secret remains in aros-tools.
-  The new App and tag-only environment exist. Its first key download was blocked
-  by Chrome; a manual replacement download, secure credential handoff and removal
-  of the unused first key remain. Old publisher credential copies are not yet
-  removed. AUR's public pinned host identity is now available at repository scope
+  secret values. The central APT App credential and tag-only environment are
+  configured, with a successful read-only consumer preflight. Acceptance still
+  requires removal of old archive signing/storage credential copies from the
+  unused tools environments; those copies have not yet been removed.
+  AUR's public pinned host identity is now available at repository scope
   for credential-free preflight, as well as in its protected environment.
 - [x] Homebrew App identity, full grant and real read-only consumer/protection
   preflight passed on 2026-09-05 at 17:18 UTC. The App key and client ID are
@@ -57,6 +66,13 @@ package release; it does not advance the native toolchain producer roadmap.
   merge and final byte read-back in the first release. No release was triggered
   by credential setup. The old PAT secret is retained for explicit cleanup,
   but the new workflow does not reference it.
+- [x] Release Please App preflight and main-only environment configured on
+  2026-09-05 at 17:36 UTC. Exact repository grant, configuration/PR/label
+  reads, key fingerprint and secret/variable metadata verified. No App rights
+  widened. Thirteen isolated workflow/scope counter-probes pass.
+- [ ] Merge the authentication changes and observe the first actual
+  App-authored release PR update with its normal protected checks. A local
+  API preflight is not this end-to-end evidence.
 - [ ] Merge the release candidate only after every protected check passes;
   create a new immutable annotated tag at that exact reviewed commit.
 - [ ] Complete the four-host first-release A/B, isolated GitHub verification,
@@ -65,6 +81,17 @@ package release; it does not advance the native toolchain producer roadmap.
   reconcile the legacy HANDOFF and migration documents.
 
 ## Explicitly separate, unproven work
+
+The shared-domain APT decision has **not** been activated. The archive implementation still needs
+qualification; the consumer contract and public installation instructions must
+then move together to `https://deb.metaneutrons.cc`. Legacy APT signing/storage
+secrets remain in the unused `apt-signing`/`apt-publication` environments.
+Remove those copies only as an explicit, verified cleanup of the old publisher.
+
+Native producer integration remains separate from initial release acceptance:
+[epic #27](https://github.com/metaneutrons/aros-tools/issues/27),
+M0 contract PR #37 and M1–M7 are open. Do not wait for that feature to release
+the existing tools suite.
 
 Fresh ARM/AArch64/RISC-V legacy KOBJ triplets, the four-host RISC-V toolchain
 release, and physical UART boot evidence on Pi 3B+, Pi 5 and Milk-V Titan are
