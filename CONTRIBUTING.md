@@ -86,6 +86,18 @@ The automated architecture gate enforces dependency direction, module size,
 module documentation and subprocess boundaries. A passing gate is necessary,
 not a substitute for explaining a new contract in the pull request.
 
+## Architecture and delivery plans
+
+Cross-repository changes need a versioned plan with ownership, compatibility
+boundaries, milestones and evidence-based acceptance criteria. Keep design
+decisions in the repository and execution status in linked issues/PRs; planned
+capabilities must not be documented as already shipped.
+
+- [Toolchain producer integration plan](docs/toolchain-producer-plan.md):
+  native producer design, staged migration and TCP-M0 through TCP-M7 gates.
+- [CMake engine migration](docs/cmake-engine-migration.md): implemented
+  ownership changes, measured evidence and the remaining source boundary.
+
 ## Commits and pull requests
 
 Use a Conventional Commit pull-request title because squash merge makes that
