@@ -1,39 +1,50 @@
 ---
 title: AROS tools
-description: Reproducible host-side tooling for upstream AROS and AROS-NX.
-template: splash
-hero:
-  tagline: Build, inspect and deploy AROS with explicit inputs, stable diagnostics and independently verifiable artifacts.
-  actions:
-    - text: Get started
-      link: /aros-tools/getting-started/quick-start/
-      icon: right-arrow
-    - text: Use with upstream AROS
-      link: /aros-tools/workflows/upstream-aros/
-      variant: minimal
-      icon: open-book
+description: Set up an AROS checkout, build with explicit toolchains, and understand the result.
+tableOfContents: false
+next: false
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+<div class="doc-intro">
+  <strong>Beta · build from source.</strong>{' '}
+  The first stable tools release is still being qualified. Use the source
+  installation today and check the{' '}
+  <a href="/aros-tools/reference/release-status/">release status</a>{' '}
+  before choosing a package channel.
+</div>
+
+`aros` is the command-line entry point. It coordinates seven companion programs
+for translation, linking, source fetching, verification and code generation.
+Keep the suite beside your AROS checkout; the tools and the operating system
+have independent source trees.
+
+## Start with a working environment
 
 <CardGrid>
-  <Card title="Upstream first" icon="seti:git">
-    Repository discovery does not assume a checkout name or location. The
-    classic GNU Make path remains an explicit compatibility boundary.
-  </Card>
-  <Card title="Fail closed" icon="warning">
-    Unsupported build recipes, unverified downloads and ambiguous hardware
-    selections stop with stable diagnostics instead of silently guessing.
-  </Card>
-  <Card title="Reproducible" icon="approve-check-circle">
-    Toolchain locks, source inventories and transactional output publication
-    make inputs and results independently measurable.
-  </Card>
+  <LinkCard title="Install the tools" description="Build the complete suite, put it on PATH, and check that the helpers agree." href="/aros-tools/getting-started/installation/" />
+  <LinkCard title="Make your first build" description="Choose AROS-NX for the integrated build path, or start with pristine upstream." href="/aros-tools/getting-started/quick-start/" />
 </CardGrid>
 
-:::caution[Pre-release]
-`aros-tools` has not published its first stable release. Source builds are
-the currently supported installation path; GitHub archives, Homebrew, APT and
-AUR become public only after the first tagged candidate passes every release
-and package-channel gate.
-:::
+## Pick up a task
+
+<CardGrid>
+  <LinkCard title="Work with upstream AROS" description="Clone upstream or your fork and understand the current product-build boundary." href="/aros-tools/workflows/upstream-aros/" />
+  <LinkCard title="Verify a toolchain" description="Select a locked release or an explicit local prefix, including offline builds." href="/aros-tools/workflows/toolchains/" />
+  <LinkCard title="Develop an application" description="Use the compiler and SDK from one matching AROS build." href="/aros-tools/workflows/cross-development/" />
+  <LinkCard title="Work with a physical board" description="Select a Pi or Milk-V profile, stage boot artifacts, and collect hardware evidence." href="/aros-tools/workflows/boards/" />
+</CardGrid>
+
+## Find an answer
+
+- **A command or option:** [Command reference](/aros-tools/reference/cli/)
+  and [standalone tools](/aros-tools/reference/standalone-tools/).
+- **An error or failed boot:** [Troubleshooting](/aros-tools/reference/troubleshooting/)
+  and [diagnostics and logs](/aros-tools/reference/diagnostics/).
+- **A host or target:** [Platform support](/aros-tools/reference/platform-support/).
+- **A change to the tools:** [Development workflow](/aros-tools/contributing/development/)
+  and [architecture](/aros-tools/reference/architecture/).
+
+New to the split between tools, source and cross-compilers? Read
+[how the pieces fit](/aros-tools/getting-started/concepts/) first.

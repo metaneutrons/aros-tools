@@ -1,23 +1,27 @@
 ---
 title: Installation
-description: Install aros-tools from reviewed source or, after public qualification, from one measured native release payload.
+description: Build the complete tools suite from source and make it available to your AROS checkouts.
 ---
+
+:::caution[Beta availability]
+Build from source today. The first stable native archives and package channels
+are still pending qualification. Check [release status](/aros-tools/reference/release-status/)
+before using any package command below.
+:::
 
 ## Requirements
 
-- Rust 1.98.0 with Cargo (selected automatically by `rust-toolchain.toml`)
-- Git
-- CMake and Ninja for the optional translated build engine
-- Node.js 24 or newer with npm, actionlint, and ShellCheck for the complete local gate
-- the host packages required by the selected AROS target
+Start with the [host prerequisites](/aros-tools/getting-started/prerequisites/):
+Rust, Cargo, Git and a native compiler/linker. CMake, Ninja, Python, curl and
+patch are also used by the AROS workflows.
 
-The verified binary paths below have additional end-user prerequisites. The
-native archive path uses curl, `jq`, GitHub CLI (`gh`), cosign and `tar`
-and either `sha256sum` or `shasum`. The Debian/Ubuntu path uses curl, GnuPG
-(`gpg` and `gpgconf`) and `dpkg`. Install these first using the concrete
-[host instructions in Prerequisites](/aros-tools/getting-started/prerequisites/).
+You do not need the complete contributor audit environment just to build and
+try the suite. That environment is documented under
+[development](/aros-tools/contributing/development/).
 
 ## Build from source
+
+Run this in the directory where you keep source checkouts:
 
 ```sh
 git clone https://github.com/metaneutrons/aros-tools.git
@@ -25,58 +29,39 @@ cd aros-tools
 cargo build --release --workspace --all-features --locked
 ```
 
-The executables are written to `target/release`. Keep the eight public tools
-together: the `aros` frontend resolves build tools as separate processes so
-their command, logging and failure boundaries remain independently testable.
-The workspace also builds the internal `aros-release` qualification producer;
-do not install it as part of the user-facing suite.
+Keep the eight public executables together in `target/release`. The workspace
+also produces the internal `aros-release` program; it is not part of a user
+installation.
 
-Before installing a development build, install the pinned audit helpers once
-and run the same canonical workspace gate used by CI:
+## Make the suite available
+
+For this terminal session, while still in the tools checkout:
 
 ```sh
-cargo install cargo-audit --version 0.22.2 --locked
-cargo install cargo-deny --version 0.20.2 --locked
-cargo install cargo-machete --version 0.9.2 --locked
-AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
-  scripts/check-workspace.sh
+export PATH="$PWD/target/release:$PATH"
+aros --version
+aros build-tools check
 ```
 
-The script is the workspace-gate single source of truth. Its default `all`
-mode includes formatting, architecture and Actions policy, actionlint,
-ShellCheck, locked strict Clippy, locked rustdoc, audit, deny, machete, the
-locked Astro build, and locked workspace tests. CI uses the closed
-source-independent `portable-test` suite on all
-four supported hosts and reserves the recursive exact-source `test` gate for
-one Linux lane. That lane also builds the ordinary workspace executables,
-discovers every CMake-engine fixture and runs each host-compatible fixture
-against the same source identity; `clang`, `cmake` and `ninja` are required. The real
-GRUB host-build fixture is an explicit Darwin/arm64 release qualification and
-is visibly omitted on other hosts. The default local `all` contract remains
-complete. The separate documentation workflow calls `docs` directly, stages
-the verified output below `/aros-tools/`, and publishes only that handoff
-through a protected Cloudflare Static Assets job. Pull requests receive no
-deployment credential.
+The check probes the six helpers required by CMake and verifies that their
+versions match the frontend. The seventh companion, `aros-verify`, is used
+for independent verification and is also part of the installed suite.
 
-Setting `AROS_TEST_SOURCE_ROOT` opts into a real source-init/sync/transpiler
-integration test. The named checkout is only read; the test works in a separate
-temporary clone. Set `AROS_TEST_TOOLS_DIR` only when the six build-tool
-executables come from a prebuilt directory instead of Cargo's target directory.
+For future sessions, add the **absolute** `target/release` path to your shell's
+PATH configuration. Do not put a relative path there: you will run `aros`
+from a separate operating-system checkout.
 
-The complete workspace gate currently uses the immutable AROS-NX source
-contract named by CI. Tests for components which already support pristine
-upstream remain part of that gate; a complete upstream-only product build is a
-separate release criterion and is not implied by this command.
-
-:::caution[Pre-release availability]
-The commands below are the closed installation contract, not a claim that a
-package is already public. Use them only after the
-[release-status page](/aros-tools/reference/release-status/) links a fully
-qualified release. An unavailable URL is not permission to use an unofficial
-mirror or omit verification.
-:::
+Next: [create your first checkout and build](/aros-tools/getting-started/quick-start/).
 
 ## Native release archive
+
+After a release is qualified, use its target-matched archive. The following
+procedure verifies the checksum and signing identity before extracting and
+installing. Select the actual published version; `0.1.0` below illustrates
+the version format.
+
+<details>
+<summary>Verified archive installation procedure (for a published release)</summary>
 
 Choose the exact version and target from the GitHub release. Each archive has a
 checksum, manifest, SPDX SBOM, Sigstore bundle and GitHub attestation:
@@ -140,7 +125,15 @@ executables as separate processes, so mixed versions are unsupported. For an
 existing installation, follow [Update and uninstall](/aros-tools/getting-started/update-uninstall/)
 instead of overwriting individual files.
 
+</details>
+
 ## Debian and Ubuntu
+
+The package channel is `https://deb.metaneutrons.cc/aros-tools`.
+After it is marked available, verify the archive key before adding the source.
+
+<details>
+<summary>Signed APT installation procedure (after channel qualification)</summary>
 
 The signed repository lives below `https://deb.metaneutrons.cc/aros-tools`.
 Verify the archive key fingerprint before installing it:
@@ -200,24 +193,26 @@ sudo apt-get install aros-tools
 Only `amd64` and `arm64` are published. APT authenticates the signed release and
 package index; do not add `trusted=yes` or globally trust the key.
 
+</details>
+
 ## Homebrew
+
+After the formula is publicly qualified:
 
 ```sh
 brew install metaneutrons/tap/aros-tools
 brew test metaneutrons/tap/aros-tools
 ```
 
-The tap formula selects one of the four measured GitHub archives and verifies
-its SHA-256.
-
 ## Arch Linux (AUR)
 
-Review the public `PKGBUILD` and install `aros-tools-bin` with your normal AUR
-workflow, for example:
+After the package is publicly qualified, review its `PKGBUILD` and install
+with your usual AUR workflow. For example:
 
 ```sh
 paru -S aros-tools-bin
 ```
 
-The AUR package supports `x86_64` and `aarch64` and selects the corresponding
-measured archive; it does not rebuild different release bytes.
+See [package channels](/aros-tools/reference/publication/) for supported hosts
+and provenance, or [update and uninstall](/aros-tools/getting-started/update-uninstall/)
+for an existing installation.

@@ -1,0 +1,12 @@
+---
+import DefaultPageTitle from '@astrojs/starlight/components/PageTitle.astro';
+const { entry } = Astro.locals.starlightRoute;
+const labels: Record<string, string> = {
+  'getting-started': 'Get started', workflows: 'Build and develop',
+  reference: 'Reference', contributing: 'Contribute',
+};
+---
+
+<p class="docs-kicker">{labels[entry.id.split('/')[0]] ?? 'Developer documentation'}</p>
+<DefaultPageTitle />
+{entry.data.description && <p class="page-description">{entry.data.description}</p>}

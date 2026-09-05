@@ -1,0 +1,26 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+---
+
+<StarlightPage frontmatter={{
+  title: 'Page not found',
+  description: 'This documentation address does not exist or has moved.',
+  editUrl: false,
+  pagefind: false,
+  tableOfContents: false,
+  prev: false,
+  next: false,
+}}>
+  <p>Search for the command or task you need, or continue from one of these pages:</p>
+  <ul>
+    <li><a href="/aros-tools/">Documentation overview</a>.</li>
+    <li><a href="/aros-tools/getting-started/installation/">Installation</a>.</li>
+    <li><a href="/aros-tools/reference/cli/">Command reference</a>.</li>
+    <li><a href="/aros-tools/reference/troubleshooting/">Troubleshooting</a>.</li>
+  </ul>
+  <p>
+    If a link in the documentation brought you here,
+    <a href="https://github.com/metaneutrons/aros-tools/issues">report the broken link</a>
+    with the page you came from and the missing address.
+  </p>
+</StarlightPage>

@@ -1,102 +1,157 @@
 ---
 title: Command reference
-description: Stable command groups, repository requirements, destructive boundaries and machine-readable output contracts.
+description: All 29 frontend command paths, their inputs, defaults, and effects.
 ---
 
-The executable is `aros`. Run `aros --help` and `aros <command> --help` for the
-authoritative option list of the installed version.
+The executable is `aros`. The tables below cover the current
+[command model](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/main.rs)
+and [handlers](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/commands.rs).
+Use `aros <command> --help` for the option list of your installed version.
+
+**Checkout required** means run from within the intended AROS source tree.
+Discovery searches upward; it does not select a neighboring repository.
 
 ## Global options
 
-Every frontend command accepts:
-
-| Option | Purpose |
+| Option | Values / behavior |
 | --- | --- |
-| `--diagnostic-format human|json` | Human error or one `aros-tool-diagnostics-v1` JSON document |
-| `--log-level off|error|warn|info|debug|trace` | Minimum local log level |
-| `--log-format human|jsonl` | Local log encoding |
+| `--diagnostic-format` | `human` (default) or `json`; errors go to stderr |
+| `--log-level` | `off` (default), `error`, `warn`, `info`, `debug`, `trace` |
+| `--log-format` | `human` (default) or `jsonl` |
 | `--log-file PATH` | Explicit local log destination |
 
-Logging is off by default. Selecting a level without a destination fails; a log
-path without a level enables `info`. Equivalent `AROS_*` environment variables
-are listed in `--help`.
+A log level requires a file. In the frontend, supplying a file with an
+effective level of `off` enables `info`.
+[Environment variables](/aros-tools/reference/configuration/#environment-variables)
+and [component logging differences](/aros-tools/reference/diagnostics/) are
+documented separately.
 
 ## Source and repository
 
-| Command | Checkout requirement | Responsibility |
+| Command | Checkout | Behavior |
 | --- | --- | --- |
-| `source init PATH` | none | Atomically clone upstream or a fork, configure remotes and optionally select a ref |
-| `source sync` | required | Fetch one exact upstream-branch OID, validate it independently, and compare-and-swap fast-forward a clean branch |
-| `info` | optional | Report host information and, when present, checkout contracts |
-| `install --source-bin DIR --prefix DIR` | none | Validate and publish one complete native suite without replacing existing programs |
+| `source init PATH` | No | Clone into a new destination; `--upstream URL`, `--fork URL`, optional `--ref REF` |
+| `source sync` | Required | Validate a candidate and fast-forward a clean attached branch; `--upstream URL`, `--ref BRANCH`, `--no-transpile` |
+| `info` | Optional | Report host/state paths and any discovered target/toolchain contracts |
+| `install --source-bin DIR --prefix DIR` | No | Publish exactly eight version-matched executables without replacing existing programs |
 
-`source sync` never performs an implicit merge commit, works only with a clean
-worktree (including ignored files) and clean recursive submodules, and refuses
-an unexpected upstream identity. Local source identities are compared after
-canonical filesystem resolution, so spelling and symlink aliases do not create
-false mismatches. The canonical override is `--upstream`; there is no `sync` or
-`--upstream-url` compatibility alias before the first release. `--ref` names a
-safe branch below `refs/heads/` and is resolved once in an isolated fetch
-quarantine. The caller's `FETCH_HEAD` is never used or replaced.
+`source init --ref` requires a full branch/tag ref or exact commit OID and
+leaves HEAD detached, even for a branch ref. Omit it to use the clone's default
+branch. `source sync --ref` takes a branch name **without** `refs/heads/`
+and defaults to `master`. Both default to canonical upstream AROS unless
+explicitly changed. Only sync reads `AROS_UPSTREAM_URL`.
 
-Candidate validation is independent of the mutable checkout. Source publication
-rechecks a persistent kernel-lock identity and the captured Git semantics,
-prefetches exact recursive submodule objects, then performs branch CAS and
-network-disabled candidate-backed materialization. A post-CAS failure is rolled
-back without force when that is provably safe. `AR0116` exposes the result as
-typed `context.commit_state` (`rolled_back`, `committed`, or `indeterminate`).
-`--no-transpile` skips graph validation
-explicitly; it is not the default.
+Sync requires clean recursive submodules and checks ignored files as well.
+It never implicitly merges divergent history.
+See [source workflows](/aros-tools/workflows/source/).
 
-`install` is the native archive's privileged publication boundary. It accepts
-exactly the eight version-matched executable files, snapshots them without
-following links, preserves an existing `bin` directory's mode, and commits
-through one locked crash-recoverable no-clobber transaction. A conflict leaves
-the existing suite unchanged; an unprovable durability failure reports
-`context.commit_state: "indeterminate"` and retains its recovery journal.
+The native installer requires an existing absolute prefix and an input
+directory containing exactly the eight programs. A Cargo output directory
+contains additional files and is **not** an `install --source-bin` input.
+Use PATH for a source build or the verified archive installation procedure.
 
-Each declared target is transpiled with a complete checkout-owned MetaMake
-context. Prefer `[targets.transpiler]` in `aros-targets.toml`. The compatibility
-bridge for older AROS-NX checkouts verifies the same-named CMake preset and its
-reviewed defaults; any drift is an `AR0115` failure that requests an explicit
-profile or a tools update.
+## Toolchains and helpers
 
-## Toolchains and builds
+All toolchain/host-compiler commands require an AROS checkout.
 
-| Command | Responsibility |
+| Command | Inputs and effect |
 | --- | --- |
-| `setup` | Install the declared host compiler, one locked target toolchain, or every locked target toolchain |
-| `host-compiler install` | Manage only the host bootstrap compiler |
-| `toolchain install|list|verify|path` | Manage exact released target toolchains |
-| `build-tools build|check` | Build or verify the Rust helpers consumed by CMake |
-| `build` | Configure and build an AROS target preset |
-| `clean` | Remove only the selected checkout build directory |
-| `test` | Run a bounded QEMU boot and evaluate evidence |
-| `golden capture|verify` | Maintain deterministic transpiler baselines |
-| `ccache` | Inspect or explicitly clear the selected compiler cache |
+| `setup` | No preset: install the managed host compiler; `--preset NAME`: install that target; `--all`: attempt every configured target |
+| `host-compiler install` | Managed host LLVM installation; supports `--force`, `--offline` |
+| `toolchain install` | Requires `--preset NAME`; supports `--force`, `--offline`, `--local DIR` |
+| `toolchain list` | Show lock entries for the current host |
+| `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
+| `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
+| `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
+| `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
-Use `--offline` to make network access a hard error. Use
-`--require-fetch-checksums` when policy requires every third-party AROS source
-archive to declare SHA-256.
+`setup` also accepts `--force` and `--offline`. Its `--local DIR`
+requires `--preset` and conflicts with `--all`.
+`--force` refreshes an archive cache, not an installed tree.
+
+For helper source builds set `AROS_TOOLS_SOURCE_DIR` to the tools checkout.
+Installed suites normally need only `build-tools check`.
+See [toolchain workflows](/aros-tools/workflows/toolchains/).
+
+## Build and inspect a product
+
+| Command | Checkout | Behavior |
+| --- | --- | --- |
+| `build` | Required | Configure the embedded CMake engine and build with Ninja |
+| `clean` | Required | Remove `build/<preset>` with `--preset`; otherwise remove all of `build/` |
+| `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
+| `ccache` | No | Show statistics for discovered sccache/ccache; `--clear` clears that cache |
+| `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
+| `golden verify` | Required | Compare with baselines; `--update` replaces them |
+
+`build` options:
+
+| Option | Meaning |
+| --- | --- |
+| `--preset NAME`, `-p` | Target/build directory; default `pc-x86_64` |
+| `--target NAME`, `-t` | One CMake target instead of the default build |
+| `--jobs N`, `-j` | Positive parallel job count |
+| `--clean` | Delete this preset's build directory before configuring |
+| `--verbose`, `-v` | Verbose CMake configure messages |
+| `--debug` | Unoptimized build with debug information; default is Release |
+| `--offline` | Require local toolchain/source inputs |
+| `--require-fetch-checksums` | Require source-authored SHA-256 coverage for fetched inputs |
+| `--toolchain-dir DIR` | Explicit local AROS cross-toolchain |
+| `--engine-dir DIR` | Explicit development override for the embedded CMake engine |
+
+`test` defaults to `--preset pc-x86_64 --timeout 20 --memory 512`.
+`--packages` adds built packages; repeat `--module FILE` for explicit modules;
+`--evidence DIR` selects the root for a new private evidence directory.
+The implementation runs `qemu-system-x86_64` and expects PC bootstrap/kernel
+paths. A different preset does not select an ARM or RISC-V emulator.
+
+Golden commands take repeatable `--preset NAME` options. Run them from the
+AROS repository root after configuring the selected builds; they consume
+recorded transpiler invocations under `build/`.
+
+:::caution[Build cleanup removes evidence too]
+`clean` and `build --clean` delete the selected build directory without an
+interactive confirmation. Preserve logs, SDK outputs, packages and boot evidence
+you need first. `ccache --clear` affects the selected compiler cache, not just
+one preset.
+:::
 
 ## Boards
 
-`board init`, `scan`, `doctor`, `build`, `deploy`, `serve`, `console` and the
-`board sd` group are documented in the [physical-board workflow](/aros-tools/workflows/boards/).
-Mutating deployment and image creation require `--apply`; raw media writing
-requires an exact scan ID and confirmation token.
+`--board NAME` selects a local profile; it is not a hardware-model argument.
+Commands using profiles also accept `--config PATH`.
+
+| Command | Checkout | Behavior |
+| --- | --- | --- |
+| `board init --board NAME` | No | Print the Pi-4 USB-ECM template; `--apply` creates a new config file |
+| `board scan` | No | Discover USB CDC-ECM adapters |
+| `board doctor --board NAME` | Required | Inspect profile, host prerequisites and artifacts |
+| `board build --board NAME` | Required | Build the profile's target with its toolchain |
+| `board deploy --board NAME` | Required | Preview TFTP staging; `--apply` publishes; optional `--artifact-dir DIR` |
+| `board serve --board NAME` | No | Serve restricted DHCP/TFTP; `--dry-run` inspects without opening sockets |
+| `board console --board NAME` | No | Launch external serial terminal; `--program`, `--device`, `--baud`, `--dry-run` |
+
+`board build` shares build options except `--preset`, which comes from the
+profile. It additionally accepts `--dtb-path PATH` and `--core-kobj-dir DIR`;
+these overrides apply to Raspberry Pi profiles. There are no CLI commands
+for automated JTAG/SWD sessions or power control.
+
+### Removable media
+
+| Command | Behavior |
+| --- | --- |
+| `board sd image` | Requires `--board`, `--boot-bundle DIR`, `--output DIR`; validates first, creates only with `--apply` |
+| `board sd scan` | List safe unmounted removable disks; `--artifact DIR` also produces write tokens |
+| `board sd unmount` | List/preview mounted candidates; `--device SCAN_ID --apply` unmounts one |
+| `board sd write` | Requires `--board`, `--artifact DIR`, `--device SCAN_ID`; writes only with exact `--confirm TOKEN` |
+
+All four media commands work without an AROS checkout.
+`image`, `unmount` and `write` support `--dry-run`.
+Raw device paths are rejected where an opaque scan ID is required.
+See [physical boards](/aros-tools/workflows/boards/) for preparation and limits.
 
 ## Specialized executables
 
-Release archives keep the specialized tools beside `aros`:
-
-- `aros-ahi-runner` validates and executes a closed external AHI build contract;
-- `aros-collect` performs deterministic two-pass linking;
-- `aros-fetch` downloads, verifies, extracts and patches third-party sources;
-- `aros-genmodule` generates module sources and SDK headers;
-- `aros-romtool` assembles and inspects ROM/package formats;
-- `aros-transpiler` translates MetaMake declarations to transactional CMake;
-- `aros-verify` independently compares translated output with `genmf`.
-
-Each has its own `--help`, `--version`, structured diagnostic and opt-in logging
-boundary. Keep all executables on the same version.
+The seven companion programs have separate interfaces. Their inputs, supported
+formats and important limits are in
+[standalone tools](/aros-tools/reference/standalone-tools/).

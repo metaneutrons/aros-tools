@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: Crate ownership and process boundaries.
+description: How the frontend, embedded CMake engine and independent tools share contracts without sharing policy.
 ---
 
 The workspace separates shared contracts from product-specific policy. Every
@@ -11,6 +11,7 @@ library packages.
 | --- | --- |
 | diagnostics, local-log mechanics, hashes, ELF and toolchain schemas | `aros-common` |
 | repository orchestration and user-facing commands | `aros-cli` |
+| embedded CMake modules and build-engine materialization | `aros-cmake-engine` |
 | MetaMake translation | `aros-transpiler` |
 | independent reference verification | `aros-verify` |
 | two-pass linking and set collection | `aros-collect` |
@@ -28,12 +29,21 @@ component failures attributable. The verifier intentionally does not reuse the
 transpiler implementation, because a shared defect must not satisfy both sides
 of a differential check.
 
+The engine is compiled into the tools and materialized into the selected build
+directory. The AROS source is an input to that engine, not its installation
+location. `--engine-dir` is the explicit development override. A nearby or
+checkout-owned engine is not selected automatically.
+
 ## Process and publication boundaries
 
 `aros` resolves the complete installed tool suite from one directory, then
 spawns the required executable through the shared command runner. A missing or
 mixed installation fails before work begins. Child diagnostics and exit status
 remain attributable to the executable that owns the operation.
+
+The configure/build probe checks six mandatory helpers. Release installation
+validates all eight public programs, including the frontend and independent
+verifier. These are different checks with different purposes.
 
 New generated trees, ROM images, source checkouts and release artifacts are
 staged beside their destination. Validation and recursive durability complete
@@ -54,3 +64,6 @@ The architecture gate rejects forbidden crate dependencies and direct process
 execution that would bypass these boundaries. `aros-common` may be depended on
 by the product crates; it contains contracts and mechanisms, but no CLI,
 translation, release or board policy.
+
+See [development workflow](/aros-tools/contributing/development/) to run the
+architecture and source-validation gates.

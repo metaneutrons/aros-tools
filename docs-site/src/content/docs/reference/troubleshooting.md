@@ -3,19 +3,22 @@ title: Troubleshooting
 description: Diagnose repository, toolchain, network, build and board failures from stable diagnostic codes without guesswork.
 ---
 
+Start with the first reported code and the exact source/preset used by the
+failed command. Preserve outputs and evidence before retrying with cleanup.
+
 ## Capture a machine-readable failure
 
 Re-run the failing command with JSON diagnostics:
 
 ```sh
-aros --diagnostic-format json COMMAND ... 2>diagnostic.json
+aros --diagnostic-format json build --preset pc-x86_64 2>diagnostic.json
 ```
 
 The process writes exactly one `aros-tool-diagnostics-v1` document on failure
 and exits non-zero. To collect local execution events as well:
 
 ```sh
-aros --log-level debug --log-format jsonl --log-file ./aros-debug.jsonl COMMAND ...
+aros --log-level debug --log-format jsonl --log-file ./aros-debug.jsonl build --preset pc-x86_64
 ```
 
 Logs are never uploaded automatically. Review them before sharing because local
@@ -25,11 +28,13 @@ paths and board identifiers may be present.
 
 | Code family | Boundary | First check |
 | --- | --- | --- |
-| `AR01xx` | repository discovery | Enter the intended checkout or use a global command such as `source init` |
+| `AR0101` | repository discovery | Enter the intended checkout or use a global command such as `source init` |
+| `AR0111`–`AR0116` | source lifecycle | Inspect input, transport, lock, state, validation or publication as reported |
 | `AR02xx` | checkout configuration | Validate `aros-targets.toml` and the requested preset |
 | `AR03xx` / `AR04xx` | helper or toolchain resolution | Run `build-tools check` or `toolchain verify` |
 | `AR05xx` | network transfer | Check URL, proxy and offline policy; do not disable checksums |
 | `AR06xx` | configure/build | Inspect the named build step and its captured output |
+| `AR0701` | PC boot check | Read the retained serial/exception evidence; verify QEMU and PC boot inputs |
 | `AR08xx` | board/media safety | Re-run scan or dry-run; never substitute a raw device path |
 | `AT…` | transpiler | Update the transpiler when a capability fingerprint changed |
 | `AG…` | module generation | Treat partial SDK output as invalid and rebuild after fixing the reported path |
@@ -45,6 +50,20 @@ the target contract embedded in `aros-tools`, while an existing file is an
 authoritative override and must validate completely. The CLI does not infer a
 sibling directory. Use `aros source init PATH`, enter an existing AROS
 checkout, or choose a command that is explicitly global.
+
+## Tools missing or versions mixed
+
+Run `aros build-tools check`. It checks all six required CMake helpers in one
+directory. Confirm that PATH points at the intended suite, or inspect an explicit
+`AROS_BUILD_TOOLS_DIR`. An invalid explicit directory is not silently replaced
+by a PATH candidate. Rebuild the workspace as one unit for a source installation.
+
+## Preset exists but no compiler is available
+
+A built-in target profile is not a toolchain lock. Check `aros toolchain list`
+inside the selected checkout. Use its qualified lock or explicitly verify a
+local AROS-built prefix. Managed host LLVM also requires a declared digest;
+the built-in asset names alone do not meet that requirement.
 
 ## Offline or checksum failure
 
@@ -81,6 +100,13 @@ Verify the release checksum, signature/attestation and target triple. Keep all
 eight binaries on one version. Package-manager repositories are supported only
 after the [release-status page](/aros-tools/reference/release-status/) marks
 their public verification complete.
+
+## Board name does not match the hardware
+
+`board init --board NAME` uses NAME as a registry label and always emits a
+Pi-4 USB-ECM template. Edit the actual model/backend/transport using the
+[board examples](/aros-tools/workflows/boards/). USB-ECM is not enabled for
+Pi 3/5, and Milk-V needs the OpenSBI/UEFI profile and its legacy inputs.
 
 If the documented checks do not explain a failure, open a GitHub issue with the
 tool version, host target, stable diagnostic document and minimal reproduction.
