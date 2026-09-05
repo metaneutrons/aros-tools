@@ -930,6 +930,8 @@ cp "$root/.github/workflows/release.yml" \
     "$work/policy/.github/workflows/release.yml"
 mkdir -p "$work/policy/.github/actions"
 cp -R "$root/.github/actions/homebrew-token" "$work/policy/.github/actions/"
+mkdir -p "$work/policy/scripts/release"
+cp "$root/scripts/release/homebrew-qualification.json" "$work/policy/scripts/release/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null
 sed -i.bak \
     '/^  homebrew-credential-preflight:/,/^  r2-credential-preflight:/ s/environment: homebrew-publication/environment: release/' \

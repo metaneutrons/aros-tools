@@ -91,6 +91,7 @@ run_quality() {
     scripts/release/verify-apt-workflow-contract.sh
     scripts/release/test-governance-policy.sh
     scripts/release/test-homebrew-app.py
+    python3 scripts/release/test-homebrew-matrix.py
     python3 scripts/release/test-release-please-app.py
     scripts/release/test-release-policy.sh
     actionlint

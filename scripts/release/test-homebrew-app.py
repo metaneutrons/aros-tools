@@ -132,6 +132,10 @@ class WorkflowPolicy(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.work = Path(self.tmp.name)
         shutil.copytree(ROOT / ".github", self.work / ".github")
+        policy_root = self.work / "scripts/release"
+        policy_root.mkdir(parents=True)
+        self.matrix_policy = policy_root / "homebrew-qualification.json"
+        shutil.copyfile(ROOT / "scripts/release/homebrew-qualification.json", self.matrix_policy)
         self.action = self.work / ".github/actions/homebrew-token/action.yml"
         self.publish = self.work / ".github/workflows/publish-ecosystem.yml"
 
@@ -197,9 +201,39 @@ class WorkflowPolicy(unittest.TestCase):
         self.check("must stay inside homebrew-publication")
 
     def test_arm_runner_cannot_qualify_intel(self):
-        release = self.work / ".github/workflows/release.yml"
-        self.replace(release, "runner: macos-15-intel", "runner: macos-14")
+        self.replace(self.matrix_policy, '"runner": "macos-15-intel"', '"runner": "macos-14"')
         self.check("four genuine native hosts")
+
+    def test_dynamic_matrix_cannot_be_bypassed(self):
+        release = self.work / ".github/workflows/release.yml"
+        self.replace(release, "fromJSON(needs.metadata.outputs.homebrew_matrix)", "fromJSON('{}')")
+        self.check("only the validated dynamic matrix")
+
+    def test_missing_coverage_output_is_rejected(self):
+        release = self.work / ".github/workflows/release.yml"
+        self.replace(release, "steps.homebrew-policy.outputs.coverage", "steps.metadata.outputs.coverage")
+        self.check("dated Homebrew matrix policy")
+
+    def test_no_release_gate_may_accept_partial_coverage(self):
+        release = self.work / ".github/workflows/release.yml"
+        original = release.read_text()
+        for job in ("release-config-preflight", "channel-preflight", "publish"):
+            with self.subTest(job=job):
+                prefix, block = original.split(f"  {job}:\n", 1)
+                release.write_text(prefix + f"  {job}:\n" + block.replace(
+                    "needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&", "true &&", 1))
+                self.check("must require full successful Homebrew coverage")
+        release.write_text(original)
+
+    def test_policy_cannot_use_a_forged_pr_event(self):
+        release = self.work / ".github/workflows/release.yml"
+        self.replace(release, '--event "$GITHUB_EVENT_NAME"', '--event pull_request')
+        self.check("dated Homebrew matrix policy")
+
+    def test_homebrew_cannot_continue_on_error(self):
+        release = self.work / ".github/workflows/release.yml"
+        self.replace(release, "  homebrew:\n", "  homebrew:\n    continue-on-error: true\n")
+        self.check("must not suppress failure")
 
     def test_missing_native_identity_proof(self):
         release = self.work / ".github/workflows/release.yml"

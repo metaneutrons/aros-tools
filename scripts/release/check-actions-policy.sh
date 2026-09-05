@@ -12,6 +12,7 @@ workflow_root="$repository_root/.github/workflows"
 
 python3 - "$workflow_root" <<'PY'
 import re
+import json
 import sys
 from pathlib import Path
 
@@ -209,17 +210,42 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                 )
         homebrew_preflight = jobs.get('homebrew-credential-preflight', '')
         homebrew_install = jobs.get('homebrew', '')
-        matrix_source = '\n'.join(line for line in homebrew_install.splitlines()
-                                  if not line.lstrip().startswith('#'))
-        measured_hosts = re.findall(
-            r'- name: (\S+)\n\s+runner: (\S+)\n\s+target: (\S+)', matrix_source)
+        metadata = jobs.get('metadata', '')
+        for required in (
+            'homebrew_matrix: ${{ steps.homebrew-policy.outputs.matrix }}',
+            'homebrew_coverage: ${{ steps.homebrew-policy.outputs.coverage }}',
+            'id: homebrew-policy', 'python3 scripts/release/homebrew-matrix.py',
+            '--event "$GITHUB_EVENT_NAME" --ref-type "$GITHUB_REF_TYPE" --ref "$GITHUB_REF"',
+            '--github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"',
+        ):
+            if required not in metadata:
+                errors.append(f'{path}: dated Homebrew matrix policy omits {required}')
+        matrix_lines = re.findall(r'^      matrix:.*$', homebrew_install, re.MULTILINE)
+        if matrix_lines != ['      matrix: ${{ fromJSON(needs.metadata.outputs.homebrew_matrix) }}']:
+            errors.append(f'{path}: Homebrew must consume only the validated dynamic matrix')
+        if 'continue-on-error:' in metadata or 'continue-on-error:' in homebrew_install:
+            errors.append(f'{path}: Homebrew policy and installation must not suppress failure')
+        if "needs.metadata.result == 'success'" not in homebrew_install:
+            errors.append(f'{path}: Homebrew installation must require successful matrix planning')
+        for job_name in ('release-config-preflight', 'channel-preflight', 'publish'):
+            condition = jobs.get(job_name, '').split('    needs:', 1)[0]
+            for required in ("needs.metadata.outputs.homebrew_coverage == 'four-hosts'",
+                             "needs.homebrew.result == 'success'"):
+                if required not in condition:
+                    errors.append(f'{path}: {job_name} must require full successful Homebrew coverage: {required}')
+        policy_path = root.parent.parent / 'scripts/release/homebrew-qualification.json'
+        try:
+            policy = json.loads(policy_path.read_text(encoding='utf-8'))
+            measured_hosts = [(row['name'], row['runner'], row['target']) for row in policy['include']]
+        except (OSError, ValueError, KeyError, TypeError):
+            measured_hosts = []
         if measured_hosts != [
             ('linux-x86_64', 'ubuntu-24.04', 'x86_64-unknown-linux-gnu'),
             ('linux-aarch64', 'ubuntu-24.04-arm', 'aarch64-unknown-linux-gnu'),
             ('macos-x86_64', 'macos-15-intel', 'x86_64-apple-darwin'),
             ('macos-aarch64', 'macos-15', 'aarch64-apple-darwin'),
         ]:
-            errors.append(f'{path}: Homebrew install matrix must bind four genuine native hosts')
+            errors.append(f'{policy_path}: Homebrew install matrix must bind four genuine native hosts')
         for required in (
             'verify-homebrew-install.py host', 'verify-homebrew-install.py installed',
             "brew ruby -e 'puts Hardware::CPU.arch'", '--brew-prefix "$(brew --prefix)"',

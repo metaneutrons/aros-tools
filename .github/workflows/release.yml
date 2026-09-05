@@ -53,11 +53,21 @@ jobs:
       requires_ab: ${{ steps.metadata.outputs.requires_ab }}
       ab_reason: ${{ steps.metadata.outputs.ab_reason }}
       asset_contract: ${{ steps.metadata.outputs.asset_contract }}
+      homebrew_matrix: ${{ steps.homebrew-policy.outputs.matrix }}
+      homebrew_coverage: ${{ steps.homebrew-policy.outputs.coverage }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Plan Homebrew coverage (dated PR-only exception, never a release waiver)
+        id: homebrew-policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/homebrew-matrix.py \
+            --event "$GITHUB_EVENT_NAME" --ref-type "$GITHUB_REF_TYPE" --ref "$GITHUB_REF" \
+            --github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"
       - name: Validate source and version
         id: metadata
         shell: bash
@@ -1110,6 +1120,7 @@ jobs:
     name: Homebrew install (${{ matrix.name }})
     if: >-
       always() &&
+      needs.metadata.result == 'success' &&
       needs.aggregate.result == 'success' &&
       (
         needs.metadata.outputs.is_release != 'true' ||
@@ -1120,22 +1131,9 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - name: macos-x86_64
-            # Bare macos-14/15 labels are ARM, not Intel. Homebrew's Tier 3
-            # Intel status never permits substituting an ARM qualification.
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - name: macos-aarch64
-            runner: macos-15
-            target: aarch64-apple-darwin
+      # The selector can omit Intel only for PRs inside the recorded UTC window.
+      # Tags (including prereleases) and manual branch runs always select four.
+      matrix: ${{ fromJSON(needs.metadata.outputs.homebrew_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1311,6 +1309,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.sign-aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success'
@@ -1353,6 +1352,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.sign-aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
@@ -1528,6 +1528,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success' &&
