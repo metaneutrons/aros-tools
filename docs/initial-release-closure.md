@@ -167,6 +167,10 @@ Native producer integration remains separate from initial release acceptance:
 M0 contract PR #37 and M1–M7 are open. Do not wait for that feature to release
 the existing tools suite.
 
+The separately planned [TCP-M8 toolchain management extension](toolchain-producer-plan.md#tcp-m8--local-toolchain-management)
+is tracked in [#41](https://github.com/metaneutrons/aros-tools/issues/41).
+It is not an additional initial-release or producer-M7 gate.
+
 Fresh ARM/AArch64/RISC-V legacy KOBJ triplets, the four-host RISC-V toolchain
 release, and physical UART boot evidence on Pi 3B+, Pi 5 and Milk-V Titan are
 not established by packaging or CI. Keep them visibly open; do not describe
