@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Source contracts, target profiles, toolchain locks, caches and local board state without hidden configuration precedence.
+description: Inspect target profiles, toolchain locks, state directories and every documented environment override.
 ---
 
 `aros-tools` separates versioned checkout configuration from machine-local
@@ -13,6 +13,7 @@ hardware and storage but must not redefine release integrity.
 | --- | --- | --- |
 | `aros-targets.toml` | optional selected-checkout override | Target profiles, MetaMake selectors and host-compiler transport |
 | `aros-toolchains.lock.toml` | selected AROS checkout | Exact release archive, host/profile, size and SHA-256 |
+| `build/<preset>/cmake-engine/` | installed tools | Materialized embedded CMake engine |
 | generated CMake graph | configured build | Transactional output of the selected transpiler version |
 
 Unknown fields and unsupported schema versions fail closed. Relative paths are
@@ -54,6 +55,17 @@ version. If those defaults change, synchronization stops with a request to add
 the explicit table or update `aros-tools`; it never silently invents a new
 target context.
 
+This example is a target block, not a complete host-compiler or release-lock
+configuration. Optional `features` describe the profile; they are not evidence
+that every named driver works. `bootloader` is another target-level field:
+when absent it defaults to `grub2gfx` for platform `pc` and an empty value for
+other platforms. An explicit value overrides that rule.
+
+The embedded host LLVM declaration has asset names but no SHA-256 values.
+Managed host-compiler installation requires reviewed digest-bearing metadata.
+
+Source: [target schema and defaults](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-common/src/target.rs).
+
 ## Tools-owned source contract
 
 `contracts/aros-source-v1.toml` pins the AROS-NX source revision used by the
@@ -72,6 +84,10 @@ source repository.
 Use `aros board init --board NAME` to print a schema-correct template and add
 `--apply` only when you intend to create the file. Existing profiles are never
 silently overwritten.
+
+The generated template is specifically Pi-4 USB-ECM; `NAME` is only the local
+profile label. Use [board configuration](/aros-tools/workflows/boards/) for
+other models and transports.
 
 ## Environment variables
 
@@ -130,8 +146,10 @@ and `LOG_FILE` suffix contract. The exact public names are:
 - `AROS_TRANSPILER_DIAGNOSTIC_FORMAT`, `AROS_TRANSPILER_LOG_LEVEL`, `AROS_TRANSPILER_LOG_FORMAT`, `AROS_TRANSPILER_LOG_FILE`
 - `AROS_VERIFY_DIAGNOSTIC_FORMAT`, `AROS_VERIFY_LOG_LEVEL`, `AROS_VERIFY_LOG_FORMAT`, `AROS_VERIFY_LOG_FILE`
 
-Logging remains off unless a non-off level and an explicit local log file are
-selected. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
+Logging is off by default and requires an explicit local file. Pass both a
+non-off level and a file for portable behavior: the frontend and collector
+have documented [file-only defaults](/aros-tools/reference/diagnostics/#collect-a-local-log)
+that differ from other tools. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
 retaining its temporary directory; it can disclose intermediate object and
 link state and should not be set in routine or release builds.
 

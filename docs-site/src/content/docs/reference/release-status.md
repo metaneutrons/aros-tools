@@ -1,51 +1,53 @@
 ---
 title: Release status
-description: Current source state, published state, and remaining public-release gates.
+description: What you can use today, and which claims still need a published release or hardware evidence.
 ---
-
-## Current source state
-
-The repository contains and continuously tests:
-
-- complete Rust workspace, architecture, formatting, Clippy, Rustdoc,
-  dependency-advisory and license/source-policy gates;
-- an explicit AROS-NX/toolchain-producer source contract rather than a moving
-  branch or sibling-checkout assumption;
-- fail-closed diagnostics and transactional output for every shipped host
-  executable;
-- deterministic archive production, duplicate-production comparison, strict
-  read-back, clean-room smoke tests, SPDX validation, signatures, provenance
-  and isolated-draft verification in the release workflow; and
-- Debian, signed APT, Homebrew and AUR qualification paths that consume the
-  measured canonical archive payloads rather than rebuilding them.
-
-Those are source and workflow capabilities. A workflow definition is not proof
-that a particular public release passed it.
 
 ## Published state
 
-No stable `aros-tools` release has been published yet. Consequently there is
-no supported public archive, Homebrew formula, APT package or AUR package to
-claim. Build from source until a release and its measured evidence appear on
-GitHub. Documentation is configured for
-`https://aros.metaneutrons.cc/aros-tools/`; its credential-free build includes
-a Wrangler dry run, and a separate protected job publishes that exact static
-handoff to the path-scoped Cloudflare Worker.
+**AROS tools is in beta.** No stable `aros-tools` release is published.
+Build from source using [installation](/aros-tools/getting-started/installation/).
+The planned native archives, Homebrew, APT and AUR paths must not be treated
+as available until they have public release evidence.
+
+The tools release and the cross-toolchain release are separate. An available
+toolchain prerelease does not imply an available tools package.
+
+| Area | Current boundary |
+| --- | --- |
+| Tools installation | Source build |
+| Native tools archives and package managers | First stable publication pending |
+| Upstream source lifecycle | Implemented with explicit source identity and graph validation |
+| Integrated product build | Uses the tools-owned engine; requires compatible AROS sources and compiler inputs |
+| Pristine upstream full product | Not yet a generally qualified product-build claim |
+| PC boot check | x86 QEMU implementation with retained evidence |
+| Pi/Milk-V models | Profile/artifact support; not a blanket hardware boot guarantee |
+| External application workflow | Matching compiler and SDK inputs; no application packaging frontend |
+
+## Current source state
+
+The source implements typed target and toolchain contracts, standalone build
+tools, structured diagnostics, and board deployment/media validation.
+See the [command reference](/aros-tools/reference/cli/) and
+[standalone tools](/aros-tools/reference/standalone-tools/) for the implemented
+surface.
+
+The workspace also has tests for deterministic archive assembly, source
+transactions, toolchain identity, package payloads and failure handling.
+A test or workflow definition describes a capability; evidence for a specific
+release must identify its exact tag and measured artifacts.
 
 ## Required for the first public release
 
-- Merge a Release Please version pull request, then create a separately
-  protected annotated tag on that exact qualified `main` commit.
-- Pass the complete four-host archive, ABI-floor, SBOM, checksum, signature,
-  provenance, isolated-download and clean-room verification matrix for that
-  immutable tag.
-- For a stable candidate, pass the credential-free APT, Homebrew and AUR
-  qualification gates before the one-time final GitHub publication. Then roll
-  the exact immutable release bytes forward to signed APT/R2, protected
-  Homebrew and AUR and verify every public channel.
-- Complete qualification of the remaining source compatibility and
-  released-toolchain-selection boundary before claiming translated product
-  builds from an entirely pristine upstream checkout as generally supported.
+The candidate must pass its four native hosts, binary compatibility checks,
+archive and SBOM verification, signatures and provenance, isolated-download
+checks, and applicable package-channel qualification.
 
-The page is intentionally conservative: it records no release as verified
-until the immutable release inventory itself supplies the evidence.
+A further claim of full product support from pristine upstream requires its
+own source/build acceptance evidence. Physical boot support requires the
+matching board, firmware, source revision, artifacts and UART evidence.
+
+Check [GitHub Releases](https://github.com/metaneutrons/aros-tools/releases)
+for immutable public tools versions and
+[toolchain releases](https://github.com/metaneutrons/aros-toolchains/releases)
+for the separate compiler artifacts.

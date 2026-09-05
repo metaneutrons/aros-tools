@@ -1,16 +1,16 @@
 ---
 title: Cross-development
-description: Use the exact AROS SDK and cross-toolchain selected by a checkout to build an external application.
+description: Reuse a matching AROS compiler and SDK for an external application, with the current integration limits made explicit.
 ---
 
-`aros-tools` can provide the same compiler, sysroot and generated SDK used by an
-AROS product build. It does not require application source to live inside the
-AROS repository.
+You can keep application source outside the operating-system tree and use the
+same cross-compiler and generated SDK. There is currently no `aros app`
+command, application manifest, standalone SDK installer or application-package
+frontend.
 
-## Prepare the SDK
+## Prepare matching inputs
 
-From the selected AROS checkout, install and verify the target toolchain, then
-build the SDK-producing targets:
+From a compatible AROS checkout:
 
 ```sh
 aros setup --preset pc-x86_64
@@ -18,38 +18,43 @@ aros build --preset pc-x86_64
 aros toolchain path --preset pc-x86_64
 ```
 
-The last command prints the verified cross-toolchain prefix. Treat that path as
-machine output: do not replace it with a similarly named compiler found on
-`PATH`.
-
-The configured build directory contains the generated headers, libraries and
-CMake metadata for that exact source revision and target. An application build
-must keep these inputs together; combining headers from one checkout with a
-toolchain or libraries from another is unsupported.
+Record the source commit, preset, tools version and compiler release identity.
+The generated SDK and libraries must come from that same source/target build.
+A cross-compiler prefix alone is not a complete application SDK.
 
 ## External CMake application
 
-Use the toolchain file and SDK paths emitted by the selected AROS build. Keep
-the application build directory outside both source trees:
+The configured build materializes a compiler-selection file at
+`build/pc-x86_64/cmake-engine/toolchains/AROS.cmake`.
+Its required inputs are `AROS_CROSS_TOOLCHAIN_ROOT` and
+`AROS_TARGET_CPU`. For an application already configured for the AROS SDK,
+the compiler-selection part can be passed as follows:
 
 ```sh
+# Run from the configured AROS source root. Replace the application paths.
 cmake -S /path/to/application -B /path/to/application-build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=/path/reported/by/the/AROS/build
-cmake --build /path/to/application-build
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/build/pc-x86_64/cmake-engine/toolchains/AROS.cmake" \
+  -DAROS_CROSS_TOOLCHAIN_ROOT="$(aros toolchain path --preset pc-x86_64)" \
+  -DAROS_TARGET_CPU=x86_64
 ```
 
-Exact variable names differ between pristine upstream MetaMake applications
-and the translated AROS-NX CMake bridge. Prefer an application's checked-in
-build instructions over reconstructing compiler flags manually.
+This file selects the compiler, target triple and binary tools. It does **not**
+export a ready-to-use application package with all SDK include paths,
+libraries, module-link rules and installation targets. Supply those through
+the application's reviewed AROS build configuration. Use its upstream
+MetaMake build when that is the maintained integration.
 
-## Reproducibility checklist
+Source: [CMake toolchain contract](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cmake-engine/engine/toolchains/AROS.cmake).
 
-- Record the AROS source commit and target preset.
-- Record the toolchain release ID and manifest SHA-256 reported by the lock.
-- Keep generated headers and libraries from the same configured build.
-- Use `--offline` in repeat builds when all inputs are already verified.
-- Never commit absolute local toolchain or build paths to a portable project.
+## Keep an application build reproducible
 
-An application-specific packaging frontend is not yet part of the public CLI;
-`aros-tools` supplies and verifies the build inputs rather than inventing an
-application manifest format before upstream compatibility is established.
+- Match headers and libraries to the selected source commit and target.
+- Record the cross-toolchain identity; do not substitute a host compiler.
+- Keep application build output separate from both source trees.
+- Resolve local paths at configure time instead of committing machine-specific paths.
+- Verify the produced module's linking/loading behavior on the intended target.
+
+Use [the collector reference](/aros-tools/reference/standalone-tools/#aros-collect)
+when debugging AROS link semantics, and
+[platform support](/aros-tools/reference/platform-support/) before making a
+host or board support claim.

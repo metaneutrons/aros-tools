@@ -1,64 +1,81 @@
 ---
 title: Update and uninstall
-description: Upgrade or remove source builds, release archives, Homebrew, APT and AUR installations without losing AROS source or toolchain stores.
+description: Change the tools suite without losing AROS source, compiler stores, or board configuration.
 ---
 
-`aros-tools` never owns the AROS source checkout or its build products. Updating
-or removing the host tools does not remove AROS sources, build directories,
-download caches or installed cross-toolchains.
+Use the same installation method for updates. The frontend and all seven
+companions must remain at one version; do not replace just one executable.
 
 ## Source build
 
-Update the reviewed tools checkout, rebuild with the lockfile, and replace the
-same installed binaries:
+Stop active tool commands before rebuilding. From the reviewed tools checkout:
 
 ```sh
-git -C /path/to/aros-tools pull --ff-only
-cargo build --release --workspace --all-features --locked \
-  --manifest-path /path/to/aros-tools/Cargo.toml
+cd /path/to/aros-tools
+git pull --ff-only
+cargo build --release --workspace --all-features --locked
+./target/release/aros --version
+./target/release/aros build-tools check
 ```
 
-Remove the copied executables from the directory where you installed them. Do
-not delete an entire shared `bin` directory.
+Running Cargo inside the repository applies its pinned Rust toolchain.
+If your PATH points at this checkout's `target/release`, the next invocation
+uses the rebuilt suite.
+
+To stop using that source installation, remove its PATH entry.
+Deleting the tools checkout is a separate decision; it may contain your
+uncommitted work.
 
 ## Release archive
 
-Verify the new archive and its checksum before replacing the eight executables.
-Keep the suite at one version; mixing `aros` with older helper binaries is not a
-supported state. To uninstall, remove only the `aros`, `aros-ahi-runner`,
-`aros-collect`, `aros-fetch`, `aros-genmodule`, `aros-romtool`,
-`aros-transpiler` and `aros-verify` files installed from the archive.
+Verify the new archive's complete evidence as described in
+[installation](/aros-tools/getting-started/installation/#native-release-archive).
+The native installer is **no-clobber**; it does not update an occupied prefix.
+
+For an upgrade, install into a new empty version-specific prefix that you own,
+check the suite, then switch your PATH to its `bin` directory.
+Stop active builds before switching. Keep the old prefix until the new
+installation has been checked.
+
+There is no `aros uninstall` command. Remove only the eight files you
+installed: `aros`, `aros-ahi-runner`, `aros-collect`, `aros-fetch`,
+`aros-genmodule`, `aros-romtool`, `aros-transpiler` and `aros-verify`.
+Do not delete a shared `bin` directory.
 
 ## Package managers
 
-After the first public release, use the package manager that installed the
-suite:
+Use these only after the relevant channel is
+[publicly available](/aros-tools/reference/release-status/).
+Upgrade using the manager that installed the suite:
 
 ```sh
 # Debian/Ubuntu
-sudo apt-get update && sudo apt-get install --only-upgrade aros-tools
-sudo apt-get remove aros-tools
+sudo apt-get update
+sudo apt-get install --only-upgrade aros-tools
 
 # Homebrew
-brew upgrade aros-tools
-brew uninstall aros-tools
+brew upgrade metaneutrons/tap/aros-tools
 
 # Arch Linux / AUR helper example
 paru -Syu aros-tools-bin
-paru -Rns aros-tools-bin
 ```
 
-Package-manager availability remains governed by the
-[release-status page](/aros-tools/reference/release-status/). Do not configure
-an unpublished repository or formula from an unverified snippet.
+To uninstall, choose the matching command:
+
+```sh
+sudo apt-get remove aros-tools       # Debian/Ubuntu
+brew uninstall aros-tools           # Homebrew
+paru -Rns aros-tools-bin             # Arch/AUR
+```
 
 ## Optional local state
 
-Configuration and caches are intentionally retained during uninstall:
+Removing the tools does not automatically remove:
 
-- board profiles: `~/.config/aros/boards.toml`;
-- tool download/store state: the paths reported by `aros info`;
-- per-checkout build directories: `<checkout>/build`.
+- local board profiles (normally `~/.config/aros/boards.toml`);
+- downloaded archives and compiler stores reported by `aros info`;
+- AROS source checkouts, build directories and retained evidence.
 
-Review these exact paths before removing them. The CLI does not offer a broad
-recursive purge command.
+Review those exact paths separately if you want to remove them.
+`aros clean` is a build-output command, not an uninstall or general
+state-purge command.

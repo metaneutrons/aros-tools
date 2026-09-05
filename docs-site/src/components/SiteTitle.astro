@@ -1,0 +1,9 @@
+---
+const { siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<div class="docs-brand">
+  <a class="brand-home" href="https://aros.metaneutrons.cc/" aria-label="AROS project home">A</a>
+  <a class="brand-title" href={siteTitleHref}>AROS <span>tools</span></a>
+  <span class="beta-badge" title="Beta — not production-ready">BETA</span>
+</div>

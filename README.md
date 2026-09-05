@@ -100,10 +100,11 @@ staged and never reuses an existing destination.
 | --- | --- | --- |
 | Frontend | `aros`, `aros-cli` | repository discovery, orchestration, host compilers, released toolchains and board presentation |
 | Translation and verification | `aros-transpiler`, `aros-verify` | transactional MetaMake-to-CMake publication and an independent historic-semantics oracle |
-| Linking and SDK generation | `aros-collect`, `aros-genmodule`, `aros-romtool` | two-pass AROS linking, ABI checks, module sources and ROM layout validation |
+| Linking and SDK generation | `aros-collect`, `aros-genmodule`, `aros-romtool` | two-pass AROS linking, ABI checks, module sources and kickstart PKG containers |
 | Inputs and external contracts | `aros-fetch`, `aros-ahi-runner` | verified source transport, safe extraction, patches and validated AHI builds |
 | Hardware workflows | `aros-board`, `aros-macos-disk-claim` | board identity, deploy/network boot/removable-media safety, and the narrow macOS disk-claim lifetime |
 | Shared foundations | `aros-common` | diagnostics, opt-in logging, hashes, ELF and toolchain contracts |
+| Build engine | `aros-cmake-engine` | embedded CMake integration, materialized in each selected build directory |
 
 `aros-cli` is intentionally an orchestrator, not a monolith: it executes the
 other tools rather than linking their implementations. `aros-verify` is
@@ -134,7 +135,8 @@ The project is deliberately strict about what it may infer:
   Local logging is off by default and writes only to an explicit `--log-file`.
   A non-off `--log-level` without that destination fails. Portable invocations
   should pass both options: the `aros` frontend promotes file-only logging to
-  `info`, while specialised tools leave their explicit `off` level unchanged.
+  `info`, and the collector defaults file-only logging to `info` if no level
+  was explicitly selected. Other specialised tools keep `off` unchanged.
   Logs never replace the terminal diagnostic or determine command success.
 
 See [diagnostics](https://aros.metaneutrons.cc/aros-tools/reference/diagnostics/),
@@ -175,10 +177,8 @@ executes every host-compatible one; the real GRUB host-build fixture is an
 explicit Darwin/arm64 release qualification and is visibly omitted elsewhere.
 Adding a fixture therefore broadens the gate rather than creating a manual test
 convention.
-The separate documentation workflow calls `docs` directly, stages the verified
-output below `/aros-tools/`, and hands it to a protected, path-scoped
-Cloudflare Static Assets deployment. Pull requests receive no deployment
-credential.
+The documentation gate checks the locked dependency graph, generated pages,
+links and static output. Run it with `scripts/check-workspace.sh docs`.
 
 The architecture gate protects the long-term shape of the workspace: it
 enforces one-way crate dependencies, keeps production modules bounded, requires
@@ -211,9 +211,10 @@ package path must pass its own gate:
 5. explicit roll-forward and public verification of APT, Homebrew and AUR from
    the canonical immutable GitHub release.
 
-The definitive details, including failure and credential boundaries, live in
-[release engineering](https://aros.metaneutrons.cc/aros-tools/reference/releases/)
-and [package publication](https://aros.metaneutrons.cc/aros-tools/reference/publication/).
+See [versions and verification](https://aros.metaneutrons.cc/aros-tools/reference/releases/)
+and [package channels](https://aros.metaneutrons.cc/aros-tools/reference/publication/)
+for the user-facing contracts. Contributor release procedures live in
+[RELEASING.md](RELEASING.md).
 
 ## Documentation
 
@@ -227,13 +228,10 @@ npm run build
 ```
 
 The checked-in lockfile is authoritative. Lifecycle scripts are disabled and
-the locked graph must pass the high-severity audit before Astro runs. The same
-gate prepares the path-nested static asset tree consumed by the Cloudflare
-Worker at `https://aros.metaneutrons.cc/aros-tools/`, so the published
-documentation and pull-request checks exercise the same dependency graph. Pull
-requests perform a credential-free Wrangler dry run; only protected `main` may
-enter the isolated `docs-publication` environment and deploy the verified
-handoff.
+the locked graph must pass the high-severity audit before Astro runs.
+Run `scripts/check-workspace.sh docs` from the repository root for the complete
+documentation gate. The [documentation guide](https://aros.metaneutrons.cc/aros-tools/contributing/documentation/)
+covers content structure, source verification and local preview.
 
 ## License
 
