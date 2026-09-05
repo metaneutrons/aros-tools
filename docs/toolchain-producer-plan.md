@@ -8,6 +8,9 @@ commands available in the current release.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The first active work package is [TCP-M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28).
+Its reviewable [interface and ownership contract](toolchain-producer-contract.md)
+and [measured baseline](toolchain-producer-baseline.md) are now recorded. M0's
+merge/acceptance status remains on its issue; later milestones have not started.
 
 ## 1. Decision and intended outcome
 
@@ -177,7 +180,7 @@ Add `aros toolchain plan` and `aros toolchain build`; preserve the meaning of
 `install`, `list`, `verify` and `path`. No aliases and no automatic installation
 or release after a build.
 
-Illustrative proposed interface, to freeze with parser fixtures in TCP-M0:
+Illustrative interface, detailed by the TCP-M0 contract (not yet implemented):
 
 ```text
 aros toolchain plan --preset pc-x86_64 --recipe /work/recipe.json \
@@ -187,8 +190,12 @@ aros toolchain plan --preset pc-x86_64 --recipe /work/recipe.json \
 aros toolchain build --preset pc-x86_64 --recipe /work/recipe.json \
   --source-dir /work/AROS --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --work-dir /work/build-pc \
-  --output-dir /work/candidate-pc --jobs 8 --offline
+  --output-dir /work/candidate-pc --cache-dir /work/source-cache \
+  --jobs 8 --timeout-seconds 21600 --offline
 ```
+
+The example deadline is a caller-selected budget, not a measured default.
+The first preview additionally requires explicit `--backend legacy-preview`.
 
 - Inputs are explicit; execution works from outside every checkout. Reject
   conflicting CLI/recipe selections. Do not infer a neighboring repository,

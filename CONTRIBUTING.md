@@ -95,6 +95,9 @@ capabilities must not be documented as already shipped.
 
 - [Toolchain producer integration plan](docs/toolchain-producer-plan.md):
   native producer design, staged migration and TCP-M0 through TCP-M7 gates.
+  Its [M0 contract](docs/toolchain-producer-contract.md) and
+  [baseline evidence](docs/toolchain-producer-baseline.md) distinguish specified
+  interfaces from implemented and qualified behavior.
 - [CMake engine migration](docs/cmake-engine-migration.md): implemented
   ownership changes, measured evidence and the remaining source boundary.
 

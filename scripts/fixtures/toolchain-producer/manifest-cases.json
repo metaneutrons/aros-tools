@@ -1,0 +1,23 @@
+{
+  "schema": "aros-toolchain-manifest-conformance-v1",
+  "base": "package-v1.json",
+  "scope": "structural-validation-not-compiler-layout-or-release-qualification",
+  "cases": [
+    {"name": "valid", "changes": [], "legacy": "accept", "native": "accept"},
+    {"name": "unknown-top-level-field", "changes": [{"path": ["future_field"], "value": true}], "legacy": "accept", "native": "reject"},
+    {"name": "whitespace-capability", "changes": [{"path": ["capabilities"], "value": [" "]}], "legacy": "accept", "native": "reject"},
+    {"name": "padded-capability", "changes": [{"path": ["capabilities"], "value": [" c "]}], "legacy": "accept", "native": "reject"},
+    {"name": "escaping-release-id", "changes": [{"path": ["release_id"], "value": "../release"}], "legacy": "accept", "native": "reject"},
+    {"name": "mismatched-triple", "changes": [{"path": ["target_triple"], "value": "arm-unknown-aros"}], "legacy": "reject", "native": "reject"},
+    {"name": "unsupported-host", "changes": [{"path": ["host"], "value": "windows-x86_64"}], "legacy": "reject", "native": "reject"},
+    {"name": "boolean-file-size", "changes": [{"path": ["files", 2, "size"], "value": true}], "legacy": "reject", "native": "reject"},
+    {"name": "boolean-epoch", "changes": [{"path": ["source_date_epoch"], "value": true}], "legacy": "reject", "native": "reject"},
+    {"name": "duplicate-path", "changes": [{"path": ["files", 1, "path"], "value": "share"}], "legacy": "reject", "native": "reject"},
+    {"name": "escaping-link", "changes": [{"path": ["files", 3, "target"], "value": "../../outside"}], "legacy": "reject", "native": "reject"},
+    {"name": "unknown-entry-field", "changes": [{"path": ["files", 0, "future_field"], "value": true}], "legacy": "reject", "native": "reject"},
+    {"name": "null-llvm-version", "changes": [{"path": ["llvm_version"], "value": null}], "legacy": "reject", "native": "reject"},
+    {"name": "future-schema", "changes": [{"path": ["schema"], "value": 2}], "legacy": "reject", "native": "reject"},
+    {"name": "uppercase-tree-digest", "changes": [{"path": ["tree_sha256"], "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}], "legacy": "reject", "native": "reject"},
+    {"name": "absolute-inventory-path", "changes": [{"path": ["files", 2, "path"], "value": "/outside"}], "legacy": "reject", "native": "reject"}
+  ]
+}

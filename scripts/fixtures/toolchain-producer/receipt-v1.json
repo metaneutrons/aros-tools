@@ -1,0 +1,25 @@
+{
+  "schema": "aros-toolchain-receipt-v1",
+  "backend": "native",
+  "identity": {
+    "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "source_commit": "1111111111111111111111111111111111111111",
+    "producer_commit": "2222222222222222222222222222222222222222",
+    "tools_commit": "3333333333333333333333333333333333333333",
+    "host": "linux-x86_64",
+    "target_profile": "pc-x86_64",
+    "executor": {
+      "contract_id": "aros-toolchain-producer-v1",
+      "contract_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "tools_commit": "3333333333333333333333333333333333333333",
+      "binary_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "origin_evidence_sha256": null
+    }
+  },
+  "phase": "preflight",
+  "input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "output_root": "/workspace/work",
+  "outputs": [],
+  "previous_receipt_sha256": null,
+  "receipt_sha256": "65c1f6c6182f2270e8ca1fa1015e213b510a7d976aa01738e1a1d0c6d08d6d15"
+}
