@@ -200,6 +200,9 @@ if [[ "${1:-}" == --paginate ]]; then
     esac
     exit 0
 fi
+if [[ "${2:-}" == --include ]]; then
+    printf 'HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
+fi
 case "$1" in
     repos/example/project/git/ref/tags/v1.2.3)
         printf '%s\n' '{"object":{"type":"tag","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
@@ -225,6 +228,9 @@ case "$1" in
         ;;
     repos/example/project/branches/main)
         printf '%s\n' '{"protected":true,"commit":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}'
+        ;;
+    repos/example/project/rules/branches/main)
+        printf '%s\n' '[]'
         ;;
     repos/example/project/branches/main/protection)
         base='{"required_status_checks":{"strict":true,"checks":[{"context":"CI / quality","app_id":15368}]},"required_pull_request_reviews":{"required_approving_review_count":1,"dismiss_stale_reviews":true,"require_code_owner_reviews":true,"require_last_push_approval":true},"required_conversation_resolution":{"enabled":true},"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false}}'

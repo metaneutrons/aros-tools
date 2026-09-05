@@ -29,6 +29,17 @@ while the measured grant explicitly included Contents write.
 The token action's [permission contract](https://github.com/actions/create-github-app-token#inputs)
 is the issuance gate; effective tap protection is verified separately.
 
+The shared [governance verifier](../scripts/release/verify-branch-protection.py)
+accepts the existing classic tap protection or one active repository ruleset
+covering the exact contracted branch. Only an authenticated classic-protection
+HTTP 404 permits the ruleset path. A ruleset must expose an empty bypass list,
+match every required check and App binding, and preserve strict checks, reviews,
+conversation resolution, linear history and deletion/force-push restrictions.
+The effective branch rules and full ruleset definition must agree. Missing
+permissions, inherited/overlapping policies, exclusions and unknown rules fail
+closed and require an explicit governance review; they are not silently merged
+or treated as absent. The verifier never changes provider settings.
+
 No stored PAT fallback exists. The source workflow's `github.token` continues
 to authenticate source-release checks, never tap writes.
 
