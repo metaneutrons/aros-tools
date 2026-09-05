@@ -107,13 +107,17 @@ if(_binary_contains_sys OR _sys_contains_binary)
 endif()
 
 set(_host_mmake "${GIA_SOURCE_ROOT}/${_AROS_GRUB_ISO_ASSETS_HOST_MMAKE_RELATIVE}")
-set(_pc_manifest "${GIA_SOURCE_ROOT}/${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}")
-set(_efi64_manifest "${GIA_SOURCE_ROOT}/${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}")
-set(_efi32_manifest "${GIA_SOURCE_ROOT}/${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}")
-foreach(_source_file IN ITEMS "${_host_mmake}" "${_pc_manifest}" "${_efi64_manifest}" "${_efi32_manifest}")
-    _aros_grub_iso_assets_require_regular("${_source_file}" "GRUB2 ISO source input")
+_aros_grub_iso_assets_require_regular("${_host_mmake}" "GRUB2 ISO source input")
+_aros_grub_iso_assets_reject_symlink_components(
+    "${GIA_SOURCE_ROOT}" "${_host_mmake}" "GRUB2 ISO source input")
+file(REAL_PATH "${_GIA_MODULE_DIR}" _engine_root)
+set(_pc_manifest "${_engine_root}/${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}")
+set(_efi64_manifest "${_engine_root}/${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}")
+set(_efi32_manifest "${_engine_root}/${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}")
+foreach(_manifest IN ITEMS "${_pc_manifest}" "${_efi64_manifest}" "${_efi32_manifest}")
+    _aros_grub_iso_assets_require_regular("${_manifest}" "GRUB2 ISO engine input")
     _aros_grub_iso_assets_reject_symlink_components(
-        "${GIA_SOURCE_ROOT}" "${_source_file}" "GRUB2 ISO source input")
+        "${_engine_root}" "${_manifest}" "GRUB2 ISO engine input")
 endforeach()
 file(SHA256 "${_host_mmake}" _host_mmake_before)
 file(SHA256 "${_pc_manifest}" _pc_manifest_before)
@@ -121,13 +125,13 @@ file(SHA256 "${_efi64_manifest}" _efi64_manifest_before)
 file(SHA256 "${_efi32_manifest}" _efi32_manifest_before)
 
 _aros_grub_iso_assets_collect_manifest(
-    "${GIA_SOURCE_ROOT}" "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
+    "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
     "i386-pc" 273 8 _pc_products)
 _aros_grub_iso_assets_collect_manifest(
-    "${GIA_SOURCE_ROOT}" "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
+    "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
     "x86_64-efi" 268 0 _efi64_products)
 _aros_grub_iso_assets_collect_manifest(
-    "${GIA_SOURCE_ROOT}" "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
+    "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
     "i386-efi" 269 0 _efi32_products)
 
 function(_gia_require_executable path label)

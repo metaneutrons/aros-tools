@@ -84,3 +84,45 @@ list(APPEND AROS_TEST_TOOL_ARGS
 if(NOT DEFINED AROS_TEST_CHILD_TIMEOUT)
     set(AROS_TEST_CHILD_TIMEOUT 180)
 endif()
+
+# Stage only the real upstream inputs a fixture needs. Never inherit a legacy
+# source-tree cmake/ copy: it would mask engine-resource ownership regressions.
+function(aros_test_copy_source destination)
+    if(EXISTS "${destination}" OR IS_SYMLINK "${destination}")
+        message(FATAL_ERROR "fixture source destination already exists: ${destination}")
+    endif()
+    file(MAKE_DIRECTORY "${destination}")
+    foreach(_relative IN LISTS ARGN)
+        if(_relative STREQUAL "" OR IS_ABSOLUTE "${_relative}" OR
+           _relative MATCHES "(^|/)\\.\\.(/|$)" OR _relative MATCHES "^cmake(/|$)")
+            message(FATAL_ERROR "unsafe fixture source input: ${_relative}")
+        endif()
+        get_filename_component(_parent "${_relative}" DIRECTORY)
+        file(COPY "${AROS_TEST_TREE}/${_relative}"
+            DESTINATION "${destination}/${_parent}")
+    endforeach()
+    if(EXISTS "${destination}/cmake" OR IS_SYMLINK "${destination}/cmake")
+        message(FATAL_ERROR "fixture source must not contain a CMake engine")
+    endif()
+endfunction()
+
+# Counter-probes mutate only a newly copied engine, never the shipped inputs.
+function(aros_test_copy_engine_defect destination manifest defect)
+    if(EXISTS "${destination}" OR IS_SYMLINK "${destination}" OR
+       NOT manifest MATCHES "^manifests/[A-Za-z0-9_.-]+\\.install$" OR
+       NOT defect MATCHES "^(missing|symlink|symlink-parent)$")
+        message(FATAL_ERROR "unsafe engine counter-probe")
+    endif()
+    file(COPY "${AROS_TEST_ENGINE_DIR}/" DESTINATION "${destination}")
+    if(defect STREQUAL "symlink-parent")
+        file(RENAME "${destination}/manifests" "${destination}/relocated-manifests")
+        file(CREATE_LINK "${destination}/relocated-manifests"
+            "${destination}/manifests" SYMBOLIC)
+    else()
+        file(REMOVE "${destination}/${manifest}")
+        if(defect STREQUAL "symlink")
+            file(CREATE_LINK "${AROS_TEST_ENGINE_DIR}/${manifest}"
+                "${destination}/${manifest}" SYMBOLIC)
+        endif()
+    endif()
+endfunction()

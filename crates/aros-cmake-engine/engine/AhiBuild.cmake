@@ -188,6 +188,10 @@ function(aros_build_ahi)
     set(_build_root_lexical "${_build_root_raw_lexical}")
     _aros_ahi_real_path("${_source_root_lexical}" _source_root)
     _aros_ahi_real_path("${_build_root_lexical}" _build_root)
+    # Product inventories belong to this selected engine, not the AROS source.
+    set(_engine_root_lexical "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    _aros_ahi_require_make_path("engine root" "${_engine_root_lexical}")
+    _aros_ahi_real_path("${_engine_root_lexical}" _engine_root)
 
     foreach(_name IN ITEMS BINARY_DIR INSTALL_PREFIX HOST_SFDC HOST_PERL)
         _aros_ahi_require_make_path("${_name}" "${AB_${_name}}")
@@ -209,7 +213,7 @@ function(aros_build_ahi)
     set(_source_dir_lexical "${_source_root_lexical}/workbench/devs/AHI")
     set(_source_manifest_lexical "${_source_dir_lexical}/ahi-build.inputs")
     set(_product_manifest_lexical
-        "${_source_root_lexical}/cmake/manifests/ahi-${AB_MODE}.install")
+        "${_engine_root_lexical}/manifests/ahi-${AB_MODE}.install")
     set(_expected_binary_lexical
         "${_build_root_lexical}/gen/configure/workbench/devs/AHI/${AB_MODE}")
     set(_expected_prefix_lexical "${_build_root_lexical}/SYS")
@@ -221,10 +225,12 @@ function(aros_build_ahi)
     endforeach()
     if(NOT EXISTS "${_source_dir_lexical}" OR NOT IS_DIRECTORY "${_source_dir_lexical}" OR
        NOT EXISTS "${_source_manifest_lexical}" OR IS_DIRECTORY "${_source_manifest_lexical}" OR
-       IS_SYMLINK "${_source_manifest_lexical}" OR
-       NOT EXISTS "${_product_manifest_lexical}" OR IS_DIRECTORY "${_product_manifest_lexical}" OR
+       IS_SYMLINK "${_source_manifest_lexical}")
+        message(FATAL_ERROR "AHI: audited source or input manifest is unavailable: ${_source_dir_lexical}")
+    endif()
+    if(NOT EXISTS "${_product_manifest_lexical}" OR IS_DIRECTORY "${_product_manifest_lexical}" OR
        IS_SYMLINK "${_product_manifest_lexical}")
-        message(FATAL_ERROR "AHI: audited source or manifest is unavailable")
+        message(FATAL_ERROR "AHI: audited engine product manifest is unavailable: ${_product_manifest_lexical}")
     endif()
     _aros_ahi_real_path("${_source_dir_lexical}" _source_dir)
     _aros_ahi_real_path("${_source_manifest_lexical}" _source_manifest)
@@ -234,7 +240,7 @@ function(aros_build_ahi)
     _aros_ahi_real_path("${_expected_sfdc_lexical}" _expected_sfdc)
     cmake_path(IS_PREFIX _source_root "${_source_dir}" NORMALIZE _source_owned)
     cmake_path(IS_PREFIX _source_dir "${_source_manifest}" NORMALIZE _source_manifest_owned)
-    cmake_path(IS_PREFIX _source_root "${_product_manifest}" NORMALIZE _product_manifest_owned)
+    cmake_path(IS_PREFIX _engine_root "${_product_manifest}" NORMALIZE _product_manifest_owned)
     cmake_path(IS_PREFIX _build_root "${_binary_dir}" NORMALIZE _binary_owned)
     cmake_path(IS_PREFIX _build_root "${_install_prefix}" NORMALIZE _prefix_owned)
     cmake_path(IS_PREFIX _build_root "${_host_sfdc}" NORMALIZE _sfdc_owned)
@@ -247,12 +253,12 @@ function(aros_build_ahi)
     if(NOT _source_dir STREQUAL "${_source_root}/workbench/devs/AHI" OR
        NOT _source_manifest STREQUAL "${_source_dir}/ahi-build.inputs" OR
        NOT _product_manifest STREQUAL
-           "${_source_root}/cmake/manifests/ahi-${AB_MODE}.install" OR
+           "${_engine_root}/manifests/ahi-${AB_MODE}.install" OR
        NOT _binary_dir STREQUAL _expected_binary OR
        NOT _install_prefix STREQUAL _expected_prefix OR
        NOT _host_sfdc STREQUAL _expected_sfdc)
         message(FATAL_ERROR
-            "AHI: source, build, install or host-SFDC identity differs from the audited capability")
+            "AHI: source, engine, build, install or host-SFDC identity differs from the audited capability")
     endif()
     foreach(_other IN ITEMS _source_dir _source_manifest _install_prefix _product_manifest)
         cmake_path(IS_PREFIX _binary_dir "${${_other}}" NORMALIZE _inside_binary)
@@ -609,6 +615,7 @@ function(aros_build_ahi)
     set(AHI_MMAKE_ID "${AB_MMAKE_ID}")
     set(AHI_MODE "${AB_MODE}")
     set(AHI_SOURCE_ROOT "${_source_root}")
+    set(AHI_ENGINE_ROOT "${_engine_root}")
     set(AHI_BUILD_ROOT "${_build_root}")
     set(AHI_SOURCE_DIR "${_source_dir}")
     set(AHI_SOURCE_MANIFEST "${_source_manifest}")
@@ -653,7 +660,7 @@ function(aros_build_ahi)
     set(_contract "${CMAKE_CURRENT_BINARY_DIR}/.aros-${AB_MMAKE_ID}-ahi-contract.cmake")
     set(_content "")
     foreach(_var IN ITEMS
-            AHI_MMAKE_ID AHI_MODE AHI_SOURCE_ROOT AHI_BUILD_ROOT AHI_SOURCE_DIR
+            AHI_MMAKE_ID AHI_MODE AHI_SOURCE_ROOT AHI_ENGINE_ROOT AHI_BUILD_ROOT AHI_SOURCE_DIR
             AHI_SOURCE_MANIFEST AHI_SOURCE_MANIFEST_SHA256
             AHI_PRODUCT_MANIFEST AHI_PRODUCT_MANIFEST_SHA256 AHI_BINARY_DIR
             AHI_STAGE_SOURCE AHI_STAGE_BUILD AHI_STAGE_LINKLIBS AHI_INSTALL_PREFIX

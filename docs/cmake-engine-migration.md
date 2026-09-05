@@ -75,7 +75,10 @@ AROS-NX PR #28 removes the 159 files from that tree.
 
 ## Qualification and remaining boundary
 
-**The fixtures are done.** All 35 engine tests pass.
+**Historical fixture baseline.** All 35 engine tests passed against a source
+checkout that still retained its old `cmake/` directory. That result did not
+prove independence from every source-side engine resource; the complete
+no-engine product run below exposed the remaining manifest dependency.
 
 Sixteen places had been loading engine modules through the source tree, so they
 were measuring the engine in the checkout while reporting on this one. They
@@ -148,8 +151,40 @@ old build tree; the fetcher's receipt and no-clobber rules remain unchanged.
 final Ninja no-op, while `SourceInventoryReconfigureTest` covers the
 configure-time path.
 
-The remaining upstream boundary is no longer engine placement or target
-configuration. A complete translated product from an entirely pristine
+## Product manifests belong to the selected engine
+
+AROS-NX PR #28's fresh matrix
+[33995179765](https://github.com/metaneutrons/AROS-NX/actions/runs/33995179765)
+passed the relocated companion-header test on all six Linux lanes, then failed
+at AHI configuration after the old source-side engine was removed. Both native
+Linux hosts reproduced `AHI: audited source or manifest is unavailable`.
+
+The remaining AHI and GRUB product manifests were still addressed through
+`<source>/cmake/manifests`; the AHI runner also required that obsolete identity.
+The selected CMake modules and GRUB runners now resolve their own bundled
+manifests. The AHI contract names `AHI_ENGINE_ROOT` separately from
+`AHI_SOURCE_ROOT`, with exact mode-specific identity, digest and ownership
+checks. A missing engine manifest does not fall back to a source copy. Older
+generated AHI contracts must be regenerated with the matching tools suite.
+
+AHI, GRUB host-build and GRUB ISO fixtures stage only their real required
+upstream inputs into isolated source trees without `cmake/`. The suite also
+rejects missing manifests, symlinked files and symlinked manifest directories;
+Rust tests reject old source-side, wrong-engine and wrong-mode substitutions.
+`ArosToolsTest` now resolves its module from the selected engine as well.
+
+The local macOS ARM64 exact-source gate passed all locked Rust tests and all
+35 engine fixtures, without host-qualified omissions, against
+`f3cfc243a84065166a46da28b0a5b22bbd0f8869`. The locked workspace release build,
+quality gate and documentation gate also passed. These local contract tests
+do not substitute for the real cross-host product matrix.
+
+The corrected engine and runner must pass the tools repository's normal
+qualification before AROS-NX #28 updates its tools pin. Its fresh complete
+four-host/three-profile product matrix remains a merge gate; the cancelled
+matrix above is failure evidence, not acceptance.
+
+A complete translated product from an entirely pristine
 upstream checkout still needs the source-side compatibility changes and an
 explicit released-toolchain selection currently carried by AROS-NX. Component
 tools, checkout lifecycle and target-graph validation remain usable without

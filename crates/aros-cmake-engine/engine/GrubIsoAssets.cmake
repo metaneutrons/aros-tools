@@ -8,9 +8,9 @@ include(CMakeParseArguments)
 set(_AROS_GRUB_ISO_ASSETS_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(_AROS_GRUB_ISO_ASSETS_HOST_MMAKE_RELATIVE
     "arch/all-pc/boot/grub2-host/mmakefile.src")
-set(_AROS_GRUB_ISO_ASSETS_PC_MANIFEST "cmake/manifests/grub-2.12-pc.install")
-set(_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST "cmake/manifests/grub-2.12-efi64.install")
-set(_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST "cmake/manifests/grub-2.12-efi32.install")
+set(_AROS_GRUB_ISO_ASSETS_PC_MANIFEST "manifests/grub-2.12-pc.install")
+set(_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST "manifests/grub-2.12-efi64.install")
+set(_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST "manifests/grub-2.12-efi32.install")
 
 function(_aros_grub_iso_assets_safe_value label value)
     foreach(_needle IN ITEMS ";" "\"" "\n" "\r" "$" "[" "]")
@@ -95,11 +95,14 @@ endfunction()
 # complete, sorted install manifests are a checked-in static inventory; no
 # globbing or host discovery participates in CMake's output ownership.
 function(_aros_grub_iso_assets_collect_manifest
-         source_root manifest_relative platform expected_mods
+         manifest_relative platform expected_mods
          expected_images output)
     _aros_grub_iso_assets_validate_relative("GRUB2 ISO manifest" "${manifest_relative}")
-    set(_manifest "${source_root}/${manifest_relative}")
+    file(REAL_PATH "${CMAKE_CURRENT_FUNCTION_LIST_DIR}" _engine_root)
+    set(_manifest "${_engine_root}/${manifest_relative}")
     _aros_grub_iso_assets_require_regular("${_manifest}" "GRUB2 ISO manifest")
+    _aros_grub_iso_assets_reject_symlink_components(
+        "${_engine_root}" "${_manifest}" "GRUB2 ISO engine manifest")
     file(STRINGS "${_manifest}" _entries)
     set(_sorted_entries "${_entries}")
     list(SORT _sorted_entries)
@@ -281,13 +284,13 @@ function(aros_stage_grub2_iso_assets)
     endif()
 
     _aros_grub_iso_assets_collect_manifest(
-        "${_source_root}" "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
+        "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
         "i386-pc" 273 8 _pc_products)
     _aros_grub_iso_assets_collect_manifest(
-        "${_source_root}" "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
+        "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
         "x86_64-efi" 268 0 _efi64_products)
     _aros_grub_iso_assets_collect_manifest(
-        "${_source_root}" "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
+        "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
         "i386-efi" 269 0 _efi32_products)
 
     set(_inputs_logical
@@ -374,9 +377,9 @@ function(aros_stage_grub2_iso_assets)
             -P "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/RunGrubIsoAssets.cmake"
         DEPENDS ${_inputs_logical}
             "${_host_mmake_logical}"
-            "${_source_root_logical}/${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
-            "${_source_root_logical}/${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
-            "${_source_root_logical}/${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
+            "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
+            "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
+            "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
             "${_contract_logical}"
             "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/RunGrubIsoAssets.cmake"
         COMMENT "Staging audited GRUB2 BIOS and EFI ISO assets"

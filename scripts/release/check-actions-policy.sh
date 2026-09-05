@@ -12,6 +12,7 @@ workflow_root="$repository_root/.github/workflows"
 
 python3 - "$workflow_root" <<'PY'
 import re
+import json
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ trusted_actions = {
     'actions/attest-build-provenance',
     'actions/checkout',
     'actions/configure-pages',
+    'actions/create-github-app-token',
     'actions/deploy-pages',
     'actions/download-artifact',
     'actions/setup-node',
@@ -34,7 +36,9 @@ trusted_actions = {
     'googleapis/release-please-action',
     'sigstore/cosign-installer',
 }
-for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
+local_actions = root.parent / 'actions'
+for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
+                    *local_actions.rglob('action.yml'), *local_actions.rglob('action.yaml'))):
     lines = path.read_text().splitlines()
     for line_number, line in enumerate(lines, 1):
         uses_match = re.match(r"^\s*-?\s*uses:\s*([^#]+?)\s*(?:#.*)?$", line)
@@ -157,7 +161,8 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
             )
 
         secret_domains = {
-            'homebrew': ('secrets.HOMEBREW_TAP_TOKEN',),
+            'homebrew': ('secrets.HOMEBREW_APP_PRIVATE_KEY',),
+            'archive': ('secrets.ARCHIVE_DISPATCH_PRIVATE_KEY',),
             'r2': ('secrets.R2_ACCESS_KEY_ID', 'secrets.R2_SECRET_ACCESS_KEY'),
             'apt': ('secrets.APT_GPG_PRIVATE_KEY', 'secrets.APT_GPG_PASSPHRASE'),
             'aur': ('secrets.AUR_SSH_PRIVATE_KEY',),
@@ -181,8 +186,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
         expected_environments = {
             'release-config-preflight': 'release',
             'homebrew-credential-preflight': 'homebrew-publication',
-            'r2-credential-preflight': 'apt-publication',
-            'apt-credential-preflight': 'apt-signing',
+            'archive-credential-preflight': 'apt-archive-publication',
             'aur-credential-preflight': 'aur-publication',
         }
         for job_name, environment in expected_environments.items():
@@ -205,6 +209,52 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
                     f'{path}: secret preflight {job_name} can run before validated configuration'
                 )
         homebrew_preflight = jobs.get('homebrew-credential-preflight', '')
+        homebrew_install = jobs.get('homebrew', '')
+        metadata = jobs.get('metadata', '')
+        for required in (
+            'homebrew_matrix: ${{ steps.homebrew-policy.outputs.matrix }}',
+            'homebrew_coverage: ${{ steps.homebrew-policy.outputs.coverage }}',
+            'id: homebrew-policy', 'python3 scripts/release/homebrew-matrix.py',
+            '--event "$GITHUB_EVENT_NAME" --ref-type "$GITHUB_REF_TYPE" --ref "$GITHUB_REF"',
+            '--github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"',
+        ):
+            if required not in metadata:
+                errors.append(f'{path}: dated Homebrew matrix policy omits {required}')
+        matrix_lines = re.findall(r'^      matrix:.*$', homebrew_install, re.MULTILINE)
+        if matrix_lines != ['      matrix: ${{ fromJSON(needs.metadata.outputs.homebrew_matrix) }}']:
+            errors.append(f'{path}: Homebrew must consume only the validated dynamic matrix')
+        if 'continue-on-error:' in metadata or 'continue-on-error:' in homebrew_install:
+            errors.append(f'{path}: Homebrew policy and installation must not suppress failure')
+        if "needs.metadata.result == 'success'" not in homebrew_install:
+            errors.append(f'{path}: Homebrew installation must require successful matrix planning')
+        for job_name in ('release-config-preflight', 'channel-preflight', 'publish'):
+            condition = jobs.get(job_name, '').split('    needs:', 1)[0]
+            for required in ("needs.metadata.outputs.homebrew_coverage == 'four-hosts'",
+                             "needs.homebrew.result == 'success'"):
+                if required not in condition:
+                    errors.append(f'{path}: {job_name} must require full successful Homebrew coverage: {required}')
+        policy_path = root.parent.parent / 'scripts/release/homebrew-qualification.json'
+        try:
+            policy = json.loads(policy_path.read_text(encoding='utf-8'))
+            measured_hosts = [(row['name'], row['runner'], row['target']) for row in policy['include']]
+        except (OSError, ValueError, KeyError, TypeError):
+            measured_hosts = []
+        if measured_hosts != [
+            ('linux-x86_64', 'ubuntu-24.04', 'x86_64-unknown-linux-gnu'),
+            ('linux-aarch64', 'ubuntu-24.04-arm', 'aarch64-unknown-linux-gnu'),
+            ('macos-x86_64', 'macos-15-intel', 'x86_64-apple-darwin'),
+            ('macos-aarch64', 'macos-15', 'aarch64-apple-darwin'),
+        ]:
+            errors.append(f'{policy_path}: Homebrew install matrix must bind four genuine native hosts')
+        for required in (
+            'verify-homebrew-install.py host', 'verify-homebrew-install.py installed',
+            "brew ruby -e 'puts Hardware::CPU.arch'", '--brew-prefix "$(brew --prefix)"',
+            '--target "$TARGET"', '--manifest "candidate/aros-tools-v${VERSION}-${TARGET}.tar.gz.manifest.json"',
+            'if ! brew install --verbose "$tap/aros-tools"; then',
+            'AP7322', 'brew test "$tap/aros-tools"',
+        ):
+            if required not in homebrew_install:
+                errors.append(f'{path}: Homebrew install qualification omits {required}')
         if (
             'verify-branch-protection.sh' not in homebrew_preflight
             or '--repository metaneutrons/homebrew-tap' not in homebrew_preflight
@@ -212,8 +262,6 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
             errors.append(
                 f'{path}: Homebrew credential preflight does not enforce the tap governance SSOT'
             )
-        if '--kill gpg-agent' not in jobs.get('apt-credential-preflight', ''):
-            errors.append(f'{path}: APT credential preflight does not terminate gpg-agent')
         for job_name in ('channel-preflight', 'publication-preflight'):
             block = jobs.get(job_name, '')
             if re.search(r'^    environment:', block, re.MULTILINE):
@@ -261,10 +309,11 @@ for path in transport_paths:
 # smallest enforceable GitHub-hosted runner boundary, so no job may combine
 # two domains and every secret-bearing step must install fail-safe cleanup.
 secret_patterns = {
+    'apt-archive-publication': re.compile(r"\$\{\{\s*secrets\.ARCHIVE_DISPATCH_PRIVATE_KEY"),
     'apt-signing': re.compile(r"\$\{\{\s*secrets\.APT_GPG_"),
     'r2-publication': re.compile(r"\$\{\{\s*secrets\.R2_"),
     'aur-publication': re.compile(r"\$\{\{\s*secrets\.AUR_"),
-    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_TAP_TOKEN"),
+    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_APP_PRIVATE_KEY"),
     'docs-publication': re.compile(r"\$\{\{\s*secrets\.CLOUDFLARE_API_TOKEN"),
 }
 
@@ -297,16 +346,12 @@ def job_steps(job: str) -> list[str]:
         for position, index in enumerate(starts)
     ]
 
-for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
+for workflow_name in ('publish-ecosystem.yml',):
     path = root / workflow_name
     if not path.exists():
         continue
     jobs = workflow_jobs(path)
     workflow_text = path.read_text()
-    if workflow_name == 'refresh-apt-metadata.yml' and 'download-release-assets.sh' not in workflow_text:
-        errors.append(
-            f'{path}: refresh does not use the bounded API-first release downloader'
-        )
     if 'gh release download' in workflow_text or 'read_bytes(' in workflow_text:
         errors.append(f'{path}: unbounded release body retrieval is forbidden')
     for job_name, job in jobs.items():
@@ -321,6 +366,21 @@ for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
                             if pattern.search(step)}
             if not step_domains:
                 continue
+            # The pinned token action revokes its short-lived installation token
+            # in its post step. There is no plaintext key file or shell cleanup.
+            if (step_domains == {'apt-archive-publication'} and
+                'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' in step and
+                'repositories: apt-archive' in step and
+                'permission-actions: write' in step and
+                'permission-contents: read' in step and
+                'skip-token-revoke' not in step):
+                continue
+            if (step_domains == {'homebrew-publication'} and
+                'uses: ./.github/actions/homebrew-token' in step and
+                'client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}' in step and
+                'private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}' in step):
+                # This local composite is checked below, including post-revocation.
+                continue
             for required in (
                 'trap cleanup EXIT',
                 "trap 'exit 130' HUP INT TERM",
@@ -332,7 +392,92 @@ for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
                     )
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
-refresh_jobs = workflow_jobs(root / 'refresh-apt-metadata.yml')
+release_jobs = workflow_jobs(root / 'release.yml')
+rp_path = root / 'release-please.yml'
+if rp_path.exists():
+    rp_job = workflow_jobs(rp_path).get('release-pr', '')
+    required_rp = (
+        'environment: release-please',
+        "if: github.ref == 'refs/heads/main'",
+        'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}',
+        'private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}',
+        'token: ${{ steps.app-token.outputs.token }}',
+        'GH_TOKEN: ${{ steps.app-token.outputs.token }}',
+        'installation/repositories?per_page=100',
+        '--paginate --slurp',
+        'skip-github-release: true',
+        'scripts/validate-version-contract.py',
+    )
+    for marker in required_rp:
+        if marker not in rp_job:
+            errors.append(f'{rp_path}: missing Release Please App contract: {marker}')
+    for field, value in (('owner', 'metaneutrons'), ('repositories', 'aros-tools')):
+        if re.findall(rf'^\s+{field}:\s*([^\n]+)', rp_job, re.MULTILINE) != [value]:
+            errors.append(f'{rp_path}: Release Please App target must be exactly {field}: {value}')
+    if re.findall(r'^\s+(permission-[\w-]+):\s*(\S+)', rp_job, re.MULTILINE) != [
+        ('permission-contents', 'write'), ('permission-pull-requests', 'write'),
+    ]:
+        errors.append(f'{rp_path}: Release Please App must request only Contents and Pull requests write')
+    for forbidden in ('github.token', 'secrets.GITHUB_TOKEN', 'skip-token-revoke',
+                      'gh workflow run', 'actions: write', 'issues: write'):
+        if forbidden in rp_job:
+            errors.append(f'{rp_path}: forbidden Release Please credential or duplicate dispatch: {forbidden}')
+    if set(re.findall(r'secrets\.([A-Z_]+)', rp_job)) != {'RELEASE_PLEASE_APP_PRIVATE_KEY'}:
+        errors.append(f'{rp_path}: Release Please must use only its own private key')
+
+# The local composite is the sole Homebrew credential factory. Its underlying
+# pinned action revokes every token at job end (including failure/cancellation).
+homebrew_action = local_actions / 'homebrew-token' / 'action.yml'
+homebrew_users = [
+    job for jobs in (publish_jobs, release_jobs) for job in jobs.values()
+    if 'HOMEBREW_APP_PRIVATE_KEY' in job or './.github/actions/homebrew-token' in job
+]
+if homebrew_users:
+    factory = homebrew_action.read_text() if homebrew_action.is_file() else ''
+    required_factory = (
+        'using: composite',
+        'uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'client-id: ${{ inputs.client-id }}', 'private-key: ${{ inputs.private-key }}',
+        'owner: metaneutrons', 'repositories: homebrew-tap',
+        'permission-contents: write', 'permission-pull-requests: write',
+        'permission-actions: read', 'permission-checks: read',
+        'permission-statuses: read', 'permission-administration: read',
+        'GH_TOKEN: ${{ steps.app.outputs.token }}',
+        'HOMEBREW_APP_SLUG: ${{ steps.app.outputs.app-slug }}',
+        'HOMEBREW_INSTALLATION_ID: ${{ steps.app.outputs.installation-id }}',
+        'scripts/release/verify-homebrew-app.sh',
+    )
+    for required in required_factory:
+        if required not in factory:
+            errors.append(f'{homebrew_action}: missing isolated App contract: {required}')
+    for field, value in (('owner', 'metaneutrons'), ('repositories', 'homebrew-tap')):
+        if re.findall(rf'^\s+{field}:\s*([^\n]+)', factory, re.MULTILINE) != [value]:
+            errors.append(f'{homebrew_action}: credential factory target must be exactly {field}: {value}')
+    permissions = re.findall(r'^\s+(permission-[\w-]+):\s*(\S+)', factory, re.MULTILINE)
+    if dict(permissions) != {
+        'permission-contents': 'write', 'permission-pull-requests': 'write',
+        'permission-actions': 'read', 'permission-checks': 'read',
+        'permission-statuses': 'read', 'permission-administration': 'read',
+    } or len(permissions) != 6:
+        errors.append(f'{homebrew_action}: unexpected or duplicate permission grant')
+    for forbidden in ('skip-token-revoke', 'permission-workflows', 'github-api-url:'):
+        if forbidden in factory:
+            errors.append(f'{homebrew_action}: forbidden credential-factory override: {forbidden}')
+    for job in homebrew_users:
+        if '    environment: homebrew-publication' not in job:
+            errors.append('Homebrew App key must stay inside homebrew-publication')
+        for step in job_steps(job):
+            if 'HOMEBREW_APP_PRIVATE_KEY' in step and (
+                'uses: ./.github/actions/homebrew-token' not in step or '\n        run:' in step
+            ):
+                errors.append('Homebrew private key must only reach the verified token factory')
+
+for path in (*root.glob('*.yml'), *root.glob('*.yaml')):
+    for legacy in ('HOMEBREW_TAP_TOKEN', 'PACKAGE_PUBLISH_TOKEN'):
+        if legacy in path.read_text():
+            errors.append(f'{path}: legacy Homebrew PAT binding is forbidden: {legacy}')
+
 docs_jobs = workflow_jobs(root / 'docs.yml')
 docs_build = docs_jobs.get('build', '')
 docs_deploy = docs_jobs.get('deploy', '')
@@ -365,6 +510,30 @@ if (root / 'publish-ecosystem.yml').exists() and (
         f'{root / "publish-ecosystem.yml"}: Homebrew mutation and merge do not revalidate the governance SSOT'
     )
 if homebrew_job:
+    steps = job_steps(homebrew_job)
+    wait = next((i for i, step in enumerate(steps) if '--watch --fail-fast' in step), -1)
+    renew = next((i for i, step in enumerate(steps) if 'id: homebrew-merge-token' in step), -1)
+    merge_step = next((i for i, step in enumerate(steps) if 'gh pr merge' in step), -1)
+    if not 0 <= wait < renew < merge_step:
+        errors.append('Homebrew must renew its App token between qualification wait and merge')
+    else:
+        if ('timeout-minutes: 35' not in steps[wait]
+                or 'python3 scripts/release/wait-homebrew-checks.py' not in steps[wait]
+                or 'EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}' not in steps[wait]
+                or 'timeout-minutes: 10' not in steps[merge_step]
+                or 'gh pr checks' not in steps[merge_step]
+                or 'GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}' not in steps[merge_step]
+                or 'uses: ./.github/actions/homebrew-token' not in steps[renew]):
+            errors.append('Homebrew wait/merge must be bounded and use a newly verified App token')
+    update = next((step for step in steps if 'id: update' in step), '')
+    if ('timeout-minutes: 10' not in update
+            or 'GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}' not in update
+            or 'git config user.name "$BOT_NAME"' not in update
+            or 'git config user.email "$BOT_EMAIL"' not in update
+            or 'gh api user ' in update):
+        errors.append('Homebrew update must use the fresh App token and verified bot identity')
+    if 'GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}' not in steps[-1]:
+        errors.append('Homebrew final read-back must use the renewed tap App token')
     if 'reviewDecision' in homebrew_job or 'independent approval' in homebrew_job:
         errors.append(
             f'{root / "publish-ecosystem.yml"}: solo-maintainer Homebrew publication must not wait for a self-review'
@@ -391,15 +560,10 @@ if homebrew_job:
 expected_domains = {
     ('docs.yml', 'build'): set(),
     ('docs.yml', 'deploy'): {'docs-publication'},
-    ('publish-ecosystem.yml', 'apt-sign'): {'apt-signing'},
-    ('publish-ecosystem.yml', 'apt'): {'r2-publication'},
+    ('publish-ecosystem.yml', 'apt'): {'apt-archive-publication'},
     ('publish-ecosystem.yml', 'homebrew'): {'homebrew-publication'},
     ('publish-ecosystem.yml', 'aur-publish'): {'aur-publication'},
     ('publish-ecosystem.yml', 'aur-verify'): set(),
-    ('refresh-apt-metadata.yml', 'prepare'): set(),
-    ('refresh-apt-metadata.yml', 'sign'): {'apt-signing'},
-    ('refresh-apt-metadata.yml', 'publish'): {'r2-publication'},
-    ('refresh-apt-metadata.yml', 'verify'): set(),
 }
 for (workflow_name, job_name), expected in expected_domains.items():
     workflow_path = root / workflow_name
@@ -408,7 +572,6 @@ for (workflow_name, job_name), expected in expected_domains.items():
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name)
     if job is None:
@@ -423,12 +586,9 @@ for (workflow_name, job_name), expected in expected_domains.items():
 
 expected_environments = {
     ('docs.yml', 'deploy'): 'docs-publication',
-    ('publish-ecosystem.yml', 'apt-sign'): 'apt-signing',
-    ('publish-ecosystem.yml', 'apt'): 'apt-publication',
+    ('publish-ecosystem.yml', 'apt'): 'apt-archive-publication',
     ('publish-ecosystem.yml', 'homebrew'): 'homebrew-publication',
     ('publish-ecosystem.yml', 'aur-publish'): 'aur-publication',
-    ('refresh-apt-metadata.yml', 'sign'): 'apt-signing',
-    ('refresh-apt-metadata.yml', 'publish'): 'apt-publication',
 }
 for (workflow_name, job_name), environment in expected_environments.items():
     workflow_path = root / workflow_name
@@ -437,7 +597,6 @@ for (workflow_name, job_name), environment in expected_environments.items():
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name, '')
     if f'    environment: {environment}' not in job:
@@ -450,8 +609,6 @@ credential_free_jobs = {
     ('publish-ecosystem.yml', 'apt-verify'),
     ('publish-ecosystem.yml', 'apt-install'),
     ('publish-ecosystem.yml', 'aur-verify'),
-    ('refresh-apt-metadata.yml', 'prepare'),
-    ('refresh-apt-metadata.yml', 'verify'),
 }
 for workflow_name, job_name in credential_free_jobs:
     workflow_path = root / workflow_name
@@ -460,7 +617,6 @@ for workflow_name, job_name in credential_free_jobs:
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name, '')
     if re.search(r'^    environment:', job, re.MULTILINE):
@@ -471,19 +627,18 @@ for workflow_name, job_name in credential_free_jobs:
 handoff_contracts: list[tuple[str, str]] = []
 if (root / 'publish-ecosystem.yml').exists():
     handoff_contracts.extend((
-        (publish_jobs.get('apt-sign', ''), 'name: signed-apt-publication'),
-        (publish_jobs.get('apt', ''), 'name: signed-apt-publication'),
         (publish_jobs.get('aur-publish', ''), 'name: aur-publication-evidence'),
         (publish_jobs.get('aur-verify', ''), 'name: aur-publication-evidence'),
     ))
+# Project publication must never regain the central archive's private keys or
+# storage permissions, even if a new job happens to isolate those credentials.
+for path in sorted(root.glob('*.yml')):
+    source = path.read_text()
+    for forbidden in ('secrets.APT_GPG_', 'secrets.R2_'):
+        if forbidden in source:
+            errors.append(f'{path}: central archive credential is forbidden here: {forbidden}')
 if (root / 'refresh-apt-metadata.yml').exists():
-    handoff_contracts.extend((
-        (refresh_jobs.get('prepare', ''), 'name: apt-refresh-unsigned-release'),
-        (refresh_jobs.get('sign', ''), 'name: apt-refresh-unsigned-release'),
-        (refresh_jobs.get('sign', ''), 'name: signed-apt-refresh'),
-        (refresh_jobs.get('publish', ''), 'name: signed-apt-refresh'),
-        (refresh_jobs.get('verify', ''), 'name: signed-apt-refresh'),
-    ))
+    errors.append('tools-owned APT refresh must not coexist with the central archive')
 for job, marker in handoff_contracts:
     if marker not in job:
         errors.append(f'{root}: isolated publication handoff is missing marker {marker}')

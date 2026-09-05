@@ -22,6 +22,7 @@ impl Contract {
     pub fn validate_filesystem(&self, contract_source: &Path) -> AhiResult<()> {
         for (path, label) in [
             (&self.source_root, "source root"),
+            (&self.engine_root, "engine root"),
             (&self.build_root, "build root"),
             (&self.source_dir, "AHI source directory"),
             (&self.sdk_include, "SDK include directory"),
@@ -77,10 +78,16 @@ impl Contract {
         for (path, label) in [
             (&self.source_dir, "source directory"),
             (&self.source_manifest, "source manifest"),
-            (&self.product_manifest, "product manifest"),
         ] {
             require_child(&self.source_root, path, label, contract_source, self)?;
         }
+        require_child(
+            &self.engine_root,
+            &self.product_manifest,
+            "product manifest",
+            contract_source,
+            self,
+        )?;
         for (path, label) in [
             (&self.binary_dir, "binary directory"),
             (&self.install_prefix, "install prefix"),

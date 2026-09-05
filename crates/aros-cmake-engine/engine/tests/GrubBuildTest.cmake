@@ -11,14 +11,25 @@ string(RANDOM LENGTH 10 ALPHABET 0123456789abcdef _suffix)
 set(_root "/tmp/aros-grub-build-${_suffix}")
 file(REMOVE_RECURSE "${_root}")
 file(MAKE_DIRECTORY "${_root}")
+set(_repo "${_root}/source")
+aros_test_copy_source("${_repo}"
+    "arch/all-pc/boot/grub2-aros" "arch/all-pc/boot/grub2-host")
 
 function(_grub_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
+    set(_selected_engine "${AROS_TEST_ENGINE_DIR}")
+    if(name MATCHES "^engine-(missing|symlink|symlink-parent)-manifest$")
+        set(_defect "${CMAKE_MATCH_1}")
+        set(_selected_engine "${_root}/${name}-engine")
+        aros_test_copy_engine_defect("${_selected_engine}"
+            "manifests/grub-2.12-pc.install" "${_defect}")
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS}
+            "-DAROS_TEST_ENGINE_DIR=${_selected_engine}"
             "-DAROS_REPO_ROOT=${_repo}"
             "-DGRUB_BUILD_CASE=${name}"
         RESULT_VARIABLE _result
@@ -162,6 +173,10 @@ endif()
 
 _grub_configure("wrong-identity" FALSE "target identity differs from the audited")
 _grub_configure("symlink-binary" FALSE "GRUB2 build root escapes the build tree")
+_grub_configure("engine-missing-manifest" FALSE "audited GRUB2 install manifest is unavailable")
+_grub_configure("engine-symlink-manifest" FALSE "audited GRUB2 install manifest is unavailable")
+_grub_configure("engine-symlink-parent-manifest" FALSE
+    "GRUB2 engine manifest contains a symlinked path component")
 
 file(REMOVE_RECURSE "${_root}")
 message(STATUS "GRUB2 host build test passed")

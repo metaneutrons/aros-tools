@@ -1,0 +1,45 @@
+name: Isolated Homebrew App token
+description: Issue, verify and automatically revoke a tap-only installation token.
+inputs:
+  client-id:
+    description: Client ID of the dedicated tap App
+    required: true
+  private-key:
+    description: Private key from the protected Homebrew environment
+    required: true
+outputs:
+  token:
+    description: Short-lived tap-only token; never persist or log
+    value: ${{ steps.app.outputs.token }}
+  bot-name:
+    description: Verified App bot login for git authorship
+    value: ${{ steps.verify.outputs.bot-name }}
+  bot-email:
+    description: Verified App bot noreply address
+    value: ${{ steps.verify.outputs.bot-email }}
+runs:
+  using: composite
+  steps:
+    - name: Issue narrowly scoped token
+      id: app
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: metaneutrons
+        repositories: homebrew-tap
+        permission-contents: write
+        permission-pull-requests: write
+        permission-actions: read
+        permission-checks: read
+        permission-statuses: read
+        # The unchanged classic branch-protection guard requires this read.
+        permission-administration: read
+    - name: Verify token scope and bot identity
+      id: verify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+        HOMEBREW_APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        HOMEBREW_INSTALLATION_ID: ${{ steps.app.outputs.installation-id }}
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/release/verify-homebrew-app.sh"

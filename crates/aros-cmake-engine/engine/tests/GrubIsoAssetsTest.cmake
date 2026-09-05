@@ -8,6 +8,8 @@ string(RANDOM LENGTH 10 ALPHABET 0123456789abcdef _suffix)
 set(_root "/tmp/aros-grub-iso-assets-${_suffix}")
 file(REMOVE_RECURSE "${_root}")
 file(MAKE_DIRECTORY "${_root}")
+set(_repo "${_root}/source")
+aros_test_copy_source("${_repo}" "arch/all-pc/boot/grub2-host")
 
 function(_assets_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
@@ -37,7 +39,7 @@ function(_assets_configure name expect_success expected_message)
 endfunction()
 
 function(_append_platform_outputs manifest platform sys_root include_images output)
-    file(STRINGS "${_repo}/${manifest}" _entries)
+    file(STRINGS "${AROS_TEST_ENGINE_DIR}/${manifest}" _entries)
     set(_outputs "")
     foreach(_relative IN LISTS _entries)
         if(_relative MATCHES "^lib/grub/${platform}/[^/]+\\.mod$" OR
@@ -67,15 +69,15 @@ if(NOT _build_result EQUAL 0)
 endif()
 
 set(_expected "")
-_append_platform_outputs("cmake/manifests/grub-2.12-pc.install" "i386-pc"
+_append_platform_outputs("manifests/grub-2.12-pc.install" "i386-pc"
     "${_build}/SYS/boot/grub/i386-pc" TRUE _pc_outputs)
 list(APPEND _expected ${_pc_outputs}
     "${_build}/SYS/boot/grub/i386-pc/core.img"
     "${_build}/SYS/boot/grub/i386-pc/grub2_eltorito")
-_append_platform_outputs("cmake/manifests/grub-2.12-efi64.install" "x86_64-efi"
+_append_platform_outputs("manifests/grub-2.12-efi64.install" "x86_64-efi"
     "${_build}/SYS/EFI/BOOT/grub/x86_64-efi" FALSE _efi64_outputs)
 list(APPEND _expected ${_efi64_outputs} "${_build}/SYS/EFI/BOOT/BOOTX64.EFI")
-_append_platform_outputs("cmake/manifests/grub-2.12-efi32.install" "i386-efi"
+_append_platform_outputs("manifests/grub-2.12-efi32.install" "i386-efi"
     "${_build}/SYS/EFI/BOOT/grub/i386-efi" FALSE _efi32_outputs)
 list(APPEND _expected ${_efi32_outputs}
     "${_build}/SYS/EFI/BOOT/BOOTIA32.EFI"

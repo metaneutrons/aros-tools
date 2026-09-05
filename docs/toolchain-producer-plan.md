@@ -1,10 +1,14 @@
 # Toolchain producer integration: architecture and delivery plan
 
-Status: implementation authorized; no producer milestone is complete yet.
+Status: producer implementation authorized; no producer milestone is complete yet.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
 percentage estimate. Command examples describe the proposed interface, not
 commands available in the current release.
+
+Planning extension approved on 2026-09-06: TCP-M8 adds explicit local toolchain
+management. It is a separate acceptance track, not a new prerequisite for M7
+or the initial tools release. The extension is planned, not implemented.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The first active work package is [TCP-M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28).
@@ -51,6 +55,9 @@ complete application SDK or evidence that a physical board boots.
 - This plan does not make producer integration a prerequisite for the first
   `aros-tools` release. Release the existing qualified scope independently;
   let Release Please determine the version of the later feature release.
+- TCP-M8 extends local consumer management after the M4 envelope contract.
+  Its completion is independent of producer qualification at M7; adding this
+  work package does not renumber or reopen M0–M7.
 - Remove our superseded orchestration scripts at cutover, not upstream's
   legitimate shell/Python build dependencies or maintained regression tests.
 
@@ -127,6 +134,13 @@ Keep producer modules focused: `contract`, `plan`, `identity`, `sources`,
 `recovery`, and a small diagnostics adapter. These are boundaries, not a
 requirement to create empty modules up front. Keep the CLI consumer
 installation path independent from the new producer dispatch.
+
+TCP-M8 reuses the consumer resolver, installer and verifier rather than
+introducing a second implementation. Move shared logic behind the
+`aros-toolchain` library boundary when required, keeping CLI handlers thin.
+Toolchain manifests/receipts and project locks remain authoritative; any
+management index is derived, revalidatable state, not a second selection or
+artifact-trust authority.
 
 ### Bootstrap and version identity
 
@@ -223,6 +237,14 @@ The first preview additionally requires explicit `--backend legacy-preview`.
   compare, index, compatibility and repackage. Add them only as their native
   implementations become available; do not expose stub success paths.
   Both local/CI `build` and these stage operations call the same library.
+
+The separately planned [TCP-M8 management surface](#tcp-m8--local-toolchain-management)
+adds all-installed-version inventory, import/registration, explicit project
+selection and safe removal/cleanup. Freeze its exact command names, flags and
+result schemas with parser fixtures before implementation. Preserve the
+current `list` default (current host and current project lock), explicit local
+overrides and the other existing consumer meanings; no proposed management
+command is advertised as available yet.
 
 Recipe creation is deliberate and separate from executing an already recorded
 recipe. The first native release supports clean, explicitly selected commits.
@@ -464,6 +486,7 @@ document or creating an issue does not satisfy an acceptance criterion.
 | TCP-M5 | Compatibility, replay and recovery parity | M4 | Qualification candidate |
 | TCP-M6 | CI cutover, legacy retirement and documentation | M5 | Release-ready implementation |
 | TCP-M7 | Immutable release qualification and consumer promotion | M6 | Qualified, distributed feature |
+| TCP-M8 | Local inventory, import, project selection and safe cleanup | M4; design may start earlier | Separately accepted management feature; does not gate M7 |
 
 ### TCP-M0 — Contract and baseline freeze
 
@@ -626,6 +649,77 @@ Exit evidence: immutable toolchain release, matching tested consumer promotion,
 distributed tools feature and completed evidence ledger. No local-only success
 or partially published channel counts as complete.
 
+### TCP-M8 — Local toolchain management
+
+Acceptance issue: [#41](https://github.com/metaneutrons/aros-tools/issues/41).
+Delivery group: [Toolchain management](https://github.com/metaneutrons/aros-tools/milestone/4).
+This extension can proceed after M4's envelope/verification acceptance,
+including its M0–M3 prerequisites. Design and existing-store inventory can
+start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
+
+- [ ] Freeze management commands, human/JSON results, diagnostics, ownership
+  receipts, reference/lease policy and on-disk compatibility. Inventory all
+  installed versions across project locks, with host/profile, immutable
+  identity, provenance/qualification class, integrity state, location and
+  known use references. Preserve current commands/defaults. New inventory and
+  preview operations are bounded and non-mutating; they do not fetch or run
+  untrusted toolchain executables merely to discover entries.
+- [ ] Reuse the existing content-addressed store, resolution, installation,
+  transport and verification contracts. A derived index must be rebuildable
+  from validated state; a stale/tampered index cannot select, overwrite or
+  delete an artifact. Do not duplicate these algorithms in CLI handlers or
+  change the separate host-compiler manager implicitly.
+- [ ] Import a verified local candidate through staged, no-clobber copies
+  into a managed envelope. Preserve its measured identity and qualification;
+  imported/built is not synonymous with released/attested. External-prefix
+  registration remains non-owning, never copies ownership onto an arbitrary
+  directory, and records missing provenance explicitly. Preserve existing
+  `--local` use without requiring registration. Managed cleanup never removes
+  an external prefix or mutates the original import input.
+- [ ] Add explicit project-scoped selection with a read-only change preview,
+  compatibility checks and an atomic, concurrent-change-checked lock update.
+  The project lock is the selection SSOT; no ambient global active/latest
+  state or automatic activation after building/importing. Specify whole-lock
+  versus per-profile selection under the existing single-release lock schema:
+  never silently mix release identities or fabricate released values for a
+  local candidate. Any incompatible schema extension needs a versioned,
+  tested migration. A failed selection preserves the previous valid lock.
+- [ ] Implement explicit removal and conservative garbage collection with
+  an exact-target dry-run, clear scope/size reporting and revalidation under
+  store/reference locks before mutation. Protect registered project locks,
+  active build leases and explicit retention references. A partial index or
+  an unreadable/missing reference is not proof of global non-use; ambiguous
+  ownership or use prevents automatic cleanup. Do not infer permission to
+  delete from a matching path/name, and never recurse over a checkout, volume,
+  arbitrary parent, external registration or another tool's shared cache.
+- [ ] Prove safe concurrency and recovery for install/import/select/remove,
+  interrupted or stale leases, PID reuse, symlink/path substitution, modified
+  lockfiles, corrupt manifests/indexes, disk-full/read-only failures and
+  post-rename durability uncertainty. Only this operation's verified managed
+  targets may change; previous valid selections, live inputs and external
+  paths survive failed operations. Specify conservative stale-reference
+  handling and on-disk rollback before enabling destructive commands.
+- [ ] Reuse the shared diagnostics/logging/process boundaries; distinguish
+  a read-only plan, committed change and uncertain durability in machine
+  results. Run CLI/parser, package/store and failure fixtures on all four
+  native hosts using isolated envelopes and existing qualified vectors.
+  Include valid imports/selections/removals and counter-probes for wrong
+  provenance, unsupported profiles, mixed releases, active references and
+  foreign ownership. No full compiler A/B matrix is added for management-only
+  changes; normal feature-release distribution gates still apply.
+- [ ] Document shipped commands, project selection/rollback, local-versus-
+  release trust, offline behavior, external-prefix ownership and cleanup
+  limits against the actual code. Record exact implementation PRs, format
+  identities, host results, durable evidence and explicit omissions before
+  closure. Calibrate an effort range from the store/reference and failure-
+  model review; assigning this issue does not invent a deadline.
+
+Exit evidence: merged implementation and source-verified docs; four-host
+positive/adversarial lifecycle results; safe project selection and cleanup
+demonstrations; and a reviewed state-format migration/rollback contract.
+Creating the issue or merging this planning extension does not complete M8
+and does not authorize real installation cleanup, compiler builds or releases.
+
 ## 8. Test strategy and runner budget
 
 | Tier | Scope | Trigger | What it proves |
@@ -671,10 +765,13 @@ Execution tracking:
   issues in the repository that actually changes. Link cross-repository
   dependencies explicitly; a tools acceptance issue stays open until its
   producer/source dependencies have evidence.
-- Group delivery into three GitHub milestones: [Toolchain build preview](https://github.com/metaneutrons/aros-tools/milestone/1)
+- One additional acceptance issue for the separately approved TCP-M8
+  management extension, using the same evidence and ownership rules.
+- Group delivery into four GitHub milestones: [Toolchain build preview](https://github.com/metaneutrons/aros-tools/milestone/1)
   (M0-M1), [Native producer candidate](https://github.com/metaneutrons/aros-tools/milestone/2)
   (M2-M6), and [Native producer qualified](https://github.com/metaneutrons/aros-tools/milestone/3)
-  (M7). GitHub milestones are repository-local collections of
+  (M7), and [Toolchain management](https://github.com/metaneutrons/aros-tools/milestone/4)
+  (M8). GitHub milestones are repository-local collections of
   issues/PRs, so a cross-repository completion percentage is not inferred from
   one repository's counter. See [GitHub milestone semantics](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/about-milestones).
 - Issues own assignment, execution state and blockers. PRs own implementation
@@ -685,9 +782,12 @@ Execution tracking:
   become checked only through evidence-linked PRs;
   do not duplicate a second manually maintained in-progress status table.
 
-The epic, eight acceptance issues and three delivery milestones were created
-on 2026-09-05 after implementation was authorized. No compiler matrix, release
-tag or publication was started by this tracking setup.
+The original epic, eight acceptance issues and three delivery milestones were
+created on 2026-09-05 after producer implementation was authorized. The TCP-M8
+acceptance issue and fourth delivery group were added on 2026-09-06 after
+Fabian approved the management planning extension. No compiler matrix,
+release tag, publication or management implementation is authorized by that
+tracking change.
 
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |
@@ -699,6 +799,7 @@ tag or publication was started by this tracking setup.
 | TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | Pending |
 | TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | Pending |
 | TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | Pending |
+| TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | Pending |
 
 ### Issue and pull-request contract
 
@@ -730,11 +831,16 @@ current issue/PR, verified state and next gate rather than a guessed percent.
 
 ### Definition of done
 
-The integration is done only when M7 closes with evidence, the native producer
+The producer integration is done only when M7 closes with evidence, the native producer
 is the single active implementation, existing consumer/distribution contracts
 remain valid, every claimed host/profile is qualified, fault paths have stable
 diagnostics, and documentation matches shipped commands. Known exceptions must
 be explicitly scoped/deferred; they cannot be hidden behind "100%".
+
+The approved management extension is complete only when M8 closes with its
+own evidence. The expanded epic remains open until all nine acceptance issues
+are complete; that tracking relationship does not make M8 a release gate for
+M7 or for the first tools suite.
 
 ## 10. Rollout risks and decisions that must remain explicit
 

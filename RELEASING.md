@@ -79,22 +79,26 @@ partial-release claim.
 
 ## 4. Protected publication
 
-Stable package promotion is globally serialized. Five protected environments
-isolate the Administration-read immutable-release check (`release`), APT
-signing (`apt-signing`), R2 publication (`apt-publication`), Homebrew
-(`homebrew-publication`) and AUR (`aur-publication`). The APT and R2
-environments deliberately admit both annotated `v*` tags and protected `main`:
-the tag publication and scheduled refresh workflows reuse the same narrowly
-scoped identities but keep them on separate jobs/runners and apply their own
-exact-ref checks. No runner or job may combine credential domains.
-`RELEASE_ADMIN_READ_TOKEN` is a
-fine-grained, repository-only Administration-read token used only by the
-checkout-free `release` preflight; a user-owned repository cannot enable
-owner-enforced immutable releases, so the workflow requires the supported
-repository `enabled=true` policy. PR jobs and ordinary qualification jobs must not receive OIDC
-or publication permissions; public verification jobs enter no environment.
-Its preflight exercises the R2 credential only with a run-scoped, non-channel
-write/read/delete probe and removes that object before the gate succeeds.
+Stable package promotion is globally serialized. Four protected environments
+isolate the Administration-read immutable-release check (`release`), the
+central archive request (`apt-archive-publication`), Homebrew
+(`homebrew-publication`) and AUR (`aur-publication`). No runner may combine
+credential domains. The archive request uses a short-lived GitHub App token
+restricted to `metaneutrons/apt-archive`, with Actions write and Contents read.
+Its private-key action revokes the installation token at job completion; no
+archive signing key or storage credential belongs in this repository.
+
+`RELEASE_ADMIN_READ_TOKEN` remains a repository-only Administration-read
+credential used only in the checkout-free immutable-release preflight.
+A user-owned repository cannot enable owner-enforced immutable releases, so
+the supported repository `enabled=true` policy is required. PR and ordinary
+qualification jobs receive neither OIDC nor publication permissions.
+
+The archive's public contract is in `contracts/apt-archive-v1.toml`: primary
+and domain-subkey fingerprints, keyring, origin, suite, architectures, validity
+and retention. Preflight reads the protected archive main manifest as inert
+data and requires an exact contract match. It does not execute archive code,
+sign anything or request publication.
 
 An OIDC-free, checkout-free `contents:write` recovery job lists every release
 page, resolves a private draft by numeric release ID, and downloads every
@@ -111,16 +115,28 @@ prerelease tag is published as a non-latest prerelease. GitHub immutable
 releases do not permit a later prerelease-to-stable transition, so the workflow
 never attempts one.
 
-For a stable release, package channels then roll forward from the same sealed
-staging bytes. An APT-key-only runner produces a closed public artifact; an
-R2-only runner re-verifies that exact handoff, uploads immutable packages and
-content-addressed by-hash indexes before mutable aliases, and writes signed
-`InRelease` last. Homebrew merges only the exact checked PR head. An AUR-key-only
-runner publishes the measured `PKGBUILD`/`.SRCINFO`, while a separate public
-runner verifies its closed three-file evidence handoff. No destination
-repository helper is executed while a write PAT is present. Every private-key
-step removes its credential files through an EXIT trap and terminates GnuPG
-agents before a later step can run.
+For a stable release, package channels roll forward from the same sealed
+staging bytes. The central archive fetches the public, attested `.deb` files
+and exclusively owns rendering, signing, retention, refresh and storage writes.
+The tools dispatch its `publish.yml` for the fixed domain/project and follow
+only the numeric run ID returned by GitHub, bound to the validated protected
+archive commit. Missing or ambiguous dispatch responses fail closed; never
+guess a run by selecting the latest one.
+
+A separate credential-free job verifies what clients receive: the exact
+primary and domain signing subkey, active key status, both Release signatures,
+publication/expiry times, the complete four-index SHA-256/SHA-512 by-hash
+matrix, matching compressed/uncompressed indexes and both exact candidate
+packages. Retained older versions are allowed; a newer version, mixed
+architecture versions or changed same-version bytes fail. Both native Linux
+architectures install via an isolated signed APT source and compare all eight
+installed binaries with the release candidate.
+
+Homebrew merges only the exact checked PR head. An AUR-key-only runner
+publishes the measured `PKGBUILD`/`.SRCINFO`, followed by independent public
+verification. No destination repository helper runs with a write PAT present.
+Every shell step that materializes a private key removes its temporary
+credential files before another step can run.
 
 The deliberate creation and push of the immutable annotated release tag is the
 single human promotion gate. Homebrew adds no redundant self-review ceremony:
@@ -161,28 +177,16 @@ rewrite successful immutable state and do not describe it as rolled back.
 Rerun the exact tag to roll the remaining stages forward, record an incident if
 convergence is delayed, and publish a new fixed version for a payload defect.
 
-APT `Valid-Until` is refreshed weekly by the protected
-`refresh-apt-metadata.yml` workflow. A refresh must reproduce the public Debian
-packages and by-hash objects byte-for-byte from the current immutable stable
-GitHub release; in the healthy case it signs only a new `Release`/`Release.gpg`/
-`InRelease` triplet. Before any write it captures and validates one R2 snapshot
-of all seven mutable objects. Missing or divergent `Packages*` aliases are
-reconciled with the deterministic bytes, while every write uses only the
-original ETag or an original absence condition; `InRelease` commits last.
-The initial channel commit likewise captures one current metadata epoch rather
-than baking the tag time into an expiring repository. A tag rerun accepts an
-already valid protected refresh only after both index forms reproduce exactly;
-if same-version metadata has expired or a mutable alias is damaged, it repairs
-the complete mutable set without changing immutable package/by-hash bytes.
-Public verification then downloads the complete key, triplet, alias, by-hash
-and package inventory and requires exactly one primary trust anchor plus one
-`VALIDSIG` bound to its configured fingerprint.
-The renderer runs in a digest-pinned, network-disabled Python container. A
-downgrade, package change, index change, mutable release or race fails closed.
-Refresh signing and R2 mutation also run on different runners under the shared
-`apt-signing` and `apt-publication` environments. Configure both environments
-to admit only annotated `v*` release tags and protected `main`, without a second
-approval after the deliberate release tag, and retain the workflows'
-independent exact-ref checks. Put the non-secret APT/R2 identity values in
-repository variables so preparation and final verification remain
-credential-free.
+APT refresh and damaged-index recovery belong to `metaneutrons/apt-archive`.
+There is no project-owned scheduled refresh or second signing key. If its
+publication fails after the immutable GitHub release is public, diagnose the
+exact archive run and recover there; rerunning the unchanged tools tag can
+request a new archive run and must reverify all public bytes before continuing.
+Do not delete or overwrite successful immutable release assets.
+
+The initial untagged 0.1.0 PR was superseded before publication. Release Please
+prepared a fresh 0.1.1 candidate including later fixes. A merged but untagged
+candidate can be explicitly retired by removing its `autorelease: pending`
+label with an audit comment, then dispatching Release Please again. This does
+not mark the version published, mutate a tag, hand-edit a version, or bypass
+qualification of the new release PR.

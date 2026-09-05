@@ -11,3 +11,9 @@ to hold our build system.
 
 `materialize()` writes the embedded copy into a build directory. Nothing is
 written into the source tree.
+
+The embedded `manifests/` directory owns the AHI and GRUB product inventories.
+Engine modules and build runners resolve those inventories from the selected
+engine, never from a source checkout's legacy `cmake/` copy. Source recipes,
+patches and input manifests remain source-owned. The contract fixtures exercise
+that boundary against isolated source trees without a CMake engine.

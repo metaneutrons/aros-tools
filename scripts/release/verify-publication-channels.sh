@@ -17,8 +17,6 @@ mode=
 repository=
 tag=
 candidate_dir=
-apt_base_url=
-apt_fingerprint=
 fixture_root=
 while (($#)); do
     case "$1" in
@@ -26,8 +24,6 @@ while (($#)); do
         --repository) repository=${2:-}; shift 2 ;;
         --tag) tag=${2:-}; shift 2 ;;
         --candidate-dir) candidate_dir=${2:-}; shift 2 ;;
-        --apt-base-url) apt_base_url=${2:-}; shift 2 ;;
-        --apt-fingerprint) apt_fingerprint=${2:-}; shift 2 ;;
         --fixture-root) fixture_root=${2:-}; shift 2 ;;
         *) fail "unknown channel verifier argument: $1" ;;
     esac
@@ -42,8 +38,6 @@ version=${tag#v}
     fail 'candidate directory contains a non-regular entry'
 [[ -f "$candidate_dir/RELEASE_NOTES.md" && ! -L "$candidate_dir/RELEASE_NOTES.md" ]] || \
     fail 'signed release notes are missing'
-[[ "$apt_base_url" == https://* && "$apt_base_url" != */ ]] || fail 'APT base URL is unsafe'
-[[ "$apt_fingerprint" =~ ^[0-9A-Fa-f]{40}$ ]] || fail 'APT fingerprint is malformed'
 if [[ -n "$fixture_root" ]]; then
     [[ "${AROS_RELEASE_POLICY_FIXTURE:-}" == 1 ]] || \
         fail 'fixtures are permitted only in release-policy tests'
@@ -102,26 +96,6 @@ compare_directories() {
     done < "$expected_names"
 }
 
-fetch_optional() {
-    local relative=$1 output=$2 class=$3 status
-    local arguments=(--output "$output" --class "$class" --allow-not-found)
-    if [[ -n "$fixture_root" ]]; then
-        arguments+=(--source-file "$fixture_root/apt/$relative")
-    else
-        arguments+=(--url "$apt_base_url/$relative")
-    fi
-    set +e
-    AROS_RELEASE_POLICY_FIXTURE="${AROS_RELEASE_POLICY_FIXTURE:-}" \
-        "$root/scripts/release/download-bounded-https.sh" "${arguments[@]}"
-    status=$?
-    set -e
-    case "$status" in
-        0) return 0 ;;
-        44) return 1 ;;
-        *) fail "bounded APT request failed for $relative" ;;
-    esac
-}
-
 # GitHub public release state.
 if [[ -n "$fixture_root" ]]; then
     cp "$fixture_root/github-releases.json" "$work/releases.json"
@@ -161,70 +135,13 @@ elif [[ "$mode" == exact ]]; then
     fail 'GitHub release has not converged'
 fi
 
-# Signed APT state. Exact mode requires the complete public mirror. Preflight
-# additionally accepts a same-version state whose immutable pool/by-hash base
-# is exact but whose mutable aliases need controlled repair.
-if fetch_optional dists/stable/InRelease "$work/apt-InRelease-probe" apt-release; then
-    apt_public="$work/apt-public"
-    apt_error="$work/apt-public.error"
-    if [[ -n "$fixture_root" ]]; then
-        source_args=(--source-directory "$fixture_root/apt")
-    else
-        source_args=(--base-url "$apt_base_url")
-    fi
-    if apt_version=$("$root/scripts/release/download-verify-apt-publication.sh" \
-        --directory "$apt_public" "${source_args[@]}" \
-        --fingerprint "$apt_fingerprint" --version auto 2> "$apt_error"); then
-        :
-    elif [[ "$mode" == preflight ]]; then
-        rm -rf -- "$apt_public"
-        if apt_version=$("$root/scripts/release/download-verify-apt-publication.sh" \
-            --directory "$apt_public" "${source_args[@]}" \
-            --fingerprint "$apt_fingerprint" --version auto --allow-expired \
-            2> "$apt_error"); then
-            :
-        else
-            rm -rf -- "$apt_public"
-            apt_expected="$work/apt-expected"
-            install -d "$apt_expected"
-            metadata_epoch=${AROS_RELEASE_NOW_EPOCH:-$(date +%s)}
-            if [[ -n "$fixture_root" ]]; then
-                AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-                  "$root/scripts/release/run-apt-metadata-renderer.sh" \
-                    "$candidate_dir" "$apt_expected" "$version" "$metadata_epoch"
-            else
-                "$root/scripts/release/run-apt-metadata-renderer.sh" \
-                    "$candidate_dir" "$apt_expected" "$version" "$metadata_epoch"
-            fi
-            if ! recovery_state=$("$root/scripts/release/verify-apt-recovery-base.sh" \
-                --expected-directory "$apt_expected" "${source_args[@]}" \
-                --fingerprint "$apt_fingerprint" --version "$version"); then
-                cat "$apt_error" >&2
-                fail 'APT channel is neither complete nor safely recoverable at the requested version'
-            fi
-            [[ "$recovery_state" == committed ]] || \
-                fail 'APT recovery preflight lost its signed commit point'
-            apt_version=$version
-        fi
-    else
-        cat "$apt_error" >&2
-        fail 'APT channel has not converged as a complete public inventory'
-    fi
-    apt_relation=$(require_acceptable_version APT "$apt_version")
-    if [[ "$apt_relation" == same ]]; then
-        for arch in amd64 arm64; do
-            if [[ -d "$apt_public" ]]; then
-                public_deb="$apt_public/pool/main/a/aros-tools/aros-tools_${version}_${arch}.deb"
-            else
-                public_deb="$candidate_dir/aros-tools_${version}_${arch}.deb"
-            fi
-            cmp "$candidate_dir/aros-tools_${version}_${arch}.deb" "$public_deb" || \
-                fail "same-version APT $arch package bytes differ"
-        done
-    fi
-elif [[ "$mode" == exact ]]; then
-    fail 'APT channel has not converged'
+# Central APT is a read-only consumer boundary. Signing, metadata recovery and
+# retention belong to apt-archive; the tools only accept its signed, exact bytes.
+apt_args=(--mode "$mode" --version "$version" --candidate-dir "$candidate_dir")
+if [[ -n "$fixture_root" ]]; then
+    apt_args+=(--fixture-root "$fixture_root/apt" --contract "$fixture_root/apt-contract.toml")
 fi
+python3 "$root/scripts/release/verify-central-apt.py" "${apt_args[@]}" >/dev/null
 
 # Public Homebrew tap state.
 if [[ -n "$fixture_root" ]]; then
