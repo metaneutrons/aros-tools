@@ -3,6 +3,8 @@ name: Release qualification
 on:
   pull_request:
     paths:
+      - '.github/actions/**'
+      - '.github/workflows/release-please.yml'
       - '.github/workflows/release.yml'
       - '.github/workflows/publish-ecosystem.yml'
       - 'Cargo.lock'

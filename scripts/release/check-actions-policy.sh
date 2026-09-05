@@ -346,6 +346,38 @@ for workflow_name in ('publish-ecosystem.yml',):
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
 release_jobs = workflow_jobs(root / 'release.yml')
+rp_path = root / 'release-please.yml'
+if rp_path.exists():
+    rp_job = workflow_jobs(rp_path).get('release-pr', '')
+    required_rp = (
+        'environment: release-please',
+        "if: github.ref == 'refs/heads/main'",
+        'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}',
+        'private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}',
+        'token: ${{ steps.app-token.outputs.token }}',
+        'GH_TOKEN: ${{ steps.app-token.outputs.token }}',
+        'installation/repositories?per_page=100',
+        '--paginate --slurp',
+        'skip-github-release: true',
+        'scripts/validate-version-contract.py',
+    )
+    for marker in required_rp:
+        if marker not in rp_job:
+            errors.append(f'{rp_path}: missing Release Please App contract: {marker}')
+    for field, value in (('owner', 'metaneutrons'), ('repositories', 'aros-tools')):
+        if re.findall(rf'^\s+{field}:\s*([^\n]+)', rp_job, re.MULTILINE) != [value]:
+            errors.append(f'{rp_path}: Release Please App target must be exactly {field}: {value}')
+    if re.findall(r'^\s+(permission-[\w-]+):\s*(\S+)', rp_job, re.MULTILINE) != [
+        ('permission-contents', 'write'), ('permission-pull-requests', 'write'),
+    ]:
+        errors.append(f'{rp_path}: Release Please App must request only Contents and Pull requests write')
+    for forbidden in ('github.token', 'secrets.GITHUB_TOKEN', 'skip-token-revoke',
+                      'gh workflow run', 'actions: write', 'issues: write'):
+        if forbidden in rp_job:
+            errors.append(f'{rp_path}: forbidden Release Please credential or duplicate dispatch: {forbidden}')
+    if set(re.findall(r'secrets\.([A-Z_]+)', rp_job)) != {'RELEASE_PLEASE_APP_PRIVATE_KEY'}:
+        errors.append(f'{rp_path}: Release Please must use only its own private key')
 
 # The local composite is the sole Homebrew credential factory. Its underlying
 # pinned action revokes every token at job end (including failure/cancellation).
