@@ -24,6 +24,7 @@ trusted_actions = {
     'actions/attest-build-provenance',
     'actions/checkout',
     'actions/configure-pages',
+    'actions/create-github-app-token',
     'actions/deploy-pages',
     'actions/download-artifact',
     'actions/setup-node',
@@ -158,6 +159,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
 
         secret_domains = {
             'homebrew': ('secrets.HOMEBREW_TAP_TOKEN',),
+            'archive': ('secrets.ARCHIVE_DISPATCH_PRIVATE_KEY',),
             'r2': ('secrets.R2_ACCESS_KEY_ID', 'secrets.R2_SECRET_ACCESS_KEY'),
             'apt': ('secrets.APT_GPG_PRIVATE_KEY', 'secrets.APT_GPG_PASSPHRASE'),
             'aur': ('secrets.AUR_SSH_PRIVATE_KEY',),
@@ -181,8 +183,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
         expected_environments = {
             'release-config-preflight': 'release',
             'homebrew-credential-preflight': 'homebrew-publication',
-            'r2-credential-preflight': 'apt-publication',
-            'apt-credential-preflight': 'apt-signing',
+            'archive-credential-preflight': 'apt-archive-publication',
             'aur-credential-preflight': 'aur-publication',
         }
         for job_name, environment in expected_environments.items():
@@ -212,8 +213,6 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
             errors.append(
                 f'{path}: Homebrew credential preflight does not enforce the tap governance SSOT'
             )
-        if '--kill gpg-agent' not in jobs.get('apt-credential-preflight', ''):
-            errors.append(f'{path}: APT credential preflight does not terminate gpg-agent')
         for job_name in ('channel-preflight', 'publication-preflight'):
             block = jobs.get(job_name, '')
             if re.search(r'^    environment:', block, re.MULTILINE):
@@ -261,6 +260,7 @@ for path in transport_paths:
 # smallest enforceable GitHub-hosted runner boundary, so no job may combine
 # two domains and every secret-bearing step must install fail-safe cleanup.
 secret_patterns = {
+    'apt-archive-publication': re.compile(r"\$\{\{\s*secrets\.ARCHIVE_DISPATCH_PRIVATE_KEY"),
     'apt-signing': re.compile(r"\$\{\{\s*secrets\.APT_GPG_"),
     'r2-publication': re.compile(r"\$\{\{\s*secrets\.R2_"),
     'aur-publication': re.compile(r"\$\{\{\s*secrets\.AUR_"),
@@ -297,16 +297,12 @@ def job_steps(job: str) -> list[str]:
         for position, index in enumerate(starts)
     ]
 
-for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
+for workflow_name in ('publish-ecosystem.yml',):
     path = root / workflow_name
     if not path.exists():
         continue
     jobs = workflow_jobs(path)
     workflow_text = path.read_text()
-    if workflow_name == 'refresh-apt-metadata.yml' and 'download-release-assets.sh' not in workflow_text:
-        errors.append(
-            f'{path}: refresh does not use the bounded API-first release downloader'
-        )
     if 'gh release download' in workflow_text or 'read_bytes(' in workflow_text:
         errors.append(f'{path}: unbounded release body retrieval is forbidden')
     for job_name, job in jobs.items():
@@ -321,6 +317,15 @@ for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
                             if pattern.search(step)}
             if not step_domains:
                 continue
+            # The pinned token action revokes its short-lived installation token
+            # in its post step. There is no plaintext key file or shell cleanup.
+            if (step_domains == {'apt-archive-publication'} and
+                'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1' in step and
+                'repositories: apt-archive' in step and
+                'permission-actions: write' in step and
+                'permission-contents: read' in step and
+                'skip-token-revoke' not in step):
+                continue
             for required in (
                 'trap cleanup EXIT',
                 "trap 'exit 130' HUP INT TERM",
@@ -332,7 +337,6 @@ for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
                     )
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
-refresh_jobs = workflow_jobs(root / 'refresh-apt-metadata.yml')
 docs_jobs = workflow_jobs(root / 'docs.yml')
 docs_build = docs_jobs.get('build', '')
 docs_deploy = docs_jobs.get('deploy', '')
@@ -391,15 +395,10 @@ if homebrew_job:
 expected_domains = {
     ('docs.yml', 'build'): set(),
     ('docs.yml', 'deploy'): {'docs-publication'},
-    ('publish-ecosystem.yml', 'apt-sign'): {'apt-signing'},
-    ('publish-ecosystem.yml', 'apt'): {'r2-publication'},
+    ('publish-ecosystem.yml', 'apt'): {'apt-archive-publication'},
     ('publish-ecosystem.yml', 'homebrew'): {'homebrew-publication'},
     ('publish-ecosystem.yml', 'aur-publish'): {'aur-publication'},
     ('publish-ecosystem.yml', 'aur-verify'): set(),
-    ('refresh-apt-metadata.yml', 'prepare'): set(),
-    ('refresh-apt-metadata.yml', 'sign'): {'apt-signing'},
-    ('refresh-apt-metadata.yml', 'publish'): {'r2-publication'},
-    ('refresh-apt-metadata.yml', 'verify'): set(),
 }
 for (workflow_name, job_name), expected in expected_domains.items():
     workflow_path = root / workflow_name
@@ -408,7 +407,6 @@ for (workflow_name, job_name), expected in expected_domains.items():
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name)
     if job is None:
@@ -423,12 +421,9 @@ for (workflow_name, job_name), expected in expected_domains.items():
 
 expected_environments = {
     ('docs.yml', 'deploy'): 'docs-publication',
-    ('publish-ecosystem.yml', 'apt-sign'): 'apt-signing',
-    ('publish-ecosystem.yml', 'apt'): 'apt-publication',
+    ('publish-ecosystem.yml', 'apt'): 'apt-archive-publication',
     ('publish-ecosystem.yml', 'homebrew'): 'homebrew-publication',
     ('publish-ecosystem.yml', 'aur-publish'): 'aur-publication',
-    ('refresh-apt-metadata.yml', 'sign'): 'apt-signing',
-    ('refresh-apt-metadata.yml', 'publish'): 'apt-publication',
 }
 for (workflow_name, job_name), environment in expected_environments.items():
     workflow_path = root / workflow_name
@@ -437,7 +432,6 @@ for (workflow_name, job_name), environment in expected_environments.items():
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name, '')
     if f'    environment: {environment}' not in job:
@@ -450,8 +444,6 @@ credential_free_jobs = {
     ('publish-ecosystem.yml', 'apt-verify'),
     ('publish-ecosystem.yml', 'apt-install'),
     ('publish-ecosystem.yml', 'aur-verify'),
-    ('refresh-apt-metadata.yml', 'prepare'),
-    ('refresh-apt-metadata.yml', 'verify'),
 }
 for workflow_name, job_name in credential_free_jobs:
     workflow_path = root / workflow_name
@@ -460,7 +452,6 @@ for workflow_name, job_name in credential_free_jobs:
     jobs = {
         'docs.yml': docs_jobs,
         'publish-ecosystem.yml': publish_jobs,
-        'refresh-apt-metadata.yml': refresh_jobs,
     }[workflow_name]
     job = jobs.get(job_name, '')
     if re.search(r'^    environment:', job, re.MULTILINE):
@@ -471,19 +462,18 @@ for workflow_name, job_name in credential_free_jobs:
 handoff_contracts: list[tuple[str, str]] = []
 if (root / 'publish-ecosystem.yml').exists():
     handoff_contracts.extend((
-        (publish_jobs.get('apt-sign', ''), 'name: signed-apt-publication'),
-        (publish_jobs.get('apt', ''), 'name: signed-apt-publication'),
         (publish_jobs.get('aur-publish', ''), 'name: aur-publication-evidence'),
         (publish_jobs.get('aur-verify', ''), 'name: aur-publication-evidence'),
     ))
+# Project publication must never regain the central archive's private keys or
+# storage permissions, even if a new job happens to isolate those credentials.
+for path in sorted(root.glob('*.yml')):
+    source = path.read_text()
+    for forbidden in ('secrets.APT_GPG_', 'secrets.R2_'):
+        if forbidden in source:
+            errors.append(f'{path}: central archive credential is forbidden here: {forbidden}')
 if (root / 'refresh-apt-metadata.yml').exists():
-    handoff_contracts.extend((
-        (refresh_jobs.get('prepare', ''), 'name: apt-refresh-unsigned-release'),
-        (refresh_jobs.get('sign', ''), 'name: apt-refresh-unsigned-release'),
-        (refresh_jobs.get('sign', ''), 'name: signed-apt-refresh'),
-        (refresh_jobs.get('publish', ''), 'name: signed-apt-refresh'),
-        (refresh_jobs.get('verify', ''), 'name: signed-apt-refresh'),
-    ))
+    errors.append('tools-owned APT refresh must not coexist with the central archive')
 for job, marker in handoff_contracts:
     if marker not in job:
         errors.append(f'{root}: isolated publication handoff is missing marker {marker}')

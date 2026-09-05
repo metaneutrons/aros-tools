@@ -135,63 +135,51 @@ After it is marked available, verify the archive key before adding the source.
 <details>
 <summary>Signed APT installation procedure (after channel qualification)</summary>
 
-The signed repository lives below `https://deb.metaneutrons.cc/aros-tools`.
-Verify the archive key fingerprint before installing it:
+The central metaneutrons archive signs the repository, not the tools project.
+Its primary fingerprint is
+`1B7B79417383648BBFBE282E01AB8296EF0FCD76`; the domain signing subkey is
+`A0C21782FC507CCBD666F3ED242072FEC8BE54A4`.
+
+Verify both before installing the domain keyring:
 
 ```sh
 set -eu
-BASE=https://deb.metaneutrons.cc/aros-tools
-EXPECTED_FINGERPRINT=D69E2F2FD93F55BD0EB3D02224DA82C3E25C0392
-KEY=$(mktemp)
-KEYRING=$(mktemp)
-CANONICAL_KEY=$(mktemp)
-KEY_HOME=$(mktemp -d)
-chmod 0700 "$KEY_HOME"
-cleanup() {
-  trap - EXIT
-  gpgconf --homedir "$KEY_HOME" --kill gpg-agent >/dev/null 2>&1 || true
-  rm -rf -- "$KEY_HOME"
-  rm -f -- "$KEY" "$KEYRING" "$CANONICAL_KEY"
-}
+WORK=$(mktemp -d)
+cleanup() { trap - EXIT; rm -rf -- "$WORK"; }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+mkdir -m 0700 "$WORK/gnupg"
+KEY="$WORK/metaneutrons-archive-keyring.pgp"
+PRIMARY=1B7B79417383648BBFBE282E01AB8296EF0FCD76
+SIGNING_FINGERPRINT=A0C21782FC507CCBD666F3ED242072FEC8BE54A4
 curl --fail --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
   --max-filesize 1048576 \
-  "$BASE/aros-tools-archive-keyring.asc" --output "$KEY"
-test "$(head -n 1 "$KEY")" = '-----BEGIN PGP PUBLIC KEY BLOCK-----'
-test "$(tail -n 1 "$KEY")" = '-----END PGP PUBLIC KEY BLOCK-----'
-test "$(grep -c '^-----BEGIN PGP PUBLIC KEY BLOCK-----$' "$KEY")" -eq 1
-test "$(grep -c '^-----END PGP PUBLIC KEY BLOCK-----$' "$KEY")" -eq 1
-FINGERPRINT=$(gpg --no-options --batch --show-keys --with-colons --fingerprint "$KEY" | awk -F: '
-  $1 == "pub" { primary_keys += 1; validity = $2; next }
-  $1 == "fpr" && primary_keys == 1 && !fingerprint {
-    fingerprint = toupper($10)
-  }
-  END {
-    if (primary_keys != 1 || length(fingerprint) != 40 ||
-        fingerprint !~ /^[0-9A-F]+$/ || validity ~ /^[redi]$/) exit 1
-    print fingerprint
-  }
+  https://deb.metaneutrons.cc/metaneutrons-archive-keyring.pgp --output "$KEY"
+IDENTITY=$(gpg --no-options --batch --no-autostart --homedir "$WORK/gnupg" \
+  --show-keys --with-colons --fingerprint "$KEY" | awk -F: '
+  $1 == "pub" { primary += 1; if ($2 ~ /^[redi]$/ || $12 !~ /c/ || $12 ~ /s/) bad = 1 }
+  $1 == "sub" { subkey += 1; if ($2 ~ /^[redi]$/ || $12 !~ /s/) bad = 1 }
+  $1 == "sec" || $1 == "ssb" { bad = 1 }
+  $1 == "fpr" { print $10; count += 1 }
+  END { if (bad || primary != 1 || subkey != 1 || count != 2) exit 1 }
 ')
-test "$FINGERPRINT" = "$EXPECTED_FINGERPRINT"
-gpg --no-options --batch --homedir "$KEY_HOME" --import "$KEY" >/dev/null 2>&1
-gpg --no-options --batch --homedir "$KEY_HOME" --armor --no-emit-version \
-  --no-comments --export "$FINGERPRINT" > "$CANONICAL_KEY"
-cmp "$KEY" "$CANONICAL_KEY" >/dev/null
-gpg --no-options --batch --homedir "$KEY_HOME" --yes --dearmor \
-  --output "$KEYRING" "$KEY"
-sudo install -m 0644 "$KEYRING" /usr/share/keyrings/aros-tools-archive-keyring.gpg
-cleanup
-trap - EXIT HUP INT TERM
-printf 'deb [arch=%s signed-by=/usr/share/keyrings/aros-tools-archive-keyring.gpg] %s stable main\n' \
-  "$(dpkg --print-architecture)" "$BASE" | \
-  sudo tee /etc/apt/sources.list.d/aros-tools.list >/dev/null
+test "$IDENTITY" = "$(printf '%s\n%s' "$PRIMARY" "$SIGNING_FINGERPRINT")"
+sudo install -m 0644 "$KEY" /usr/share/keyrings/metaneutrons-archive-keyring.pgp
+sudo tee /etc/apt/sources.list.d/aros-tools.sources >/dev/null <<'SOURCES'
+Types: deb
+URIs: https://deb.metaneutrons.cc/aros-tools
+Suites: rolling
+Components: main
+Architectures: amd64 arm64
+Signed-By: /usr/share/keyrings/metaneutrons-archive-keyring.pgp
+SOURCES
 sudo apt-get update
 sudo apt-get install aros-tools
 ```
 
 Only `amd64` and `arm64` are published. APT authenticates the signed release and
-package index; do not add `trusted=yes` or globally trust the key.
+package index, including content-addressed by-hash downloads. Do not add
+`trusted=yes`, disable expiry checks or globally trust the key.
 
 </details>
 

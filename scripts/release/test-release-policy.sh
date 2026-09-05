@@ -4,15 +4,7 @@ set -euo pipefail
 
 root=$(unset CDPATH; cd -- "$(dirname -- "$0")/../.." && pwd -P)
 work=$(mktemp -d "${TMPDIR:-/tmp}/aros-release-policy.XXXXXX")
-fixture_gnupg=
-revoked_gnupg=
-expired_gnupg=
 cleanup() {
-    for home in "$fixture_gnupg" "$revoked_gnupg" "$expired_gnupg"; do
-        if [[ -n "$home" && -d "$home" ]]; then
-            rm -rf -- "$home"
-        fi
-    done
     rm -rf -- "$work"
 }
 trap cleanup EXIT
@@ -112,29 +104,16 @@ mkdir "$work/output-parent-target"
 ln -s "$work/output-parent-target" "$work/output-parent-link"
 expect_failure "$root/scripts/release/prepare-output-parent.sh" \
     --path "$work/output-parent-link/new-output" --mode 0755
-for helper in \
-    verify-apt-public-key.sh download-bounded-https.sh \
-    download-release-assets.sh download-verify-apt-publication.sh \
-    build-apt-repository.sh; do
+for helper in download-bounded-https.sh download-release-assets.sh; do
     grep -F 'prepare-output-parent.sh' "$root/scripts/release/$helper" >/dev/null || {
         printf 'public-output helper bypasses parent policy: %s\n' "$helper" >&2
         exit 1
     }
 done
 
-# The mutable repository variable, checked-in trust anchor and installation
-# documentation are one identity contract.
-production_fingerprint=$(tr -d '\r\n' < "$root/contracts/apt-trust-anchor.txt")
-"$root/scripts/release/verify-apt-trust-anchor.sh" \
-    --fingerprint "$production_fingerprint" \
-    --documentation "$root/docs-site/src/content/docs/getting-started/installation.md"
-expect_failure "$root/scripts/release/verify-apt-trust-anchor.sh" \
-    --fingerprint 0000000000000000000000000000000000000000
-grep -F 'verify-apt-trust-anchor.sh' "$root/.github/workflows/release.yml" >/dev/null
-grep -F 'verify-apt-trust-anchor.sh' \
-    "$root/.github/workflows/publish-ecosystem.yml" >/dev/null
-grep -F 'verify-apt-trust-anchor.sh' \
-    "$root/.github/workflows/refresh-apt-metadata.yml" >/dev/null
+# Installation and the public trust decision share one reviewed central contract.
+python3 "$root/scripts/release/central-apt-contract.py" \
+    --documentation "$root/docs-site/src/content/docs/getting-started/installation.md" >/dev/null
 
 # Release mutation window: exact boundary succeeds, stale/future identities fail.
 AROS_RELEASE_NOW_EPOCH=1700000000 \
@@ -313,11 +292,6 @@ done
 # Published release assets are accepted only as the exact 48-file signed
 # inventory with API-bound IDs, states, type caps, sizes and streaming SHA-256.
 mkdir "$work/assets"
-if command -v sha256sum >/dev/null; then
-    fixture_checksum=(sha256sum)
-else
-    fixture_checksum=(shasum -a 256)
-fi
 python3 "$root/scripts/release/release-asset-metadata.py" contract \
     --version 1.2.3 > "$work/asset-contract.json"
 python3 - "$work/asset-contract.json" "$work/assets" \
@@ -699,639 +673,20 @@ expect_failure "${verify[@]}" --sbom "$work/bad-inventory.spdx.json"
 expect_failure "${verify[@]}" --sbom "$work/bad-schema.spdx.json"
 expect_failure "${verify[@]}" --sbom "$work/bad-ambiguous-digest.spdx.json"
 
-# APT metadata is rendered by repository-owned standard-library code.  Two
-# builds at one epoch are byte-identical; a protected refresh changes only the
-# signed release triplet while package, Packages and by-hash bytes stay fixed.
-mkdir "$work/apt-candidate"
-python3 - "$work/apt-candidate" <<'PY'
-import gzip
-import io
-import pathlib
-import shutil
-import sys
-import tarfile
-
-root = pathlib.Path(sys.argv[1])
-
-def tar_gz(name: str, payload: bytes) -> bytes:
-    output = io.BytesIO()
-    with gzip.GzipFile(filename='', mode='wb', mtime=0, fileobj=output) as compressed:
-        with tarfile.open(fileobj=compressed, mode='w') as archive:
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            info.mtime = 0
-            info.uid = info.gid = 0
-            info.uname = info.gname = ''
-            archive.addfile(info, io.BytesIO(payload))
-    return output.getvalue()
-
-def ar_member(name: str, payload: bytes) -> bytes:
-    header = (
-        f'{name + "/":<16}{0:<12}{0:<6}{0:<6}{0o100644:<8o}{len(payload):<10}`\n'
-    ).encode('ascii')
-    return header + payload + (b'\n' if len(payload) % 2 else b'')
-
-for arch in ('amd64', 'arm64'):
-    control = (
-        'Package: aros-tools\nVersion: 1.2.3-1\n'
-        f'Architecture: {arch}\nMaintainer: Test <test@example.invalid>\n'
-        'Description: deterministic fixture\n'
-    ).encode()
-    package = b'!<arch>\n'
-    package += ar_member('debian-binary', b'2.0\n')
-    package += ar_member('control.tar.gz', tar_gz('./control', control))
-    package += ar_member('data.tar.gz', tar_gz('./usr/share/aros-tools-fixture', b'ok\n'))
-    (root / f'aros-tools_1.2.3_{arch}.deb').write_bytes(package)
-
-# A tiny compressed control member must not be allowed to expand without a
-# hard bound. Keep the valid arm64 package so the renderer reaches amd64 input
-# validation through the same exact two-architecture contract.
-bomb_root = root.parent / 'apt-bomb-candidate'
-bomb_root.mkdir()
-for arch in ('amd64', 'arm64'):
-    shutil.copy2(
-        root / f'aros-tools_1.2.3_{arch}.deb',
-        bomb_root / f'aros-tools_1.2.3_{arch}.deb',
-    )
-bomb_control = io.BytesIO()
-with gzip.GzipFile(filename='', mode='wb', mtime=0, fileobj=bomb_control) as compressed:
-    with tarfile.open(fileobj=compressed, mode='w') as archive:
-        info = tarfile.TarInfo('./padding')
-        info.size = 16 * 1024 * 1024 + 1
-        info.mtime = 0
-        info.uid = info.gid = 0
-        info.uname = info.gname = ''
-        archive.addfile(info, io.BytesIO(b'\0' * info.size))
-bomb = b'!<arch>\n'
-bomb += ar_member('debian-binary', b'2.0\n')
-bomb += ar_member('control.tar.gz', bomb_control.getvalue())
-bomb += ar_member('data.tar.gz', tar_gz('./fixture', b'ok\n'))
-(bomb_root / 'aros-tools_1.2.3_amd64.deb').write_bytes(bomb)
-PY
-mkdir "$work/apt-bomb-output"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-    "$root/scripts/release/run-apt-metadata-renderer.sh" \
-      "$work/apt-bomb-candidate" "$work/apt-bomb-output" 1.2.3 1704067200
-grep -F -- '--memory 256m --memory-swap 256m --pids-limit 64 --cpus 2' \
-    "$root/scripts/release/run-apt-metadata-renderer.sh" >/dev/null
-# macOS has a short AF_UNIX path limit for gpg-agent sockets. Keep this fixture
-# home under /tmp even when TMPDIR itself is a long per-user path.
-fixture_gnupg=$(mktemp -d /tmp/aros-release-gpg.XXXXXX)
-chmod 0700 "$fixture_gnupg"
-export GNUPGHOME="$fixture_gnupg"
-gpg --batch --faked-system-time '1704067200!' --pinentry-mode loopback \
-    --passphrase '' --quick-generate-key \
-    'AROS fixture <fixture@example.invalid>' rsa2048 sign 0 >/dev/null
-apt_fingerprint=$(gpg --batch --with-colons --list-secret-keys --fingerprint | \
-    awk -F: '$1 == "fpr" { print toupper($10); exit }')
-gpg --batch --armor --pinentry-mode loopback --passphrase '' \
-    --export-secret-keys "$apt_fingerprint" > "$work/apt-private.asc"
-: > "$work/apt-passphrase"
-for copy in a b; do
-    AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-      "$root/scripts/release/build-apt-repository.sh" \
-        --candidate-dir "$work/apt-candidate" \
-        --output-dir "$work/apt-${copy}" --version 1.2.3 \
-        --source-date-epoch 1704067200 \
-        --private-key "$work/apt-private.asc" \
-        --passphrase-file "$work/apt-passphrase" \
-        --fingerprint "$apt_fingerprint"
-done
-diff --recursive --no-dereference "$work/apt-a" "$work/apt-b"
-
-# One signing subkey per archive domain. This fixture covers the path the other
-# cases never touch, because they call without --signing-subkey: the right
-# subkey accepted, a foreign subkey rejected, and a bundle that still carries
-# the secret primary key rejected.
-subkey_gnupg=$(mktemp -d /tmp/aros-subkey-gpg.XXXXXX)
-chmod 0700 "$subkey_gnupg"
-GNUPGHOME="$subkey_gnupg" gpg --batch --faked-system-time '1704067200!' \
-    --pinentry-mode loopback --passphrase '' --quick-generate-key \
-    'AROS subkey fixture <subkey@example.invalid>' ed25519 cert 0 >/dev/null
-subkey_primary=$(GNUPGHOME="$subkey_gnupg" gpg --batch --with-colons \
-    --list-keys --fingerprint | awk -F: '$1 == "fpr" { print toupper($10); exit }')
-for _ in 1 2; do
-    GNUPGHOME="$subkey_gnupg" gpg --batch --faked-system-time '1704067200!' \
-        --pinentry-mode loopback --passphrase '' \
-        --quick-add-key "$subkey_primary" ed25519 sign 0 >/dev/null
-done
-mapfile -t subkeys < <(GNUPGHOME="$subkey_gnupg" gpg --batch --with-colons \
-    --list-keys --fingerprint | \
-    awk -F: '$1 == "sub" { want = 1; next } $1 == "fpr" && want { print toupper($10); want = 0 }')
-[[ ${#subkeys[@]} == 2 ]] || {
-    printf 'subkey fixture must expose exactly two signing subkeys\n' >&2
-    exit 1
-}
-subkey_a=${subkeys[0]}
-subkey_b=${subkeys[1]}
-GNUPGHOME="$subkey_gnupg" gpg --batch --armor --pinentry-mode loopback \
-    --passphrase '' --export-secret-subkeys "${subkey_a}!" > "$work/subkey-only.asc"
-GNUPGHOME="$subkey_gnupg" gpg --batch --armor --pinentry-mode loopback \
-    --passphrase '' --export-secret-keys "$subkey_primary" > "$work/subkey-full.asc"
-
-AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-  "$root/scripts/release/build-apt-repository.sh" \
-    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey" \
-    --version 1.2.3 --source-date-epoch 1704067200 \
-    --private-key "$work/subkey-only.asc" \
-    --passphrase-file "$work/apt-passphrase" \
-    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
-
-# The shipped certificate must be minimised to exactly this subkey.
-[[ $(gpg --no-options --batch --with-colons --show-keys \
-        "$work/apt-subkey/aros-tools-archive-keyring.asc" | grep -c '^sub') == 1 ]] || {
-    printf 'domain keyring must carry exactly one signing subkey\n' >&2
-    exit 1
-}
-gpg --no-options --batch --dearmor \
-    < "$work/apt-subkey/aros-tools-archive-keyring.asc" > "$work/subkey-keyring.gpg"
-gpgv --keyring "$work/subkey-keyring.gpg" --status-fd 3 \
-    "$work/apt-subkey/dists/stable/Release.gpg" \
-    "$work/apt-subkey/dists/stable/Release" 3> "$work/subkey.status" 2>/dev/null
-"$root/scripts/release/verify-gpgv-status.sh" --status-file "$work/subkey.status" \
-    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
-# Derselbe Primaerschluessel, aber der Domain-Subkey passt nicht: ohne die
-# Pruefung von VALIDSIG-Feld 1 bliebe das unsichtbar.
-expect_failure "$root/scripts/release/verify-gpgv-status.sh" \
-    --status-file "$work/subkey.status" \
-    --fingerprint "$subkey_primary" --signing-subkey "$subkey_b"
-
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-  "$root/scripts/release/build-apt-repository.sh" \
-    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey-wrong" \
-    --version 1.2.3 --source-date-epoch 1704067200 \
-    --private-key "$work/subkey-only.asc" \
-    --passphrase-file "$work/apt-passphrase" \
-    --fingerprint "$subkey_primary" --signing-subkey "$subkey_b"
-# The secret primary key must never sit in the signing environment.
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-  "$root/scripts/release/build-apt-repository.sh" \
-    --candidate-dir "$work/apt-candidate" --output-dir "$work/apt-subkey-full" \
-    --version 1.2.3 --source-date-epoch 1704067200 \
-    --private-key "$work/subkey-full.asc" \
-    --passphrase-file "$work/apt-passphrase" \
-    --fingerprint "$subkey_primary" --signing-subkey "$subkey_a"
-rm -rf -- "$subkey_gnupg"
-"$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-a" --mode full --version 1.2.3 \
-    --fingerprint "$apt_fingerprint" >/dev/null
-# A caller-controlled GnuPG option file must not change the canonical export or
-# the measured trust-anchor identity.
-printf '%s\n' 'emit-version' 'comment release-policy-injection' \
-    > "$fixture_gnupg/gpg.conf"
-"$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-a" --mode full --version 1.2.3 \
-    --fingerprint "$apt_fingerprint" >/dev/null
-unlink "$fixture_gnupg/gpg.conf"
-
-# GnuPG can report VALIDSIG and return success for a signature whose primary
-# key is now revoked. Both the canonical trust-anchor check and the shared
-# status parser must reject that state explicitly.
-revoked_gnupg=$(mktemp -d /tmp/aros-revoked-gpg.XXXXXX)
-revoked_home=$revoked_gnupg
-chmod 0700 "$revoked_home"
-gpg --no-options --batch --homedir "$revoked_home" \
-    --import "$work/apt-private.asc" >/dev/null 2>&1
-sed 's/^://' "$fixture_gnupg/openpgp-revocs.d/${apt_fingerprint}.rev" | \
-    gpg --no-options --batch --homedir "$revoked_home" --import >/dev/null 2>&1
-gpg --no-options --batch --homedir "$revoked_home" --armor --no-emit-version \
-    --no-comments --export "$apt_fingerprint" > "$work/revoked-key.asc"
-expect_failure "$root/scripts/release/verify-apt-public-key.sh" \
-    --key "$work/revoked-key.asc" --fingerprint "$apt_fingerprint" \
-    --keyring-output "$work/revoked-keyring.gpg"
-gpg --no-options --batch --homedir "$revoked_home" --yes --dearmor \
-    --output "$work/revoked-status-keyring.gpg" "$work/revoked-key.asc"
-set +e
-gpgv --status-fd 3 --keyring "$work/revoked-status-keyring.gpg" \
-    "$work/apt-a/dists/stable/InRelease" \
-    3> "$work/revoked-inrelease.status" 2>/dev/null
-set -e
-grep -F '[GNUPG:] REVKEYSIG ' "$work/revoked-inrelease.status" >/dev/null
-grep -F '[GNUPG:] VALIDSIG ' "$work/revoked-inrelease.status" >/dev/null
-expect_failure "$root/scripts/release/verify-gpgv-status.sh" \
-    --status-file "$work/revoked-inrelease.status" --fingerprint "$apt_fingerprint"
-cp -R "$work/apt-a" "$work/apt-revoked-key"
-install -m 0644 "$work/revoked-key.asc" \
-    "$work/apt-revoked-key/aros-tools-archive-keyring.asc"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-revoked-copy" --source-directory "$work/apt-revoked-key" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-# Expired primary keys are rejected even when the key packet and armor are
-# otherwise canonical. A real gpgv transcript (when supported by the host
-# version) or the equivalent explicit status fixture must also fail closed.
-expired_gnupg=$(mktemp -d /tmp/aros-expired-gpg.XXXXXX)
-expired_home=$expired_gnupg
-chmod 0700 "$expired_home"
-gpg --no-options --batch --homedir "$expired_home" \
-    --faked-system-time '1704067200!' --pinentry-mode loopback --passphrase '' \
-    --quick-generate-key 'AROS expired fixture <expired@example.invalid>' \
-    rsa2048 sign 1d >/dev/null
-expired_fingerprint=$(gpg --no-options --batch --homedir "$expired_home" \
-    --with-colons --list-keys --fingerprint | \
-    awk -F: '$1 == "fpr" { print toupper($10); exit }')
-gpg --no-options --batch --homedir "$expired_home" --armor --no-emit-version \
-    --no-comments --export "$expired_fingerprint" > "$work/expired-key.asc"
-expect_failure "$root/scripts/release/verify-apt-public-key.sh" \
-    --key "$work/expired-key.asc" --fingerprint "$expired_fingerprint" \
-    --keyring-output "$work/expired-keyring.gpg"
-cat > "$work/expired.status" <<STATUS
-[GNUPG:] NEWSIG
-[GNUPG:] EXPKEYSIG 0000000000000000 expired
-[GNUPG:] VALIDSIG $expired_fingerprint 2024-01-01 1704067200 0 4 0 1 10 00 $expired_fingerprint
-STATUS
-expect_failure "$root/scripts/release/verify-gpgv-status.sh" \
-    --status-file "$work/expired.status" --fingerprint "$expired_fingerprint"
-
-cp -R "$work/apt-a" "$work/apt-invalid-inventory"
-: > "$work/apt-invalid-inventory/private-key.asc"
-expect_failure "$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-invalid-inventory" --mode full --version 1.2.3 \
-    --fingerprint "$apt_fingerprint"
-unlink "$work/apt-invalid-inventory/private-key.asc"
-unlink "$work/apt-invalid-inventory/dists/stable/InRelease"
-expect_failure "$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-invalid-inventory" --mode full --version 1.2.3 \
-    --fingerprint "$apt_fingerprint"
-
-mkdir -p "$work/apt-metadata/dists/stable"
-install -m 0644 "$work/apt-a/aros-tools-archive-keyring.asc" \
-    "$work/apt-metadata/aros-tools-archive-keyring.asc"
-for name in Release Release.gpg InRelease; do
-    install -m 0644 "$work/apt-a/dists/stable/$name" \
-        "$work/apt-metadata/dists/stable/$name"
-done
-"$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-metadata" --mode metadata \
-    --fingerprint "$apt_fingerprint" >/dev/null
-printf '\n' >> "$work/apt-metadata/dists/stable/Release"
-expect_failure "$root/scripts/release/verify-apt-publication-inventory.sh" \
-    --directory "$work/apt-metadata" --mode metadata \
-    --fingerprint "$apt_fingerprint"
-AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-  "$root/scripts/release/build-apt-repository.sh" \
-    --candidate-dir "$work/apt-candidate" \
-    --output-dir "$work/apt-refresh" --version 1.2.3 \
-    --source-date-epoch 1704672000 \
-    --private-key "$work/apt-private.asc" \
-    --passphrase-file "$work/apt-passphrase" \
-    --fingerprint "$apt_fingerprint"
-for path in \
-    pool/main/a/aros-tools/aros-tools_1.2.3_amd64.deb \
-    pool/main/a/aros-tools/aros-tools_1.2.3_arm64.deb \
-    dists/stable/main/binary-amd64/Packages \
-    dists/stable/main/binary-amd64/Packages.gz \
-    dists/stable/main/binary-arm64/Packages \
-    dists/stable/main/binary-arm64/Packages.gz; do
-    cmp "$work/apt-a/$path" "$work/apt-refresh/$path"
-done
-diff --recursive --no-dereference \
-    "$work/apt-a/dists/stable/main/binary-amd64/by-hash" \
-    "$work/apt-refresh/dists/stable/main/binary-amd64/by-hash"
-diff --recursive --no-dereference \
-    "$work/apt-a/dists/stable/main/binary-arm64/by-hash" \
-    "$work/apt-refresh/dists/stable/main/binary-arm64/by-hash"
-if cmp -s "$work/apt-a/dists/stable/InRelease" \
-    "$work/apt-refresh/dists/stable/InRelease"; then
-    printf '%s\n' 'APT refresh fixture did not advance signed metadata' >&2
-    exit 1
-fi
-
-# The public mirror verifier consumes every mutable alias, both by-hash forms,
-# both packages and the complete signed Release triplet. Its trust anchor is
-# exactly one primary key and one signature bound to that primary fingerprint.
-AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-  "$root/scripts/release/download-verify-apt-publication.sh" \
-    --directory "$work/apt-public-copy" --source-directory "$work/apt-a" \
-    --fingerprint "$apt_fingerprint" --version 1.2.3 >/dev/null
-diff --recursive --no-dereference "$work/apt-a" "$work/apt-public-copy"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-public-expired" --source-directory "$work/apt-a" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-AROS_RELEASE_POLICY_FIXTURE=1 \
-  "$root/scripts/release/download-verify-apt-publication.sh" \
-    --directory "$work/apt-public-expired-preflight" \
-    --source-directory "$work/apt-a" --fingerprint "$apt_fingerprint" \
-    --version 1.2.3 --allow-expired >/dev/null
-
-gpg --batch --faked-system-time '1704067200!' --pinentry-mode loopback \
-    --passphrase '' --quick-generate-key \
-    'AROS attacker fixture <attacker@example.invalid>' rsa2048 sign 0 >/dev/null
-attacker_fingerprint=$(gpg --batch --with-colons --list-secret-keys --fingerprint | \
-    awk -F: -v trusted="$apt_fingerprint" \
-      '$1 == "fpr" && toupper($10) != trusted { print toupper($10); exit }')
-[[ "$attacker_fingerprint" =~ ^[0-9A-F]{40}$ ]] || exit 1
-gpg --batch --armor --pinentry-mode loopback --passphrase '' \
-    --export-secret-keys "$apt_fingerprint" "$attacker_fingerprint" \
-    > "$work/apt-multiple-private.asc"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-    "$root/scripts/release/build-apt-repository.sh" \
-      --candidate-dir "$work/apt-candidate" \
-      --output-dir "$work/apt-multiple-private-output" --version 1.2.3 \
-      --source-date-epoch 1704067200 \
-      --private-key "$work/apt-multiple-private.asc" \
-      --passphrase-file "$work/apt-passphrase" \
-      --fingerprint "$apt_fingerprint"
-cp -R "$work/apt-a" "$work/apt-extra-key"
-gpg --batch --armor --export "$attacker_fingerprint" \
-    >> "$work/apt-extra-key/aros-tools-archive-keyring.asc"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-extra-key-copy" --source-directory "$work/apt-extra-key" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-# One syntactically canonical armor envelope may still carry multiple primary
-# keys.  Fingerprint-first validation must reject that form before dearmor.
-cp -R "$work/apt-a" "$work/apt-two-primary-one-armor"
-gpg --batch --armor --export "$apt_fingerprint" "$attacker_fingerprint" \
-    > "$work/apt-two-primary-one-armor/aros-tools-archive-keyring.asc"
-[[ $(grep -c '^-----BEGIN PGP PUBLIC KEY BLOCK-----$' \
-    "$work/apt-two-primary-one-armor/aros-tools-archive-keyring.asc") == 1 ]] || exit 1
-documented_key_fingerprint() {
-    gpg --batch --show-keys --with-colons --fingerprint "$1" | awk -F: '
-        $1 == "pub" { primary_keys += 1; validity = $2; next }
-        $1 == "fpr" && primary_keys == 1 && !fingerprint {
-            fingerprint = toupper($10)
-        }
-        END {
-            if (primary_keys != 1 || length(fingerprint) != 40 ||
-                fingerprint !~ /^[0-9A-F]+$/ || validity ~ /^[redi]$/) exit 1
-            print fingerprint
-        }
-    '
-}
-[[ $(documented_key_fingerprint \
-    "$work/apt-a/aros-tools-archive-keyring.asc") == "$apt_fingerprint" ]] || exit 1
-if documented_key_fingerprint \
-    "$work/apt-two-primary-one-armor/aros-tools-archive-keyring.asc" >/dev/null 2>&1; then
-    printf '%s\n' 'documented APT key check accepted two primary keys in one armor' >&2
-    exit 1
-fi
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-two-primary-one-armor-copy" \
-      --source-directory "$work/apt-two-primary-one-armor" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-# OpenPGP permits optional Armor headers, but the APT trust-anchor contract has
-# one byte-canonical, option-free export.  A semantically identical key with an
-# injected Comment header must therefore fail before dearmor.
-cp -R "$work/apt-a" "$work/apt-comment-header"
-awk 'NR == 1 { print; print "Comment: alternate-representation"; next } { print }' \
-    "$work/apt-a/aros-tools-archive-keyring.asc" \
-    > "$work/apt-comment-header/aros-tools-archive-keyring.asc"
-[[ $(documented_key_fingerprint \
-    "$work/apt-comment-header/aros-tools-archive-keyring.asc") == \
-    "$apt_fingerprint" ]] || exit 1
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-comment-header-copy" \
-      --source-directory "$work/apt-comment-header" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-installation_doc="$root/docs-site/src/content/docs/getting-started/installation.md"
-# These are literal documentation markers, not substitutions in this fixture.
-# shellcheck disable=SC2016
-grep -F 'KEY=$(mktemp)' "$installation_doc" >/dev/null
-# shellcheck disable=SC2016
-grep -F 'KEYRING=$(mktemp)' "$installation_doc" >/dev/null
-grep -F 'primary_keys != 1' "$installation_doc" >/dev/null
-grep -F -- '--max-filesize 1048576' "$installation_doc" >/dev/null
-grep -F 'command -v sha256sum' "$installation_doc" >/dev/null
-grep -F 'shasum -a 256 --check' "$installation_doc" >/dev/null
-grep -F -- '--max-filesize 268435456' "$installation_doc" >/dev/null
-grep -F -- '--max-filesize 65536' "$installation_doc" >/dev/null
-grep -F -- '--max-filesize 4194304' "$installation_doc" >/dev/null
-# These are literal documentation markers, not shell substitutions.
-# shellcheck disable=SC2016
-grep -F 'gpg --no-options --batch --homedir "$KEY_HOME" --armor --no-emit-version' \
-    "$installation_doc" >/dev/null
-# shellcheck disable=SC2016
-grep -F 'cmp "$KEY" "$CANONICAL_KEY"' "$installation_doc" >/dev/null
-if grep -Eq '/tmp/aros-tools[^ ]*(key|ring)' "$installation_doc"; then
-    printf '%s\n' 'APT installation documentation uses a predictable key path' >&2
-    exit 1
-fi
-
-# Execute the documented native-install block with hermetic transport and
-# verifier commands.  A failed identity verification must stop before either
-# archive extraction or the first privileged install command.
-native_script="$work/native-install.sh"
-awk '
-    /^## Native release archive$/ { section = 1; next }
-    section && /^```sh$/ { capture = 1; next }
-    capture && /^```$/ { exit }
-    capture { print }
-' "$installation_doc" > "$native_script"
-grep -Fx 'set -eu' "$native_script" >/dev/null
-# This is a literal documentation marker, not a shell substitution.
-# shellcheck disable=SC2016
-grep -F 'sudo "$SUITE/aros" install --source-bin "$SUITE" --prefix "$PREFIX"' \
-    "$native_script" >/dev/null
-if grep -E 'sudo[[:space:]]+install([[:space:]]|$)' "$native_script" >/dev/null; then
-    printf '%s\n' 'native installation documentation bypasses the suite transaction' >&2
-    exit 1
-fi
-if grep -F '/bin/*' "$native_script" >/dev/null; then
-    printf '%s\n' 'native installation documentation uses a wildcard binary inventory' >&2
-    exit 1
-fi
-native_mock="$work/native-mock-bin"
-mkdir "$native_mock"
-cat > "$native_mock/curl" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-output=
-while (($#)); do
-    case "$1" in
-        --output) output=${2:?}; shift 2 ;;
-        *) shift ;;
-    esac
-done
-[[ -n "$output" ]]
-: > "$output"
-MOCK
-cat > "$native_mock/sha256sum" <<'MOCK'
-#!/usr/bin/env bash
-exit 0
-MOCK
-cat > "$native_mock/jq" <<'MOCK'
-#!/usr/bin/env bash
-printf '%s\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-MOCK
-cat > "$native_mock/gh" <<'MOCK'
-#!/usr/bin/env bash
-exit 0
-MOCK
-cat > "$native_mock/cosign" <<'MOCK'
-#!/usr/bin/env bash
-exit 42
-MOCK
-for command in tar sudo; do
-    cat > "$native_mock/$command" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$0" >> "${NATIVE_SIDE_EFFECT_LOG:?}"
-exit 90
-MOCK
-done
-chmod 0755 "$native_mock"/* "$native_script"
-expect_failure env PATH="$native_mock:$PATH" \
-    NATIVE_SIDE_EFFECT_LOG="$work/native-side-effect" sh "$native_script"
-[[ ! -e "$work/native-side-effect" ]] || {
-    printf '%s\n' 'native documentation continued after failed identity verification' >&2
-    exit 1
-}
-
-# With identity verification successful, the documentation must delegate one
-# privileged operation to the verified aros suite installer. Its Rust tests own
-# exact-inventory, no-clobber, injected-failure and concurrent-race coverage.
-cat > "$native_mock/cosign" <<'MOCK'
-#!/usr/bin/env bash
-exit 0
-MOCK
-cat > "$native_mock/tar" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-directory=
-while (($#)); do
-    case "$1" in
-        --directory) directory=${2:?}; shift 2 ;;
-        *) shift ;;
-    esac
-done
-suite="$directory/aros-tools-v0.1.0-aarch64-apple-darwin/bin"
-mkdir -p "$suite"
-for binary in aros aros-ahi-runner aros-collect aros-fetch aros-genmodule \
-    aros-romtool aros-transpiler aros-verify; do
-    printf '%s\n' '#!/bin/sh' 'exit 0' > "$suite/$binary"
-    chmod 0755 "$suite/$binary"
-done
-cat > "$suite/aros" <<'INSTALLER'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" > "${NATIVE_SIDE_EFFECT_LOG:?}"
-exit 91
-INSTALLER
-chmod 0755 "$suite/aros"
-MOCK
-cat > "$native_mock/sudo" <<'MOCK'
-#!/usr/bin/env bash
-set -euo pipefail
-exec "$@"
-MOCK
-chmod 0755 "$native_mock/cosign" "$native_mock/tar" "$native_mock/sudo"
-expect_failure env PATH="$native_mock:$PATH" \
-    NATIVE_SIDE_EFFECT_LOG="$work/native-installer-invocation" sh "$native_script"
-grep -F 'install --source-bin ' "$work/native-installer-invocation" >/dev/null
-grep -F -- '--prefix /usr/local' "$work/native-installer-invocation" >/dev/null
-
-# These are literal script markers, not shell substitutions.
-# shellcheck disable=SC2016
-grep -F -- '--no-comments --export "$export_selector"' \
-    "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# Without a trailing exclamation mark gpg exports every subkey and picks one
-# itself when signing. Both selectors therefore have to be pinned once a domain
-# subkey is named, and fall back to the primary otherwise.
-# shellcheck disable=SC2016
-grep -F -- 'export_selector="${signing_subkey}!"' \
-    "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# shellcheck disable=SC2016
-grep -F -- 'local_user="${signing_subkey}!"' \
-    "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# shellcheck disable=SC2016
-grep -F -- 'export_selector="$fingerprint"' \
-    "$root/scripts/release/build-apt-repository.sh" >/dev/null
-# The status verifier has to compare the signing subkey, not just the primary,
-# or a subkey-to-domain mismatch stays invisible.
-# shellcheck disable=SC2016
-grep -F -- 'signer = toupper($3)' \
-    "$root/scripts/release/verify-gpgv-status.sh" >/dev/null
-# Feld 15 der sec-Zeile ist '#', wenn der geheime Primaerschluessel fehlt.
-# Diese Pruefung erzwingt "Primaer bleibt offline" maschinell.
-# shellcheck disable=SC2016
-grep -F -- 'primary_stub = ($15 == "#")' \
-    "$root/scripts/release/verify-apt-signing-key.sh" >/dev/null
-grep -F -- '--armor --no-emit-version --no-comments' \
-    "$root/.github/workflows/refresh-apt-metadata.yml" >/dev/null
-grep -F 'verify-apt-public-key.sh' \
-    "$root/scripts/release/verify-apt-publication-inventory.sh" >/dev/null
-grep -F 'verify-apt-public-key.sh' \
-    "$root/scripts/release/verify-apt-recovery-base.sh" >/dev/null
-# The complete maintainer environment belongs in the contributor guide, not
-# the minimal user prerequisite list. Preserve the installable tooling contract.
-grep -F 'brew install actionlint cmake coreutils cosign curl dpkg gh git' \
-    "$root/docs-site/src/content/docs/contributing/development.md" >/dev/null
-
-cp -R "$work/apt-a" "$work/apt-missing-release-signature"
-unlink "$work/apt-missing-release-signature/dists/stable/Release.gpg"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-missing-release-signature-copy" \
-      --source-directory "$work/apt-missing-release-signature" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-cp -R "$work/apt-a" "$work/apt-missing-plain-by-hash"
-plain_digest=$("${fixture_checksum[@]}" \
-    "$work/apt-missing-plain-by-hash/dists/stable/main/binary-amd64/Packages" | \
-    awk '{ print $1 }')
-unlink "$work/apt-missing-plain-by-hash/dists/stable/main/binary-amd64/by-hash/SHA256/$plain_digest"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
-    "$root/scripts/release/download-verify-apt-publication.sh" \
-      --directory "$work/apt-missing-plain-by-hash-copy" \
-      --source-directory "$work/apt-missing-plain-by-hash" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-
-# Same-version recovery admits only an exact immutable pool/by-hash base. The
-# mutable index aliases, detached signature, or commit point may be missing;
-# an invalid present commit point and an extra trust anchor always fail closed.
-mkdir "$work/apt-recovery-expected"
-AROS_RELEASE_POLICY_FIXTURE=1 AROS_APT_RENDER_LOCAL_FOR_TESTS=1 \
-  "$root/scripts/release/run-apt-metadata-renderer.sh" \
-    "$work/apt-candidate" "$work/apt-recovery-expected" 1.2.3 1704067200
-cp -R "$work/apt-a" "$work/apt-recovery-aliases"
-unlink "$work/apt-recovery-aliases/dists/stable/main/binary-amd64/Packages"
-unlink "$work/apt-recovery-aliases/dists/stable/Release.gpg"
-printf '%s\n' 'recoverable divergent alias' \
-    > "$work/apt-recovery-aliases/dists/stable/main/binary-arm64/Packages.gz"
-recovery_state=$(AROS_RELEASE_POLICY_FIXTURE=1 \
-  "$root/scripts/release/verify-apt-recovery-base.sh" \
-    --expected-directory "$work/apt-recovery-expected" \
-    --source-directory "$work/apt-recovery-aliases" \
-    --fingerprint "$apt_fingerprint" --version 1.2.3)
-[[ "$recovery_state" == committed ]] || exit 1
-
-cp -R "$work/apt-a" "$work/apt-recovery-no-commit"
-unlink "$work/apt-recovery-no-commit/dists/stable/InRelease"
-recovery_state=$(AROS_RELEASE_POLICY_FIXTURE=1 \
-  "$root/scripts/release/verify-apt-recovery-base.sh" \
-    --expected-directory "$work/apt-recovery-expected" \
-    --source-directory "$work/apt-recovery-no-commit" \
-    --fingerprint "$apt_fingerprint" --version 1.2.3)
-[[ "$recovery_state" == missing-commit-point ]] || exit 1
-
-cp -R "$work/apt-a" "$work/apt-recovery-bad-commit"
-printf '%s\n' tampered >> "$work/apt-recovery-bad-commit/dists/stable/InRelease"
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 \
-    "$root/scripts/release/verify-apt-recovery-base.sh" \
-      --expected-directory "$work/apt-recovery-expected" \
-      --source-directory "$work/apt-recovery-bad-commit" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
-expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 \
-    "$root/scripts/release/verify-apt-recovery-base.sh" \
-      --expected-directory "$work/apt-recovery-expected" \
-      --source-directory "$work/apt-extra-key" \
-      --fingerprint "$apt_fingerprint" --version 1.2.3
+# APT is centrally produced. Exercise the consumer's signature, exact-byte,
+# retained-version and adversarial input cases, then reuse only public fixtures.
+python3 "$root/scripts/release/test-central-apt.py" -q
+python3 "$root/scripts/release/test-central-apt-request.py" -q
+python3 "$root/scripts/release/test-central-apt.py" --fixture-output "$work/central-apt"
 
 # Public-state preflight and final verification cover GitHub, signed APT,
 # Homebrew and AUR together. Same-version replay requires exact bytes; a newer
 # version in any one channel rejects the whole release before exposure.
 mkdir -p "$work/channel-candidate" "$work/channels/github-assets" \
     "$work/channels/homebrew/Formula" "$work/channels/aur"
-cp "$work/apt-candidate"/*.deb "$work/channel-candidate/"
-cp -R "$work/apt-a" "$work/channels/apt"
+cp "$work/central-apt/candidate"/aros-tools_1.2.3_*.deb "$work/channel-candidate/"
+cp -R "$work/central-apt/archive" "$work/channels/apt"
+cp "$work/central-apt/contract.toml" "$work/channels/apt-contract.toml"
 cat > "$work/channel-candidate/RELEASE_NOTES.md" <<'MARKDOWN'
 ## 1.2.3
 
@@ -1380,8 +735,6 @@ channel_verify=(
     "$root/scripts/release/verify-publication-channels.sh"
     --repository example/project --tag v1.2.3
     --candidate-dir "$work/channel-candidate"
-    --apt-base-url https://deb.example.invalid/aros-tools
-    --apt-fingerprint "$apt_fingerprint"
     --fixture-root "$work/channels"
 )
 for verify_mode in preflight exact; do
@@ -1390,22 +743,22 @@ for verify_mode in preflight exact; do
       PATH="$work/mock-bin:$PATH" \
       "${channel_verify[@]}" --mode "$verify_mode" >/dev/null
 done
-cp "$work/channels/apt/dists/stable/main/binary-amd64/Packages" \
+cp "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages" \
     "$work/Packages.amd64.saved"
-printf '\n' >> "$work/channels/apt/dists/stable/main/binary-amd64/Packages"
+printf '\n' >> "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages"
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
     MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
     PATH="$work/mock-bin:$PATH" \
     "${channel_verify[@]}" --mode exact
 mv "$work/Packages.amd64.saved" \
-    "$work/channels/apt/dists/stable/main/binary-amd64/Packages"
-cp "$work/channels/apt/dists/stable/Release" "$work/Release.saved"
-printf '\n' >> "$work/channels/apt/dists/stable/Release"
+    "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages"
+cp "$work/channels/apt/aros-tools/dists/rolling/Release" "$work/Release.saved"
+printf '\n' >> "$work/channels/apt/aros-tools/dists/rolling/Release"
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
     MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
     PATH="$work/mock-bin:$PATH" \
     "${channel_verify[@]}" --mode exact
-mv "$work/Release.saved" "$work/channels/apt/dists/stable/Release"
+mv "$work/Release.saved" "$work/channels/apt/aros-tools/dists/rolling/Release"
 printf '%s\n' \
     '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"9.0.0-1"}]}' \
     > "$work/channels/aur-rpc.json"
@@ -1424,43 +777,24 @@ expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=17040672
     "${channel_verify[@]}" --mode preflight
 unset GNUPGHOME
 
-# Snapshot-CAS is a checked workflow contract: all seven mutable objects are
-# captured before the first write, mutation helpers never perform a fresh HEAD,
-# refresh shares the five protected environments, and final verification uses
-# the complete public mirror. Exercise both the live positive policy and narrow
-# negative mutations.
+# Producer ownership may not creep back in, and the request token may not
+# silently expand to another repository or a broader permission set.
 "$root/scripts/release/verify-apt-workflow-contract.sh" "$root" >/dev/null
 mkdir -p "$work/apt-workflow-contract/.github/workflows"
+for name in release.yml publish-ecosystem.yml; do
+    cp "$root/.github/workflows/$name" "$work/apt-workflow-contract/.github/workflows/$name"
+done
+"$root/scripts/release/verify-apt-workflow-contract.sh" "$work/apt-workflow-contract" >/dev/null
+# The GitHub expression must remain literal in this rejected fixture.
+# shellcheck disable=SC2016
+printf '\n# forbidden secret: ${{ secrets.APT_GPG_PRIVATE_KEY }}\n' \
+    >> "$work/apt-workflow-contract/.github/workflows/publish-ecosystem.yml"
+expect_failure "$root/scripts/release/verify-apt-workflow-contract.sh" "$work/apt-workflow-contract"
 cp "$root/.github/workflows/publish-ecosystem.yml" \
     "$work/apt-workflow-contract/.github/workflows/publish-ecosystem.yml"
-cp "$root/.github/workflows/refresh-apt-metadata.yml" \
-    "$work/apt-workflow-contract/.github/workflows/refresh-apt-metadata.yml"
-"$root/scripts/release/verify-apt-workflow-contract.sh" \
-    "$work/apt-workflow-contract" >/dev/null
-python3 - "$work/apt-workflow-contract/.github/workflows/publish-ecosystem.yml" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-needle = '          publish_snapshot() {\n'
-if text.count(needle) != 1:
-    raise SystemExit('fixture cannot locate singular publish_snapshot function')
-path.write_text(text.replace(
-    needle,
-    needle + '            aws s3api head-object --bucket unsafe --key unsafe\n',
-    1,
-))
-PY
-expect_failure "$root/scripts/release/verify-apt-workflow-contract.sh" \
-    "$work/apt-workflow-contract"
-cp "$root/.github/workflows/publish-ecosystem.yml" \
+sed -i.bak 's/repositories: apt-archive/repositories: another-repository/' \
     "$work/apt-workflow-contract/.github/workflows/publish-ecosystem.yml"
-sed -i.bak 's/environment: apt-signing/environment: apt-refresh-signing/' \
-    "$work/apt-workflow-contract/.github/workflows/refresh-apt-metadata.yml"
-rm "$work/apt-workflow-contract/.github/workflows/refresh-apt-metadata.yml.bak"
-expect_failure "$root/scripts/release/verify-apt-workflow-contract.sh" \
-    "$work/apt-workflow-contract"
+expect_failure "$root/scripts/release/verify-apt-workflow-contract.sh" "$work/apt-workflow-contract"
 
 # The workflow trust policy itself must reject mutable external actions.
 mkdir -p "$work/policy/.github/workflows"
