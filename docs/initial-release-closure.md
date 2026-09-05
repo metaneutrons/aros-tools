@@ -50,6 +50,21 @@ package release; it does not advance the native toolchain producer roadmap.
   Shared-root implementation: 33 signed-archive tests and 18 dispatch/manifest
   tests pass, including other projects, missing consumer packages, mixed
   architectures and state/index disagreement. Full CI and merge remain gates.
+- [x] Central archive PR #15 merged as
+  `0319276b951412c2a433e03841832fb718b58e11`. Its publisher and verifier passed
+  a real isolated private-R2 test on 2026-09-05: bootstrap with an empty
+  architecture index, second-project import, native dual-architecture upgrade,
+  metadata-only refresh and byte-exact isolated downloads of every candidate.
+  Stale baselines and immutable collisions were rejected without overwrites.
+  All synthetic objects, the disposable bucket and its short-lived token were
+  removed and cleanup verified. Production packages were not published by this
+  qualification.
+- [x] Source-repository ruleset restored to the existing six-check governance
+  contract, including docs `build`, with all checks bound to GitHub Actions
+  App `15368`. No bypass or other ruleset field changed. The protection
+  verifier now handles rulesets and classic protection, with positive and
+  negative HTTP, identity, scope and policy fixtures; the actual read-only
+  release-policy credential passed the ruleset preflight.
 - [ ] Verify publication credentials and environment isolation without exposing
   secret values. The central APT App credential and tag-only environment are
   configured, with a successful read-only consumer preflight. Acceptance still
@@ -83,11 +98,11 @@ package release; it does not advance the native toolchain producer roadmap.
 
 ## Explicitly separate, unproven work
 
-The shared-domain APT implementation and consumer migration are prepared, not
-yet merged or published. Archive tests include signed two-project transactions,
-conditional S3 upload simulation, byte-identical container rendering and actual
-Debian 12/13 APT consumers with a wrong-key counter-probe. Live isolated R2
-qualification and the protected CI/merge gates remain. Legacy APT signing/storage
+The shared-domain archive implementation is merged and live-R2 qualified; the
+tools consumer migration still requires its protected merge. No first tools
+release was published. Archive tests include signed two-project transactions,
+conditional S3 uploads, byte-identical container rendering and actual
+Debian 12/13 APT consumers with a wrong-key counter-probe. Legacy APT signing/storage
 secrets remain in the unused `apt-signing`/`apt-publication` environments.
 Remove those copies only as an explicit, verified cleanup of the old publisher.
 
