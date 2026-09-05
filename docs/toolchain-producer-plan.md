@@ -646,6 +646,9 @@ or partially published channel counts as complete.
 
 Acceptance issue: [#41](https://github.com/metaneutrons/aros-tools/issues/41).
 Delivery group: [Toolchain management](https://github.com/metaneutrons/aros-tools/milestone/4).
+The [pre-M4 design review](toolchain-management-design.md) records the
+source-based store inventory, proposed command boundaries and unresolved
+ownership/selection decisions; it does not implement or complete M8.
 This extension can proceed after M4's envelope/verification acceptance,
 including its M0–M3 prerequisites. Design and existing-store inventory can
 start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
