@@ -25,11 +25,12 @@ fn test_contract(root: &Path, make_body: &str) -> Contract {
     Contract {
         mode: Mode::X86_64,
         source_root: root.join("source"),
+        engine_root: root.join("engine"),
         build_root,
         source_dir: root.join("source/workbench/devs/AHI"),
         source_manifest: root.join("source/workbench/devs/AHI/ahi-build.inputs"),
         source_manifest_sha256: "0".repeat(64),
-        product_manifest: root.join("source/cmake/manifests/ahi-x86_64.install"),
+        product_manifest: root.join("engine/manifests/ahi-x86_64.install"),
         product_manifest_sha256: "0".repeat(64),
         stage_source: binary_dir.join("source"),
         stage_linklibs: binary_dir.join("linklibs"),

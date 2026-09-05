@@ -25,9 +25,18 @@ string(RANDOM LENGTH 10 ALPHABET 0123456789abcdef _suffix)
 set(_root "/tmp/aros-ahi-build-${_suffix}")
 file(REMOVE_RECURSE "${_root}")
 file(MAKE_DIRECTORY "${_root}")
+set(_repo "${_root}/source")
+aros_test_copy_source("${_repo}" "workbench/devs/AHI" "tools/sfdc")
 
 function(_ahi_configure mode case expect_success expected)
     set(_build "${_root}/${mode}-${case}")
+    set(_selected_engine "${AROS_TEST_ENGINE_DIR}")
+    if(case MATCHES "^engine-(missing|symlink|symlink-parent)-manifest$")
+        set(_defect "${CMAKE_MATCH_1}")
+        set(_selected_engine "${_root}/${case}-engine")
+        aros_test_copy_engine_defect("${_selected_engine}"
+            "manifests/ahi-${mode}.install" "${_defect}")
+    endif()
     if(case STREQUAL "whitespace-build")
         set(_build "${_root}/${mode} build")
     endif()
@@ -37,7 +46,7 @@ function(_ahi_configure mode case expect_success expected)
         # tools -- a mock compiler, archiver and make -- so handing it the real
         # executable paths would have it build for real, which is what it exists
         # to avoid.
-        "-DAROS_TEST_ENGINE_DIR=${AROS_TEST_ENGINE_DIR}" -G Ninja
+        "-DAROS_TEST_ENGINE_DIR=${_selected_engine}" -G Ninja
             "-DAROS_REPO_ROOT=${_repo}" "-DHOST_PERL=${_perl}"
             "-DAROS_AHI_RUNNER_BIN=${_ahi_runner}"
             "-DAHI_FIXTURE_MODE=${mode}" "-DAHI_FIXTURE_CASE=${case}"
@@ -184,6 +193,12 @@ _ahi_configure("x86_64" "missing-runner" FALSE
     "AROS_AHI_RUNNER_BIN is not an executable regular file")
 _ahi_configure("x86_64" "whitespace-build" FALSE
     "_build_root_raw cannot contain whitespace for configure/Make")
+_ahi_configure("x86_64" "engine-missing-manifest" FALSE
+    "audited engine product manifest is unavailable")
+_ahi_configure("x86_64" "engine-symlink-manifest" FALSE
+    "audited engine product manifest is unavailable")
+_ahi_configure("x86_64" "engine-symlink-parent-manifest" FALSE
+    "source, engine, build, install or host-SFDC identity differs")
 file(SHA256 "${_repo}/workbench/devs/AHI/configure" _configure_after)
 file(TIMESTAMP "${_repo}/workbench/devs/AHI/configure" _configure_time_after UTC)
 file(SHA256 "${_repo}/workbench/devs/AHI/ahi-build.inputs" _manifest_after)
