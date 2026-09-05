@@ -1,0 +1,16 @@
+schema_version = 1
+repository = "metaneutrons/apt-archive"
+workflow = "publish.yml"
+domain = "metaneutrons.cc"
+project = "aros-tools"
+base_url = "https://deb.metaneutrons.cc"
+layout = "shared-root-v1"
+origin = "metaneutrons"
+suite = "rolling"
+component = "main"
+architectures = ["amd64", "arm64"]
+keyring = "metaneutrons-archive-keyring.pgp"
+primary_fingerprint = "1B7B79417383648BBFBE282E01AB8296EF0FCD76"
+signing_subkey = "A0C21782FC507CCBD666F3ED242072FEC8BE54A4" # gitleaks:allow -- public OpenPGP fingerprint, not a credential
+valid_until_days = 180
+keep_versions = 5

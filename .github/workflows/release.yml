@@ -3,6 +3,8 @@ name: Release qualification
 on:
   pull_request:
     paths:
+      - '.github/actions/**'
+      - '.github/workflows/release-please.yml'
       - '.github/workflows/release.yml'
       - '.github/workflows/publish-ecosystem.yml'
       - 'Cargo.lock'
@@ -51,11 +53,21 @@ jobs:
       requires_ab: ${{ steps.metadata.outputs.requires_ab }}
       ab_reason: ${{ steps.metadata.outputs.ab_reason }}
       asset_contract: ${{ steps.metadata.outputs.asset_contract }}
+      homebrew_matrix: ${{ steps.homebrew-policy.outputs.matrix }}
+      homebrew_coverage: ${{ steps.homebrew-policy.outputs.coverage }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Plan Homebrew coverage (dated PR-only exception, never a release waiver)
+        id: homebrew-policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release/homebrew-matrix.py \
+            --event "$GITHUB_EVENT_NAME" --ref-type "$GITHUB_REF_TYPE" --ref "$GITHUB_REF" \
+            --github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"
       - name: Validate source and version
         id: metadata
         shell: bash
@@ -1104,66 +1116,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  apt-metadata:
-    name: Signed APT repository metadata
-    if: >-
-      always() &&
-      needs.aggregate.result == 'success' &&
-      (
-        needs.metadata.outputs.is_release != 'true' ||
-        needs.sign-aggregate.result == 'success'
-      )
-    needs: [metadata, aggregate, sign-aggregate]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: qualified-release-staging
-          path: candidate
-      - name: Generate a deterministic signed repository twice
-        shell: bash
-        env:
-          VERSION: ${{ needs.metadata.outputs.version }}
-          REPOSITORY_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch || needs.metadata.outputs.source_date_epoch }}
-        run: |
-          set -euo pipefail
-          export GNUPGHOME="$RUNNER_TEMP/qualification-gnupg"
-          install -d -m 0700 "$GNUPGHOME"
-          gpg --batch --faked-system-time "${REPOSITORY_DATE_EPOCH}!" \
-            --pinentry-mode loopback --passphrase '' \
-            --quick-generate-key 'AROS qualification <qualification@example.invalid>' \
-            rsa2048 sign 1d
-          fingerprint=$(gpg --batch --with-colons --list-secret-keys --fingerprint | \
-            awk -F: '$1 == "fpr" { print toupper($10); exit }')
-          gpg --batch --armor --pinentry-mode loopback --passphrase '' \
-            --export-secret-keys "$fingerprint" > "$RUNNER_TEMP/private.asc"
-          : > "$RUNNER_TEMP/passphrase"
-          for copy in a b; do
-            scripts/release/build-apt-repository.sh \
-              --candidate-dir candidate \
-              --output-dir "$RUNNER_TEMP/repository-${copy}" \
-              --version "$VERSION" \
-              --source-date-epoch "$REPOSITORY_DATE_EPOCH" \
-              --private-key "$RUNNER_TEMP/private.asc" \
-              --passphrase-file "$RUNNER_TEMP/passphrase" \
-              --fingerprint "$fingerprint"
-          done
-          diff --recursive --no-dereference \
-            "$RUNNER_TEMP/repository-a" "$RUNNER_TEMP/repository-b"
-          test "$(find "$RUNNER_TEMP/repository-a" -type f | wc -l)" -eq 14
-          grep -Fx 'Acquire-By-Hash: yes' \
-            "$RUNNER_TEMP/repository-a/dists/stable/Release"
-          grep -Eq '^Valid-Until: .+' \
-            "$RUNNER_TEMP/repository-a/dists/stable/Release"
-
   homebrew:
     name: Homebrew install (${{ matrix.name }})
     if: >-
       always() &&
+      needs.metadata.result == 'success' &&
       needs.aggregate.result == 'success' &&
       (
         needs.metadata.outputs.is_release != 'true' ||
@@ -1174,23 +1131,13 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-24.04
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-          - name: macos-x86_64
-            # Homebrew classifies Intel Sequoia as Tier 3 and currently builds
-            # openssl@3 from source there; the hosted image's pre-existing
-            # OpenSSL state makes that unrelated post-install fail after this
-            # formula is already installed. Sonoma is the supported Intel
-            # package-manager baseline. The archive itself is still produced
-            # and smoke-tested independently on macos-15-intel above.
-            runner: macos-14
-          - name: macos-aarch64
-            runner: macos-15
+      # The selector can omit Intel only for PRs inside the recorded UTC window.
+      # Tags (including prereleases) and manual branch runs always select four.
+      matrix: ${{ fromJSON(needs.metadata.outputs.homebrew_matrix) }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: qualified-release-staging
@@ -1200,11 +1147,21 @@ jobs:
         with:
           core: false
           cask: false
+      - name: Verify the real host and Homebrew architecture
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/verify-homebrew-install.py host \
+            --target "$TARGET" --brew-prefix "$(brew --prefix)" \
+            --brew-arch "$(brew ruby -e 'puts Hardware::CPU.arch')"
       - name: Install and test the measured formula
         shell: bash
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
           VERSION: ${{ needs.metadata.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           port=38080
@@ -1240,7 +1197,15 @@ jobs:
           fi
           ruby -c "$formula"
           brew audit --strict "$tap/aros-tools"
-          brew install "$tap/aros-tools"
+          if ! brew install --verbose "$tap/aros-tools"; then
+            echo '::error::AP7322 Homebrew installation or dependency post-install failed; qualification remains failed'
+            brew config
+            exit 1
+          fi
+          python3 scripts/release/verify-homebrew-install.py installed \
+            --target "$TARGET" --version "$VERSION" \
+            --manifest "candidate/aros-tools-v${VERSION}-${TARGET}.tar.gz.manifest.json" \
+            --prefix "$(brew --prefix aros-tools)"
           brew test "$tap/aros-tools"
           for binary in \
             aros aros-ahi-runner aros-collect aros-fetch \
@@ -1344,11 +1309,11 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.sign-aggregate.result == 'success' &&
-      needs.apt-metadata.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success'
-    needs: [metadata, sign-aggregate, apt-metadata, homebrew, aur]
+    needs: [metadata, sign-aggregate, homebrew, aur]
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1363,10 +1328,6 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_ADMIN_READ_TOKEN }}
           IS_STABLE: ${{ needs.metadata.outputs.is_stable }}
           AUR_SSH_KNOWN_HOSTS: ${{ vars.AUR_SSH_KNOWN_HOSTS }}
-          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
-          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
         run: |
           set -euo pipefail
           cleanup() { unset GH_TOKEN; }
@@ -1382,28 +1343,8 @@ jobs:
           fi
           # metaneutrons is a user account, so owner enforcement is unavailable;
           # the repository-level enabled bit is the strongest supported policy.
-          if [[ "$IS_STABLE" == true ]]; then
-            required=(
-              AUR_SSH_KNOWN_HOSTS APT_GPG_FINGERPRINT APT_PUBLIC_BASE_URL
-              R2_ACCOUNT_ID R2_BUCKET_NAME
-            )
-            for name in "${required[@]}"; do
-              [[ -n "${!name:-}" ]] || {
-                echo "::error::AP7101 release variable is missing: $name"; exit 1;
-              }
-            done
-            [[ "$APT_GPG_FINGERPRINT" =~ ^[0-9A-Fa-f]{40}$ ]] || {
-              echo '::error::AP7102 APT fingerprint is malformed'; exit 1;
-            }
-            [[ "$APT_PUBLIC_BASE_URL" == 'https://deb.metaneutrons.cc/aros-tools' ]] || {
-              echo '::error::AP7103 APT public URL is not canonical'; exit 1;
-            }
-            [[ "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]] || {
-              echo '::error::AP7104 R2 account ID is malformed'; exit 1;
-            }
-            [[ "$R2_BUCKET_NAME" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || {
-              echo '::error::AP7105 R2 bucket name is malformed'; exit 1;
-            }
+          if [[ "$IS_STABLE" == true && -z "$AUR_SSH_KNOWN_HOSTS" ]]; then
+            echo '::error::AP7101 AUR host-key identity is missing'; exit 1
           fi
 
   channel-preflight:
@@ -1411,12 +1352,12 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.sign-aggregate.result == 'success' &&
-      needs.apt-metadata.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success'
-    needs: [metadata, sign-aggregate, apt-metadata, homebrew, aur]
+    needs: [metadata, sign-aggregate, homebrew, aur]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -1435,19 +1376,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.metadata.outputs.tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
-          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
-          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
           scripts/release/verify-candidate-inventory.sh \
             --directory candidate --version "$VERSION" --signed true
-          scripts/release/verify-apt-trust-anchor.sh \
-            --fingerprint "$APT_GPG_FINGERPRINT"
           scripts/release/verify-publication-channels.sh \
             --mode preflight --repository "$GITHUB_REPOSITORY" \
-            --tag "$TAG" --candidate-dir candidate \
-            --apt-base-url "$APT_PUBLIC_BASE_URL" \
-            --apt-fingerprint "$APT_GPG_FINGERPRINT"
+            --tag "$TAG" --candidate-dir candidate
 
   homebrew-credential-preflight:
     name: Verify the isolated Homebrew credential
@@ -1466,139 +1401,63 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Issue and verify isolated Homebrew App token
+        id: homebrew-token
+        uses: ./.github/actions/homebrew-token
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
       - name: Verify dedicated tap access
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}
         run: |
           set -euo pipefail
           cleanup() { unset GH_TOKEN; }
           trap cleanup EXIT
           trap 'exit 130' HUP INT TERM
           [[ -n "$GH_TOKEN" ]] || { echo '::error::AP7110 Homebrew credential is missing'; exit 1; }
-          [[ $(gh api repos/metaneutrons/homebrew-tap --jq '.permissions.push') == true ]] || {
-            echo '::error::AP7110 package credential cannot write the Homebrew tap'; exit 1;
-          }
+          # Write permissions are required during App token issuance, not
+          # inferred from GET /repos user-role flags.
           scripts/release/verify-branch-protection.sh \
             --repository metaneutrons/homebrew-tap >/dev/null || {
               echo '::error::AP7110 Homebrew tap differs from the governance contract'; exit 1;
             }
 
-  r2-credential-preflight:
-    name: Verify the isolated R2 credential
+  archive-credential-preflight:
+    name: Verify the isolated central archive dispatch identity
     if: >-
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.channel-preflight.result == 'success' &&
       needs.release-config-preflight.result == 'success'
     needs: [metadata, channel-preflight, release-config-preflight]
-    environment: apt-publication
+    environment: apt-archive-publication
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
-      - name: Verify bucket-scoped read/write/delete access
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: archive-token
+        with:
+          client-id: ${{ vars.ARCHIVE_DISPATCH_CLIENT_ID }}
+          private-key: ${{ secrets.ARCHIVE_DISPATCH_PRIVATE_KEY }}
+          owner: metaneutrons
+          repositories: apt-archive
+          permission-actions: write
+          permission-contents: read
+      - name: Validate protected archive input without publishing
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_REGION: auto
-          AWS_DEFAULT_REGION: auto
-          AWS_EC2_METADATA_DISABLED: 'true'
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+          GH_TOKEN: ${{ steps.archive-token.outputs.token }}
         run: |
           set -euo pipefail
-          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          probe_key="aros-tools/.publication-probes/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup() {
-            if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" && \
-                  -n "${R2_ACCOUNT_ID:-}" && -n "${R2_BUCKET_NAME:-}" ]]; then
-              aws s3api delete-object --endpoint-url "$endpoint" \
-                --bucket "$R2_BUCKET_NAME" --key "$probe_key" >/dev/null || true
-            fi
-            rm -f -- "$RUNNER_TEMP/r2-write-probe" "$RUNNER_TEMP/r2-write-probe.readback"
-            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-          }
+          cleanup() { unset GH_TOKEN; }
           trap cleanup EXIT
           trap 'exit 130' HUP INT TERM
-          [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
-            echo '::error::AP7111 R2 credential is missing'; exit 1;
-          }
-          aws s3api head-bucket --endpoint-url "$endpoint" --bucket "$R2_BUCKET_NAME"
-          printf '%s\n' "aros-tools release ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
-            > "$RUNNER_TEMP/r2-write-probe"
-          aws s3api put-object --endpoint-url "$endpoint" \
-            --bucket "$R2_BUCKET_NAME" --key "$probe_key" \
-            --body "$RUNNER_TEMP/r2-write-probe" --if-none-match '*' \
-            --cache-control no-store --content-type 'text/plain; charset=utf-8' >/dev/null
-          aws s3api get-object --endpoint-url "$endpoint" \
-            --bucket "$R2_BUCKET_NAME" --key "$probe_key" \
-            "$RUNNER_TEMP/r2-write-probe.readback" >/dev/null
-          cmp "$RUNNER_TEMP/r2-write-probe" "$RUNNER_TEMP/r2-write-probe.readback"
-          aws s3api delete-object --endpoint-url "$endpoint" \
-            --bucket "$R2_BUCKET_NAME" --key "$probe_key" >/dev/null
-
-  apt-credential-preflight:
-    name: Verify the isolated APT signing credential
-    if: >-
-      needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.is_stable == 'true' &&
-      needs.channel-preflight.result == 'success' &&
-      needs.release-config-preflight.result == 'success'
-    needs: [metadata, channel-preflight, release-config-preflight]
-    environment: apt-signing
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Import, match and exercise only the configured signing key
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
-        run: |
-          set -euo pipefail
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          cleanup() {
-            gpgconf --kill gpg-agent >/dev/null 2>&1 || true
-            rm -rf -- "$GNUPGHOME"
-            rm -f -- "$RUNNER_TEMP/apt-private.asc" \
-              "$RUNNER_TEMP/signing-probe" "$RUNNER_TEMP/signing-probe.sig"
-            unset APT_GPG_PRIVATE_KEY APT_GPG_PASSPHRASE
-          }
-          trap cleanup EXIT
-          trap 'exit 130' HUP INT TERM
-          [[ -n "$APT_GPG_PRIVATE_KEY" && -n "$APT_GPG_PASSPHRASE" ]] || {
-            echo '::error::AP7120 APT signing credential is missing'; exit 1;
-          }
-          install -d -m 0700 "$GNUPGHOME"
-          install -m 0600 /dev/null "$RUNNER_TEMP/apt-private.asc"
-          printf '%s\n' "$APT_GPG_PRIVATE_KEY" > "$RUNNER_TEMP/apt-private.asc"
-          gpg --batch --import "$RUNNER_TEMP/apt-private.asc" >/dev/null 2>&1
-          measured=$(gpg --batch --with-colons --list-secret-keys \
-            --fingerprint "$APT_GPG_FINGERPRINT" | awk -F: '
-              $1 == "sec" { secret_keys += 1; validity = $2; next }
-              $1 == "fpr" && secret_keys == 1 && !measured {
-                measured = toupper($10)
-              }
-              END {
-                if (secret_keys != 1 || length(measured) != 40 ||
-                    measured !~ /^[0-9A-F]+$/ || validity ~ /^[redi]$/) exit 1
-                print measured
-              }
-            ') || {
-              echo '::error::AP7120 APT bundle lacks one active primary secret key'; exit 1;
-            }
-          [[ "$measured" == "${APT_GPG_FINGERPRINT^^}" ]] || {
-            echo '::error::AP7120 imported APT key fingerprint differs'; exit 1;
-          }
-          printf 'aros-tools publication preflight\n' > "$RUNNER_TEMP/signing-probe"
-          printf '%s' "$APT_GPG_PASSPHRASE" | gpg \
-            --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
-            --local-user "$APT_GPG_FINGERPRINT" --detach-sign \
-            --output "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
-          gpg --batch --verify "$RUNNER_TEMP/signing-probe.sig" "$RUNNER_TEMP/signing-probe"
+          scripts/release/request-central-apt.sh preflight
 
   aur-credential-preflight:
     name: Verify the isolated AUR SSH credential
@@ -1653,25 +1512,24 @@ jobs:
       needs.release-config-preflight.result == 'success' &&
       needs.channel-preflight.result == 'success' &&
       needs.homebrew-credential-preflight.result == 'success' &&
-      needs.r2-credential-preflight.result == 'success' &&
-      needs.apt-credential-preflight.result == 'success' &&
+      needs.archive-credential-preflight.result == 'success' &&
       needs.aur-credential-preflight.result == 'success'
-    needs: [metadata, release-config-preflight, channel-preflight, homebrew-credential-preflight, r2-credential-preflight, apt-credential-preflight, aur-credential-preflight]
+    needs: [metadata, release-config-preflight, channel-preflight, homebrew-credential-preflight, archive-credential-preflight, aur-credential-preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions:
       contents: read
     steps:
       - name: Confirm every isolated fail-closed gate
-        run: printf '%s\n' 'release configuration, public state and four credentials verified on separate runners'
+        run: printf '%s\n' 'release configuration, public state and isolated archive, Homebrew and AUR identities verified'
 
   publish:
     name: Publish the immutable GitHub release exactly once
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
       needs.aggregate.result == 'success' &&
-      needs.apt-metadata.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success' &&
       needs.release-config-preflight.result == 'success' &&
@@ -1681,7 +1539,7 @@ jobs:
           needs.publication-preflight.result == 'success'
         )
       )
-    needs: [metadata, release-recovery, aggregate, apt-metadata, homebrew, aur, release-config-preflight, channel-preflight, publication-preflight]
+    needs: [metadata, release-recovery, aggregate, homebrew, aur, release-config-preflight, channel-preflight, publication-preflight]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -2077,8 +1935,6 @@ jobs:
           SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
           TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
           VERSION: ${{ needs.metadata.outputs.version }}
-          APT_PUBLIC_BASE_URL: ${{ vars.APT_PUBLIC_BASE_URL }}
-          APT_GPG_FINGERPRINT: ${{ vars.APT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
           scripts/release/verify-release-ref.sh \
@@ -2159,7 +2015,5 @@ jobs:
             --candidate-dir candidate
           scripts/release/verify-publication-channels.sh \
             --mode exact --repository "$GITHUB_REPOSITORY" \
-            --tag "$TAG" --candidate-dir candidate \
-            --apt-base-url "$APT_PUBLIC_BASE_URL" \
-            --apt-fingerprint "$APT_GPG_FINGERPRINT"
+            --tag "$TAG" --candidate-dir candidate
           echo 'immutable stable release and every converged channel remain verified'

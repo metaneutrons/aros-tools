@@ -1,104 +1,74 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
 repository_root=${1:-.}
-workflow_root="$repository_root/.github/workflows"
-[[ -d "$workflow_root" && ! -L "$workflow_root" ]] || {
-    printf '%s\n' '::error::AP7238 workflow directory is missing or unsafe' >&2
-    exit 1
-}
-
-python3 - "$workflow_root" <<'PY'
+python3 - "$repository_root" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-publish_path = root / 'publish-ecosystem.yml'
-refresh_path = root / 'refresh-apt-metadata.yml'
-errors: list[str] = []
-
-for path in (publish_path, refresh_path):
+workflows = root / '.github/workflows'
+errors = []
+texts = {}
+for name in ('release.yml', 'publish-ecosystem.yml'):
+    path = workflows / name
     if not path.is_file() or path.is_symlink():
-        errors.append(f'{path}: APT workflow is missing or unsafe')
+        errors.append(f'{name}: missing regular workflow')
+    else:
+        texts[name] = path.read_text()
+if (workflows / 'refresh-apt-metadata.yml').exists():
+    errors.append('tools-owned APT refresh remains; the central archive owns refresh')
 
-if errors:
-    for error in errors:
-        print(f'::error::AP7238 {error}', file=sys.stderr)
-    raise SystemExit(1)
-
-publish = publish_path.read_text()
-refresh = refresh_path.read_text()
-
-def require(text: str, marker: str, label: str) -> None:
-    if marker not in text:
-        errors.append(f'{label}: missing contract marker {marker!r}')
-
-def function_body(text: str, name: str, label: str) -> str:
-    match = re.search(
-        rf'(?ms)^          {re.escape(name)}\(\) \{{\n(.*?)^          \}}$',
-        text,
-    )
-    if match is None:
-        errors.append(f'{label}: function {name} is missing or structurally ambiguous')
-        return ''
-    return match.group(1)
-
-for forbidden in ('environment: apt-refresh-signing', 'environment: apt-refresh-publication'):
-    if forbidden in refresh:
-        errors.append(f'{refresh_path}: legacy environment remains: {forbidden}')
-require(refresh, '    environment: apt-signing', str(refresh_path))
-require(refresh, '    environment: apt-publication', str(refresh_path))
-
-release_snapshot = function_body(publish, 'snapshot_mutable', str(publish_path))
-release_put = function_body(publish, 'publish_snapshot', str(publish_path))
-refresh_snapshot = function_body(refresh, 'snapshot_mutable', str(refresh_path))
-refresh_put = function_body(refresh, 'put_snapshot', str(refresh_path))
-for label, body in (
-    ('release snapshot', release_snapshot),
-    ('refresh snapshot', refresh_snapshot),
-):
-    require(body, 'head-object', label)
-    require(body, 'get-object', label)
-    require(body, '--if-match "$etag"', label)
-for label, body in (('release put', release_put), ('refresh put', refresh_put)):
-    if 'head-object' in body or 'get-object' in body:
-        errors.append(f'{label}: mutation re-reads R2 instead of using the validated snapshot')
-    require(body, '--if-match', label)
-    require(body, "--if-none-match '*'", label)
-
-for text, label in ((publish, str(publish_path)), (refresh, str(refresh_path))):
-    for marker in (
-        "snapshot_mutable 'aros-tools/dists/stable/Release' Release",
-        "snapshot_mutable 'aros-tools/dists/stable/Release.gpg' Release-gpg",
-        "snapshot_mutable 'aros-tools/dists/stable/InRelease' InRelease",
-        'snapshot_mutable "aros-tools/${prefix}/Packages"',
-        'snapshot_mutable "aros-tools/${prefix}/Packages.gz"',
+for name, text in texts.items():
+    for forbidden in (
+        'secrets.APT_GPG_', 'secrets.R2_', 'environment: apt-signing',
+        'environment: apt-publication', 'build-apt-repository.sh',
+        'download-verify-apt-publication.sh', 'dists/stable',
     ):
-        require(text, marker, label)
+        if forbidden in text:
+            errors.append(f'{name}: obsolete archive ownership: {forbidden}')
 
-require(publish, 'download-verify-apt-publication.sh', str(publish_path))
-require(publish, 'complete public APT inventory did not converge', str(publish_path))
-require(refresh, 'verify-apt-recovery-base.sh', str(refresh_path))
-require(refresh, 'download-verify-apt-publication.sh', str(refresh_path))
-require(refresh, '    needs: [prepare, publish]', str(refresh_path))
-require(refresh, 'complete refreshed APT inventory did not converge', str(refresh_path))
-require(refresh, 'put_snapshot "$rebuilt/${prefix}/Packages"', str(refresh_path))
-require(refresh, 'put_snapshot "$rebuilt/${prefix}/Packages.gz"', str(refresh_path))
+def block(text, name):
+    match = re.search(rf'(?ms)^  {re.escape(name)}:\n.*?(?=^  [a-z][a-z0-9-]*:\n|\Z)', text)
+    return match.group() if match else ''
 
-release_snapshot_end = publish.find("snapshot_mutable 'aros-tools/dists/stable/InRelease' InRelease")
-release_first_put = publish.find('aws s3api put-object', release_snapshot_end)
-if release_snapshot_end < 0 or release_first_put < release_snapshot_end:
-    errors.append(f'{publish_path}: release mutation can precede the complete mutable snapshot')
-refresh_snapshot_end = refresh.find("snapshot_mutable 'aros-tools/dists/stable/InRelease' InRelease")
-refresh_first_put = refresh.find('aws s3api put-object', refresh_snapshot_end)
-if refresh_snapshot_end < 0 or refresh_first_put < refresh_snapshot_end:
-    errors.append(f'{refresh_path}: refresh mutation can precede the complete mutable snapshot')
+for workflow, name, mode in (
+    ('release.yml', 'archive-credential-preflight', 'preflight'),
+    ('publish-ecosystem.yml', 'apt', 'dispatch'),
+):
+    text = block(texts.get(workflow, ''), name)
+    for marker in (
+        'environment: apt-archive-publication',
+        'actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'client-id: ${{ vars.ARCHIVE_DISPATCH_CLIENT_ID }}',
+        'private-key: ${{ secrets.ARCHIVE_DISPATCH_PRIVATE_KEY }}',
+        'owner: metaneutrons', 'repositories: apt-archive',
+        'permission-actions: write', 'permission-contents: read',
+        f'scripts/release/request-central-apt.sh {mode}',
+    ):
+        if marker not in text:
+            errors.append(f'{workflow}/{name}: missing scoped request contract: {marker}')
+    permissions = re.findall(r'^          permission-([a-z-]+): ([a-z]+)$', text, re.M)
+    if sorted(permissions) != [('actions', 'write'), ('contents', 'read')]:
+        errors.append(f'{workflow}/{name}: archive App token has excess permissions')
+    if 'skip-token-revoke' in text:
+        errors.append(f'{workflow}/{name}: ephemeral archive token revocation may not be disabled')
 
+publication = texts.get('publish-ecosystem.yml', '')
+for name, dependency in (('apt-verify', 'apt'), ('apt-install', 'apt-verify')):
+    text = block(publication, name)
+    for marker in (f'needs: {dependency}', 'verify-central-apt.py --mode exact',
+                   '--candidate-dir candidate'):
+        if marker not in text:
+            errors.append(f'{name}: missing public consumer gate: {marker}')
+    if 'secrets.' in text or re.search(r'^    environment:', text, re.M):
+        errors.append(f'{name}: public verification must remain credential-free')
+if 'verify-release-ref.sh' not in block(publication, 'apt') or '.immutable == true' not in block(publication, 'apt'):
+    errors.append('central dispatch must follow immutable source-release validation')
 if errors:
     for error in errors:
         print(f'::error::AP7238 {error}', file=sys.stderr)
     raise SystemExit(1)
-print('validated APT workflow trust, recovery, and snapshot-CAS contracts')
+print('validated central APT ownership, scoped dispatch and credential-free consumer gates')
 PY

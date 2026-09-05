@@ -18,11 +18,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: release-please
     permissions:
-      actions: write
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -39,20 +37,46 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/validate-version-contract.py
+      - name: Issue the repository-only Release Please App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          owner: metaneutrons
+          repositories: aros-tools
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Verify the Release Please App identity and token scope
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_SLUG" == metaneutrons-release-please && "$INSTALLATION_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo '::error::AP7140 Release Please token was issued by an unexpected App'; exit 1;
+          }
+          gh api 'installation/repositories?per_page=100' --paginate --slurp |
+            jq -e --arg repository "$GITHUB_REPOSITORY" '
+              length > 0 and all(.[]; .total_count == 1) and
+              ([.[].repositories[].full_name] == [$repository])' >/dev/null || {
+                echo '::error::AP7141 Release Please token is not restricted to this repository'; exit 1;
+              }
       - name: Open or update the manifest release PR
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           target-branch: main
           skip-github-release: true
-      - name: Dispatch every protected check for the exact release PR head
+      - name: Verify the exact App-authored release PR
         if: steps.release.outputs.prs_created == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_JSON: ${{ steps.release.outputs.pr }}
         run: |
           set -euo pipefail
@@ -139,20 +163,11 @@ jobs:
               raise SystemExit(f'Release PR does not change required files: {missing}')
           PY
 
-          # GITHUB_TOKEN-created PR events are intentionally suppressed by
-          # GitHub. Explicit workflow_dispatch events are the documented
-          # recursion-safe exception and avoid a long-lived PAT/App secret.
-          for workflow in ci.yml release.yml docs.yml codeql.yml; do
-            current_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
-            if [[ "$current_head" != "$head_sha" ]]; then
-              echo "::error::Release PR head changed before ${workflow} dispatch"
-              exit 1
-            fi
-            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$head_ref"
-          done
+          # App-authored PR events trigger the normal protected workflows.
+          # Do not duplicate their runner work with explicit dispatches.
           current_head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
           if [[ "$current_head" != "$head_sha" ]]; then
-            echo '::error::Release PR head changed during protected-check dispatch'
+            echo '::error::Release PR head changed during identity validation'
             exit 1
           fi
-          printf 'Dispatched protected checks for PR #%s at %s\n' "$number" "$head_sha"
+          printf 'Verified Release Please PR #%s at %s; normal PR checks apply\n' "$number" "$head_sha"
