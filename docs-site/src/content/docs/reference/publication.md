@@ -45,14 +45,16 @@ object.
 
 ## Protected credential domains
 
-Configure five independent GitHub environments. APT signing and R2 publication
-intentionally reuse their narrowly scoped identities for tag publication and
-metadata refresh, but those operations still run on separate jobs/runners and
-enforce their exact tag or `main` ref independently. Other credential domains
-stay in their one named environment:
+Configure six independent GitHub environments. Documentation deployment, APT
+signing and R2 publication intentionally use separately scoped identities;
+APT and R2 reuse their identities for tag publication and metadata refresh,
+but those operations still run on separate jobs/runners and enforce their exact
+tag or `main` ref independently. Other credential domains stay in their one
+named environment:
 
 | Environment | Allowed ref | Secrets |
 | --- | --- | --- |
+| `docs-publication` | protected `main` | `CLOUDFLARE_API_TOKEN` |
 | `release` | annotated release tags matching `v*` | `RELEASE_ADMIN_READ_TOKEN` (this repository only, Administration read-only) |
 | `apt-signing` | annotated release tags matching `v*` and protected `main` | `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` |
 | `apt-publication` | annotated release tags matching `v*` and protected `main` | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` |
@@ -76,6 +78,7 @@ same version branch, PR and byte-identical head.
 
 | Secret | Required scope |
 | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare token limited to Workers Scripts edit on the `lexICT` account and Workers Routes edit in the `metaneutrons.cc` zone; no R2 permission |
 | `RELEASE_ADMIN_READ_TOKEN` | Fine-grained access only to this repository, Administration read-only; used by one checkout-free preflight to read immutable-release policy |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained access only to `metaneutrons/homebrew-tap`, with Contents and Pull requests read/write plus Administration read for the branch-protection preflight |
 | `AUR_SSH_PRIVATE_KEY` | Dedicated unencrypted CI key whose public half is registered in the AUR account |
@@ -187,7 +190,11 @@ The bucket is namespaced by product. This workflow owns only `aros-tools/`; the
 reserved `toolchains/` and `images/` prefixes can be published independently
 without changing existing package URLs. `deb.metaneutrons.cc` is the dedicated
 APT hostname; `aros.metaneutrons.cc` remains the general AROS distribution and
-documentation hostname.
+documentation hostname. Its R2 custom-domain CNAME is intentionally retained:
+the narrower `aros.metaneutrons.cc/aros-tools` and
+`aros.metaneutrons.cc/aros-tools/*` Worker routes serve the nested Astro static
+assets before unmatched requests continue to the bucket origin. The Worker has
+no R2 binding and cannot read or write distribution objects.
 
 ## Failure contract
 

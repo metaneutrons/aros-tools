@@ -265,6 +265,7 @@ secret_patterns = {
     'r2-publication': re.compile(r"\$\{\{\s*secrets\.R2_"),
     'aur-publication': re.compile(r"\$\{\{\s*secrets\.AUR_"),
     'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_TAP_TOKEN"),
+    'docs-publication': re.compile(r"\$\{\{\s*secrets\.CLOUDFLARE_API_TOKEN"),
 }
 
 def workflow_jobs(path: Path) -> dict[str, str]:
@@ -332,6 +333,27 @@ for workflow_name in ('publish-ecosystem.yml', 'refresh-apt-metadata.yml'):
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
 refresh_jobs = workflow_jobs(root / 'refresh-apt-metadata.yml')
+docs_jobs = workflow_jobs(root / 'docs.yml')
+docs_build = docs_jobs.get('build', '')
+docs_deploy = docs_jobs.get('deploy', '')
+if docs_jobs:
+    if 'secrets.' in docs_build or re.search(r'^    environment:', docs_build, re.MULTILINE):
+        errors.append(f'{root / "docs.yml"}: documentation build must remain credential-free')
+    if docs_deploy.count('secrets.CLOUDFLARE_API_TOKEN') != 1 or docs_deploy.count('secrets.') != 1:
+        errors.append(
+            f'{root / "docs.yml"}: deploy must receive only one Cloudflare documentation secret'
+        )
+    for required in (
+        'npm run worker:deploy',
+        'trap cleanup EXIT',
+        "trap 'exit 130' HUP INT TERM",
+        'https://aros.metaneutrons.cc/aros-tools/',
+    ):
+        if required not in docs_deploy:
+            errors.append(f'{root / "docs.yml"}: deploy omits contract marker: {required}')
+    for forbidden in ('contents: write', 'id-token: write', 'secrets.R2_'):
+        if forbidden in docs_deploy:
+            errors.append(f'{root / "docs.yml"}: deploy must not contain {forbidden}')
 homebrew_job = publish_jobs.get('homebrew', '')
 if (root / 'publish-ecosystem.yml').exists() and (
     'verify_tap_governance()' not in homebrew_job
@@ -367,6 +389,8 @@ if homebrew_job:
             f'{root / "publish-ecosystem.yml"}: Homebrew merge is not directly guarded by tap governance'
         )
 expected_domains = {
+    ('docs.yml', 'build'): set(),
+    ('docs.yml', 'deploy'): {'docs-publication'},
     ('publish-ecosystem.yml', 'apt-sign'): {'apt-signing'},
     ('publish-ecosystem.yml', 'apt'): {'r2-publication'},
     ('publish-ecosystem.yml', 'homebrew'): {'homebrew-publication'},
@@ -381,7 +405,11 @@ for (workflow_name, job_name), expected in expected_domains.items():
     workflow_path = root / workflow_name
     if not workflow_path.exists():
         continue
-    jobs = publish_jobs if workflow_name == 'publish-ecosystem.yml' else refresh_jobs
+    jobs = {
+        'docs.yml': docs_jobs,
+        'publish-ecosystem.yml': publish_jobs,
+        'refresh-apt-metadata.yml': refresh_jobs,
+    }[workflow_name]
     job = jobs.get(job_name)
     if job is None:
         errors.append(f'{root / workflow_name}: required isolated job is missing: {job_name}')
@@ -394,6 +422,7 @@ for (workflow_name, job_name), expected in expected_domains.items():
         )
 
 expected_environments = {
+    ('docs.yml', 'deploy'): 'docs-publication',
     ('publish-ecosystem.yml', 'apt-sign'): 'apt-signing',
     ('publish-ecosystem.yml', 'apt'): 'apt-publication',
     ('publish-ecosystem.yml', 'homebrew'): 'homebrew-publication',
@@ -405,7 +434,11 @@ for (workflow_name, job_name), environment in expected_environments.items():
     workflow_path = root / workflow_name
     if not workflow_path.exists():
         continue
-    jobs = publish_jobs if workflow_name == 'publish-ecosystem.yml' else refresh_jobs
+    jobs = {
+        'docs.yml': docs_jobs,
+        'publish-ecosystem.yml': publish_jobs,
+        'refresh-apt-metadata.yml': refresh_jobs,
+    }[workflow_name]
     job = jobs.get(job_name, '')
     if f'    environment: {environment}' not in job:
         errors.append(
@@ -413,6 +446,7 @@ for (workflow_name, job_name), environment in expected_environments.items():
         )
 
 credential_free_jobs = {
+    ('docs.yml', 'build'),
     ('publish-ecosystem.yml', 'apt-verify'),
     ('publish-ecosystem.yml', 'apt-install'),
     ('publish-ecosystem.yml', 'aur-verify'),
@@ -423,7 +457,11 @@ for workflow_name, job_name in credential_free_jobs:
     workflow_path = root / workflow_name
     if not workflow_path.exists():
         continue
-    jobs = publish_jobs if workflow_name == 'publish-ecosystem.yml' else refresh_jobs
+    jobs = {
+        'docs.yml': docs_jobs,
+        'publish-ecosystem.yml': publish_jobs,
+        'refresh-apt-metadata.yml': refresh_jobs,
+    }[workflow_name]
     job = jobs.get(job_name, '')
     if re.search(r'^    environment:', job, re.MULTILINE):
         errors.append(

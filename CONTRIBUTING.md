@@ -44,9 +44,11 @@ every host-compatible `aros-cmake-engine` CMake fixture against that same
 qualified checkout; `clang`, `cmake` and `ninja` are therefore required for this gate.
 The real GRUB host-build fixture is an explicit Darwin/arm64 release
 qualification and is reported as an omission on other hosts. The separate
-documentation workflow runs the same locked npm/Astro
-contract through `docs`, then uploads the verified output through a separately
-pinned Pages action.
+documentation workflow runs the same locked npm/Astro contract through `docs`,
+nests the verified output below the public `/aros-tools/` prefix, and proves
+the pinned Wrangler deployment locally. A protected credential-bearing job
+publishes only that build-job handoff to the path-scoped Cloudflare Worker;
+pull requests receive no deployment credential.
 
 `AROS_TEST_SOURCE_ROOT` enables the otherwise skipped real
 `aros source init` → `aros source sync` → `aros-transpiler` integration case.

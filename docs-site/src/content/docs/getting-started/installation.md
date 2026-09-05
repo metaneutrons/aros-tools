@@ -53,9 +53,10 @@ discovers every CMake-engine fixture and runs each host-compatible fixture
 against the same source identity; `clang`, `cmake` and `ninja` are required. The real
 GRUB host-build fixture is an explicit Darwin/arm64 release qualification and
 is visibly omitted on other hosts. The default local `all` contract remains
-complete. The
-separate documentation workflow calls `docs` directly and uploads only its
-verified output through a separately pinned Pages action.
+complete. The separate documentation workflow calls `docs` directly, stages
+the verified output below `/aros-tools/`, and publishes only that handoff
+through a protected Cloudflare Static Assets job. Pull requests receive no
+deployment credential.
 
 Setting `AROS_TEST_SOURCE_ROOT` opts into a real source-init/sync/transpiler
 integration test. The named checkout is only read; the test works in a separate

@@ -5,6 +5,9 @@ target/
 coverage/
 node_modules/
 dist/
+worker-dist/
+.wrangler/
+.wrangler-output/
 .astro/
 **/__pycache__/
 

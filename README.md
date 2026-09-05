@@ -175,9 +175,10 @@ executes every host-compatible one; the real GRUB host-build fixture is an
 explicit Darwin/arm64 release qualification and is visibly omitted elsewhere.
 Adding a fixture therefore broadens the gate rather than creating a manual test
 convention.
-The separate
-documentation workflow calls `docs` directly and then uploads the verified
-`dist` tree through a separately pinned Pages action.
+The separate documentation workflow calls `docs` directly, stages the verified
+output below `/aros-tools/`, and hands it to a protected, path-scoped
+Cloudflare Static Assets deployment. Pull requests receive no deployment
+credential.
 
 The architecture gate protects the long-term shape of the workspace: it
 enforces one-way crate dependencies, keeps production modules bounded, requires
@@ -227,8 +228,12 @@ npm run build
 
 The checked-in lockfile is authoritative. Lifecycle scripts are disabled and
 the locked graph must pass the high-severity audit before Astro runs. The same
-gate is used for GitHub Pages, so the published documentation and pull-request
-checks exercise the same dependency graph.
+gate prepares the path-nested static asset tree consumed by the Cloudflare
+Worker at `https://aros.metaneutrons.cc/aros-tools/`, so the published
+documentation and pull-request checks exercise the same dependency graph. Pull
+requests perform a credential-free Wrangler dry run; only protected `main` may
+enter the isolated `docs-publication` environment and deploy the verified
+handoff.
 
 ## License
 

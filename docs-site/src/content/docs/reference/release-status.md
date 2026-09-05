@@ -28,8 +28,9 @@ No stable `aros-tools` release has been published yet. Consequently there is
 no supported public archive, Homebrew formula, APT package or AUR package to
 claim. Build from source until a release and its measured evidence appear on
 GitHub. Documentation is configured for
-`https://aros.metaneutrons.cc/aros-tools/`; availability at that URL depends on
-the Pages deployment and DNS state.
+`https://aros.metaneutrons.cc/aros-tools/`; its credential-free build includes
+a Wrangler dry run, and a separate protected job publishes that exact static
+handoff to the path-scoped Cloudflare Worker.
 
 ## Required for the first public release
 
