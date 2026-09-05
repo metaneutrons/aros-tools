@@ -21,6 +21,8 @@ package release; it does not advance the native toolchain producer roadmap.
   GitHub App instead of widening Release Please. It has only Actions write,
   Contents read and mandatory Metadata read; installation must be restricted to
   `apt-archive`. The tools credential environment accepts only `v*` tags.
+- Homebrew uses its separate tap-only App, not the APT or Release-Please App.
+  See the [authentication and qualification contract](homebrew-publication.md).
 
 ## Acceptance evidence
 
@@ -46,6 +48,15 @@ package release; it does not advance the native toolchain producer roadmap.
   of the unused first key remain. Old publisher credential copies are not yet
   removed. AUR's public pinned host identity is now available at repository scope
   for credential-free preflight, as well as in its protected environment.
+- [x] Homebrew App identity, full grant and real read-only consumer/protection
+  preflight passed on 2026-09-05 at 17:18 UTC. The App key and client ID are
+  configured in the existing tag-only `homebrew-publication` environment.
+  Local regression gates cover scope, identity, token renewal and legacy PAT
+  rejection. No protection rule or bypass changed.
+- [ ] Qualify the App-authenticated formula PR, four-host tap CI, exact-head
+  merge and final byte read-back in the first release. No release was triggered
+  by credential setup. The old PAT secret is retained for explicit cleanup,
+  but the new workflow does not reference it.
 - [ ] Merge the release candidate only after every protected check passes;
   create a new immutable annotated tag at that exact reviewed commit.
 - [ ] Complete the four-host first-release A/B, isolated GitHub verification,
