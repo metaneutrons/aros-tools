@@ -217,12 +217,21 @@ jobs:
           path: candidate
       - name: Verify closed immutable staging inventory
         run: scripts/release/verify-candidate-inventory.sh --directory candidate --version "$VERSION" --signed true
+      - name: Issue and verify isolated Homebrew App token
+        id: homebrew-token
+        uses: ./.github/actions/homebrew-token
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
       - name: Open an exact formula update
         id: update
+        timeout-minutes: 10
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}
           SOURCE_REPOSITORY_TOKEN: ${{ github.token }}
+          BOT_NAME: ${{ steps.homebrew-token.outputs.bot-name }}
+          BOT_EMAIL: ${{ steps.homebrew-token.outputs.bot-email }}
         run: |
           set -euo pipefail
           cleanup() {
@@ -356,9 +365,8 @@ jobs:
             printf '%s\n' "$pending_changes"
             exit 1
           fi
-          actor=$(gh api user --jq .login)
-          git config user.name 'AROS release automation'
-          git config user.email "${actor}@users.noreply.github.com"
+          git config user.name "$BOT_NAME"
+          git config user.email "$BOT_EMAIL"
           git add Formula/aros-tools.rb README.md
           git commit -m "aros-tools ${VERSION}"
           GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
@@ -393,10 +401,28 @@ jobs:
           echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           cleanup
           trap - EXIT HUP INT TERM
-      - name: Require tap qualification and merge
+      - name: Wait for tap qualification
         if: steps.update.outputs.pr != ''
+        timeout-minutes: 35
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}
+          PR: ${{ steps.update.outputs.pr }}
+        run: |
+          set -euo pipefail
+          gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
+            --watch --fail-fast --interval 20
+      # A token lasts one hour. Late mutations must not reuse the pre-wait token.
+      - name: Renew and verify Homebrew App token after qualification
+        id: homebrew-merge-token
+        uses: ./.github/actions/homebrew-token
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+      - name: Revalidate tap qualification and merge
+        if: steps.update.outputs.pr != ''
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}
           PR: ${{ steps.update.outputs.pr }}
           EXPECTED_HEAD: ${{ steps.update.outputs.head_sha }}
         run: |
@@ -407,8 +433,7 @@ jobs:
           }
           trap cleanup EXIT
           trap 'exit 130' HUP INT TERM
-          gh pr checks "$PR" --repo metaneutrons/homebrew-tap \
-            --watch --fail-fast --interval 20
+          gh pr checks "$PR" --repo metaneutrons/homebrew-tap
           measured_head=$(gh pr view "$PR" --repo metaneutrons/homebrew-tap \
             --json headRefOid --jq .headRefOid)
           if [[ ! "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ || \
@@ -432,7 +457,7 @@ jobs:
           trap - EXIT HUP INT TERM
       - name: Verify the formula now on protected main
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}
         run: |
           set -euo pipefail
           encoded=$(gh api \

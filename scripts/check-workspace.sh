@@ -90,6 +90,7 @@ run_quality() {
     scripts/release/check-actions-policy.sh
     scripts/release/verify-apt-workflow-contract.sh
     scripts/release/test-governance-policy.sh
+    scripts/release/test-homebrew-app.py
     scripts/release/test-release-policy.sh
     actionlint
     # All checked-in shell programs form one lint boundary. The NUL-delimited

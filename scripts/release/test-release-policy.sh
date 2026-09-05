@@ -922,6 +922,8 @@ unlink "$work/policy/.github/workflows/publish-ecosystem.yml"
 rm -f "$work/policy/.github/workflows"/*
 cp "$root/.github/workflows/release.yml" \
     "$work/policy/.github/workflows/release.yml"
+mkdir -p "$work/policy/.github/actions"
+cp -R "$root/.github/actions/homebrew-token" "$work/policy/.github/actions/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null
 sed -i.bak \
     '/^  homebrew-credential-preflight:/,/^  r2-credential-preflight:/ s/environment: homebrew-publication/environment: release/' \

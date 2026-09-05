@@ -1378,18 +1378,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Issue and verify isolated Homebrew App token
+        id: homebrew-token
+        uses: ./.github/actions/homebrew-token
+        with:
+          client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
       - name: Verify dedicated tap access
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}
         run: |
           set -euo pipefail
           cleanup() { unset GH_TOKEN; }
           trap cleanup EXIT
           trap 'exit 130' HUP INT TERM
           [[ -n "$GH_TOKEN" ]] || { echo '::error::AP7110 Homebrew credential is missing'; exit 1; }
-          [[ $(gh api repos/metaneutrons/homebrew-tap --jq '.permissions.push') == true ]] || {
-            echo '::error::AP7110 package credential cannot write the Homebrew tap'; exit 1;
-          }
+          # Write permissions are required during App token issuance, not
+          # inferred from GET /repos user-role flags.
           scripts/release/verify-branch-protection.sh \
             --repository metaneutrons/homebrew-tap >/dev/null || {
               echo '::error::AP7110 Homebrew tap differs from the governance contract'; exit 1;

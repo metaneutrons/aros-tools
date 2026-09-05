@@ -35,7 +35,9 @@ trusted_actions = {
     'googleapis/release-please-action',
     'sigstore/cosign-installer',
 }
-for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
+local_actions = root.parent / 'actions'
+for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
+                    *local_actions.rglob('action.yml'), *local_actions.rglob('action.yaml'))):
     lines = path.read_text().splitlines()
     for line_number, line in enumerate(lines, 1):
         uses_match = re.match(r"^\s*-?\s*uses:\s*([^#]+?)\s*(?:#.*)?$", line)
@@ -158,7 +160,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'))):
             )
 
         secret_domains = {
-            'homebrew': ('secrets.HOMEBREW_TAP_TOKEN',),
+            'homebrew': ('secrets.HOMEBREW_APP_PRIVATE_KEY',),
             'archive': ('secrets.ARCHIVE_DISPATCH_PRIVATE_KEY',),
             'r2': ('secrets.R2_ACCESS_KEY_ID', 'secrets.R2_SECRET_ACCESS_KEY'),
             'apt': ('secrets.APT_GPG_PRIVATE_KEY', 'secrets.APT_GPG_PASSPHRASE'),
@@ -264,7 +266,7 @@ secret_patterns = {
     'apt-signing': re.compile(r"\$\{\{\s*secrets\.APT_GPG_"),
     'r2-publication': re.compile(r"\$\{\{\s*secrets\.R2_"),
     'aur-publication': re.compile(r"\$\{\{\s*secrets\.AUR_"),
-    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_TAP_TOKEN"),
+    'homebrew-publication': re.compile(r"\$\{\{\s*secrets\.HOMEBREW_APP_PRIVATE_KEY"),
     'docs-publication': re.compile(r"\$\{\{\s*secrets\.CLOUDFLARE_API_TOKEN"),
 }
 
@@ -326,6 +328,12 @@ for workflow_name in ('publish-ecosystem.yml',):
                 'permission-contents: read' in step and
                 'skip-token-revoke' not in step):
                 continue
+            if (step_domains == {'homebrew-publication'} and
+                'uses: ./.github/actions/homebrew-token' in step and
+                'client-id: ${{ vars.HOMEBREW_APP_CLIENT_ID }}' in step and
+                'private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}' in step):
+                # This local composite is checked below, including post-revocation.
+                continue
             for required in (
                 'trap cleanup EXIT',
                 "trap 'exit 130' HUP INT TERM",
@@ -337,6 +345,60 @@ for workflow_name in ('publish-ecosystem.yml',):
                     )
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
+release_jobs = workflow_jobs(root / 'release.yml')
+
+# The local composite is the sole Homebrew credential factory. Its underlying
+# pinned action revokes every token at job end (including failure/cancellation).
+homebrew_action = local_actions / 'homebrew-token' / 'action.yml'
+homebrew_users = [
+    job for jobs in (publish_jobs, release_jobs) for job in jobs.values()
+    if 'HOMEBREW_APP_PRIVATE_KEY' in job or './.github/actions/homebrew-token' in job
+]
+if homebrew_users:
+    factory = homebrew_action.read_text() if homebrew_action.is_file() else ''
+    required_factory = (
+        'using: composite',
+        'uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1',
+        'client-id: ${{ inputs.client-id }}', 'private-key: ${{ inputs.private-key }}',
+        'owner: metaneutrons', 'repositories: homebrew-tap',
+        'permission-contents: write', 'permission-pull-requests: write',
+        'permission-actions: read', 'permission-checks: read',
+        'permission-statuses: read', 'permission-administration: read',
+        'GH_TOKEN: ${{ steps.app.outputs.token }}',
+        'HOMEBREW_APP_SLUG: ${{ steps.app.outputs.app-slug }}',
+        'HOMEBREW_INSTALLATION_ID: ${{ steps.app.outputs.installation-id }}',
+        'scripts/release/verify-homebrew-app.sh',
+    )
+    for required in required_factory:
+        if required not in factory:
+            errors.append(f'{homebrew_action}: missing isolated App contract: {required}')
+    for field, value in (('owner', 'metaneutrons'), ('repositories', 'homebrew-tap')):
+        if re.findall(rf'^\s+{field}:\s*([^\n]+)', factory, re.MULTILINE) != [value]:
+            errors.append(f'{homebrew_action}: credential factory target must be exactly {field}: {value}')
+    permissions = re.findall(r'^\s+(permission-[\w-]+):\s*(\S+)', factory, re.MULTILINE)
+    if dict(permissions) != {
+        'permission-contents': 'write', 'permission-pull-requests': 'write',
+        'permission-actions': 'read', 'permission-checks': 'read',
+        'permission-statuses': 'read', 'permission-administration': 'read',
+    } or len(permissions) != 6:
+        errors.append(f'{homebrew_action}: unexpected or duplicate permission grant')
+    for forbidden in ('skip-token-revoke', 'permission-workflows', 'github-api-url:'):
+        if forbidden in factory:
+            errors.append(f'{homebrew_action}: forbidden credential-factory override: {forbidden}')
+    for job in homebrew_users:
+        if '    environment: homebrew-publication' not in job:
+            errors.append('Homebrew App key must stay inside homebrew-publication')
+        for step in job_steps(job):
+            if 'HOMEBREW_APP_PRIVATE_KEY' in step and (
+                'uses: ./.github/actions/homebrew-token' not in step or '\n        run:' in step
+            ):
+                errors.append('Homebrew private key must only reach the verified token factory')
+
+for path in (*root.glob('*.yml'), *root.glob('*.yaml')):
+    for legacy in ('HOMEBREW_TAP_TOKEN', 'PACKAGE_PUBLISH_TOKEN'):
+        if legacy in path.read_text():
+            errors.append(f'{path}: legacy Homebrew PAT binding is forbidden: {legacy}')
+
 docs_jobs = workflow_jobs(root / 'docs.yml')
 docs_build = docs_jobs.get('build', '')
 docs_deploy = docs_jobs.get('deploy', '')
@@ -369,6 +431,28 @@ if (root / 'publish-ecosystem.yml').exists() and (
         f'{root / "publish-ecosystem.yml"}: Homebrew mutation and merge do not revalidate the governance SSOT'
     )
 if homebrew_job:
+    steps = job_steps(homebrew_job)
+    wait = next((i for i, step in enumerate(steps) if '--watch --fail-fast' in step), -1)
+    renew = next((i for i, step in enumerate(steps) if 'id: homebrew-merge-token' in step), -1)
+    merge_step = next((i for i, step in enumerate(steps) if 'gh pr merge' in step), -1)
+    if not 0 <= wait < renew < merge_step:
+        errors.append('Homebrew must renew its App token between qualification wait and merge')
+    else:
+        if ('timeout-minutes: 35' not in steps[wait]
+                or 'timeout-minutes: 10' not in steps[merge_step]
+                or 'gh pr checks' not in steps[merge_step]
+                or 'GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}' not in steps[merge_step]
+                or 'uses: ./.github/actions/homebrew-token' not in steps[renew]):
+            errors.append('Homebrew wait/merge must be bounded and use a newly verified App token')
+    update = next((step for step in steps if 'id: update' in step), '')
+    if ('timeout-minutes: 10' not in update
+            or 'GH_TOKEN: ${{ steps.homebrew-token.outputs.token }}' not in update
+            or 'git config user.name "$BOT_NAME"' not in update
+            or 'git config user.email "$BOT_EMAIL"' not in update
+            or 'gh api user ' in update):
+        errors.append('Homebrew update must use the fresh App token and verified bot identity')
+    if 'GH_TOKEN: ${{ steps.homebrew-merge-token.outputs.token }}' not in steps[-1]:
+        errors.append('Homebrew final read-back must use the renewed tap App token')
     if 'reviewDecision' in homebrew_job or 'independent approval' in homebrew_job:
         errors.append(
             f'{root / "publish-ecosystem.yml"}: solo-maintainer Homebrew publication must not wait for a self-review'
