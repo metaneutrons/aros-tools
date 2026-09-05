@@ -1,6 +1,6 @@
 # Initial release closure
 
-Status: in progress, 2026-09-05. This closes the repository split and first
+Status: in progress, 2026-09-06. This closes the repository split and first
 package release; it does not advance the native toolchain producer roadmap.
 
 ## Decisions
@@ -41,21 +41,36 @@ package release; it does not advance the native toolchain producer roadmap.
 
 - [x] AROS-NX PR #27: twelve product checks and filename checks passed; merged
   normally as `909df75879f278eec08a88c3f0a4aa3e963d888f`.
-- [ ] AROS-NX PR #25: twelve product checks and filename checks passed on
+- [x] AROS-NX PR #25: twelve product checks and filename checks passed on
   `a2698c5e3e8e2bc8cf8934777bccbac081c9a42c`; matrix run `33960448985`.
-  Still open, not merged (2026-09-05).
-- [ ] AROS-NX PR #28: follow-up `e6ca85381f` updates the tools input, runs the
-  companion-header test from the selected engine after building its tools, and
-  uses their locked Rust toolchain. Local release build, fixture and actionlint
-  pass; remote qualification follows PR #25 to avoid a redundant matrix.
-- [ ] Verify the fail-closed upstream synchronizer after the mirrored upstream
-  head is contained in main; qualify its next proposal normally. The workflow
-  is already active (verified 2026-09-05); no reactivation is necessary.
-- [ ] Remove the tools-owned APT publisher and qualify central archive
+  Merged normally as `844630f1d91dfcaa21fc05100f8c586920ee385a` on
+  2026-09-05 at 22:09:44 UTC, preserving the upstream history.
+- [ ] AROS-NX PR #28: follow-up `e6ca85381f` corrected the tools input,
+  companion-header fixture placement and locked Rust selection. After merging
+  forward from new main, matrix `33995179765` tested `c4af20b16b`.
+  The companion-header fixture passed on all six Linux lanes, but product
+  configuration then failed: AHI still required a manifest from the removed
+  source-side `cmake/` directory. The remaining matrix was cancelled after
+  independent Linux hosts reproduced the defect. The
+  [engine-resource ownership correction](cmake-engine-migration.md#product-manifests-belong-to-the-selected-engine)
+  must qualify and merge in tools first; then update #28 to that exact tools
+  commit and require a fresh complete twelve-lane product matrix. It remains
+  open; a cancelled run is not acceptance evidence.
+- [ ] Observe the next normal fail-closed upstream synchronization and qualify
+  its proposal. PR #25 restored the previously failing invariant: main now
+  contains mirrored upstream `966097d4c07fe5a1af3b20ebaa41d40dd8311c09`.
+  The workflow remains active. At the 2026-09-05 check, upstream `82b41642`
+  was another 105 commits ahead; those commits are separate, unqualified work.
+- [x] Remove the tools-owned APT publisher and qualify central archive
   consumption, trust, by-hash metadata, retained versions and negative cases.
   Shared-root implementation: 33 signed-archive tests and 18 dispatch/manifest
   tests pass, including other projects, missing consumer packages, mixed
-  architectures and state/index disagreement. Full CI and merge remain gates.
+  architectures and state/index disagreement. All required and publication
+  qualification workflows passed on PR #39 head `5e1c065498ac8eba373e7e2692048619e118678c`;
+  normal protected squash merge `2f23c512ac3ae876701a12ad907402d5f6d26a63`
+  on 2026-09-05 at 22:14:35 UTC has exactly the tested source tree.
+  PR acceptance used the approved three-host Homebrew exception; this does
+  not establish four-host release acceptance or production publication.
 - [x] Central archive PR #15 merged as
   `0319276b951412c2a433e03841832fb718b58e11`. Its publisher and verifier passed
   a real isolated private-R2 test on 2026-09-05: bootstrap with an empty
@@ -71,11 +86,15 @@ package release; it does not advance the native toolchain producer roadmap.
   verifier now handles rulesets and classic protection, with positive and
   negative HTTP, identity, scope and policy fixtures; the actual read-only
   release-policy credential passed the ruleset preflight.
-- [ ] Verify publication credentials and environment isolation without exposing
+- [x] Verify publication credentials and environment isolation without exposing
   secret values. The central APT App credential and tag-only environment are
-  configured, with a successful read-only consumer preflight. Acceptance still
-  requires removal of old archive signing/storage credential copies from the
-  unused tools environments; those copies have not yet been removed.
+  configured, with a successful read-only consumer preflight. After PR #39's
+  merge, exactly five approved obsolete secret copies were removed on
+  2026-09-05 at 22:16:46 UTC: the two `R2_*` copies from `apt-publication`,
+  `APT_GPG_PRIVATE_KEY` and `APT_GPG_PASSPHRASE` from `apt-signing`, and
+  `HOMEBREW_TAP_TOKEN` from `homebrew-publication`. Exact metadata preflight
+  and read-back proved both old APT environments empty and the Homebrew App
+  key unchanged. No shared credential, App grant, vault or keychain changed.
   AUR's public pinned host identity is now available at repository scope
   for credential-free preflight, as well as in its protected environment.
 - [x] Homebrew App identity, full grant and real read-only consumer/protection
@@ -89,8 +108,8 @@ package release; it does not advance the native toolchain producer roadmap.
   changed.
 - [ ] Qualify the App-authenticated formula PR, four-host tap CI, exact-head
   merge and final byte read-back in the first release. No release was triggered
-  by credential setup. The old PAT secret is retained for explicit cleanup,
-  but the new workflow does not reference it.
+  by credential setup. The old tools-local PAT copy has been removed; the
+  workflow uses only the restricted Homebrew App.
 - [ ] Requalify genuine Intel Homebrew installation. Run `33985724773` reported
   all four Homebrew labels green, but its `macos-x86_64` job used the ARM
   `macos-14` runner. That result is not Intel evidence. The correction selects
@@ -115,9 +134,17 @@ package release; it does not advance the native toolchain producer roadmap.
   2026-09-05 at 17:36 UTC. Exact repository grant, configuration/PR/label
   reads, key fingerprint and secret/variable metadata verified. No App rights
   widened. Thirteen isolated workflow/scope counter-probes pass.
-- [ ] Merge the authentication changes and observe the first actual
-  App-authored release PR update with its normal protected checks. A local
-  API preflight is not this end-to-end evidence.
+- [x] Merge the authentication changes and observe the first actual
+  App-authored release PR update with naturally triggered protected checks.
+  Main-push run `33995343916` succeeded on `2f23c512`, including exact token
+  scope/identity, release-PR verification and post-job revocation. The
+  `metaneutrons-release-please[bot]` App updated PR #38 to
+  `48eab742b98f76e42c2718ca63a5001307cb37a3` and triggered release, workspace,
+  docs and CodeQL runs `33995370040`, `33995369750`, `33995369748` and
+  `33995369734` through normal `pull_request` events. Both actor fields match
+  the App; no manual dispatch substituted for those events. PR #38 remains
+  open. This proves App integration, not release qualification or permission
+  to merge/tag the candidate.
 - [ ] Merge the release candidate only after every protected check passes;
   create a new immutable annotated tag at that exact reviewed commit.
 - [ ] Complete the four-host first-release A/B, isolated GitHub verification,
@@ -128,12 +155,12 @@ package release; it does not advance the native toolchain producer roadmap.
 ## Explicitly separate, unproven work
 
 The shared-domain archive implementation is merged and live-R2 qualified; the
-tools consumer migration still requires its protected merge. No first tools
+tools consumer migration is also merged through PR #39. No first tools
 release was published. Archive tests include signed two-project transactions,
 conditional S3 uploads, byte-identical container rendering and actual
-Debian 12/13 APT consumers with a wrong-key counter-probe. Legacy APT signing/storage
-secrets remain in the unused `apt-signing`/`apt-publication` environments.
-Remove those copies only as an explicit, verified cleanup of the old publisher.
+Debian 12/13 APT consumers with a wrong-key counter-probe. Obsolete tools-local
+APT signing/storage and Homebrew PAT copies have been removed with exact
+before/after metadata checks. Actual first-release publication remains open.
 
 Native producer integration remains separate from initial release acceptance:
 [epic #27](https://github.com/metaneutrons/aros-tools/issues/27),
