@@ -1124,19 +1124,22 @@ jobs:
         include:
           - name: linux-x86_64
             runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - name: macos-x86_64
-            # Homebrew classifies Intel Sequoia as Tier 3 and currently builds
-            # openssl@3 from source there; the hosted image's pre-existing
-            # OpenSSL state makes that unrelated post-install fail after this
-            # formula is already installed. Sonoma is the supported Intel
-            # package-manager baseline. The archive itself is still produced
-            # and smoke-tested independently on macos-15-intel above.
-            runner: macos-14
+            # Bare macos-14/15 labels are ARM, not Intel. Homebrew's Tier 3
+            # Intel status never permits substituting an ARM qualification.
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
           - name: macos-aarch64
             runner: macos-15
+            target: aarch64-apple-darwin
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: qualified-release-staging
@@ -1146,11 +1149,21 @@ jobs:
         with:
           core: false
           cask: false
+      - name: Verify the real host and Homebrew architecture
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/verify-homebrew-install.py host \
+            --target "$TARGET" --brew-prefix "$(brew --prefix)" \
+            --brew-arch "$(brew ruby -e 'puts Hardware::CPU.arch')"
       - name: Install and test the measured formula
         shell: bash
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
           VERSION: ${{ needs.metadata.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           port=38080
@@ -1186,7 +1199,15 @@ jobs:
           fi
           ruby -c "$formula"
           brew audit --strict "$tap/aros-tools"
-          brew install "$tap/aros-tools"
+          if ! brew install --verbose "$tap/aros-tools"; then
+            echo '::error::AP7322 Homebrew installation or dependency post-install failed; qualification remains failed'
+            brew config
+            exit 1
+          fi
+          python3 scripts/release/verify-homebrew-install.py installed \
+            --target "$TARGET" --version "$VERSION" \
+            --manifest "candidate/aros-tools-v${VERSION}-${TARGET}.tar.gz.manifest.json" \
+            --prefix "$(brew --prefix aros-tools)"
           brew test "$tap/aros-tools"
           for binary in \
             aros aros-ahi-runner aros-collect aros-fetch \

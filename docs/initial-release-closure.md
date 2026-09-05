@@ -82,6 +82,12 @@ package release; it does not advance the native toolchain producer roadmap.
   merge and final byte read-back in the first release. No release was triggered
   by credential setup. The old PAT secret is retained for explicit cleanup,
   but the new workflow does not reference it.
+- [ ] Requalify genuine Intel Homebrew installation. Run `33985724773` reported
+  all four Homebrew labels green, but its `macos-x86_64` job used the ARM
+  `macos-14` runner. That result is not Intel evidence. The correction selects
+  `macos-15-intel` and verifies real host identity plus installed native bytes
+  against the selected staging manifest. A fresh complete run must pass;
+  dependency/post-install errors remain blocking.
 - [x] Release Please App preflight and main-only environment configured on
   2026-09-05 at 17:36 UTC. Exact repository grant, configuration/PR/label
   reads, key fingerprint and secret/variable metadata verified. No App rights

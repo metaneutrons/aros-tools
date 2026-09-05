@@ -208,6 +208,27 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                     f'{path}: secret preflight {job_name} can run before validated configuration'
                 )
         homebrew_preflight = jobs.get('homebrew-credential-preflight', '')
+        homebrew_install = jobs.get('homebrew', '')
+        matrix_source = '\n'.join(line for line in homebrew_install.splitlines()
+                                  if not line.lstrip().startswith('#'))
+        measured_hosts = re.findall(
+            r'- name: (\S+)\n\s+runner: (\S+)\n\s+target: (\S+)', matrix_source)
+        if measured_hosts != [
+            ('linux-x86_64', 'ubuntu-24.04', 'x86_64-unknown-linux-gnu'),
+            ('linux-aarch64', 'ubuntu-24.04-arm', 'aarch64-unknown-linux-gnu'),
+            ('macos-x86_64', 'macos-15-intel', 'x86_64-apple-darwin'),
+            ('macos-aarch64', 'macos-15', 'aarch64-apple-darwin'),
+        ]:
+            errors.append(f'{path}: Homebrew install matrix must bind four genuine native hosts')
+        for required in (
+            'verify-homebrew-install.py host', 'verify-homebrew-install.py installed',
+            "brew ruby -e 'puts Hardware::CPU.arch'", '--brew-prefix "$(brew --prefix)"',
+            '--target "$TARGET"', '--manifest "candidate/aros-tools-v${VERSION}-${TARGET}.tar.gz.manifest.json"',
+            'if ! brew install --verbose "$tap/aros-tools"; then',
+            'AP7322', 'brew test "$tap/aros-tools"',
+        ):
+            if required not in homebrew_install:
+                errors.append(f'{path}: Homebrew install qualification omits {required}')
         if (
             'verify-branch-protection.sh' not in homebrew_preflight
             or '--repository metaneutrons/homebrew-tap' not in homebrew_preflight

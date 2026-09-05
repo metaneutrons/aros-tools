@@ -2,10 +2,13 @@
 """Offline positive/negative contracts for Homebrew App publication."""
 
 import json
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -193,6 +196,19 @@ class WorkflowPolicy(unittest.TestCase):
         self.replace(self.publish, "environment: homebrew-publication", "environment: release")
         self.check("must stay inside homebrew-publication")
 
+    def test_arm_runner_cannot_qualify_intel(self):
+        release = self.work / ".github/workflows/release.yml"
+        self.replace(release, "runner: macos-15-intel", "runner: macos-14")
+        self.check("four genuine native hosts")
+
+    def test_missing_native_identity_proof(self):
+        release = self.work / ".github/workflows/release.yml"
+        for mode in ("host", "installed"):
+            original = release.read_text()
+            self.replace(release, f"verify-homebrew-install.py {mode}", "true")
+            self.check("Homebrew install qualification omits")
+            release.write_text(original)
+
 
 class CheckRegistration(unittest.TestCase):
     @classmethod
@@ -259,6 +275,113 @@ class CheckRegistration(unittest.TestCase):
         self.data["statusCheckRollup"] = [dict(__typename="StatusContext", context="CI success", state="PENDING")]
         self.wait(lambda _: self.data)
         self.assertEqual(self.now, 0)
+
+
+class NativeInstallation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "verify_brew_install", ROOT / "scripts/release/verify-homebrew-install.py")
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="aros-brew-native-")
+        self.addCleanup(self.tmp.cleanup)
+        self.work = Path(self.tmp.name)
+        self.prefix = self.work / "installed"
+        (self.prefix / "bin").mkdir(parents=True)
+        self.manifest_path = self.work / "manifest.json"
+        self.target = "x86_64-apple-darwin"
+        self.prepare(self.target)
+
+    def prepare(self, target):
+        header = bytearray(32)
+        arm = target.startswith("aarch64")
+        if target.endswith("apple-darwin"):
+            header[:4] = b"\xcf\xfa\xed\xfe"
+            struct.pack_into("<I", header, 4, 0x0100000C if arm else 0x01000007)
+            struct.pack_into("<I", header, 12, 2)
+        else:
+            header[:7] = b"\x7fELF\x02\x01\x01"
+            struct.pack_into("<HH", header, 16, 3, 183 if arm else 62)
+        self.manifest = dict(schema=1, package="aros-tools", version="0.1.0", target=target,
+                             archive=f"aros-tools-v0.1.0-{target}.tar.gz", files=[])
+        for name in sorted(self.module.BINARY_NAMES):
+            payload = bytes(header) + name.encode()
+            path = self.prefix / "bin" / name
+            path.write_bytes(payload)
+            path.chmod(0o755)
+            self.manifest["files"].append(dict(path=f"bin/{name}", size=len(payload),
+                                               sha256=hashlib.sha256(payload).hexdigest()))
+
+    def check(self, marker=None, target=None):
+        self.manifest_path.write_text(json.dumps(self.manifest))
+        if marker:
+            with self.assertRaisesRegex(self.module.QualificationError, marker):
+                self.module.check_install(self.manifest_path, self.prefix, target or self.target, "0.1.0")
+        else:
+            self.module.check_install(self.manifest_path, self.prefix, target or self.target, "0.1.0")
+
+    def test_four_native_hosts_and_wrong_mappings(self):
+        for target, host in self.module.HOSTS.items():
+            with self.subTest(target=target):
+                self.module.check_host(target, *host)
+                for other in self.module.HOSTS.values():
+                    if other != host:
+                        with self.assertRaisesRegex(self.module.QualificationError, "AP7320"):
+                            self.module.check_host(target, *other)
+                with self.assertRaisesRegex(self.module.QualificationError, "AP7320"):
+                    self.module.check_host(target, *host, translated=True)
+
+    def test_binary_inventory_tracks_canonical_rust_contract(self):
+        source = (ROOT / "crates/aros-release/src/archive.rs").read_text()
+        names = re.search(r'pub const BINARIES:.*?= &\[(.*?)\];', source, re.S).group(1)
+        self.assertEqual(set(re.findall(r'"([^"]+)"', names)), self.module.BINARY_NAMES)
+
+    def test_four_payload_formats(self):
+        for target in self.module.HOSTS:
+            with self.subTest(target=target):
+                self.prepare(target)
+                self.check(target=target)
+
+    def test_wrong_manifest_identity(self):
+        for field, value in (("schema", 2), ("target", "aarch64-apple-darwin"),
+                             ("version", "0.1.1"), ("archive", "other.tar.gz")):
+            with self.subTest(field=field):
+                previous = self.manifest[field]
+                self.manifest[field] = value
+                self.check("AP7321")
+                self.manifest[field] = previous
+
+    def test_arm_payload_even_with_matching_digest_is_not_intel(self):
+        self.prepare("aarch64-apple-darwin")
+        self.manifest.update(target=self.target, archive=f"aros-tools-v0.1.0-{self.target}.tar.gz")
+        self.check("not native")
+
+    def test_altered_installed_bytes(self):
+        binary = self.prefix / "bin/aros"
+        binary.write_bytes(binary.read_bytes()[:-1] + b"!")
+        self.check("installed bytes differ")
+
+    def test_symlink_and_nonexecutable_rejected(self):
+        binary = self.prefix / "bin/aros"
+        binary.chmod(0o644)
+        self.check("executable mode")
+        binary.rename(self.work / "actual-aros")
+        binary.symlink_to(self.work / "actual-aros")
+        self.check("file type")
+
+    def test_extra_installed_binary(self):
+        (self.prefix / "bin/extra").write_text("not in the release")
+        self.check("unexpected inventory")
+
+    def test_duplicate_or_traversing_manifest_entry(self):
+        self.manifest["files"].append(self.manifest["files"][0])
+        self.check("binary inventory")
+        self.manifest["files"].pop()
+        self.manifest["files"][0]["path"] = "bin/../../escape"
+        self.check("binary inventory")
 
 
 if __name__ == "__main__":

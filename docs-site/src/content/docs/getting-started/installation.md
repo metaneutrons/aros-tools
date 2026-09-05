@@ -192,6 +192,12 @@ brew install metaneutrons/tap/aros-tools
 brew test metaneutrons/tap/aros-tools
 ```
 
+On Intel Macs, Homebrew itself is now
+[Tier 3](https://docs.brew.sh/Support-Tiers): dependencies may require source
+builds or fail to install. The native GitHub archive remains the alternative
+for the aros-tools executables; its prerequisite tools still need to be
+available. Do not ignore a failed Homebrew dependency installation.
+
 ## Arch Linux (AUR)
 
 After the package is publicly qualified, review its `PKGBUILD` and install

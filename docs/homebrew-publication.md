@@ -67,6 +67,20 @@ run may be resumed only through the existing exact-byte roll-forward rules.
 
 ## Diagnostics and verification
 
+Native package qualification uses explicit `macos-15-intel` for Intel and
+`macos-15` for Apple silicon; bare macOS labels are not architecture-neutral.
+The gate measures the OS, process architecture, Homebrew CPU and default prefix,
+rejects Rosetta, then compares all eight installed executables to the selected
+host's already-verified staging manifest. Native Mach-O/ELF headers, regular
+executable files, the exact bin inventory, sizes and SHA-256 must agree before
+the formula test and version checks run. Dependency or post-install failure
+remains a failed install, even if the aros-tools files already exist.
+
+[Homebrew classifies Intel macOS as Tier 3](https://docs.brew.sh/Support-Tiers).
+Dependency bottles may be unavailable and source builds may fail. Our explicit
+Intel gate is measured package qualification, not a promise of upstream Homebrew
+support; never replace it with an ARM job or ignore its installation failures.
+
 | Code | Failed guarantee |
 | --- | --- |
 | AP7110 | Required App token missing |
@@ -81,6 +95,9 @@ run may be resumed only through the existing exact-byte roll-forward rules.
 | AP7312 | Check API, response or state is invalid; no retry as empty inventory |
 | AP7313 | A check failed while others were still registering |
 | AP7314 | Required checks did not register within five minutes |
+| AP7320 | Actual host, Homebrew architecture/prefix or translation state differs |
+| AP7321 | Installed native files do not match the selected staging manifest |
+| AP7322 | Homebrew installation or dependency post-install failed |
 
 API error bodies and credential values are not logged by the verifier. A
 local successful preflight proves access and protection, not a completed
