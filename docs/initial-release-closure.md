@@ -31,6 +31,11 @@ package release; it does not advance the native toolchain producer roadmap.
   `apt-archive`. The tools credential environment accepts only `v*` tags.
 - Homebrew uses its separate tap-only App, not the APT or Release-Please App.
   See the [authentication and qualification contract](homebrew-publication.md).
+- Fabian approved [HB-2026-09-05](homebrew-intel-exception.md): pause only the
+  Intel Homebrew PR-install lane until 2026-10-05, 00:00 UTC, with enforced
+  expiry. Native Intel builds/tests remain required. This permits development
+  PR acceptance with explicitly incomplete Homebrew coverage, never a release;
+  tag/manual runs and shared tap CI retain all four hosts.
 
 ## Acceptance evidence
 
@@ -78,8 +83,9 @@ package release; it does not advance the native toolchain producer roadmap.
   configured in the existing tag-only `homebrew-publication` environment.
   Local regression gates cover scope, identity, token renewal and legacy PAT
   rejection. The check-registration race is bounded to five minutes and covered
-  by 33 App/publication tests, with 11 additional native-host and installed-byte
-  counter-probes (44 Homebrew tests in total). No tap protection rule or bypass
+  by App/publication tests, with additional native-host and installed-byte
+  counter-probes. The dated PR exception has separate matrix/expiry and actual
+  publication-condition counter-probes. No tap protection rule or bypass
   changed.
 - [ ] Qualify the App-authenticated formula PR, four-host tap CI, exact-head
   merge and final byte read-back in the first release. No release was triggered
@@ -96,10 +102,15 @@ package release; it does not advance the native toolchain producer roadmap.
   job-only debug replay (attempt 2, job `101367689886`) reproduced the failure
   and exposed its cause: Homebrew 6.0.22 rejects its own API-cache formula path
   in `FormulaInstaller#post_install_formula_path`, before OpenSSL's hook runs.
-  A current Git-backed core tap is a documented alternative source mode, but
-  adopting it would need aligned Intel qualification, tap CI and installation
-  instructions; it has not been implemented or qualified. Dependency/post-install
-  errors remain blocking. See the [debug evidence](https://github.com/metaneutrons/aros-tools/actions/runs/33987257343/job/101367689886).
+  Independent isolated ARM checks also reproduce the automatic API-source
+  failure on the exact runner revision and upstream main; Intel exposes but
+  does not cause the bug. No alternate core source mode or Homebrew production
+  fix has been applied. Dependency/post-install errors remain blocking for
+  releases. See the [debug evidence](https://github.com/metaneutrons/aros-tools/actions/runs/33987257343/job/101367689886)
+  and the [dated PR exception/removal checklist](homebrew-intel-exception.md).
+- [ ] Remove `HB-2026-09-05` after genuine four-host evidence. The PR-only
+  exception expires at 2026-10-05, 00:00 UTC; it must not silently become the
+  permanent matrix or be counted as first-release acceptance.
 - [x] Release Please App preflight and main-only environment configured on
   2026-09-05 at 17:36 UTC. Exact repository grant, configuration/PR/label
   reads, key fingerprint and secret/variable metadata verified. No App rights

@@ -81,6 +81,13 @@ Dependency bottles may be unavailable and source builds may fail. Our explicit
 Intel gate is measured package qualification, not a promise of upstream Homebrew
 support; never replace it with an ARM job or ignore its installation failures.
 
+**Temporary PR-only exception:** [HB-2026-09-05](homebrew-intel-exception.md)
+pauses this Intel installation lane until 2026-10-05, 00:00 UTC. Native Intel
+builds/tests continue. Every affected PR explicitly reports incomplete
+Homebrew qualification; tag and manual runs still require all four hosts.
+The exception does not change tap CI or authorize a release. Its expiry is
+enforced, with the removal checklist in the linked decision record.
+
 | Code | Failed guarantee |
 | --- | --- |
 | AP7110 | Required App token missing |
@@ -98,6 +105,10 @@ support; never replace it with an ARM job or ignore its installation failures.
 | AP7320 | Actual host, Homebrew architecture/prefix or translation state differs |
 | AP7321 | Installed native files do not match the selected staging manifest |
 | AP7322 | Homebrew installation or dependency post-install failed |
+| AP7330 | Invalid/unsafe matrix or an unapproved exception scope/duration |
+| AP7331 | PR exception is outside its recorded UTC validity window |
+| AP7332 | Unknown or contradictory qualification event/ref |
+| AP7333 | Policy read/parse or diagnostic-output I/O failed |
 
 API error bodies and credential values are not logged by the verifier. A
 local successful preflight proves access and protection, not a completed
@@ -105,6 +116,7 @@ publication.
 
 ```sh
 python3 scripts/release/test-homebrew-app.py
+python3 scripts/release/test-homebrew-matrix.py
 bash scripts/release/test-governance-policy.sh
 bash scripts/release/test-release-policy.sh
 bash scripts/release/check-actions-policy.sh
