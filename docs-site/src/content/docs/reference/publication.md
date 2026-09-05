@@ -15,7 +15,7 @@ records which channels are actually available.
 | --- | --- | --- |
 | GitHub native archive | macOS Intel/Apple silicon; Linux x86-64/ARM64 | [aros-tools releases](https://github.com/metaneutrons/aros-tools/releases) |
 | Homebrew | The same four hosts | `metaneutrons/tap/aros-tools` |
-| Signed APT | Debian/Ubuntu on `amd64` or `arm64`, within the binary compatibility floor | `https://deb.metaneutrons.cc/aros-tools` |
+| Signed APT | Debian/Ubuntu on `amd64` or `arm64`, within the binary compatibility floor | `https://deb.metaneutrons.cc` |
 | AUR | Arch Linux on `x86_64` or `aarch64` | `aros-tools-bin` |
 
 [Installation](/aros-tools/getting-started/installation/) contains the commands

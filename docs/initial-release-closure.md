@@ -22,8 +22,8 @@ package release; it does not advance the native toolchain producer roadmap.
   archive owns signing, retention, metadata refresh and publication.
 - The intended public installation contract is the shared root
   `https://deb.metaneutrons.cc`, suite `rolling`, component `main`, with the
-  central domain keyring. The current per-project consumer contract still
-  needs that migration. Publication is incomplete until both architectures
+  central domain keyring. The consumer contract and public instructions now
+  use that root and verify the signed shared-domain inventory. Publication is incomplete until both architectures
   install the exact released bytes.
 - Fabian also approved a separate, account-private `metaneutrons-apt-dispatch`
   GitHub App instead of widening Release Please. It has only Actions write,
@@ -47,9 +47,9 @@ package release; it does not advance the native toolchain producer roadmap.
   head is contained in main; qualify its next proposal normally.
 - [ ] Remove the tools-owned APT publisher and qualify central archive
   consumption, trust, by-hash metadata, retained versions and negative cases.
-  Implementation is locally complete: 27 signed-archive tests, 18 dispatch and
-  manifest tests, the entire workspace quality gate and the documentation gate
-  pass. GitHub qualification and merge are still required.
+  Shared-root implementation: 33 signed-archive tests and 18 dispatch/manifest
+  tests pass, including other projects, missing consumer packages, mixed
+  architectures and state/index disagreement. Full CI and merge remain gates.
 - [ ] Verify publication credentials and environment isolation without exposing
   secret values. The central APT App credential and tag-only environment are
   configured, with a successful read-only consumer preflight. Acceptance still
@@ -61,7 +61,8 @@ package release; it does not advance the native toolchain producer roadmap.
   preflight passed on 2026-09-05 at 17:18 UTC. The App key and client ID are
   configured in the existing tag-only `homebrew-publication` environment.
   Local regression gates cover scope, identity, token renewal and legacy PAT
-  rejection. No protection rule or bypass changed.
+  rejection. The check-registration race is bounded to five minutes and covered
+  by 33 tests in total. No protection rule or bypass changed.
 - [ ] Qualify the App-authenticated formula PR, four-host tap CI, exact-head
   merge and final byte read-back in the first release. No release was triggered
   by credential setup. The old PAT secret is retained for explicit cleanup,
@@ -82,9 +83,11 @@ package release; it does not advance the native toolchain producer roadmap.
 
 ## Explicitly separate, unproven work
 
-The shared-domain APT decision has **not** been activated. The archive implementation still needs
-qualification; the consumer contract and public installation instructions must
-then move together to `https://deb.metaneutrons.cc`. Legacy APT signing/storage
+The shared-domain APT implementation and consumer migration are prepared, not
+yet merged or published. Archive tests include signed two-project transactions,
+conditional S3 upload simulation, byte-identical container rendering and actual
+Debian 12/13 APT consumers with a wrong-key counter-probe. Live isolated R2
+qualification and the protected CI/merge gates remain. Legacy APT signing/storage
 secrets remain in the unused `apt-signing`/`apt-publication` environments.
 Remove those copies only as an explicit, verified cleanup of the old publisher.
 

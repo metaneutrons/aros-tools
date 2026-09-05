@@ -26,6 +26,7 @@ RUN_URL = f"https://github.com/{REPOSITORY}/actions/runs/{RUN_ID}"
 
 # Inert public input, intentionally independent of the publication implementation.
 MANIFEST = '''[domain]
+layout = "shared-root-v1"
 host = "deb.metaneutrons.cc"
 base_url = "https://deb.metaneutrons.cc"
 origin = "metaneutrons"
@@ -43,7 +44,6 @@ acquire_by_hash = true
 valid_until_days = 180
 [[projects]]
 name = "aros-tools"
-prefix = "/aros-tools"
 source_repo = "metaneutrons/aros-tools"
 packages = ["aros-tools"]
 keep_versions = 5

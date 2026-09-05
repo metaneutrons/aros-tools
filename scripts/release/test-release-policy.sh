@@ -743,22 +743,22 @@ for verify_mode in preflight exact; do
       PATH="$work/mock-bin:$PATH" \
       "${channel_verify[@]}" --mode "$verify_mode" >/dev/null
 done
-cp "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages" \
+cp "$work/channels/apt/dists/rolling/main/binary-amd64/Packages" \
     "$work/Packages.amd64.saved"
-printf '\n' >> "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages"
+printf '\n' >> "$work/channels/apt/dists/rolling/main/binary-amd64/Packages"
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
     MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
     PATH="$work/mock-bin:$PATH" \
     "${channel_verify[@]}" --mode exact
 mv "$work/Packages.amd64.saved" \
-    "$work/channels/apt/aros-tools/dists/rolling/main/binary-amd64/Packages"
-cp "$work/channels/apt/aros-tools/dists/rolling/Release" "$work/Release.saved"
-printf '\n' >> "$work/channels/apt/aros-tools/dists/rolling/Release"
+    "$work/channels/apt/dists/rolling/main/binary-amd64/Packages"
+cp "$work/channels/apt/dists/rolling/Release" "$work/Release.saved"
+printf '\n' >> "$work/channels/apt/dists/rolling/Release"
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
     MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
     PATH="$work/mock-bin:$PATH" \
     "${channel_verify[@]}" --mode exact
-mv "$work/Release.saved" "$work/channels/apt/aros-tools/dists/rolling/Release"
+mv "$work/Release.saved" "$work/channels/apt/dists/rolling/Release"
 printf '%s\n' \
     '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"9.0.0-1"}]}' \
     > "$work/channels/aur-rpc.json"

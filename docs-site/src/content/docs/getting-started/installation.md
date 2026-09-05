@@ -129,7 +129,7 @@ instead of overwriting individual files.
 
 ## Debian and Ubuntu
 
-The package channel is `https://deb.metaneutrons.cc/aros-tools`.
+The package channel is `https://deb.metaneutrons.cc`.
 After it is marked available, verify the archive key before adding the source.
 
 <details>
@@ -167,7 +167,7 @@ test "$IDENTITY" = "$(printf '%s\n%s' "$PRIMARY" "$SIGNING_FINGERPRINT")"
 sudo install -m 0644 "$KEY" /usr/share/keyrings/metaneutrons-archive-keyring.pgp
 sudo tee /etc/apt/sources.list.d/aros-tools.sources >/dev/null <<'SOURCES'
 Types: deb
-URIs: https://deb.metaneutrons.cc/aros-tools
+URIs: https://deb.metaneutrons.cc
 Suites: rolling
 Components: main
 Architectures: amd64 arm64

@@ -26,6 +26,7 @@ def validate(manifest: dict, contract: dict) -> None:
     expected = {
         ("domain", "host"): "deb." + contract["domain"],
         ("domain", "base_url"): contract["base_url"],
+        ("domain", "layout"): contract["layout"],
         ("domain", "origin"): contract["origin"],
         ("domain", "keyring_package"): contract["keyring"].removesuffix(".pgp"),
         ("domain", "keyring_file"): "/usr/share/keyrings/" + contract["keyring"],
@@ -42,8 +43,20 @@ def validate(manifest: dict, contract: dict) -> None:
         actual = manifest.get(section, {}).get(field)
         apt.require(type(actual) is type(value) and actual == value,
                     f"central archive {section}.{field} differs from the reviewed consumer contract")
-    for field, value in {"prefix": "/" + contract["prefix"],
-                         "source_repo": "metaneutrons/aros-tools", "packages": ["aros-tools"],
+    packages = set()
+    names = set()
+    for item in manifest["projects"]:
+        apt.require(isinstance(item, dict) and "prefix" not in item,
+                    "shared archive projects must not declare prefixes")
+        apt.require(isinstance(item.get("name"), str) and item["name"] not in names,
+                    "shared archive project names must be unique")
+        names.add(item["name"])
+        owned = item.get("packages")
+        apt.require(isinstance(owned, list) and owned
+                    and all(isinstance(name, str) and name not in packages for name in owned)
+                    and len(owned) == len(set(owned)), "shared archive package ownership overlaps")
+        packages.update(owned)
+    for field, value in {"source_repo": "metaneutrons/aros-tools", "packages": ["aros-tools"],
                          "keep_versions": contract["keep_versions"]}.items():
         apt.require(type(project[0].get(field)) is type(value) and project[0].get(field) == value,
                     f"central archive project.{field} differs from the reviewed consumer contract")
@@ -65,8 +78,10 @@ def main() -> None:
         text = args.documentation.read_text(encoding="utf-8")
         for value in (contract["primary_fingerprint"], contract["signing_subkey"],
                       contract["keyring"], "Suites: " + contract["suite"],
-                      contract["base_url"] + "/" + contract["prefix"]):
+                      "URIs: " + contract["base_url"] + "\n"):
             apt.require(value in text, f"installation documentation omits central APT identity {value}")
+        apt.require(contract["base_url"] + "/aros-tools" not in text,
+                    "installation documentation still uses a project APT prefix")
     print(json.dumps(contract, sort_keys=True))
 
 

@@ -67,7 +67,7 @@ def create_fixture(root: Path) -> dict:
 
 
 def sign(root: Path, contract: dict, fields: str | None = None, epoch: int | None = None) -> None:
-    release = root / "archive/aros-tools/dists/rolling/Release"
+    release = root / "archive/dists/rolling/Release"
     if fields is not None:
         release.write_text(fields)
     timestamp = epoch or int(email.utils.parsedate_to_datetime(
@@ -81,7 +81,7 @@ def sign(root: Path, contract: dict, fields: str | None = None, epoch: int | Non
 
 def render_fixture(root: Path, contract: dict, versions: tuple[str, ...] = ("1.2.2", "1.2.3"),
                    *, fields_override: dict | None = None, epoch: int | None = None) -> None:
-    archive = root / "archive/aros-tools"
+    archive = root / "archive"
     dists = archive / "dists/rolling"
     for arch in ("amd64", "arm64"):
         index_dir = dists / f"main/binary-{arch}"
@@ -98,11 +98,20 @@ def render_fixture(root: Path, contract: dict, versions: tuple[str, ...] = ("1.2
                            f"Filename: {filename}\nSize: {len(payload)}\n"
                            f"SHA256: {hashlib.sha256(payload).hexdigest()}\n"
                            f"SHA512: {hashlib.sha512(payload).hexdigest()}\n")
+        payload = b"another project's portable package\n"
+        filename = "pool/main/d/devserial/devserial_2:0.4~rc1-2_all.deb"
+        path = archive / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        entries.append("Package: devserial\nVersion: 2:0.4~rc1-2\nArchitecture: all\n"
+                       f"Filename: {filename}\nSize: {len(payload)}\n"
+                       f"SHA256: {hashlib.sha256(payload).hexdigest()}\n"
+                       f"SHA512: {hashlib.sha512(payload).hexdigest()}\n")
         (index_dir / "Packages").write_text("\n".join(entries))
         (index_dir / "Packages.gz").write_bytes(gzip.compress((index_dir / "Packages").read_bytes(), mtime=0))
     published = epoch or int(time.time()) - 30
     fields = {
-        "Origin": "metaneutrons", "Label": "aros-tools", "Suite": "rolling", "Codename": "rolling",
+        "Origin": "metaneutrons", "Label": "metaneutrons", "Suite": "rolling", "Codename": "rolling",
         "Architectures": "amd64 arm64", "Components": "main", "Acquire-By-Hash": "yes",
         "Date": email.utils.format_datetime(dt.datetime.fromtimestamp(published, dt.timezone.utc), usegmt=True),
         "Valid-Until": email.utils.format_datetime(
@@ -110,6 +119,7 @@ def render_fixture(root: Path, contract: dict, versions: tuple[str, ...] = ("1.2
     }
     if fields_override:
         fields.update(fields_override)
+    write_state(root, contract)
     lines = [f"{key}: {value}" for key, value in fields.items()]
     for algorithm in ("sha256", "sha512"):
         lines.append(algorithm.upper() + ":")
@@ -122,7 +132,31 @@ def render_fixture(root: Path, contract: dict, versions: tuple[str, ...] = ("1.2
                 by_hash = path.parent / "by-hash" / algorithm.upper() / checksum
                 by_hash.parent.mkdir(parents=True, exist_ok=True)
                 by_hash.write_bytes(path.read_bytes())
+        append_state_hash(dists, algorithm, lines)
     sign(root, contract, "\n".join(lines) + "\n", published)
+
+
+def write_state(root, contract):
+    dists = root / "archive/dists/rolling"
+    rows = {}
+    for arch in contract["architectures"]:
+        for item in apt.parse_deb822((dists / f"main/binary-{arch}/Packages").read_bytes()):
+            identity = (item["package"], item["version"], item["architecture"])
+            rows[identity] = {"project": item["package"], "source_repo": "metaneutrons/" + item["package"],
+                              "package": item["package"], "version": item["version"], "architecture": item["architecture"],
+                              "filename": item["filename"], "size": int(item["size"]), "sha256": item["sha256"]}
+    (dists / "archive-state.json").write_text(json.dumps(dict(schema_version=1,
+        base_url=contract["base_url"], suite="rolling", component="main",
+        architectures=contract["architectures"], packages=list(rows.values()))))
+
+
+def append_state_hash(dists, algorithm, lines):
+    path = dists / "archive-state.json"
+    checksum = hashlib.new(algorithm, path.read_bytes()).hexdigest()
+    lines.append(f" {checksum} {path.stat().st_size} archive-state.json")
+    by_hash = dists / "by-hash" / algorithm.upper() / checksum
+    by_hash.parent.mkdir(parents=True, exist_ok=True)
+    by_hash.write_bytes(path.read_bytes())
 
 
 class CentralAptTests(unittest.TestCase):
@@ -154,7 +188,7 @@ class CentralAptTests(unittest.TestCase):
         self.contract = copy.deepcopy(type(self).contract)
 
     def change_signed_release(self, old: str, new: str):
-        path = self.case / "archive/aros-tools/dists/rolling/Release"
+        path = self.case / "archive/dists/rolling/Release"
         original = path.read_text()
         self.assertIn(old, original)
         # Malformed signed fields are the input under test, not a fixture error.
@@ -162,8 +196,10 @@ class CentralAptTests(unittest.TestCase):
             apt.parse_deb822(original.encode())[0]["date"]).timestamp())
         sign(self.case, self.contract, original.replace(old, new), epoch)
 
-    def refresh_index_signatures(self):
-        directory = self.case / "archive/aros-tools/dists/rolling"
+    def refresh_index_signatures(self, rebuild_state=True):
+        directory = self.case / "archive/dists/rolling"
+        if rebuild_state:
+            write_state(self.case, self.contract)
         path = directory / "Release"
         text = path.read_text().split("SHA256:\n")[0]
         for algorithm in ("sha256", "sha512"):
@@ -175,10 +211,13 @@ class CentralAptTests(unittest.TestCase):
                     text += f" {checksum} {index.stat().st_size} {index.relative_to(directory)}\n"
                     by_hash = index.parent / "by-hash" / algorithm.upper() / checksum
                     by_hash.write_bytes(index.read_bytes())
+            lines = []
+            append_state_hash(directory, algorithm, lines)
+            text += "\n".join(lines) + "\n"
         sign(self.case, self.contract, text)
 
     def change_packages(self, arch: str, transform):
-        directory = self.case / f"archive/aros-tools/dists/rolling/main/binary-{arch}"
+        directory = self.case / f"archive/dists/rolling/main/binary-{arch}"
         payload = transform((directory / "Packages").read_text())
         (directory / "Packages").write_text(payload)
         (directory / "Packages.gz").write_bytes(gzip.compress(payload.encode(), mtime=0))
@@ -194,6 +233,50 @@ class CentralAptTests(unittest.TestCase):
         self.assertEqual(result["state"], "same")
         self.assertEqual(set(result["packages"]), {"amd64", "arm64"})
 
+    def test_existing_domain_without_aros_is_absent_in_preflight(self):
+        render_fixture(self.case, self.contract, versions=())
+        self.assertEqual(self.verify("preflight")["state"], "absent")
+        with self.assertRaisesRegex(apt.VerificationError, "not converged"):
+            self.verify()
+
+    def test_only_one_aros_architecture_is_not_absent(self):
+        self.change_packages("arm64", lambda text: "\n\n".join(
+            p for p in text.split("\n\n") if not p.startswith("Package: aros-tools\n")))
+        with self.assertRaisesRegex(apt.VerificationError, "architectures disagree"):
+            self.verify("preflight")
+
+    def test_state_ownership_and_binding(self):
+        path = self.case / "archive/dists/rolling/archive-state.json"
+        state = json.loads(path.read_text())
+        for row in state["packages"]:
+            if row["package"] == "aros-tools":
+                row["source_repo"] = "other/repository"
+        path.write_text(json.dumps(state))
+        self.refresh_index_signatures(rebuild_state=False)
+        with self.assertRaisesRegex(apt.VerificationError, "ownership changed"):
+            self.verify()
+
+    def test_signed_state_cannot_omit_other_project(self):
+        path = self.case / "archive/dists/rolling/archive-state.json"
+        state = json.loads(path.read_text())
+        state["packages"] = [p for p in state["packages"] if p["package"] == "aros-tools"]
+        path.write_text(json.dumps(state))
+        self.refresh_index_signatures(rebuild_state=False)
+        with self.assertRaisesRegex(apt.VerificationError, "state and package index disagree"):
+            self.verify()
+
+    def test_state_tampering(self):
+        path = self.case / "archive/dists/rolling/archive-state.json"
+        path.write_text(path.read_text().replace("metaneutrons", "xetaneutrons"))
+        with self.assertRaisesRegex(apt.VerificationError, "state differs"):
+            self.verify()
+
+    def test_empty_binary_index_without_aros(self):
+        render_fixture(self.case, self.contract, versions=())
+        self.change_packages("amd64", lambda text: text.replace("Architecture: all", "Architecture: amd64"))
+        self.change_packages("arm64", lambda _: "")
+        self.assertEqual(self.verify("preflight")["state"], "absent")
+
     def test_preflight_older_and_newer_are_distinct(self):
         self.assertEqual(self.verify("preflight", "1.2.4")["state"], "older")
         with self.assertRaisesRegex(apt.VerificationError, "newer version"):
@@ -202,7 +285,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify("exact", "1.2.4")
 
     def test_absent_is_only_allowed_before_publication(self):
-        (self.case / "archive/aros-tools/dists/rolling/InRelease").unlink()
+        (self.case / "archive/dists/rolling/InRelease").unlink()
         self.assertEqual(self.verify("preflight")["state"], "absent")
         with self.assertRaises(apt.VerificationError):
             self.verify()
@@ -213,7 +296,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_same_version_remote_payload_tampering(self):
-        path = self.case / "archive/aros-tools/pool/main/a/aros-tools/aros-tools_1.2.3-1_amd64.deb"
+        path = self.case / "archive/pool/main/a/aros-tools/aros-tools_1.2.3-1_amd64.deb"
         value = path.read_bytes()
         path.write_bytes(b"x" + value[1:])
         with self.assertRaisesRegex(apt.VerificationError, "same-version APT amd64"):
@@ -230,19 +313,19 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_tampered_signature_is_not_an_absent_channel(self):
-        path = self.case / "archive/aros-tools/dists/rolling/InRelease"
+        path = self.case / "archive/dists/rolling/InRelease"
         path.write_bytes(path.read_bytes().replace(b"Suite: rolling", b"Suite: changed"))
         with self.assertRaises(apt.VerificationError):
             self.verify("preflight")
 
     def test_detached_release_must_match_inrelease(self):
-        path = self.case / "archive/aros-tools/dists/rolling/Release"
+        path = self.case / "archive/dists/rolling/Release"
         path.write_bytes(path.read_bytes() + b"\n")
         with self.assertRaisesRegex(apt.VerificationError, "differs from signed"):
             self.verify()
 
     def test_by_hash_tampering(self):
-        directory = self.case / "archive/aros-tools/dists/rolling/main/binary-amd64/by-hash/SHA512"
+        directory = self.case / "archive/dists/rolling/main/binary-amd64/by-hash/SHA512"
         for path in directory.iterdir():
             payload = path.read_bytes()
             path.write_bytes(b"x" + payload[1:])
@@ -250,7 +333,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_index_alias_tampering(self):
-        path = self.case / "archive/aros-tools/dists/rolling/main/binary-arm64/Packages"
+        path = self.case / "archive/dists/rolling/main/binary-arm64/Packages"
         path.write_bytes(path.read_bytes() + b"\n")
         with self.assertRaises(apt.VerificationError):
             self.verify()
@@ -293,7 +376,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_missing_signed_index_is_rejected(self):
-        path = self.case / "archive/aros-tools/dists/rolling/Release"
+        path = self.case / "archive/dists/rolling/Release"
         text = "\n".join(line for line in path.read_text().splitlines()
                          if not line.endswith("main/binary-arm64/Packages.gz")) + "\n"
         sign(self.case, self.contract, text)
@@ -301,7 +384,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_signed_wrong_validity_period_is_rejected(self):
-        path = self.case / "archive/aros-tools/dists/rolling/Release"
+        path = self.case / "archive/dists/rolling/Release"
         fields = apt.parse_deb822(path.read_bytes())[0]
         self.change_signed_release("Valid-Until: " + fields["valid-until"], "Valid-Until: " + fields["date"])
         with self.assertRaisesRegex(apt.VerificationError, "validity period"):
@@ -320,7 +403,8 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_signed_mixed_latest_architectures_are_rejected(self):
-        self.change_packages("arm64", lambda text: text.split("\n\n")[0] + "\n")
+        self.change_packages("arm64", lambda text: "\n\n".join(
+            stanza for stanza in text.split("\n\n") if "Version: 1.2.3-1" not in stanza))
         with self.assertRaisesRegex(apt.VerificationError, "architectures disagree"):
             self.verify("preflight")
 
@@ -336,7 +420,7 @@ class CentralAptTests(unittest.TestCase):
             self.verify()
 
     def test_signed_gzip_bomb_is_bounded(self):
-        compressed = self.case / "archive/aros-tools/dists/rolling/main/binary-amd64/Packages.gz"
+        compressed = self.case / "archive/dists/rolling/main/binary-amd64/Packages.gz"
         compressed.write_bytes(gzip.compress(b"x" * (16 * apt.MIB + 1), mtime=0))
         self.refresh_index_signatures()
         with self.assertRaisesRegex(apt.VerificationError, "expansion bound"):

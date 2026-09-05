@@ -61,7 +61,7 @@ def load_contract(path: Path = CONTRACT) -> dict:
         contract = tomllib.load(stream)
     fields = {
         "schema_version", "repository", "workflow", "domain", "project",
-        "base_url", "prefix", "origin", "suite", "component", "architectures",
+        "base_url", "layout", "origin", "suite", "component", "architectures",
         "keyring", "primary_fingerprint", "signing_subkey", "valid_until_days",
         "keep_versions",
     }
@@ -71,7 +71,7 @@ def load_contract(path: Path = CONTRACT) -> dict:
     require(contract["repository"] == "metaneutrons/apt-archive"
             and contract["workflow"] == "publish.yml"
             and contract["domain"] == "metaneutrons.cc"
-            and contract["project"] == contract["prefix"] == "aros-tools"
+            and contract["project"] == "aros-tools" and contract["layout"] == "shared-root-v1"
             and contract["base_url"] == "https://deb.metaneutrons.cc"
             and contract["origin"] == "metaneutrons"
             and contract["suite"] == "rolling" and contract["component"] == "main"
@@ -123,7 +123,7 @@ def version_tuple(value: str) -> tuple[int, int, int]:
 def safe_relative(value: str) -> str:
     parts = PurePosixPath(value).parts
     require(bool(parts) and not value.startswith("/") and str(PurePosixPath(value)) == value
-            and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", part) and part not in (".", "..")
+            and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~:-]*", part) and part not in (".", "..")
                     for part in parts), f"unsafe APT path: {value!r}")
     return value
 
@@ -142,7 +142,7 @@ class Archive:
               expected_size: int | None = None, domain_root: bool = False) -> Path | None:
         safe_relative(relative)
         destination = self.root / relative
-        source_path = relative if domain_root else f"{self.contract['prefix']}/{relative}"
+        source_path = relative  # The keyring, indexes and pools share the domain root.
         arguments = [str(SCRIPTS / "download-bounded-https.sh"), "--output", str(destination),
                      "--class", category]
         if self.fixture is None:
@@ -151,9 +151,11 @@ class Archive:
             arguments += ["--source-file", str(self.fixture / source_path)]
         if optional:
             arguments += ["--allow-not-found"]
-        if expected_size is not None:
+        if expected_size is not None and expected_size > 0:
             arguments += ["--expected-bytes", str(expected_size)]
         result = command(arguments, accepted=(0, 44) if optional else (0,))
+        if result.returncode == 0 and expected_size == 0:
+            require(destination.stat().st_size == 0, "expected an empty architecture index")
         return None if result.returncode == 44 else destination
 
     def verify_key(self, key: Path) -> Path:
@@ -227,7 +229,7 @@ class Archive:
         require(len(paragraphs) == 1, "signed Release must contain one stanza")
         fields = paragraphs[0]
         for field, expected in {
-            "origin": policy["origin"], "label": policy["project"], "suite": policy["suite"],
+            "origin": policy["origin"], "label": policy["origin"], "suite": policy["suite"],
             "codename": policy["suite"], "components": policy["component"],
             "architectures": " ".join(policy["architectures"]), "acquire-by-hash": "yes",
         }.items():
@@ -248,6 +250,7 @@ class Archive:
         identities: dict[str, dict[str, tuple[str, int]]] = {}
         expected_paths = {f"main/binary-{arch}/{name}" for arch in policy["architectures"]
                           for name in ("Packages", "Packages.gz")}
+        expected_paths.add("archive-state.json")
         for label, algorithm, length in (("sha256", "sha256", 64), ("sha512", "sha512", 128)):
             records = {}
             for line in fields.get(label, "").splitlines():
@@ -257,12 +260,22 @@ class Archive:
                 require(len(pieces) == 3, f"malformed signed {label} record")
                 checksum, size, path = pieces
                 require(re.fullmatch(rf"[0-9a-f]{{{length}}}", checksum) is not None
-                        and re.fullmatch(r"[1-9][0-9]*", size) is not None
+                        and re.fullmatch(r"0|[1-9][0-9]*", size) is not None
                         and int(size) <= 16 * MIB and path not in records,
                         f"invalid or duplicate signed {label} identity")
                 records[path] = (checksum, int(size))
-            require(set(records) == expected_paths, f"signed {label} inventory is not the 4-index matrix")
+            require(set(records) == expected_paths, f"signed {label} inventory is not the 4-index matrix plus domain state")
             identities[algorithm] = records
+        state_digest, state_size = identities["sha256"]["archive-state.json"]
+        state_file = self.fetch(f"{prefix}/archive-state.json", "apt-index", expected_size=state_size)
+        assert state_file is not None
+        for algorithm in ("sha256", "sha512"):
+            checksum, size = identities[algorithm]["archive-state.json"]
+            require(size == state_size and digest(state_file, algorithm) == checksum,
+                    "domain state differs from signed identity")
+            by_hash = self.fetch(f"{prefix}/by-hash/{algorithm.upper()}/{checksum}", "apt-index", expected_size=size)
+            require(by_hash is not None and digest(by_hash, algorithm) == checksum, "domain state by-hash differs")
+        inventory = self.state_inventory(state_file)
         measured = {}
         versions = {}
         for arch in policy["architectures"]:
@@ -292,8 +305,14 @@ class Archive:
                 identity = (package.get("package"), package.get("version"), package.get("architecture"))
                 require(identity not in all_identities, f"duplicate package stanza for {arch}")
                 all_identities.add(identity)
-                require(identity[0] in ("aros-tools", "metaneutrons-archive-keyring")
-                        and identity[2] in (arch, "all"), f"unexpected package or architecture in {arch}")
+                require(identity[2] in (arch, "all"), f"unexpected package architecture in {arch}")
+                path = safe_relative(package.get("filename", ""))
+                row = inventory.get(identity)
+                require(row is not None and row["filename"] == path
+                        and str(row["size"]) == package.get("size")
+                        and row["sha256"] == package.get("sha256")
+                        and re.fullmatch(r"[0-9a-f]{128}", package.get("sha512", "")) is not None,
+                        "signed state and package index disagree")
                 if identity[0] != "aros-tools":
                     continue
                 require(identity[2] == arch and isinstance(identity[1], str) and identity[1].endswith("-1"),
@@ -302,7 +321,13 @@ class Archive:
                 parsed = version_tuple(current)
                 require(parsed not in releases, "duplicate aros-tools version")
                 releases[parsed] = package
-            require(0 < len(releases) <= policy["keep_versions"], f"{arch} has no bounded release history")
+            require(all_identities == {key for key in inventory if key[2] in (arch, "all")},
+                    "signed state and package index inventory disagree")
+            require(len(releases) <= policy["keep_versions"], f"{arch} has no bounded release history")
+            if not releases:
+                require(mode == "preflight", f"APT has not converged to {version} on {arch}")
+                versions[arch] = None
+                continue
             newest = max(releases)
             require(newest <= wanted, f"APT already exposes newer version {'.'.join(map(str, newest))}")
             require(mode == "preflight" or newest == wanted,
@@ -330,9 +355,54 @@ class Archive:
                 measured[arch] = path
         require(len(set(versions.values())) == 1, "APT architectures disagree on latest version")
         newest = next(iter(versions.values()))
+        if newest is None:
+            return {"state": "absent", "version": None, "expired": now >= expires, "packages": {}}
         return {"state": "same" if newest == wanted else "older",
                 "version": ".".join(map(str, newest)), "expired": now >= expires,
                 "packages": measured}
+
+    def state_inventory(self, path: Path) -> dict:
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                require(key not in result, "duplicate domain state field")
+                result[key] = value
+            return result
+        state = json.loads(path.read_text(), object_pairs_hook=unique)
+        policy = self.contract
+        require(isinstance(state, dict) and set(state) == {"schema_version", "base_url", "suite", "component", "architectures", "packages"}
+                and type(state["schema_version"]) is int and state["schema_version"] == 1
+                and state["base_url"] == policy["base_url"] and state["suite"] == policy["suite"]
+                and state["component"] == policy["component"] and state["architectures"] == policy["architectures"],
+                "signed domain state binding differs")
+        require(isinstance(state["packages"], list) and 0 < len(state["packages"]) <= 4096,
+                "signed domain state has no bounded inventory")
+        result, paths, owners = {}, set(), {}
+        for row in state["packages"]:
+            require(isinstance(row, dict) and set(row) == {"project", "source_repo", "package", "version", "architecture", "filename", "size", "sha256"}
+                    and all(isinstance(row[key], str) for key in row if key != "size"),
+                    "invalid domain state package fields")
+            require(re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", row["package"]) is not None
+                    and re.fullmatch(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~:-]*", row["version"]) is not None
+                    and re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", row["project"]) is not None
+                    and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", row["source_repo"]) is not None
+                    and row["architecture"] in (*policy["architectures"], "all")
+                    and type(row["size"]) is int and 0 < row["size"] <= 512 * MIB
+                    and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None,
+                    "unsafe domain state package identity")
+            identity = (row["package"], row["version"], row["architecture"])
+            filename = safe_relative(row["filename"])
+            require(filename.startswith("pool/main/") and filename not in paths and identity not in result,
+                    "duplicate or non-pool domain state package")
+            owner = (row["project"], row["source_repo"])
+            require(owners.setdefault(row["package"], owner) == owner, "domain state ownership overlaps")
+            if row["package"] == "aros-tools":
+                require(owner == ("aros-tools", "metaneutrons/aros-tools"), "aros-tools state ownership changed")
+            result[identity] = row
+            paths.add(filename)
+        require(not any((package, version, "all") in result for package, version, arch in result if arch != "all"),
+                "domain state mixes portable and native package identities")
+        return result
 
 
 def main() -> None:

@@ -141,7 +141,7 @@ jobs:
             --version "$VERSION" --candidate-dir candidate --output-dir "$public"
           contract=$(python3 scripts/release/central-apt-contract.py)
           keyring=$(jq -er .keyring <<<"$contract")
-          base=$(jq -er '.base_url + "/" + .prefix' <<<"$contract")
+          base=$(jq -er '.base_url' <<<"$contract")
           suite=$(jq -er .suite <<<"$contract")
           sudo install -m 0644 "$public/$keyring" "/usr/share/keyrings/$keyring"
           printf 'Types: deb\nURIs: %s\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /usr/share/keyrings/%s\n' \
