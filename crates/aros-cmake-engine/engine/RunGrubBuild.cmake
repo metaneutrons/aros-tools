@@ -128,7 +128,7 @@ function(_gb_lane_contract mode)
         set(_link_format "-melf_i386")
         set(_platform_dir "i386-pc")
         set(_file_count 615)
-        set(_manifest_relative "cmake/manifests/grub-2.12-pc.install")
+        set(_manifest_relative "manifests/grub-2.12-pc.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/boot.img"
@@ -153,7 +153,7 @@ function(_gb_lane_contract mode)
         set(_link_format "-melf_x86_64")
         set(_platform_dir "x86_64-efi")
         set(_file_count 591)
-        set(_manifest_relative "cmake/manifests/grub-2.12-efi64.install")
+        set(_manifest_relative "manifests/grub-2.12-efi64.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/kernel.img"
@@ -175,7 +175,7 @@ function(_gb_lane_contract mode)
         set(_link_format "-melf_i386")
         set(_platform_dir "i386-efi")
         set(_file_count 593)
-        set(_manifest_relative "cmake/manifests/grub-2.12-efi32.install")
+        set(_manifest_relative "manifests/grub-2.12-efi32.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/kernel.img"
@@ -371,6 +371,7 @@ foreach(_path IN ITEMS PATCH ARCHIVE INSTALL_MANIFEST)
     _gb_require_regular_file("${GB_${_path}}" "GRUB2 ${_path}")
 endforeach()
 _gb_real_path("${GB_SOURCE_ROOT}" _source_root)
+_gb_real_path("${CMAKE_CURRENT_LIST_DIR}" _engine_root)
 _gb_real_path("${GB_BUILD_ROOT}" _build_root)
 _gb_real_path("${GB_BINARY_DIR}" _binary_dir)
 _gb_real_path("${GB_INSTALL_PREFIX}" _install_prefix)
@@ -386,7 +387,9 @@ _gb_real_path("${_expected_patch}" _expected_patch)
 set(_expected_archive "${_build_root}/downloads/grub-2.12.tar.xz")
 _gb_real_path("${_expected_archive}" _expected_archive)
 set(_expected_install_manifest
-    "${_source_root}/${GB_EXPECTED_manifest_relative}")
+    "${_engine_root}/${GB_EXPECTED_manifest_relative}")
+_gb_reject_symlink_components(
+    "${_engine_root}" "${_expected_install_manifest}" "GRUB2 engine manifest")
 _gb_real_path("${_expected_install_manifest}" _expected_install_manifest)
 set(_configure_root "${_build_root}/gen/configure")
 _gb_real_path("${_configure_root}" _configure_root)
@@ -400,7 +403,7 @@ cmake_path(IS_PREFIX _configure_root "${_binary_dir}" NORMALIZE _binary_owned)
 cmake_path(IS_PREFIX _build_root "${_install_prefix}" NORMALIZE _prefix_owned)
 cmake_path(IS_PREFIX _build_root "${_archive}" NORMALIZE _archive_owned)
 cmake_path(IS_PREFIX _source_root "${_patch}" NORMALIZE _patch_owned)
-cmake_path(IS_PREFIX _source_root "${_install_manifest}" NORMALIZE
+cmake_path(IS_PREFIX _engine_root "${_install_manifest}" NORMALIZE
     _install_manifest_owned)
 if(NOT _configure_owned OR _configure_root STREQUAL _build_root OR
    NOT _binary_owned OR _binary_dir STREQUAL _configure_root OR

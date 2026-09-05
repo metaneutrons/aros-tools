@@ -18,7 +18,7 @@ function(_fixture_write_if_changed path contents)
 endfunction()
 
 function(_fixture_host_prefix prefix manifest)
-    file(STRINGS "${AROS_REPO_ROOT}/${manifest}" _entries)
+    file(STRINGS "${AROS_TEST_ENGINE_DIR}/${manifest}" _entries)
     foreach(_relative IN LISTS _entries)
         if(_relative STREQUAL "grub-mkimage")
             continue()
@@ -48,9 +48,9 @@ printf 'fixture grub image\n' > "$out"
 endfunction()
 
 set(_host_root "${CMAKE_BINARY_DIR}/hosttools/grub2")
-_fixture_host_prefix("${_host_root}/pc" "cmake/manifests/grub-2.12-pc.install")
-_fixture_host_prefix("${_host_root}/efi-x86_64" "cmake/manifests/grub-2.12-efi64.install")
-_fixture_host_prefix("${_host_root}/efi-i386" "cmake/manifests/grub-2.12-efi32.install")
+_fixture_host_prefix("${_host_root}/pc" "manifests/grub-2.12-pc.install")
+_fixture_host_prefix("${_host_root}/efi-x86_64" "manifests/grub-2.12-efi64.install")
+_fixture_host_prefix("${_host_root}/efi-i386" "manifests/grub-2.12-efi32.install")
 
 add_custom_target(grub2-host)
 add_custom_target(grub2-efi-host)

@@ -12,6 +12,7 @@ const REQUIRED_FIELDS: &[&str] = &[
     "AHI_MMAKE_ID",
     "AHI_MODE",
     "AHI_SOURCE_ROOT",
+    "AHI_ENGINE_ROOT",
     "AHI_BUILD_ROOT",
     "AHI_SOURCE_DIR",
     "AHI_SOURCE_MANIFEST",
@@ -57,6 +58,7 @@ const REQUIRED_FIELDS: &[&str] = &[
 
 const ABSOLUTE_PATH_FIELDS: &[&str] = &[
     "AHI_SOURCE_ROOT",
+    "AHI_ENGINE_ROOT",
     "AHI_BUILD_ROOT",
     "AHI_SOURCE_DIR",
     "AHI_SOURCE_MANIFEST",
@@ -148,6 +150,7 @@ impl ProductKind {
 pub struct Contract {
     pub mode: Mode,
     pub source_root: PathBuf,
+    pub engine_root: PathBuf,
     pub build_root: PathBuf,
     pub source_dir: PathBuf,
     pub source_manifest: PathBuf,
@@ -353,6 +356,7 @@ impl Contract {
         let contract = Self {
             mode,
             source_root: take_path(&mut values, "AHI_SOURCE_ROOT", source)?,
+            engine_root: take_path(&mut values, "AHI_ENGINE_ROOT", source)?,
             build_root: take_path(&mut values, "AHI_BUILD_ROOT", source)?,
             source_dir: take_path(&mut values, "AHI_SOURCE_DIR", source)?,
             source_manifest: take_path(&mut values, "AHI_SOURCE_MANIFEST", source)?,
@@ -409,10 +413,9 @@ impl Contract {
     fn validate_derived_identity(&self, source: &Path) -> AhiResult<()> {
         let expected_source = self.source_root.join("workbench/devs/AHI");
         let expected_source_manifest = expected_source.join("ahi-build.inputs");
-        let expected_product_manifest = self.source_root.join(format!(
-            "cmake/manifests/ahi-{}.install",
-            self.mode.as_str()
-        ));
+        let expected_product_manifest = self
+            .engine_root
+            .join(format!("manifests/ahi-{}.install", self.mode.as_str()));
         let expected_binary = self.build_root.join(format!(
             "gen/configure/workbench/devs/AHI/{}",
             self.mode.as_str()
@@ -800,6 +803,7 @@ mod tests {
             ("AHI_MMAKE_ID", MMAKE_ID.to_owned()),
             ("AHI_MODE", "x86_64".to_owned()),
             ("AHI_SOURCE_ROOT", "/source".to_owned()),
+            ("AHI_ENGINE_ROOT", "/engine".to_owned()),
             ("AHI_BUILD_ROOT", "/build".to_owned()),
             ("AHI_SOURCE_DIR", "/source/workbench/devs/AHI".to_owned()),
             (
@@ -809,7 +813,7 @@ mod tests {
             ("AHI_SOURCE_MANIFEST_SHA256", "0".repeat(64)),
             (
                 "AHI_PRODUCT_MANIFEST",
-                "/source/cmake/manifests/ahi-x86_64.install".to_owned(),
+                "/engine/manifests/ahi-x86_64.install".to_owned(),
             ),
             ("AHI_PRODUCT_MANIFEST_SHA256", "1".repeat(64)),
             (
@@ -892,8 +896,59 @@ mod tests {
         let contract =
             Contract::parse(&valid_x86_64_contract(), Path::new("contract.cmake")).unwrap();
         assert_eq!(contract.mode, Mode::X86_64);
+        assert_eq!(contract.engine_root, Path::new("/engine"));
+        assert_eq!(
+            contract.product_manifest,
+            Path::new("/engine/manifests/ahi-x86_64.install")
+        );
         assert_eq!(contract.product_count(), 73);
         assert_eq!(contract.input_count(), 1);
+    }
+
+    #[test]
+    fn product_manifest_cannot_be_substituted_from_the_source_or_another_engine() {
+        let original = assignment(
+            "AHI_PRODUCT_MANIFEST",
+            "/engine/manifests/ahi-x86_64.install",
+        );
+        for path in [
+            "/source/cmake/manifests/ahi-x86_64.install",
+            "/other-engine/manifests/ahi-x86_64.install",
+            "/engine/manifests/ahi-arm.install",
+            "/engine/ahi-x86_64.install",
+        ] {
+            let valid = valid_x86_64_contract();
+            assert_eq!(valid.matches(&original).count(), 1);
+            let text = valid.replacen(&original, &assignment("AHI_PRODUCT_MANIFEST", path), 1);
+            let error = Contract::parse(&text, Path::new("contract.cmake")).unwrap_err();
+            assert_eq!(error.diagnostic().code, DiagnosticCode::AhiContractIdentity);
+            assert!(error.diagnostic().message.contains("AHI_PRODUCT_MANIFEST"));
+        }
+    }
+
+    #[test]
+    fn engine_root_is_required_and_does_not_fall_back_to_the_source_tree() {
+        let valid = valid_x86_64_contract();
+        let original = assignment("AHI_ENGINE_ROOT", "/engine");
+        assert_eq!(valid.matches(&original).count(), 1);
+        let text = valid.replacen(&original, "", 1);
+        let error = Contract::parse(&text, Path::new("contract.cmake")).unwrap_err();
+        assert_eq!(error.diagnostic().code, DiagnosticCode::AhiContractSyntax);
+        assert_eq!(
+            error.diagnostic().message,
+            "AHI contract omits AHI_ENGINE_ROOT"
+        );
+    }
+
+    #[test]
+    fn engine_root_must_be_absolute() {
+        let valid = valid_x86_64_contract();
+        let original = assignment("AHI_ENGINE_ROOT", "/engine");
+        assert_eq!(valid.matches(&original).count(), 1);
+        let text = valid.replacen(&original, &assignment("AHI_ENGINE_ROOT", "engine"), 1);
+        let error = Contract::parse(&text, Path::new("contract.cmake")).unwrap_err();
+        assert_eq!(error.diagnostic().code, DiagnosticCode::AhiContractPath);
+        assert!(error.diagnostic().message.contains("AHI_ENGINE_ROOT"));
     }
 
     #[test]
