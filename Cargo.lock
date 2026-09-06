@@ -255,8 +255,10 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
+ "tracing",
 ]
 
 [[package]]

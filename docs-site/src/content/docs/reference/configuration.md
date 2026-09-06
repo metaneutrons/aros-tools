@@ -170,6 +170,11 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_TEST_SOURCE_ROOT`, `AROS_TEST_TOOLS_DIR`
 - `AROS_PUBLICATION_TEST_FAIL_AT`, `AROS_PUBLICATION_TEST_PAUSE_AT`, `AROS_PUBLICATION_TEST_PAUSE_MS`, `AROS_PUBLICATION_TEST_CRASH_AT`
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
+- `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
+- `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`
+
+The guard and process-escape names are used only by integration-test executables
+to coordinate isolated filesystem/process fixtures; no shipped command reads them.
 
 The host LLVM version comes exclusively from the effective `[host_compiler]`
 contract (checkout override or embedded pristine-upstream default); no ambient

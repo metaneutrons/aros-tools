@@ -2,6 +2,69 @@
 use super::*;
 
 #[cfg(unix)]
+struct BoundaryAction {
+    point: &'static str,
+    matches: Box<dyn Fn(&Path) -> bool>,
+    action: Box<dyn FnOnce(&Path)>,
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    static BOUNDARY_ACTION: std::cell::RefCell<Option<BoundaryAction>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Inject on the tested thread at an exact boundary, never after a timing guess.
+/// This entire module and both call sites are absent from non-test builds.
+#[cfg(unix)]
+pub(super) fn run_boundary(point: &str, path: &Path) {
+    let action = BOUNDARY_ACTION.with_borrow_mut(|slot| {
+        if slot
+            .as_ref()
+            .is_some_and(|hook| hook.point == point && (hook.matches)(path))
+        {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = action {
+        (hook.action)(path);
+    }
+}
+
+#[cfg(unix)]
+fn at_boundary<T>(
+    point: &'static str,
+    matches: impl Fn(&Path) -> bool + 'static,
+    action: impl FnOnce(&Path) + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            BOUNDARY_ACTION.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    BOUNDARY_ACTION.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "boundary actions must not overlap");
+        *slot = Some(BoundaryAction {
+            point,
+            matches: Box::new(matches),
+            action: Box::new(action),
+        });
+    });
+    let _reset = Reset;
+    let result = operation();
+    assert!(
+        BOUNDARY_ACTION.with_borrow(Option::is_none),
+        "selected boundary was not exercised"
+    );
+    result
+}
+
+#[cfg(unix)]
 static FAULT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
@@ -814,39 +877,25 @@ fn staged_digest_race_never_publishes_or_deletes_the_changed_stage() {
     let target = root.path().join("target");
     let mut transaction = DurableFileSet::new(&journal).unwrap();
     transaction.stage_write(&target, b"intended").unwrap();
-    std::env::set_var(
-        "AROS_PUBLICATION_TEST_PAUSE_AT",
-        scoped_test_point("before-apply"),
-    );
-    std::env::set_var("AROS_PUBLICATION_TEST_PAUSE_MS", "400");
     let root_path = root.path().to_path_buf();
-    let racer = std::thread::spawn(move || {
-        // Let commit finish the operation stage and enter the explicit
-        // before-apply pause. Racing the initial stage write exercises a
-        // different pre-publication failure contract.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            let stage = std::fs::read_dir(&root_path)
+    // Seeing staged bytes does not prove their readback and journal update
+    // completed. Inject only after both, without sleeps or a scheduled racer.
+    let result = at_boundary(
+        "before-apply",
+        |_| true,
+        move |_| {
+            let stage = std::fs::read_dir(root_path)
                 .unwrap()
                 .filter_map(Result::ok)
                 .find(|entry| {
                     entry.file_name().to_string_lossy().contains(".aros-stage-")
                         && std::fs::read(entry.path()).is_ok_and(|contents| contents == b"intended")
                 })
-                .map(|entry| entry.path());
-            if let Some(stage) = stage {
-                std::fs::write(stage, b"raced-stage").unwrap();
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "stage never appeared");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    });
-    let result = transaction.commit();
-    racer.join().unwrap();
-    std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
-    std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
+                .expect("verified operation stage must exist");
+            std::fs::write(stage.path(), b"raced-stage").unwrap();
+        },
+        || transaction.commit(),
+    );
 
     let error = result.unwrap_err();
     assert_eq!(
@@ -861,6 +910,42 @@ fn staged_digest_race_never_publishes_or_deletes_the_changed_stage() {
         .expect("digest-mismatched stage must be retained for inspection");
     assert_eq!(std::fs::read(retained.path()).unwrap(), b"raced-stage");
     assert!(journal.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn unverified_stage_readback_race_has_the_distinct_io_failure_contract() {
+    let _environment = lock_fault_environment();
+    let root = tempfile::tempdir().unwrap();
+    let journal = root.path().join("journal");
+    let target = root.path().join("target");
+    let mut transaction = DurableFileSet::new(&journal).unwrap();
+    transaction.stage_write(&target, b"intended").unwrap();
+    // A slow initial stage fsync can let a timer-driven test land here,
+    // before stage ownership had been verified and recorded in the journal.
+    let error = at_boundary(
+        "stage-before-readback",
+        |path| std::fs::read(path).is_ok_and(|bytes| bytes == b"intended"),
+        |path| std::fs::write(path, b"raced-stage").unwrap(),
+        || transaction.commit(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        publication_failure_class(&error),
+        PublicationFailureClass::Io
+    );
+    assert!(error
+        .to_string()
+        .contains("failed identity/digest/mode readback"));
+    assert!(!target.exists());
+    assert!(!journal.exists());
+    assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".aros-stage-")
+    }));
 }
 
 #[cfg(unix)]

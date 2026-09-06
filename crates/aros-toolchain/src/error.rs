@@ -12,6 +12,14 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn state(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerState,
+            message,
+            "stop the operation and inspect the explicitly selected work/output roots; any partially reserved directories are retained, never reused or automatically deleted",
+        )
+    }
+
     pub(crate) fn context(mut self, context: DiagnosticContext) -> Self {
         if let Some(diagnostic) = self.diagnostics.diagnostics.first_mut() {
             diagnostic.context = Some(context);

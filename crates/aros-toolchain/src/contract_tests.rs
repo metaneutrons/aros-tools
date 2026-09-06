@@ -294,6 +294,7 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerIdentity,
         DiagnosticCode::ProducerPrerequisite,
         DiagnosticCode::ProducerPreflight,
+        DiagnosticCode::ProducerState,
     ]
     .iter()
     .map(ToString::to_string)
@@ -310,6 +311,7 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerIdentity,
         DiagnosticCode::ProducerPrerequisite,
         DiagnosticCode::ProducerPreflight,
+        DiagnosticCode::ProducerState,
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), code.to_string());
     }

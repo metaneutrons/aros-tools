@@ -193,7 +193,7 @@ class ToolchainProducerContractTests(unittest.TestCase):
         diagnostics = self.contract["diagnostics"]
         self.assertEqual(diagnostics["envelope"], "aros-tool-diagnostics-v1")
         self.assertEqual(diagnostics["registration"], "partial-M1")
-        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202"])
+        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202", "AX0801"])
         self.assertEqual(diagnostics["failure_exit"], 1)
         self.assertEqual(diagnostics["json_failure_stderr_documents"], 1)
         self.assertEqual(len(set(diagnostics["codes"])), len(diagnostics["codes"]))

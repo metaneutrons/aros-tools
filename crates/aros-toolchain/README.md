@@ -9,7 +9,8 @@ Implemented:
   lowercase identities, strict integer fields and safe, sorted patch paths;
 - bounded recipe input and canonical UTF-8 JSON self-digest verification;
 - the shared envelope with AX0101 (contract), AX0102 (identity), AX0201 (Git
-  prerequisites) and AX0202 (roots/resources), without input-document dumps;
+  prerequisites), AX0202 (roots/resources) and AX0801 (work ownership/state),
+  without input-document dumps;
 - maintained native conformance/counter-probes against the independent M0
   encoding vectors. No second SHA-256 implementation or source-lock copy.
 
@@ -35,9 +36,44 @@ documents/individual selected blobs and captured streams are capped at 1 MiB,
 profiles/toolchains directory entries at 128, frontend hashing at 512 MiB.
 These are inspection bounds, not measured compiler resource defaults.
 
+## Work ownership primitive, not a build command
+
+`workspace::RunDirectories` is a lower-level M1 building block, not called by
+`plan`. It resolves the original selections afresh and exclusively creates only
+fresh work/output leaves under existing parents. Sources and cache are untouched.
+Directory locks remain held by the owning process; private ownership markers,
+directory identities, parent bindings and marker bytes are rechecked at each
+explicit `revalidate` boundary. Existing roots, even empty ones, are never
+adopted. Descriptor-relative no-follow traversal is shared with inspection.
+
+Reservation is not atomic across the two roots. A failure can retain a partially
+created reservation; AX0801 says to inspect the selected paths. After all child
+activity has ended, consume the guard with `release()` to explicitly unlock
+both original directory descriptions and report any AX0801 failure. Cancellation
+or namespace changes do not suppress unlocking. Drop performs fallback unlocking
+and logs failures through the existing tracing subscriber, but cannot return a
+successful cleanup result; it never deletes data. Explicit unlocking prevents
+an inherited/duplicated descriptor from extending the owner's lock lifetime
+past drop; `CLOEXEC` alone only closes such references at exec, not at fork.
+Only the creating process may unlock; an inherited non-owner guard closes its
+own descriptor without releasing the parent's still-active lock.
+The lock guard exists before fallible marker construction, so partial setup
+failures receive the same fallback cleanup. There is no implicit resume,
+stale-state adoption, automatic cleanup, phase receipt or candidate publication. The caller-provided
+owner digest binds its chosen operation, not trusted executor origin. Locks and
+boundary checks do not sandbox a hostile process with the same user's access.
+
+The shared process runner now provides a one-way `CancellationToken` and bounded
+controlled execution with distinct cancellation/timeout/status outcomes. The
+frontend's signal handling, complete build deadline, source/executor readiness
+and isolated adapter still need integration before any compiler can launch.
+Guard tests and subprocess fixtures do not qualify a real toolchain build.
+
+## Current CLI scope
+
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
 The implemented plan requires explicit `--backend legacy-preview`; native
-fails before file reads. `build`, the adapter, state ownership/cancellation,
+fails before file reads. `build`, the adapter, integrated ownership/cancellation,
 and real Linux x86-64/macOS AArch64 preview evidence remain later M1 work.
 No extra executable is exposed. `aros-fetch` is added as a dependency
 only when native transport is actually implemented, not as an unused promise.

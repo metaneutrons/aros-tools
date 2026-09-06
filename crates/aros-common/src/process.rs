@@ -7,11 +7,34 @@
 
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// Default maximum retained bytes for each captured child stream.
 pub const DEFAULT_CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// Cooperative, one-way cancellation shared by an operation and its children.
+///
+/// Clones share the same flag. This token installs no process-wide signal
+/// handler; the frontend owns signal policy and requests cancellation here.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// Request cancellation. The token deliberately cannot be reset or reused
+    /// to authorize a later phase after an operation has been cancelled.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Return whether this operation was cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 /// Completed child process whose standard streams were inherited or redirected
 /// by the caller.
@@ -36,6 +59,9 @@ pub struct ProcessOutput {
     pub status: ExitStatus,
     /// Whether this runner terminated the process after its deadline.
     pub timed_out: bool,
+    /// Whether the controlled runner terminated this process on cancellation.
+    /// Mutually exclusive with `timed_out`; older entry points always set false.
+    pub cancelled: bool,
     /// Bounded standard output.
     pub stdout: CapturedStream,
     /// Bounded standard error.
@@ -166,7 +192,7 @@ pub fn run_output_with_limit(
     command: &mut Command,
     per_stream_limit: usize,
 ) -> io::Result<ProcessOutput> {
-    run_output_inner(command, None, per_stream_limit, None)
+    run_output_inner(command, None, per_stream_limit, None, None)
 }
 
 /// Run a command with bounded streams and a hard process-group deadline.
@@ -180,7 +206,34 @@ pub fn run_output_with_timeout(
     per_stream_limit: usize,
     timeout: Duration,
 ) -> io::Result<ProcessOutput> {
-    run_output_inner(command, None, per_stream_limit, Some(timeout))
+    run_output_inner(command, None, per_stream_limit, Some(timeout), None)
+}
+
+/// Run a command with bounded capture, a deadline, and cooperative cancellation.
+///
+/// A cancellation observed before spawn returns [`io::ErrorKind::Interrupted`]
+/// without starting a child. After spawn the result retains captured output and
+/// the final reaped status; `cancelled` is distinct from `timed_out`. A child
+/// already observed to have exited wins over a concurrent cancellation. Otherwise
+/// cancellation wins over a simultaneously observed deadline. Unix cleanup covers
+/// the process group, not descendants that deliberately escape it or a sandbox.
+///
+/// # Errors
+/// Returns an I/O error for invalid limits/deadlines, pre-spawn cancellation,
+/// spawn, capture or cleanup failure. Cancellation never retries a command.
+pub fn run_output_with_control(
+    command: &mut Command,
+    per_stream_limit: usize,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> io::Result<ProcessOutput> {
+    run_output_inner(
+        command,
+        None,
+        per_stream_limit,
+        Some(timeout),
+        Some(cancellation),
+    )
 }
 
 /// Run a command with exact standard input and bounded captured streams.
@@ -197,7 +250,7 @@ pub fn run_output_with_input(
     input: &[u8],
     per_stream_limit: usize,
 ) -> io::Result<ProcessOutput> {
-    run_output_inner(command, Some(input), per_stream_limit, None)
+    run_output_inner(command, Some(input), per_stream_limit, None, None)
 }
 
 fn run_output_inner(
@@ -205,6 +258,7 @@ fn run_output_inner(
     input: Option<&[u8]>,
     per_stream_limit: usize,
     timeout: Option<Duration>,
+    cancellation: Option<&CancellationToken>,
 ) -> io::Result<ProcessOutput> {
     if per_stream_limit == 0 {
         return Err(io::Error::new(
@@ -213,6 +267,10 @@ fn run_output_inner(
         ));
     }
     let tool = command.get_program().to_string_lossy().into_owned();
+    let started = Instant::now();
+    let deadline = timeout
+        .map(|value| process_deadline(started, value))
+        .transpose()?;
     configure_process_group(command);
     command
         .stdin(if input.is_some() {
@@ -222,7 +280,7 @@ fn run_output_inner(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let started = Instant::now();
+    check_cancellation(cancellation)?;
     let mut child = command.spawn()?;
     let stdout = child
         .stdout
@@ -240,47 +298,75 @@ fn run_output_inner(
         None
     };
 
-    let stdout_reader = thread::spawn(move || drain_bounded(stdout, per_stream_limit));
-    let stderr_reader = thread::spawn(move || drain_bounded(stderr, per_stream_limit));
-    let input_writer = stdin.zip(input).map(|(mut stdin, input)| {
+    if let Err(error) = prepare_capture_pipe(&stdout)
+        .and_then(|()| prepare_capture_pipe(&stderr))
+        .and_then(|()| stdin.as_ref().map_or(Ok(()), prepare_capture_pipe))
+    {
+        return Err(combine_process_errors(
+            error,
+            &terminate_and_reap(&mut child),
+        ));
+    }
+    let finished = Arc::new(AtomicBool::new(false));
+    let stdout_finished = Arc::clone(&finished);
+    let stderr_finished = Arc::clone(&finished);
+    let stdout_reader =
+        thread::spawn(move || drain_bounded(stdout, per_stream_limit, &stdout_finished));
+    let stderr_reader =
+        thread::spawn(move || drain_bounded(stderr, per_stream_limit, &stderr_finished));
+    let input_writer = stdin.zip(input).map(|(stdin, input)| {
         let input = input.to_vec();
-        thread::spawn(move || {
-            stdin.write_all(&input)?;
-            stdin.flush()
-        })
+        let input_finished = Arc::clone(&finished);
+        thread::spawn(move || write_complete(stdin, &input, &input_finished))
     });
 
-    let (status, timed_out) = match wait_for_child(&mut child, timeout) {
+    let (status, completion) = match wait_for_child(&mut child, deadline, cancellation) {
         Ok(result) => result,
         Err(primary) => {
             let cleanup = terminate_and_reap(&mut child);
-            // A failed wait/termination path cannot prove that descendants
-            // closed inherited descriptors. Detach workers instead of risking
-            // a second, unbounded wait while reporting the primary failure.
+            finished.store(true, Ordering::Release);
+            // Report the primary failure promptly. On Unix, pipe workers see
+            // the stop flag and close their descriptors within the drain bound.
             drop(stdout_reader);
             drop(stderr_reader);
             drop(input_writer);
             return Err(combine_process_errors(primary, &cleanup));
         }
     };
-    if !timed_out {
+    if completion == Completion::Exited {
         if let Err(primary) = kill_remaining_process_group(&mut child) {
-            // Do not join pipe workers after group termination failed: a surviving
-            // descendant may still own those descriptors and would make cleanup
-            // block forever. Dropping the handles keeps this failure path bounded.
+            finished.store(true, Ordering::Release);
+            // A failed group termination is not complete cleanup. Unix pipe
+            // workers stop independently; do not delay the primary failure.
             drop(stdout_reader);
             drop(stderr_reader);
             drop(input_writer);
             return Err(primary);
         }
     }
-    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer)?;
+    finished.store(true, Ordering::Release);
+    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer).map_err(
+        |error| match completion {
+            Completion::Cancelled => io::Error::new(
+                io::ErrorKind::Interrupted,
+                format!("operation cancelled; pipe cleanup also failed: {error}"),
+            ),
+            Completion::TimedOut => io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("process deadline expired; pipe cleanup also failed: {error}"),
+            ),
+            Completion::Exited => error,
+        },
+    )?;
     let elapsed = started.elapsed();
+    let timed_out = completion == Completion::TimedOut;
+    let cancelled = completion == Completion::Cancelled;
     tracing::debug!(
         tool,
         elapsed_ms = elapsed.as_millis(),
         success = status.success(),
         timed_out,
+        cancelled,
         stdout_bytes = stdout.total_bytes(),
         stderr_bytes = stderr.total_bytes(),
         stdout_omitted = stdout.omitted_bytes(),
@@ -292,6 +378,7 @@ fn run_output_inner(
         elapsed,
         status,
         timed_out,
+        cancelled,
         stdout,
         stderr,
     })
@@ -312,49 +399,80 @@ pub fn run_status_with_timeout(
     let tool = command.get_program().to_string_lossy().into_owned();
     configure_process_group(command);
     let started = Instant::now();
-    let deadline = started.checked_add(timeout).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "process timeout deadline overflowed",
-        )
-    })?;
+    let deadline = process_deadline(started, timeout)?;
     let mut child = command.spawn()?;
-    let (status, timed_out) = match wait_until(&mut child, deadline, POLL_INTERVAL) {
+    let (status, completion) = match wait_until(&mut child, deadline, POLL_INTERVAL, None) {
         Ok(result) => result,
         Err(primary) => {
             let cleanup = terminate_and_reap(&mut child);
             return Err(combine_process_errors(primary, &cleanup));
         }
     };
+    let timed_out = completion == Completion::TimedOut;
     if !timed_out {
         kill_remaining_process_group(&mut child)?;
     }
     Ok(timed_result(tool, started, status, timed_out))
 }
 
-fn wait_for_child(child: &mut Child, timeout: Option<Duration>) -> io::Result<(ExitStatus, bool)> {
-    let Some(timeout) = timeout else {
-        return child.wait().map(|status| (status, false));
-    };
-    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
+fn process_deadline(started: Instant, timeout: Duration) -> io::Result<Instant> {
+    started.checked_add(timeout).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "process timeout deadline overflowed",
         )
-    })?;
-    wait_until(child, deadline, Duration::from_millis(20))
+    })
+}
+
+fn check_cancellation(cancellation: Option<&CancellationToken>) -> io::Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "operation cancelled before child spawn",
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> io::Result<(ExitStatus, Completion)> {
+    let Some(deadline) = deadline else {
+        return child.wait().map(|status| (status, Completion::Exited));
+    };
+    wait_until(child, deadline, Duration::from_millis(20), cancellation)
 }
 
 fn wait_until(
     child: &mut Child,
     deadline: Instant,
     poll_interval: Duration,
-) -> io::Result<(ExitStatus, bool)> {
+    cancellation: Option<&CancellationToken>,
+) -> io::Result<(ExitStatus, Completion)> {
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok((status, false));
+            return Ok((status, Completion::Exited));
         }
         let now = Instant::now();
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let cleanup = terminate_and_reap(child);
+            if !cleanup.is_empty() {
+                return Err(combine_process_errors(
+                    io::Error::new(io::ErrorKind::Interrupted, "cancelled child cleanup failed"),
+                    &cleanup,
+                ));
+            }
+            return child.wait().map(|status| (status, Completion::Cancelled));
+        }
         if now >= deadline {
             if let Some(status) = child.try_wait().map_err(|error| {
                 io::Error::new(
@@ -362,7 +480,7 @@ fn wait_until(
                     format!("deadline expired and final child-state inspection failed: {error}"),
                 )
             })? {
-                return Ok((status, false));
+                return Ok((status, Completion::Exited));
             }
             if let Err(kill_error) = kill_process_group(child) {
                 if let Some(status) = child.try_wait().map_err(|error| {
@@ -373,21 +491,24 @@ fn wait_until(
                         ),
                     )
                 })? {
-                    return Ok((status, false));
+                    return Ok((status, Completion::Exited));
                 }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!("could not terminate timed-out process group: {kill_error}"),
                 ));
             }
-            return child.wait().map(|status| (status, true)).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
+            return child
+                .wait()
+                .map(|status| (status, Completion::TimedOut))
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
                         "timed-out process group was terminated but could not be reaped: {error}"
                     ),
-                )
-            });
+                    )
+                });
         }
         thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
     }
@@ -466,15 +587,41 @@ fn timed_result(
     }
 }
 
-fn drain_bounded(mut stream: impl Read, limit: usize) -> io::Result<CapturedStream> {
+#[cfg(unix)]
+fn prepare_capture_pipe(stream: &impl std::os::fd::AsFd) -> io::Result<()> {
+    let flags = rustix::fs::fcntl_getfl(stream)?;
+    rustix::fs::fcntl_setfl(stream, flags | rustix::fs::OFlags::NONBLOCK)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_capture_pipe<T>(_stream: &T) -> io::Result<()> {
+    Ok(())
+}
+
+fn drain_bounded(
+    mut stream: impl Read,
+    limit: usize,
+    finished: &AtomicBool,
+) -> io::Result<CapturedStream> {
     let head_capacity = limit.div_ceil(2);
     let tail_capacity = limit - head_capacity;
     let mut head = Vec::with_capacity(head_capacity);
     let mut tail = Vec::with_capacity(tail_capacity);
     let mut total_bytes = 0_u64;
     let mut buffer = [0_u8; 8 * 1024];
+    let mut finished_at = None;
     loop {
-        let read = stream.read(&mut buffer)?;
+        check_pipe_deadline(finished, &mut finished_at)?;
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if read == 0 {
             break;
         }
@@ -517,6 +664,43 @@ fn drain_bounded(mut stream: impl Read, limit: usize) -> io::Result<CapturedStre
         omitted_bytes,
         total_bytes,
     })
+}
+
+fn check_pipe_deadline(finished: &AtomicBool, finished_at: &mut Option<Instant>) -> io::Result<()> {
+    if finished.load(Ordering::Acquire) {
+        let since = *finished_at.get_or_insert_with(Instant::now);
+        if since.elapsed() >= Duration::from_secs(1) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "pipe remained open after child cleanup; a descendant may have escaped the process group and require separate cleanup"));
+        }
+    }
+    Ok(())
+}
+
+fn write_complete(
+    mut stream: impl Write,
+    mut input: &[u8],
+    finished: &AtomicBool,
+) -> io::Result<()> {
+    let mut finished_at = None;
+    while !input.is_empty() {
+        check_pipe_deadline(finished, &mut finished_at)?;
+        match stream.write(input) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "child stdin accepted no bytes",
+                ))
+            }
+            Ok(written) => input = &input[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    stream.flush()
 }
 
 fn join_stream(
@@ -718,5 +902,25 @@ mod tests {
         let error = run_output_with_limit(&mut Command::new("definitely-not-a-command"), 0)
             .expect_err("zero limit must fail first");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn already_observed_exit_wins_over_late_cancellation() {
+        let mut command = Command::new("sh");
+        configure_process_group(&mut command);
+        let mut child = command.args(["-c", "exit 7"]).spawn().unwrap();
+        child.wait().unwrap();
+        let token = CancellationToken::default();
+        token.cancel();
+        let (status, completion) = wait_until(
+            &mut child,
+            Instant::now(),
+            Duration::from_millis(1),
+            Some(&token),
+        )
+        .unwrap();
+        assert_eq!(status.code(), Some(7));
+        assert!(completion == Completion::Exited);
     }
 }
