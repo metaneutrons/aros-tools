@@ -15,9 +15,9 @@ The next acceptance gate is [TCP-M1 / #29](https://github.com/metaneutrons/aros-
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
 its completed contract freeze. M1's first non-executing library slice does not
 complete its CLI, lifecycle or real-build criteria.
-Its reviewable [interface and ownership contract](toolchain-producer-contract.md)
-and [measured baseline](toolchain-producer-baseline.md) are now recorded. M0's
-merge/acceptance status remains on its issue; later milestones have not started.
+The accepted [interface and ownership contract](toolchain-producer-contract.md)
+and [measured baseline](toolchain-producer-baseline.md) remain the foundation
+for later implementation. Issues own execution status and remaining gates.
 
 ## 1. Decision and intended outcome
 
