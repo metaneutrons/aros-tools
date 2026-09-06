@@ -25,6 +25,7 @@ mod observability;
 mod repo;
 mod source;
 mod toolchain;
+mod toolchain_plan;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -332,6 +333,8 @@ enum HostCompilerCommands {
 
 #[derive(Subcommand)]
 enum ToolchainCommands {
+    /// Inspect explicit producer inputs without building (experimental)
+    Plan(toolchain_plan::PlanArgs),
     /// Install the exact host + target artifact selected by the lock file
     Install {
         /// Target profile whose locked artifact should be installed
@@ -637,7 +640,11 @@ impl Commands {
                 SourceCommand::Init { .. } => RepositoryRequirement::Global,
                 SourceCommand::Sync { .. } => RepositoryRequirement::Required,
             },
-            Self::Ccache { .. } | Self::Install { .. } => RepositoryRequirement::Global,
+            Self::Ccache { .. }
+            | Self::Install { .. }
+            | Self::Toolchain {
+                command: ToolchainCommands::Plan(_),
+            } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
                 BoardCommand::Init { .. }
@@ -693,6 +700,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 | ToolchainCommands::Verify { preset, .. }
                 | ToolchainCommands::Path { preset, .. } => Some(preset.clone()),
                 ToolchainCommands::List => None,
+                ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
             };
             (
                 DiagnosticCode::CliToolchain,

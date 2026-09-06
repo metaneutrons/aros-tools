@@ -22,7 +22,7 @@ library packages.
 | source transport, cache, extraction and patching | `aros-fetch` |
 | isolated AHI configure/build/product validation | `aros-ahi-runner` |
 | deterministic native archive production and verification | `aros-release` |
-| experimental, non-executing producer recipe validation | `aros-toolchain` |
+| experimental read-only producer inspection; no build execution | `aros-toolchain` |
 
 The CLI executes build tools as standalone programs. It does not link their
 implementations into one process. This preserves explicit contracts and keeps

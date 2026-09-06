@@ -54,6 +54,7 @@ file before sharing it. A log file is not part of a deterministic artifact.
 | `AG` | Module generator |
 | `RM` | ROM tool |
 | `AP` | Internal release/installation boundary |
+| `AX` | Experimental toolchain producer inspection |
 
 Codes are stable identifiers and are not reused for a different retired error.
 See [the diagnostic model](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-common/src/diagnostic.rs)
@@ -62,7 +63,16 @@ for the exact code definitions.
 Captured child stdout/stderr are drained concurrently and bounded to 64 KiB
 per stream, with explicit truncation. Interactive console commands retain
 their terminal. Source Git operations have a 30-minute process-group deadline;
-source graph transpilation has a 10-minute deadline.
+source graph transpilation has a 10-minute deadline. Producer-plan Git queries
+instead use 1 MiB per stream, at most 10 seconds each within a 60-second Git
+inspection budget; they never replay untrusted Git stderr.
+Git failures preserve `tool`, `exit_code`, `signal`, `timed_out` and
+`timeout_ms` in the shared context when available; the command identity is retained.
+
+Producer inspection uses `AX0101` for contracts, `AX0102` for identities,
+`AX0201` for Git prerequisites and `AX0202` for input roots/resources.
+Successful blocked plans contain findings on stdout; invalid inputs use the
+normal failure envelope on stderr. Do not interpret exit 0 as build permission.
 
 ## Interpret source synchronization failures
 

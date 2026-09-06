@@ -104,7 +104,7 @@ staged and never reuses an existing destination.
 | Inputs and external contracts | `aros-fetch`, `aros-ahi-runner` | verified source transport, safe extraction, patches and validated AHI builds |
 | Hardware workflows | `aros-board`, `aros-macos-disk-claim` | board identity, deploy/network boot/removable-media safety, and the narrow macOS disk-claim lifetime |
 | Shared foundations | `aros-common` | diagnostics, opt-in logging, hashes, ELF and toolchain contracts |
-| Producer foundation (experimental) | `aros-toolchain` | non-executing recipe validation; CLI build integration remains in development |
+| Producer inspection (experimental) | `aros-toolchain` | read-only `toolchain plan`; build execution remains in development |
 | Build engine | `aros-cmake-engine` | embedded CMake integration, materialized in each selected build directory |
 
 `aros-cli` is intentionally an orchestrator, not a monolith: it executes the

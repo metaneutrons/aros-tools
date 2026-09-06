@@ -94,6 +94,22 @@ struct ClassifiedFailure {
     boundary: ErrorBoundary,
 }
 
+/// Carry a library's already-classified diagnostic through the CLI boundary.
+/// Do not render it to text and reclassify it as a generic consumer failure.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("{message}")]
+struct NativeDiagnostic {
+    message: String,
+    diagnostic: Box<Diagnostic>,
+}
+
+pub fn native_diagnostic(diagnostic: Diagnostic) -> miette::Report {
+    miette::Report::new(NativeDiagnostic {
+        message: diagnostic.message.clone(),
+        diagnostic: Box::new(diagnostic),
+    })
+}
+
 /// Typed publication-state marker carried through rich error chains.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -562,6 +578,16 @@ pub fn report_diagnostic(
     mut boundary: ErrorBoundary,
     mut context: DiagnosticContext,
 ) -> Diagnostic {
+    if let Some(native) = error.downcast_ref::<NativeDiagnostic>() {
+        let mut diagnostic = (*native.diagnostic).clone();
+        // Preserve native process/state metadata while adding command identity.
+        let native_context = diagnostic
+            .context
+            .get_or_insert_with(DiagnosticContext::default);
+        native_context.mode = native_context.mode.take().or(context.mode);
+        native_context.target = native_context.target.take().or(context.target);
+        return diagnostic;
+    }
     if let Some(classified) = error.downcast_ref::<ClassifiedFailure>() {
         boundary = classified.boundary;
     }

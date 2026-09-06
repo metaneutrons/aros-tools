@@ -1,6 +1,8 @@
 //! Producer errors use the existing shared diagnostic envelope and codes.
 
-use aros_common::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticStage};
+use aros_common::diagnostic::{
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage,
+};
 
 /// Safe, structured contract failure. Input documents are never copied into it.
 #[derive(Debug, thiserror::Error)]
@@ -10,6 +12,36 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn context(mut self, context: DiagnosticContext) -> Self {
+        if let Some(diagnostic) = self.diagnostics.diagnostics.first_mut() {
+            diagnostic.context = Some(context);
+        }
+        self
+    }
+
+    pub(crate) fn input(mut self, label: &'static str) -> Self {
+        for diagnostic in &mut self.diagnostics.diagnostics {
+            diagnostic.message = format!("{label}: {}", diagnostic.message);
+        }
+        self
+    }
+
+    pub(crate) fn preflight(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerPreflight,
+            message,
+            "select readable regular inputs, disjoint absolute roots and positive explicit resource budgets; no directories have been reserved",
+        )
+    }
+
+    pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerPrerequisite,
+            message,
+            "install a trusted Git with --no-lazy-fetch support and prepare the selected objects separately; planning never downloads missing objects",
+        )
+    }
+
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerContract,
