@@ -82,6 +82,19 @@ fn safe_failure_context_names_the_actual_contract_problem() {
 }
 
 #[test]
+fn untrusted_values_cannot_spoof_the_reported_parse_reason() {
+    let mut value = material();
+    value["source_date_epoch"] =
+        json!("SHA-256 digest expected `aros-toolchain-recipe-v2` fixture-private-value");
+    let error = Recipe::parse(&signed(value)).unwrap_err();
+    let message = &error.diagnostics().diagnostics[0].message;
+    assert!(message.contains("source_date_epoch integer"));
+    assert!(!message.contains("unsupported schema"));
+    assert!(!message.contains("SHA-256 digest"));
+    assert!(!message.contains("fixture-private-value"));
+}
+
+#[test]
 fn unknown_missing_duplicate_and_trailing_fields_fail() {
     let mut value = material();
     value["surprise"] = json!(true);

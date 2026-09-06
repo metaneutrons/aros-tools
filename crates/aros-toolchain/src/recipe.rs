@@ -207,6 +207,8 @@ fn lowercase_hex(value: &str) -> bool {
 
 fn safe_parse_reason(error: &serde_json::Error) -> String {
     let detail = error.to_string();
+    let position = format!(" at line {} column {}", error.line(), error.column());
+    let detail = detail.strip_suffix(&position).unwrap_or(&detail);
     // Only names from the closed schema are permitted in rendered context.
     // Never forward serde's invalid values or arbitrary unknown field names.
     for field in [
@@ -234,13 +236,15 @@ fn safe_parse_reason(error: &serde_json::Error) -> String {
     }
     let reason = if detail.starts_with("unknown field") {
         "unknown field; this recipe and its patch records have a closed schema"
-    } else if detail.contains("expected `aros-toolchain-recipe-v2`") {
+    } else if detail.ends_with(", expected `aros-toolchain-recipe-v2`") {
         "unsupported schema; expected aros-toolchain-recipe-v2"
-    } else if detail.contains("expected a lowercase 40-hex Git object identity") {
+    } else if detail.starts_with("expected a lowercase 40-hex Git object identity") {
         "expected a lowercase 40-hex Git object identity"
-    } else if detail.contains("SHA-256 digest") {
+    } else if detail.starts_with("expected a lowercase SHA-256 digest")
+        || detail.starts_with("expected a 64-character hexadecimal SHA-256 digest")
+    {
         "expected a lowercase 64-hex SHA-256 digest"
-    } else if detail.contains("expected u64") || detail.contains("number out of range") {
+    } else if detail.ends_with(", expected u64") || detail.starts_with("number out of range") {
         "expected an unsigned 64-bit source_date_epoch integer, not a boolean, float or string"
     } else {
         match error.classify() {
