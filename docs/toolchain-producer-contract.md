@@ -1,7 +1,10 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: specified, not implemented; awaiting architecture-PR review. This is
-engineering documentation, not a list of commands available to users.
+Status: specified; the first M1 library slice implements recipe-v2 syntax,
+self-digest validation and AX0101/AX0102 diagnostics only. This is engineering
+documentation, not a list of commands available to users. See the
+[library's exact limits](../crates/aros-toolchain/README.md). Planning, execution,
+state management and origin/source verification are not implemented by that slice.
 [Epic #27](https://github.com/metaneutrons/aros-tools/issues/27) tracks delivery;
 [M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28) tracks this freeze.
 The [delivery plan](toolchain-producer-plan.md) supplies scope and acceptance
@@ -297,7 +300,9 @@ Fixtures and rule ownership:
 | Forged receipt or compatibility report | Revalidate all references; receipts alone cannot prove origin, independence or release eligibility. |
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
-Reserve `AX` for producer diagnostics; add its enum variants in M1, not M0.
+Reserve `AX` for producer diagnostics. The first M1 library slice registers
+AX0101 and AX0102; all remaining codes below stay reserved until their actual
+implementations land. The versioned contract records that exact subset.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,
 digest and retry classifications go in typed evidence and safe messages/hints,
