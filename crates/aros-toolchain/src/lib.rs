@@ -13,6 +13,8 @@ mod filesystem;
 mod inspection;
 pub mod plan;
 pub mod recipe;
+#[cfg(unix)]
+mod source_audit;
 pub mod workspace;
 
 pub use error::ContractError;

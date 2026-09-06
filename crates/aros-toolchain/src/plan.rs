@@ -2,7 +2,7 @@
 //!
 //! Validates explicit identities and selected committed metadata. It never
 //! runs source-provided code, fetches objects, scans/changes caches or reserves
-//! output roots. Recursive snapshots and build eligibility remain M1/M2 gates.
+//! output roots. Isolated snapshots and build eligibility remain M1/M2 gates.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -167,26 +167,48 @@ pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
         .map_err(|error| error.input("--producer-dir"))?;
     let tools = Checkout::inspect(&paths.tools, recipe.tools(), deadline)
         .map_err(|error| error.input("--tools-dir"))?;
-    let profiles = producer.required_file("toolchains/profiles-v1.json")?;
+    let profiles = producer
+        .required_file("toolchains/profiles-v1.json")
+        .map_err(|error| error.input("--producer-dir"))?;
     if sha256_bytes(&profiles) != *recipe.profiles_sha256() {
         return Err(ContractError::identity(
             "selected profiles differ from the recipe digest",
         ));
     }
     check_profile(&profiles, &request.preset)?;
-    producer.source_lock(recipe.source_lock_sha256())?;
+    producer
+        .source_lock(recipe.source_lock_sha256())
+        .map_err(|error| error.input("--producer-dir"))?;
     // M2 owns source-lock semantics and completeness. Here only the exact
     // recipe-declared patch identities are checked, never applied.
     for patch in recipe.patches() {
-        if sha256_bytes(&source.required_file(patch.path())?) != *patch.sha256() {
+        if sha256_bytes(
+            &source
+                .required_file(patch.path())
+                .map_err(|error| error.input("--source-dir"))?,
+        ) != *patch.sha256()
+        {
             return Err(ContractError::identity(
                 "committed source patch differs from its recipe digest",
             ));
         }
     }
     let driver_present = producer
-        .file("scripts/toolchain/build-release.sh")?
+        .file("scripts/toolchain/build-release.sh")
+        .map_err(|error| error.input("--producer-dir"))?
         .is_some();
+    #[cfg(unix)]
+    {
+        let mut budget = crate::source_audit::Budget::new(deadline);
+        for (checkout, label) in [
+            (&source, "--source-dir"),
+            (&producer, "--producer-dir"),
+            (&tools, "--tools-dir"),
+        ] {
+            crate::source_audit::verify(checkout, &mut budget, 0)
+                .map_err(|error| error.input(label))?;
+        }
+    }
     let mut findings = findings(request, driver_present);
     findings.push(Diagnostic::error(
         DiagnosticCode::ProducerIdentity, DiagnosticStage::Configuration,
@@ -303,7 +325,7 @@ pub(crate) fn resolve_paths(request: &PlanRequest) -> Result<Paths, ContractErro
 fn findings(request: &PlanRequest, driver_present: bool) -> Vec<Diagnostic> {
     let mut findings = vec![Diagnostic::error(
         DiagnosticCode::ProducerContract, DiagnosticStage::Configuration,
-        "Build execution is not implemented. Recursive clean snapshots, source capabilities, source-lock semantics, prerequisites, cache integrity, ownership locks and cancellation have not been qualified.",
+        "Build execution is not implemented. Recursive raw worktree/index checks do not create isolated execution snapshots. Source capabilities, source-lock semantics, prerequisites, cache integrity, integrated ownership and cancellation remain unqualified.",
     ).with_hint("Do not execute this plan as a build authorization. Continue TCP-M1/M2; no cache was scanned, no prerequisite installed and no directory reserved.")];
     if !driver_present {
         findings.push(Diagnostic::error(DiagnosticCode::ProducerContract, DiagnosticStage::Configuration,

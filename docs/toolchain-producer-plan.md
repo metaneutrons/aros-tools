@@ -256,6 +256,13 @@ Dirty-source snapshots and arbitrary local patches are a later feature unless
 their complete material identity and non-release classification are designed
 and tested first. There is no general `--allow-dirty` release escape hatch.
 
+The M1 read-only inspector now compares every selected worktree/index and
+recursive gitlink with raw committed material, including ignored/untracked
+entries and executable bits. It never runs Git filters or source scripts.
+This is a prerequisite, not completion of the snapshot gate: isolated
+materialization, independent material/origin verification, and before/after
+execution checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
+
 ### Upstream compatibility is a capability check
 
 An explicit pristine-upstream checkout is a valid input to inspection, but it

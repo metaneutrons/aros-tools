@@ -2,7 +2,8 @@
 
 Status: partial M1 implementation. Recipe validation and experimental
 `plan --backend legacy-preview` inspection and lower-level directory guards/
-shared cancellation exist. Execution, recursive clean snapshots, resumable state
+shared cancellation exist. Recursive raw worktree/index/submodule inspection
+is implemented; execution, isolated clean snapshots, resumable state
 and origin verification do not. This document also
 specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
@@ -177,9 +178,14 @@ readiness with exit 0; execution must refuse it. No filesystem reservation is
 encoded in a plan. JSON result is one complete document plus newline.
 
 The initial M1 inspector always returns `blocked` for valid inspected inputs:
-it checks root commit/tree identities, selected raw committed metadata and
-root overlaps, but cannot yet certify recursive clean material, source
-capabilities, lock semantics, prerequisites/cache or executor/build lifecycle.
+it checks root commit/tree identities, selected raw committed metadata, root
+overlaps and complete recursive raw worktree/index material. The latter rejects
+dirty, ignored, untracked, missing, wrong-mode and changed/uninitialized
+submodule inputs without filters, source execution, fetching or cleanup.
+This read-only comparison is not an isolated snapshot, an independent Git
+object-database integrity audit or trusted origin proof; it cannot freeze a
+concurrently mutable checkout. Source capabilities, lock semantics,
+prerequisites/cache and executor/build lifecycle remain gates.
 `network_isolation: fetch-guard` is the selected future legacy policy, not an
 active OS isolation claim. Native selection fails before filesystem reads;
 no native declaration or driver is guessed from a historical recipe.

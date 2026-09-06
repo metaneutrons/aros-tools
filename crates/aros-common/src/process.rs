@@ -253,6 +253,31 @@ pub fn run_output_with_input(
     run_output_inner(command, Some(input), per_stream_limit, None, None)
 }
 
+/// Deliver exact input with bounded capture, a deadline and cancellation.
+///
+/// Uses the process-group cleanup guarantees of [`run_output_with_control`].
+/// A closed stdin caused by cancellation/timeout preserves that unsuccessful
+/// outcome and captured output; it never claims successful input delivery.
+///
+/// # Errors
+/// Returns an I/O error for invalid bounds, pre-spawn cancellation, incomplete
+/// input delivery on normal exit, or failed process/pipe setup or cleanup.
+pub fn run_output_with_input_and_control(
+    command: &mut Command,
+    input: &[u8],
+    per_stream_limit: usize,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> io::Result<ProcessOutput> {
+    run_output_inner(
+        command,
+        Some(input),
+        per_stream_limit,
+        Some(timeout),
+        Some(cancellation),
+    )
+}
+
 fn run_output_inner(
     command: &mut Command,
     input: Option<&[u8]>,
@@ -345,8 +370,8 @@ fn run_output_inner(
         }
     }
     finished.store(true, Ordering::Release);
-    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer).map_err(
-        |error| match completion {
+    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer, completion)
+        .map_err(|error| match completion {
             Completion::Cancelled => io::Error::new(
                 io::ErrorKind::Interrupted,
                 format!("operation cancelled; pipe cleanup also failed: {error}"),
@@ -356,8 +381,7 @@ fn run_output_inner(
                 format!("process deadline expired; pipe cleanup also failed: {error}"),
             ),
             Completion::Exited => error,
-        },
-    )?;
+        })?;
     let elapsed = started.elapsed();
     let timed_out = completion == Completion::TimedOut;
     let cancelled = completion == Completion::Cancelled;
@@ -599,8 +623,43 @@ fn prepare_capture_pipe<T>(_stream: &T) -> io::Result<()> {
     Ok(())
 }
 
+/// Pipe workers wait for readiness, not a fixed sleep per buffer. The bounded
+/// wait still gives escaped pipes regular opportunities to observe cleanup.
+trait PipeReadiness {
+    fn wait_for_io(&self, writing: bool) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd> PipeReadiness for T {
+    fn wait_for_io(&self, writing: bool) -> io::Result<()> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        let flags = if writing {
+            PollFlags::OUT
+        } else {
+            PollFlags::IN
+        };
+        let mut descriptors = [PollFd::new(self, flags)];
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000,
+        };
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl<T> PipeReadiness for T {
+    fn wait_for_io(&self, _writing: bool) -> io::Result<()> {
+        thread::sleep(Duration::from_millis(10));
+        Ok(())
+    }
+}
+
 fn drain_bounded(
-    mut stream: impl Read,
+    mut stream: impl Read + PipeReadiness,
     limit: usize,
     finished: &AtomicBool,
 ) -> io::Result<CapturedStream> {
@@ -617,7 +676,7 @@ fn drain_bounded(
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+                stream.wait_for_io(false)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -678,7 +737,7 @@ fn check_pipe_deadline(finished: &AtomicBool, finished_at: &mut Option<Instant>)
 }
 
 fn write_complete(
-    mut stream: impl Write,
+    mut stream: impl Write + PipeReadiness,
     mut input: &[u8],
     finished: &AtomicBool,
 ) -> io::Result<()> {
@@ -695,7 +754,7 @@ fn write_complete(
             Ok(written) => input = &input[written..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+                stream.wait_for_io(true)?;
             }
             Err(error) => return Err(error),
         }
@@ -722,6 +781,7 @@ fn join_workers(
     stdout_reader: thread::JoinHandle<io::Result<CapturedStream>>,
     stderr_reader: thread::JoinHandle<io::Result<CapturedStream>>,
     input_writer: Option<thread::JoinHandle<io::Result<()>>>,
+    completion: Completion,
 ) -> io::Result<(CapturedStream, CapturedStream)> {
     let stdout = join_stream(stdout_reader, "stdout");
     let stderr = join_stream(stderr_reader, "stderr");
@@ -743,7 +803,19 @@ fn join_workers(
         record("drain stderr", error);
     }
     if let Err(error) = &input {
-        record("write stdin", error);
+        // Killing a child with unread stdin normally closes the writer's pipe.
+        // Retain the timeout/cancellation and captured streams, not a spurious
+        // cleanup failure. All other worker failures (including an escaped
+        // descendant's open pipe) remain errors; normal exits still require
+        // complete input delivery.
+        if completion == Completion::Exited
+            || !matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero
+            )
+        {
+            record("write stdin", error);
+        }
     }
     if let Some(primary) = primary {
         return Err(combine_process_errors(primary, &additional));

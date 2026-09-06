@@ -103,7 +103,7 @@ socket2 = { version = "0.6", features = ["all"] }
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 # Safe POSIX file-descriptor operations used by the Linux SD writer to open a
 # whole block device with O_EXCL | O_NOFOLLOW without local unsafe code.
-rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount", "process"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "mount", "process", "event"] }
 # Minimal, typed bindings used by the macOS whole-disk claim RAII guard.
 # They are linked only on macOS by the guard crate.
 objc2-disk-arbitration = { version = "0.3.2", default-features = false, features = ["std", "DADisk", "DADissenter", "DASession", "libc"] }
