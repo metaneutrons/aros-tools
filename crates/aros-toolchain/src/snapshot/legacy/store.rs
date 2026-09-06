@@ -4,12 +4,13 @@ use aros_common::{sha256_bytes, sha256_reader, CancellationToken};
 use rustix::fs::{self as fs, Mode, OFlags};
 use std::{
     fs::File,
-    io::{Read as _, Write as _},
+    io::Read as _,
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use super::super::unix::{identity, parent};
+use super::Operations;
 use crate::{
     filesystem::{open_directory, DIRECTORY},
     inspection,
@@ -40,6 +41,7 @@ impl Store {
         commit: &GitObjectId,
         deadline: Instant,
         cancellation: &CancellationToken,
+        operations: &mut impl Operations,
     ) -> Result<Self, ContractError> {
         Budget::controlled(deadline, cancellation).check(0)?;
         let root_file = open_directory(root).map_err(io_failure)?;
@@ -64,15 +66,20 @@ impl Store {
             fs::mkdirat(&ancestor, leaf, Mode::from_raw_mode(0o700)).map_err(io_failure)?;
             store.entries.insert(name.into(), directory());
         }
-        store.write("config", CONFIG)?;
+        store.write("config", CONFIG, operations)?;
         let head = format!("{}\n", commit.as_str());
-        store.write("HEAD", head.as_bytes())?;
-        store.write("shallow", head.as_bytes())?;
+        store.write("HEAD", head.as_bytes(), operations)?;
+        store.write("shallow", head.as_bytes(), operations)?;
         store.check()?;
         Ok(store)
     }
 
-    fn write(&mut self, name: &str, bytes: &[u8]) -> Result<(), ContractError> {
+    fn write(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        operations: &mut impl Operations,
+    ) -> Result<(), ContractError> {
         let (ancestor, leaf) = parent(&self.file, name)?;
         let mut file = File::from(
             fs::openat(
@@ -83,7 +90,9 @@ impl Store {
             )
             .map_err(io_failure)?,
         );
-        file.write_all(bytes).map_err(io_failure)?;
+        operations
+            .write_metadata(&mut file, bytes)
+            .map_err(io_failure)?;
         self.entries.insert(
             name.into(),
             Entry {
