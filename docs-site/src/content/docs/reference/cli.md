@@ -107,7 +107,7 @@ missing, wrong-mode or uninitialized material is rejected. Even empty
 untracked directories count; keep build/cache directories outside the roots.
 Raw symlink targets are compared without following them. Git filters and index
 flags cannot hide changes, and inspection never cleans the checkouts.
-Plans currently report `blocked`: isolated execution snapshots, source capabilities,
+Plans currently report `blocked`: integrated execution snapshots, source capabilities,
 source-lock semantics, prerequisites/cache, executor origin and safe build
 lifecycle remain unqualified. The frontend's unknown source commit is null,
 not the old collector commit. `fetch-guard` describes the intended legacy
@@ -116,6 +116,8 @@ policy, not a proven OS sandbox. Exit 0 means inspection completed; inspect
 
 The default `native` backend is not implemented and fails before file reads;
 it never falls back. No `toolchain build` command is advertised yet.
+The lower-level source-snapshot library is not called by `plan` and does not
+change its read-only behavior or grant execution readiness.
 
 ## Build and inspect a product
 

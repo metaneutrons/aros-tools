@@ -259,9 +259,13 @@ and tested first. There is no general `--allow-dirty` release escape hatch.
 The M1 read-only inspector now compares every selected worktree/index and
 recursive gitlink with raw committed material, including ignored/untracked
 entries and executable bits. It never runs Git filters or source scripts.
-This is a prerequisite, not completion of the snapshot gate: isolated
-materialization, independent material/origin verification, and before/after
-execution checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
+The separate lower-level `SourceSnapshot` now materializes one selected input
+under held run ownership, flattens recursive gitlinks without Git metadata and
+revalidates its exact raw inventory before/after durable no-clobber publication.
+It rejects unsafe link graphs and retains failed material without adoption.
+This does not complete the execution gate: integration across all selected
+roots, independent material/origin verification, and before/after execution
+checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
 
 ### Upstream compatibility is a capability check
 

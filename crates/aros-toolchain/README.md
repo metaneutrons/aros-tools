@@ -29,7 +29,7 @@ fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
 Plans currently have `readiness: blocked`, even with complete resource options.
-Isolated execution snapshots, source capabilities, lock semantics, prerequisites/cache,
+Integrated execution snapshots, source capabilities, lock semantics, prerequisites/cache,
 executor origin, ownership and cancellation remain unqualified. A blocked
 inspection exits 0; invalid input exits 1 without a result. Neither a plan nor
 a valid self-digest grants build permission. The recursive read-only check
@@ -98,6 +98,51 @@ Other pipe/drain/cleanup failures remain errors. The frontend's signal handling,
 complete build deadline, source/executor readiness
 and isolated adapter still need integration before any compiler can launch.
 Guard tests and subprocess fixtures do not qualify a real toolchain build.
+
+## Isolated source material primitive
+
+`snapshot::SourceSnapshot::prepare` is a separate library API, not a CLI command
+or an execution-ready plan. It borrows a live `RunDirectories` guard and selects
+exactly one recipe root with `SourceRole::{Source, Producer, Tools}`. The two
+complete inspections share one explicitly supplied deadline: a read-only
+preflight before staging, then raw-object copying plus repeated source checks.
+It never copies working-file bytes or hardlinks, runs filters, fetches objects,
+executes producer scripts, or changes the original checkouts/cache/output.
+
+Each role exclusively creates `.<role>-pending` under the held work descriptor.
+Committed files retain their raw bytes and Git executable bit (private 0600/0700
+files); recursively selected gitlinks become ordinary directories. All `.git`
+metadata is omitted. Unicode/spaces are preserved; unsafe names and case-folded
+sibling collisions fail. Source timestamps are not yet normalized for builds.
+
+Symlinks are created only after resolving their complete graph against the
+flattened committed inventory. Targets must be bounded relative UTF-8 paths
+inside that input; absolute/escaping/dangling targets, link-expansion cycles, non-directory
+traversal and more than 40 link expansions fail. This is intentionally stricter
+than read-only `plan`, which can inspect dangling/escaping links without using
+them. Links between the three selected roots are not authorized implicitly.
+
+The shared no-follow/no-clobber publication primitive syncs and atomically
+renames the complete staging tree to `<role>`. Revalidation before and after
+publication checks the exact bytes, modes, link targets, membership and root
+identity; snapshot regular files must have a single link. Later `revalidate`
+uses the retained in-process inventory without Git. Editing an original file
+cannot change the copy. Modified snapshots, extra `.git` or other entries,
+special files, hardlinks and changed work/output ownership fail closed.
+
+Failures retain partial or complete material and return AX diagnostics, including
+publication failure classification; a retry never adopts it. Drop deletes nothing.
+There is no persisted success receipt or automatic recovery. Each role is
+independent, **not** one transaction across all three inputs. The future executor
+must hold and revalidate all selected snapshots and its separate readiness gates.
+
+Per preparation pass/input, the existing recursive count/byte/depth/blob limits
+apply. Git children use at most ten seconds of the remaining explicit operation
+deadline; cancellation is passed into the shared process runner. Filesystem loops
+check budgets between entries and 64 KiB write chunks. Kernel I/O/fsync and the
+shared publication traversal are not preemptible; timeout/cancellation observed
+after publication is a failure with the complete tree retained, never success.
+This is neither a same-user sandbox nor independent Git-object/origin verification.
 
 ## Current CLI scope
 
