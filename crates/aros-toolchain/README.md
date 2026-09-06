@@ -92,6 +92,8 @@ controlled execution with distinct cancellation/timeout/status outcomes. The
 input-capable variant uses the same runner, including bounded blocked-writer
 cleanup. A stdin pipe closed by cancellation/timeout preserves that outcome
 and captured output; normal exit still requires complete input delivery.
+Unix pipe workers wait for OS readiness instead of imposing a fixed sleep on
+each temporary `WouldBlock`; the existing post-cleanup drain bound is unchanged.
 Other pipe/drain/cleanup failures remain errors. The frontend's signal handling,
 complete build deadline, source/executor readiness
 and isolated adapter still need integration before any compiler can launch.
