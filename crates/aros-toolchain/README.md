@@ -16,24 +16,48 @@ Implemented:
 
 Recipe parsing performs no I/O. Planning inspects three explicit Git
 roots/commit/tree pairs, raw committed profile/lock/patch identities and
-proposed disjoint roots. Descriptor-relative reads reject links and special
-files; bounded trusted Git queries disable filters, fsmonitor, hooks, lazy
+proposed disjoint roots. It also checks the complete raw worktree and index of
+each root and every initialized recursive gitlink against the selected trees.
+This includes ignored/untracked files and empty directories, missing files,
+executable bits, staged conflicts/changes, raw symlink targets and binary blobs.
+Git index stat caches, `assume-unchanged`, `skip-worktree`, ignore rules and clean
+filters cannot waive these comparisons. Selected metadata must be regular;
+other committed symlinks are compared as link bytes, never followed.
+Descriptor-relative reads reject special files and symlink directories;
+bounded trusted Git queries disable filters, fsmonitor, hooks, lazy
 fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
 Plans currently have `readiness: blocked`, even with complete resource options.
-Recursive snapshots, source capabilities, lock semantics, prerequisites/cache,
+Isolated execution snapshots, source capabilities, lock semantics, prerequisites/cache,
 executor origin, ownership and cancellation remain unqualified. A blocked
 inspection exits 0; invalid input exits 1 without a result. Neither a plan nor
-a valid self-digest grants build permission. Raw-file comparison does not
-certify a concurrently mutable tree or ignored/untracked/submodule files.
+a valid self-digest grants build permission. The recursive read-only check
+does not freeze a concurrently mutable tree, create an isolated snapshot,
+re-hash Git's object database independently, or establish trusted origin.
+It compares against the raw material returned by the selected local Git
+database. Git metadata is excluded only at each verified repository root;
+linked worktree/submodule metadata may be external. This is not a sandbox.
+Boundary metadata/name checks catch observed races, not every possible change
+by a hostile same-user process. Execution still requires isolated, revalidated
+material and trusted executor evidence; no caller can reuse an audit as a receipt.
+AX0102 names the selected root and, for committed-file mismatches, the validated
+root-relative path. Undeclared names, private file bytes and Git stderr are not
+echoed. No ignored files are removed or automatically exempted: use separately
+prepared clean checkouts with Cargo targets and transport caches outside them.
 
 The measured frontend file digest is not an attestation. An unproven frontend
 commit is null in blocked plans, **not** the recipe's collector commit.
 Execution/results/receipts may not adopt this plan-only exception.
 Git queries use 10-second group limits within a 60-second Git budget;
-documents/individual selected blobs and captured streams are capped at 1 MiB,
+documents/individual selected metadata blobs are capped at 1 MiB,
 profiles/toolchains directory entries at 128, frontend hashing at 512 MiB.
+Recursive inspection shares the 60-second budget across all three roots and
+submodules: at most 200,000 entries, 8 GiB of declared blob bytes, 64 levels,
+4,096-byte UTF-8 relative paths, 64 MiB per blob and 32 MiB per tree/index
+listing. Raw `cat-file --batch` reads are grouped (normally 8 MiB, at most
+4,096 blobs); one larger allowed blob gets its own bounded batch. NUL-framed
+inventories and exact ID/type/size headers are validated, never truncated.
 These are inspection bounds, not measured compiler resource defaults.
 
 ## Work ownership primitive, not a build command
@@ -65,7 +89,11 @@ boundary checks do not sandbox a hostile process with the same user's access.
 
 The shared process runner now provides a one-way `CancellationToken` and bounded
 controlled execution with distinct cancellation/timeout/status outcomes. The
-frontend's signal handling, complete build deadline, source/executor readiness
+input-capable variant uses the same runner, including bounded blocked-writer
+cleanup. A stdin pipe closed by cancellation/timeout preserves that outcome
+and captured output; normal exit still requires complete input delivery.
+Other pipe/drain/cleanup failures remain errors. The frontend's signal handling,
+complete build deadline, source/executor readiness
 and isolated adapter still need integration before any compiler can launch.
 Guard tests and subprocess fixtures do not qualify a real toolchain build.
 

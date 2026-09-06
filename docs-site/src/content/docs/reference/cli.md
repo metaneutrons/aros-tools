@@ -100,9 +100,14 @@ No directories are created, no locks reserved and no cache contents scanned.
 As with other commands, explicit `--log-file` can write the selected log;
 keep that optional destination outside source roots.
 
-This first inspection checks recipe self-consistency, selected committed
-profile/lock/patch identities and root overlap, **not build readiness**.
-Plans currently report `blocked`: recursive clean snapshots, source capabilities,
+Inspection checks recipe self-consistency, selected committed profile/lock/patch
+identities, root overlap and the raw worktree/index of all three checkouts and
+their recursive submodules, **not build readiness**. Dirty, ignored, untracked,
+missing, wrong-mode or uninitialized material is rejected. Even empty
+untracked directories count; keep build/cache directories outside the roots.
+Raw symlink targets are compared without following them. Git filters and index
+flags cannot hide changes, and inspection never cleans the checkouts.
+Plans currently report `blocked`: isolated execution snapshots, source capabilities,
 source-lock semantics, prerequisites/cache, executor origin and safe build
 lifecycle remain unqualified. The frontend's unknown source commit is null,
 not the old collector commit. `fetch-guard` describes the intended legacy
