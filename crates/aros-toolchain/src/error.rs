@@ -1,6 +1,8 @@
 //! Producer errors use the existing shared diagnostic envelope and codes.
 
-use aros_common::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSet, DiagnosticStage};
+use aros_common::diagnostic::{
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage,
+};
 
 /// Safe, structured contract failure. Input documents are never copied into it.
 #[derive(Debug, thiserror::Error)]
@@ -10,6 +12,13 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn context(mut self, context: DiagnosticContext) -> Self {
+        if let Some(diagnostic) = self.diagnostics.diagnostics.first_mut() {
+            diagnostic.context = Some(context);
+        }
+        self
+    }
+
     pub(crate) fn input(mut self, label: &'static str) -> Self {
         for diagnostic in &mut self.diagnostics.diagnostics {
             diagnostic.message = format!("{label}: {}", diagnostic.message);

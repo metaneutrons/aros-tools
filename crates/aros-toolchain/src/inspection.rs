@@ -6,7 +6,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use aros_common::{run_output_with_timeout, sha256_bytes, sha256_reader, Sha256Digest};
+use aros_common::{
+    exit_signal, run_output_with_timeout, sha256_bytes, sha256_reader, DiagnosticContext,
+    Sha256Digest,
+};
 
 use crate::recipe::{safe_relative_path, GitObjectId};
 use crate::{canonical::MAX_DOCUMENT_BYTES, ContractError};
@@ -181,13 +184,15 @@ impl<'a> Checkout<'a> {
     pub(crate) fn recheck(&self) -> Result<(), ContractError> {
         let head = self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
         let observed_tree = self.git(&["rev-parse", "--verify", "HEAD^{tree}"])?;
-        if text(&head)?.trim() != self.commit.as_str()
-            || text(&observed_tree)?.trim() != self.tree.as_str()
-        {
+        let head = GitObjectId::try_from(text(&head)?.trim().to_owned())
+            .map_err(ContractError::identity)?;
+        let observed_tree = GitObjectId::try_from(text(&observed_tree)?.trim().to_owned())
+            .map_err(ContractError::identity)?;
+        if head != *self.commit || observed_tree != *self.tree {
             return Err(ContractError::identity(format!(
-                "checkout identity differs from recipe commit {} / tree {}",
+                "checkout identity mismatch: expected commit {} / tree {}; observed commit {} / tree {}",
                 self.commit.as_str(),
-                self.tree.as_str()
+                self.tree.as_str(), head.as_str(), observed_tree.as_str()
             )));
         }
         Ok(())
@@ -297,16 +302,46 @@ impl<'a> Checkout<'a> {
                 "gc.auto=0",
             ])
             .args(arguments);
-        let result = run_output_with_timeout(
-            &mut command,
-            MAX_DOCUMENT_BYTES,
-            remaining.min(Duration::from_secs(10)),
-        )
-        .map_err(|_| {
-            ContractError::prerequisite("could not execute bounded read-only Git inspection")
-        })?;
+        let timeout = remaining.min(Duration::from_secs(10));
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let result = run_output_with_timeout(&mut command, MAX_DOCUMENT_BYTES, timeout).map_err(
+            |error| {
+                let reason = match error.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        "trusted Git executable or selected working directory is missing"
+                    }
+                    std::io::ErrorKind::PermissionDenied => {
+                        "permission denied while executing read-only Git inspection"
+                    }
+                    std::io::ErrorKind::TimedOut => {
+                        "read-only Git inspection timed out and process cleanup failed"
+                    }
+                    _ => "I/O failure while executing or capturing read-only Git inspection",
+                };
+                ContractError::prerequisite(reason).context(DiagnosticContext {
+                    tool: Some("git".into()),
+                    timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
+                    timeout_ms: Some(timeout_ms),
+                    ..DiagnosticContext::default()
+                })
+            },
+        )?;
         if result.timed_out || !result.status.success() {
-            return Err(ContractError::prerequisite("read-only Git inspection failed or timed out; objects may be missing, inaccessible or unsupported by Git"));
+            let reason = if result.timed_out {
+                "read-only Git inspection exceeded its process deadline"
+            } else {
+                "read-only Git inspection exited unsuccessfully; check local objects, access and Git capability"
+            };
+            return Err(
+                ContractError::prerequisite(reason).context(DiagnosticContext {
+                    tool: Some("git".into()),
+                    exit_code: result.status.code(),
+                    signal: exit_signal(result.status),
+                    timed_out: Some(result.timed_out),
+                    timeout_ms: Some(timeout_ms),
+                    ..DiagnosticContext::default()
+                }),
+            );
         }
         // Never forward potentially private Git stderr or truncate an identity.
         result

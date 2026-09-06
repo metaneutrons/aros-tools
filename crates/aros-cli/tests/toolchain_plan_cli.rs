@@ -518,12 +518,21 @@ fn git_failure_and_deadline_preserve_one_safe_diagnostic() {
     let output = fixture.command().env("PATH", &bin).output().unwrap();
     failure(&output, "AX0201");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("private-child-output"));
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["context"]["tool"], "git");
+    assert_eq!(diagnostic["diagnostics"][0]["context"]["exit_code"], 7);
+    assert_eq!(diagnostic["diagnostics"][0]["context"]["timed_out"], false);
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["target"],
+        "pc-x86_64"
+    );
     fs::write(&program, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
     let started = std::time::Instant::now();
-    failure(
-        &fixture.command().env("PATH", &bin).output().unwrap(),
-        "AX0201",
-    );
+    let timeout = fixture.command().env("PATH", &bin).output().unwrap();
+    failure(&timeout, "AX0201");
+    let diagnostic: Value = serde_json::from_slice(&timeout.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["context"]["timed_out"], true);
+    assert_eq!(diagnostic["diagnostics"][0]["context"]["timeout_ms"], 10000);
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
 }
 

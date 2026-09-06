@@ -580,10 +580,12 @@ pub fn report_diagnostic(
 ) -> Diagnostic {
     if let Some(native) = error.downcast_ref::<NativeDiagnostic>() {
         let mut diagnostic = (*native.diagnostic).clone();
-        // Keep existing library context; otherwise attach the command context.
-        if diagnostic.context.is_none() {
-            diagnostic.context = Some(context);
-        }
+        // Preserve native process/state metadata while adding command identity.
+        let native_context = diagnostic
+            .context
+            .get_or_insert_with(DiagnosticContext::default);
+        native_context.mode = native_context.mode.take().or(context.mode);
+        native_context.target = native_context.target.take().or(context.target);
         return diagnostic;
     }
     if let Some(classified) = error.downcast_ref::<ClassifiedFailure>() {

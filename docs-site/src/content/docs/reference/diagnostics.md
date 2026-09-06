@@ -66,6 +66,8 @@ their terminal. Source Git operations have a 30-minute process-group deadline;
 source graph transpilation has a 10-minute deadline. Producer-plan Git queries
 instead use 1 MiB per stream, at most 10 seconds each within a 60-second Git
 inspection budget; they never replay untrusted Git stderr.
+Git failures preserve `tool`, `exit_code`, `signal`, `timed_out` and
+`timeout_ms` in the shared context when available; the command identity is retained.
 
 Producer inspection uses `AX0101` for contracts, `AX0102` for identities,
 `AX0201` for Git prerequisites and `AX0202` for input roots/resources.
