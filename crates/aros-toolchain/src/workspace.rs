@@ -15,12 +15,16 @@ use crate::plan::{self, Backend, Paths, PlanRequest};
 use crate::ContractError;
 
 #[cfg(unix)]
+mod directory_lock;
+#[cfg(unix)]
 mod unix;
 
 /// Held directory locks and identities for one fresh local operation.
 ///
 /// The owning process must retain this guard for the whole operation. Locks
 /// are advisory and close-on-exec; a same-user hostile process is not sandboxed.
+/// Call `release` to report unlock failures after all child activity has ended;
+/// Drop performs fallback unlocking and logs failures, never deletes data.
 /// This record is neither a phase receipt nor permission to execute a plan.
 #[derive(Debug)]
 pub struct RunDirectories {
@@ -112,6 +116,38 @@ impl RunDirectories {
             self.work.revalidate()?;
             self.output.revalidate()?;
             Ok(())
+        }
+        #[cfg(not(unix))]
+        Err(ContractError::state(
+            "work ownership requires a supported Unix host",
+        ))
+    }
+
+    /// Explicitly release both locks without modifying any directory contents.
+    ///
+    /// Call only after all work and child-process cleanup has completed. This
+    /// consumes ownership even on failure; neither a cancelled operation nor a
+    /// changed namespace may skip releasing the original held descriptors.
+    ///
+    /// # Errors
+    /// Returns AX0801 for any unlock failure. Both roots are attempted; Drop
+    /// makes a final fallback attempt and closes descriptors. A fallback must
+    /// not turn the returned failure into a successful operation.
+    pub fn release(mut self) -> Result<(), ContractError> {
+        #[cfg(unix)]
+        {
+            let mut failures = Vec::new();
+            if let Err(error) = self.work.release() {
+                failures.push(format!("work directory unlock failed: {error}"));
+            }
+            if let Err(error) = self.output.release() {
+                failures.push(format!("output directory unlock failed: {error}"));
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(ContractError::state(failures.join("; ")))
+            }
         }
         #[cfg(not(unix))]
         Err(ContractError::state(

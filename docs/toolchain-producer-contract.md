@@ -363,7 +363,13 @@ It adds no CLI command, recipe/origin authority, snapshot, adapter or phase-resu
 support. Internal `.aros-toolchain-owner-v1.json` markers bind an operation digest
 and role, not build receipts; they never permit adoption of an existing directory.
 Parents must already exist. A partial reservation is retained on failure, and
-drop only releases handles/locks. The caller must finish all readiness gates and
+`release()` explicitly unlocks both held directory descriptions and returns
+AX0801 on failure; it must follow completion of all child activity. Drop performs
+fallback unlocking with tracing on failure, then closes descriptors, never
+deletes data. A duplicated/inherited descriptor cannot substitute for the
+owner's explicit unlock, and CLOEXEC is not close-on-fork. An inherited guard
+must not unlock its parent's description; only the creating process releases
+the lock. The caller must finish all readiness gates and
 revalidate at execution boundaries before using these mechanisms together.
 
 Remaining implementation gates include: private MetaMake fetch integration,

@@ -7,9 +7,9 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use aros_common::Sha256Digest;
-use rustix::fs::{self as fs, AtFlags, FlockOperation, Mode, OFlags};
+use rustix::fs::{self as fs, AtFlags, Mode, OFlags};
 
-use super::state_io;
+use super::{directory_lock::DirectoryLock, state_io};
 use crate::filesystem::{open_directory, DIRECTORY};
 use crate::ContractError;
 
@@ -86,14 +86,15 @@ impl Parent {
             fs::openat(&self.file, &self.leaf, DIRECTORY, Mode::empty())
                 .map_err(|error| state_io("open reserved directory", &path, &error.into()))?,
         );
-        fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|error| state_io("lock reserved directory", &path, &error.into()))?;
-        let root_identity = identity(&file)
+        let lock = DirectoryLock::acquire(file)
+            .map_err(|error| state_io("lock reserved directory", &path, &error))?;
+        let file = lock.file();
+        let root_identity = identity(file)
             .map_err(|error| state_io("inspect reserved directory", &path, &error))?;
         let record = format!("{{\"schema\":\"aros-toolchain-owner-v1\",\"role\":\"{role}\",\"owner_sha256\":\"{owner}\"}}\n").into_bytes();
         let mut marker = File::from(
             fs::openat(
-                &file,
+                file,
                 MARKER,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::RUSR | Mode::WUSR,
@@ -111,7 +112,7 @@ impl Parent {
             .map_err(|error| state_io("persist reserved directory", &path, &error))?;
         let reservation = OwnedDirectory {
             parent: self,
-            file,
+            lock,
             identity: root_identity,
             marker_identity,
             record,
@@ -124,13 +125,17 @@ impl Parent {
 #[derive(Debug)]
 pub(super) struct OwnedDirectory {
     parent: Parent,
-    file: File,
+    lock: DirectoryLock,
     identity: (u64, u64),
     marker_identity: (u64, u64),
     record: Vec<u8>,
 }
 
 impl OwnedDirectory {
+    pub(super) fn release(&mut self) -> io::Result<()> {
+        self.lock.release()
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), ContractError> {
         self.parent.revalidate()?;
         let path = self.parent.path.join(&self.parent.leaf);
@@ -159,11 +164,12 @@ impl OwnedDirectory {
                 "reserved directory is no longer private",
             ));
         }
-        fs::flock(&self.file, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|error| state_io("revalidate directory lock", &path, &error.into()))?;
+        self.lock
+            .revalidate()
+            .map_err(|error| state_io("revalidate directory lock", &path, &error))?;
         let marker = File::from(
             fs::openat(
-                &self.file,
+                self.lock.file(),
                 MARKER,
                 OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
@@ -202,6 +208,32 @@ fn identity(file: &File) -> io::Result<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustix::fs::FlockOperation;
+
+    #[test]
+    fn dropping_owner_unlocks_even_while_a_duplicated_description_survives() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap().join("work");
+        let guard = Parent::inspect(&path)
+            .unwrap()
+            .reserve(&aros_common::sha256_bytes(b"fixture"), "work")
+            .unwrap();
+        // dup and fork share the same open file description. CLOEXEC only
+        // closes inherited descriptors at exec, not during the fork window.
+        let duplicate = guard.lock.file().try_clone().unwrap();
+        assert!(rustix::io::fcntl_getfd(&duplicate)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
+        let independent = File::open(&path).unwrap();
+        assert_eq!(
+            fs::flock(&independent, FlockOperation::NonBlockingLockExclusive).unwrap_err(),
+            rustix::io::Errno::WOULDBLOCK,
+        );
+        drop(guard);
+        fs::flock(&independent, FlockOperation::NonBlockingLockExclusive).unwrap();
+        // The duplicated reference is intentionally still alive here.
+        duplicate.metadata().unwrap();
+    }
 
     #[test]
     fn parent_replaced_between_inspection_and_reservation_is_refused() {

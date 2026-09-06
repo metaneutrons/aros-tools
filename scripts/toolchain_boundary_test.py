@@ -9,7 +9,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED = {"aros-common", "aros-fetch", "serde", "serde_json", "thiserror", "toml", "rustix", "tempfile"}
+ALLOWED = {"aros-common", "aros-fetch", "serde", "serde_json", "thiserror", "toml", "rustix", "tempfile", "tracing"}
 
 
 def dependency_names(manifest: dict, workspace: dict) -> set[str]:

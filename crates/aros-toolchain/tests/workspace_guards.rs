@@ -141,6 +141,29 @@ fn existing_work_or_output_is_never_adopted_even_when_empty() {
 }
 
 #[test]
+fn explicit_release_unlocks_both_original_roots_after_cancellation_and_rename() {
+    let fixture = Fixture::new();
+    let guard = fixture.reserve().unwrap();
+    fs::write(fixture.work().join("retained"), b"partial evidence").unwrap();
+    let moved = fixture.root.path().join("moved work");
+    fs::rename(fixture.work(), &moved).unwrap();
+    fs::create_dir(fixture.work()).unwrap();
+    fs::write(fixture.work().join("foreign"), b"keep").unwrap();
+    fixture.token.cancel();
+    let before = fixture.digest();
+    guard.release().unwrap();
+    for path in [moved.as_path(), fixture.output()] {
+        let observer = fs::File::open(path).unwrap();
+        rustix::fs::flock(
+            &observer,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
+    }
+    assert_eq!(fixture.digest(), before);
+}
+
+#[test]
 fn missing_parent_is_not_implicitly_created() {
     let mut fixture = Fixture::new();
     fixture.request.output_dir = Some(fixture.root.path().join("missing/parent/output"));

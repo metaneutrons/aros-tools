@@ -47,9 +47,19 @@ explicit `revalidate` boundary. Existing roots, even empty ones, are never
 adopted. Descriptor-relative no-follow traversal is shared with inspection.
 
 Reservation is not atomic across the two roots. A failure can retain a partially
-created reservation; AX0801 says to inspect the selected paths. Drop releases
-locks but never deletes data. There is no implicit resume, stale-state adoption,
-automatic cleanup, phase receipt or candidate publication. The caller-provided
+created reservation; AX0801 says to inspect the selected paths. After all child
+activity has ended, consume the guard with `release()` to explicitly unlock
+both original directory descriptions and report any AX0801 failure. Cancellation
+or namespace changes do not suppress unlocking. Drop performs fallback unlocking
+and logs failures through the existing tracing subscriber, but cannot return a
+successful cleanup result; it never deletes data. Explicit unlocking prevents
+an inherited/duplicated descriptor from extending the owner's lock lifetime
+past drop; `CLOEXEC` alone only closes such references at exec, not at fork.
+Only the creating process may unlock; an inherited non-owner guard closes its
+own descriptor without releasing the parent's still-active lock.
+The lock guard exists before fallible marker construction, so partial setup
+failures receive the same fallback cleanup. There is no implicit resume,
+stale-state adoption, automatic cleanup, phase receipt or candidate publication. The caller-provided
 owner digest binds its chosen operation, not trusted executor origin. Locks and
 boundary checks do not sandbox a hostile process with the same user's access.
 
