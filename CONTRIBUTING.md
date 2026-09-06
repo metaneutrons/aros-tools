@@ -18,7 +18,7 @@ Source-contract tests need the immutable AROS-NX revision named in
 `contracts/aros-source-v1.toml`; do not substitute a moving branch or infer a
 neighboring checkout.
 
-Install the pinned audit helpers once and run the canonical complete gate. The
+Install the pinned audit helpers once and run the canonical iteration gate. The
 script resolves the repository root itself, so it is safe to invoke from a
 subdirectory:
 
@@ -27,26 +27,65 @@ cargo install cargo-audit --version 0.22.2 --locked
 cargo install cargo-deny --version 0.20.2 --locked
 cargo install cargo-machete --version 0.9.2 --locked
 # Also install the platform tools listed above from your package manager.
-AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
-  scripts/check-workspace.sh
+scripts/check-workspace.sh
 ```
 
-`scripts/check-workspace.sh` is the workspace-gate SSOT. Its default `all`
-mode includes formatting, architecture, Actions/APT/governance/release-policy
-fixtures, actionlint,
-ShellCheck, locked strict Clippy, locked rustdoc, audit, deny, machete, the
-locked Astro build, and locked workspace tests. CI runs the closed
-source-independent `portable-test` suite on all
-four supported hosts and the recursive exact-source `test` gate on one Linux
-lane. This reduces runner work without weakening the default local `all`
-contract. The exact-source gate also builds the workspace executables and runs
-every host-compatible `aros-cmake-engine` CMake fixture against that same
-qualified checkout; `clang`, `cmake` and `ninja` are therefore required for this gate.
-The real GRUB host-build fixture is an explicit Darwin/arm64 release
-qualification and is reported as an omission on other hosts. The separate
-documentation gate runs the locked npm/Astro contract through `docs` and
-validates generated links and static output under the public `/aros-tools/`
-prefix.
+`scripts/check-workspace.sh` is the workspace-gate SSOT. Its default `check`
+mode runs quality and portable tests: formatting, architecture, Actions/APT/
+governance/release-policy fixtures, actionlint, ShellCheck, locked strict Clippy,
+rustdoc, audit, deny and machete, followed by the closed source-independent
+Rust suite. It does **not** run the source-coupled Rust suite, Astro build or
+real CMake/GRUB product fixtures. `check` and `portable-test` reject a configured
+`AROS_TEST_SOURCE_ROOT` instead of silently treating partial coverage as full.
+The previous full default remains available only through explicit `all`.
+
+### Test stages and integration checkpoints
+
+| When | Gate | Evidence and limits |
+| --- | --- | --- |
+| Editing a focused crate | `cargo test -p <crate> --locked` | Fast regression feedback; not the workspace gate. |
+| Ordinary local iteration / before pushing | `scripts/check-workspace.sh` | Quality + portable Rust; no source checkout or product build. |
+| Source/transpiler behavior changes and PR source lane | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh source-test` | Full locked Rust suite against the exact clean recursive source; no CMake fixtures. |
+| Documentation changes | `scripts/check-workspace.sh docs` | Locked npm/Astro build, generated links and deployment dry-run. |
+| Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible CMake fixture. |
+| Feature/milestone acceptance or release candidate | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh all` | Quality + docs + integration; requires the host coverage below. |
+
+PR CI retains all four required host-test jobs. Linux x86-64 runs the full
+source-coupled Rust suite; the other three hosts run `portable-test`. No
+failing test is hidden by a path filter, label, job skip or check-name change.
+On a push to `main`, and on an explicit **Workspace CI → Run workflow** start,
+the Linux source lane also runs all compatible CMake fixtures. Thus repeated
+PR iterations do not rebuild unrelated products. Quality, documentation and
+the separate four-host release/package qualification policies are unchanged.
+
+Before merging changes to the CMake engine, source translation, AROS source
+contract, fetch/build runner boundaries or this gate itself, run `test` once
+on the final implementation candidate; use the explicit CI dispatch for its
+Linux coverage and a local Darwin/arm64 run where GRUB is affected. This is an
+integration checkpoint, not a command to repeat after each edit. Complete
+cross-cutting feature/milestone acceptance and release-candidate qualification
+require both Linux x86-64 and Darwin/arm64 evidence on the same candidate tree
+and qualified source. Record exact identities, commands, hosts, result and
+omissions in the PR or milestone issue. Any later executable/test/contract
+change invalidates that candidate evidence; a docs-only change does not require
+rebuilding GRUB. A failed checkpoint blocks acceptance/promotion; fix and rerun
+it rather than accepting a green partial stage.
+
+The real GRUB fixture builds PC, EFI64 and EFI32 host tools **only on
+Darwin/arm64**; Linux explicitly reports that host-qualified omission. A green
+Linux CI run alone is therefore not the complete macOS/GRUB evidence. The
+explicit `test`/`all` gate discovers every `*Test.cmake`, so newly added fixtures
+cannot silently fall out of the integration inventory. `clang`, `cmake` and
+`ninja` are required. The local invocation is:
+
+```sh
+AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+  scripts/check-workspace.sh all
+```
+
+This policy schedules existing tests; it does not grant release authority,
+replace toolchain A/B/compatibility checks, change pins or waive a failing
+required check. No periodic expensive sweep is scheduled by default.
 
 `AROS_TEST_SOURCE_ROOT` enables the otherwise skipped real
 `aros source init` → `aros source sync` → `aros-transpiler` integration case.
