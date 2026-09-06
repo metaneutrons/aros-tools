@@ -1,11 +1,12 @@
 # TCP-M1: isolated Git identities for the legacy adapter
 
-Status: interface characterization and implementation design, **not an enabled
+Status: implemented lower-level consuming library API, **not an enabled
 adapter**. Tracked by [M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
 This refines the [producer contract](toolchain-producer-contract.md); it does
 not change recipe-v2, enable `build`, waive readiness gates or alter a producer
-source pin. The maintained [Git boundary tests](../crates/aros-toolchain/tests/legacy_git_contract.rs)
-exercise tiny synthetic repositories, not compiler qualification.
+source pin. The [production-API tests](../crates/aros-toolchain/tests/source_snapshots/legacy_views.rs)
+and [negative Git protocol probes](../crates/aros-toolchain/tests/legacy_git_contract.rs)
+exercise synthetic repositories, not compiler qualification.
 
 ## Why a raw snapshot is insufficient
 
@@ -27,7 +28,7 @@ would defeat the selected producer's contract. None is the adapter solution.
 ## Selected approach: fresh stores containing the exact selected closure
 
 Use Git's existing object implementation; do not add a Rust SHA-1 or pack writer.
-The production execution-view implementation must:
+`snapshot::LegacySourceView` follows this boundary:
 
 1. Hold the existing run guard and revalidate the selected raw snapshot. A
    conversion consumes that material guard; it must not leave a live
@@ -36,7 +37,10 @@ The production execution-view implementation must:
 2. Record each independently selected repository: role root and recursive
    gitlinks, exact commit/tree and raw inventory. A flattened path list alone
    loses this repository topology and is insufficient.
-3. Create private, exclusive metadata staging under owned work. Never initialize
+3. Relocate only our owned raw material from `<role>` to fresh
+   `.<role>-legacy-pending`, using the shared durable no-clobber publisher.
+   Construct private, exclusive metadata inside that unpublished staging tree.
+   Never initialize
    from user/system templates or copy an existing `.git`. Only reviewed fixed
    metadata, a detached exact `HEAD` and an explicit one-commit shallow boundary
    are generated. No remotes, credentials, hooks, replacement refs, alternates,
@@ -58,12 +62,16 @@ The production execution-view implementation must:
    Do not downgrade fsck findings or substitute connectivity-only validation.
 7. Construct indexes from the verified trees using `read-tree` without `-u`.
    Never check out files or run clean/smudge filters: raw snapshot bytes remain
-   authoritative. Publish/attach only freshly verified owned metadata, with
-   no-clobber durability and descriptor/namespace checks at every boundary.
+   authoritative. Publish the entire verified view as `<role>-legacy`, with
+   shared no-clobber durability and descriptor/namespace checks at both
+   relocation boundaries. No three-root transaction or resume/adoption exists.
 8. Recheck actual commit/tree, index and complete raw material, plus the exact
-   allowed metadata/topology. Metadata may be exempted from a raw material walk
-   **only at independently verified repository roots**; a blanket `.git`
-   exemption is not acceptable. Revalidate before and after the legacy child.
+   allowed metadata/topology. **No metadata entry is exempted**: generated files
+   and directories join the same exact material inventory, with SHA-256/size
+   records separate from Git object identities. Every byte and membership is
+   checked before Git reuse and again afterwards. Optional index-cache writes
+   are disabled; even those byte changes invalidate a view. The future driver
+   must preserve this policy and revalidate before and after the legacy child.
    Retain failures; never adopt staging or return the consumed guard as valid.
 
 Git documents the explicit object-list input and self-contained pack format in
@@ -78,20 +86,47 @@ Git SHA-1 identities keep their existing recipe meaning; they do not replace
 the measured SHA-256 material/evidence contracts. Same-user races and malicious
 source execution still require the existing trust and credential-free-job policy.
 
+The object transfer has shared per-role limits of 200,000 objects / 8 GiB and
+64 MiB per object; at most 1,024 repositories are captured during raw preparation.
+Normally an export batch contains at most 8 MiB plus framing / 4,096 objects;
+a larger permitted object is transferred alone. Generated indexes/listings are
+bounded at 32 MiB. The existing material count/byte/depth/path limits apply to
+the complete augmented tree too. Each Git child is bounded to at most ten
+seconds of the explicit shared operation deadline. Kernel I/O/fsync is not
+preemptible, and a late deadline/failure may leave a complete retained tree.
+Full metadata-byte rechecks before individual Git operations deliberately add
+cost, especially when a repository needs many packs. Budget exhaustion is an
+error, never permission to skip checks or use a partial view.
+
+The shared AX diagnostic envelope preserves safe error classes, process exit/
+timeout information and static Git step labels. It never prints arbitrary Git
+stderr or private metadata. Any diagnostic emitted by isolated-store Git
+validation, including a warning or truncated stderr, prevents success.
+
 ## What the maintained tests establish
 
 - Exact original commit/tree IDs and clean legacy status survive the fresh
   shallow transfer; parent history, source-local configuration and extra Git
   metadata are absent. Later original mutations do not change the copied files.
+- Source/producer/tools roles use distinct owned destinations. The consuming
+  guard removes the old raw pathname, not its original checkout. Two levels of
+  recursive gitlinks preserve independent identities, symlinks and raw bytes.
+- A 9 MiB blob, a duplicate at another path and descendant trees exercise
+  multiple independently strict pack imports through the production API.
 - Strict import fails for a tree whose referenced objects are missing and for
   a damaged pack checksum. An otherwise valid pack carrying a different object
   succeeds at import, so the expected-vs-measured object-set comparison is a
   separate required check. A deliberately poisoned loose object cannot retain
   its claimed identity through this transfer; rejection may occur during export,
   import or the final object-set comparison, depending on Git's implementation.
-- Parent fsck can succeed with a gitlink commit absent from its object database.
-  Each child therefore needs its own object store, exact identity, raw checks
-  and recursive topology; a green parent check cannot substitute for them.
+- Restoring a corrupted original object database after raw snapshot capture
+  cannot authorize poisoned snapshot bytes: imported material must also match
+  the retained raw SHA-256 inventory, not just the original object ID strings.
+- Modified config/HEAD/shallow/index/pack bytes, extra metadata, symlink/FIFO
+  metadata, hardlinks, added directories and replaced view roots fail reuse.
+  Occupied pending/final leaves are not adopted or removed. Missing/poisoned
+  source objects, invalid/expired budgets and cancellation (including after
+  metadata creation begins) fail with retained material and no successful guard.
 - Metadata-free fixture material fails the historical Git identity/status
   queries. No compatibility result is inferred from the raw snapshot API.
 
@@ -104,27 +139,80 @@ this probe did not transfer or qualify those child repositories, create a
 complete worktree or run the legacy verifier/compiler. This is root-object-store
 scale evidence, not an execution view, a timeout default or M1 acceptance.
 
-The small test transfer helper is intentionally disposable **fixture setup**,
-not a public implementation or another producer. Its assertions remain useful
-regression contracts. It lacks operation ownership, aggregate source budgets,
-durable publication and use-time guards; do not import it into production.
-When the execution-view API exists, run these assertions through that API and
-remove the superseded setup helper. Keep the tests maintained and cross-host.
+A subsequent **production-API** macOS AArch64 probe on the same day used all
+three actual selected roots: AROS `f3cfc243a84065166a46da28b0a5b22bbd0f8869`,
+producer `c8039cf2b7291097ad62c6750bd7367e91a068f4` and tools
+`707037be4f8ff37300a1a89166c35f661c28bafe`. Recipe digest:
+`906ff611b34b1095fde00d86f164157c09d83ae6ee0fcfa3259b395280e14671`.
+Using an optimized library build and explicit 180-second budgets per API
+operation, the AROS raw snapshot took 49.629 s, conversion 104.387 s and later
+revalidation 12.510 s. All **76** AROS repository stores (root + 75 gitlinks),
+producer and tools passed; the selected producer's **unchanged** `verify-checkout`
+accepted all three roots and lock/profile identities. Guard revalidation after
+that credential-free verifier also passed. Producer raw/view/recheck timings
+were 321/557/86 ms; tools 416/611/104 ms.
+
+An earlier unoptimized run exhausted the same 180-second conversion budget and
+retained its partial staging without a view. No limits/checks were relaxed for
+the successful optimized run. These measurements are local source/interface
+evidence, not cross-host/compiler qualification, a new timeout default, executor
+origin or permission to reuse either probe's retained directories.
+
+A Linux x86-64 production-API probe on 2026-09-06 rebuilt the library from
+`c7a3cd586097696db6ea66c3eb0b71f9b540206c` with Rust 1.98.0 and Git 2.55.0.
+It used copies of the macOS prepared inputs at the same three recipe identities;
+these were **not independently acquired upstream checkouts** and were not
+adopted as already-verified guards. Linux independently audited them, created
+new raw snapshots and shallow Git views, passed the unchanged selected
+`verify-checkout`, and revalidated all resulting guards before releasing ownership.
+All 76 AROS stores plus producer/tools passed. With the same explicit 180-second
+per-operation budgets, AROS raw/view/recheck took 44.151 / 142.838 / 14.397 s;
+producer 369/542/65 ms and tools 1433/601/84 ms. This completes the two-host
+three-input **source/interface** probe, not an independent download/reproduction,
+trusted executor attestation, cache validation or either real PC compiler lane.
+
+### Debug hashing regression and correction
+
+At PR #51's initial head `d48c7177ce99bdd0833fa008b2356e03a17fafd1`,
+the macOS Intel PR job exceeded the unchanged 30-second conversion budget in
+the 9 MiB multi-pack test. The same head passed the independent dispatch, all
+other hosts and the complete package qualification. This is not evidence of a
+Homebrew failure; runner-to-runner timing variation was not independently traced.
+
+A local x86-64 test under Rosetta took 16.69 s, with stack sampling identifying
+`sha2`'s unoptimized software compression loop inside full metadata checks.
+Optimizing **only** the existing `sha2` dependency at level 2 reduced the same
+unchanged test to 3.33 s. The workspace now records that development-profile
+override; explicit debug assertions and overflow checks stay enabled. All
+workspace code, test data/assertions, cancellation/deadline limits and release
+settings are unchanged. There is no platform exception, new hash implementation,
+cached integrity result or reduced byte verification.
+
+Cargo documents [dependency-specific profile overrides and test inheritance](https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).
+This is a debug-backend performance correction, not a relaxation of runtime
+budgets or proof of release resource defaults. Updated cross-host qualification
+must pass before the PR can merge.
+
+The previous successful-transfer test helper has been removed. Maintained
+positive conversion/recursive tests call the production API; only deliberately
+invalid pack fixtures retain direct low-level Git setup. There is no second
+snapshot implementation or producer algorithm in tests.
 
 ## Remaining implementation and acceptance gates
 
-- Implement the consuming view conversion and repository-topology inventory,
-  reusing the existing raw visitor, filesystem and process boundaries.
-- Bind the expected commit-to-tree graph to the imported object set, recheck
-  metadata/index/material and test corrupted local object storage, replaced
-  roots, hostile metadata, hardlinks, cancellation, full-disk and post-rename
-  failures. Never weaken `SourceSnapshot::revalidate` to accept added `.git`.
-- Validate the full selected real inputs and the **unchanged** legacy
-  `verify-checkout` command on Linux and macOS. Toy Git queries are not that
-  integration evidence, and object-store validation alone is not a worktree.
+- The consuming conversion, topology inventory, independently checked object
+  graph and metadata guards are implemented, reusing raw auditors, filesystem
+  publication and bounded process execution. Shared publication fault tests
+  cover that primitive; view-level full-disk/post-rename fault injection is not
+  yet separately qualified. Do not infer it from happy-path Git tests.
+- Full selected inputs and the **unchanged** legacy `verify-checkout` now pass
+  on Linux x86-64 and macOS AArch64 as described above. These local probes are
+  not the integrated adapter lifecycle or compiler acceptance. The Linux seed
+  is explicitly derived from the macOS material, not independent acquisition.
 - Finish frontend build identity, prerequisites/cache and sanitized child
   environment. Only then wire the explicitly selected coarse `legacy-driver`
   boundary and its existing failure/cancellation/result contracts.
 - Demonstrate the two real local PC lanes and verified prefix use required by
-  M1. Keep M1 open until those gates pass; no extra release-matrix or GRUB run
-  is justified by this design/fixture-only change.
+  M1. Keep M1 open until those gates pass. This production source-contract slice
+  warrants one explicit Linux integration run at its final PR head, not an
+  additional release A/B matrix or repeated local GRUB build.

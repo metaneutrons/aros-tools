@@ -21,10 +21,7 @@ pub struct Entry {
 
 pub type Inventory = BTreeMap<String, Entry>;
 
-pub(super) fn read(
-    checkout: &Checkout<'_>,
-    budget: &mut Budget,
-) -> Result<Inventory, ContractError> {
+pub fn read(checkout: &Checkout<'_>, budget: &mut Budget) -> Result<Inventory, ContractError> {
     let bytes = checkout.git_input(
         &[
             "ls-tree",
@@ -100,10 +97,7 @@ fn parse(bytes: &[u8], budget: &mut Budget) -> Result<Inventory, ContractError> 
     Ok(entries)
 }
 
-pub(super) fn verify_index(
-    checkout: &Checkout<'_>,
-    entries: &Inventory,
-) -> Result<(), ContractError> {
+pub fn verify_index(checkout: &Checkout<'_>, entries: &Inventory) -> Result<(), ContractError> {
     let bytes = checkout.git_input(
         &["ls-files", "--stage", "--full-name", "-z"],
         &[],
@@ -139,7 +133,7 @@ pub(super) fn verify_index(
     Ok(())
 }
 
-pub(super) fn measure_blobs(
+pub fn measure_blobs(
     checkout: &Checkout<'_>,
     entries: &mut Inventory,
     budget: &Budget,

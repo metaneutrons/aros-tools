@@ -3,8 +3,8 @@
 Status: partial M1 implementation. Recipe validation and experimental
 `plan --backend legacy-preview` inspection and lower-level directory guards/
 shared cancellation exist. Recursive raw worktree/index/submodule inspection
-is implemented. A lower-level metadata-free snapshot primitive exists, separate
-from planning; integrated execution, resumable state and origin verification do
+is implemented. Lower-level metadata-free snapshots and consuming isolated Git
+views exist, separate from planning; integrated execution, resumable state and origin verification do
 not. This document also
 specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
@@ -391,9 +391,11 @@ See the [snapshot limits](../crates/aros-toolchain/README.md#isolated-source-mat
 
 The unchanged legacy driver additionally requires real Git HEAD/tree/status
 queries in all three roots. Raw snapshots do not supply that interface. The
-[isolated execution-view design](toolchain-legacy-execution-view.md) records
-the tested shallow-object-store approach and the production gates still open.
-Its synthetic Git fixtures do not enable conversion or compiler execution.
+[isolated execution view](toolchain-legacy-execution-view.md) consumes one raw
+snapshot and reconstructs independently verified shallow stores for every
+recorded repository. Raw bytes and every generated metadata byte remain guarded;
+there is no metadata exemption or copied user configuration. This library-only
+conversion does not enable an adapter or compiler execution.
 
 Remaining implementation gates include: private MetaMake fetch integration,
 trusted executor evidence, integrated snapshot/adapter lifecycle, actual four-host process

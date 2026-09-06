@@ -1,8 +1,9 @@
 //! Characterize the Git boundary required by the unchanged legacy producer.
 //!
-//! The fixture transfer below is deliberately NOT a production snapshot API:
-//! it has no run ownership, durable publication, streaming budget or reuse guard.
-//! It uses only tiny, test-owned repositories and never launches a compiler.
+//! These negative protocol probes use only tiny, test-owned repositories.
+//! Successful conversion and recursive gitlinks are tested exclusively through
+//! `LegacySourceView` in `source_snapshots/legacy_views.rs`, not a second adapter.
+//! No test launches a compiler.
 #![cfg(unix)]
 
 use std::{
@@ -132,108 +133,10 @@ fn objects(root: &Path) -> BTreeSet<String> {
     .collect()
 }
 
-fn transfer(source: &Path, view: &Path) -> BTreeSet<String> {
-    let head = git(source, &["rev-parse", "HEAD"]);
-    let tree = git(source, &["rev-parse", HEAD_TREE]);
-    fresh_store(view, &head);
-    let listing = git(
-        source,
-        &[
-            "ls-tree",
-            "-r",
-            "-t",
-            "--format=%(objecttype) %(objectname)",
-            "HEAD",
-        ],
-    );
-    let entries: Vec<_> = listing
-        .lines()
-        .map(|line| line.split_once(' ').unwrap())
-        .collect();
-    // A strict partial pack cannot reference a tree/blob imported only later.
-    // Gitlinks belong to independent stores, not the parent repository's ODB.
-    let mut expected = BTreeSet::new();
-    for oid in entries
-        .iter()
-        .filter(|(kind, _)| *kind == "blob")
-        .map(|(_, oid)| *oid)
-        .chain(
-            entries
-                .iter()
-                .rev()
-                .filter(|(kind, _)| *kind == "tree")
-                .map(|(_, oid)| *oid),
-        )
-        .chain([tree.as_str(), head.as_str()])
-    {
-        if expected.insert(oid.to_owned()) {
-            let (success, bytes) = pack(source, &[oid]);
-            assert!(success);
-            assert!(invoke(view, &["index-pack", "--stdin", "--strict"], &bytes).0);
-        }
-    }
-    git(
-        view,
-        &[
-            "fsck",
-            "--strict",
-            "--full",
-            "--no-reflogs",
-            "--no-dangling",
-            &head,
-        ],
-    );
-    assert_eq!(objects(view), expected);
-    git(view, &["read-tree", &tree]); // Index only: never checkout/filter files.
-    expected
-}
-
 fn payload(root: &Path) {
     fs::write(root.join("file"), b"selected version\n").unwrap();
     fs::create_dir(root.join("nested")).unwrap();
     fs::write(root.join("nested/Größe file"), b"raw\0binary\n").unwrap();
-}
-
-#[test]
-fn exact_shallow_identity_passes_legacy_queries_without_copying_history_or_config() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path();
-    let original = root.join("original");
-    let previous = source(&original);
-    git(
-        &original,
-        &[
-            "config",
-            "remote.origin.url",
-            "https://fixture.invalid/not-copied",
-        ],
-    );
-    git(&original, &["config", "filter.fixture.clean", "false"]);
-    fs::write(
-        original.join(".git/private-fixture"),
-        b"not source material",
-    )
-    .unwrap();
-    let view = root.join("view");
-    let expected = transfer(&original, &view);
-    assert!(!expected.contains(&previous));
-    assert!(!view.join(".git/private-fixture").exists());
-    assert!(!view.join(".git/hooks").exists());
-    assert!(!view.join(".git/objects/info/alternates").exists());
-    assert!(!invoke(&view, &["config", "--get", "remote.origin.url"], &[]).0);
-    assert!(!invoke(&view, &["config", "--get", "filter.fixture.clean"], &[]).0);
-    payload(&view);
-    for query in ["HEAD", HEAD_TREE] {
-        assert_eq!(
-            git(&view, &["rev-parse", query]),
-            git(&original, &["rev-parse", query])
-        );
-    }
-    assert!(git(&view, &["status", "--porcelain", "--untracked-files=no"]).is_empty());
-    fs::write(original.join("file"), b"changed original\n").unwrap();
-    assert_eq!(fs::read(view.join("file")).unwrap(), b"selected version\n");
-    fs::write(view.join("file"), b"changed isolated material\n").unwrap();
-    assert!(!git(&view, &["status", "--porcelain", "--untracked-files=no"]).is_empty());
 }
 
 #[test]
@@ -273,33 +176,6 @@ fn valid_pack_checksum_does_not_bind_a_claimed_object_identity() {
     assert!(invoke(&view, &["index-pack", "--stdin", "--strict"], &bytes).0);
     assert_eq!(objects(&view), BTreeSet::from([wrong]));
     assert_ne!(objects(&view), BTreeSet::from([expected]));
-}
-
-#[test]
-fn parent_integrity_does_not_verify_gitlink_material() {
-    let temporary = tempfile::tempdir().unwrap();
-    let original = temporary.path().join("original");
-    source(&original);
-    let child = original.join("module");
-    source(&child);
-    let child_head = git(&child, &["rev-parse", "HEAD"]);
-    commit(&original, "test: selected gitlink");
-    let view = temporary.path().join("view");
-    let parent_objects = transfer(&original, &view);
-    // fsck passed above, although the gitlink's commit is absent from the ODB.
-    assert!(!parent_objects.contains(&child_head));
-    payload(&view);
-    let child_view = view.join("module");
-    let child_objects = transfer(&child, &child_view);
-    payload(&child_view);
-    assert!(child_objects.contains(&child_head));
-    assert!(git(&view, &["status", "--porcelain", "--untracked-files=no"]).is_empty());
-    fs::write(child_view.join("file"), b"modified child\n").unwrap();
-    assert!(!git(
-        &child_view,
-        &["status", "--porcelain", "--untracked-files=no"]
-    )
-    .is_empty());
 }
 
 #[test]

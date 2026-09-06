@@ -15,6 +15,9 @@ use std::{fs, path::Path, process::Command, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+#[path = "source_snapshots/legacy_views.rs"]
+mod legacy_views;
+
 struct Fixture {
     _temporary: tempfile::TempDir,
     request: PlanRequest,
