@@ -8,6 +8,7 @@
 
 pub mod canonical;
 mod error;
+pub mod executor;
 #[cfg(unix)]
 mod filesystem;
 mod inspection;

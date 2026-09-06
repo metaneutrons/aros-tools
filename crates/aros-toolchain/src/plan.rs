@@ -78,7 +78,7 @@ pub struct Plan {
 }
 
 /// Recipe and frontend identity are intentionally distinct.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Identity {
     /// Verified recipe self-digest.
     pub recipe_sha256: Sha256Digest,
@@ -97,7 +97,7 @@ pub struct Identity {
 }
 
 /// Unverified frontend file observation, insufficient for execution/release.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Executor {
     /// Native contract is not selected by a legacy recipe.
     pub contract_id: Option<&'static str>,
@@ -150,6 +150,24 @@ pub struct Resources {
 /// invalid inputs. Missing build readiness is a successful *blocked inspection*,
 /// never a successful build. Native selection fails before all filesystem reads.
 pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
+    inspect_with_timeout(request, Duration::from_secs(60))
+}
+
+/// Inspect explicit inputs with a caller-selected bounded read-only budget.
+///
+/// The public `plan` command intentionally retains its 60-second contract.
+/// The local build adapter may select a larger, still finite budget because a
+/// complete AROS checkout can contain substantially more Git material than a
+/// normal inspection fixture.
+pub fn inspect_with_timeout(
+    request: &PlanRequest,
+    timeout: Duration,
+) -> Result<Plan, ContractError> {
+    if timeout.is_zero() {
+        return Err(ContractError::preflight(
+            "producer inspection timeout must be positive",
+        ));
+    }
     if request.backend != Backend::LegacyPreview {
         return Err(ContractError::invalid("native toolchain planning is not implemented; select --backend legacy-preview explicitly for experimental read-only inspection"));
     }
@@ -160,7 +178,9 @@ pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
     let paths = resolve_paths(request)?;
     let bytes = inspection::read(&request.recipe).map_err(|error| error.input("--recipe"))?;
     let recipe = Recipe::parse(&bytes).map_err(|error| error.input("--recipe"))?;
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        ContractError::preflight("producer inspection timeout is not representable")
+    })?;
     let source = Checkout::inspect(&paths.source, recipe.source(), deadline)
         .map_err(|error| error.input("--source-dir"))?;
     let producer = Checkout::inspect(&paths.producer, recipe.producer(), deadline)

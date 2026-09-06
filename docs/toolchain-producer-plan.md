@@ -3,8 +3,8 @@
 Status: producer implementation authorized; M0 accepted on 2026-09-06.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
-percentage estimate. Command examples describe the proposed interface, not
-commands available in the current release.
+percentage estimate. The plan distinguishes the implemented local preview
+slice from future release and qualification commands.
 
 Planning extension approved on 2026-09-06: TCP-M8 adds explicit local toolchain
 management. It is a separate acceptance track, not a new prerequisite for M7
@@ -16,6 +16,13 @@ The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
 its completed contract freeze. M1's experimental read-only plan/CLI slice does
 not complete its lifecycle, source-readiness or real-build criteria. Valid
 inspection results remain blocked pending those missing safety gates.
+
+The current M1 implementation now also exposes an explicit local
+`toolchain build --backend legacy-preview` adapter. It reuses the plan
+preflight, runs the reviewed legacy driver only from metadata-free snapshots,
+requires a prepared offline cache, binds the producer's Rust channel, and
+retains local candidate evidence. It is not a release executor or provenance
+attestation; the two host proofs below remain required before M1 can close.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
 and [measured baseline](toolchain-producer-baseline.md) remain the foundation
 for later implementation. Issues own execution status and remaining gates.

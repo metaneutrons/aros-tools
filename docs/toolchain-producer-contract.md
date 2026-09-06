@@ -1,10 +1,12 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: partial M1 implementation. Recipe validation and experimental
-`plan --backend legacy-preview` inspection and lower-level directory guards/
+Status: partial M1 implementation. Recipe validation, experimental
+`plan --backend legacy-preview` inspection, the explicit local
+`build --backend legacy-preview` adapter and lower-level directory guards/
 shared cancellation exist. Recursive raw worktree/index/submodule inspection
-is implemented. Lower-level metadata-free snapshots and consuming isolated Git
-views exist, separate from planning; integrated execution, resumable state and origin verification do
+is implemented. The adapter now probes prerequisites/cache, creates isolated
+views, sanitizes the child environment and reports bounded cancellation;
+integrated native execution, resumable state and trusted origin verification do
 not. This document also
 specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
@@ -87,8 +89,10 @@ reviewed default; nested build tools must not multiply the job budget.
 `--backend native` is the eventual default. Before native support exists,
 building requires explicit `--backend legacy-preview`; unsupported selections
 fail before side effects. Never automatically choose an old script after a
-native failure. Remove the experimental adapter at M6, with documented update
-guidance, rather than keeping an indefinite second implementation.
+native failure. The current preview requires `--offline`, an existing prepared
+cache and an explicit release-id for a local candidate. Remove the experimental
+adapter at M6, with documented update guidance, rather than keeping an
+indefinite second implementation.
 
 `plan` may omit output/resource choices; their fields are null and readiness is
 `incomplete`. It does not fetch, execute source scripts, bootstrap helpers,
@@ -104,6 +108,19 @@ compilation always uses prepared, verified inputs. No new ambient source,
 recipe, compiler-flag or credential overrides are introduced. `--resume` is
 explicit, local-only and rejects foreign or invalid receipts. Release jobs
 always select fresh work/install roots and no compiled-object cache.
+
+The implemented M1 preview accepts the explicit `build --backend legacy-preview`
+surface. It probes `git`, Python, CMake, Rust/Cargo and make before reservation,
+requires an existing cache directory, then uses fresh work/output leaves and
+three metadata-free snapshots converted to independent shallow Git views. The
+legacy driver receives only those views, a copied recipe, the selected lock and
+profiles, and a sanitized child environment (`PATH`, private `HOME`/`TMPDIR`,
+`LC_ALL=C`, `LANG=C`, `TZ=UTC`, offline Git/Cargo settings). The shared bounded
+process runner propagates the explicit deadline and Ctrl-C cancellation and
+reaps the process group. Partial or complete material is retained on every
+failure. A successful local result measures regular output files and host-tool
+versions, marks `qualification` as `local-only`, and records executor origin as
+`not-run`; it cannot publish or satisfy release provenance.
 
 Low-level commands use `aros toolchain producer <operation>`. Common result and
 diagnostic options apply to all. Required options are frozen as follows:

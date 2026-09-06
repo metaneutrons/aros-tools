@@ -25,6 +25,7 @@ mod observability;
 mod repo;
 mod source;
 mod toolchain;
+mod toolchain_build;
 mod toolchain_plan;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
@@ -335,6 +336,8 @@ enum HostCompilerCommands {
 enum ToolchainCommands {
     /// Inspect explicit producer inputs without building (experimental)
     Plan(toolchain_plan::PlanArgs),
+    /// Build one local experimental legacy-preview candidate
+    Build(toolchain_build::BuildArgs),
     /// Install the exact host + target artifact selected by the lock file
     Install {
         /// Target profile whose locked artifact should be installed
@@ -643,7 +646,7 @@ impl Commands {
             Self::Ccache { .. }
             | Self::Install { .. }
             | Self::Toolchain {
-                command: ToolchainCommands::Plan(_),
+                command: ToolchainCommands::Plan(_) | ToolchainCommands::Build(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
@@ -698,7 +701,10 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             let target = match command {
                 ToolchainCommands::Install { preset, .. }
                 | ToolchainCommands::Verify { preset, .. }
-                | ToolchainCommands::Path { preset, .. } => Some(preset.clone()),
+                | ToolchainCommands::Path { preset, .. }
+                | ToolchainCommands::Build(toolchain_build::BuildArgs { preset, .. }) => {
+                    Some(preset.clone())
+                }
                 ToolchainCommands::List => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
             };
