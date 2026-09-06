@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    exit_signal, run_output_with_timeout, sha256_bytes, sha256_reader, DiagnosticContext,
-    Sha256Digest,
+    exit_signal, run_output_with_input_and_control, sha256_bytes, sha256_reader, CancellationToken,
+    DiagnosticContext, Sha256Digest,
 };
 
 use crate::recipe::{safe_relative_path, GitObjectId};
@@ -146,43 +146,31 @@ pub fn frontend_digest() -> Result<Sha256Digest, ContractError> {
 }
 
 pub struct Checkout<'a> {
-    root: &'a Path,
-    commit: &'a GitObjectId,
-    tree: &'a GitObjectId,
-    deadline: Instant,
+    pub(crate) root: &'a Path,
+    commit: GitObjectId,
+    pub(crate) tree: GitObjectId,
+    pub(crate) deadline: Instant,
 }
 
 impl<'a> Checkout<'a> {
     pub(crate) fn inspect(
         root: &'a Path,
-        identity: (&'a GitObjectId, &'a GitObjectId),
+        identity: (&GitObjectId, &GitObjectId),
         deadline: Instant,
     ) -> Result<Self, ContractError> {
         let checkout = Self {
             root,
-            commit: identity.0,
-            tree: identity.1,
+            commit: identity.0.clone(),
+            tree: identity.1.clone(),
             deadline,
         };
-        let top = checkout.git(&["rev-parse", "--show-toplevel"])?;
-        let top = PathBuf::from(text(&top)?.trim_end_matches('\n'));
-        if directory(&top)? != root {
-            return Err(ContractError::identity(
-                "selected input is not the Git checkout root",
-            ));
-        }
         checkout.recheck()?;
         Ok(checkout)
     }
 
     pub(crate) fn recheck(&self) -> Result<(), ContractError> {
-        let head = self.git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
-        let observed_tree = self.git(&["rev-parse", "--verify", "HEAD^{tree}"])?;
-        let head = GitObjectId::try_from(text(&head)?.trim().to_owned())
-            .map_err(ContractError::identity)?;
-        let observed_tree = GitObjectId::try_from(text(&observed_tree)?.trim().to_owned())
-            .map_err(ContractError::identity)?;
-        if head != *self.commit || observed_tree != *self.tree {
+        let (head, observed_tree) = observed_identity(self.root, self.deadline)?;
+        if head != self.commit || observed_tree != self.tree {
             return Err(ContractError::identity(format!(
                 "checkout identity mismatch: expected commit {} / tree {}; observed commit {} / tree {}",
                 self.commit.as_str(),
@@ -190,6 +178,26 @@ impl<'a> Checkout<'a> {
             )));
         }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn submodule(
+        root: &'a Path,
+        commit: &GitObjectId,
+        deadline: Instant,
+    ) -> Result<Self, ContractError> {
+        let (observed, tree) = observed_identity(root, deadline)?;
+        if observed != *commit {
+            return Err(ContractError::identity(
+                "submodule HEAD differs from its selected gitlink",
+            ));
+        }
+        Ok(Self {
+            root,
+            commit: observed,
+            tree,
+            deadline,
+        })
     }
 
     pub(crate) fn file(&self, path: &str) -> Result<Option<Vec<u8>>, ContractError> {
@@ -220,7 +228,8 @@ impl<'a> Checkout<'a> {
         if read(&self.root.join(path))? != blob {
             return Err(ContractError::identity(
                 "selected input differs from its committed raw bytes",
-            ));
+            )
+            .source_path(path));
         }
         Ok(Some(blob))
     }
@@ -263,87 +272,147 @@ impl<'a> Checkout<'a> {
         Ok(())
     }
 
-    fn git(&self, arguments: &[&str]) -> Result<Vec<u8>, ContractError> {
-        let remaining = self
-            .deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| {
-                ContractError::prerequisite(
-                    "read-only Git inspection exceeded its 60-second budget",
-                )
-            })?;
-        let mut command = Command::new("git");
-        command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_ALLOW_PROTOCOL", "")
-            .env("LC_ALL", "C")
-            .current_dir(self.root)
-            .args([
-                "--no-pager",
-                "--no-replace-objects",
-                "--no-lazy-fetch",
-                "--literal-pathspecs",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "gc.auto=0",
-            ])
-            .args(arguments);
-        let timeout = remaining.min(Duration::from_secs(10));
-        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-        let result = run_output_with_timeout(&mut command, MAX_DOCUMENT_BYTES, timeout).map_err(
-            |error| {
-                let reason = match error.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        "trusted Git executable or selected working directory is missing"
-                    }
-                    std::io::ErrorKind::PermissionDenied => {
-                        "permission denied while executing read-only Git inspection"
-                    }
-                    std::io::ErrorKind::TimedOut => {
-                        "read-only Git inspection timed out and process cleanup failed"
-                    }
-                    _ => "I/O failure while executing or capturing read-only Git inspection",
-                };
-                ContractError::prerequisite(reason).context(DiagnosticContext {
-                    tool: Some("git".into()),
-                    timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
-                    timeout_ms: Some(timeout_ms),
-                    ..DiagnosticContext::default()
-                })
-            },
-        )?;
-        if result.timed_out || !result.status.success() {
-            let reason = if result.timed_out {
-                "read-only Git inspection exceeded its process deadline"
-            } else {
-                "read-only Git inspection exited unsuccessfully; check local objects, access and Git capability"
-            };
-            return Err(
-                ContractError::prerequisite(reason).context(DiagnosticContext {
-                    tool: Some("git".into()),
-                    exit_code: result.status.code(),
-                    signal: exit_signal(result.status),
-                    timed_out: Some(result.timed_out),
-                    timeout_ms: Some(timeout_ms),
-                    ..DiagnosticContext::default()
-                }),
-            );
-        }
-        // Never forward potentially private Git stderr or truncate an identity.
-        result
-            .stdout
-            .exact_bytes()
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| ContractError::invalid("Git inspection output exceeds 1 MiB"))
+    pub(crate) fn git(&self, arguments: &[&str]) -> Result<Vec<u8>, ContractError> {
+        self.git_input(arguments, &[], MAX_DOCUMENT_BYTES)
     }
+
+    pub(crate) fn git_input(
+        &self,
+        arguments: &[&str],
+        input: &[u8],
+        limit: usize,
+    ) -> Result<Vec<u8>, ContractError> {
+        git(self.root, arguments, input, limit, self.deadline)
+    }
+}
+
+fn git(
+    root: &Path,
+    arguments: &[&str],
+    input: &[u8],
+    limit: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, ContractError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| {
+            ContractError::prerequisite("read-only Git inspection exceeded its 60-second budget")
+        })?;
+    let mut command = Command::new("git");
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("LC_ALL", "C")
+        .current_dir(root)
+        .args([
+            "--no-pager",
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "gc.auto=0",
+        ])
+        .args(arguments);
+    let timeout = remaining.min(Duration::from_secs(10));
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let result = run_output_with_input_and_control(
+        &mut command,
+        input,
+        limit,
+        timeout,
+        &CancellationToken::default(),
+    )
+    .map_err(|error| {
+        let reason = match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                "trusted Git executable or selected working directory is missing"
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                "permission denied while executing read-only Git inspection"
+            }
+            std::io::ErrorKind::TimedOut => {
+                "read-only Git inspection timed out and process cleanup failed"
+            }
+            _ => "I/O failure while executing or capturing read-only Git inspection",
+        };
+        ContractError::prerequisite(reason).context(DiagnosticContext {
+            tool: Some("git".into()),
+            timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
+            timeout_ms: Some(timeout_ms),
+            ..DiagnosticContext::default()
+        })
+    })?;
+    if result.timed_out || !result.status.success() {
+        let reason = if result.timed_out {
+            "read-only Git inspection exceeded its process deadline"
+        } else {
+            "read-only Git inspection exited unsuccessfully; check local objects, access and Git capability"
+        };
+        return Err(
+            ContractError::prerequisite(reason).context(DiagnosticContext {
+                tool: Some("git".into()),
+                exit_code: result.status.code(),
+                signal: exit_signal(result.status),
+                timed_out: Some(result.timed_out),
+                timeout_ms: Some(timeout_ms),
+                ..DiagnosticContext::default()
+            }),
+        );
+    }
+    // Never forward potentially private Git stderr or truncate an identity.
+    result
+        .stdout
+        .exact_bytes()
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| {
+            ContractError::invalid(format!(
+                "Git inspection output exceeds its {limit}-byte capture limit"
+            ))
+        })
+}
+
+fn observed_identity(
+    root: &Path,
+    deadline: Instant,
+) -> Result<(GitObjectId, GitObjectId), ContractError> {
+    // One bounded plumbing query per boundary, not separate subprocesses for
+    // root, commit and tree in each of the many small AROS catalog submodules.
+    let bytes = git(
+        root,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "HEAD^{commit}",
+            "HEAD^{tree}",
+        ],
+        &[],
+        MAX_DOCUMENT_BYTES,
+        deadline,
+    )?;
+    let fields: Vec<_> = text(&bytes)?.split_terminator('\n').collect();
+    let [top, commit_text, tree_text] = fields.as_slice() else {
+        return Err(ContractError::identity(
+            "Git identity response must contain exactly one root, commit and tree",
+        ));
+    };
+    if directory(Path::new(top))? != root {
+        return Err(ContractError::identity(
+            "selected input is not the Git checkout root",
+        ));
+    }
+    Ok((
+        GitObjectId::try_from((*commit_text).to_owned()).map_err(ContractError::identity)?,
+        GitObjectId::try_from((*tree_text).to_owned()).map_err(ContractError::identity)?,
+    ))
 }
 
 fn text(bytes: &[u8]) -> Result<&str, ContractError> {

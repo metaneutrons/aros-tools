@@ -1,7 +1,7 @@
 //! Producer errors use the existing shared diagnostic envelope and codes.
 
 use aros_common::diagnostic::{
-    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage,
+    Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage, SourceLocation,
 };
 
 /// Safe, structured contract failure. Input documents are never copied into it.
@@ -12,6 +12,19 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    /// Attach only an already validated committed path, never an untracked name
+    /// or raw Git output. Nested repository locations remain root-relative.
+    pub(crate) fn source_path(mut self, path: &str) -> Self {
+        if let Some(diagnostic) = self.diagnostics.diagnostics.first_mut() {
+            let location = diagnostic.location.take().map_or_else(
+                || path.to_owned(),
+                |location| format!("{path}/{}", location.path),
+            );
+            diagnostic.location = Some(SourceLocation::new(location));
+        }
+        self
+    }
+
     pub(crate) fn state(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerState,

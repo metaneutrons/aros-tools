@@ -14,6 +14,16 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn recommit(&mut self, name: &str) {
+        let checkout = self.root.join(name);
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "test: source audit fixture"]);
+        self.recipe[format!("{name}_commit")] = json!(git(&checkout, &["rev-parse", "HEAD"]));
+        self.recipe[format!("{name}_tree")] = json!(git(&checkout, &["rev-parse", "HEAD^{tree}"]));
+        sign(&mut self.recipe);
+        self.save();
+    }
+
     fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary
@@ -308,6 +318,233 @@ fn changed_raw_metadata_fails_without_filters_or_script_execution() {
     fs::write(fixture.root.join("source/patch.diff"), "changed\n").unwrap();
     failure(&fixture.command().output().unwrap(), "AX0102");
     assert!(!marker.exists());
+}
+
+#[test]
+fn raw_nonmetadata_changes_fail_for_each_selected_checkout() {
+    for (root, file) in [
+        ("source", "configure"),
+        ("producer", "scripts/toolchain/build-release.sh"),
+        ("tools", "Cargo.toml"),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.join(root).join(file), "uncommitted source\n").unwrap();
+        let output = fixture.command().output().unwrap();
+        failure(&output, "AX0102");
+        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("--{root}-dir")));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(diagnostic["diagnostics"][0]["location"]["path"], file);
+    }
+}
+
+#[test]
+fn ignored_untracked_and_empty_directories_fail_without_cleanup() {
+    for relative in [
+        "source/ignored-private",
+        "producer/untracked-private",
+        "tools/empty-private",
+    ] {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("source/.git/info/exclude"),
+            "ignored-private\n",
+        )
+        .unwrap();
+        let extra = fixture.root.join(relative);
+        if relative.ends_with("empty-private") {
+            fs::create_dir(&extra).unwrap();
+        } else {
+            fs::write(&extra, "must be retained\n").unwrap();
+        }
+        let before = inventory(&fixture.root);
+        let output = fixture.command().output().unwrap();
+        failure(&output, "AX0102");
+        assert_eq!(inventory(&fixture.root), before);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private"));
+    }
+}
+
+#[test]
+fn index_flags_and_clean_filters_cannot_hide_raw_changes() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let fixture = Fixture::new();
+        let source = fixture.root.join("source");
+        let marker = fixture.root.join("filter-must-not-run");
+        git(&source, &["update-index", flag, "configure"]);
+        git(
+            &source,
+            &[
+                "config",
+                "filter.must-not-run.clean",
+                &format!("touch '{}'", marker.display()),
+            ],
+        );
+        fs::write(source.join("configure"), "hidden change\n").unwrap();
+        assert!(!marker.exists(), "fixture preparation ran a filter");
+        failure(&fixture.command().output().unwrap(), "AX0102");
+        assert!(!marker.exists());
+    }
+}
+
+#[test]
+fn staged_change_fails_even_when_worktree_bytes_match_head() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("source");
+    let original = fs::read(source.join("configure")).unwrap();
+    fs::write(source.join("configure"), "staged change\n").unwrap();
+    git(&source, &["add", "configure"]);
+    fs::write(source.join("configure"), original).unwrap();
+    failure(&fixture.command().output().unwrap(), "AX0102");
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_links_are_measured_without_following_them_and_modes_are_checked() {
+    use std::os::unix::{fs::symlink, fs::PermissionsExt};
+    let mut fixture = Fixture::new();
+    let source = fixture.root.join("source");
+    symlink("../nonexistent-target", source.join("committed-link")).unwrap();
+    fixture.recommit("source");
+    fixture.plan();
+    fs::remove_file(source.join("committed-link")).unwrap();
+    symlink("../another-target", source.join("committed-link")).unwrap();
+    failure(&fixture.command().output().unwrap(), "AX0102");
+
+    let fixture = Fixture::new();
+    let file = fixture.root.join("source/configure");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &fixture.root.join("source"),
+        &["config", "core.filemode", "false"],
+    );
+    failure(&fixture.command().output().unwrap(), "AX0102");
+}
+
+#[cfg(unix)]
+#[test]
+fn tracked_fifo_and_symlink_directory_fail_without_following_or_blocking() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let file = fixture.root.join("source/configure");
+    fs::remove_file(&file).unwrap();
+    assert!(Command::new("mkfifo")
+        .arg(&file)
+        .status()
+        .unwrap()
+        .success());
+    failure(&fixture.command().output().unwrap(), "AX0102");
+
+    let mut fixture = Fixture::new();
+    fs::create_dir(fixture.root.join("source/subdir")).unwrap();
+    fs::write(fixture.root.join("source/subdir/file"), "content").unwrap();
+    fixture.recommit("source");
+    fs::rename(
+        fixture.root.join("source/subdir"),
+        fixture.root.join("outside"),
+    )
+    .unwrap();
+    symlink("../outside", fixture.root.join("source/subdir")).unwrap();
+    failure(&fixture.command().output().unwrap(), "AX0102");
+}
+
+#[test]
+fn recursively_pinned_modules_require_clean_initialized_exact_checkouts() {
+    let mut fixture = Fixture::new();
+    let module = fixture.root.join("source/module");
+    let nested = module.join("nested");
+    for checkout in [&module, &nested] {
+        fs::create_dir(checkout).unwrap();
+        git(checkout, &["init", "-q"]);
+        fs::write(checkout.join("file"), "module content\n").unwrap();
+    }
+    for checkout in [&nested, &module] {
+        git(checkout, &["add", "."]);
+        git(checkout, &["commit", "-qm", "test: module fixture"]);
+    }
+    fixture.recommit("source");
+    let before = inventory(&fixture.root);
+    fixture.plan();
+    assert_eq!(inventory(&fixture.root), before);
+    fs::write(nested.join("file"), "dirty module\n").unwrap();
+    let output = fixture.command().output().unwrap();
+    failure(&output, "AX0102");
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        diagnostic["diagnostics"][0]["location"]["path"],
+        "module/nested/file"
+    );
+    fs::write(nested.join("file"), "module content\n").unwrap();
+    fs::write(nested.join(".git/info/exclude"), "ignored\n").unwrap();
+    fs::write(nested.join("ignored"), "ignored module content\n").unwrap();
+    failure(&fixture.command().output().unwrap(), "AX0102");
+    fs::remove_file(nested.join("ignored")).unwrap();
+    fs::write(nested.join("file"), "different committed module\n").unwrap();
+    git(&nested, &["add", "."]);
+    git(
+        &nested,
+        &["commit", "-qm", "test: different module revision"],
+    );
+    failure(&fixture.command().output().unwrap(), "AX0102");
+    fs::rename(&nested, fixture.root.join("retained-module")).unwrap();
+    fs::create_dir(&nested).unwrap();
+    let output = fixture.command().output().unwrap();
+    failure(&output, "AX0102");
+    assert!(nested.read_dir().unwrap().next().is_none());
+}
+
+#[test]
+fn raw_blob_batches_accept_binary_content_and_cross_batch_boundary() {
+    let mut fixture = Fixture::new();
+    let data: Vec<u8> = (0..9 * 1024 * 1024)
+        .map(|index| (index % 256) as u8)
+        .collect();
+    fs::write(fixture.root.join("source/binary"), &data).unwrap();
+    fs::write(fixture.root.join("tools/empty"), []).unwrap();
+    fixture.recommit("source");
+    fixture.recommit("tools");
+    fixture.plan();
+}
+
+#[test]
+fn missing_raw_object_is_not_fetched_or_repaired() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("source");
+    let oid = git(&source, &["rev-parse", "HEAD:configure"]);
+    let object = source.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    fs::rename(&object, fixture.root.join("retained-object")).unwrap();
+    let before = inventory(&fixture.root);
+    let output = fixture.command().output().unwrap();
+    failure(&output, "AX0102");
+    assert_eq!(inventory(&fixture.root), before);
+    assert!(!object.exists());
+}
+
+#[test]
+fn linked_worktree_metadata_is_supported_without_source_mutation() {
+    let mut fixture = Fixture::new();
+    let source = fixture.root.join("source");
+    let origin = fixture.root.join("source-origin");
+    fs::rename(&source, &origin).unwrap();
+    git(
+        &origin,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            source.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(source.join(".git").is_file());
+    // No new recipe: a linked checkout with exactly the selected identity is
+    // supported. Its external administrative files are never modified.
+    let before = inventory(&fixture.root);
+    fixture.plan();
+    assert_eq!(inventory(&fixture.root), before);
+    // Keep the fixture binding exercised independently of worktree layout.
+    fs::write(source.join("another"), "new material").unwrap();
+    fixture.recommit("source");
+    fixture.plan();
 }
 
 #[test]
