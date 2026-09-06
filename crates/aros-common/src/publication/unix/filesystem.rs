@@ -38,6 +38,8 @@ pub(super) fn write_new_file_mode(
             ));
         }
         rfs::fsync(&parent.fd)?;
+        #[cfg(test)]
+        crate::publication::publication_tests::run_boundary("stage-before-readback", path);
         let measured = read_regular_with_mode(path)?;
         if !measured
             .as_ref()

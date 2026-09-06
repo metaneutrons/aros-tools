@@ -898,6 +898,8 @@ mod unix {
             return finish_failed_transaction(journal_path, error, &rollback);
         }
 
+        #[cfg(test)]
+        super::publication_tests::run_boundary("before-apply", journal_path);
         test_pause_point("before-apply");
         for (index, operation) in journal.operations.iter().enumerate() {
             if let Err(error) = apply_operation(operation) {
