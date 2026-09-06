@@ -158,6 +158,19 @@ the successful optimized run. These measurements are local source/interface
 evidence, not cross-host/compiler qualification, a new timeout default, executor
 origin or permission to reuse either probe's retained directories.
 
+A Linux x86-64 production-API probe on 2026-09-06 rebuilt the library from
+`c7a3cd586097696db6ea66c3eb0b71f9b540206c` with Rust 1.98.0 and Git 2.55.0.
+It used copies of the macOS prepared inputs at the same three recipe identities;
+these were **not independently acquired upstream checkouts** and were not
+adopted as already-verified guards. Linux independently audited them, created
+new raw snapshots and shallow Git views, passed the unchanged selected
+`verify-checkout`, and revalidated all resulting guards before releasing ownership.
+All 76 AROS stores plus producer/tools passed. With the same explicit 180-second
+per-operation budgets, AROS raw/view/recheck took 44.151 / 142.838 / 14.397 s;
+producer 369/542/65 ms and tools 1433/601/84 ms. This completes the two-host
+three-input **source/interface** probe, not an independent download/reproduction,
+trusted executor attestation, cache validation or either real PC compiler lane.
+
 ### Debug hashing regression and correction
 
 At PR #51's initial head `d48c7177ce99bdd0833fa008b2356e03a17fafd1`,
@@ -192,9 +205,10 @@ snapshot implementation or producer algorithm in tests.
   publication and bounded process execution. Shared publication fault tests
   cover that primitive; view-level full-disk/post-rename fault injection is not
   yet separately qualified. Do not infer it from happy-path Git tests.
-- Validate the full selected real inputs and the **unchanged** legacy
-  `verify-checkout` command on Linux and macOS. Toy Git queries are not that
-  integration evidence, and object-store validation alone is not a worktree.
+- Full selected inputs and the **unchanged** legacy `verify-checkout` now pass
+  on Linux x86-64 and macOS AArch64 as described above. These local probes are
+  not the integrated adapter lifecycle or compiler acceptance. The Linux seed
+  is explicitly derived from the macOS material, not independent acquisition.
 - Finish frontend build identity, prerequisites/cache and sanitized child
   environment. Only then wire the explicitly selected coarse `legacy-driver`
   boundary and its existing failure/cancellation/result contracts.
