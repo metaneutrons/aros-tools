@@ -102,6 +102,9 @@ The shared AX diagnostic envelope preserves safe error classes, process exit/
 timeout information and static Git step labels. It never prints arbitrary Git
 stderr or private metadata. Any diagnostic emitted by isolated-store Git
 validation, including a warning or truncated stderr, prevents success.
+Legacy view publication errors retain both the publication class and the safe
+I/O kind (for example `Io, StorageFull`). An uncertain publication stays
+`CommitStateUncertain`; its wrapped cause is not exposed as raw filesystem text.
 
 ## What the maintained tests establish
 
@@ -129,6 +132,42 @@ validation, including a warning or truncated stderr, prevents success.
   metadata creation begins) fail with retained material and no successful guard.
 - Metadata-free fixture material fails the historical Git identity/status
   queries. No compatibility result is inferred from the raw snapshot API.
+
+### Storage and publication failure boundaries
+
+The maintained fault suite complements the public-API happy-path and mutation
+tests. The public API always uses real filesystem writes and the unchanged
+shared source-tree publisher. Only a private, statically selected mutation
+boundary is substituted in the lifecycle unit tests; callers cannot select a
+fake backend, and no new environment variable or Cargo feature enables faults.
+
+| Injected boundary | Required retained state |
+| --- | --- |
+| `ENOSPC` at each of six config/HEAD/shallow writes across a root and gitlink, after zero or five bytes | Raw bytes plus exact empty/partial metadata in private staging; no final view |
+| Storage-full result before either relocation | Raw source or complete staging, respectively; destination absent |
+| Uncertain result after either real relocation | Complete tree at the new name; no successful view guard |
+| Later-store write failure and final uncertain publication for producer/tools roles | Same retention and no-adoption contract as the source role |
+
+These four lifecycle tests cover 20 scenarios. They compare the exact bytes,
+modes, symlink targets and membership captured at the failure boundary, retain
+the original root inode, reject further mutations and reuse, preserve the other
+selected views/input checkouts/output/cache, and require AX0801 with a safe
+retention hint. Releasing the owning run does not delete the retained evidence;
+reserving the same roots again fails.
+
+Two additional common-library tests exercise the **source** publisher itself:
+`StorageFull` injected after tree sync but before rename remains class `Io`,
+while the same error after the real no-clobber rename and before parent sync
+passes through the actual `CommitStateUncertain` mapping. Those injection hooks
+are one-shot, thread-local, path-matched and compiled only under `cfg(test)`.
+Existing debug-only publication fault controls used by other workspace tests
+are unchanged; the new tests neither depend on nor extend them.
+
+The lifecycle post-rename tests model the classified failure returned by that
+publisher after a real successful publication; they do not themselves make
+`fsync` fail. Together these layers test publisher classification and caller
+retention without claiming a physically full volume, power-loss durability or
+exhaustive failure injection at every Git-owned pack/index write.
 
 A local macOS AArch64 scale probe on 2026-09-06 used Apple Git 2.50.1 against
 the selected AROS root `f3cfc243a84065166a46da28b0a5b22bbd0f8869`, tree
@@ -190,8 +229,8 @@ cached integrity result or reduced byte verification.
 
 Cargo documents [dependency-specific profile overrides and test inheritance](https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).
 This is a debug-backend performance correction, not a relaxation of runtime
-budgets or proof of release resource defaults. Updated cross-host qualification
-must pass before the PR can merge.
+budgets or proof of release resource defaults. PR #51 passed final-head
+cross-host qualification and merged as `b862b11ff8db367fc918ee595e89ef9cd69e2b70`.
 
 The previous successful-transfer test helper has been removed. Maintained
 positive conversion/recursive tests call the production API; only deliberately
@@ -202,9 +241,9 @@ snapshot implementation or producer algorithm in tests.
 
 - The consuming conversion, topology inventory, independently checked object
   graph and metadata guards are implemented, reusing raw auditors, filesystem
-  publication and bounded process execution. Shared publication fault tests
-  cover that primitive; view-level full-disk/post-rename fault injection is not
-  yet separately qualified. Do not infer it from happy-path Git tests.
+  publication and bounded process execution. The deterministic storage-full
+  and post-rename fault coverage above is separate from real compiler or
+  filesystem crash-durability qualification.
 - Full selected inputs and the **unchanged** legacy `verify-checkout` now pass
   on Linux x86-64 and macOS AArch64 as described above. These local probes are
   not the integrated adapter lifecycle or compiler acceptance. The Linux seed

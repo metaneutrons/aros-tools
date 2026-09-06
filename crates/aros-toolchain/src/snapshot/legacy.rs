@@ -1,14 +1,20 @@
 //! Consuming raw-material conversion; no build permission or metadata exemptions.
 
 mod objects;
+mod operations;
 mod store;
+
+#[cfg(test)]
+mod fault_tests;
+
+pub(super) use operations::{Operations, SystemOperations};
 
 use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
 
-use aros_common::{publication::publish_prepared_source_tree_noclobber, CancellationToken};
+use aros_common::CancellationToken;
 use rustix::fs::{self as fs, AtFlags};
 
 use super::unix::Material;
@@ -59,6 +65,7 @@ pub(super) fn convert(
     mut material: Material,
     deadline: Instant,
     cancellation: &CancellationToken,
+    operations: &mut impl Operations,
 ) -> Result<Material, ContractError> {
     material.revalidate(deadline, cancellation)?;
     for repository in &material.repositories {
@@ -98,6 +105,7 @@ pub(super) fn convert(
         &work.join(pending),
         deadline,
         cancellation,
+        operations,
     )?;
     let mut transfer_budget = Budget::controlled(deadline, cancellation);
     let mut verification_budget = Budget::controlled(deadline, cancellation);
@@ -107,7 +115,13 @@ pub(super) fn convert(
         material.check_root()?;
         let root = material.root.join(&repository.relative);
         let source = repository.checkout(&repository.source, deadline, cancellation)?;
-        let mut store = store::Store::create(&root, &repository.commit, deadline, cancellation)?;
+        let mut store = store::Store::create(
+            &root,
+            &repository.commit,
+            deadline,
+            cancellation,
+            operations,
+        )?;
         objects::transfer(&source, repository, &mut store, &mut transfer_budget)?;
         objects::verify(repository, &mut store, &mut verification_budget)?;
         source.recheck()?;
@@ -122,6 +136,7 @@ pub(super) fn convert(
         &work.join(destination),
         deadline,
         cancellation,
+        operations,
     )?;
     revalidate(run, &material, deadline, cancellation)?;
     tracing::debug!(
@@ -137,14 +152,15 @@ fn relocate(
     destination: &Path,
     deadline: Instant,
     cancellation: &CancellationToken,
+    operations: &mut impl Operations,
 ) -> Result<(), ContractError> {
     run.revalidate(cancellation)?;
     material.check_root()?;
     Budget::controlled(deadline, cancellation).check(0)?;
-    publish_prepared_source_tree_noclobber(&material.root, destination).map_err(|error| {
-        let class = aros_common::publication::publication_failure_class(&error);
+    operations.publish(&material.root, destination).map_err(|error| {
+        let operations::PublicationFailure { class, kind } = error;
         ContractError::state(format!(
-            "legacy view publication failed ({class:?}); staged or complete material is retained"
+            "legacy view publication failed ({class:?}, {kind:?}); staged or complete material is retained"
         ))
     })?;
     destination.clone_into(&mut material.root);

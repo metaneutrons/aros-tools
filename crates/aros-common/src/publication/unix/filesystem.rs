@@ -1,6 +1,23 @@
 //! Descriptor-relative, no-follow filesystem and CAS primitives.
 
 use super::*;
+
+/// Persist a prepared-tree rename; the caller classifies any failure as uncertain.
+pub(super) fn sync_prepared_parent(
+    parent: &ParentHandle,
+    destination: &Path,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    crate::publication::publication_tests::run_fault_point(
+        "prepared-tree-after-rename-before-sync",
+        destination,
+    )?;
+    #[cfg(not(test))]
+    let _ = destination;
+    test_fail_point("prepared-tree-after-rename-before-sync")?;
+    rfs::fsync(&parent.fd).map_err(Into::into)
+}
+
 pub(super) fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<FileIdentity> {
     write_new_file_mode(path, contents, 0o644)
 }

@@ -65,6 +65,73 @@ fn at_boundary<T>(
 }
 
 #[cfg(unix)]
+struct FaultAction {
+    point: &'static str,
+    matches: Box<dyn Fn(&Path) -> bool>,
+    error: std::io::Error,
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    static FAULT_ACTION: std::cell::RefCell<Option<FaultAction>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Return one selected test error at an exact publication boundary.
+///
+/// The hook is thread-local and one-shot, so it cannot affect another
+/// publication running in a different test thread or persist into a retry.
+#[cfg(unix)]
+pub(super) fn run_fault_point(point: &str, path: &Path) -> std::io::Result<()> {
+    let action = FAULT_ACTION.with_borrow_mut(|slot| {
+        if slot
+            .as_ref()
+            .is_some_and(|hook| hook.point == point && (hook.matches)(path))
+        {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    if let Some(action) = action {
+        Err(action.error)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn with_fault_point<T>(
+    point: &'static str,
+    matches: impl Fn(&Path) -> bool + 'static,
+    error: std::io::Error,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAULT_ACTION.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    FAULT_ACTION.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "fault actions must not overlap");
+        *slot = Some(FaultAction {
+            point,
+            matches: Box::new(matches),
+            error,
+        });
+    });
+    let _reset = Reset;
+    let result = operation();
+    assert!(
+        FAULT_ACTION.with_borrow(Option::is_none),
+        "selected fault boundary was not exercised"
+    );
+    result
+}
+
+#[cfg(unix)]
 static FAULT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
@@ -644,6 +711,83 @@ fn prepared_source_tree_rejects_casefold_collisions() {
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert!(staging.exists());
     assert!(!destination.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_source_tree_storage_full_before_rename_retains_staging() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let staging = root_path.join("staging");
+    let destination = root_path.join("published");
+    std::fs::create_dir_all(staging.join("source dir")).unwrap();
+    std::fs::write(
+        staging.join("source dir/source file ±.txt"),
+        b"source payload",
+    )
+    .unwrap();
+    let expected_staging = staging.clone();
+
+    let result = with_fault_point(
+        "prepared-tree-after-sync-before-rename",
+        move |path| path == expected_staging,
+        std::io::Error::new(
+            ErrorKind::StorageFull,
+            "injected storage-full staging failure",
+        ),
+        || publish_prepared_source_tree_noclobber(&staging, &destination),
+    );
+
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::StorageFull);
+    assert_eq!(
+        publication_failure_class(&error),
+        PublicationFailureClass::Io
+    );
+    assert!(staging.exists());
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(staging.join("source dir/source file ±.txt")).unwrap(),
+        b"source payload"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_source_tree_storage_full_after_rename_retains_complete_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let staging = root_path.join("staging");
+    let destination = root_path.join("published");
+    std::fs::create_dir_all(staging.join("source dir")).unwrap();
+    std::fs::write(
+        staging.join("source dir/source file ±.txt"),
+        b"source payload",
+    )
+    .unwrap();
+    let expected_destination = destination.clone();
+
+    let result = with_fault_point(
+        "prepared-tree-after-rename-before-sync",
+        move |path| path == expected_destination,
+        std::io::Error::new(
+            ErrorKind::StorageFull,
+            "injected storage-full parent sync failure",
+        ),
+        || publish_prepared_source_tree_noclobber(&staging, &destination),
+    );
+
+    let error = result.unwrap_err();
+    assert_eq!(
+        publication_failure_class(&error),
+        PublicationFailureClass::CommitStateUncertain
+    );
+    assert!(!is_rollback_incomplete(&error));
+    assert!(!staging.exists());
+    assert_eq!(
+        std::fs::read(destination.join("source dir/source file ±.txt")).unwrap(),
+        b"source payload"
+    );
 }
 
 #[cfg(unix)]

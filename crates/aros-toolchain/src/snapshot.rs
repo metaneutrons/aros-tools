@@ -93,24 +93,45 @@ impl<'run> LegacySourceView<'run> {
         timeout: Duration,
         cancellation: &CancellationToken,
     ) -> Result<Self, ContractError> {
-        let deadline = deadline(timeout)?;
-        snapshot.run.revalidate(cancellation)?;
         #[cfg(unix)]
-        {
-            let material = legacy::convert(snapshot.run, snapshot.material, deadline, cancellation)
-                .map_err(ContractError::retained_material)?;
-            Ok(Self {
-                run: snapshot.run,
-                material,
-            })
-        }
+        return Self::prepare_using(
+            snapshot,
+            timeout,
+            cancellation,
+            &mut legacy::SystemOperations,
+        );
         #[cfg(not(unix))]
         {
-            let _ = deadline;
+            let _ = deadline(timeout)?;
+            snapshot.run.revalidate(cancellation)?;
             Err(ContractError::state(
                 "legacy source views require a supported Unix host",
             ))
         }
+    }
+
+    // No public backend selection: only unit tests can substitute mutations.
+    #[cfg(unix)]
+    fn prepare_using(
+        snapshot: SourceSnapshot<'run>,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        operations: &mut impl legacy::Operations,
+    ) -> Result<Self, ContractError> {
+        let deadline = deadline(timeout)?;
+        snapshot.run.revalidate(cancellation)?;
+        let material = legacy::convert(
+            snapshot.run,
+            snapshot.material,
+            deadline,
+            cancellation,
+            operations,
+        )
+        .map_err(ContractError::retained_material)?;
+        Ok(Self {
+            run: snapshot.run,
+            material,
+        })
     }
 
     /// Check ownership and every raw/metadata byte, then Git identities/indexes.

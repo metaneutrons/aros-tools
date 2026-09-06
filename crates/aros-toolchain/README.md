@@ -178,6 +178,12 @@ integrity over throughput; large/debug builds may exhaust a caller's budget.
 Kernel filesystem I/O/fsync is not preemptible. Failures retain the raw, staged
 or complete tree, never adopt it or issue a successful use guard.
 
+Maintained fault tests cover empty/partial metadata writes on storage exhaustion,
+both relocation boundaries, retained bytes and rejected reuse across all roles.
+Separate source-publisher tests exercise its real uncertain-commit error mapping.
+These are deterministic boundary tests, not actual volume exhaustion or power-loss
+evidence; see [the fault model and limits](../../docs/toolchain-legacy-execution-view.md#storage-and-publication-failure-boundaries).
+
 This API is Unix-only, in-process, non-resumable and separate from planning.
 It establishes source/object consistency, not trusted origin, executor identity,
 cache readiness, an OS sandbox or compiler qualification. All three guards and
