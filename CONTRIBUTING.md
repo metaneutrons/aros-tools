@@ -5,6 +5,10 @@ upstream AROS and keep AROS-NX-specific extensions explicit. A pull request is
 ready for review only when its behavior, failure contract, tests and user
 documentation agree.
 
+For ongoing implementation work, start with [HANDOFF.md](HANDOFF.md). It links
+the last verified checkpoint and next bounded slice; issues remain the live
+execution record, and the producer plan owns acceptance criteria.
+
 ## Development environment
 
 The supported Rust toolchain is pinned in `rust-toolchain.toml`. The canonical

@@ -829,6 +829,15 @@ tracking change.
 
 ### Issue and pull-request contract
 
+The repository-root [HANDOFF.md](../HANDOFF.md) is the compact session entry
+point: last verified implementation checkpoint, next bounded action and links
+to authoritative issues, contracts and evidence. Replace its stale checkpoint
+instead of appending historical status; Git history is the archive. It must
+not duplicate the backlog or promote a past green run into current readiness.
+Keep host-specific paths, raw logs, private operational notes and credential
+references in stable private state outside Git and disposable build directories.
+Record their locations and checksums in the private index, not in public docs.
+
 An implementation issue records its TCP milestone, owning repository, problem,
 bounded scope, dependencies, affected contracts, linked acceptance criteria,
 test/evidence plan, rollout/rollback and estimated effort range. Estimates are
