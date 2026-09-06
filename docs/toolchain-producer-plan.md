@@ -3,22 +3,68 @@
 Status: producer implementation authorized; M0 accepted on 2026-09-06.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
-percentage estimate. Command examples describe the proposed interface, not
-commands available in the current release.
+percentage estimate. The plan distinguishes the implemented local preview
+slice from future release and qualification commands.
 
 Planning extension approved on 2026-09-06: TCP-M8 adds explicit local toolchain
 management. It is a separate acceptance track, not a new prerequisite for M7
 or the initial tools release. The extension is planned, not implemented.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
-The next acceptance gate is [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
+The M1 acceptance evidence is recorded below and its formal issue is
+[TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29). The next
+implementation gate is [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30).
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
-its completed contract freeze. M1's experimental read-only plan/CLI slice does
-not complete its lifecycle, source-readiness or real-build criteria. Valid
-inspection results remain blocked pending those missing safety gates.
+its completed contract freeze. M1's experimental plan/CLI slice is now
+complete for its local-preview acceptance boundary; native lifecycle,
+source-readiness and release gates remain explicitly assigned to M2–M7.
+
+The current M1 implementation now also exposes an explicit local
+`toolchain build --backend legacy-preview` adapter. It reuses the plan
+preflight, runs the reviewed legacy driver only from metadata-free snapshots,
+requires a prepared offline cache, binds the producer's Rust channel, and
+retains local candidate evidence. It is not a release executor or provenance
+attestation. The two required host proofs are recorded below. Trusted origin,
+native-executor and release-qualification evidence are later milestone gates,
+not prerequisites for accepting this experimental M1 boundary.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
 and [measured baseline](toolchain-producer-baseline.md) remain the foundation
 for later implementation. Issues own execution status and remaining gates.
+
+### Measured TCP-M1 local lane evidence (2026-09-06)
+
+The legacy-preview adapter was executed from the tools checkout against the
+same producer contract on both requested native PC hosts. Each run used a
+fresh, owned work/output root, an explicitly prepared offline cache and the
+producer-declared Rust 1.96.1 channel. The result envelope reported
+`prerequisites=passed`, `cache=passed`, `environment=passed`,
+`integrity=passed`, `qualification=local-only` and `commit_state=committed`.
+The archive, manifest, SHA-256 sidecar and SPDX document were re-hashed after
+the run; archive member paths were checked for absolute or parent traversal.
+Each archive was then extracted into a fresh temporary prefix and verified
+with the existing `aros toolchain verify --preset pc-x86_64 --local` command on
+its native host. This verifies the local-prefix consumer boundary without
+turning the preview into a release qualification.
+
+| Host | Profile | Jobs | Recipe SHA-256 | Source commit | Producer commit | Archive (bytes) | Archive SHA-256 | Tree SHA-256 |
+| --- | --- | ---: | --- | --- | --- | ---: | --- | --- |
+| macOS ARM64 (`macos-aarch64`) | `pc-x86_64` | 4 | `f73e397a90a32cab33fecdd46cd7054700ef31571475c7bab4cc31964d984aad` | `f3cfc243a84065166a46da28b0a5b22bbd0f8869` | `e25986c8dd516e2b9a08d33bdc6eade3be10f0f3` | 26,489,348 | `85041d73d0a0a5def960cf44f195fe2d1f15b7adf980bc9db441852b5a80983b` | `5632523c0f62edbe3068c96b1ac531009c330e6dea7815ab68d20cb01571eb73` |
+| Linux x86-64 (`linux-x86_64`) | `pc-x86_64` | 8 | `906ff611b34b1095fde00d86f164157c09d83ae6ee0fcfa3259b395280e14671` | `f3cfc243a84065166a46da28b0a5b22bbd0f8869` | `c8039cf2b7291097ad62c6750bd7367e91a068f4` | 41,500,268 | `8066253b8c246b485e6ed73288435aeea4389edbce64e568839f0b3fe6d24ff4` | `ad61f7e5b2ad1cbaafa2308dff0478cf698ae7f7bbba977d5dec85a7eba95642` |
+
+Observed toolchain inputs were LLVM 11.0.0. The macOS lane used Apple Clang
+21.0.0, CMake 4.4.3, GNU Make 4.4.1 and Python 3.14.7; the Linux lane used
+GCC 16.1.1, CMake 4.4.0, GNU Make 4.4.1 and Python 3.14.6. Both lanes
+consumed the seven locked LLVM/Clang runtime source archives recorded in their
+verified source-usage logs. The complete result envelopes and retained build
+material are local evidence, not release artifacts.
+
+The first Linux attempt stopped cleanly before producing an envelope because
+the remote cache's vendor configuration contained escaped placeholder quotes.
+The cache configuration was corrected and the retry above completed; no
+producer or CLI source change was needed. This negative attempt remains
+retained for auditability. No A/B matrix, release tag, publication or trusted
+origin attestation was performed, and the `origin` check therefore remains
+`not-run` by design.
 
 ## 1. Decision and intended outcome
 
@@ -535,22 +581,23 @@ at `abab341f259037ead9217181f39ba9384d014bab`; see the
 
 ### TCP-M1 — Shared library boundary and CLI preview
 
-- [ ] Introduce `aros-toolchain` and thin CLI modules with library/process
+- [x] Introduce `aros-toolchain` and thin CLI modules with library/process
   dependency gates; preserve existing consumer commands and package inventory.
-- [ ] Implement read-only planning and one explicit, temporary legacy-driver
+- [x] Implement read-only planning and one explicit, temporary legacy-driver
   adapter against the selected producer checkout. No copied shell logic,
   moving branch resolution or fallback after a native failure.
-- [ ] Establish diagnostics/logging, cancellation and guarded work/output
+- [x] Establish diagnostics/logging, cancellation and guarded work/output
   ownership before launching real builds. Isolate all legacy mutations.
-- [ ] Exercise mock success/failure/cancellation and invocation from outside
+- [x] Exercise mock success/failure/cancellation and invocation from outside
   checkouts; demonstrate one single-build local PC lane on Linux x86-64 and
   macOS AArch64 when hosts are available, with verified local-prefix use.
-- [ ] Mark the adapter experimental and record its remaining shell/Python
+- [x] Mark the adapter experimental and record its remaining shell/Python
   dependencies and coarse diagnostic limits. Do not expose it as a finished
   enterprise producer or switch release CI yet.
 
-Exit evidence: process-boundary tests plus two measured local lane reports.
-Absent host evidence remains open; it is not inferred from mock tests.
+Exit evidence: process-boundary tests plus two measured local lane reports,
+including native-host local-prefix verification. Accepted as an experimental
+local-preview boundary; no native or release claim is implied.
 
 ### TCP-M2 — Native input and environment contracts
 
@@ -818,7 +865,7 @@ tracking change.
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |
 | TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | [Accepted evidence](toolchain-producer-baseline.md#m0-acceptance) |
-| TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | Pending |
+| TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | [Measured local lane evidence](#measured-tcp-m1-local-lane-evidence-2026-09-06) |
 | TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Pending |
 | TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | Pending |
 | TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | Pending |

@@ -65,6 +65,7 @@ and works from any directory.
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
+| `toolchain build` | Experimental local legacy-preview candidate; explicit roots, prepared offline cache, fresh isolated views and bounded cancellation |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
@@ -115,9 +116,30 @@ policy, not a proven OS sandbox. Exit 0 means inspection completed; inspect
 `readiness` and `findings`. Invalid inputs exit 1 with no result on stdout.
 
 The default `native` backend is not implemented and fails before file reads;
-it never falls back. No `toolchain build` command is advertised yet.
-The lower-level source-snapshot library is not called by `plan` and does not
-change its read-only behavior or grant execution readiness.
+it never falls back. The legacy preview is explicit and local-only:
+
+```sh
+aros toolchain build --backend legacy-preview --preset pc-x86_64 \
+  --recipe /work/recipe.json --source-dir /work/AROS \
+  --producer-dir /work/aros-toolchains --tools-dir /work/aros-tools \
+  --work-dir /work/toolchain-run --output-dir /work/toolchain-candidate \
+  --cache-dir /work/source-cache --jobs 8 --timeout-seconds 21600 \
+  --release-id local-pc-2026-09-06 --offline --format json
+```
+
+`toolchain build` rechecks every selected checkout, probes Git/Python/CMake/
+Rust/Cargo/make, requires an existing prepared cache, and reserves fresh
+non-overlapping work/output leaves. It materializes metadata-free snapshots and
+independent shallow Git views before invoking the reviewed
+`build-release.sh`. The child gets a cleared environment with explicit PATH,
+HOME, TMPDIR, locale, timezone, Git and Cargo offline settings. Ctrl-C and the
+whole-operation deadline terminate and reap the child process group; retained
+work/output material is never adopted or deleted. Results report measured files,
+host-tool versions and `qualification: local-only`; executor origin is
+explicitly `not-run`, so no local result authorizes a release or publication.
+The command requires `--offline` because the current legacy driver consumes a
+prepared cache and is not a network sandbox. The lower-level source-snapshot
+library is not called by `plan` and does not change its read-only behavior.
 
 ## Build and inspect a product
 

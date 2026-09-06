@@ -1,7 +1,9 @@
 # aros-toolchain
 
-Experimental TCP-M1 producer inspection behind `aros toolchain plan`. It is
-not a compiler driver or a released management feature.
+TCP-M1 producer inspection and local legacy-preview execution behind
+`aros toolchain plan` and `aros toolchain build`, accepted as an experimental
+local-preview boundary. It is not a native compiler driver, release publisher
+or released management feature.
 
 Implemented:
 
@@ -30,10 +32,11 @@ download, cache scan, directory reservation, installation or cleanup runs.
 
 Plans currently have `readiness: blocked`, even with complete resource options.
 The [legacy execution-view implementation](../../docs/toolchain-legacy-execution-view.md)
-adds a separate consuming library conversion for the historical Git-aware
-interface. It is not wired to the CLI, an adapter or a build-readiness result.
-Integrated execution snapshots, source capabilities, lock semantics, prerequisites/cache,
-executor origin, ownership and cancellation remain unqualified. A blocked
+is now consumed by the explicit local preview adapter. The adapter probes host
+prerequisites, requires a prepared offline cache, seals a sanitized child
+environment, runs the reviewed legacy driver with bounded cancellation and
+returns a measured local-only candidate. It does not attest executor origin,
+publish, resume or claim release readiness. A blocked
 inspection exits 0; invalid input exits 1 without a result. Neither a plan nor
 a valid self-digest grants build permission. The recursive read-only check
 does not freeze a concurrently mutable tree, create an isolated snapshot,
@@ -193,10 +196,14 @@ the remaining execution gates must be integrated before enabling the driver.
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
 The implemented plan requires explicit `--backend legacy-preview`; native
-fails before file reads. `build`, the adapter, integrated ownership/cancellation,
-and real Linux x86-64/macOS AArch64 preview evidence remain later M1 work.
-No extra executable is exposed. `aros-fetch` is added as a dependency
-only when native transport is actually implemented, not as an unused promise.
+fails before file reads. `toolchain build --backend legacy-preview` is the
+explicit experimental adapter and requires `--offline`; native execution,
+trusted executor origin and release qualification remain later gates. The
+required real Linux x86-64 and macOS AArch64 preview lanes, including local
+prefix verification through `toolchain verify --local`, are recorded as the
+M1 acceptance evidence. No extra executable is exposed. `aros-fetch` is added
+as a dependency only when native transport is actually implemented, not as an
+unused promise.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
 [delivery plan](../../docs/toolchain-producer-plan.md) and

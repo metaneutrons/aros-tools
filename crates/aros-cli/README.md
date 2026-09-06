@@ -14,7 +14,7 @@ than linking their implementations.
 | `setup` | install the host compiler or locked cross-toolchains |
 | `host-compiler` | manage downloaded host LLVM |
 | `build-tools` | build/check the complete Rust build-tool suite |
-| `toolchain` | install, list, verify, and locate released AROS cross-toolchains |
+| `toolchain` | install, list, verify, locate released cross-toolchains, and run an explicit local preview |
 | `build` / `clean` | configure and build a declared target profile |
 | `test` | run evidence-producing, non-interactive QEMU boot validation |
 | `board` | validated physical-board, network boot, serial, and removable-media workflows |
@@ -167,6 +167,13 @@ aros --diagnostic-format json build --preset pc-x86_64
 
 The setting is global, so it may also follow a subcommand. The equivalent
 environment variable is `AROS_DIAGNOSTIC_FORMAT=human|json`.
+
+The experimental `aros toolchain build` command is deliberately explicit: it
+accepts immutable source/producer/tools paths, a recipe, a prepared offline
+cache, and fresh work/output roots. It currently supports only the
+`legacy-preview` backend, never publishes or tags, and reports a local-only
+result. A native producer executor and release qualification remain separate
+gates; the command never falls back from one backend to another.
 
 Every fatal diagnostic has a stable code, stage, severity, message, actionable
 hint, and optional deterministic context. The schema is
