@@ -47,7 +47,7 @@ class ToolchainProducerContractTests(unittest.TestCase):
 
     def test_scope_does_not_advertise_a_runtime_implementation(self) -> None:
         self.assertEqual(self.contract["schema_version"], 1)
-        self.assertEqual(self.contract["status"], "specified-not-implemented")
+        self.assertEqual(self.contract["status"], "non-executing-foundation-only")
         self.assertEqual(self.contract["new_executables"], [])
         self.assertEqual(self.contract["dependencies"], ["aros-common", "aros-fetch"])
         self.assertEqual(self.contract["forbidden_dependencies"], ["aros-cli", "aros-release"])
@@ -189,17 +189,21 @@ class ToolchainProducerContractTests(unittest.TestCase):
         for name in self.golden["producer_functions"]:
             self.assertRegex(document, rf"\b{re.escape(name)}\b")
 
-    def test_diagnostic_reservation_is_unique_and_does_not_claim_registration(self) -> None:
+    def test_diagnostic_reservation_and_partial_registration_are_exact(self) -> None:
         diagnostics = self.contract["diagnostics"]
         self.assertEqual(diagnostics["envelope"], "aros-tool-diagnostics-v1")
-        self.assertEqual(diagnostics["registration"], "reserved-until-M1")
+        self.assertEqual(diagnostics["registration"], "partial-M1")
+        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102"])
         self.assertEqual(diagnostics["failure_exit"], 1)
         self.assertEqual(diagnostics["json_failure_stderr_documents"], 1)
         self.assertEqual(len(set(diagnostics["codes"])), len(diagnostics["codes"]))
         source = (ROOT / "crates/aros-common/src/diagnostic.rs").read_text()
         for code in diagnostics["codes"]:
             self.assertRegex(code, r"^AX[0-9]{4}$")
-            self.assertNotIn('"' + code + '"', source)
+            if code in diagnostics["registered_codes"]:
+                self.assertIn('"' + code + '"', source)
+            else:
+                self.assertNotIn('"' + code + '"', source)
 
 
 if __name__ == "__main__":

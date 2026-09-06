@@ -1,7 +1,10 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: specified, not implemented; awaiting architecture-PR review. This is
-engineering documentation, not a list of commands available to users.
+Status: specified; the first M1 library slice implements recipe-v2 syntax,
+self-digest validation and AX0101/AX0102 diagnostics only. This is engineering
+documentation, not a list of commands available to users. See the
+[library's exact limits](../crates/aros-toolchain/README.md). Planning, execution,
+state management and origin/source verification are not implemented by that slice.
 [Epic #27](https://github.com/metaneutrons/aros-tools/issues/27) tracks delivery;
 [M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28) tracks this freeze.
 The [delivery plan](toolchain-producer-plan.md) supplies scope and acceptance
@@ -297,7 +300,9 @@ Fixtures and rule ownership:
 | Forged receipt or compatibility report | Revalidate all references; receipts alone cannot prove origin, independence or release eligibility. |
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
-Reserve `AX` for producer diagnostics; add its enum variants in M1, not M0.
+Reserve `AX` for producer diagnostics. The first M1 library slice registers
+AX0101 and AX0102; all remaining codes below stay reserved until their actual
+implementations land. The versioned contract records that exact subset.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,
 digest and retry classifications go in typed evidence and safe messages/hints,
@@ -323,10 +328,13 @@ opt-in, local and redacted. There is no remote telemetry.
 
 ## 7. Evidence and remaining gates
 
-See [M0 baseline evidence](toolchain-producer-baseline.md). These are fixture and
-source-review findings, not a new toolchain qualification. M0 is complete only
-after this architecture/contract PR is reviewed and merged with green gates.
-Do not close M1–M7 or activate native producer declarations on that basis.
+See [M0 acceptance evidence](toolchain-producer-baseline.md#m0-acceptance).
+These are fixture and source-review findings, not a new toolchain qualification.
+M0 was accepted through PR #37. Do not close M1–M8 or activate native producer
+declarations on that basis. The first M1 library slice does not supply a plan,
+build driver or receipt-reuse implementation; its native recipe input/canonical
+output cap is 1 MiB and canonical nesting is limited to 64 levels. These are
+parser safety limits, not measured compiler resource defaults.
 
 Remaining implementation gates include: private MetaMake fetch integration,
 trusted executor evidence, recursive clean snapshots, actual four-host process

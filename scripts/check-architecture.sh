@@ -73,7 +73,7 @@ if [ -n "$direct_process" ]; then
     failed=1
 fi
 
-for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-verify; do
+for component in aros-ahi-runner aros-board aros-collect aros-fetch aros-toolchain aros-verify; do
     direct_process=$(production_process_calls "crates/$component/src" \
         | grep -v ':.*response\.status()' || true)
     if [ -n "$direct_process" ]; then

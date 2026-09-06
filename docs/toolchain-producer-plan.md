@@ -1,6 +1,6 @@
 # Toolchain producer integration: architecture and delivery plan
 
-Status: producer implementation authorized; no producer milestone is complete yet.
+Status: producer implementation authorized; M0 accepted on 2026-09-06.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
 percentage estimate. Command examples describe the proposed interface, not
@@ -11,10 +11,13 @@ management. It is a separate acceptance track, not a new prerequisite for M7
 or the initial tools release. The extension is planned, not implemented.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
-The first active work package is [TCP-M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28).
-Its reviewable [interface and ownership contract](toolchain-producer-contract.md)
-and [measured baseline](toolchain-producer-baseline.md) are now recorded. M0's
-merge/acceptance status remains on its issue; later milestones have not started.
+The next acceptance gate is [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
+The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
+its completed contract freeze. M1's first non-executing library slice does not
+complete its CLI, lifecycle or real-build criteria.
+The accepted [interface and ownership contract](toolchain-producer-contract.md)
+and [measured baseline](toolchain-producer-baseline.md) remain the foundation
+for later implementation. Issues own execution status and remaining gates.
 
 ## 1. Decision and intended outcome
 
@@ -472,9 +475,10 @@ or compatibility failure, overwrite a historical asset, or retarget a tag.
 
 ## 7. Milestones and acceptance gates
 
-No implementation milestone is complete at this planning baseline. Work starts
-with TCP-M0; linked GitHub issues carry live execution status. Writing this
-document or creating an issue does not satisfy an acceptance criterion.
+The original planning baseline completed no implementation milestone. M0 has
+since been accepted with the linked evidence below; GitHub issues carry live
+execution status. Writing a document or creating an issue does not satisfy
+an acceptance criterion.
 
 | Milestone | Deliverable | Depends on | Promotion boundary |
 | --- | --- | --- | --- |
@@ -490,25 +494,29 @@ document or creating an issue does not satisfy an acceptance criterion.
 
 ### TCP-M0 — Contract and baseline freeze
 
-- [ ] Inventory every producer script/function, workflow call site, fixture,
+- [x] Inventory every producer script/function, workflow call site, fixture,
   source/profile/schema rule and compatibility/recovery path; assign its new
   owner. Record changes needed to the source-contract validator.
-- [ ] Freeze public/maintainer commands, plan/result/receipt formats, executor
+- [x] Freeze public/maintainer commands, plan/result/receipt formats, executor
   identity, diagnostics, source cleanliness and schema compatibility policy.
   Resolve manifest/parser differences with negative fixtures.
-- [ ] Record a versioned native producer capability contract in `aros-tools`;
+- [x] Record a versioned native producer capability contract in `aros-tools`;
   recipes in `aros-toolchains` reference it. Keep source locks/profiles in one
   authoritative location, with only explicitly synchronized conformance
   fixtures across repositories.
-- [ ] Capture existing fixture results and small package golden vectors.
+- [x] Capture existing fixture results and small package golden vectors.
   Record representative local build resource observations when available;
   label missing measurements and claimed support separately.
-- [ ] Review the trust/credential/path/cache model and the upstream source
+- [x] Review the trust/credential/path/cache model and the upstream source
   boundary. Create the tracking epic/acceptance issues when implementation is
   authorized, and link them here.
 
 Exit evidence: approved contract/architecture PR, script-to-owner inventory,
 baseline fixture results and recorded open risks. No production path changed.
+
+Accepted through [PR #37](https://github.com/metaneutrons/aros-tools/pull/37)
+at `abab341f259037ead9217181f39ba9384d014bab`; see the
+[M0 acceptance ledger](toolchain-producer-baseline.md#m0-acceptance).
 
 ### TCP-M1 — Shared library boundary and CLI preview
 
@@ -794,7 +802,7 @@ tracking change.
 
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |
-| TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | Pending |
+| TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | [Accepted evidence](toolchain-producer-baseline.md#m0-acceptance) |
 | TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | Pending |
 | TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Pending |
 | TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | Pending |

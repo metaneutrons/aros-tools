@@ -247,6 +247,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aros-toolchain"
+version = "0.1.0"
+dependencies = [
+ "aros-common",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "aros-transpiler"
 version = "0.1.0"
 dependencies = [

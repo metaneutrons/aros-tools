@@ -9,6 +9,12 @@ use std::fmt;
 /// must not be reused when a diagnostic is retired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum DiagnosticCode {
+    /// Native producer contract syntax, version or canonical value failure.
+    #[serde(rename = "AX0101")]
+    ProducerContract,
+    /// Native producer identity/digest disagreement.
+    #[serde(rename = "AX0102")]
+    ProducerIdentity,
     #[serde(rename = "AT0001")]
     SourceWalk,
     #[serde(rename = "AT0002")]
@@ -202,6 +208,8 @@ pub enum DiagnosticCode {
 impl fmt::Display for DiagnosticCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::ProducerContract => "AX0101",
+            Self::ProducerIdentity => "AX0102",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
             Self::SourceParse => "AT0003",

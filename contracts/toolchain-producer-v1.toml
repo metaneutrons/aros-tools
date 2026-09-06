@@ -2,7 +2,7 @@
 # Source locks and target profiles remain authoritative in aros-toolchains.
 schema_version = 1
 id = "aros-toolchain-producer-v1"
-status = "specified-not-implemented"
+status = "non-executing-foundation-only"
 specification = "docs/toolchain-producer-contract.md"
 tracking_issue = "https://github.com/metaneutrons/aros-tools/issues/28"
 library = "aros-toolchain"
@@ -70,7 +70,8 @@ commit_states = ["rolled_back", "committed", "indeterminate"]
 [diagnostics]
 envelope = "aros-tool-diagnostics-v1"
 family = "AX"
-registration = "reserved-until-M1"
+registration = "partial-M1"
+registered_codes = ["AX0101", "AX0102"]
 success_exit = 0
 failure_exit = 1
 failure_stdout = "empty"
