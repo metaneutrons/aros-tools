@@ -25,17 +25,24 @@ zero='0000000000000000000000000000000000000000'
 tips=''
 excludes=''
 lines=0
-while read -r _local_ref local_oid _remote_ref remote_oid; do
-    [ -n "${local_oid:-}" ] || continue
-    lines=$((lines + 1))
-    # Eine Löschung bringt keine neuen Objekte mit.
-    [ "$local_oid" = "$zero" ] && continue
-    tips="$tips $local_oid"
-    # Der Stand der Gegenseite aus stdin ist maßgeblich. Die lokalen
-    # Remote-Tracking-Refs kommen zusätzlich dazu, weil ein Commit auch über
-    # einen anderen Branch schon dort liegen kann.
-    [ "$remote_oid" != "$zero" ] && excludes="$excludes $remote_oid"
-done
+# Git supplies a pipe with one ref line per update.  Lefthook deliberately
+# runs commands with the interactive terminal as stdin instead, so blindly
+# reading here would hang every push.  In that wrapper (and for a manual run),
+# use the documented conservative fallback below; in a direct Git hook retain
+# the exact ref-range scan.
+if [ ! -t 0 ]; then
+    while read -r _local_ref local_oid _remote_ref remote_oid; do
+        [ -n "${local_oid:-}" ] || continue
+        lines=$((lines + 1))
+        # Eine Löschung bringt keine neuen Objekte mit.
+        [ "$local_oid" = "$zero" ] && continue
+        tips="$tips $local_oid"
+        # Der Stand der Gegenseite aus stdin ist maßgeblich. Die lokalen
+        # Remote-Tracking-Refs kommen zusätzlich dazu, weil ein Commit auch über
+        # einen anderen Branch schon dort liegen kann.
+        [ "$remote_oid" != "$zero" ] && excludes="$excludes $remote_oid"
+    done
+fi
 
 if [ "$lines" -gt 0 ]; then
     if [ -z "$tips" ]; then
