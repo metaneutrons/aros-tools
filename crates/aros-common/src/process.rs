@@ -253,6 +253,31 @@ pub fn run_output_with_input(
     run_output_inner(command, Some(input), per_stream_limit, None, None)
 }
 
+/// Deliver exact input with bounded capture, a deadline and cancellation.
+///
+/// Uses the process-group cleanup guarantees of [`run_output_with_control`].
+/// A closed stdin caused by cancellation/timeout preserves that unsuccessful
+/// outcome and captured output; it never claims successful input delivery.
+///
+/// # Errors
+/// Returns an I/O error for invalid bounds, pre-spawn cancellation, incomplete
+/// input delivery on normal exit, or failed process/pipe setup or cleanup.
+pub fn run_output_with_input_and_control(
+    command: &mut Command,
+    input: &[u8],
+    per_stream_limit: usize,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+) -> io::Result<ProcessOutput> {
+    run_output_inner(
+        command,
+        Some(input),
+        per_stream_limit,
+        Some(timeout),
+        Some(cancellation),
+    )
+}
+
 fn run_output_inner(
     command: &mut Command,
     input: Option<&[u8]>,
@@ -345,8 +370,8 @@ fn run_output_inner(
         }
     }
     finished.store(true, Ordering::Release);
-    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer).map_err(
-        |error| match completion {
+    let (stdout, stderr) = join_workers(stdout_reader, stderr_reader, input_writer, completion)
+        .map_err(|error| match completion {
             Completion::Cancelled => io::Error::new(
                 io::ErrorKind::Interrupted,
                 format!("operation cancelled; pipe cleanup also failed: {error}"),
@@ -356,8 +381,7 @@ fn run_output_inner(
                 format!("process deadline expired; pipe cleanup also failed: {error}"),
             ),
             Completion::Exited => error,
-        },
-    )?;
+        })?;
     let elapsed = started.elapsed();
     let timed_out = completion == Completion::TimedOut;
     let cancelled = completion == Completion::Cancelled;
@@ -722,6 +746,7 @@ fn join_workers(
     stdout_reader: thread::JoinHandle<io::Result<CapturedStream>>,
     stderr_reader: thread::JoinHandle<io::Result<CapturedStream>>,
     input_writer: Option<thread::JoinHandle<io::Result<()>>>,
+    completion: Completion,
 ) -> io::Result<(CapturedStream, CapturedStream)> {
     let stdout = join_stream(stdout_reader, "stdout");
     let stderr = join_stream(stderr_reader, "stderr");
@@ -743,7 +768,19 @@ fn join_workers(
         record("drain stderr", error);
     }
     if let Err(error) = &input {
-        record("write stdin", error);
+        // Killing a child with unread stdin normally closes the writer's pipe.
+        // Retain the timeout/cancellation and captured streams, not a spurious
+        // cleanup failure. All other worker failures (including an escaped
+        // descendant's open pipe) remain errors; normal exits still require
+        // complete input delivery.
+        if completion == Completion::Exited
+            || !matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero
+            )
+        {
+            record("write stdin", error);
+        }
     }
     if let Some(primary) = primary {
         return Err(combine_process_errors(primary, &additional));

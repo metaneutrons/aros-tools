@@ -8,7 +8,104 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aros_common::{exit_signal, run_output_with_control, CancellationToken};
+use aros_common::{
+    exit_signal, run_output_with_control, run_output_with_input_and_control, CancellationToken,
+};
+
+#[test]
+fn controlled_input_preserves_exact_bytes_and_normal_failure() {
+    let input = vec![0x9f; 512 * 1024];
+    for status in [0, 7] {
+        let result = run_output_with_input_and_control(
+            Command::new("sh")
+                .args(["-c", "cat; exit \"$1\"", "fixture"])
+                .arg(status.to_string()),
+            &input,
+            input.len(),
+            Duration::from_secs(10),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        assert_eq!(result.status.code(), Some(status));
+        assert_eq!(result.stdout.exact_bytes(), Some(input.as_slice()));
+        assert!(!result.cancelled && !result.timed_out);
+    }
+}
+
+#[test]
+fn controlled_input_never_spawns_after_cancellation() {
+    let token = CancellationToken::default();
+    token.cancel();
+    let error = run_output_with_input_and_control(
+        &mut Command::new("aros-nonexistent-test-process"),
+        b"input",
+        256,
+        Duration::from_secs(1),
+        &token,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+}
+
+#[test]
+fn controlled_input_requires_complete_delivery_after_normal_exit() {
+    let error = run_output_with_input_and_control(
+        Command::new("sh").args(["-c", "exit 0"]),
+        &vec![b'x'; 512 * 1024],
+        256,
+        Duration::from_secs(10),
+        &CancellationToken::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn controlled_input_reaps_a_child_that_never_reads_stdin_on_timeout() {
+    let result = run_output_with_input_and_control(
+        Command::new("sh").args(["-c", "sleep 30"]),
+        &vec![b'x'; 512 * 1024],
+        256,
+        Duration::from_millis(50),
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    assert!(result.timed_out && !result.cancelled);
+    assert!(!result.status.success());
+    assert!(result.elapsed < Duration::from_secs(5));
+}
+
+#[test]
+fn controlled_input_cancels_a_blocked_writer_and_preserves_output() {
+    let root = tempfile::tempdir().unwrap();
+    let ready = root.path().join("ready");
+    let token = CancellationToken::default();
+    let cancellation = token.clone();
+    let marker = ready.clone();
+    let watcher = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let started = marker.exists();
+        cancellation.cancel();
+        started
+    });
+    let result = run_output_with_input_and_control(
+        Command::new("sh")
+            .args(["-c", "printf READY; : > \"$1\"; sleep 30", "fixture"])
+            .arg(&ready),
+        &vec![b'x'; 512 * 1024],
+        256,
+        Duration::from_secs(15),
+        &token,
+    )
+    .unwrap();
+    assert!(watcher.join().unwrap());
+    assert!(result.cancelled && !result.timed_out);
+    assert!(!result.status.success());
+    assert_eq!(result.stdout.exact_bytes(), Some(b"READY".as_slice()));
+}
 
 #[test]
 fn cancellation_is_shared_one_way_and_operation_local() {
