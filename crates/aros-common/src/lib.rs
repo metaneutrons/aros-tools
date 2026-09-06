@@ -50,9 +50,10 @@ pub use observability::{
     ObservabilityPolicy,
 };
 pub use process::{
-    bounded_output_detail, exit_signal, run_output, run_output_with_input, run_output_with_limit,
-    run_output_with_timeout, run_status, run_status_with_timeout, CapturedStream, ProcessOutput,
-    ProcessStatus, TimedProcessStatus, DEFAULT_CAPTURE_LIMIT,
+    bounded_output_detail, exit_signal, run_output, run_output_with_control, run_output_with_input,
+    run_output_with_limit, run_output_with_timeout, run_status, run_status_with_timeout,
+    CancellationToken, CapturedStream, ProcessOutput, ProcessStatus, TimedProcessStatus,
+    DEFAULT_CAPTURE_LIMIT,
 };
 pub use publication::{
     canonical_source_file, casefold_path_key, exchange_prepared_tree,

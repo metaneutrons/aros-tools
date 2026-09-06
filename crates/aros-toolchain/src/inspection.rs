@@ -82,28 +82,22 @@ pub fn destination(path: &Path) -> Result<PathBuf, ContractError> {
 /// Descriptor-relative no-follow traversal also prevents FIFO/device blocking.
 #[cfg(unix)]
 fn open_regular(path: &Path) -> Result<File, ContractError> {
-    use rustix::fs::{open, openat, Mode, OFlags};
+    use rustix::fs::{openat, Mode, OFlags};
     let path = absolute(path)?;
-    let names: Vec<_> = path
-        .components()
-        .filter_map(|part| match part {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    let (leaf, ancestors) = names
-        .split_last()
+    let leaf = path
+        .file_name()
         .ok_or_else(|| ContractError::preflight("expected a regular input file"))?;
+    let ancestor = path
+        .parent()
+        .ok_or_else(|| ContractError::preflight("input has no parent directory"))?;
     let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
     let failed =
         |_| ContractError::preflight("cannot open a regular input through non-symlink ancestors");
-    let mut parent = open("/", flags | OFlags::DIRECTORY, Mode::empty()).map_err(failed)?;
-    for name in ancestors {
-        parent =
-            openat(&parent, *name, flags | OFlags::DIRECTORY, Mode::empty()).map_err(failed)?;
-    }
+    let parent = crate::filesystem::open_directory(ancestor).map_err(failed)?;
     let file = File::from(
-        openat(&parent, *leaf, flags | OFlags::NONBLOCK, Mode::empty()).map_err(failed)?,
+        openat(&parent, leaf, flags | OFlags::NONBLOCK, Mode::empty()).map_err(|_| {
+            ContractError::preflight("cannot open a regular input through non-symlink ancestors")
+        })?,
     );
     if !file
         .metadata()

@@ -228,7 +228,7 @@ pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
     })
 }
 
-fn validate_resources(request: &PlanRequest) -> Result<(), ContractError> {
+pub(crate) fn validate_resources(request: &PlanRequest) -> Result<(), ContractError> {
     if request.jobs == Some(0)
         || request.timeout_seconds == Some(0)
         || request
@@ -252,7 +252,7 @@ fn validate_resources(request: &PlanRequest) -> Result<(), ContractError> {
     Ok(())
 }
 
-fn resolve_paths(request: &PlanRequest) -> Result<Paths, ContractError> {
+pub(crate) fn resolve_paths(request: &PlanRequest) -> Result<Paths, ContractError> {
     let paths = Paths {
         source: inspection::directory(&request.source_dir)
             .map_err(|error| error.input("--source-dir"))?,

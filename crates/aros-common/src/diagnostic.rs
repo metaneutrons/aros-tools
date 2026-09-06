@@ -19,6 +19,9 @@ pub enum DiagnosticCode {
     ProducerPrerequisite,
     #[serde(rename = "AX0202")]
     ProducerPreflight,
+    /// Producer work ownership or operation-state failure.
+    #[serde(rename = "AX0801")]
+    ProducerState,
     #[serde(rename = "AT0001")]
     SourceWalk,
     #[serde(rename = "AT0002")]
@@ -216,6 +219,7 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerIdentity => "AX0102",
             Self::ProducerPrerequisite => "AX0201",
             Self::ProducerPreflight => "AX0202",
+            Self::ProducerState => "AX0801",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
             Self::SourceParse => "AT0003",
