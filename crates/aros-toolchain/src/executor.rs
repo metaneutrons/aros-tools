@@ -58,6 +58,12 @@ pub struct BuildRequest {
     pub release_id: String,
 }
 
+struct PreparedInputs {
+    recipe: Recipe,
+    tools: Vec<ToolObservation>,
+    rust_toolchain: Option<String>,
+}
+
 /// Versioned result for one completed local candidate.
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
@@ -104,6 +110,12 @@ pub struct Evidence {
 }
 
 /// Execute one local legacy-preview build with cancellation and bounded output.
+///
+/// # Errors
+///
+/// Returns a typed contract error when preflight, snapshotting, execution,
+/// cancellation, timeout handling, output measurement, or owned-root release
+/// fails. Retained work and output material is never deleted on a failed run.
 pub fn run(
     request: &BuildRequest,
     cancellation: &CancellationToken,
@@ -157,25 +169,25 @@ pub fn run(
         .ok_or_else(|| ContractError::preflight("build timeout is not representable"))?;
     let owner = recipe.sha256().clone();
     let run_dirs = RunDirectories::reserve(&plan_request, &owner, cancellation)?;
-    let result = run_owned(
-        request,
-        plan,
+    let inputs = PreparedInputs {
         recipe,
         tools,
         rust_toolchain,
+    };
+    run_owned(
+        request,
+        plan,
+        &inputs,
         run_dirs,
         operation_deadline,
         cancellation,
-    );
-    result
+    )
 }
 
 fn run_owned(
     request: &BuildRequest,
     mut plan: plan::Plan,
-    recipe: Recipe,
-    tools: Vec<ToolObservation>,
-    rust_toolchain: Option<String>,
+    inputs: &PreparedInputs,
     run_dirs: RunDirectories,
     deadline: Instant,
     cancellation: &CancellationToken,
@@ -183,9 +195,7 @@ fn run_owned(
     let result = run_owned_inner(
         request,
         &mut plan,
-        &recipe,
-        &tools,
-        rust_toolchain.as_deref(),
+        inputs,
         &run_dirs,
         deadline,
         cancellation,
@@ -193,8 +203,7 @@ fn run_owned(
     let release = run_dirs.release();
     match (result, release) {
         (Ok(result), Ok(())) => Ok(result),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) | (Err(error), Ok(())) => Err(error),
         (Err(error), Err(release_error)) => Err(ContractError::state(format!(
             "legacy build failed and owned-root release also failed: {error}; {release_error}"
         ))),
@@ -204,9 +213,7 @@ fn run_owned(
 fn run_owned_inner(
     request: &BuildRequest,
     plan: &mut plan::Plan,
-    recipe: &Recipe,
-    tools: &[ToolObservation],
-    rust_toolchain: Option<&str>,
+    inputs: &PreparedInputs,
     run_dirs: &RunDirectories,
     deadline: Instant,
     cancellation: &CancellationToken,
@@ -216,13 +223,18 @@ fn run_owned_inner(
 
     // Every producer input receives a fresh metadata-free snapshot and then a
     // separate shallow Git view.  No original checkout is passed to the driver.
-    let source =
-        SourceSnapshot::prepare(run_dirs, SourceRole::Source, recipe, timeout, cancellation)?;
+    let source = SourceSnapshot::prepare(
+        run_dirs,
+        SourceRole::Source,
+        &inputs.recipe,
+        timeout,
+        cancellation,
+    )?;
     let source = LegacySourceView::prepare(source, remaining(deadline)?, cancellation)?;
     let producer = SourceSnapshot::prepare(
         run_dirs,
         SourceRole::Producer,
-        recipe,
+        &inputs.recipe,
         remaining(deadline)?,
         cancellation,
     )?;
@@ -230,13 +242,13 @@ fn run_owned_inner(
     let tools_view = SourceSnapshot::prepare(
         run_dirs,
         SourceRole::Tools,
-        recipe,
+        &inputs.recipe,
         remaining(deadline)?,
         cancellation,
     )?;
     let tools_view = LegacySourceView::prepare(tools_view, remaining(deadline)?, cancellation)?;
 
-    let source_lock = select_source_lock(producer.root(), recipe.source_lock_sha256())?;
+    let source_lock = select_source_lock(producer.root(), inputs.recipe.source_lock_sha256())?;
     let profiles = producer.root().join("toolchains/profiles-v1.json");
     let driver = producer.root().join("scripts/toolchain/build-release.sh");
     let driver_work = run_dirs
@@ -259,7 +271,7 @@ fn run_owned_inner(
     let source_root = source.root().to_owned();
     let producer_root = producer.root().to_owned();
     let tools_root = tools_view.root().to_owned();
-    let work_root = driver_work.clone();
+    let work_root = driver_work;
     let output_root = run_dirs
         .paths()
         .output
@@ -333,7 +345,7 @@ fn run_owned_inner(
             "--jobs",
             &jobs,
         ]);
-    if let Some(rust_toolchain) = rust_toolchain {
+    if let Some(rust_toolchain) = inputs.rust_toolchain.as_deref() {
         command.env("RUSTUP_TOOLCHAIN", rust_toolchain);
     }
     let output = run_output_with_input_and_control(
@@ -343,7 +355,7 @@ fn run_owned_inner(
         remaining(deadline)?,
         cancellation,
     )
-    .map_err(|error| process_error(&driver, error, cancellation))?;
+    .map_err(|error| process_error(&driver, &error, cancellation))?;
     let (stdout_report, stderr_report) = persist_process_output(&work_root, &output)?;
     if output.cancelled || cancellation.is_cancelled() {
         return Err(ContractError::state(
@@ -380,7 +392,6 @@ fn run_owned_inner(
     // provenance.  The executable is measured, and source identity is checked,
     // but no signed/trusted origin attestation is invented here.
     plan.identity.executor.tools_commit = Some(plan.identity.tools_commit.clone());
-    let _ = tools;
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
@@ -414,7 +425,7 @@ fn run_owned_inner(
                 report_sha256: None,
             },
         ],
-        environment: tools.to_vec(),
+        environment: inputs.tools.clone(),
         qualification: "local-only",
         commit_state: "committed",
     })
@@ -596,13 +607,9 @@ fn select_source_lock(root: &Path, expected: &Sha256Digest) -> Result<PathBuf, C
                 .file_name()
                 .and_then(|value| value.to_str())
                 .is_some_and(|value| value.ends_with(".sources.json"))
+            && sha256_file(&path).is_ok_and(|result| result.digest == *expected)
         {
-            if sha256_file(&path)
-                .map(|result| result.digest == *expected)
-                .unwrap_or(false)
-            {
-                matches.push(path);
-            }
+            matches.push(path);
         }
     }
     if matches.len() != 1 {
@@ -678,7 +685,7 @@ fn remaining(deadline: Instant) -> Result<Duration, ContractError> {
 
 fn process_error(
     path: &Path,
-    error: std::io::Error,
+    error: &std::io::Error,
     cancellation: &CancellationToken,
 ) -> ContractError {
     if cancellation.is_cancelled() || error.kind() == std::io::ErrorKind::Interrupted {

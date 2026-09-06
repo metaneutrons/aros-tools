@@ -159,6 +159,11 @@ pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
 /// The local build adapter may select a larger, still finite budget because a
 /// complete AROS checkout can contain substantially more Git material than a
 /// normal inspection fixture.
+///
+/// # Errors
+///
+/// Returns a typed contract error when the selected backend, resources,
+/// checkout identities, recipe, or bounded inspection cannot be validated.
 pub fn inspect_with_timeout(
     request: &PlanRequest,
     timeout: Duration,
