@@ -13,6 +13,8 @@ use aros_common::CancellationToken;
 use crate::{recipe::GitObjectId, workspace::RunDirectories, ContractError, Recipe};
 
 #[cfg(unix)]
+mod legacy;
+#[cfg(unix)]
 mod links;
 #[cfg(unix)]
 mod unix;
@@ -60,6 +62,89 @@ pub struct SourceSnapshot<'run> {
     run: &'run RunDirectories,
     #[cfg(unix)]
     material: unix::Material,
+}
+
+/// Exact raw material plus newly generated and sealed shallow Git metadata.
+///
+/// Not a build permission, origin attestation or resumable receipt. Conversion
+/// consumes the metadata-free guard and relocates its owned material; copied
+/// paths do not remain use guards. Every metadata byte is checked on reuse.
+pub struct LegacySourceView<'run> {
+    run: &'run RunDirectories,
+    #[cfg(unix)]
+    material: unix::Material,
+}
+
+impl<'run> LegacySourceView<'run> {
+    /// Convert one raw snapshot without copying user Git metadata or history.
+    ///
+    /// Moves the owned source to fresh `.<role>-legacy-pending` staging, creates
+    /// independent shallow stores for all recorded repositories, validates the
+    /// object graph and raw bytes, then publishes `<role>-legacy` without reuse.
+    /// All children share the explicit deadline/cancellation; filesystem I/O
+    /// and fsync are not preemptible. A failure retains staged/complete material.
+    /// No source code, fetch, compiler, cleanup or receipt adoption is performed.
+    ///
+    /// # Errors
+    /// Returns AX diagnostics for changed inputs, invalid Git objects/metadata,
+    /// occupied destinations, exhausted budgets or uncertain durable publication.
+    pub fn prepare(
+        snapshot: SourceSnapshot<'run>,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, ContractError> {
+        let deadline = deadline(timeout)?;
+        snapshot.run.revalidate(cancellation)?;
+        #[cfg(unix)]
+        {
+            let material = legacy::convert(snapshot.run, snapshot.material, deadline, cancellation)
+                .map_err(ContractError::retained_material)?;
+            Ok(Self {
+                run: snapshot.run,
+                material,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = deadline;
+            Err(ContractError::state(
+                "legacy source views require a supported Unix host",
+            ))
+        }
+    }
+
+    /// Check ownership and every raw/metadata byte, then Git identities/indexes.
+    ///
+    /// Git inspection is offline with optional index writes disabled. Any index
+    /// byte change (even a stat-cache refresh) invalidates the view; callers must
+    /// not run Git commands that modify it. This is not same-user OS isolation.
+    ///
+    /// # Errors
+    /// Returns AX diagnostics on changed material/ownership or exhausted budgets.
+    pub fn revalidate(
+        &self,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ContractError> {
+        let deadline = deadline(timeout)?;
+        #[cfg(unix)]
+        return legacy::revalidate(self.run, &self.material, deadline, cancellation)
+            .map_err(ContractError::retained_material);
+        #[cfg(not(unix))]
+        {
+            let _ = (deadline, cancellation, self.run);
+            Err(ContractError::state(
+                "legacy source views require a supported Unix host",
+            ))
+        }
+    }
+
+    /// Observing a path does not authorize execution or protect it from mutation.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.material.root
+    }
 }
 
 impl<'run> SourceSnapshot<'run> {

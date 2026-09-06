@@ -8,7 +8,7 @@ use aros_common::{sha256_bytes, sha256_reader};
 use rustix::fs::{self as fs, AtFlags, Mode, OFlags, Stat};
 
 use super::{
-    inventory::{Entry, Inventory},
+    material::{Entry, Inventory},
     mismatch, Budget, MAX_ENTRIES,
 };
 use crate::{
@@ -45,14 +45,18 @@ impl RootBinding {
 
 pub(super) fn verify(
     checkout: &Checkout<'_>,
-    entries: &Inventory,
+    entries: &super::inventory::Inventory,
     budget: &mut Budget,
     depth: usize,
 ) -> Result<(), ContractError> {
-    verify_root(checkout.root, entries, budget, depth, true)
+    let material = entries
+        .iter()
+        .map(|(path, entry)| (path.clone(), Entry::from(entry)))
+        .collect();
+    verify_root(checkout.root, &material, budget, depth, true)
 }
 
-/// Flattened, metadata-free material uses the same byte/type/directory checks.
+/// Exact material, including explicitly inventoried metadata, has no exemptions.
 pub fn verify_material(
     root: &Path,
     entries: &Inventory,

@@ -16,7 +16,8 @@ use crate::{
     inspection::Checkout,
     source_audit::{
         self,
-        inventory::{Entry, Inventory},
+        inventory::Entry,
+        material::{Entry as MaterialEntry, Inventory},
         worktree, Budget,
     },
     workspace::RunDirectories,
@@ -25,8 +26,9 @@ use crate::{
 
 pub(super) struct Material {
     pub root: PathBuf,
-    identity: (u64, u64),
-    entries: Inventory,
+    pub(super) identity: (u64, u64),
+    pub(super) entries: Inventory,
+    pub(super) repositories: Vec<super::legacy::Repository>,
 }
 
 impl Material {
@@ -43,7 +45,7 @@ impl Material {
         budget.check(0)
     }
 
-    fn check_root(&self) -> Result<(), ContractError> {
+    pub(super) fn check_root(&self) -> Result<(), ContractError> {
         if identity(&open_directory(&self.root).map_err(io_failure)?)? != self.identity {
             return Err(ContractError::state(
                 "source snapshot root identity changed",
@@ -101,12 +103,22 @@ pub(super) fn prepare(
         links: BTreeMap::new(),
         budget: Budget::controlled(deadline, cancellation),
     };
-    source_audit::visit(
+    let mut repositories = Vec::new();
+    source_audit::visit_repositories(
         &checkout,
         &mut Budget::controlled(deadline, cancellation),
         0,
         "",
         &mut |path, entry, bytes| writer.put(path, entry, bytes),
+        &mut |path, checkout, entries| {
+            if repositories.len() == 1024 {
+                return Err(ContractError::invalid(
+                    "snapshot exceeds 1024 repositories per input",
+                ));
+            }
+            repositories.push(super::legacy::Repository::capture(path, checkout, entries));
+            Ok(())
+        },
     )?;
     super::links::validate(&writer.entries, &writer.links, &writer.budget)?;
     for (path, target) in &writer.links {
@@ -123,6 +135,7 @@ pub(super) fn prepare(
         root: work.join(&pending),
         identity: root_identity,
         entries: writer.entries,
+        repositories,
     };
     run.revalidate(cancellation)?;
     material.revalidate(deadline, cancellation)?;
@@ -163,7 +176,7 @@ impl Writer<'_> {
             ));
         }
         let (parent, leaf) = parent(self.root, path)?;
-        let mut record = entry.clone();
+        let mut record = MaterialEntry::from(entry);
         match entry.mode {
             "040000" | "160000" => {
                 fs::mkdirat(&parent, leaf, Mode::RUSR | Mode::WUSR | Mode::XUSR)
@@ -204,7 +217,7 @@ impl Writer<'_> {
     }
 }
 
-fn parent<'a>(root: &File, path: &'a str) -> Result<(File, &'a str), ContractError> {
+pub(super) fn parent<'a>(root: &File, path: &'a str) -> Result<(File, &'a str), ContractError> {
     let mut parts = path.split('/').collect::<Vec<_>>();
     let leaf = parts
         .pop()
@@ -217,7 +230,7 @@ fn parent<'a>(root: &File, path: &'a str) -> Result<(File, &'a str), ContractErr
     Ok((parent, leaf))
 }
 
-fn identity(file: &File) -> Result<(u64, u64), ContractError> {
+pub(super) fn identity(file: &File) -> Result<(u64, u64), ContractError> {
     let metadata = file.metadata().map_err(io_failure)?;
     Ok((metadata.dev(), metadata.ino()))
 }

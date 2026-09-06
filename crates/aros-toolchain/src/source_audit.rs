@@ -5,6 +5,7 @@
 //! compares their bytes/modes and rejects every undeclared filesystem entry.
 
 pub mod inventory;
+pub mod material;
 pub mod worktree;
 
 use std::time::Instant;
@@ -13,11 +14,11 @@ use aros_common::CancellationToken;
 
 use crate::{inspection::Checkout, ContractError};
 
-const MAX_ENTRIES: usize = 200_000;
+pub const MAX_ENTRIES: usize = 200_000;
 const MAX_DEPTH: usize = 64;
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
-const MAX_INVENTORY_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_INVENTORY_BYTES: usize = 32 * 1024 * 1024;
 
 pub struct Budget {
     deadline: Instant,
@@ -59,7 +60,7 @@ impl Budget {
         Ok(())
     }
 
-    fn entry(&mut self, size: usize) -> Result<(), ContractError> {
+    pub(crate) fn entry(&mut self, size: usize) -> Result<(), ContractError> {
         self.entries += 1;
         self.bytes += size as u64;
         if self.entries > MAX_ENTRIES || self.bytes > MAX_SOURCE_BYTES {
@@ -86,6 +87,23 @@ pub fn visit(
     depth: usize,
     prefix: &str,
     visitor: &mut Visitor<'_>,
+) -> Result<(), ContractError> {
+    visit_repositories(checkout, budget, depth, prefix, visitor, &mut |_, _, _| {
+        Ok(())
+    })
+}
+
+/// Called only after each complete repository, its children and bindings pass.
+pub type RepositoryVisitor<'a> =
+    dyn FnMut(&str, &Checkout<'_>, &inventory::Inventory) -> Result<(), ContractError> + 'a;
+
+pub fn visit_repositories(
+    checkout: &Checkout<'_>,
+    budget: &mut Budget,
+    depth: usize,
+    prefix: &str,
+    visitor: &mut Visitor<'_>,
+    repository: &mut RepositoryVisitor<'_>,
 ) -> Result<(), ContractError> {
     budget.check(depth)?;
     let binding = worktree::RootBinding::capture(checkout.root)?;
@@ -120,8 +138,15 @@ pub fn visit(
             } else {
                 format!("{prefix}/{path}")
             };
-            visit(&child, budget, child_depth, &path_prefix, visitor)
-                .map_err(|error| error.source_path(path))?;
+            visit_repositories(
+                &child,
+                budget,
+                child_depth,
+                &path_prefix,
+                visitor,
+                repository,
+            )
+            .map_err(|error| error.source_path(path))?;
         }
     }
     if entries.values().any(|entry| entry.mode == "160000") {
@@ -132,6 +157,7 @@ pub fn visit(
     // Catch HEAD/index changes while the raw filesystem was being inspected.
     inventory::verify_index(checkout, &entries)?;
     checkout.recheck()?;
+    repository(prefix, checkout, &entries)?;
     tracing::debug!(
         entries = entries.len(),
         depth,

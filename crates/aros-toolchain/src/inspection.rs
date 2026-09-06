@@ -1,4 +1,4 @@
-//! Bounded read-only input inspection; never refresh indexes or run filters.
+//! Bounded Git inspection and private-store preparation; never run filters.
 
 use std::fs::File;
 use std::io::Read;
@@ -154,6 +154,10 @@ pub struct Checkout<'a> {
 }
 
 impl<'a> Checkout<'a> {
+    #[cfg(unix)]
+    pub(crate) const fn identity(&self) -> (&GitObjectId, &GitObjectId) {
+        (&self.commit, &self.tree)
+    }
     pub(crate) fn inspect(
         root: &'a Path,
         identity: (&GitObjectId, &GitObjectId),
@@ -315,6 +319,57 @@ fn git(
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, ContractError> {
+    run_git(root, arguments, input, limit, deadline, cancellation, false)
+}
+
+/// Only call for an independently held, freshly created metadata store.
+#[cfg(unix)]
+pub fn prepare_git(
+    root: &Path,
+    arguments: &[&str],
+    input: &[u8],
+    limit: usize,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, ContractError> {
+    run_git(root, arguments, input, limit, deadline, cancellation, true)
+}
+
+fn run_git(
+    root: &Path,
+    arguments: &[&str],
+    input: &[u8],
+    limit: usize,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+    isolated_write: bool,
+) -> Result<Vec<u8>, ContractError> {
+    let boundary = if isolated_write {
+        "isolated Git preparation"
+    } else {
+        "read-only Git inspection"
+    };
+    // Static operation labels only: arguments can contain private paths/data.
+    let step = match arguments.first().copied() {
+        Some("index-pack") => "strict pack import",
+        Some("pack-objects") => "selected object export",
+        Some("fsck") => "full object validation",
+        Some("read-tree") => "isolated index creation",
+        Some("cat-file") => "object inspection",
+        Some("ls-tree") => "tree inspection",
+        Some("ls-files") => "index inspection",
+        Some("rev-parse") => "repository identity",
+        Some("status") => "tracked status",
+        _ => "repository query",
+    };
+    let operation = format!("{boundary} ({step})");
+    tracing::trace!(
+        step,
+        isolated_write,
+        input_bytes = input.len(),
+        capture_limit = limit,
+        "running bounded Git operation"
+    );
     if cancellation.is_cancelled() {
         return Err(ContractError::state(
             "source operation cancelled before Git inspection",
@@ -323,7 +378,7 @@ fn git(
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or_else(|| {
-            ContractError::prerequisite("read-only Git inspection exceeded its operation budget")
+            ContractError::prerequisite(format!("{operation} exceeded its operation budget"))
         })?;
     let mut command = Command::new("git");
     command
@@ -334,6 +389,7 @@ fn git(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_ATTR_NOSYSTEM", "1")
         .env("LC_ALL", "C")
         .current_dir(root)
         .args([
@@ -347,6 +403,10 @@ fn git(
             "core.hooksPath=/dev/null",
             "-c",
             "gc.auto=0",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "pack.writeReverseIndex=false",
         ])
         .args(arguments);
     let timeout = remaining.min(Duration::from_secs(10));
@@ -370,20 +430,18 @@ fn git(
                     std::io::ErrorKind::NotFound => {
                         "trusted Git executable or selected working directory is missing"
                     }
-                    std::io::ErrorKind::PermissionDenied => {
-                        "permission denied while executing read-only Git inspection"
-                    }
-                    std::io::ErrorKind::TimedOut => {
-                        "read-only Git inspection timed out and process cleanup failed"
-                    }
-                    _ => "I/O failure while executing or capturing read-only Git inspection",
+                    std::io::ErrorKind::PermissionDenied => "permission denied while executing Git",
+                    std::io::ErrorKind::TimedOut => "Git timed out and process cleanup failed",
+                    _ => "I/O failure while executing or capturing Git",
                 };
-                ContractError::prerequisite(reason).context(DiagnosticContext {
-                    tool: Some("git".into()),
-                    timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
-                    timeout_ms: Some(timeout_ms),
-                    ..DiagnosticContext::default()
-                })
+                ContractError::prerequisite(format!("{operation}: {reason}")).context(
+                    DiagnosticContext {
+                        tool: Some("git".into()),
+                        timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
+                        timeout_ms: Some(timeout_ms),
+                        ..DiagnosticContext::default()
+                    },
+                )
             })?;
     if result.cancelled || cancellation.is_cancelled() {
         return Err(ContractError::state(
@@ -392,9 +450,11 @@ fn git(
     }
     if result.timed_out || !result.status.success() {
         let reason = if result.timed_out {
-            "read-only Git inspection exceeded its process deadline"
+            format!("{operation} exceeded its process deadline")
         } else {
-            "read-only Git inspection exited unsuccessfully; check local objects, access and Git capability"
+            format!(
+                "{operation} exited unsuccessfully; check local objects, access and Git capability"
+            )
         };
         return Err(
             ContractError::prerequisite(reason).context(DiagnosticContext {
@@ -408,13 +468,21 @@ fn git(
         );
     }
     // Never forward potentially private Git stderr or truncate an identity.
+    if isolated_write
+        && result
+            .stderr
+            .exact_bytes()
+            .is_none_or(|bytes| !bytes.is_empty())
+    {
+        return Err(ContractError::identity(format!("{operation} reported diagnostics; refusing to treat a warning or truncated diagnostic as successful validation")));
+    }
     result
         .stdout
         .exact_bytes()
         .map(<[u8]>::to_vec)
         .ok_or_else(|| {
             ContractError::invalid(format!(
-                "Git inspection output exceeds its {limit}-byte capture limit"
+                "{operation} output exceeds its {limit}-byte capture limit"
             ))
         })
 }

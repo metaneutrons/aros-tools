@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
-    source_audit::{inventory::Inventory, Budget},
+    source_audit::{material::Inventory, Budget},
     ContractError,
 };
 
@@ -82,7 +82,7 @@ fn invalid() -> ContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{recipe::GitObjectId, source_audit::inventory::Entry};
+    use crate::source_audit::material::Entry;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -120,7 +120,6 @@ mod tests {
                 path.to_owned(),
                 Entry {
                     mode,
-                    oid: GitObjectId::try_from("1".repeat(40)).unwrap(),
                     size: 0,
                     digest: None,
                 },
