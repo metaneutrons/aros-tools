@@ -22,7 +22,7 @@ library packages.
 | source transport, cache, extraction and patching | `aros-fetch` |
 | isolated AHI configure/build/product validation | `aros-ahi-runner` |
 | deterministic native archive production and verification | `aros-release` |
-| experimental read-only producer inspection; no build execution | `aros-toolchain` |
+| experimental producer inspection and work-ownership primitives; no build execution | `aros-toolchain` |
 
 The CLI executes build tools as standalone programs. It does not link their
 implementations into one process. This preserves explicit contracts and keeps
@@ -41,6 +41,13 @@ checkout-owned engine is not selected automatically.
 spawns the required executable through the shared command runner. A missing or
 mixed installation fails before work begins. Child diagnostics and exit status
 remain attributable to the executable that owns the operation.
+
+The shared runner supports cooperative cancellation without installing global
+signal handlers. It distinguishes requested cancellation, timeout and the child's
+own status. On Unix it also bounds pipe cleanup after termination; a descendant
+that escapes the process group is an explicit cleanup failure, not proof of a
+sandbox. The experimental toolchain work guards remain separate from read-only
+planning and do not yet enable a public build command.
 
 The configure/build probe checks six mandatory helpers. Release installation
 validates all eight public programs, including the frontend and independent

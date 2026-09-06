@@ -1,8 +1,9 @@
 # Native toolchain producer contract (TCP-M0)
 
 Status: partial M1 implementation. Recipe validation and experimental
-`plan --backend legacy-preview` inspection exist; execution, recursive clean
-snapshots, state management and origin verification do not. This document also
+`plan --backend legacy-preview` inspection and lower-level directory guards/
+shared cancellation exist. Execution, recursive clean snapshots, resumable state
+and origin verification do not. This document also
 specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
 [command reference](../docs-site/src/content/docs/reference/cli.md).
@@ -320,8 +321,8 @@ Fixtures and rule ownership:
 | Forged receipt or compatibility report | Revalidate all references; receipts alone cannot prove origin, independence or release eligibility. |
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
-Reserve `AX` for producer diagnostics. The first M1 library slice registers
-AX0101, AX0102, AX0201 and AX0202; all remaining codes below stay reserved until their actual
+Reserve `AX` for producer diagnostics. The M1 library registers
+AX0101, AX0102, AX0201, AX0202 and AX0801 (work ownership); all remaining codes below stay reserved until their actual
 implementations land. The versioned contract records that exact subset.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,
@@ -355,6 +356,15 @@ declarations on that basis. The first M1 inspection slice does not supply a
 build driver or receipt-reuse implementation; its native recipe input/canonical
 output cap is 1 MiB and canonical nesting is limited to 64 levels. These are
 parser safety limits, not measured compiler resource defaults.
+
+The subsequent lower-level guard slice adds operation-local shared cancellation
+and fresh advisory-locked work/output leaves with explicit ownership revalidation.
+It adds no CLI command, recipe/origin authority, snapshot, adapter or phase-resume
+support. Internal `.aros-toolchain-owner-v1.json` markers bind an operation digest
+and role, not build receipts; they never permit adoption of an existing directory.
+Parents must already exist. A partial reservation is retained on failure, and
+drop only releases handles/locks. The caller must finish all readiness gates and
+revalidate at execution boundaries before using these mechanisms together.
 
 Remaining implementation gates include: private MetaMake fetch integration,
 trusted executor evidence, recursive clean snapshots, actual four-host process

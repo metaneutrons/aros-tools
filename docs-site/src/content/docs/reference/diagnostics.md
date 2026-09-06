@@ -71,6 +71,9 @@ Git failures preserve `tool`, `exit_code`, `signal`, `timed_out` and
 
 Producer inspection uses `AX0101` for contracts, `AX0102` for identities,
 `AX0201` for Git prerequisites and `AX0202` for input roots/resources.
+The lower-level work-ownership library also registers `AX0801`; it is not yet
+connected to a public build command. Its failures retain any partially reserved
+work/output directories instead of deleting or automatically reusing them.
 Successful blocked plans contain findings on stdout; invalid inputs use the
 normal failure envelope on stderr. Do not interpret exit 0 as build permission.
 

@@ -8,7 +8,8 @@ reusable contracts that must behave identically across components:
 - fail-closed parsing of `aros-targets.toml`;
 - typed SHA-256 parsing and streaming hashing;
 - architecture, ELF, source-text, toolchain-lock, and manifest types;
-- bounded, deadline-aware process execution with process-group cleanup;
+- bounded, deadline-aware process execution with cooperative cancellation and
+  process-group cleanup;
 - broken-pipe-safe shared standard-output macros and deferred output errors;
 - portable output-name and source-root containment validation;
 - durable, journalled file-set publication and atomic no-clobber tree/file
@@ -23,6 +24,23 @@ chooses its own diagnostic codes, hints, stages, and logging schema through a
 small component adapter. New shared code belongs here only when at least two
 components require identical semantics and can preserve their own error
 boundary while using it.
+
+`CancellationToken` is operation-local, shared between clones and one-way.
+`run_output_with_control` starts no child after observed pre-spawn cancellation;
+otherwise it returns the reaped status and bounded output with separate
+`cancelled` and `timed_out` flags. An already observed exit wins over a late
+request. Frontends own signal handlers; the library installs none. Existing
+process entry points retain their behavior and report `cancelled: false`.
+
+On Unix, captured stdin/stdout/stderr use nonblocking pipe workers. Once child
+cleanup finishes, workers have one second to finish I/O and close their handles.
+An escaped descendant holding or flooding a pipe therefore produces an explicit
+cleanup error instead of an unbounded join. A cancellation remains an
+`Interrupted` failure when capture cleanup also fails. The runner does not
+claim to kill descendants that deliberately leave its process group, enforce a
+network sandbox or interrupt an operating-system call stuck inside the kernel.
+Process deadlines cover spawn and child waiting; pipe cleanup has that separate
+bounded allowance. The same pipe-worker guarantee is not implemented on Windows.
 
 `TargetProfile::load_from_file` and `TargetProfile::load_config` treat their
 path as authoritative. Missing files, invalid TOML, and empty target arrays are
