@@ -62,6 +62,30 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn sources(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerSources,
+            message,
+            "restore the exact selected source lock and its verified offline cache entries; do not infer a checksum, alter a cache object or fall back to the network",
+        )
+    }
+
+    pub(crate) fn source_use(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerSourceUse,
+            message,
+            "use only the exact source closure declared by the selected lock; regenerate and review a new lock when the source build reaches a new input",
+        )
+    }
+
+    pub(crate) fn environment(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerEnvironment,
+            message,
+            "select a supported host interpreter and the exact lock-owned modules; do not install packages or use a host site-packages fallback during the producer run",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

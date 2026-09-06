@@ -4,14 +4,14 @@
 //! runs source-provided code, fetches objects, scans/changes caches or reserves
 //! output roots. Isolated snapshots and build eligibility remain M1/M2 gates.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aros_common::{sha256_bytes, Diagnostic, DiagnosticCode, DiagnosticStage, Sha256Digest};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::inspection::{self, Checkout};
+use crate::profiles::{identifier, Profiles};
 use crate::recipe::GitObjectId;
 use crate::{ContractError, Recipe};
 
@@ -200,7 +200,7 @@ pub fn inspect_with_timeout(
             "selected profiles differ from the recipe digest",
         ));
     }
-    check_profile(&profiles, &request.preset)?;
+    Profiles::parse(&profiles)?.select(&request.preset)?;
     producer
         .source_lock(recipe.source_lock_sha256())
         .map_err(|error| error.input("--producer-dir"))?;
@@ -368,80 +368,4 @@ fn findings(request: &PlanRequest, driver_present: bool) -> Vec<Diagnostic> {
             .with_hint("Select --work-dir, --output-dir, --cache-dir, --jobs and --timeout-seconds; this does not remove the other blockers."));
     }
     findings
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileDocument {
-    schema: String,
-    #[serde(rename = "upstream_commit")]
-    _upstream_commit: GitObjectId,
-    profiles: Vec<Profile>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Profile {
-    name: String,
-    configure_target: String,
-    upstream_output_target: String,
-    target_triple: String,
-    cpu: String,
-    platform: String,
-    float_abi: String,
-    capabilities: Vec<String>,
-}
-
-fn check_profile(input: &[u8], selected: &str) -> Result<(), ContractError> {
-    let profiles: ProfileDocument = serde_json::from_slice(input).map_err(|_| {
-        ContractError::invalid("invalid or unsupported closed profiles-v1 document")
-    })?;
-    if profiles.schema != "aros-toolchain-profiles-v1"
-        || profiles.profiles.is_empty()
-        || profiles.profiles.len() > 128
-    {
-        return Err(ContractError::invalid(
-            "expected profiles-v1 with 1..128 entries",
-        ));
-    }
-    let mut names = BTreeSet::new();
-    for profile in &profiles.profiles {
-        if !names.insert(&profile.name)
-            || [
-                &profile.name,
-                &profile.configure_target,
-                &profile.upstream_output_target,
-                &profile.target_triple,
-                &profile.cpu,
-                &profile.platform,
-            ]
-            .iter()
-            .any(|value| !identifier(value))
-            || (!profile.float_abi.is_empty() && !identifier(&profile.float_abi))
-            || profile.capabilities.is_empty()
-            || profile.capabilities.iter().any(|value| !identifier(value))
-            || profile.capabilities.iter().collect::<BTreeSet<_>>().len()
-                != profile.capabilities.len()
-        {
-            return Err(ContractError::invalid(
-                "profiles contain duplicate or invalid identifiers/capabilities",
-            ));
-        }
-    }
-    if !names.iter().any(|name| name.as_str() == selected) {
-        return Err(ContractError::invalid(
-            "preset is not present in the recipe-selected profiles",
-        ));
-    }
-    Ok(())
-}
-
-fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        && value != "."
-        && value != ".."
 }

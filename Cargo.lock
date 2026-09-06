@@ -252,13 +252,21 @@ name = "aros-toolchain"
 version = "0.1.0"
 dependencies = [
  "aros-common",
+ "aros-fetch",
+ "flate2",
+ "fs2",
  "rustix",
+ "semver",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
+ "url",
+ "which",
 ]
 
 [[package]]

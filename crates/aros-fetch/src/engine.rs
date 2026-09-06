@@ -26,6 +26,8 @@ use crate::FetchResult;
 
 mod budget;
 use budget::{ExtractionBudget, MAX_ARCHIVE_ENTRIES};
+/// Safe snapshotting of an already-downloaded, verified cache payload.
+pub mod cache;
 mod diagnostics;
 use diagnostics::{
     cache_failure, context, contract_failure, extraction_failure, integrity_failure,

@@ -19,6 +19,15 @@ pub enum DiagnosticCode {
     ProducerPrerequisite,
     #[serde(rename = "AX0202")]
     ProducerPreflight,
+    /// Producer source/cache declaration or verified payload failure.
+    #[serde(rename = "AX0301")]
+    ProducerSources,
+    /// Producer source-use closure failure.
+    #[serde(rename = "AX0302")]
+    ProducerSourceUse,
+    /// Producer-controlled external build environment failure.
+    #[serde(rename = "AX0401")]
+    ProducerEnvironment,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
@@ -219,6 +228,9 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerIdentity => "AX0102",
             Self::ProducerPrerequisite => "AX0201",
             Self::ProducerPreflight => "AX0202",
+            Self::ProducerSources => "AX0301",
+            Self::ProducerSourceUse => "AX0302",
+            Self::ProducerEnvironment => "AX0401",
             Self::ProducerState => "AX0801",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
