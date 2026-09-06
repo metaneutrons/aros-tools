@@ -22,10 +22,43 @@ The current M1 implementation now also exposes an explicit local
 preflight, runs the reviewed legacy driver only from metadata-free snapshots,
 requires a prepared offline cache, binds the producer's Rust channel, and
 retains local candidate evidence. It is not a release executor or provenance
-attestation; the two host proofs below remain required before M1 can close.
+attestation. The two required host proofs are now recorded below; M1 remains
+open because the origin, native-executor and release-qualification gates are
+intentionally not claimed by this local preview.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
 and [measured baseline](toolchain-producer-baseline.md) remain the foundation
 for later implementation. Issues own execution status and remaining gates.
+
+### Measured TCP-M1 local lane evidence (2026-09-06)
+
+The legacy-preview adapter was executed from the tools checkout against the
+same producer contract on both requested native PC hosts. Each run used a
+fresh, owned work/output root, an explicitly prepared offline cache and the
+producer-declared Rust 1.96.1 channel. The result envelope reported
+`prerequisites=passed`, `cache=passed`, `environment=passed`,
+`integrity=passed`, `qualification=local-only` and `commit_state=committed`.
+The archive, manifest, SHA-256 sidecar and SPDX document were re-hashed after
+the run; archive member paths were checked for absolute or parent traversal.
+
+| Host | Profile | Jobs | Recipe SHA-256 | Source commit | Producer commit | Archive (bytes) | Archive SHA-256 | Tree SHA-256 |
+| --- | --- | ---: | --- | --- | --- | ---: | --- | --- |
+| macOS ARM64 (`macos-aarch64`) | `pc-x86_64` | 4 | `f73e397a90a32cab33fecdd46cd7054700ef31571475c7bab4cc31964d984aad` | `f3cfc243a84065166a46da28b0a5b22bbd0f8869` | `e25986c8dd516e2b9a08d33bdc6eade3be10f0f3` | 26,489,348 | `85041d73d0a0a5def960cf44f195fe2d1f15b7adf980bc9db441852b5a80983b` | `5632523c0f62edbe3068c96b1ac531009c330e6dea7815ab68d20cb01571eb73` |
+| Linux x86-64 (`linux-x86_64`) | `pc-x86_64` | 8 | `906ff611b34b1095fde00d86f164157c09d83ae6ee0fcfa3259b395280e14671` | `f3cfc243a84065166a46da28b0a5b22bbd0f8869` | `c8039cf2b7291097ad62c6750bd7367e91a068f4` | 41,500,268 | `8066253b8c246b485e6ed73288435aeea4389edbce64e568839f0b3fe6d24ff4` | `ad61f7e5b2ad1cbaafa2308dff0478cf698ae7f7bbba977d5dec85a7eba95642` |
+
+Observed toolchain inputs were LLVM 11.0.0. The macOS lane used Apple Clang
+21.0.0, CMake 4.4.3, GNU Make 4.4.1 and Python 3.14.7; the Linux lane used
+GCC 16.1.1, CMake 4.4.0, GNU Make 4.4.1 and Python 3.14.6. Both lanes
+consumed the seven locked LLVM/Clang runtime source archives recorded in their
+verified source-usage logs. The complete result envelopes and retained build
+material are local evidence, not release artifacts.
+
+The first Linux attempt stopped cleanly before producing an envelope because
+the remote cache's vendor configuration contained escaped placeholder quotes.
+The cache configuration was corrected and the retry above completed; no
+producer or CLI source change was needed. This negative attempt remains
+retained for auditability. No A/B matrix, release tag, publication or trusted
+origin attestation was performed, and the `origin` check therefore remains
+`not-run` by design.
 
 ## 1. Decision and intended outcome
 
