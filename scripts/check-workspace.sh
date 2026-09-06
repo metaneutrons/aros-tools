@@ -4,30 +4,38 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/check-workspace.sh [all|quality|docs|test|portable-test]
+Usage: scripts/check-workspace.sh [check|all|quality|docs|source-test|test|portable-test]
 
 Run the canonical aros-tools workspace gate from any directory.
-  all      Run quality, documentation, and test gates (default).
+  check    Run quality and portable tests for ordinary iteration (default).
+  all      Explicit complete gate: quality, documentation, and integration tests.
   quality  Run formatting, policy, lint, Rust documentation, and dependency gates.
   docs     Audit locked web dependencies and build the Astro documentation.
-  test     Run all locked tests against the exact qualified AROS-NX source.
+  source-test
+           Run all locked Rust tests against the exact qualified AROS-NX source,
+           without the CMake engine/product-build fixtures.
+  test     Explicit integration checkpoint: source-test plus every compatible
+           CMake fixture (including real GRUB builds on Darwin/arm64).
   portable-test
            Run the closed cross-host suite without a qualified source checkout.
            Source-coupled transpiler/verifier tests are compiled but execute
-           only in the exact-source `test` gate.
+           only in the exact-source `source-test` and `test` gates.
 
-The test gate requires AROS_TEST_SOURCE_ROOT to name the exact qualified
-AROS-NX checkout used by the versioned source contract.
+The source-test, test and all gates require AROS_TEST_SOURCE_ROOT to name the
+exact qualified AROS-NX checkout used by the versioned source contract.
+check and portable-test reject that variable rather than silently ignore it.
+Use test/all at the integration checkpoints documented in CONTRIBUTING.md;
+a successful check/source-test is not complete engine qualification.
 EOF
 }
 
-mode=${1:-all}
+mode=${1:-check}
 if [[ $# -gt 1 ]]; then
     usage >&2
     exit 2
 fi
 case "$mode" in
-    all | quality | docs | test | portable-test) ;;
+    check | all | quality | docs | source-test | test | portable-test) ;;
     -h | --help)
         usage
         exit 0
@@ -42,6 +50,14 @@ esac
 script_root=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd -P)
 repository_root=$(unset CDPATH; cd -- "$script_root/.." && pwd -P)
 cd "$repository_root"
+
+# Reject conflicting intent before the quality gate spends any work.
+if [[ "$mode" == check || "$mode" == portable-test ]] && \
+   [[ -n "${AROS_TEST_SOURCE_ROOT:-}" ]]; then
+    printf '%s\n' \
+        'error: check/portable-test must not receive AROS_TEST_SOURCE_ROOT; select source-test, test or all explicitly' >&2
+    exit 1
+fi
 
 require_quality_tools() {
     local command_name
@@ -129,7 +145,7 @@ run_docs() {
     )
 }
 
-run_tests() {
+run_source_tests() {
     if [[ -z "${AROS_TEST_SOURCE_ROOT:-}" || ! -d "$AROS_TEST_SOURCE_ROOT" ]]; then
         printf '%s\n' \
             'error: AROS_TEST_SOURCE_ROOT must name the qualified AROS-NX checkout required by workspace tests' >&2
@@ -181,7 +197,11 @@ PY
         return 1
     fi
     cargo test --workspace --all-features --locked
+    printf '%s\n' 'source Rust tests passed; CMake engine fixtures require the explicit test/all gate'
+}
 
+run_tests() {
+    run_source_tests
     # The engine's CMake fixtures are product-contract tests, not Rust unit
     # tests. Build the normal executables they drive, then execute every
     # host-compatible fixture against the same exact source identity validated
@@ -228,16 +248,11 @@ PY
 }
 
 run_portable_tests() {
-    if [[ -n "${AROS_TEST_SOURCE_ROOT:-}" ]]; then
-        printf '%s\n' \
-            'error: portable-test must not receive AROS_TEST_SOURCE_ROOT; use test for exact-source qualification' >&2
-        return 1
-    fi
     # aros-transpiler and aros-verify deliberately contain white-box tests
     # whose oracle is the exact AROS-NX tree. Running those tests without that
     # input is an invalid qualification, not a portable skip. Compile every one
     # of their test targets on each host, execute their source-independent bin
-    # tests, and leave the complete runtime suite to run_tests above.
+    # tests, and leave the complete Rust runtime suite to run_source_tests.
     cargo test --workspace --all-features --locked \
         --exclude aros-transpiler --exclude aros-verify
     cargo test --locked -p aros-transpiler -p aros-verify \
@@ -246,9 +261,10 @@ run_portable_tests() {
         --all-features
     cargo test --locked -p aros-verify --bin aros-verify \
         --all-features
+    printf '%s\n' 'portable tests passed; source-coupled Rust tests and CMake engine fixtures were not executed'
 }
 
-if [[ "$mode" == all || "$mode" == quality ]]; then
+if [[ "$mode" == check || "$mode" == all || "$mode" == quality ]]; then
     run_quality
 fi
 if [[ "$mode" == all || "$mode" == docs ]]; then
@@ -257,6 +273,9 @@ fi
 if [[ "$mode" == all || "$mode" == test ]]; then
     run_tests
 fi
-if [[ "$mode" == portable-test ]]; then
+if [[ "$mode" == source-test ]]; then
+    run_source_tests
+fi
+if [[ "$mode" == check || "$mode" == portable-test ]]; then
     run_portable_tests
 fi

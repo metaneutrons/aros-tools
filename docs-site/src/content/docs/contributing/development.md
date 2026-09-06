@@ -52,21 +52,36 @@ From the tools repository:
 | `scripts/check-workspace.sh docs` | Locked docs dependency audit, Astro build, links and static-output validation |
 | `scripts/check-workspace.sh quality` | Workspace quality, architecture and policy checks |
 | `scripts/check-workspace.sh portable-test` | Source-independent tests |
-| `scripts/check-workspace.sh test` | Source-coupled tests with the exact qualified AROS-NX checkout |
-| `scripts/check-workspace.sh` | Complete local gate |
+| `scripts/check-workspace.sh source-test` | Full Rust tests with the exact qualified AROS-NX checkout; no CMake fixtures |
+| `scripts/check-workspace.sh test` | Explicit integration checkpoint: source Rust + every host-compatible CMake fixture |
+| `scripts/check-workspace.sh all` | Explicit complete gate: quality, docs and integration |
+| `scripts/check-workspace.sh` | Default iteration gate: quality + portable Rust; no product build |
 
 The exact-source gate requires a recursive checkout of the immutable revision in
 [`contracts/aros-source-v1.toml`](https://github.com/metaneutrons/aros-tools/blob/main/contracts/aros-source-v1.toml).
-Pass it explicitly:
+Pass it explicitly when running the integration checkpoint:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
-  scripts/check-workspace.sh
+  scripts/check-workspace.sh all
 ```
 
 Do not substitute a moving branch. Tests use that source as input and create
 their own temporary work where needed. CMake-engine fixtures require clang,
 CMake and Ninja; platform-specific omissions are reported explicitly.
+
+PR CI keeps its four required host jobs: one Linux lane runs the source-coupled
+Rust suite, while the other hosts run portable tests. The full Linux CMake
+sweep runs after integration into `main` or an explicit Workspace CI dispatch,
+not on every PR revision. Engine/source-boundary changes require a full check
+of their final candidate before merge; cross-cutting milestone acceptance and
+release candidates require Linux and Darwin/arm64 evidence. The real GRUB
+fixture runs only on Darwin/arm64, so Linux success alone cannot prove it.
+See the authoritative [integration checkpoint policy](https://github.com/metaneutrons/aros-tools/blob/main/CONTRIBUTING.md#test-stages-and-integration-checkpoints).
+
+Successful partial stages are not full qualification. Do not repeat a GRUB
+build for docs-only changes; run `docs`. Do not replace a failed integration
+check with a passing narrower stage.
 
 ## Change one behavior
 
