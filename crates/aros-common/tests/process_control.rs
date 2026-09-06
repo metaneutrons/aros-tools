@@ -61,6 +61,26 @@ fn controlled_input_requires_complete_delivery_after_normal_exit() {
 }
 
 #[test]
+fn controlled_bulk_input_drains_both_outputs_with_bounded_capture() {
+    let input = vec![b'x'; 16 * 1024 * 1024];
+    let result = run_output_with_input_and_control(
+        Command::new("sh").args(["-c", "cat | tee /dev/stderr"]),
+        &input,
+        1024,
+        Duration::from_secs(30),
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    assert!(result.status.success());
+    assert!(!result.cancelled && !result.timed_out);
+    for stream in [&result.stdout, &result.stderr] {
+        assert_eq!(stream.total_bytes(), input.len() as u64);
+        assert!(stream.is_truncated());
+        assert_eq!(stream.omitted_bytes(), input.len() as u64 - 1024);
+    }
+}
+
+#[test]
 fn controlled_input_reaps_a_child_that_never_reads_stdin_on_timeout() {
     let result = run_output_with_input_and_control(
         Command::new("sh").args(["-c", "sleep 30"]),

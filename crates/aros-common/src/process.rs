@@ -623,8 +623,43 @@ fn prepare_capture_pipe<T>(_stream: &T) -> io::Result<()> {
     Ok(())
 }
 
+/// Pipe workers wait for readiness, not a fixed sleep per buffer. The bounded
+/// wait still gives escaped pipes regular opportunities to observe cleanup.
+trait PipeReadiness {
+    fn wait_for_io(&self, writing: bool) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd> PipeReadiness for T {
+    fn wait_for_io(&self, writing: bool) -> io::Result<()> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        let flags = if writing {
+            PollFlags::OUT
+        } else {
+            PollFlags::IN
+        };
+        let mut descriptors = [PollFd::new(self, flags)];
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000,
+        };
+        match poll(&mut descriptors, Some(&timeout)) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl<T> PipeReadiness for T {
+    fn wait_for_io(&self, _writing: bool) -> io::Result<()> {
+        thread::sleep(Duration::from_millis(10));
+        Ok(())
+    }
+}
+
 fn drain_bounded(
-    mut stream: impl Read,
+    mut stream: impl Read + PipeReadiness,
     limit: usize,
     finished: &AtomicBool,
 ) -> io::Result<CapturedStream> {
@@ -641,7 +676,7 @@ fn drain_bounded(
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+                stream.wait_for_io(false)?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -702,7 +737,7 @@ fn check_pipe_deadline(finished: &AtomicBool, finished_at: &mut Option<Instant>)
 }
 
 fn write_complete(
-    mut stream: impl Write,
+    mut stream: impl Write + PipeReadiness,
     mut input: &[u8],
     finished: &AtomicBool,
 ) -> io::Result<()> {
@@ -719,7 +754,7 @@ fn write_complete(
             Ok(written) => input = &input[written..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+                stream.wait_for_io(true)?;
             }
             Err(error) => return Err(error),
         }
