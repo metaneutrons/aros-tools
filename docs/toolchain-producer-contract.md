@@ -3,8 +3,9 @@
 Status: partial M1 implementation. Recipe validation and experimental
 `plan --backend legacy-preview` inspection and lower-level directory guards/
 shared cancellation exist. Recursive raw worktree/index/submodule inspection
-is implemented; execution, isolated clean snapshots, resumable state
-and origin verification do not. This document also
+is implemented. A lower-level metadata-free snapshot primitive exists, separate
+from planning; integrated execution, resumable state and origin verification do
+not. This document also
 specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
 [command reference](../docs-site/src/content/docs/reference/cli.md).
@@ -378,8 +379,18 @@ must not unlock its parent's description; only the creating process releases
 the lock. The caller must finish all readiness gates and
 revalidate at execution boundaries before using these mechanisms together.
 
+The source-material slice adds `SourceSnapshot`, an in-process guard borrowing
+work ownership. It preflights one selected checkout and recursively copies only
+raw committed blobs into fresh role-specific staging, without Git metadata,
+filters or hardlinks. The shared verifier checks exact material before/after
+durable no-clobber publication and at explicit reuse boundaries. Committed links
+must resolve inside that flattened input; dangling, escaping and cyclic links
+are rejected before any link is created. Failures retain evidence. Each role is
+independent, not a three-root transaction, phase receipt or execution permission.
+See the [snapshot limits](../crates/aros-toolchain/README.md#isolated-source-material-primitive).
+
 Remaining implementation gates include: private MetaMake fetch integration,
-trusted executor evidence, recursive clean snapshots, actual four-host process
+trusted executor evidence, integrated snapshot/adapter lifecycle, actual four-host process
 and filesystem behavior, xz-library byte parity, archive resource limits, exact
 native source-lock/parser fixtures, tools-owned compatibility engine and
 measured CPU/RAM/storage/time defaults. None is waived by a specification test.

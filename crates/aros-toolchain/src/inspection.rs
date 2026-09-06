@@ -150,6 +150,7 @@ pub struct Checkout<'a> {
     commit: GitObjectId,
     pub(crate) tree: GitObjectId,
     pub(crate) deadline: Instant,
+    cancellation: CancellationToken,
 }
 
 impl<'a> Checkout<'a> {
@@ -158,18 +159,29 @@ impl<'a> Checkout<'a> {
         identity: (&GitObjectId, &GitObjectId),
         deadline: Instant,
     ) -> Result<Self, ContractError> {
+        Self::inspect_controlled(root, identity, deadline, &CancellationToken::default())
+    }
+
+    pub(crate) fn inspect_controlled(
+        root: &'a Path,
+        identity: (&GitObjectId, &GitObjectId),
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, ContractError> {
         let checkout = Self {
             root,
             commit: identity.0.clone(),
             tree: identity.1.clone(),
             deadline,
+            cancellation: cancellation.clone(),
         };
         checkout.recheck()?;
         Ok(checkout)
     }
 
     pub(crate) fn recheck(&self) -> Result<(), ContractError> {
-        let (head, observed_tree) = observed_identity(self.root, self.deadline)?;
+        let (head, observed_tree) =
+            observed_identity(self.root, self.deadline, &self.cancellation)?;
         if head != self.commit || observed_tree != self.tree {
             return Err(ContractError::identity(format!(
                 "checkout identity mismatch: expected commit {} / tree {}; observed commit {} / tree {}",
@@ -185,8 +197,9 @@ impl<'a> Checkout<'a> {
         root: &'a Path,
         commit: &GitObjectId,
         deadline: Instant,
+        cancellation: &CancellationToken,
     ) -> Result<Self, ContractError> {
-        let (observed, tree) = observed_identity(root, deadline)?;
+        let (observed, tree) = observed_identity(root, deadline, cancellation)?;
         if observed != *commit {
             return Err(ContractError::identity(
                 "submodule HEAD differs from its selected gitlink",
@@ -197,6 +210,7 @@ impl<'a> Checkout<'a> {
             commit: observed,
             tree,
             deadline,
+            cancellation: cancellation.clone(),
         })
     }
 
@@ -282,7 +296,14 @@ impl<'a> Checkout<'a> {
         input: &[u8],
         limit: usize,
     ) -> Result<Vec<u8>, ContractError> {
-        git(self.root, arguments, input, limit, self.deadline)
+        git(
+            self.root,
+            arguments,
+            input,
+            limit,
+            self.deadline,
+            &self.cancellation,
+        )
     }
 }
 
@@ -292,11 +313,17 @@ fn git(
     input: &[u8],
     limit: usize,
     deadline: Instant,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, ContractError> {
+    if cancellation.is_cancelled() {
+        return Err(ContractError::state(
+            "source operation cancelled before Git inspection",
+        ));
+    }
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or_else(|| {
-            ContractError::prerequisite("read-only Git inspection exceeded its 60-second budget")
+            ContractError::prerequisite("read-only Git inspection exceeded its operation budget")
         })?;
     let mut command = Command::new("git");
     command
@@ -324,33 +351,45 @@ fn git(
         .args(arguments);
     let timeout = remaining.min(Duration::from_secs(10));
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-    let result = run_output_with_input_and_control(
-        &mut command,
-        input,
-        limit,
-        timeout,
-        &CancellationToken::default(),
-    )
-    .map_err(|error| {
-        let reason = match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                "trusted Git executable or selected working directory is missing"
-            }
-            std::io::ErrorKind::PermissionDenied => {
-                "permission denied while executing read-only Git inspection"
-            }
-            std::io::ErrorKind::TimedOut => {
-                "read-only Git inspection timed out and process cleanup failed"
-            }
-            _ => "I/O failure while executing or capturing read-only Git inspection",
-        };
-        ContractError::prerequisite(reason).context(DiagnosticContext {
-            tool: Some("git".into()),
-            timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
-            timeout_ms: Some(timeout_ms),
-            ..DiagnosticContext::default()
-        })
-    })?;
+    let result =
+        run_output_with_input_and_control(&mut command, input, limit, timeout, cancellation)
+            .map_err(|error| {
+                if cancellation.is_cancelled() {
+                    return ContractError::state(format!(
+                        "source operation cancelled; Git startup or cleanup failed ({:?})",
+                        error.kind()
+                    ))
+                    .context(DiagnosticContext {
+                        tool: Some("git".into()),
+                        timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
+                        timeout_ms: Some(timeout_ms),
+                        ..DiagnosticContext::default()
+                    });
+                }
+                let reason = match error.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        "trusted Git executable or selected working directory is missing"
+                    }
+                    std::io::ErrorKind::PermissionDenied => {
+                        "permission denied while executing read-only Git inspection"
+                    }
+                    std::io::ErrorKind::TimedOut => {
+                        "read-only Git inspection timed out and process cleanup failed"
+                    }
+                    _ => "I/O failure while executing or capturing read-only Git inspection",
+                };
+                ContractError::prerequisite(reason).context(DiagnosticContext {
+                    tool: Some("git".into()),
+                    timed_out: Some(error.kind() == std::io::ErrorKind::TimedOut),
+                    timeout_ms: Some(timeout_ms),
+                    ..DiagnosticContext::default()
+                })
+            })?;
+    if result.cancelled || cancellation.is_cancelled() {
+        return Err(ContractError::state(
+            "source operation cancelled during Git inspection",
+        ));
+    }
     if result.timed_out || !result.status.success() {
         let reason = if result.timed_out {
             "read-only Git inspection exceeded its process deadline"
@@ -383,6 +422,7 @@ fn git(
 fn observed_identity(
     root: &Path,
     deadline: Instant,
+    cancellation: &CancellationToken,
 ) -> Result<(GitObjectId, GitObjectId), ContractError> {
     // One bounded plumbing query per boundary, not separate subprocesses for
     // root, commit and tree in each of the many small AROS catalog submodules.
@@ -397,6 +437,7 @@ fn observed_identity(
         &[],
         MAX_DOCUMENT_BYTES,
         deadline,
+        cancellation,
     )?;
     let fields: Vec<_> = text(&bytes)?.split_terminator('\n').collect();
     let [top, commit_text, tree_text] = fields.as_slice() else {

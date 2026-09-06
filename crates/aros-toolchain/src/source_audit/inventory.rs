@@ -11,14 +11,15 @@ use crate::{
     ContractError,
 };
 
-pub(super) struct Entry {
+#[derive(Clone)]
+pub struct Entry {
     pub mode: &'static str,
     pub oid: GitObjectId,
     pub size: usize,
     pub digest: Option<Sha256Digest>,
 }
 
-pub(super) type Inventory = BTreeMap<String, Entry>;
+pub type Inventory = BTreeMap<String, Entry>;
 
 pub(super) fn read(
     checkout: &Checkout<'_>,
@@ -142,32 +143,34 @@ pub(super) fn measure_blobs(
     checkout: &Checkout<'_>,
     entries: &mut Inventory,
     budget: &Budget,
+    visitor: &mut super::Visitor<'_>,
 ) -> Result<(), ContractError> {
     // One bounded batch handles many small files, not one process per file.
     // IDs, never paths, are supplied on stdin: no filters or symlink following.
     let mut pending = entries
-        .values_mut()
-        .filter(|entry| matches!(entry.mode, "100644" | "100755" | "120000"))
+        .iter_mut()
+        .filter(|(_, entry)| matches!(entry.mode, "100644" | "100755" | "120000"))
         .peekable();
     while pending.peek().is_some() {
         budget.check(0)?;
         let mut batch = Vec::new();
         let mut input = String::new();
         let mut limit = 0;
-        while let Some(entry) =
-            pending.next_if(|entry| limit == 0 || limit + entry.size + 128 <= 8 * 1024 * 1024)
+        while let Some((path, entry)) =
+            pending.next_if(|(_, entry)| limit == 0 || limit + entry.size + 128 <= 8 * 1024 * 1024)
         {
             limit += entry.size + 128;
             input.push_str(entry.oid.as_str());
             input.push('\n');
-            batch.push(entry);
+            batch.push((path, entry));
             if batch.len() == 4096 {
                 break;
             }
         }
         let output = checkout.git_input(&["cat-file", "--batch"], input.as_bytes(), limit)?;
         let mut remaining = output.as_slice();
-        for entry in batch {
+        for (path, entry) in batch {
+            budget.check(0)?;
             let header = format!("{} blob {}\n", entry.oid.as_str(), entry.size);
             remaining = remaining
                 .strip_prefix(header.as_bytes())
@@ -176,6 +179,7 @@ pub(super) fn measure_blobs(
                 .get(..entry.size)
                 .ok_or_else(|| mismatch("incomplete raw Git blob"))?;
             entry.digest = Some(sha256_bytes(bytes));
+            visitor(path, entry, bytes)?;
             remaining = remaining
                 .get(entry.size..)
                 .and_then(|rest| rest.strip_prefix(b"\n"))

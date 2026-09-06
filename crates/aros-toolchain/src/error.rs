@@ -12,6 +12,13 @@ pub struct ContractError {
 }
 
 impl ContractError {
+    pub(crate) fn retained_material(mut self) -> Self {
+        for diagnostic in &mut self.diagnostics.diagnostics {
+            diagnostic.hint = Some("stop and inspect the owned work/output roots; partial or complete source material is retained, never adopted, removed or authorized for execution by this failure".into());
+        }
+        self
+    }
+
     /// Attach only an already validated committed path, never an untracked name
     /// or raw Git output. Nested repository locations remain root-relative.
     pub(crate) fn source_path(mut self, path: &str) -> Self {
