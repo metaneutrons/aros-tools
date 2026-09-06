@@ -1,14 +1,14 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: partial M1 implementation. Recipe validation, experimental
+Status: M1 accepted as an experimental local-preview boundary. Recipe validation,
 `plan --backend legacy-preview` inspection, the explicit local
 `build --backend legacy-preview` adapter and lower-level directory guards/
 shared cancellation exist. Recursive raw worktree/index/submodule inspection
 is implemented. The adapter now probes prerequisites/cache, creates isolated
 views, sanitizes the child environment and reports bounded cancellation;
 integrated native execution, resumable state and trusted origin verification do
-not. This document also
-specifies future commands, not all available to users. See the
+not. Those are later milestone gates, not M1 acceptance requirements. This
+document also specifies future commands, not all available to users. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
 [command reference](../docs-site/src/content/docs/reference/cli.md).
 [Epic #27](https://github.com/metaneutrons/aros-tools/issues/27) tracks delivery;

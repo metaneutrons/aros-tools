@@ -1,8 +1,9 @@
 # aros-toolchain
 
-Experimental TCP-M1 producer inspection and local legacy-preview execution
-behind `aros toolchain plan` and `aros toolchain build`. It is not a native
-compiler driver, release publisher or released management feature.
+TCP-M1 producer inspection and local legacy-preview execution behind
+`aros toolchain plan` and `aros toolchain build`, accepted as an experimental
+local-preview boundary. It is not a native compiler driver, release publisher
+or released management feature.
 
 Implemented:
 
@@ -197,10 +198,12 @@ The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
 The implemented plan requires explicit `--backend legacy-preview`; native
 fails before file reads. `toolchain build --backend legacy-preview` is the
 explicit experimental adapter and requires `--offline`; native execution,
-trusted executor origin and release qualification remain blocked. Real Linux
-x86-64/macOS AArch64 preview evidence remains the M1 acceptance gate. No extra
-executable is exposed. `aros-fetch` is added as a dependency
-only when native transport is actually implemented, not as an unused promise.
+trusted executor origin and release qualification remain later gates. The
+required real Linux x86-64 and macOS AArch64 preview lanes, including local
+prefix verification through `toolchain verify --local`, are recorded as the
+M1 acceptance evidence. No extra executable is exposed. `aros-fetch` is added
+as a dependency only when native transport is actually implemented, not as an
+unused promise.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
 [delivery plan](../../docs/toolchain-producer-plan.md) and
