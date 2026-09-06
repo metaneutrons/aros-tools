@@ -13,8 +13,9 @@ or the initial tools release. The extension is planned, not implemented.
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The next acceptance gate is [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
-its completed contract freeze. M1's first non-executing library slice does not
-complete its CLI, lifecycle or real-build criteria.
+its completed contract freeze. M1's experimental read-only plan/CLI slice does
+not complete its lifecycle, source-readiness or real-build criteria. Valid
+inspection results remain blocked pending those missing safety gates.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
 and [measured baseline](toolchain-producer-baseline.md) remain the foundation
 for later implementation. Issues own execution status and remaining gates.

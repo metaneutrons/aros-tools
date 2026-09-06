@@ -1,6 +1,6 @@
 ---
 title: Command reference
-description: All 29 frontend command paths, their inputs, defaults, and effects.
+description: All 30 frontend command paths, their inputs, defaults, and effects.
 ---
 
 The executable is `aros`. The tables below cover the current
@@ -52,7 +52,9 @@ Use PATH for a source build or the verified archive installation procedure.
 
 ## Toolchains and helpers
 
-All toolchain/host-compiler commands require an AROS checkout.
+Consumer toolchain/host-compiler commands require an AROS checkout.
+Experimental producer planning instead requires three explicit source roots
+and works from any directory.
 
 | Command | Inputs and effect |
 | --- | --- |
@@ -62,6 +64,7 @@ All toolchain/host-compiler commands require an AROS checkout.
 | `toolchain list` | Show lock entries for the current host |
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
+| `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
@@ -72,6 +75,42 @@ requires `--preset` and conflicts with `--all`.
 For helper source builds set `AROS_TOOLS_SOURCE_DIR` to the tools checkout.
 Installed suites normally need only `build-tools check`.
 See [toolchain workflows](/aros-tools/workflows/toolchains/).
+
+### Experimental producer inspection
+
+```sh
+aros toolchain plan --backend legacy-preview --preset pc-x86_64 \
+  --recipe /work/recipe.json --source-dir /work/AROS \
+  --producer-dir /work/aros-toolchains --tools-dir /work/collector-tools \
+  --format json --offline
+```
+
+All five selections (`preset`, `recipe`, `source-dir`, `producer-dir`,
+`tools-dir`) are mandatory. The roots must match the recipe's exact Git
+commits/trees. `tools-dir` selects the recipe's collector source, not necessarily
+the current frontend's source. A trusted Git supporting `--no-lazy-fetch` and
+locally prepared Git objects are required; inspection never fetches them.
+Use regular recipe/input files without symlink ancestors.
+
+Optional `--work-dir`, `--output-dir`, `--cache-dir`, positive `--jobs` and
+positive `--timeout-seconds` describe a future build; omitted values stay null.
+No directories are created, no locks reserved and no cache contents scanned.
+`--offline` also honors `AROS_OFFLINE`; planning itself is always offline.
+`--format human|json` controls stdout independently of `--diagnostic-format`.
+As with other commands, explicit `--log-file` can write the selected log;
+keep that optional destination outside source roots.
+
+This first inspection checks recipe self-consistency, selected committed
+profile/lock/patch identities and root overlap, **not build readiness**.
+Plans currently report `blocked`: recursive clean snapshots, source capabilities,
+source-lock semantics, prerequisites/cache, executor origin and safe build
+lifecycle remain unqualified. The frontend's unknown source commit is null,
+not the old collector commit. `fetch-guard` describes the intended legacy
+policy, not a proven OS sandbox. Exit 0 means inspection completed; inspect
+`readiness` and `findings`. Invalid inputs exit 1 with no result on stdout.
+
+The default `native` backend is not implemented and fails before file reads;
+it never falls back. No `toolchain build` command is advertised yet.
 
 ## Build and inspect a product
 

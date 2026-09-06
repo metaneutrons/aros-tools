@@ -5,6 +5,15 @@ Implementation reference: `9be605ca980cc673d698001e5ab12b2beaf034f4`.
 This overhaul changes documentation and its presentation, not Rust behavior,
 release inputs or qualification policy.
 
+## Maintenance addendum — 2026-09-06
+
+The M1 inspection change adds the 30th leaf command, `toolchain plan`, with
+its actual help/arguments and source boundary in the command reference.
+The inspector remains blocked and never builds. Added AX diagnostics and
+their distinct 1 MiB/10-second Git bounds are documented; the historical
+29-command and visual audit below is unchanged, not claimed as a fresh
+browser sweep. The updated documentation build checks 1,654 generated links.
+
 ## Coverage and source boundaries
 
 | Area | Evidence inspected | Result documented |
