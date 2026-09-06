@@ -2,8 +2,10 @@
 //!
 //! This lower-level M1 primitive is not called by read-only planning. It does
 //! not verify recipes, executor origin or source snapshots, launch commands,
-//! publish candidates or resume work. It must run only after those preflight
-//! gates. Callers must revalidate before and after every mutation boundary.
+//! publish candidates or resume work. Callers must preflight the intended
+//! operation; snapshot preparation repeats its own source preflight before
+//! staging. Builds need all additional readiness gates. Callers must revalidate
+//! before and after every mutation boundary.
 //! Existing directories (even empty ones) are never adopted. Failed or dropped
 //! reservations retain their directories; no user tree is a cleanup target.
 
@@ -36,6 +38,11 @@ pub struct RunDirectories {
 }
 
 impl RunDirectories {
+    #[cfg(unix)]
+    pub(crate) const fn work_file(&self) -> &std::fs::File {
+        self.work.file()
+    }
+
     /// Reserve only the final work/output leaves under existing parents.
     ///
     /// `owner` binds these directories to a caller-measured operation identity;

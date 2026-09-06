@@ -132,6 +132,10 @@ pub(super) struct OwnedDirectory {
 }
 
 impl OwnedDirectory {
+    pub(super) const fn file(&self) -> &File {
+        self.lock.file()
+    }
+
     pub(super) fn release(&mut self) -> io::Result<()> {
         self.lock.release()
     }

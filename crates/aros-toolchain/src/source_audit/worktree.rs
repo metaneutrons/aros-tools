@@ -1,6 +1,7 @@
 //! No-follow worktree enumeration and byte comparison. Git metadata is the
 //! only exemption, at each independently verified repository's root only.
 
+use std::path::Path;
 use std::{collections::BTreeSet, fs::File, io::Read};
 
 use aros_common::{sha256_bytes, sha256_reader};
@@ -16,20 +17,65 @@ use crate::{
     ContractError,
 };
 
+/// Retain the root binding across recursive child work as well as local reads.
+pub(super) struct RootBinding {
+    file: File,
+    before: Stat,
+}
+
+impl RootBinding {
+    pub(super) fn capture(path: &Path) -> Result<Self, ContractError> {
+        let file = open_directory(path).map_err(io_failure)?;
+        let before = fs::fstat(&file).map_err(io_failure)?;
+        Ok(Self { file, before })
+    }
+
+    pub(super) fn recheck(&self, path: &Path) -> Result<(), ContractError> {
+        let current = open_directory(path).map_err(io_failure)?;
+        if !same(&self.before, &fs::fstat(&self.file).map_err(io_failure)?)
+            || !same(&self.before, &fs::fstat(&current).map_err(io_failure)?)
+        {
+            return Err(mismatch(
+                "source root binding changed across recursive material inspection",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn verify(
     checkout: &Checkout<'_>,
     entries: &Inventory,
     budget: &mut Budget,
     depth: usize,
 ) -> Result<(), ContractError> {
-    let root = open_directory(checkout.root).map_err(io_failure)?;
+    verify_root(checkout.root, entries, budget, depth, true)
+}
+
+/// Flattened, metadata-free material uses the same byte/type/directory checks.
+pub fn verify_material(
+    root: &Path,
+    entries: &Inventory,
+    budget: &mut Budget,
+) -> Result<(), ContractError> {
+    verify_root(root, entries, budget, 0, false)
+}
+
+fn verify_root(
+    path: &Path,
+    entries: &Inventory,
+    budget: &mut Budget,
+    depth: usize,
+    allow_git: bool,
+) -> Result<(), ContractError> {
+    let root = open_directory(path).map_err(io_failure)?;
     let before = fs::fstat(&root).map_err(io_failure)?;
     let mut seen = BTreeSet::new();
-    visit(checkout, &root, "", entries, &mut seen, budget, depth)?;
+    visit(allow_git, &root, "", entries, &mut seen, budget, depth)?;
     if let Some(missing) = entries.keys().find(|path| !seen.contains(*path)) {
         return Err(mismatch("worktree is missing committed source entries").source_path(missing));
     }
-    let rebound = open_directory(checkout.root).map_err(io_failure)?;
+    let rebound = open_directory(path).map_err(io_failure)?;
     if !same(&before, &fs::fstat(&rebound).map_err(io_failure)?) {
         return Err(mismatch("source root changed during recursive inspection"));
     }
@@ -37,7 +83,7 @@ pub(super) fn verify(
 }
 
 fn visit(
-    checkout: &Checkout<'_>,
+    allow_git: bool,
     directory: &File,
     prefix: &str,
     entries: &Inventory,
@@ -53,7 +99,7 @@ fn visit(
         let stat =
             fs::statat(directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io_failure)?;
         let kind = fs::FileType::from_raw_mode(stat.st_mode);
-        if prefix.is_empty() && name == ".git" {
+        if allow_git && prefix.is_empty() && name == ".git" {
             if !kind.is_file() && !kind.is_dir() {
                 return Err(mismatch(
                     "Git metadata must not be a symlink or special file",
@@ -76,18 +122,18 @@ fn visit(
                 if !same(&stat, &fs::fstat(&child).map_err(io_failure)?) {
                     return Err(mismatch("source directory changed before inspection"));
                 }
-                if entry.mode == "160000" {
-                    submodule(checkout, &path, entry, budget, depth + 1)
-                        .map_err(|error| error.source_path(&path))?;
-                } else {
-                    visit(checkout, &child, &path, entries, seen, budget, depth + 1)?;
+                // Recursive Git identities/material are handled by the shared
+                // audit visitor; flattened snapshots contain only directories.
+                if entry.mode == "040000" {
+                    visit(allow_git, &child, &path, entries, seen, budget, depth + 1)?;
                 }
                 if !same(&stat, &fs::fstat(&child).map_err(io_failure)?) {
                     return Err(mismatch("source directory changed during inspection"));
                 }
             }
             "100644" | "100755" if kind.is_file() => {
-                regular(directory, name, &stat, entry).map_err(|error| error.source_path(&path))?;
+                regular(directory, name, &stat, entry, !allow_git)
+                    .map_err(|error| error.source_path(&path))?;
             }
             "120000" if kind.is_symlink() => {
                 let target =
@@ -128,7 +174,18 @@ fn visit(
     Ok(())
 }
 
-fn regular(parent: &File, name: &str, before: &Stat, entry: &Entry) -> Result<(), ContractError> {
+fn regular(
+    parent: &File,
+    name: &str,
+    before: &Stat,
+    entry: &Entry,
+    single_link: bool,
+) -> Result<(), ContractError> {
+    if single_link && before.st_nlink != 1 {
+        return Err(mismatch(
+            "snapshot regular files must have exactly one link",
+        ));
+    }
     let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
     let mut file = File::from(fs::openat(parent, name, flags, Mode::empty()).map_err(io_failure)?);
     if !same(before, &fs::fstat(&file).map_err(io_failure)?) {
@@ -153,21 +210,6 @@ fn regular(parent: &File, name: &str, before: &Stat, entry: &Entry) -> Result<()
         ));
     }
     Ok(())
-}
-
-fn submodule(
-    parent: &Checkout<'_>,
-    path: &str,
-    entry: &Entry,
-    budget: &mut Budget,
-    depth: usize,
-) -> Result<(), ContractError> {
-    budget.check(depth)?;
-    let root = parent.root.join(path);
-    // No .gitmodules URL lookup, submodule update, shell or lazy fetch. An
-    // absent/deinitialized module fails; a populated module must be its own root.
-    let checkout = Checkout::submodule(&root, &entry.oid, parent.deadline)?;
-    super::verify(&checkout, budget, depth)
 }
 
 fn names(directory: &File) -> Result<BTreeSet<String>, ContractError> {
