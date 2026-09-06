@@ -147,39 +147,38 @@ for the exact contracts.
 
 ## Development
 
-Install the three pinned Cargo audit tools once, then use the canonical gate
-script with Node.js 24 or newer, npm, actionlint, ShellCheck, and an explicit, qualified
-AROS-NX checkout:
+Install the three pinned Cargo audit tools once, then use the canonical
+iteration gate with the prerequisites in [CONTRIBUTING.md](CONTRIBUTING.md):
 
 ```console
 cargo install cargo-audit --version 0.22.2 --locked
 cargo install cargo-deny --version 0.20.2 --locked
 cargo install cargo-machete --version 0.9.2 --locked
 # Also install actionlint and ShellCheck from your platform package manager.
-AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
-  scripts/check-workspace.sh
+scripts/check-workspace.sh
 ```
 
-The source path is intentionally never inferred from a neighbouring directory.
-CI pins the exact AROS-NX revision used by the toolchain producer, which keeps
-a moving upstream branch from changing the meaning of a tools commit.
-
 `scripts/check-workspace.sh` is the single source of truth used locally and by
-CI. The default `all` mode also performs actionlint, ShellCheck and the locked
-Astro documentation build. Its `quality`, `docs`, `test`, and `portable-test`
-modes split runner responsibilities without changing that complete local
-contract. The closed portable crate suite runs on all four supported hosts and
-compiles every transpiler/verifier test target there. One Linux lane alone
-executes the source-coupled transpiler/verifier tests against the large
-recursive checkout and exact AROS-NX source qualification; they are never
-silently run or skipped without that oracle.
-That exact-source lane also discovers every checked-in CMake-engine fixture and
-executes every host-compatible one; the real GRUB host-build fixture is an
-explicit Darwin/arm64 release qualification and is visibly omitted elsewhere.
-Adding a fixture therefore broadens the gate rather than creating a manual test
-convention.
-The documentation gate checks the locked dependency graph, generated pages,
-links and static output. Run it with `scripts/check-workspace.sh docs`.
+CI. The default `check` runs quality and portable Rust tests, without a source
+checkout, documentation build or real product builds. Run `docs` for the locked
+Astro build and link checks; it requires Node.js 24 or newer and npm.
+
+`source-test` adds the full source-coupled Rust suite with an explicit, exact
+qualified AROS-NX checkout. The expensive CMake-engine sweep is reserved for
+explicit `test`/`all` integration checkpoints and the integrated `main` CI lane,
+not every PR iteration. `all` also includes quality and documentation.
+The real GRUB fixture runs only on Darwin/arm64; Linux reports that omission
+rather than claiming full host coverage. All four required PR host jobs remain.
+See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
+for when full Linux and macOS evidence is mandatory.
+
+The qualified source is never inferred from a neighbouring directory or a
+moving branch. Full integration is explicit:
+
+```sh
+AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+  scripts/check-workspace.sh all
+```
 
 The architecture gate protects the long-term shape of the workspace: it
 enforces one-way crate dependencies, keeps production modules bounded, requires

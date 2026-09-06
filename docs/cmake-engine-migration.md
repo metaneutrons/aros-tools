@@ -129,8 +129,12 @@ EFI64 and EFI32 host-tool lanes. It downloads grub-2.12 from the canonical GNU
 origin with the GNU mirror redirector as a fallback; both origins share the
 same required SHA-256 identity. The canonical exact-source workspace gate now
 discovers every `*Test.cmake` file and executes every host-compatible fixture.
-The GRUB test is reported as an explicit host-qualified omission elsewhere, so
-the suite remains a visible CI contract rather than a manual list.
+The GRUB test is reported as an explicit host-qualified omission elsewhere.
+The full sweep is now an explicit integration checkpoint, not the default
+local iteration gate or a product rebuild on every PR revision. The
+[contributor test policy](../CONTRIBUTING.md#test-stages-and-integration-checkpoints)
+owns when it runs and which Linux/Darwin evidence is required; discovery and
+the full fixture inventory remain unchanged.
 
 **Built-in profiles are complete.** The four current target profiles and the
 host LLVM declaration are embedded in `aros-common`, including explicit

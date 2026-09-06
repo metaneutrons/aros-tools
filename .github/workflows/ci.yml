@@ -292,8 +292,18 @@ jobs:
           toolchain=$(scripts/release/read-rust-toolchain.sh)
           rustup toolchain install "$toolchain" --profile minimal
           rustup show active-toolchain
-      - name: Run complete workspace tests against qualified source
-        if: matrix.source_qualification
+      - name: Run source-coupled Rust tests for the pull request
+        if: matrix.source_qualification && github.event_name == 'pull_request'
+        working-directory: aros-tools
+        env:
+          AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
+        run: scripts/check-workspace.sh source-test
+      # Product-build fixtures run once on the integrated main commit, not on
+      # every PR edit/push. workflow_dispatch is the explicit pre-integration
+      # path when an engine/source-boundary change requires earlier evidence.
+      # The required host test job is never skipped or renamed by this policy.
+      - name: Run complete workspace integration checkpoint
+        if: matrix.source_qualification && github.event_name != 'pull_request'
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
