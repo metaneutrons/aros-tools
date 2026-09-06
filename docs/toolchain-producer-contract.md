@@ -328,10 +328,13 @@ opt-in, local and redacted. There is no remote telemetry.
 
 ## 7. Evidence and remaining gates
 
-See [M0 baseline evidence](toolchain-producer-baseline.md). These are fixture and
-source-review findings, not a new toolchain qualification. M0 is complete only
-after this architecture/contract PR is reviewed and merged with green gates.
-Do not close M1–M7 or activate native producer declarations on that basis.
+See [M0 acceptance evidence](toolchain-producer-baseline.md#m0-acceptance).
+These are fixture and source-review findings, not a new toolchain qualification.
+M0 was accepted through PR #37. Do not close M1–M8 or activate native producer
+declarations on that basis. The first M1 library slice does not supply a plan,
+build driver or receipt-reuse implementation; its native recipe input/canonical
+output cap is 1 MiB and canonical nesting is limited to 64 levels. These are
+parser safety limits, not measured compiler resource defaults.
 
 Remaining implementation gates include: private MetaMake fetch integration,
 trusted executor evidence, recursive clean snapshots, actual four-host process

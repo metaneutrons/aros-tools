@@ -104,6 +104,27 @@ credential, path/cache, snapshot, parser and recovery decisions. In particular:
 5. tools-owned CMake compatibility, native recursive source audits and trusted
    executor evidence still require implementation and measured tests.
 
-M0's evidence is ready for the contract/architecture review. Its acceptance
-issue stays open until the PR is merged with green checks. No later milestone
-is complete on the strength of these fixtures.
+## M0 acceptance
+
+Accepted on 2026-09-06 through normally protected
+[PR #37](https://github.com/metaneutrons/aros-tools/pull/37), merge commit
+`abab341f259037ead9217181f39ba9384d014bab`. The final tested head was
+`cff8784833438be4de87acb097ed7a60b765be4b`, refreshed against main including
+the separately accepted M8 planning extension. Its changes remained the same
+13 contract/documentation/fixture files; no compiler runtime path changed.
+
+- [Workspace CI](https://github.com/metaneutrons/aros-tools/actions/runs/33999583782):
+  all four native hosts, quality and commit hygiene passed.
+- [CodeQL](https://github.com/metaneutrons/aros-tools/actions/runs/33999583761)
+  and [documentation](https://github.com/metaneutrons/aros-tools/actions/runs/33999583771)
+  passed. Publication was intentionally absent.
+- Local canonical quality, 19 Python contract tests and the exact historical
+  package vector/16-case replay passed again before push. The measured baseline
+  identities and digests above are unchanged.
+- All six required checks were successful checks from the configured GitHub
+  Actions App; live protection verification passed. No bypass or extra reviewer
+  was introduced.
+
+This completes [M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28),
+not M1–M8. Compiler resource measurements, native source/executor verification,
+the local preview adapter and real host builds remain explicitly unproved.
