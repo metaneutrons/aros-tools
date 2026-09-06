@@ -158,6 +158,28 @@ the successful optimized run. These measurements are local source/interface
 evidence, not cross-host/compiler qualification, a new timeout default, executor
 origin or permission to reuse either probe's retained directories.
 
+### Debug hashing regression and correction
+
+At PR #51's initial head `d48c7177ce99bdd0833fa008b2356e03a17fafd1`,
+the macOS Intel PR job exceeded the unchanged 30-second conversion budget in
+the 9 MiB multi-pack test. The same head passed the independent dispatch, all
+other hosts and the complete package qualification. This is not evidence of a
+Homebrew failure; runner-to-runner timing variation was not independently traced.
+
+A local x86-64 test under Rosetta took 16.69 s, with stack sampling identifying
+`sha2`'s unoptimized software compression loop inside full metadata checks.
+Optimizing **only** the existing `sha2` dependency at level 2 reduced the same
+unchanged test to 3.33 s. The workspace now records that development-profile
+override; explicit debug assertions and overflow checks stay enabled. All
+workspace code, test data/assertions, cancellation/deadline limits and release
+settings are unchanged. There is no platform exception, new hash implementation,
+cached integrity result or reduced byte verification.
+
+Cargo documents [dependency-specific profile overrides and test inheritance](https://doc.rust-lang.org/cargo/reference/profiles.html#overrides).
+This is a debug-backend performance correction, not a relaxation of runtime
+budgets or proof of release resource defaults. Updated cross-host qualification
+must pass before the PR can merge.
+
 The previous successful-transfer test helper has been removed. Maintained
 positive conversion/recursive tests call the production API; only deliberately
 invalid pack fixtures retain direct low-level Git setup. There is no second

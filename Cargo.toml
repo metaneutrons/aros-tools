@@ -27,6 +27,16 @@ homepage = "https://aros.metaneutrons.cc/aros-tools/"
 repository = "https://github.com/metaneutrons/aros-tools"
 readme = "README.md"
 
+# Bounded source/archive checks hash full bytes even in debug builds. The SHA-2
+# software backend otherwise dominates those checks on hosts without SHA CPU
+# instructions. Optimize only that dependency; preserve all debug safety checks,
+# workspace code debuggability, operation budgets and the unchanged release profile.
+# See docs/toolchain-legacy-execution-view.md for the measured regression.
+[profile.dev.package.sha2]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
