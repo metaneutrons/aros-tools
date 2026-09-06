@@ -1,0 +1,99 @@
+# TCP-M0 specification, not an advertisement of implemented CLI capabilities.
+# Source locks and target profiles remain authoritative in aros-toolchains.
+schema_version = 1
+id = "aros-toolchain-producer-v1"
+status = "specified-not-implemented"
+specification = "docs/toolchain-producer-contract.md"
+tracking_issue = "https://github.com/metaneutrons/aros-tools/issues/28"
+library = "aros-toolchain"
+frontend = "aros toolchain"
+new_executables = []
+dependencies = ["aros-common", "aros-fetch"]
+forbidden_dependencies = ["aros-cli", "aros-release"]
+
+[inputs]
+recipe_schema = "aros-toolchain-recipe-v2"
+source_lock_schema = "aros-toolchain-source-lock-v2"
+profiles_schema = "aros-toolchain-profiles-v1"
+native_declaration = "toolchains/producer-executor-v1.toml"
+declaration_fields = ["schema_version", "contract_id", "contract_path", "contract_sha256", "tools_commit", "source_lock", "profiles"]
+legacy_preview_requires_explicit_selection = true
+source_target = "crosstools-release"
+source_mutation = "forbidden"
+native_executor_identity = "recipe-tools-commit-and-verified-build-evidence"
+cleanliness = "isolated-recursive-committed-material-only"
+
+[commands]
+preserved = ["install", "list", "verify", "path"]
+public = ["plan", "build"]
+maintainer = ["recipe", "package", "verify-archive", "compare", "index", "compatibility", "repackage"]
+namespace = "producer"
+common_required = ["preset", "recipe", "source-dir", "producer-dir", "tools-dir"]
+common_optional = ["backend", "work-dir", "output-dir", "cache-dir", "jobs", "timeout-seconds", "offline", "format"]
+build_additionally_required = ["work-dir", "output-dir", "cache-dir", "jobs", "timeout-seconds"]
+build_optional = ["resume"]
+backends = ["native", "legacy-preview"]
+default_backend = "native"
+result_formats = ["human", "json"]
+default_result_format = "human"
+forbidden = ["allow-dirty", "publish", "install-after-build", "force", "allow-unverified"]
+
+[documents]
+plan_schema = "aros-toolchain-plan-v1"
+result_schema = "aros-toolchain-result-v1"
+receipt_schema = "aros-toolchain-receipt-v1"
+unknown_fields = "reject-except-explicit-extension-maps"
+encoding = "utf-8-json"
+canonical_digest_encoding = "sorted-keys-compact-json-unescaped-utf8-one-final-lf"
+plan_fields = ["schema", "operation", "backend", "identity", "paths", "resources", "steps", "readiness", "findings"]
+result_fields = ["schema", "operation", "backend", "identity", "output_root", "outputs", "evidence", "qualification", "commit_state"]
+receipt_fields = ["schema", "backend", "identity", "phase", "input_sha256", "output_root", "outputs", "previous_receipt_sha256", "receipt_sha256"]
+identity_fields = ["recipe_sha256", "source_commit", "producer_commit", "tools_commit", "host", "target_profile", "executor"]
+executor_fields = ["contract_id", "contract_sha256", "tools_commit", "binary_sha256", "origin_evidence_sha256"]
+paths_fields = ["source", "producer", "tools", "work", "output", "cache"]
+resources_fields = ["jobs", "timeout_seconds", "offline", "network_isolation", "free_bytes"]
+output_fields = ["path", "kind", "sha256", "size"]
+evidence_fields = ["check", "status", "report_sha256"]
+qualifications = ["local-only", "qualification-candidate"]
+receipt_digest = "sha256-canonical-json-without-receipt_sha256"
+release_asset = false
+
+[lifecycle]
+phases = ["preflight", "sources", "environment", "configure", "compiler", "collector", "package", "verify", "candidate"]
+legacy_phase = "legacy-driver"
+fresh_release_builds = true
+shared_compiled_cache = false
+automatic_resume = false
+automatic_publish = false
+commit_states = ["rolled_back", "committed", "indeterminate"]
+
+[diagnostics]
+envelope = "aros-tool-diagnostics-v1"
+family = "AX"
+registration = "reserved-until-M1"
+success_exit = 0
+failure_exit = 1
+failure_stdout = "empty"
+json_failure_stderr_documents = 1
+logging = "existing-opt-in-local-policy"
+codes = ["AX0001", "AX0002", "AX0101", "AX0102", "AX0103", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0801", "AX0802", "AX0901", "AX0999"]
+
+[artifacts]
+manifest_schema = 1
+consumer_lock_schema = 1
+index_is_consumer_lock = false
+archive_format = "tar-pax-xz-preset9"
+archive_root = "toolchain"
+manifest_name = "toolchain-manifest.json"
+tree_fixture = "crates/aros-cli/tests/fixtures/tree-digest-v1.fixture.json"
+outer_types = ["regular-file"]
+payload_types = ["directory", "file", "symlink"]
+archive_count = 12
+manifest_count = 12
+sidecar_count = 12
+sbom_count = 12
+support_count = 8
+total_assets = 56
+checksummed_assets = 55
+attested_subjects = 54
+support_files = ["toolchain-recipe-v2.json", "{source-lock-filename}", "profiles-v1.json", "toolchain-manifest-v1.schema.json", "tree-digest-v1.fixture.json", "toolchain-index-v1.json", "toolchain-provenance.sigstore.json", "SHA256SUMS"]

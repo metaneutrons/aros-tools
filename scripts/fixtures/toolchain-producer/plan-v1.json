@@ -1,0 +1,56 @@
+{
+  "schema": "aros-toolchain-plan-v1",
+  "operation": "plan",
+  "backend": "native",
+  "identity": {
+    "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "source_commit": "1111111111111111111111111111111111111111",
+    "producer_commit": "2222222222222222222222222222222222222222",
+    "tools_commit": "3333333333333333333333333333333333333333",
+    "host": "linux-x86_64",
+    "target_profile": "pc-x86_64",
+    "executor": {
+      "contract_id": "aros-toolchain-producer-v1",
+      "contract_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "tools_commit": "3333333333333333333333333333333333333333",
+      "binary_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "origin_evidence_sha256": null
+    }
+  },
+  "paths": {
+    "source": "/workspace/source",
+    "producer": "/workspace/producer",
+    "tools": "/workspace/tools",
+    "work": null,
+    "output": null,
+    "cache": null
+  },
+  "resources": {
+    "jobs": null,
+    "timeout_seconds": null,
+    "offline": true,
+    "network_isolation": "fetch-guard",
+    "free_bytes": null
+  },
+  "steps": [
+    "preflight",
+    "sources",
+    "environment",
+    "configure",
+    "compiler",
+    "collector",
+    "package",
+    "verify",
+    "candidate"
+  ],
+  "readiness": "incomplete",
+  "findings": [
+    {
+      "code": "AX0202",
+      "severity": "warning",
+      "stage": "configuration",
+      "message": "Work, output, cache and resource budgets have not been selected.",
+      "hint": "Select --work-dir, --output-dir, --cache-dir, --jobs and --timeout-seconds before building."
+    }
+  ]
+}

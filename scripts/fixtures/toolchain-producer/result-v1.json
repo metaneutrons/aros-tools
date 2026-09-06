@@ -1,0 +1,38 @@
+{
+  "schema": "aros-toolchain-result-v1",
+  "operation": "package",
+  "backend": "native",
+  "identity": {
+    "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "source_commit": "1111111111111111111111111111111111111111",
+    "producer_commit": "2222222222222222222222222222222222222222",
+    "tools_commit": "3333333333333333333333333333333333333333",
+    "host": "linux-x86_64",
+    "target_profile": "pc-x86_64",
+    "executor": {
+      "contract_id": "aros-toolchain-producer-v1",
+      "contract_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "tools_commit": "3333333333333333333333333333333333333333",
+      "binary_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "origin_evidence_sha256": null
+    }
+  },
+  "output_root": "/workspace/candidate",
+  "outputs": [
+    {
+      "path": "fixture.tar.xz",
+      "kind": "file",
+      "sha256": "555c7ff6340d9ddfc704e8a1a64f3b8a88d41afe444bfc3972b6bae532b2f01c",
+      "size": 848
+    }
+  ],
+  "evidence": [
+    {
+      "check": "integrity",
+      "status": "not-run",
+      "report_sha256": null
+    }
+  ],
+  "qualification": "local-only",
+  "commit_state": "committed"
+}
