@@ -36,6 +36,9 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             host_compiler_command(required_repo(repo_root)?, command).await
         }
         Commands::BuildTools { command } => build_tools_command(command, repo_root),
+        Commands::Toolchain {
+            command: ToolchainCommands::Plan(args),
+        } => crate::toolchain_plan::run(args),
         Commands::Toolchain { command } => {
             toolchain_command(required_repo(repo_root)?, command).await
         }
@@ -176,6 +179,7 @@ fn build_tools_command(command: BuildToolsCommand, repo_root: Option<&Path>) -> 
 
 async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Result<()> {
     match command {
+        ToolchainCommands::Plan(args) => return crate::toolchain_plan::run(args),
         ToolchainCommands::Install {
             preset,
             force,

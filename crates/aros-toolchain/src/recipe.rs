@@ -267,7 +267,7 @@ fn digest<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Sha256Digest, D:
     Sha256Digest::parse(&value).map_err(serde::de::Error::custom)
 }
 
-fn safe_relative_path(value: &str) -> bool {
+pub(crate) fn safe_relative_path(value: &str) -> bool {
     !value.is_empty()
         && !value
             .chars()

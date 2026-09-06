@@ -292,6 +292,8 @@ fn registered_diagnostics_match_the_versioned_contract() {
     let actual: Vec<_> = [
         DiagnosticCode::ProducerContract,
         DiagnosticCode::ProducerIdentity,
+        DiagnosticCode::ProducerPrerequisite,
+        DiagnosticCode::ProducerPreflight,
     ]
     .iter()
     .map(ToString::to_string)
@@ -306,6 +308,8 @@ fn registered_diagnostics_match_the_versioned_contract() {
     for code in [
         DiagnosticCode::ProducerContract,
         DiagnosticCode::ProducerIdentity,
+        DiagnosticCode::ProducerPrerequisite,
+        DiagnosticCode::ProducerPreflight,
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), code.to_string());
     }

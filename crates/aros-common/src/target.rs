@@ -8,6 +8,19 @@ use std::path::Path;
 const BUILT_IN_CONFIG_PATH: &str = "<built-in aros-targets.toml>";
 const BUILT_IN_CONFIG: &str = include_str!("../config/aros-targets.toml");
 
+/// Current native host key shared by producer inspection and consumer lookup.
+/// This is a host mapping, not a target profile or qualification claim.
+#[must_use]
+pub fn native_host_key() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("macos-aarch64"),
+        ("macos", "x86_64") => Some("macos-x86_64"),
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("linux", "aarch64") => Some("linux-aarch64"),
+        _ => None,
+    }
+}
+
 /// Host compiler asset declaration per host platform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

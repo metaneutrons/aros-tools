@@ -15,6 +15,10 @@ pub enum DiagnosticCode {
     /// Native producer identity/digest disagreement.
     #[serde(rename = "AX0102")]
     ProducerIdentity,
+    #[serde(rename = "AX0201")]
+    ProducerPrerequisite,
+    #[serde(rename = "AX0202")]
+    ProducerPreflight,
     #[serde(rename = "AT0001")]
     SourceWalk,
     #[serde(rename = "AT0002")]
@@ -210,6 +214,8 @@ impl fmt::Display for DiagnosticCode {
         let value = match self {
             Self::ProducerContract => "AX0101",
             Self::ProducerIdentity => "AX0102",
+            Self::ProducerPrerequisite => "AX0201",
+            Self::ProducerPreflight => "AX0202",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
             Self::SourceParse => "AT0003",

@@ -82,13 +82,13 @@ pub fn default_host_compiler_dir() -> Result<PathBuf> {
 ///
 /// Returns an error when the host has no supported deterministic release.
 pub fn host_platform_key() -> Result<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Ok("macos-aarch64"),
-        ("macos", "x86_64") => Ok("macos-x86_64"),
-        ("linux", "x86_64") => Ok("linux-x86_64"),
-        ("linux", "aarch64") => Ok("linux-aarch64"),
-        (os, arch) => bail!("unsupported host platform: {os} {arch}"),
-    }
+    aros_common::target::native_host_key().ok_or_else(|| {
+        miette::miette!(
+            "unsupported host platform: {} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })
 }
 
 /// Return a human-readable label for a host matrix key.

@@ -1,10 +1,11 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: specified; the first M1 library slice implements recipe-v2 syntax,
-self-digest validation and AX0101/AX0102 diagnostics only. This is engineering
-documentation, not a list of commands available to users. See the
-[library's exact limits](../crates/aros-toolchain/README.md). Planning, execution,
-state management and origin/source verification are not implemented by that slice.
+Status: partial M1 implementation. Recipe validation and experimental
+`plan --backend legacy-preview` inspection exist; execution, recursive clean
+snapshots, state management and origin verification do not. This document also
+specifies future commands, not all available to users. See the
+[library's exact limits](../crates/aros-toolchain/README.md) and implemented
+[command reference](../docs-site/src/content/docs/reference/cli.md).
 [Epic #27](https://github.com/metaneutrons/aros-tools/issues/27) tracks delivery;
 [M0 / #28](https://github.com/metaneutrons/aros-tools/issues/28) tracks this freeze.
 The [delivery plan](toolchain-producer-plan.md) supplies scope and acceptance
@@ -144,6 +145,12 @@ state is not a log: no wall-clock timestamps, environment dump or secret values.
 - `executor`: contract ID/digest, actual tools commit and executable digest;
   origin-evidence digest is nullable for local work, required for release proof.
   Legacy preview can have null contract fields but must identify the frontend.
+  Read-only inspection may additionally report a null executor `tools_commit`
+  when no verifiable frontend build metadata exists, **only with blocked
+  readiness and an explicit finding**. Its measured on-disk executable digest
+  is an observation, not in-memory origin proof. This plan-only clarification
+  does not permit null executor commit identities in execution results,
+  receipts or release evidence, or substitution of the old collector commit.
 - `output`: relative path, `kind` (`file` or `tree`), SHA-256, size. File size is
   measured bytes; tree size is null and its digest uses the existing inventory
   algorithm. Output entries are unique and sorted by path.
@@ -167,6 +174,19 @@ honest `legacy-driver` boundary, not inferred internal stages. `readiness` is
 shape with warnings/errors and hints. A valid inspection may report blocked
 readiness with exit 0; execution must refuse it. No filesystem reservation is
 encoded in a plan. JSON result is one complete document plus newline.
+
+The initial M1 inspector always returns `blocked` for valid inspected inputs:
+it checks root commit/tree identities, selected raw committed metadata and
+root overlaps, but cannot yet certify recursive clean material, source
+capabilities, lock semantics, prerequisites/cache or executor/build lifecycle.
+`network_isolation: fetch-guard` is the selected future legacy policy, not an
+active OS isolation claim. Native selection fails before filesystem reads;
+no native declaration or driver is guessed from a historical recipe.
+Legacy recipes lack lock paths: inspection requires exactly one direct
+committed `toolchains/*.sources.json` matching the recipe digest, and uses
+the historical `toolchains/profiles-v1.json` path. It does not pin an LLVM
+version or accept an uncommitted lock/profile copy. Native declaration-based
+resolution remains M2; full snapshot/source validation still gates execution.
 
 ### Result: `aros-toolchain-result-v1`
 
@@ -301,7 +321,7 @@ Fixtures and rule ownership:
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
 Reserve `AX` for producer diagnostics. The first M1 library slice registers
-AX0101 and AX0102; all remaining codes below stay reserved until their actual
+AX0101, AX0102, AX0201 and AX0202; all remaining codes below stay reserved until their actual
 implementations land. The versioned contract records that exact subset.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,
@@ -331,7 +351,7 @@ opt-in, local and redacted. There is no remote telemetry.
 See [M0 acceptance evidence](toolchain-producer-baseline.md#m0-acceptance).
 These are fixture and source-review findings, not a new toolchain qualification.
 M0 was accepted through PR #37. Do not close M1–M8 or activate native producer
-declarations on that basis. The first M1 library slice does not supply a plan,
+declarations on that basis. The first M1 inspection slice does not supply a
 build driver or receipt-reuse implementation; its native recipe input/canonical
 output cap is 1 MiB and canonical nesting is limited to 64 levels. These are
 parser safety limits, not measured compiler resource defaults.

@@ -46,6 +46,7 @@ path = "src/main.rs"
 aros-board.workspace = true
 aros-cmake-engine.workspace = true
 aros-common.workspace = true
+aros-toolchain.workspace = true
 aros-release.workspace = true
 clap.workspace = true
 console.workspace = true
