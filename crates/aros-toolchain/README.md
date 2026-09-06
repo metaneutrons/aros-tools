@@ -29,6 +29,10 @@ fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
 Plans currently have `readiness: blocked`, even with complete resource options.
+The [legacy execution-view design](../../docs/toolchain-legacy-execution-view.md)
+explains why metadata-free material cannot yet be passed to the historical
+Git-aware driver. Its maintained Git fixtures establish an interface approach,
+not an implemented conversion, adapter or build-readiness result.
 Integrated execution snapshots, source capabilities, lock semantics, prerequisites/cache,
 executor origin, ownership and cancellation remain unqualified. A blocked
 inspection exits 0; invalid input exits 1 without a result. Neither a plan nor

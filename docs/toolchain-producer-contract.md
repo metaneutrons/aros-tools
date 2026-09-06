@@ -389,6 +389,12 @@ are rejected before any link is created. Failures retain evidence. Each role is
 independent, not a three-root transaction, phase receipt or execution permission.
 See the [snapshot limits](../crates/aros-toolchain/README.md#isolated-source-material-primitive).
 
+The unchanged legacy driver additionally requires real Git HEAD/tree/status
+queries in all three roots. Raw snapshots do not supply that interface. The
+[isolated execution-view design](toolchain-legacy-execution-view.md) records
+the tested shallow-object-store approach and the production gates still open.
+Its synthetic Git fixtures do not enable conversion or compiler execution.
+
 Remaining implementation gates include: private MetaMake fetch integration,
 trusted executor evidence, integrated snapshot/adapter lifecycle, actual four-host process
 and filesystem behavior, xz-library byte parity, archive resource limits, exact
