@@ -263,8 +263,11 @@ The separate lower-level `SourceSnapshot` now materializes one selected input
 under held run ownership, flattens recursive gitlinks without Git metadata and
 revalidates its exact raw inventory before/after durable no-clobber publication.
 It rejects unsafe link graphs and retains failed material without adoption.
+A consuming `LegacySourceView` now adds fresh shallow stores and independently
+checks their complete objects against those captured bytes; all metadata stays
+inside the exact material guard. No original Git metadata/history is copied.
 This does not complete the execution gate: integration across all selected
-roots, independent material/origin verification, and before/after execution
+roots, trusted origin/executor verification, and before/after execution
 checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
 
 ### Upstream compatibility is a capability check
