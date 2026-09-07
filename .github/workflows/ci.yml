@@ -5,7 +5,18 @@ on:
     types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [main]
+  schedule:
+    # A weekly native sweep catches runner/toolchain drift without charging
+    # every documentation-only pull request for four platform runners.
+    - cron: '41 3 * * 1'
   workflow_dispatch:
+    inputs:
+      platform_scope:
+        description: 'Host matrix for this explicit qualification run'
+        required: true
+        default: full
+        type: choice
+        options: [fast, full]
 
 permissions:
   contents: read
@@ -19,6 +30,56 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
+  platform-plan:
+    name: Plan host matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      scope: ${{ steps.plan.outputs.scope }}
+      reason: ${{ steps.plan.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve pull-request paths as bounded inert data
+        id: paths
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/changed-paths.txt"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo '::error::pull-request event has no bounded base/head identity'; exit 1;
+            }
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$output"
+          else
+            : > "$output"
+          fi
+          [[ ! -L "$output" && -f "$output" ]] || {
+            echo '::error::changed-path handoff is not a regular file'; exit 1;
+          }
+          echo "path=$output" >> "$GITHUB_OUTPUT"
+      - name: Select the host matrix
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGED_PATHS: ${{ steps.paths.outputs.path }}
+          DISPATCH_SCOPE: ${{ inputs.platform_scope || 'full' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/plan_ci_platform_matrix.py \
+            --event "$EVENT_NAME" \
+            --changed-paths "$CHANGED_PATHS" \
+            --dispatch-scope "$DISPATCH_SCOPE" \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-summary "$GITHUB_STEP_SUMMARY"
+
   commit-hygiene:
     name: Commit hygiene
     if: github.event_name == 'pull_request'
@@ -138,22 +199,10 @@ jobs:
 
   test:
     name: Tests (${{ matrix.name }})
+    needs: platform-plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-24.04
-            source_qualification: true
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-            source_qualification: false
-          - name: macos-x86_64
-            runner: macos-15-intel
-            source_qualification: false
-          - name: macos-aarch64
-            runner: macos-15
-            source_qualification: false
+      matrix: ${{ fromJSON(needs.platform-plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout aros-tools
