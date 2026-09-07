@@ -74,5 +74,6 @@ pub use toolchain_inventory::{
 };
 pub use toolchain_manifest::{
     parse_credential_free_https_url, ArosToolchainArtifact, ArosToolchainLock,
-    ArosToolchainManifest, ArosToolchainManifestEntry,
+    ArosToolchainManifest, ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE,
+    AROS_TOOLCHAIN_MANIFEST_SCHEMA,
 };

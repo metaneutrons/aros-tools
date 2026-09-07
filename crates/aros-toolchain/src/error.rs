@@ -110,6 +110,14 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn package(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerPackage,
+            message,
+            "inspect the retained package staging and explicitly selected candidate; do not alter the candidate or overwrite an existing package output",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,
