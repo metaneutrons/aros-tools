@@ -25,7 +25,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts/fixtures/toolchain-producer"
-TREE = ROOT / "crates/aros-cli/tests/fixtures/tree-digest-v1.fixture.json"
+TREE = ROOT / "crates/aros-common/tests/fixtures/tree-digest-v1.fixture.json"
 
 
 def digest(data: bytes) -> str:

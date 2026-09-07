@@ -33,6 +33,7 @@ pub mod publication;
 pub mod target;
 pub mod text;
 pub mod toolchain;
+pub mod toolchain_inventory;
 pub mod toolchain_manifest;
 
 pub use arch::Architecture;
@@ -67,6 +68,10 @@ pub use publication::{
 pub use target::{TargetProfile, TranspilerProfile};
 pub use text::read_source;
 pub use toolchain::Toolchain;
+pub use toolchain_inventory::{
+    normalized_toolchain_file_mode, toolchain_inventory_sha256, toolchain_tree_inventory,
+    toolchain_tree_inventory_excluding, ToolchainInventoryError,
+};
 pub use toolchain_manifest::{
     parse_credential_free_https_url, ArosToolchainArtifact, ArosToolchainLock,
     ArosToolchainManifest, ArosToolchainManifestEntry,
