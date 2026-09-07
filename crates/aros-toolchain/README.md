@@ -1,9 +1,10 @@
 # aros-toolchain
 
-TCP-M1 producer inspection and local legacy-preview execution behind
-`aros toolchain plan` and `aros toolchain build`, accepted as an experimental
-local-preview boundary. It is not a native compiler driver, release publisher
-or released management feature.
+TCP-M1 and TCP-M2 are accepted. TCP-M3 provides the controlled native local
+lifecycle behind `aros toolchain plan` and `aros toolchain build` when the
+selected producer publishes a matching `producer-executor-v1.toml`. It is not
+a package/release publisher and every successful local build remains a
+local-only candidate.
 
 Implemented:
 
@@ -12,13 +13,13 @@ Implemented:
 - bounded recipe input and canonical UTF-8 JSON self-digest verification;
 - the shared envelope with AX0101 (contract), AX0102 (identity), AX0201 (Git
   prerequisites), AX0202 (roots/resources), AX0301 (verified source cache),
-  AX0302 (source-use closure), AX0401 (controlled external environment) and
-  AX0801 (work ownership/state),
+  AX0302 (source-use closure), AX0401 (controlled external environment),
+  AX0501/AX0502/AX0503 (configure/compiler/collector) and AX0801 (state),
   without input-document dumps;
 - maintained native conformance/counter-probes against the independent M0
   encoding vectors. No second SHA-256 implementation or source-lock copy.
 
-The in-progress TCP-M2 library boundary additionally owns closed
+The accepted TCP-M2 library boundary owns closed
 `aros-toolchain-source-lock-v2` parsing, recipe/lock patch-closure binding,
 no-follow verification of every direct source-cache payload through
 `aros-fetch`, exact source-use ledgers and preparation of a fresh private host
@@ -27,25 +28,28 @@ Mako and MarkupSafe source archives, never invokes `pip`, and proves module
 version and private import origin with the selected host Python 3 interpreter.
 It retains the interpreter plus lock-verified package filename/hash/version/size
 observations for a later receipt rather than treating host site packages as proof.
-These are internal building blocks: native `toolchain plan`/`build`, source
-integration and the compiler lifecycle remain later M2/M3 work. The Cargo
+The Cargo
 vendor input is copied through no-follow descriptors into a fresh private tree,
 validated against every `.cargo-checksum.json` and the selected tools
 `Cargo.lock` closure, and supplied only by a generated offline Cargo home.
 The private MetaMake adapter accepts one source-lock archive
 from an explicitly identical cache root, records it once in a durable ledger,
 and rejects every other candidate before an upstream fetch script could run.
-The M2 environment builder clears inherited variables, retains only explicitly
-selected host tool directories, applies deterministic locale/time/archive/CMake
+The environment builder clears inherited variables, retains only explicitly
+selected host tool directories plus an explicit POSIX utility baseline, and
+applies deterministic locale/time/archive/CMake
 settings, reproduces the source/producer/tools/work compiler prefix maps, and
 retains the source-cache/tools/work Rust remaps for the later collector phase.
-No M2 helper runs an AROS build or alters an input cache.
+No input helper alters an input cache.
 
 The library also parses and binds the closed `producer-executor-v1.toml`
 selection document to its exact contract, recipe, lock and profile bytes. The
-current producer repository does not yet publish that declaration or executor
-origin evidence, so public native planning/execution deliberately stays disabled;
-binding a declaration is not evidence that this binary may run a compiler.
+currently selected official producer does not yet publish that declaration.
+Accordingly, native planning and execution reject that selection with AX0202;
+no declaration is guessed from historical producer state. Once a selected
+producer commits a matching declaration, native planning may inspect it and the
+local lifecycle may run. Declaration binding is still not origin evidence, so
+that result remains local-only.
 
 Recipe parsing performs no I/O. Planning inspects three explicit Git
 roots/commit/tree pairs, raw committed profile/lock/patch identities and
@@ -61,15 +65,15 @@ bounded trusted Git queries disable filters, fsmonitor, hooks, lazy
 fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
-Plans currently have `readiness: blocked`, even with complete resource options.
+Native plans bind a declared contract and profile and report `ready` only when
+the caller supplied `--offline`, disjoint work/output/cache roots and positive
+resource budgets. A plan never reserves those roots or verifies cache payload bytes; the
+lifecycle repeats all binding after reservation and performs those checks.
 The [legacy execution-view implementation](../../docs/toolchain-legacy-execution-view.md)
-is now consumed by the explicit local preview adapter. The adapter probes host
-prerequisites, requires a prepared offline cache, seals a sanitized child
-environment, runs the reviewed legacy driver with bounded cancellation and
-returns a measured local-only candidate. It does not attest executor origin,
-publish, resume or claim release readiness. A blocked
-inspection exits 0; invalid input exits 1 without a result. Neither a plan nor
-a valid self-digest grants build permission. The recursive read-only check
+remains an explicit historical adapter. Both paths are local-only: neither
+attests executor origin, publishes, resumes, or claims release readiness. A
+valid inspection exits 0; invalid input exits 1 without a result. Neither a
+plan nor a valid self-digest grants release permission. The recursive read-only check
 does not freeze a concurrently mutable tree, create an isolated snapshot,
 re-hash Git's object database independently, or establish trusted origin.
 It compares against the raw material returned by the selected local Git
@@ -120,8 +124,10 @@ Only the creating process may unlock; an inherited non-owner guard closes its
 own descriptor without releasing the parent's still-active lock.
 The lock guard exists before fallible marker construction, so partial setup
 failures receive the same fallback cleanup. There is no implicit resume,
-stale-state adoption, automatic cleanup, phase receipt or candidate publication. The caller-provided
-owner digest binds its chosen operation, not trusted executor origin. Locks and
+stale-state adoption, automatic cleanup or candidate publication. This primitive
+itself does not issue phase receipts; the native lifecycle writes its own
+retained receipt chain after completed phases. The caller-provided owner digest
+binds its chosen operation, not trusted executor origin. Locks and
 boundary checks do not sandbox a hostile process with the same user's access.
 
 The shared process runner now provides a one-way `CancellationToken` and bounded
@@ -131,10 +137,10 @@ cleanup. A stdin pipe closed by cancellation/timeout preserves that outcome
 and captured output; normal exit still requires complete input delivery.
 Unix pipe workers wait for OS readiness instead of imposing a fixed sleep on
 each temporary `WouldBlock`; the existing post-cleanup drain bound is unchanged.
-Other pipe/drain/cleanup failures remain errors. The frontend's signal handling,
-complete build deadline, source/executor readiness
-and isolated adapter still need integration before any compiler can launch.
-Guard tests and subprocess fixtures do not qualify a real toolchain build.
+Other pipe/drain/cleanup failures remain errors. The native lifecycle integrates
+the frontend bridge, complete build deadline, source/executor binding and
+isolated snapshots before a compiler can launch. Guard tests and subprocess
+fixtures still do not qualify a real toolchain build.
 
 ## Isolated source material primitive
 
@@ -226,15 +232,17 @@ the remaining execution gates must be integrated before enabling the driver.
 ## Current CLI scope
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
-The implemented plan requires explicit `--backend legacy-preview`; native
-fails before file reads. `toolchain build --backend legacy-preview` is the
-explicit experimental adapter and requires `--offline`; native execution,
-trusted executor origin and release qualification remain later gates. The
-required real Linux x86-64 and macOS AArch64 preview lanes, including local
-prefix verification through `toolchain verify --local`, are recorded as the
-M1 acceptance evidence. No extra executable is exposed. `aros-fetch` is added
-as a dependency only when native transport is actually implemented, not as an
-unused promise.
+`toolchain build` defaults to the native lifecycle and requires `--offline`, a
+prepared verified source cache, an exact declaration, fresh work/output roots,
+and explicit jobs/deadline. It invokes unchanged AROS `configure`, MetaMake's
+source-owned `crosstools-release` target and a hidden Rust fetch bridge that
+serves only declared cache payloads, then builds the exact vendored
+`aros-collect`. Every phase writes a canonical self-verifying receipt and the
+candidate removes producer-only LLVM configuration inputs before returning a
+measured collector. `legacy-preview` is explicit and remains only a historical
+diagnostic adapter. No extra executable is exposed. Trusted executor origin,
+receipt revalidation/resume, full candidate inventory, real host/profile
+evidence and release qualification remain later gates.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
 [delivery plan](../../docs/toolchain-producer-plan.md) and
@@ -245,7 +253,9 @@ Run the maintained native tests with:
 ```sh
 cargo test --locked -p aros-toolchain
 cargo test --locked -p aros-cli --test toolchain_plan_cli
+cargo test --locked -p aros-cli --test toolchain_fetch_bridge_cli
 ```
 
 The normal workspace test gate includes this library on each native CI host.
-No compiler build or full A/B matrix is needed for this non-executing change.
+The synthetic lifecycle test does not replace the two M3 real PC build
+diagnostics or a release qualification matrix.

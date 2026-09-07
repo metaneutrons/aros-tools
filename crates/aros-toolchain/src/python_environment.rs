@@ -76,6 +76,28 @@ impl PythonEnvironment {
         cache_root: &Path,
         destination: &Path,
     ) -> Result<Self, ContractError> {
+        let interpreter = find_interpreter()?;
+        Self::prepare_with_interpreter(lock, cache_root, destination, &interpreter)
+    }
+
+    /// Prepare the private runtime with one already observed host interpreter.
+    ///
+    /// Native lifecycle code uses this form so the interpreter that imports
+    /// lock-owned modules is identical to the interpreter recorded in host
+    /// preflight. The path is still canonicalized and version-probed here;
+    /// callers cannot substitute an unchecked string.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0401 under the same conditions as [`Self::prepare`], plus an
+    /// error when the caller-selected interpreter is not a usable Python 3
+    /// executable.
+    pub fn prepare_with_interpreter(
+        lock: &SourceLock,
+        cache_root: &Path,
+        destination: &Path,
+        interpreter: &PythonInterpreter,
+    ) -> Result<Self, ContractError> {
         verify_selected_package_contract(lock)?;
         if !cache_root.is_absolute() {
             return Err(ContractError::environment(
@@ -96,7 +118,7 @@ impl PythonEnvironment {
             ContractError::environment("cannot create private host Python environment directory")
         })?;
         ensure_private_directory(destination)?;
-        let interpreter = find_interpreter()?;
+        let interpreter = revalidate_interpreter(interpreter)?;
         let mut import_roots = Vec::with_capacity(lock.host_python_packages().len());
         let mut packages = Vec::with_capacity(lock.host_python_packages().len());
         for package in lock.host_python_packages() {
@@ -261,6 +283,40 @@ fn find_interpreter() -> Result<PythonInterpreter, ContractError> {
         .filter(|line| line.starts_with("Python 3."))
         .ok_or_else(|| ContractError::environment("selected host interpreter is not Python 3"))?
         .to_owned();
+    Ok(PythonInterpreter { path, version })
+}
+
+fn revalidate_interpreter(
+    expected: &PythonInterpreter,
+) -> Result<PythonInterpreter, ContractError> {
+    let path = fs::canonicalize(&expected.path).map_err(|_| {
+        ContractError::environment("selected host Python interpreter changed before preparation")
+    })?;
+    if !path.is_file() {
+        return Err(ContractError::environment(
+            "selected host Python interpreter is not a regular file",
+        ));
+    }
+    let mut command = Command::new(&path);
+    command.args(["-s", "-B", "--version"]);
+    let output =
+        run_output_with_timeout(&mut command, CAPTURE_LIMIT, PROBE_TIMEOUT).map_err(|_| {
+            ContractError::environment("cannot revalidate the selected host Python interpreter")
+        })?;
+    let version = output
+        .stdout
+        .exact_bytes()
+        .or_else(|| output.stderr.exact_bytes())
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(|text| text.lines().next())
+        .filter(|line| line.starts_with("Python 3."))
+        .ok_or_else(|| ContractError::environment("selected host interpreter is not Python 3"))?
+        .to_owned();
+    if path != expected.path || version != expected.version {
+        return Err(ContractError::environment(
+            "selected host Python interpreter changed after native preflight",
+        ));
+    }
     Ok(PythonInterpreter { path, version })
 }
 

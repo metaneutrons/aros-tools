@@ -1,63 +1,70 @@
 # Development handoff
 
-Checkpoint verified on 2026-09-06. This is a compact entry point, not a second
+Checkpoint verified on 2026-09-07. This is a compact entry point, not a second
 backlog, live CI dashboard or authorization to build, merge or publish.
 Recheck linked issues and runs before acting; replace stale checkpoint text
-instead of appending a session history. Git history preserves earlier versions.
+instead of appending session history. Git history preserves earlier versions.
 
 ## Last verified implementation checkpoint
 
-- Baseline: [`a0ca5bacd3550249f037f7a5b17dce380f263e75`](https://github.com/metaneutrons/aros-tools/commit/a0ca5bacd3550249f037f7a5b17dce380f263e75),
-  the regular squash merge of [PR #52](https://github.com/metaneutrons/aros-tools/pull/52).
-- M0 is [accepted](docs/toolchain-producer-baseline.md#m0-acceptance);
-  [M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29) remains open.
-- Read-only planning, owned work roots, raw snapshots, isolated legacy Git
-  views and their storage-failure tests are implemented. The views are library
-  primitives, not an integrated compiler adapter. Planning remains blocked;
-  ordinary downloaded-toolchain consumer commands are unchanged.
-- PR #52's [final-head integration](https://github.com/metaneutrons/aros-tools/actions/runs/34047346292),
-  four-host PR tests, package qualification, documentation and CodeQL passed.
-  Its merge's [Workspace CI](https://github.com/metaneutrons/aros-tools/actions/runs/34053399214),
-  [CodeQL](https://github.com/metaneutrons/aros-tools/actions/runs/34053399346)
-  and [Release Please](https://github.com/metaneutrons/aros-tools/actions/runs/34053399264)
-  also passed. These are recorded runs, not evidence for later changes.
+- Baseline: [`1a77bc1ad24180893410d353792a20f98c4b489d`](https://github.com/metaneutrons/aros-tools/commit/1a77bc1ad24180893410d353792a20f98c4b489d),
+  the merge of [PR #59](https://github.com/metaneutrons/aros-tools/pull/59),
+  which establishes the risk-based CI matrix.
+- TCP-M0, [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29)
+  and [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) are
+  accepted. [TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31)
+  is the active issue.
+- Branch `fix/tcp-m3-native-lifecycle` implements the native local lifecycle:
+  declaration-bound snapshots and cache, private locked Python/Cargo inputs,
+  source `configure`, source-owned `crosstools-release`, the internal verified
+  MetaMake fetch bridge, exact `aros-collect` installation, process-group
+  cancellation/deadlines and ordered self-verifying phase receipts. It produces
+  a local-only candidate; it has no packaging, publication or origin-attestation
+  authority.
+- The branch's local verification is green: `cargo check -p aros-toolchain -p
+  aros-cli`, `python3 scripts/toolchain_producer_contract_test.py`, the native
+  synthetic lifecycle test, executor tests, and CLI plan/fetch-bridge tests.
+  Re-run them after any change. These are not real compiler qualification.
 
-## Next implementation slice
+## Next bounded action
 
-Implement the executor-identity/origin and prerequisite/cache/environment
-readiness boundary before allowing a compiler start. Distinguish the running
-executor from the recipe-selected tools checkout; a self-declared digest is
-not trusted origin. Keep failure diagnostics and cancellation aligned with the
-existing shared boundaries.
+Finish and review the TCP-M3 implementation PR before changing
+`aros-toolchains`. The official producer currently has no committed
+`toolchains/producer-executor-v1.toml`; add it only after the merged tools
+commit is known, so its contract digest and `tools_commit` are measured rather
+than fabricated. Then run the two required real single-build PC diagnostics:
+Linux x86-64 and macOS AArch64. Do not run a complete A/B matrix for this
+milestone.
 
-Use [M1's acceptance criteria](docs/toolchain-producer-plan.md#tcp-m1--shared-library-boundary-and-cli-preview)
-and the [producer contract](docs/toolchain-producer-contract.md), not a copied
-checklist here. Adapter integration and real Linux x86-64/macOS AArch64 PC
-builds with verified prefix use remain subsequent acceptance work.
+Issue #31 remains open until it has the required receipt-revalidation/resume
+boundary, fault/resource coverage and the six requested host/profile reports.
+Do not claim M3 completion from the synthetic lifecycle or the two PC
+diagnostics alone.
 
 ## Resume safely
 
 1. Read applicable repository instructions and inspect the working tree before
    choosing a branch. Preserve unrelated changes and retained run directories.
-2. Recheck the [active issue](https://github.com/metaneutrons/aros-tools/issues/29),
+2. Recheck [issue #31](https://github.com/metaneutrons/aros-tools/issues/31),
    current PR heads and required checks. Never infer current completion from
-   an older handoff or reuse stale qualification for changed executable code.
+   this handoff or reuse stale qualification for changed executable code.
 3. Resolve source/producer identities from the versioned contracts. Do not
    substitute neighboring checkouts, moving branches or retained build output.
 4. Follow the [test-stage policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints).
-   Use one final-candidate integration checkpoint when required; do not repeat
-   expensive compiler/GRUB/A-B builds for documentation-only changes.
+   Use a final-candidate integration checkpoint only when required; do not
+   repeat expensive compiler/GRUB/A-B builds for documentation-only changes.
 
 ## Records and ownership
 
 - [Producer plan](docs/toolchain-producer-plan.md#9-repository-tracking-and-handoff):
   design, dependencies and acceptance criteria; issues own live execution state.
-- [Implementation scope](crates/aros-toolchain/README.md) and
+- [Implementation scope](crates/aros-toolchain/README.md),
+  [producer contract](docs/toolchain-producer-contract.md) and
   [legacy-view evidence and limits](docs/toolchain-legacy-execution-view.md):
   implemented guarantees, measured evidence and explicit omissions.
 - Keep raw logs, machine-specific paths, private operations notes and credential
   references outside Git in a stable private state directory, not a disposable
-  build directory. Keep an index and checksums there. Retained snapshots are
-  evidence, not resumable guards or permission to execute archived scripts.
+  build directory. Retained snapshots are evidence, not resumable guards or
+  permission to execute archived scripts.
 - This handoff is developer documentation in Git; it is not a public-site
   operations manual. Do not add hosting configuration or secrets here.

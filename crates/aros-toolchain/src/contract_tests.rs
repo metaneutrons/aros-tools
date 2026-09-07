@@ -297,6 +297,9 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerSources,
         DiagnosticCode::ProducerSourceUse,
         DiagnosticCode::ProducerEnvironment,
+        DiagnosticCode::ProducerConfigure,
+        DiagnosticCode::ProducerCompiler,
+        DiagnosticCode::ProducerCollector,
         DiagnosticCode::ProducerState,
     ]
     .iter()
@@ -317,6 +320,9 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerSources,
         DiagnosticCode::ProducerSourceUse,
         DiagnosticCode::ProducerEnvironment,
+        DiagnosticCode::ProducerConfigure,
+        DiagnosticCode::ProducerCompiler,
+        DiagnosticCode::ProducerCollector,
         DiagnosticCode::ProducerState,
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), code.to_string());

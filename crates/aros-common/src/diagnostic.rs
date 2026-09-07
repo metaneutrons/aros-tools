@@ -28,6 +28,15 @@ pub enum DiagnosticCode {
     /// Producer-controlled external build environment failure.
     #[serde(rename = "AX0401")]
     ProducerEnvironment,
+    /// Producer-controlled upstream configure phase failure.
+    #[serde(rename = "AX0501")]
+    ProducerConfigure,
+    /// Producer-controlled upstream compiler/runtime phase failure.
+    #[serde(rename = "AX0502")]
+    ProducerCompiler,
+    /// Producer-controlled exact collector phase failure.
+    #[serde(rename = "AX0503")]
+    ProducerCollector,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
@@ -231,6 +240,9 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerSources => "AX0301",
             Self::ProducerSourceUse => "AX0302",
             Self::ProducerEnvironment => "AX0401",
+            Self::ProducerConfigure => "AX0501",
+            Self::ProducerCompiler => "AX0502",
+            Self::ProducerCollector => "AX0503",
             Self::ProducerState => "AX0801",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",

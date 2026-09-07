@@ -1,11 +1,9 @@
-//! Experimental, local-only legacy producer execution.
+//! Local-only producer execution dispatch.
 //!
-//! This module is the narrow M1 adapter boundary.  It performs the complete
-//! read-only inspection first, reserves fresh work/output roots, materializes
-//! metadata-free source snapshots plus independent legacy Git views, and only
-//! then invokes the reviewed producer driver.  The child receives a controlled
-//! environment and is always run through the shared bounded process runner.
-//! A successful local run is not a release attestation and never publishes.
+//! Native execution is a controlled M3 lifecycle. The retained M1 adapter is
+//! selected only through explicit `legacy-preview` and remains a historical
+//! diagnostic path. Both use explicit inputs and bounded process control; a
+//! successful local run is never a release attestation or publication.
 
 use std::fs;
 use std::io::Write;
@@ -27,10 +25,10 @@ use crate::{ContractError, Recipe};
 const CAPTURE_LIMIT: usize = 256 * 1024;
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Explicit inputs for one local legacy-preview build.
+/// Explicit inputs for one local native or legacy-preview build.
 #[derive(Debug, Clone)]
 pub struct BuildRequest {
-    /// Backend must be selected explicitly; no native fallback exists yet.
+    /// Backend must be selected explicitly; no fallback exists.
     pub backend: Backend,
     /// Producer profile name.
     pub preset: String,
@@ -52,10 +50,15 @@ pub struct BuildRequest {
     pub jobs: u64,
     /// Whole operation deadline.
     pub timeout_seconds: u64,
-    /// Legacy preview currently requires prepared offline inputs.
+    /// Both execution backends require prepared offline inputs.
     pub offline: bool,
     /// Explicit local candidate identifier; it is never a publication target.
     pub release_id: String,
+    /// Exact frontend executable exposing the private MetaMake fetch bridge.
+    ///
+    /// Native execution requires this value. The CLI supplies its own binary;
+    /// the legacy preview never reads it.
+    pub fetch_bridge: Option<PathBuf>,
 }
 
 struct PreparedInputs {
@@ -71,6 +74,8 @@ pub struct BuildResult {
     pub schema: &'static str,
     /// Completed operation.
     pub operation: &'static str,
+    /// Explicit backend that completed the candidate.
+    pub backend: Backend,
     /// Identity and executor observation.
     pub identity: Identity,
     /// Canonical owned output root.
@@ -80,6 +85,10 @@ pub struct BuildResult {
     /// Explicit readiness and verification claims.
     pub evidence: Vec<Evidence>,
     /// Measured host tools used by the sanitized child environment.
+    ///
+    /// This is retained for the in-process caller and receipt construction;
+    /// it is not an undeclared field of `aros-toolchain-result-v1`.
+    #[serde(skip_serializing)]
     pub environment: Vec<ToolObservation>,
     /// Local candidates never qualify as releases.
     pub qualification: &'static str,
@@ -92,6 +101,8 @@ pub struct BuildResult {
 pub struct Output {
     /// Safe relative path.
     pub path: String,
+    /// Output representation within the selected phase/result root.
+    pub kind: &'static str,
     /// File SHA-256.
     pub sha256: Sha256Digest,
     /// Measured byte length.
@@ -120,9 +131,26 @@ pub fn run(
     request: &BuildRequest,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
+    match request.backend {
+        Backend::Native => {
+            #[cfg(unix)]
+            return crate::native_lifecycle::run(request, cancellation);
+            #[cfg(not(unix))]
+            return Err(ContractError::state(
+                "native toolchain lifecycle requires a supported Unix host",
+            ));
+        }
+        Backend::LegacyPreview => run_legacy(request, cancellation),
+    }
+}
+
+fn run_legacy(
+    request: &BuildRequest,
+    cancellation: &CancellationToken,
+) -> Result<BuildResult, ContractError> {
     if request.backend != Backend::LegacyPreview {
         return Err(ContractError::invalid(
-            "native toolchain execution is not implemented; select --backend legacy-preview explicitly",
+            "legacy execution requires --backend legacy-preview explicitly",
         ));
     }
     if !request.offline {
@@ -395,6 +423,7 @@ fn run_owned_inner(
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
+        backend: request.backend,
         identity: plan.identity.clone(),
         output_root,
         outputs,
@@ -663,6 +692,7 @@ fn collect_outputs_inner(
                 .map_err(|_| ContractError::state("cannot hash retained producer output"))?;
             output.push(Output {
                 path: relative.replace(std::path::MAIN_SEPARATOR, "/"),
+                kind: "file",
                 sha256: measured.digest,
                 size: measured.size,
             });

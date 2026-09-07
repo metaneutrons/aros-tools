@@ -30,7 +30,7 @@ pub struct PlanArgs {
     /// Exact recipe-selected tools/collector checkout root
     #[arg(long)]
     tools_dir: PathBuf,
-    /// native is not implemented; legacy-preview requires explicit selection
+    /// Native is the default; legacy-preview requires explicit selection
     #[arg(long, default_value = "native", value_parser = parse_backend)]
     backend: Backend,
     /// Proposed work root; not created or reserved

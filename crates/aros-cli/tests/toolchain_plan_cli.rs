@@ -14,6 +14,60 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn enable_native(&mut self) {
+        let patch_path = "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff";
+        fs::create_dir_all(self.root.join("source/tools/crosstools/llvm")).unwrap();
+        fs::write(
+            self.root.join("source").join(patch_path),
+            b"fixture native patch\n",
+        )
+        .unwrap();
+        self.recipe["patches"] = json!([{
+            "path": patch_path,
+            "sha256": sha256_bytes(b"fixture native patch\n"),
+        }]);
+        self.recommit("source");
+        let lock = serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
+            "sources": [{
+                "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
+                "patch": patch_path,
+                "filename": "llvm-11.0.0.src.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
+                "sha256": "a".repeat(64), "size": 1
+            }],
+            "host_python_packages": [
+                {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": "b".repeat(64), "size": 1, "source_root": "mako", "python_path": "."},
+                {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": "c".repeat(64), "size": 1, "source_root": "markupsafe", "python_path": "."}
+            ]
+        }))
+        .unwrap();
+        let contract = b"fixture native contract\n";
+        fs::create_dir_all(self.root.join("tools/contracts")).unwrap();
+        fs::write(
+            self.root.join("tools/contracts/toolchain-producer-v1.toml"),
+            contract,
+        )
+        .unwrap();
+        self.recommit("tools");
+        fs::write(
+            self.root
+                .join("producer/toolchains/arbitrary-version.sources.json"),
+            &lock,
+        )
+        .unwrap();
+        fs::write(
+            self.root.join("producer/toolchains/producer-executor-v1.toml"),
+            format!(
+                "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"toolchains/arbitrary-version.sources.json\"\nprofiles = \"toolchains/profiles-v1.json\"\n",
+                sha256_bytes(contract),
+                self.recipe["tools_commit"].as_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        self.recipe["source_lock_sha256"] = json!(sha256_bytes(&lock));
+        self.recommit("producer");
+    }
+
     fn recommit(&mut self, name: &str) {
         let checkout = self.root.join(name);
         git(&checkout, &["add", "."]);
@@ -105,6 +159,10 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
+        self.command_with_backend("legacy-preview")
+    }
+
+    fn command_with_backend(&self, backend: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
         command
             .current_dir(&self.root)
@@ -117,13 +175,13 @@ impl Fixture {
                 "toolchain",
                 "plan",
                 "--format=json",
-                "--backend=legacy-preview",
                 "--preset=pc-x86_64",
                 "--recipe=recipe.json",
                 "--source-dir=source",
                 "--producer-dir=producer",
                 "--tools-dir=tools",
             ]);
+        command.arg(format!("--backend={backend}"));
         command
     }
 
@@ -640,7 +698,7 @@ fn aliases_are_resolved_for_ownership_but_input_links_and_fifos_are_refused() {
 }
 
 #[test]
-fn native_default_fails_before_discovering_or_opening_paths() {
+fn native_default_requires_real_selected_inputs_without_creating_paths() {
     let temporary = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_aros"))
         .current_dir(temporary.path())
@@ -658,8 +716,78 @@ fn native_default_fails_before_discovering_or_opening_paths() {
         ])
         .output()
         .unwrap();
-    failure(&output, "AX0101");
+    failure(&output, "AX0202");
     assert!(fs::read_dir(temporary.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn native_plan_binds_its_declared_contract_without_mutation() {
+    let mut fixture = Fixture::new();
+    fixture.enable_native();
+    let before = inventory(&fixture.root);
+    let output = fixture.command_with_backend("native").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(inventory(&fixture.root), before);
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["backend"], "native");
+    assert_eq!(plan["readiness"], "incomplete");
+    assert_eq!(
+        plan["steps"],
+        json!([
+            "preflight",
+            "sources",
+            "environment",
+            "configure",
+            "compiler",
+            "collector"
+        ])
+    );
+    assert_eq!(
+        plan["identity"]["executor"]["tools_commit"],
+        fixture.recipe["tools_commit"]
+    );
+    assert!(plan["identity"]["executor"]["contract_sha256"].is_string());
+}
+
+#[test]
+fn native_plan_requires_offline_policy_before_reporting_ready() {
+    let mut fixture = Fixture::new();
+    fixture.enable_native();
+    let mut command = fixture.command_with_backend("native");
+    command.args([
+        "--work-dir=work",
+        "--output-dir=output",
+        "--cache-dir=cache",
+        "--jobs=1",
+        "--timeout-seconds=60",
+    ]);
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["readiness"], "incomplete");
+    assert!(plan["findings"].as_array().unwrap().iter().any(|finding| {
+        finding["message"] == "Native execution requires the explicit offline policy."
+    }));
+
+    let output = fixture
+        .command_with_backend("native")
+        .args([
+            "--work-dir=work",
+            "--output-dir=output",
+            "--cache-dir=cache",
+            "--jobs=1",
+            "--timeout-seconds=60",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["readiness"], "ready");
 }
 
 #[test]

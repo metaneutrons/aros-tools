@@ -16,6 +16,8 @@ mod filesystem;
 mod inspection;
 pub mod metamake_fetch;
 pub mod native_declaration;
+#[cfg(unix)]
+mod native_lifecycle;
 pub mod plan;
 pub mod preflight;
 pub mod producer_environment;

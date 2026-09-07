@@ -1,6 +1,7 @@
 # Toolchain producer integration: architecture and delivery plan
 
-Status: producer implementation authorized; M0 accepted on 2026-09-06.
+Status: producer implementation authorized; M0, M1 and M2 accepted. TCP-M3 is
+in implementation and is not accepted.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
 percentage estimate. The plan distinguishes the implemented local preview
@@ -12,12 +13,15 @@ or the initial tools release. The extension is planned, not implemented.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The M1 acceptance evidence is recorded below and its formal issue is
-[TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29). The next
-implementation gate is [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30).
+[TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
+[TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) is accepted;
+the active implementation gate is
+[TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31).
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
 its completed contract freeze. M1's experimental plan/CLI slice is now
-complete for its local-preview acceptance boundary; native lifecycle,
-source-readiness and release gates remain explicitly assigned to M2–M7.
+complete for its local-preview acceptance boundary. Native lifecycle work is
+now explicitly assigned to M3; source-readiness remains accepted M2 scope and
+release gates remain assigned to M4–M7.
 
 The current M1 implementation now also exposes an explicit local
 `toolchain build --backend legacy-preview` adapter. It reuses the plan
@@ -601,13 +605,13 @@ local-preview boundary; no native or release claim is implied.
 
 ### TCP-M2 — Native input and environment contracts
 
-- [ ] Implement recipe/lock/profile parsing, identity checks, preflight and
+- [x] Implement recipe/lock/profile parsing, identity checks, preflight and
   capability diagnostics; clean snapshots include recursive source material.
-- [ ] Use `aros-fetch` through a reviewed API boundary for verified acquisition;
+- [x] Use `aros-fetch` through a reviewed API boundary for verified acquisition;
   implement the locked MetaMake fetch adapter and exact source-use accounting.
-- [ ] Prepare the selected Rust vendor tree and private host Python runtime,
+- [x] Prepare the selected Rust vendor tree and private host Python runtime,
   with an explicit, sanitized execution environment and preserved prefix maps.
-- [ ] Cover stale/poisoned caches, missing hashes, undeclared sources/patches,
+- [x] Cover stale/poisoned caches, missing hashes, undeclared sources/patches,
   mutated checkouts, wrong executor, unsupported source contracts and offline
   cache misses. Verify that none reaches compiler execution.
 
@@ -615,7 +619,15 @@ Exit evidence: native preflight/source tests on all four hosts; locked offline
 fixtures prove controlled network paths cannot be used. Do not claim an OS
 sandbox unless it has independent platform evidence.
 
+Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55)
+at `89245f082f3e55a063d24d28b8b70425c5d2cbca`.
+
 ### TCP-M3 — Native build lifecycle
+
+Implementation status: the controlled local lifecycle and synthetic contract
+tests are in active review. The unchecked acceptance criteria, notably receipt
+revalidation/resume, fault coverage and six real host/profile runs, remain
+mandatory before issue #31 can close.
 
 - [ ] Implement configure, crosstools-release and exact-collector phases;
   preserve existing target flags, aliases, runtime closure and normalization
@@ -866,7 +878,7 @@ tracking change.
 | --- | --- | --- |
 | TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | [Accepted evidence](toolchain-producer-baseline.md#m0-acceptance) |
 | TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | [Measured local lane evidence](#measured-tcp-m1-local-lane-evidence-2026-09-06) |
-| TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Pending |
+| TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55) |
 | TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | Pending |
 | TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | Pending |
 | TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | Pending |
