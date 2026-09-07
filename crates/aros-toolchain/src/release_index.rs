@@ -5,7 +5,7 @@
 //! makes the pre-attestation/final checksum boundary explicit.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -638,15 +638,14 @@ fn checksums_bytes(directory: &Path, names: &BTreeSet<String>) -> Result<Vec<u8>
 }
 
 fn publish_new(path: &Path, bytes: &[u8]) -> Result<(), ContractError> {
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| ContractError::index("cannot create absent release inventory output"))?;
-    output
-        .write_all(bytes)
-        .and_then(|()| output.sync_all())
-        .map_err(|_| ContractError::index("cannot synchronize release inventory output"))?;
+    let staged = stage_bytes(path, bytes)?;
+    fs::hard_link(staged.path(), path).map_err(|_| {
+        ContractError::index("cannot atomically create absent release inventory output")
+    })?;
+    sync_parent(path)?;
+    staged
+        .close()
+        .map_err(|_| ContractError::index("cannot remove release inventory staging file"))?;
     sync_parent(path)
 }
 
@@ -656,17 +655,7 @@ fn replace_existing(path: &Path, expected: &[u8], desired: &[u8]) -> Result<(), 
             "release checksums changed before finalization",
         ));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| ContractError::index("release checksum path has no parent"))?;
-    let mut staged = tempfile::Builder::new()
-        .prefix(".aros-toolchain-index-stage-")
-        .tempfile_in(parent)
-        .map_err(|_| ContractError::index("cannot reserve release checksum staging file"))?;
-    staged
-        .write_all(desired)
-        .and_then(|()| staged.as_file().sync_all())
-        .map_err(|_| ContractError::index("cannot synchronize final release checksums"))?;
+    let staged = stage_bytes(path, desired)?;
     if read_metadata(path, "release checksums")? != expected {
         return Err(ContractError::index(
             "release checksums changed before atomic finalization",
@@ -676,6 +665,21 @@ fn replace_existing(path: &Path, expected: &[u8], desired: &[u8]) -> Result<(), 
         .persist(path)
         .map_err(|_| ContractError::index("cannot atomically replace final release checksums"))?;
     sync_parent(path)
+}
+
+fn stage_bytes(path: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, ContractError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ContractError::index("release output path has no parent"))?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".aros-toolchain-index-stage-")
+        .tempfile_in(parent)
+        .map_err(|_| ContractError::index("cannot reserve release inventory staging file"))?;
+    staged
+        .write_all(bytes)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|_| ContractError::index("cannot synchronize release inventory staging file"))?;
+    Ok(staged)
 }
 
 fn sync_parent(path: &Path) -> Result<(), ContractError> {
