@@ -9,7 +9,28 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED = {"aros-common", "aros-fetch", "serde", "serde_json", "thiserror", "toml", "rustix", "tempfile", "tracing"}
+# This is a closed architectural allow-list, not an unrestricted crates.io
+# exception. M2 adds only bounded parsing, archive, no-follow locking and
+# prerequisite-discovery primitives; producer lifecycle/publication owners
+# remain forbidden below.
+ALLOWED = {
+    "aros-common",
+    "aros-fetch",
+    "flate2",
+    "fs2",
+    "rustix",
+    "semver",
+    "serde",
+    "serde_json",
+    "tar",
+    "tempfile",
+    "thiserror",
+    "tokio",
+    "toml",
+    "tracing",
+    "url",
+    "which",
+}
 
 
 def dependency_names(manifest: dict, workspace: dict) -> set[str]:

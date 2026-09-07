@@ -221,6 +221,9 @@ fn collector_rustflags(source_cache: &Path, tools: &Path, work: &Path) -> String
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Duration;
+
+    use aros_common::run_output_with_timeout;
 
     use super::{ProducerEnvironment, ReproducibilityRoots};
 
@@ -268,7 +271,11 @@ mod tests {
         ));
         let mut command = std::process::Command::new("/usr/bin/env");
         environment.apply_to(&mut command);
-        let output = String::from_utf8(command.output().unwrap().stdout).unwrap();
+        let output =
+            run_output_with_timeout(&mut command, 16 * 1024, Duration::from_secs(10)).unwrap();
+        assert!(!output.timed_out);
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec()).unwrap();
         assert!(output.contains("LC_ALL=C"));
         assert!(output.contains("SOURCE_DATE_EPOCH=1700000000"));
         assert!(output.contains("CMAKE_BUILD_PARALLEL_LEVEL=4"));
