@@ -86,6 +86,30 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn configure(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerConfigure,
+            message,
+            "inspect the retained configure work and phase log; do not reuse the compilation root or bypass the selected source contract",
+        )
+    }
+
+    pub(crate) fn compiler(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCompiler,
+            message,
+            "inspect the retained compiler work and phase log; do not adopt a partial compiler tree as a successful candidate",
+        )
+    }
+
+    pub(crate) fn collector(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCollector,
+            message,
+            "inspect the retained collector work and phase log; restore the exact tools snapshot and verified vendor closure before retrying in fresh roots",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

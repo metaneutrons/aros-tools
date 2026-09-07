@@ -61,6 +61,24 @@ impl NativeExecutorDeclaration {
         &self.0.source_lock
     }
 
+    /// Tools-relative contract path whose committed bytes are bound below.
+    #[must_use]
+    pub fn contract_path(&self) -> &str {
+        &self.0.contract_path
+    }
+
+    /// Declared digest of the selected tools contract document.
+    #[must_use]
+    pub const fn contract_sha256(&self) -> &Sha256Digest {
+        &self.0.contract_sha256
+    }
+
+    /// Stable identifier of this closed contract format.
+    #[must_use]
+    pub fn contract_id(&self) -> &str {
+        &self.0.contract_id
+    }
+
     /// Producer-relative profiles path; it is not an arbitrary local path.
     #[must_use]
     pub fn profiles_path(&self) -> &str {

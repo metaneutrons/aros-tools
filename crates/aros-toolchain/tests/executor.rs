@@ -116,6 +116,7 @@ printf '%s\n' 'isolated adapter output' > "$output/candidate.txt"
             timeout_seconds: 60,
             offline: true,
             release_id: "local-fixture".into(),
+            fetch_bridge: None,
         }
     }
 }

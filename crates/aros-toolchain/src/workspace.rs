@@ -13,7 +13,7 @@ use std::path::Path;
 
 use aros_common::{CancellationToken, Sha256Digest};
 
-use crate::plan::{self, Backend, Paths, PlanRequest};
+use crate::plan::{self, Paths, PlanRequest};
 use crate::ContractError;
 
 #[cfg(unix)]
@@ -59,11 +59,6 @@ impl RunDirectories {
         owner: &Sha256Digest,
         cancellation: &CancellationToken,
     ) -> Result<Self, ContractError> {
-        if request.backend != Backend::LegacyPreview {
-            return Err(ContractError::invalid(
-                "native execution is not implemented",
-            ));
-        }
         plan::validate_resources(request)?;
         if request.work_dir.is_none()
             || request.output_dir.is_none()

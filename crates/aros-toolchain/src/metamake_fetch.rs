@@ -276,6 +276,60 @@ impl SourceUseLedger {
         })
     }
 
+    /// Reopen one previously created ledger for a controlled bridge invocation.
+    ///
+    /// The native lifecycle creates the ledger before starting `make`. Each
+    /// source-owned MetaMake child then reopens that exact no-follow regular
+    /// file to append one resolved payload. This does not adopt arbitrary
+    /// historic state: callers must have reserved the enclosing work root and
+    /// created the ledger in the same operation before any child starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0302 when the selected path is not an existing direct,
+    /// bounded regular file below an absolute real directory.
+    pub fn open(path: &Path) -> Result<Self, ContractError> {
+        let parent = path.parent().ok_or_else(|| {
+            ContractError::source_use("source-use ledger has no parent directory")
+        })?;
+        let leaf = path.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+            ContractError::source_use("source-use ledger has no portable UTF-8 filename")
+        })?;
+        if !portable_basename(leaf) || !parent.is_absolute() {
+            return Err(ContractError::source_use(
+                "source-use ledger must be an absolute direct path with a portable filename",
+            ));
+        }
+        let parent = canonical_system_parent(parent)?;
+        let parent_file = open_directory(&parent).map_err(|_| {
+            ContractError::source_use("source-use ledger parent is not a real directory")
+        })?;
+        let file = File::from(
+            rfs::openat(
+                &parent_file,
+                leaf,
+                OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| ContractError::source_use("cannot safely open source-use ledger"))?,
+        );
+        let metadata = rfs::fstat(&file)
+            .map_err(|_| ContractError::source_use("cannot inspect source-use ledger"))?;
+        if !rfs::FileType::from_raw_mode(metadata.st_mode).is_file()
+            || metadata.st_size < 0
+            || u64::try_from(metadata.st_size)
+                .ok()
+                .is_none_or(|size| size > MAX_LEDGER_BYTES)
+        {
+            return Err(ContractError::source_use(
+                "source-use ledger is not a bounded regular file",
+            ));
+        }
+        Ok(Self {
+            path: parent.join(leaf),
+        })
+    }
+
     /// Record one lock-selected payload exactly once.
     ///
     /// A bounded advisory lock serializes concurrent `make` children. The
@@ -459,7 +513,9 @@ mod tests {
         .unwrap();
         let selected = invocation.resolve(&lock(bytes), &cache).unwrap();
         assert_eq!(selected.filename(), "llvm-11.0.0.src.tar.xz");
-        let ledger = SourceUseLedger::create(&temporary.path().join("use.log")).unwrap();
+        let path = temporary.path().join("use.log");
+        let ledger = SourceUseLedger::create(&path).unwrap();
+        let ledger = SourceUseLedger::open(ledger.path()).unwrap();
         ledger.record(&selected).unwrap();
         ledger.verify_complete(&lock(bytes)).unwrap();
         assert_eq!(

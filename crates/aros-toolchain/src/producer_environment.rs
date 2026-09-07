@@ -72,7 +72,7 @@ impl ProducerEnvironment {
                 "native producer environment requires distinct reproducibility and cache roots",
             ));
         }
-        let path = sanitized_path(tool_directories)?;
+        let path = sanitized_path_with_platform_utilities(tool_directories)?;
         let prefix_maps = prefix_maps(&source, &producer, &tools, &work);
         let collector_rustflags = collector_rustflags(&source_cache, &tools, &work);
         Ok(Self {
@@ -146,7 +146,9 @@ fn canonical_compiler_root(path: &Path, label: &str) -> Result<PathBuf, Contract
     Ok(canonical)
 }
 
-fn sanitized_path(tool_directories: &[PathBuf]) -> Result<OsString, ContractError> {
+fn sanitized_path_with_platform_utilities(
+    tool_directories: &[PathBuf],
+) -> Result<OsString, ContractError> {
     if tool_directories.is_empty() {
         return Err(ContractError::environment(
             "native producer environment requires at least one explicit tool directory",
@@ -162,6 +164,17 @@ fn sanitized_path(tool_directories: &[PathBuf]) -> Result<OsString, ContractErro
             ));
         }
         ordered.push(directory);
+    }
+    // Configure and MetaMake are source-owned programs and invoke the
+    // portable POSIX utility set directly. Keep that base explicit rather
+    // than inheriting the caller's full PATH. Canonical de-duplication here
+    // applies only to the fixed platform additions; duplicate user-selected
+    // tool directories above remain a contract error.
+    for utility in [Path::new("/usr/bin"), Path::new("/bin")] {
+        let utility = canonical_compiler_root(utility, "required platform utility directory")?;
+        if selected.insert(utility.clone()) {
+            ordered.push(utility);
+        }
     }
     std::env::join_paths(ordered).map_err(|_| {
         ContractError::environment("native producer environment cannot encode its sanitized PATH")

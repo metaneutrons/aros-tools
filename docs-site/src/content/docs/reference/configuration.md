@@ -159,8 +159,11 @@ link state and should not be set in routine or release builds.
 `XDG_CONFIG_HOME` supplies the preferred board-config root, `PATH` is searched
 only for a complete version-matched build-tool suite when no
 `AROS_BUILD_TOOLS_DIR` is set, and `CARGO` selects the Cargo executable for the
-explicit `aros build-tools build` source workflow. These ambient variables do
-not replace checkout locks, source identities, or artifact digests.
+explicit `aros build-tools build` source workflow. `RUSTUP_HOME`, when it is an
+absolute existing directory, supplies the installed Rust toolchain store to an
+isolated local toolchain-producer collector build; its Cargo configuration and
+registry remain private and lock-verified. These ambient variables do not
+replace checkout locks, source identities, or artifact digests.
 
 ### Qualification-only variables
 

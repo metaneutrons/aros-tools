@@ -1,14 +1,13 @@
 # Native toolchain producer contract (TCP-M0)
 
-Status: M1 accepted as an experimental local-preview boundary. Recipe validation,
-`plan --backend legacy-preview` inspection, the explicit local
-`build --backend legacy-preview` adapter and lower-level directory guards/
-shared cancellation exist. Recursive raw worktree/index/submodule inspection
-is implemented. The adapter now probes prerequisites/cache, creates isolated
-views, sanitizes the child environment and reports bounded cancellation;
-integrated native execution, resumable state and trusted origin verification do
-not. Those are later milestone gates, not M1 acceptance requirements. This
-document also specifies future commands, not all available to users. See the
+Status: M1 and M2 are accepted. M3 now implements a controlled local native
+lifecycle after declaration binding: isolated committed snapshots, verified
+offline source cache, private Python/Cargo environments, source `configure`,
+source-owned `crosstools-release`, the exact collector build and durable phase
+receipts. Recursive raw worktree/index/submodule inspection remains mandatory.
+Trusted executor-origin verification, receipt revalidation/resume, a complete
+candidate inventory and real host/profile evidence remain M3 gates. This
+document distinguishes implemented commands from later contractual decisions. See the
 [library's exact limits](../crates/aros-toolchain/README.md) and implemented
 [command reference](../docs-site/src/content/docs/reference/cli.md).
 [Epic #27](https://github.com/metaneutrons/aros-tools/issues/27) tracks delivery;
@@ -86,13 +85,15 @@ or compiler-timeout default. The deadline covers the whole operation and is
 propagated as remaining time to children. M1 evidence may justify a later,
 reviewed default; nested build tools must not multiply the job budget.
 
-`--backend native` is the eventual default. Before native support exists,
-building requires explicit `--backend legacy-preview`; unsupported selections
-fail before side effects. Never automatically choose an old script after a
-native failure. The current preview requires `--offline`, an existing prepared
-cache and an explicit release-id for a local candidate. Remove the experimental
-adapter at M6, with documented update guidance, rather than keeping an
-indefinite second implementation.
+`--backend native` is the default. It requires a selected committed
+`producer-executor-v1.toml` whose contract, tools commit, source lock and
+profiles bind exactly to the recipe. It then requires `--offline`, a verified
+prepared cache, fresh work/output roots, positive jobs/deadline and the
+frontend's internal verified MetaMake bridge. It runs only unchanged source
+programs (`configure` and `crosstools-release`) inside the controlled Rust
+lifecycle. `legacy-preview` remains explicit; never automatically choose it
+after a native failure. Remove the historical adapter at M6 with documented
+update guidance rather than keeping an indefinite second implementation.
 
 `plan` may omit output/resource choices; their fields are null and readiness is
 `incomplete`. It does not fetch, execute source scripts, bootstrap helpers,
@@ -105,9 +106,10 @@ an inspection result, not a promise that an ensuing build will succeed.
 Build revalidates every selection after acquiring locks. `--offline` (including
 the existing `AROS_OFFLINE` policy) prohibits producer-controlled network use;
 compilation always uses prepared, verified inputs. No new ambient source,
-recipe, compiler-flag or credential overrides are introduced. `--resume` is
-explicit, local-only and rejects foreign or invalid receipts. Release jobs
-always select fresh work/install roots and no compiled-object cache.
+recipe, compiler-flag or credential overrides are introduced. The current CLI
+does not expose `--resume`: retained receipts are audit evidence only until a
+reviewed revalidation-and-resume implementation exists. Release jobs always
+select fresh work/install roots and no compiled-object cache.
 
 The implemented M1 preview accepts the explicit `build --backend legacy-preview`
 surface. It probes `git`, Python, CMake, Rust/Cargo and make before reservation,
@@ -121,6 +123,20 @@ reaps the process group. Partial or complete material is retained on every
 failure. A successful local result measures regular output files and host-tool
 versions, marks `qualification` as `local-only`, and records executor origin as
 `not-run`; it cannot publish or satisfy release provenance.
+
+The implemented M3 native path preserves the upstream build boundary rather
+than translating it: after new ownership reservations and three isolated
+committed snapshots, it rebinds the producer declaration, checks exact cached
+sources, prepares the locked Python and Cargo environments, then invokes AROS
+`configure` and its `crosstools-release` target. The only MetaMake download
+entry is a hidden Rust bridge in the same `aros` binary; it resolves a declared
+cache payload, records it in the durable source-use ledger, and only then calls
+the unchanged upstream helper. The lifecycle builds the declared vendored
+`aros-collect`, installs the collector aliases, removes producer-only LLVM
+configuration inputs and writes an ordered canonical receipt chain. Child
+processes use the one whole-operation deadline and process-group cancellation;
+phase logs and all owned material are retained on failure. It has no package,
+publication, attestation or release authority.
 
 Low-level commands use `aros toolchain producer <operation>`. Common result and
 diagnostic options apply to all. Required options are frozen as follows:
@@ -203,7 +219,7 @@ shape with warnings/errors and hints. A valid inspection may report blocked
 readiness with exit 0; execution must refuse it. No filesystem reservation is
 encoded in a plan. JSON result is one complete document plus newline.
 
-The initial M1 inspector always returns `blocked` for valid inspected inputs:
+The legacy M1 inspector returns `blocked` for valid inspected inputs:
 it checks root commit/tree identities, selected raw committed metadata, root
 overlaps and complete recursive raw worktree/index material. The latter rejects
 dirty, ignored, untracked, missing, wrong-mode and changed/uninitialized
@@ -213,8 +229,11 @@ object-database integrity audit or trusted origin proof; it cannot freeze a
 concurrently mutable checkout. Source capabilities, lock semantics,
 prerequisites/cache and executor/build lifecycle remain gates.
 `network_isolation: fetch-guard` is the selected future legacy policy, not an
-active OS isolation claim. Native selection fails before filesystem reads;
-no native declaration or driver is guessed from a historical recipe.
+active OS isolation claim. Native selection reads only the matching committed
+declaration and its bound inputs; it never guesses a declaration or driver from
+historical producer state. Native readiness is `incomplete` when required
+roots/resources are omitted and `ready` only after complete declaration-bound
+inspection. Cache byte verification and reservations remain lifecycle work.
 Legacy recipes lack lock paths: inspection requires exactly one direct
 committed `toolchains/*.sources.json` matching the recipe digest, and uses
 the historical `toolchains/profiles-v1.json` path. It does not pin an LLVM
@@ -385,11 +404,12 @@ opt-in, local and redacted. There is no remote telemetry.
 
 See [M0 acceptance evidence](toolchain-producer-baseline.md#m0-acceptance).
 These are fixture and source-review findings, not a new toolchain qualification.
-M0 was accepted through PR #37. Do not close M1–M8 or activate native producer
-declarations on that basis. The first M1 inspection slice does not supply a
-build driver or receipt-reuse implementation; its native recipe input/canonical
-output cap is 1 MiB and canonical nesting is limited to 64 levels. These are
-parser safety limits, not measured compiler resource defaults.
+M0, M1 and M2 are accepted through PRs #37, #52 and #55. TCP-M3 is in active
+implementation; do not activate an official producer declaration or close its
+issue solely because the local lifecycle and synthetic fixtures exist. The
+native recipe input/canonical output cap is 1 MiB and canonical nesting is
+limited to 64 levels. These are parser safety limits, not measured compiler
+resource defaults.
 
 The subsequent lower-level guard slice adds operation-local shared cancellation
 and fresh advisory-locked work/output leaves with explicit ownership revalidation.

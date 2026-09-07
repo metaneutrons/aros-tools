@@ -24,8 +24,14 @@ const CAPTURE_LIMIT: usize = 16 * 1024;
 pub struct HostTool {
     /// Stable prerequisite role, not an arbitrary user-supplied command name.
     pub name: &'static str,
-    /// Canonical executable selected from the current host PATH.
+    /// Canonical resolved target selected from the current host `PATH`.
     pub path: PathBuf,
+    /// Absolute invocation path selected from the current host `PATH`.
+    ///
+    /// This deliberately retains a checked proxy/symlink path. Replacing it
+    /// with its canonical target can change invocation-name-selected tool behaviour;
+    /// Rustup's `cargo` proxy is one such supported host prerequisite.
+    pub invocation_path: PathBuf,
     /// Sanitized first version line from that exact executable.
     pub version: String,
 }
@@ -50,7 +56,7 @@ impl HostPreflight {
         let mut seen = BTreeSet::new();
         self.tools
             .iter()
-            .filter_map(|tool| tool.path.parent().map(PathBuf::from))
+            .filter_map(|tool| tool.invocation_path.parent().map(PathBuf::from))
             .filter(|directory| seen.insert(directory.clone()))
             .collect()
     }
@@ -100,22 +106,31 @@ fn probe(name: &'static str) -> Result<HostTool, ContractError> {
             "required native producer tool '{name}' is unavailable"
         ))
     })?;
-    let path = fs::canonicalize(selected).map_err(|_| {
+    probe_selected(name, selected)
+}
+
+fn probe_selected(name: &'static str, selected: PathBuf) -> Result<HostTool, ContractError> {
+    if !selected.is_absolute() {
+        return Err(ContractError::prerequisite(format!(
+            "required native producer tool '{name}' did not resolve to an absolute invocation path"
+        )));
+    }
+    let resolved = fs::canonicalize(&selected).map_err(|_| {
         ContractError::prerequisite(format!(
             "required native producer tool '{name}' cannot be canonicalized"
         ))
     })?;
-    if !path.is_file() {
+    if !resolved.is_file() {
         return Err(ContractError::prerequisite(format!(
             "required native producer tool '{name}' is not a regular executable file"
         )));
     }
-    let parent = path.parent().ok_or_else(|| {
+    let parent = selected.parent().ok_or_else(|| {
         ContractError::prerequisite(format!(
             "required native producer tool '{name}' has no executable directory"
         ))
     })?;
-    let mut command = Command::new(&path);
+    let mut command = Command::new(&selected);
     command
         .env_clear()
         .env("PATH", parent)
@@ -154,7 +169,8 @@ fn probe(name: &'static str) -> Result<HostTool, ContractError> {
         .to_owned();
     Ok(HostTool {
         name,
-        path,
+        path: resolved,
+        invocation_path: selected,
         version,
     })
 }
@@ -169,9 +185,14 @@ fn version_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
-    use super::inspect;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::{inspect, probe_selected};
     use crate::profiles::Profiles;
 
     #[test]
@@ -190,7 +211,34 @@ mod tests {
         .unwrap();
         let preflight = inspect(profiles.select("pc-x86_64").unwrap()).unwrap();
         assert!(preflight.tools.iter().all(|tool| tool.path.is_absolute()));
+        assert!(preflight
+            .tools
+            .iter()
+            .all(|tool| tool.invocation_path.is_absolute()));
         assert!(preflight.tools.iter().all(|tool| !tool.version.is_empty()));
         assert!(!preflight.tool_directories().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_proxy_invocation_path_after_validating_its_resolved_target() {
+        let temporary = tempdir().unwrap();
+        let target = temporary.path().join("cargo-proxy-target");
+        fs::write(
+            &target,
+            "#!/bin/sh\ntest \"${0##*/}\" = cargo || exit 97\nprintf '%s\\n' 'cargo fixture 1.0'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&target, permissions).unwrap();
+        let proxy = temporary.path().join("cargo");
+        symlink(&target, &proxy).unwrap();
+
+        let tool = probe_selected("cargo", proxy.clone()).unwrap();
+
+        assert_eq!(tool.path, target.canonicalize().unwrap());
+        assert_eq!(tool.invocation_path, proxy);
+        assert_eq!(tool.version, "cargo fixture 1.0");
     }
 }

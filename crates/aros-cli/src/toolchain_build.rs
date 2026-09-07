@@ -19,7 +19,7 @@ pub enum ResultFormat {
     Json,
 }
 
-/// Explicit inputs for one local legacy-preview build.
+/// Explicit inputs for one local native or legacy-preview build.
 #[derive(Args)]
 pub struct BuildArgs {
     /// Producer-owned target profile.
@@ -46,7 +46,7 @@ pub struct BuildArgs {
     /// Existing prepared source cache; it is never populated by this command.
     #[arg(long)]
     pub cache_dir: PathBuf,
-    /// Experimental backend; native is not implemented yet.
+    /// Explicit lifecycle backend; native is the default and never falls back.
     #[arg(long, default_value = "native", value_parser = parse_backend)]
     pub backend: Backend,
     /// Positive producer parallelism.
@@ -78,6 +78,9 @@ fn parse_backend(value: &str) -> Result<Backend, String> {
 
 /// Run the adapter on a blocking thread and propagate Ctrl-C cooperatively.
 pub async fn run(args: BuildArgs) -> miette::Result<()> {
+    let fetch_bridge = std::env::current_exe().map_err(|_| {
+        miette::miette!("cannot resolve the running aros executable for the native fetch bridge")
+    })?;
     let request = BuildRequest {
         backend: args.backend,
         preset: args.preset,
@@ -92,6 +95,7 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
         timeout_seconds: args.timeout_seconds,
         offline: args.offline,
         release_id: args.release_id,
+        fetch_bridge: Some(fetch_bridge),
     };
     let cancellation = CancellationToken::default();
     let worker_token = cancellation.clone();
