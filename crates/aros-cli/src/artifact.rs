@@ -631,7 +631,55 @@ pub fn command_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aros_common::{toolchain_tree_inventory, ArosToolchainManifest};
+    use serde_json::Value;
     use std::io::Write;
+
+    fn decode_base64(value: &str) -> Vec<u8> {
+        fn sextet(byte: u8) -> Option<u8> {
+            match byte {
+                b'A'..=b'Z' => Some(byte - b'A'),
+                b'a'..=b'z' => Some(byte - b'a' + 26),
+                b'0'..=b'9' => Some(byte - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        }
+
+        let encoded = value
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        let (quartets, remainder) = encoded.as_chunks::<4>();
+        assert!(
+            remainder.is_empty(),
+            "fixture Base64 must use whole quartets"
+        );
+        let mut decoded = Vec::with_capacity(quartets.len() * 3);
+        for quartet in quartets {
+            let first = sextet(quartet[0]).expect("fixture Base64 has an invalid first sextet");
+            let second = sextet(quartet[1]).expect("fixture Base64 has an invalid second sextet");
+            let third = if quartet[2] == b'=' {
+                0
+            } else {
+                sextet(quartet[2]).expect("fixture Base64 has an invalid third sextet")
+            };
+            let fourth = if quartet[3] == b'=' {
+                0
+            } else {
+                sextet(quartet[3]).expect("fixture Base64 has an invalid fourth sextet")
+            };
+            decoded.push(first << 2 | second >> 4);
+            if quartet[2] != b'=' {
+                decoded.push(second << 4 | third >> 2);
+            }
+            if quartet[3] != b'=' {
+                decoded.push(third << 6 | fourth);
+            }
+        }
+        decoded
+    }
 
     #[test]
     fn state_paths_must_be_absolute() {
@@ -790,6 +838,42 @@ mod tests {
                 0o755
             );
         }
+    }
+
+    #[test]
+    fn consumes_the_native_producer_known_answer_archive() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/toolchain-producer/package-v1.json"
+        ))
+        .unwrap();
+        let archive_bytes = decode_base64(fixture["archive_base64"].as_str().unwrap());
+        assert_eq!(
+            archive_bytes.len(),
+            fixture["archive_size"].as_u64().unwrap() as usize
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("legacy-native-vector.tar.xz");
+        fs::write(&archive, &archive_bytes).unwrap();
+        verify_archive(
+            &archive,
+            fixture["archive_sha256"].as_str().unwrap(),
+            fixture["archive_size"].as_u64(),
+        )
+        .unwrap();
+
+        let staging = extract_to_staging(&archive, directory.path(), 1).unwrap();
+        let manifest = ArosToolchainManifest::load(staging.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap(),
+            fixture["manifest"].clone()
+        );
+        let (tree_sha256, entries) = toolchain_tree_inventory(staging.path()).unwrap();
+        assert_eq!(tree_sha256, manifest.tree_sha256);
+        assert_eq!(entries, manifest.files);
+        assert_eq!(
+            fs::read(staging.path().join("share/Größe/marker-ä.txt")).unwrap(),
+            b"AROS tree fixture\n"
+        );
     }
 
     #[test]

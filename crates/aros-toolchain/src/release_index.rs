@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 
 use aros_common::{
     open_regular_file_nofollow, parse_credential_free_https_url, sha256_bytes, sha256_reader,
-    ArosToolchainManifest, Sha256Digest,
+    ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::package::{canonical_asset_name, pretty_json, spdx_bytes};
+use crate::package::{canonical_asset_name, pretty_json};
+use crate::package_verify::{verify_members, PackageAssetPaths, PackageVerificationRequest};
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::Recipe;
 use crate::source_lock::SourceLock;
@@ -31,6 +32,11 @@ const MANIFEST_SCHEMA_NAME: &str = "toolchain-manifest-v1.schema.json";
 const TREE_FIXTURE_NAME: &str = "tree-digest-v1.fixture.json";
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+
+const MANIFEST_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../aros-common/tests/fixtures/toolchain-manifest-v1.schema.json");
+const TREE_FIXTURE_BYTES: &[u8] =
+    include_bytes!("../../aros-common/tests/fixtures/tree-digest-v1.fixture.json");
 
 const V1_HOSTS: &[&str] = &[
     "linux-aarch64",
@@ -422,11 +428,20 @@ fn require_exact_regular_members(
 }
 
 fn validate_static_support(directory: &Path) -> Result<(), ContractError> {
-    for (name, kind) in [
-        (MANIFEST_SCHEMA_NAME, "toolchain manifest schema"),
-        (TREE_FIXTURE_NAME, "tree digest fixture"),
+    for (name, kind, expected) in [
+        (
+            MANIFEST_SCHEMA_NAME,
+            "toolchain manifest schema",
+            MANIFEST_SCHEMA_BYTES,
+        ),
+        (TREE_FIXTURE_NAME, "tree digest fixture", TREE_FIXTURE_BYTES),
     ] {
-        require_json_object(&read_metadata(&directory.join(name), kind)?, kind)?;
+        let actual = read_metadata(&directory.join(name), kind)?;
+        if actual != expected {
+            return Err(ContractError::index(format!(
+                "{kind} does not match the versioned native conformance material"
+            )));
+        }
     }
     Ok(())
 }
@@ -439,8 +454,6 @@ fn validate_package_asset(
     source_lock: &SourceLock,
     profiles: &Profiles,
 ) -> Result<NativeReleaseArtifact, ContractError> {
-    let archive = directory.join(asset);
-    let (archive_sha256, size) = measure_asset(&archive, MAX_ARCHIVE_BYTES)?;
     let manifest_path = directory.join(format!("{asset}.manifest.json"));
     let manifest_bytes = read_metadata(&manifest_path, "external package manifest")?;
     let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
@@ -462,63 +475,60 @@ fn validate_package_asset(
     let profile = profiles.select(&manifest.target_profile).map_err(|_| {
         ContractError::index("package manifest profile is absent from the published profiles")
     })?;
-    validate_manifest_identity(&manifest, request, recipe, source_lock, profile)?;
-    let checksum = read_metadata(
-        &directory.join(format!("{asset}.sha256")),
-        "archive checksum",
-    )?;
-    if checksum != format!("{archive_sha256}  {asset}\n").as_bytes() {
-        return Err(ContractError::index(
-            "package checksum sidecar does not match its measured archive",
-        ));
-    }
-    let expected_sbom = spdx_bytes(source_lock, &manifest)?;
-    if read_metadata(
-        &directory.join(format!("{asset}.spdx.json")),
-        "package SPDX SBOM",
-    )? != expected_sbom
-    {
-        return Err(ContractError::index(
-            "package SPDX SBOM does not match the closed source and manifest inputs",
-        ));
-    }
+    let verification = PackageVerificationRequest {
+        package_dir: directory.to_path_buf(),
+        release_id: request.release_id.clone(),
+        host: manifest.host.clone(),
+        recipe: recipe.clone(),
+        source_lock: source_lock.clone(),
+        profile: profile.clone(),
+        build_environment: manifest.build_environment.clone(),
+        forbidden_prefixes: vec![],
+    };
+    let verified = verify_members(
+        &verification,
+        &PackageAssetPaths::for_asset(directory, asset),
+    )
+    .map_err(|_| {
+        ContractError::index(
+            "package set did not pass bounded native archive read-back verification",
+        )
+    })?;
+    let required_paths = required_paths(source_lock.version(), profile)?;
+    verify_required_paths(&verified.manifest, &required_paths)?;
     Ok(NativeReleaseArtifact {
         asset: asset.into(),
-        sha256: archive_sha256.to_string(),
-        size,
-        host: manifest.host,
-        target_profile: manifest.target_profile,
-        target_triple: manifest.target_triple,
-        tree_sha256: manifest.tree_sha256,
-        llvm_version: manifest.llvm_version.unwrap_or_default(),
+        sha256: verified.archive_sha256.to_string(),
+        size: verified.archive_size,
+        host: verified.manifest.host,
+        target_profile: verified.manifest.target_profile,
+        target_triple: verified.manifest.target_triple,
+        tree_sha256: verified.manifest.tree_sha256,
+        llvm_version: verified.manifest.llvm_version.unwrap_or_default(),
         enabled: true,
         strip_components: 1,
-        required_paths: required_paths(source_lock.version(), profile)?,
+        required_paths,
     })
 }
 
-fn validate_manifest_identity(
+fn verify_required_paths(
     manifest: &ArosToolchainManifest,
-    request: &IndexRequest,
-    recipe: &Recipe,
-    source_lock: &SourceLock,
-    profile: &Profile,
+    required_paths: &[String],
 ) -> Result<(), ContractError> {
-    let valid = manifest.release_id == request.release_id
-        && manifest.llvm_version.as_deref() == Some(source_lock.version())
-        && manifest.target_triple == profile.target_triple()
-        && manifest.capabilities == profile.capabilities()
-        && manifest.recipe_sha256 == recipe.sha256().as_str()
-        && manifest.source_lock_sha256 == recipe.source_lock_sha256().as_str()
-        && manifest.profiles_sha256 == recipe.profiles_sha256().as_str()
-        && manifest.source_commit == recipe.source().0.as_str()
-        && manifest.producer_commit == recipe.producer().0.as_str()
-        && manifest.tools_commit == recipe.tools().0.as_str()
-        && manifest.source_date_epoch == recipe.source_date_epoch();
-    if !valid {
-        return Err(ContractError::index(
-            "package manifest identity is not bound to the closed release inputs",
-        ));
+    for path in required_paths {
+        if path == AROS_TOOLCHAIN_MANIFEST_FILE {
+            continue;
+        }
+        let Some(entry) = manifest.files.iter().find(|entry| entry.path == *path) else {
+            return Err(ContractError::index(
+                "verified package payload is missing an indexed required path",
+            ));
+        };
+        if !matches!(entry.kind.as_str(), "file" | "symlink") {
+            return Err(ContractError::index(
+                "indexed required path is not a package file or symbolic link",
+            ));
+        }
     }
     Ok(())
 }
@@ -810,8 +820,10 @@ fn safe_source_lock_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aros_common::{sha256_bytes, ArosToolchainManifestEntry};
+    use aros_common::sha256_bytes;
     use serde_json::{json, Map};
+
+    use crate::package::{package, PackageRequest};
 
     fn fixture_profiles() -> Vec<u8> {
         serde_json::to_vec(&json!({
@@ -859,6 +871,29 @@ mod tests {
         serde_json::to_vec(&value).unwrap()
     }
 
+    fn write_candidate(root: &Path, llvm_version: &str, profile: &Profile) {
+        for path in required_paths(llvm_version, profile).unwrap() {
+            if path == AROS_TOOLCHAIN_MANIFEST_FILE {
+                continue;
+            }
+            let destination = root.join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, b"native release-index fixture\n").unwrap();
+        }
+    }
+
+    fn copy_package_to_release(root: &Path, output: &crate::package::PackageOutput) {
+        for source in [
+            &output.archive,
+            &output.manifest,
+            &output.checksum,
+            &output.sbom,
+        ] {
+            let name = source.file_name().unwrap();
+            fs::copy(source, root.join(name)).unwrap();
+        }
+    }
+
     fn write_complete_pre_attestation_fixture(root: &Path) -> IndexRequest {
         let source_lock_bytes = fixture_source_lock();
         let profiles_bytes = fixture_profiles();
@@ -866,56 +901,35 @@ mod tests {
         fs::write(root.join(RECIPE_NAME), &recipe_bytes).unwrap();
         fs::write(root.join("llvm-11.sources.json"), &source_lock_bytes).unwrap();
         fs::write(root.join(PROFILES_NAME), &profiles_bytes).unwrap();
-        fs::write(root.join(MANIFEST_SCHEMA_NAME), b"{}").unwrap();
-        fs::write(root.join(TREE_FIXTURE_NAME), b"{}").unwrap();
+        fs::write(root.join(MANIFEST_SCHEMA_NAME), MANIFEST_SCHEMA_BYTES).unwrap();
+        fs::write(root.join(TREE_FIXTURE_NAME), TREE_FIXTURE_BYTES).unwrap();
         let source_lock = SourceLock::parse(&source_lock_bytes).unwrap();
         let profiles = Profiles::parse(&profiles_bytes).unwrap();
         let recipe = Recipe::parse(&recipe_bytes).unwrap();
+        let staging = tempfile::tempdir().unwrap();
         for host in V1_HOSTS {
             for profile_name in V1_PROFILES {
-                let profile = profiles.select(profile_name).unwrap();
-                let asset =
-                    canonical_asset_name(source_lock.version(), host, profile_name).unwrap();
-                let payload = format!("fixture archive {host}/{profile_name}\n");
-                fs::write(root.join(&asset), &payload).unwrap();
-                let manifest = ArosToolchainManifest {
-                    schema: 1,
+                let profile = profiles.select(profile_name).unwrap().clone();
+                let candidate = staging
+                    .path()
+                    .join(format!("candidate-{host}-{profile_name}"));
+                fs::create_dir(&candidate).unwrap();
+                write_candidate(&candidate, source_lock.version(), &profile);
+                let output = package(&PackageRequest {
+                    candidate_root: candidate,
+                    output_dir: staging
+                        .path()
+                        .join(format!("package-{host}-{profile_name}")),
                     release_id: "fixture-release".into(),
                     host: (*host).into(),
-                    target_profile: (*profile_name).into(),
-                    target_triple: profile.target_triple().into(),
-                    tree_sha256: "a".repeat(64),
-                    llvm_version: Some(source_lock.version().into()),
-                    recipe_sha256: recipe.sha256().to_string(),
-                    source_lock_sha256: recipe.source_lock_sha256().to_string(),
-                    profiles_sha256: recipe.profiles_sha256().to_string(),
-                    source_commit: recipe.source().0.as_str().into(),
-                    producer_commit: recipe.producer().0.as_str().into(),
-                    tools_commit: recipe.tools().0.as_str().into(),
-                    source_date_epoch: recipe.source_date_epoch(),
-                    capabilities: profile.capabilities().to_vec(),
+                    recipe: recipe.clone(),
+                    source_lock: source_lock.clone(),
+                    profile,
                     build_environment: Map::new(),
-                    files: vec![ArosToolchainManifestEntry {
-                        path: "bin/clang".into(),
-                        mode: "0755".into(),
-                        kind: "file".into(),
-                        sha256: Some("b".repeat(64)),
-                        size: Some(1),
-                        target: None,
-                    }],
-                };
-                let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-                fs::write(root.join(format!("{asset}.manifest.json")), &manifest_bytes).unwrap();
-                fs::write(
-                    root.join(format!("{asset}.sha256")),
-                    format!("{}  {asset}\n", sha256_bytes(payload.as_bytes())),
-                )
+                    forbidden_prefixes: vec![],
+                })
                 .unwrap();
-                fs::write(
-                    root.join(format!("{asset}.spdx.json")),
-                    spdx_bytes(&source_lock, &manifest).unwrap(),
-                )
-                .unwrap();
+                copy_package_to_release(root, &output);
             }
         }
         IndexRequest {
@@ -989,6 +1003,11 @@ mod tests {
             serde_json::from_slice(&fs::read(final_output.index_path).unwrap()).unwrap();
         assert_eq!(index["release_id"], "fixture-release");
         assert_eq!(index["artifacts"].as_array().unwrap().len(), 12);
+        assert!(index["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|artifact| artifact["required_paths"].as_array().unwrap().len() >= 26));
     }
 
     #[test]
@@ -1006,6 +1025,26 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let request = write_complete_pre_attestation_fixture(temporary.path());
         fs::remove_file(temporary.path().join(format!("{asset}.spdx.json"))).unwrap();
+        assert!(index_complete_v1(&request).is_err());
+    }
+
+    #[test]
+    fn complete_matrix_rejects_invalid_native_archive_and_support_drift() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = write_complete_pre_attestation_fixture(temporary.path());
+        let asset = canonical_asset_name("11.0.0", "linux-x86_64", "pc-x86_64").unwrap();
+        let invalid_archive = b"this is not an XZ archive\n";
+        fs::write(temporary.path().join(&asset), invalid_archive).unwrap();
+        fs::write(
+            temporary.path().join(format!("{asset}.sha256")),
+            format!("{}  {asset}\n", sha256_bytes(invalid_archive)),
+        )
+        .unwrap();
+        assert!(index_complete_v1(&request).is_err());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let request = write_complete_pre_attestation_fixture(temporary.path());
+        fs::write(temporary.path().join(MANIFEST_SCHEMA_NAME), b"{}").unwrap();
         assert!(index_complete_v1(&request).is_err());
     }
 }

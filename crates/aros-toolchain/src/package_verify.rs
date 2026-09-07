@@ -63,6 +63,31 @@ pub struct VerifiedPackage {
     pub archive_size: u64,
 }
 
+/// The four closed outer members of one toolchain package set.
+///
+/// This internal representation lets the release-index verifier reuse the
+/// same bounded archive read-back logic after it has established the larger
+/// 56-file release inventory. Public callers should use [`verify`], which
+/// additionally requires that its directory contains exactly these members.
+#[derive(Debug, Clone)]
+pub(crate) struct PackageAssetPaths {
+    pub(crate) archive: PathBuf,
+    pub(crate) manifest: PathBuf,
+    pub(crate) checksum: PathBuf,
+    pub(crate) sbom: PathBuf,
+}
+
+impl PackageAssetPaths {
+    pub(crate) fn for_asset(directory: &Path, asset: &str) -> Self {
+        Self {
+            archive: directory.join(asset),
+            manifest: directory.join(format!("{asset}.manifest.json")),
+            checksum: directory.join(format!("{asset}.sha256")),
+            sbom: directory.join(format!("{asset}.spdx.json")),
+        }
+    }
+}
+
 /// Verify one complete native package set without extracting or installing it.
 ///
 /// # Errors
@@ -77,10 +102,7 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
         &request.host,
         request.profile.name(),
     )?;
-    let archive = request.package_dir.join(&asset);
-    let manifest_path = request.package_dir.join(format!("{asset}.manifest.json"));
-    let checksum_path = request.package_dir.join(format!("{asset}.sha256"));
-    let sbom_path = request.package_dir.join(format!("{asset}.spdx.json"));
+    let paths = PackageAssetPaths::for_asset(&request.package_dir, &asset);
     let expected_members = [
         asset.clone(),
         format!("{asset}.manifest.json"),
@@ -89,14 +111,41 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
     ];
     require_exact_outer_members(&request.package_dir, expected_members.iter())?;
 
-    let (archive_file, archive_size, archive_sha256) = measure_archive(&archive)?;
+    verify_members_validated(request, &paths)
+}
+
+/// Verify explicit members that are already part of a larger closed inventory.
+///
+/// The caller must establish the outer inventory contract before calling this
+/// function. It retains all no-follow, identity, sidecar, SPDX, bounded-XZ,
+/// tar-header, payload-inventory, and embedded-manifest checks of [`verify`].
+pub(crate) fn verify_members(
+    request: &PackageVerificationRequest,
+    paths: &PackageAssetPaths,
+) -> Result<VerifiedPackage, ContractError> {
+    validate_request(request)?;
+    verify_members_validated(request, paths)
+}
+
+fn verify_members_validated(
+    request: &PackageVerificationRequest,
+    paths: &PackageAssetPaths,
+) -> Result<VerifiedPackage, ContractError> {
+    let (archive_file, archive_size, archive_sha256) = measure_archive(&paths.archive)?;
+    let asset = paths
+        .archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ContractError::verification("package archive path is not a UTF-8 basename")
+        })?;
     let expected_checksum = format!("{archive_sha256}  {asset}\n");
-    if read_metadata(&checksum_path, "checksum sidecar")? != expected_checksum.as_bytes() {
+    if read_metadata(&paths.checksum, "checksum sidecar")? != expected_checksum.as_bytes() {
         return Err(ContractError::verification(
             "package checksum sidecar does not match the measured archive",
         ));
     }
-    let manifest_bytes = read_metadata(&manifest_path, "external manifest")?;
+    let manifest_bytes = read_metadata(&paths.manifest, "external manifest")?;
     let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ContractError::verification("external package manifest is not valid JSON"))?;
     manifest.validate().map_err(|_| {
@@ -104,7 +153,7 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
     })?;
     verify_manifest_identity(&manifest, request)?;
     let expected_sbom = spdx_bytes(&request.source_lock, &manifest)?;
-    if read_metadata(&sbom_path, "SPDX SBOM")? != expected_sbom {
+    if read_metadata(&paths.sbom, "SPDX SBOM")? != expected_sbom {
         return Err(ContractError::verification(
             "package SPDX SBOM does not match the closed source and manifest inputs",
         ));
@@ -697,6 +746,27 @@ mod tests {
         encoder.finish().unwrap().flush().unwrap();
     }
 
+    fn write_xz_tar_entries(
+        path: &Path,
+        append: impl FnOnce(&mut tar::Builder<xz2::write::XzEncoder<File>>),
+    ) {
+        use std::io::Write as _;
+
+        let output = File::create(path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(output, 6);
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append(
+                &canonical_header("toolchain", tar::EntryType::Directory, 0, 0o755),
+                &b""[..],
+            )
+            .unwrap();
+        append(&mut builder);
+        builder.finish().unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap().flush().unwrap();
+    }
+
     #[test]
     fn rejects_paths_outside_the_single_toolchain_root() {
         assert!(package_relative_path(Path::new("other/payload")).is_err());
@@ -775,5 +845,34 @@ mod tests {
         });
         let manifest = fixture_manifest();
         assert!(verify_archive_tree(File::open(&archive).unwrap(), &manifest, &[]).is_err());
+    }
+
+    #[test]
+    fn archive_reader_rejects_casefold_collisions_and_special_entries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let collision = temporary.path().join("collision.tar.xz");
+        write_xz_tar_entries(&collision, |builder| {
+            for path in ["toolchain/Foo", "toolchain/foo"] {
+                builder
+                    .append(
+                        &canonical_header(path, tar::EntryType::Regular, 1, 0o644),
+                        &b"x"[..],
+                    )
+                    .unwrap();
+            }
+        });
+        let manifest = fixture_manifest();
+        assert!(verify_archive_tree(File::open(&collision).unwrap(), &manifest, &[]).is_err());
+
+        let special = temporary.path().join("special.tar.xz");
+        write_xz_tar_entries(&special, |builder| {
+            builder
+                .append(
+                    &canonical_header("toolchain/fifo", tar::EntryType::Fifo, 0, 0o644),
+                    &b""[..],
+                )
+                .unwrap();
+        });
+        assert!(verify_archive_tree(File::open(&special).unwrap(), &manifest, &[]).is_err());
     }
 }
