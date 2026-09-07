@@ -140,6 +140,14 @@ checking and host Python setup are phases, not additional public executables.
 The MetaMake fetch bridge must use an implemented private entry point of the
 same executable or an equivalent in-process integration; its quoting/protocol
 is an M2 design gate, not an extra user-facing command promised here.
+For the qualified LLVM-11 closure each upstream `%fetch` selects one `tar.xz`
+candidate. The bridge therefore rejects fallback suffix lists before the
+unchanged upstream helper can choose a cache object; a future multi-format
+source contract requires a reviewed lock/schema extension and native update.
+The selected Rust vendor tree must match the exact external closure of the
+tools snapshot's `Cargo.lock`, including registry package checksums. A private
+host-Python environment records its interpreter and every lock-verified package
+identity; it never inherits site packages or invokes `pip`.
 
 ## 3. Versioned JSON documents
 
@@ -345,8 +353,10 @@ Fixtures and rule ownership:
 | Forged receipt or compatibility report | Revalidate all references; receipts alone cannot prove origin, independence or release eligibility. |
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
-Reserve `AX` for producer diagnostics. The M1 library registers
-AX0101, AX0102, AX0201, AX0202 and AX0801 (work ownership); all remaining codes below stay reserved until their actual
+Reserve `AX` for producer diagnostics. The M2 input-contract library registers
+AX0101, AX0102, AX0201, AX0202, AX0301 (verified sources), AX0302
+(source-use closure), AX0401 (controlled external environment) and AX0801
+(work ownership); all remaining codes below stay reserved until their actual
 implementations land. The versioned contract records that exact subset.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,

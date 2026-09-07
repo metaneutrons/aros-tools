@@ -11,10 +11,41 @@ Implemented:
   lowercase identities, strict integer fields and safe, sorted patch paths;
 - bounded recipe input and canonical UTF-8 JSON self-digest verification;
 - the shared envelope with AX0101 (contract), AX0102 (identity), AX0201 (Git
-  prerequisites), AX0202 (roots/resources) and AX0801 (work ownership/state),
+  prerequisites), AX0202 (roots/resources), AX0301 (verified source cache),
+  AX0302 (source-use closure), AX0401 (controlled external environment) and
+  AX0801 (work ownership/state),
   without input-document dumps;
 - maintained native conformance/counter-probes against the independent M0
   encoding vectors. No second SHA-256 implementation or source-lock copy.
+
+The in-progress TCP-M2 library boundary additionally owns closed
+`aros-toolchain-source-lock-v2` parsing, recipe/lock patch-closure binding,
+no-follow verification of every direct source-cache payload through
+`aros-fetch`, exact source-use ledgers and preparation of a fresh private host
+Python import tree.  The environment accepts only the source-contract's locked
+Mako and MarkupSafe source archives, never invokes `pip`, and proves module
+version and private import origin with the selected host Python 3 interpreter.
+It retains the interpreter plus lock-verified package filename/hash/version/size
+observations for a later receipt rather than treating host site packages as proof.
+These are internal building blocks: native `toolchain plan`/`build`, source
+integration and the compiler lifecycle remain later M2/M3 work. The Cargo
+vendor input is copied through no-follow descriptors into a fresh private tree,
+validated against every `.cargo-checksum.json` and the selected tools
+`Cargo.lock` closure, and supplied only by a generated offline Cargo home.
+The private MetaMake adapter accepts one source-lock archive
+from an explicitly identical cache root, records it once in a durable ledger,
+and rejects every other candidate before an upstream fetch script could run.
+The M2 environment builder clears inherited variables, retains only explicitly
+selected host tool directories, applies deterministic locale/time/archive/CMake
+settings, reproduces the source/producer/tools/work compiler prefix maps, and
+retains the source-cache/tools/work Rust remaps for the later collector phase.
+No M2 helper runs an AROS build or alters an input cache.
+
+The library also parses and binds the closed `producer-executor-v1.toml`
+selection document to its exact contract, recipe, lock and profile bytes. The
+current producer repository does not yet publish that declaration or executor
+origin evidence, so public native planning/execution deliberately stays disabled;
+binding a declaration is not evidence that this binary may run a compiler.
 
 Recipe parsing performs no I/O. Planning inspects three explicit Git
 roots/commit/tree pairs, raw committed profile/lock/patch identities and
