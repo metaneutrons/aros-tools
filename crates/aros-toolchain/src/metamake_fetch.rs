@@ -230,7 +230,7 @@ impl ResolvedMetaMakeSource {
     }
 }
 
-/// Append-only, duplicate-rejecting source-use record owned by one build.
+/// Append-only, unique source-use record owned by one build.
 #[derive(Debug)]
 pub struct SourceUseLedger {
     path: PathBuf,
@@ -330,16 +330,20 @@ impl SourceUseLedger {
         })
     }
 
-    /// Record one lock-selected payload exactly once.
+    /// Record one lock-selected payload on its first use.
     ///
     /// A bounded advisory lock serializes concurrent `make` children. The
-    /// record is synced before this function returns, so later success evidence
-    /// never relies on a buffered append.
+    /// first record is synced before this function returns, so later success
+    /// evidence never relies on a buffered append. Repeated requests for the
+    /// same already-resolved payload are idempotent: the unchanged upstream
+    /// MetaMake graph can request a component again in a later dependency
+    /// phase, but it cannot expand the selected source closure or add a second
+    /// ledger entry.
     ///
     /// # Errors
     ///
-    /// Returns AX0302 when the ledger cannot be locked, changes, is malformed
-    /// or would record one source archive more than once.
+    /// Returns AX0302 when the ledger cannot be locked, changes or is
+    /// malformed.
     pub fn record(&self, payload: &ResolvedMetaMakeSource) -> Result<(), ContractError> {
         let mut file = File::from(
             rfs::open(
@@ -457,9 +461,7 @@ fn record_locked(file: &mut File, filename: &str) -> Result<(), ContractError> {
         .read_to_string(&mut existing)
         .map_err(|_| ContractError::source_use("source-use ledger is not UTF-8"))?;
     if existing.lines().any(|line| line == filename) {
-        return Err(ContractError::source_use(
-            "MetaMake fetch attempted to consume a locked source archive more than once",
-        ));
+        return Ok(());
     }
     file.write_all(filename.as_bytes())
         .and_then(|()| file.write_all(b"\n"))
@@ -525,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn cannot_redirect_fetch_or_reuse_a_locked_archive() {
+    fn cannot_redirect_fetch_and_idempotently_reuse_a_locked_archive() {
         let temporary = tempfile::tempdir().unwrap();
         let cache = temporary.path().join("cache");
         let elsewhere = temporary.path().join("elsewhere");
@@ -561,7 +563,11 @@ mod tests {
         .unwrap();
         let ledger = SourceUseLedger::create(&temporary.path().join("use.log")).unwrap();
         ledger.record(&allowed).unwrap();
-        assert!(ledger.record(&allowed).is_err());
+        ledger.record(&allowed).unwrap();
+        assert_eq!(
+            fs::read_to_string(ledger.path()).unwrap(),
+            "llvm-11.0.0.src.tar.xz\n"
+        );
     }
 
     #[test]
