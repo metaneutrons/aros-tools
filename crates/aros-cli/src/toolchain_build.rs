@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use aros_common::CancellationToken;
-use aros_toolchain::executor::BuildRequest;
+use aros_toolchain::executor::{BuildRequest, ResumePhase};
 use aros_toolchain::plan::Backend;
 use clap::{Args, ValueEnum};
 
@@ -37,10 +37,10 @@ pub struct BuildArgs {
     /// Exact tools/collector checkout root.
     #[arg(long)]
     pub tools_dir: PathBuf,
-    /// Fresh work root; this final path must not already exist.
+    /// Fresh work root; with --resume-from it must be the exact retained root.
     #[arg(long)]
     pub work_dir: PathBuf,
-    /// Fresh output root; this final path must not already exist.
+    /// Fresh output root; with --resume-from it must be the exact retained root.
     #[arg(long)]
     pub output_dir: PathBuf,
     /// Existing prepared source cache; it is never populated by this command.
@@ -61,9 +61,19 @@ pub struct BuildArgs {
     /// Explicit local candidate identifier; this does not publish or tag.
     #[arg(long)]
     pub release_id: String,
+    /// Re-enter one verified native phase boundary. Only `compiler` is currently safe.
+    #[arg(long, value_parser = parse_resume_phase)]
+    pub resume_from: Option<ResumePhase>,
     /// Result representation on stdout.
     #[arg(long, value_enum, default_value = "human")]
     pub format: ResultFormat,
+}
+
+fn parse_resume_phase(value: &str) -> Result<ResumePhase, String> {
+    match value {
+        "compiler" => Ok(ResumePhase::Compiler),
+        _ => Err("expected compiler; incomplete compiler trees are never resumable".into()),
+    }
 }
 
 fn parse_backend(value: &str) -> Result<Backend, String> {
@@ -96,6 +106,7 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
         offline: args.offline,
         release_id: args.release_id,
         fetch_bridge: Some(fetch_bridge),
+        resume_from: args.resume_from,
     };
     let cancellation = CancellationToken::default();
     let worker_token = cancellation.clone();

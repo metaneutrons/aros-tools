@@ -9,7 +9,7 @@ use std::process::Command;
 
 use aros_common::{sha256_bytes, CancellationToken, DiagnosticCode};
 use aros_toolchain::canonical;
-use aros_toolchain::executor::{self, BuildRequest};
+use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
 use aros_toolchain::plan::Backend;
 use serde_json::json;
 
@@ -117,6 +117,7 @@ printf '%s\n' 'isolated adapter output' > "$output/candidate.txt"
             offline: true,
             release_id: "local-fixture".into(),
             fetch_bridge: None,
+            resume_from: None,
         }
     }
 }
@@ -187,4 +188,17 @@ fn non_offline_preview_is_rejected_before_checkout_access() {
     request.offline = false;
     let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
     assert!(error.to_string().contains("offline cache"));
+}
+
+#[test]
+fn legacy_preview_rejects_native_resume_boundaries_before_mutation() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("legacy-preview has no resumable phase boundary"));
+    assert!(!fixture.root.join("work").exists());
+    assert!(!fixture.root.join("output").exists());
 }

@@ -124,7 +124,10 @@ Only the creating process may unlock; an inherited non-owner guard closes its
 own descriptor without releasing the parent's still-active lock.
 The lock guard exists before fallible marker construction, so partial setup
 failures receive the same fallback cleanup. There is no implicit resume,
-stale-state adoption, automatic cleanup or candidate publication. This primitive
+stale-state adoption, automatic cleanup or candidate publication. The native
+lifecycle alone may explicitly reacquire roots at its reviewed compiler receipt
+boundary; it must revalidate every retained identity before any child starts.
+This primitive
 itself does not issue phase receipts; the native lifecycle writes its own
 retained receipt chain after completed phases. The caller-provided owner digest
 binds its chosen operation, not trusted executor origin. Locks and
@@ -240,9 +243,12 @@ serves only declared cache payloads, then builds the exact vendored
 `aros-collect`. Every phase writes a canonical self-verifying receipt and the
 candidate removes producer-only LLVM configuration inputs before returning a
 measured collector. `legacy-preview` is explicit and remains only a historical
-diagnostic adapter. No extra executable is exposed. Trusted executor origin,
-receipt revalidation/resume, full candidate inventory, real host/profile
-evidence and release qualification remain later gates.
+diagnostic adapter. No extra executable is exposed. `--resume-from compiler`
+is the sole local recovery boundary: it remeasures the retained snapshots and
+compiler output, revalidates every predecessor receipt and starts the collector
+in a fresh Cargo target root. It never reuses a failed compiler tree or applies
+to release work. Trusted executor origin, full candidate inventory, real
+host/profile evidence and release qualification remain later gates.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
 [delivery plan](../../docs/toolchain-producer-plan.md) and

@@ -5,11 +5,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use aros_common::{sha256_bytes, CancellationToken};
 use aros_toolchain::canonical;
-use aros_toolchain::executor::{self, BuildRequest};
+use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
 use aros_toolchain::plan::Backend;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -229,7 +229,25 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
             offline: true,
             release_id: "native-fixture".into(),
             fetch_bridge: Some(self.bridge.clone()),
+            resume_from: None,
         }
+    }
+
+    fn replace_source_configure(&self, contents: &str) {
+        let source = self.root.join("source");
+        write_executable(&source.join("configure"), contents);
+        git(&source, &["add", "configure"]);
+        git(
+            &source,
+            &["commit", "-qm", "test: alter native configure phase"],
+        );
+        let mut recipe: serde_json::Value =
+            serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
+        recipe["source_commit"] = json!(git(&source, &["rev-parse", "HEAD"]));
+        recipe["source_tree"] = json!(git(&source, &["rev-parse", "HEAD^{tree}"]));
+        recipe.as_object_mut().unwrap().remove("recipe_sha256");
+        recipe["recipe_sha256"] = json!(sha256_bytes(&canonical::bytes(&recipe).unwrap()));
+        fs::write(&self.recipe, serde_json::to_vec(&recipe).unwrap()).unwrap();
     }
 }
 
@@ -306,6 +324,166 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     )
     .unwrap();
     assert_eq!(usage, "llvm-11.0.0.src.tar.xz\n");
+}
+
+#[test]
+fn explicit_collector_resume_revalidates_predecessors_and_uses_a_fresh_cargo_target() {
+    let fixture = Fixture::new();
+    executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let prefix = fixture.root.join("output/toolchain/bin");
+
+    // Model an interruption after the compiler receipt but before a collector
+    // receipt could be committed. The compiler receipt owns llvm-config; the
+    // collector normalization would otherwise make the remeasurement fail.
+    fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+        fs::remove_file(prefix.join(name)).unwrap();
+    }
+    fs::write(prefix.join("llvm-config"), b"producer-only").unwrap();
+
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let result = executor::run(&request, &CancellationToken::default()).unwrap();
+    assert_eq!(result.commit_state, "committed");
+    assert!(prefix.join("aros-collect").is_file());
+    assert!(lifecycle.join("receipts/collector.json").is_file());
+    assert!(lifecycle
+        .join("logs/collector-resume-1.stdout.log")
+        .is_file());
+    assert!(lifecycle.join("rust-target-resume-1").is_dir());
+}
+
+#[test]
+fn collector_resume_rejects_a_tampered_retained_snapshot_before_execution() {
+    let fixture = Fixture::new();
+    executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let prefix = fixture.root.join("output/toolchain/bin");
+    fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+        fs::remove_file(prefix.join(name)).unwrap();
+    }
+    fs::write(prefix.join("llvm-config"), b"producer-only").unwrap();
+    fs::write(
+        fixture.root.join("work/tools/src/main.rs"),
+        "fn main() { panic!(\"tampered\"); }\n",
+    )
+    .unwrap();
+
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("retained preflight receipt does not match the current verified input_sha256"));
+    assert!(!lifecycle.join("rust-target-resume-1").exists());
+}
+
+#[test]
+fn native_configure_failure_retains_owned_roots_and_phase_logs() {
+    let fixture = Fixture::new();
+    fixture.replace_source_configure(
+        "#!/bin/sh\nprintf 'fixture configure failure\\n' >&2\nexit 23\n",
+    );
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("configure phase exited unsuccessfully"));
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    assert!(fixture
+        .root
+        .join("work/.aros-toolchain-owner-v1.json")
+        .is_file());
+    assert!(fixture
+        .root
+        .join("output/.aros-toolchain-owner-v1.json")
+        .is_file());
+    assert!(lifecycle.join("receipts/environment.json").is_file());
+    assert!(lifecycle.join("logs/configure.stderr.log").is_file());
+    assert!(!lifecycle.join("receipts/configure.json").exists());
+}
+
+#[test]
+fn native_cancellation_reaps_configure_process_group_and_retains_roots() {
+    let fixture = Fixture::new();
+    fixture.replace_source_configure(
+        "#!/bin/sh\nset -eu\n( trap '' TERM; sleep 30 ) &\nprintf '%s\\n' \"$!\" > \"$TMPDIR/child-pid\"\ntrap '' TERM\nsleep 30\n",
+    );
+    let request = fixture.request();
+    let token = CancellationToken::default();
+    let canceller = token.clone();
+    let child_pid = fixture.root.join("work/native-lifecycle/tmp/child-pid");
+    let trigger = std::thread::spawn(move || {
+        for _ in 0..100 {
+            if child_pid.is_file() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        canceller.cancel();
+    });
+
+    let error = executor::run(&request, &token).unwrap_err();
+    trigger.join().unwrap();
+    assert!(
+        error.to_string().contains("configure phase cancelled"),
+        "{error}"
+    );
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    assert!(fixture.root.join("work/source").is_dir());
+    assert!(fixture
+        .root
+        .join("output/.aros-toolchain-owner-v1.json")
+        .is_file());
+    assert!(lifecycle.join("receipts/environment.json").is_file());
+    assert!(!lifecycle.join("receipts/configure.json").exists());
+    assert!(lifecycle.join("logs/configure.stderr.log").is_file());
+    let child = fs::read_to_string(lifecycle.join("tmp/child-pid"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    for _ in 0..20 {
+        if !Command::new("/bin/kill")
+            .args(["-0", &child])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("configure descendant {child} survived native process-group cancellation");
+}
+
+#[test]
+fn native_deadline_cancels_a_running_phase_without_committing_it() {
+    let fixture = Fixture::new();
+    fixture.replace_source_configure("#!/bin/sh\ntrap '' TERM\nsleep 30\n");
+    let mut request = fixture.request();
+    // Snapshot construction includes recursive Git-object validation.  It is
+    // deliberately part of the whole-operation deadline and can take several
+    // seconds on contended ARM runners, so leave it a real scheduling margin.
+    // The sleeping configure phase still deterministically consumes the
+    // shared deadline.
+    request.timeout_seconds = 15;
+
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("configure phase exceeded the explicit build deadline"),
+        "{error}"
+    );
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    assert!(lifecycle.join("receipts/environment.json").is_file());
+    assert!(!lifecycle.join("receipts/configure.json").exists());
+    assert!(lifecycle.join("logs/configure.stderr.log").is_file());
 }
 
 fn write_executable(path: &Path, contents: &str) {

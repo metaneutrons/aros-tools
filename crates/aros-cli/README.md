@@ -178,6 +178,13 @@ controlled local lifecycle only when the selected producer provides a matching
 result. `legacy-preview` remains an explicit historical diagnostic backend;
 the command never falls back between backends.
 
+After an interruption, native builds expose one deliberately narrow recovery
+boundary: `--resume-from compiler` revalidates the retained ownership markers,
+all predecessor receipts, snapshot/cache inputs and measured compiler outputs,
+then runs only the collector in a fresh Cargo target directory. It rejects a
+partial compiler tree, a completed collector receipt, malformed/tampered state
+and every other phase. Release jobs always use fresh roots and never resume.
+
 Every fatal diagnostic has a stable code, stage, severity, message, actionable
 hint, and optional deterministic context. The schema is
 `aros-tool-diagnostics-v1`. Current code families are:

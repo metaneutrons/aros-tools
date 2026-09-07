@@ -40,9 +40,9 @@ pub struct BuildRequest {
     pub producer_dir: PathBuf,
     /// Exact tools/collector checkout selected by the recipe.
     pub tools_dir: PathBuf,
-    /// Fresh work root; the final leaf must not already exist.
+    /// Fresh work root; an explicit resume must name its exact retained leaf.
     pub work_dir: PathBuf,
-    /// Fresh output root; the final leaf must not already exist.
+    /// Fresh output root; an explicit resume must name its exact retained leaf.
     pub output_dir: PathBuf,
     /// Existing prepared source cache.  It is verified by the producer.
     pub cache_dir: PathBuf,
@@ -59,6 +59,22 @@ pub struct BuildRequest {
     /// Native execution requires this value. The CLI supplies its own binary;
     /// the legacy preview never reads it.
     pub fetch_bridge: Option<PathBuf>,
+    /// Explicitly re-enter one verified native phase boundary.
+    ///
+    /// This is deliberately narrow: a failed compiler tree is never reused.
+    /// Additional boundaries require their own verified recovery contract.
+    pub resume_from: Option<ResumePhase>,
+}
+
+/// A reviewed native lifecycle boundary eligible for explicit local resume.
+///
+/// Resumption is not an incremental compiler cache. It currently permits only
+/// re-running the collector after a complete, revalidated compiler phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumePhase {
+    /// Re-run the collector in a fresh Cargo target directory after compiler
+    /// outputs and all predecessor receipts have been revalidated.
+    Compiler,
 }
 
 struct PreparedInputs {
@@ -151,6 +167,11 @@ fn run_legacy(
     if request.backend != Backend::LegacyPreview {
         return Err(ContractError::invalid(
             "legacy execution requires --backend legacy-preview explicitly",
+        ));
+    }
+    if request.resume_from.is_some() {
+        return Err(ContractError::invalid(
+            "legacy-preview has no resumable phase boundary; select native --resume-from compiler explicitly",
         ));
     }
     if !request.offline {
