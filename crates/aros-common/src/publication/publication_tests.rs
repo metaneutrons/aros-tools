@@ -1,6 +1,17 @@
 //! Fault, race, recovery, containment, and portability tests.
 use super::*;
 
+#[test]
+fn payload_casefold_keys_accept_utf8_without_weakening_cross_host_safety() {
+    assert_eq!(
+        payload_casefold_path_key(Path::new("share/Größe/marker-ä.txt")).unwrap(),
+        payload_casefold_path_key(Path::new("share/größe/MARKER-Ä.TXT")).unwrap()
+    );
+    for unsafe_path in ["../escape", "share/CON", "share/name:", "share/name."] {
+        assert!(payload_casefold_path_key(Path::new(unsafe_path)).is_err());
+    }
+}
+
 #[cfg(unix)]
 struct BoundaryAction {
     point: &'static str,

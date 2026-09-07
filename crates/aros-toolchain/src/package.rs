@@ -9,8 +9,8 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{
-    measure_regular_file, publish_prepared_tree_noclobber, sha256_file, toolchain_tree_inventory,
-    ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
+    measure_regular_file, payload_casefold_path_key, publish_prepared_tree_noclobber, sha256_file,
+    toolchain_tree_inventory, ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
     AROS_TOOLCHAIN_MANIFEST_SCHEMA,
 };
 use serde_json::{json, Map, Value};
@@ -130,7 +130,7 @@ pub fn package(request: &PackageRequest) -> Result<PackageOutput, ContractError>
         &checksum,
         format!("{}  {asset}\n", measured.digest).as_bytes(),
     )?;
-    write_new(&sbom, &spdx_bytes(request, &manifest)?)?;
+    write_new(&sbom, &spdx_bytes(&request.source_lock, &manifest)?)?;
     sync_tree(package_stage.path())?;
 
     publish_prepared_tree_noclobber(package_stage.path(), &request.output_dir).map_err(
@@ -253,7 +253,8 @@ fn copy_directory(
             continue;
         }
         let child_relative = relative.join(name);
-        let folded = payload_casefold_key(&child_relative)?;
+        let folded = payload_casefold_path_key(&child_relative)
+            .map_err(|_| ContractError::package("candidate path is not portable"))?;
         if !portable_paths.insert(folded) {
             return Err(ContractError::package(
                 "candidate contains a case-folding path collision",
@@ -317,50 +318,6 @@ fn copy_regular(
     )
 }
 
-/// Derive a collision key for a source-controlled payload path.
-///
-/// Producer output names are ASCII-only, but upstream toolchain payloads may
-/// legitimately contain UTF-8 names (the legacy vector includes `Größe`).
-/// We therefore cannot use the generated-output name policy here.  This
-/// accepts valid UTF-8 relative components while rejecting names that collide
-/// under Unicode lowercase comparison on a case-insensitive host.
-fn payload_casefold_key(path: &Path) -> Result<String, ContractError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        let Component::Normal(component) = component else {
-            return Err(ContractError::package(
-                "candidate path is not a safe relative payload path",
-            ));
-        };
-        let value = component
-            .to_str()
-            .ok_or_else(|| ContractError::package("candidate path is not UTF-8"))?;
-        if value.is_empty()
-            || value == "."
-            || value == ".."
-            || value
-                .chars()
-                .any(|character| character.is_control() || matches!(character, '/' | '\\' | ':'))
-        {
-            return Err(ContractError::package(
-                "candidate path is not a portable payload component",
-            ));
-        }
-        parts.push(
-            value
-                .chars()
-                .flat_map(char::to_lowercase)
-                .collect::<String>(),
-        );
-    }
-    if parts.is_empty() {
-        return Err(ContractError::package(
-            "candidate path is not a nonempty relative payload path",
-        ));
-    }
-    Ok(parts.join("/"))
-}
-
 #[cfg(unix)]
 fn copy_symlink(source: &Path, destination: &Path, relative: &Path) -> Result<(), ContractError> {
     use std::os::unix::fs::symlink;
@@ -383,7 +340,7 @@ fn copy_symlink(
     ))
 }
 
-fn validate_link_target(relative: &Path, target: &Path) -> Result<(), ContractError> {
+pub(crate) fn validate_link_target(relative: &Path, target: &Path) -> Result<(), ContractError> {
     if target.is_absolute() || target.to_str().is_none() {
         return Err(ContractError::package(
             "candidate symbolic link has an absolute or non-UTF-8 target",
@@ -892,8 +849,8 @@ fn write_tar_padding<W: Write>(output: &mut W, size: u64) -> Result<(), Contract
     Ok(())
 }
 
-fn spdx_bytes(
-    request: &PackageRequest,
+pub(crate) fn spdx_bytes(
+    source_lock: &SourceLock,
     manifest: &ArosToolchainManifest,
 ) -> Result<Vec<u8>, ContractError> {
     let mut packages = vec![json!({
@@ -906,7 +863,7 @@ fn spdx_bytes(
         "licenseConcluded": "NOASSERTION", "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION"
     })];
     let mut relationships = Vec::new();
-    for (index, source) in request.source_lock.source_components().enumerate() {
+    for (index, source) in source_lock.source_components().enumerate() {
         let identifier = format!("SPDXRef-Source-{}", index + 1);
         let payload = source.payload();
         packages.push(json!({
@@ -926,12 +883,7 @@ fn spdx_bytes(
         };
         relationships.push(json!({"spdxElementId": left, "relationshipType": relationship, "relatedSpdxElement": right}));
     }
-    for (index, package) in request
-        .source_lock
-        .host_python_packages()
-        .iter()
-        .enumerate()
-    {
+    for (index, package) in source_lock.host_python_packages().iter().enumerate() {
         let identifier = format!("SPDXRef-HostPython-{}", index + 1);
         let payload = package.payload();
         packages.push(json!({
@@ -1226,6 +1178,28 @@ mod tests {
             .files
             .iter()
             .all(|entry| !entry.path.starts_with('.')));
+        let verification = crate::package_verify::PackageVerificationRequest {
+            package_dir: first.output_dir.clone(),
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let verified = crate::package_verify::verify(&verification).unwrap();
+        assert_eq!(verified.manifest, manifest);
+        let checksum = fs::read(&first.checksum).unwrap();
+        fs::write(&first.checksum, b"wrong checksum\n").unwrap();
+        assert!(crate::package_verify::verify(&verification).is_err());
+        fs::write(&first.checksum, checksum).unwrap();
+        let sbom = fs::read(&first.sbom).unwrap();
+        fs::write(&first.sbom, b"{}\n").unwrap();
+        assert!(crate::package_verify::verify(&verification).is_err());
+        fs::write(&first.sbom, sbom).unwrap();
+        fs::write(first.output_dir.join("unexpected"), b"extra outer asset").unwrap();
+        assert!(crate::package_verify::verify(&verification).is_err());
     }
 
     #[cfg(unix)]
@@ -1242,8 +1216,8 @@ mod tests {
         assert!(scan_prefixes(&root, &[PathBuf::from("/work/build")]).is_err());
 
         assert_eq!(
-            payload_casefold_key(Path::new("Foo")).unwrap(),
-            payload_casefold_key(Path::new("foo")).unwrap()
+            payload_casefold_path_key(Path::new("Foo")).unwrap(),
+            payload_casefold_path_key(Path::new("foo")).unwrap()
         );
         fs::write(root.join("Foo"), b"one").unwrap();
         let request = PackageRequest {
