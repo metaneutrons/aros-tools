@@ -10,10 +10,9 @@ instead of appending session history. Git history preserves earlier versions.
 - Baseline: [`6f2956bcbde283732a134de0f1aad3a8cab470e9`](https://github.com/metaneutrons/aros-tools/commit/6f2956bcbde283732a134de0f1aad3a8cab470e9),
   the merged [PR #60](https://github.com/metaneutrons/aros-tools/pull/60),
   which supplies the declaration-bound native local lifecycle.
-- TCP-M0, [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29)
-  and [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) are
-  accepted. [TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31)
-  is the active issue.
+- TCP-M0 through TCP-M3 are accepted. The six measured M3 local-build proofs
+  and their precise boundary are in
+  [the TCP-M3 evidence ledger](docs/tcp-m3-native-evidence.md). M4 is next.
 - Branch `fix/tcp-m3-completion` extends the merged lifecycle with one safe,
   explicit recovery boundary: `--resume-from compiler` reacquires only the
   retained private roots, revalidates the snapshot/cache/receipt/output chain,
@@ -32,19 +31,10 @@ instead of appending session history. Git history preserves earlier versions.
 
 ## Next bounded action
 
-Merge the M3 completion change before changing `aros-toolchains`. The official
-producer currently has no committed `toolchains/producer-executor-v1.toml`; add
-it only after the merged tools commit is known, so its contract digest and
-`tools_commit` are measured rather than fabricated. Then create a clean recipe
-and execute the six required native single-build diagnostics: all three
-profiles on Linux x86-64 and macOS AArch64. Verify each produced local prefix
-with `aros toolchain verify --local`; do not run a complete A/B matrix for this
-milestone.
-
-Issue #31 remains open until the M3 completion change is merged and the six
-requested host/profile reports have recorded exact identities, resource
-observations and local-prefix verification. Do not claim M3 completion from
-synthetic lifecycle tests or a partial host/profile set.
+Begin TCP-M4 from the accepted M3 candidate boundary. Preserve the native
+executor's no-clobber publication and receipts; M4 must add the native
+toolchain envelope and complete verification without treating the M3 local
+prefixes as release artifacts.
 
 ## Resume safely
 
