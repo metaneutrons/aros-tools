@@ -7,40 +7,31 @@ instead of appending session history. Git history preserves earlier versions.
 
 ## Last verified implementation checkpoint
 
-- Baseline: [`6f2956bcbde283732a134de0f1aad3a8cab470e9`](https://github.com/metaneutrons/aros-tools/commit/6f2956bcbde283732a134de0f1aad3a8cab470e9),
-  the merged [PR #60](https://github.com/metaneutrons/aros-tools/pull/60),
-  which supplies the declaration-bound native local lifecycle.
-- TCP-M0 through TCP-M3 are accepted. The six measured M3 local-build proofs
-  and their precise boundary are in
-  [the TCP-M3 evidence ledger](docs/tcp-m3-native-evidence.md). M4 is next.
-- Branch `fix/tcp-m3-completion` extends the merged lifecycle with one safe,
-  explicit recovery boundary: `--resume-from compiler` reacquires only the
-  retained private roots, revalidates the snapshot/cache/receipt/output chain,
-  then builds the collector in a fresh Cargo target root. It rejects partial
-  compiler state, completed collector state and all malformed or changed input.
-  The same change binds recursive snapshot digests and effective build flags to
-  phase inputs, gives Cargo the declared job budget, and adds native failure,
-  deadline, cancellation and retained-root tests.
-- Current local verification is green: `cargo fmt --check`, `cargo clippy
-  --workspace --all-targets --all-features --locked -- -D warnings`,
-  `cargo test --locked -p aros-toolchain --test native_lifecycle`, `cargo test
-  --locked -p aros-toolchain --test workspace_guards`, `cargo test --locked -p
-  aros-toolchain --test executor`, `cargo test --locked -p aros-cli --test
-  toolchain_plan_cli`, and `python3 scripts/toolchain_producer_contract_test.py`.
-  These are not real compiler qualification.
+- Baseline: [`0fa0a37375afc00aafe2c848f1a2a58896d05512`](https://github.com/metaneutrons/aros-tools/commit/0fa0a37375afc00aafe2c848f1a2a58896d05512),
+  the merged [PR #72](https://github.com/metaneutrons/aros-tools/pull/72).
+- TCP-M0 through TCP-M4 are accepted. M3 local-build limits are recorded in
+  [the TCP-M3 evidence ledger](docs/tcp-m3-native-evidence.md); M4 native
+  packaging/read-back results and its strict boundary are recorded in
+  [the TCP-M4 evidence ledger](docs/tcp-m4-native-evidence.md).
+- M4 owns deterministic synthetic package inventory, manifests, sidecars,
+  SBOMs and bounded archive read-back. The integrated main checkpoint is
+  [Workspace CI run 34165692830](https://github.com/metaneutrons/aros-tools/actions/runs/34165692830),
+  green on exactly the baseline commit. Its preceding four-host M4
+  qualification is recorded in the evidence ledger.
+- This remains neither compiler nor release qualification: it creates no tag,
+  publication, attestation, A/B result or hardware evidence.
 
 ## Next bounded action
 
-Begin TCP-M4 from the accepted M3 candidate boundary. Preserve the native
-executor's no-clobber publication and receipts; M4 must add the native
-toolchain envelope and complete verification without treating the M3 local
-prefixes as release artifacts.
+Begin TCP-M5 from the accepted M4 package boundary. Port compatibility,
+replay and recovery without treating the M4 synthetic envelopes as released
+toolchains. Keep all release, A/B and publication gates pending until TCP-M7.
 
 ## Resume safely
 
 1. Read applicable repository instructions and inspect the working tree before
    choosing a branch. Preserve unrelated changes and retained run directories.
-2. Recheck [issue #31](https://github.com/metaneutrons/aros-tools/issues/31),
+2. Recheck [issue #33](https://github.com/metaneutrons/aros-tools/issues/33),
    current PR heads and required checks. Never infer current completion from
    this handoff or reuse stale qualification for changed executable code.
 3. Resolve source/producer identities from the versioned contracts. Do not
