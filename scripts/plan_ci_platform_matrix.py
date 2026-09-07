@@ -24,6 +24,9 @@ HOSTS: Final = (
 DOCUMENTATION_FILES: Final = {
     "README.md",
     "CONTRIBUTING.md",
+    # The root handoff is deliberately versioned developer documentation. It
+    # cannot alter the produced binary or the source/producer contract.
+    "HANDOFF.md",
 }
 DOCUMENTATION_DIRECTORIES: Final = ("docs/", "docs-site/")
 MAX_CHANGED_PATHS_BYTES: Final = 1024 * 1024

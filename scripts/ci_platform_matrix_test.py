@@ -20,7 +20,12 @@ class PlatformMatrixTests(unittest.TestCase):
     def test_documentation_only_pr_is_linux_only_and_source_independent(self):
         scope, reason, value = planner.plan(
             event="pull_request",
-            changed_paths=("README.md", "docs-site/src/content/docs/index.mdx", "docs/notes.md"),
+            changed_paths=(
+                "README.md",
+                "HANDOFF.md",
+                "docs-site/src/content/docs/index.mdx",
+                "docs/notes.md",
+            ),
             dispatch_scope="full",
         )
         self.assertEqual(scope, "fast")
