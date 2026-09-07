@@ -58,7 +58,9 @@ for arg in "$@"; do
 done
 test -n "$prefix"
 test -n "$cache"
-printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
+printf '%s\n' "$@" > configure.args
+printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
+printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@printf "%%s\\n" "$${CMAKE_BUILD_PARALLEL_LEVEL}" > native-cmake-jobs\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
 "#,
         );
         write_executable(
@@ -120,13 +122,18 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
         .unwrap();
         fs::write(
             root.join("tools/Cargo.toml"),
-            "[package]\nname = \"aros-collect\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[dependencies]\nfixture-dependency = \"1.0.0\"\n",
+            "[package]\nname = \"aros-collect\"\nversion = \"0.0.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n[dependencies]\nfixture-dependency = \"1.0.0\"\n",
         )
         .unwrap();
         fs::write(root.join("tools/Cargo.lock"), format!("version = 4\n\n[[package]]\nname = \"aros-collect\"\nversion = \"0.0.0\"\ndependencies = [\"fixture-dependency\"]\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{package_checksum}\"\n")).unwrap();
         fs::write(
             root.join("tools/src/main.rs"),
-            "fn main() { assert_eq!(fixture_dependency::answer(), 42); }\n",
+            "fn main() { assert_eq!(fixture_dependency::answer(), 42); print!(\"{}\", env!(\"FIXTURE_CARGO_JOBS\")); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tools/build.rs"),
+            "fn main() { println!(\"cargo:rustc-env=FIXTURE_CARGO_JOBS={}\", std::env::var(\"CARGO_BUILD_JOBS\").unwrap()); }\n",
         )
         .unwrap();
         git(&root.join("tools"), &["add", "."]);
@@ -286,6 +293,48 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     assert!(prefix.join("bin/collect-aros32").is_symlink());
     assert!(!prefix.join("bin/llvm-config").exists());
     assert!(!prefix.join("lib/cmake/llvm").exists());
+    assert!(!fixture
+        .root
+        .join("output/.aros-native-toolchain-stage")
+        .exists());
+    let build = fixture.root.join("work/native-lifecycle/build");
+    let configure_args = fs::read_to_string(build.join("configure.args")).unwrap();
+    for expected in [
+        "--target=pc-x86_64",
+        "--with-toolchain=llvm",
+        "--with-llvm-version=11.0.0",
+        "--enable-toolchain-release",
+        &format!(
+            "--with-portssources={}",
+            fixture.root.join("cache").display()
+        ),
+        &format!(
+            "--with-aros-toolchain-install={}",
+            fixture
+                .root
+                .join("output/.aros-native-toolchain-stage")
+                .display()
+        ),
+    ] {
+        assert!(configure_args.contains(expected), "missing {expected}");
+    }
+    assert_eq!(
+        fs::read_to_string(build.join("configure-cmake-jobs"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("native-cmake-jobs"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    let collector_jobs = Command::new(prefix.join("bin/aros-collect"))
+        .output()
+        .unwrap();
+    assert!(collector_jobs.status.success());
+    assert_eq!(collector_jobs.stdout, b"1");
     let mut previous: Option<String> = None;
     for phase in [
         "preflight",
@@ -293,6 +342,7 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
         "configure",
         "compiler",
         "collector",
+        "publish",
     ] {
         let receipt: serde_json::Value = serde_json::from_slice(
             &fs::read(
@@ -331,7 +381,11 @@ fn explicit_collector_resume_revalidates_predecessors_and_uses_a_fresh_cargo_tar
     let fixture = Fixture::new();
     executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
     let lifecycle = fixture.root.join("work/native-lifecycle");
-    let prefix = fixture.root.join("output/toolchain/bin");
+    let published = fixture.root.join("output/toolchain");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    fs::rename(&published, &staging).unwrap();
+    fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    let prefix = staging.join("bin");
 
     // Model an interruption after the compiler receipt but before a collector
     // receipt could be committed. The compiler receipt owns llvm-config; the
@@ -346,7 +400,11 @@ fn explicit_collector_resume_revalidates_predecessors_and_uses_a_fresh_cargo_tar
     request.resume_from = Some(ResumePhase::Compiler);
     let result = executor::run(&request, &CancellationToken::default()).unwrap();
     assert_eq!(result.commit_state, "committed");
-    assert!(prefix.join("aros-collect").is_file());
+    assert!(fixture
+        .root
+        .join("output/toolchain/bin/aros-collect")
+        .is_file());
+    assert!(!staging.exists());
     assert!(lifecycle.join("receipts/collector.json").is_file());
     assert!(lifecycle
         .join("logs/collector-resume-1.stdout.log")
@@ -359,7 +417,11 @@ fn collector_resume_rejects_a_tampered_retained_snapshot_before_execution() {
     let fixture = Fixture::new();
     executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
     let lifecycle = fixture.root.join("work/native-lifecycle");
-    let prefix = fixture.root.join("output/toolchain/bin");
+    let published = fixture.root.join("output/toolchain");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    fs::rename(&published, &staging).unwrap();
+    fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    let prefix = staging.join("bin");
     fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
     for name in ["aros-collect", "collect-aros", "collect-aros32"] {
         fs::remove_file(prefix.join(name)).unwrap();
@@ -377,6 +439,38 @@ fn collector_resume_rejects_a_tampered_retained_snapshot_before_execution() {
     assert!(error
         .to_string()
         .contains("retained preflight receipt does not match the current verified input_sha256"));
+    assert!(!lifecycle.join("rust-target-resume-1").exists());
+}
+
+#[test]
+fn collector_resume_rejects_a_tampered_configure_output_before_execution() {
+    let fixture = Fixture::new();
+    executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let published = fixture.root.join("output/toolchain");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    fs::rename(&published, &staging).unwrap();
+    fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+        fs::remove_file(staging.join("bin").join(name)).unwrap();
+    }
+    fs::write(staging.join("bin/llvm-config"), b"producer-only").unwrap();
+    fs::write(
+        lifecycle.join("build/configure.args"),
+        b"tampered configure boundary\n",
+    )
+    .unwrap();
+
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("retained native phase output does not match its durable receipt"),
+        "{error}"
+    );
     assert!(!lifecycle.join("rust-target-resume-1").exists());
 }
 
@@ -403,6 +497,49 @@ fn native_configure_failure_retains_owned_roots_and_phase_logs() {
     assert!(lifecycle.join("receipts/environment.json").is_file());
     assert!(lifecycle.join("logs/configure.stderr.log").is_file());
     assert!(!lifecycle.join("receipts/configure.json").exists());
+}
+
+#[test]
+fn native_publication_never_replaces_a_final_prefix_and_retains_staging() {
+    let fixture = Fixture::new();
+    fixture.replace_source_configure(
+        r#"#!/bin/sh
+set -eu
+prefix=
+cache=
+for arg in "$@"; do
+  case "$arg" in
+    --with-aros-toolchain-install=*) prefix=${arg#*=} ;;
+    --with-portssources=*) cache=${arg#*=} ;;
+  esac
+done
+test -n "$prefix"
+test -n "$cache"
+parent=$(dirname "$prefix")
+mkdir "$parent/toolchain"
+printf retained > "$parent/toolchain/preexisting"
+printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
+"#,
+    );
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("publication refused an existing final prefix"),
+        "{error}"
+    );
+    let output = fixture.root.join("output");
+    assert_eq!(
+        fs::read(output.join("toolchain/preexisting")).unwrap(),
+        b"retained"
+    );
+    assert!(output
+        .join(".aros-native-toolchain-stage/bin/aros-collect")
+        .is_file());
+    let receipts = fixture.root.join("work/native-lifecycle/receipts");
+    assert!(receipts.join("collector.json").is_file());
+    assert!(!receipts.join("publish.json").exists());
 }
 
 #[test]

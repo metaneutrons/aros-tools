@@ -3,8 +3,12 @@
 //! The Rust layer owns lifecycle state, input binding, environment selection,
 //! process supervision and receipts. `configure`, MetaMake and the
 //! `crosstools-release` target remain unmodified source-owned programs. This
-//! module has no packaging, publication or release-attestation capability.
+//! module has no packaging, release-publication or release-attestation
+//! capability. It does durably publish a completed *local* candidate into its
+//! reserved output root; that operation cannot create, modify or promote a
+//! release asset.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -13,10 +17,11 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    exit_signal, measure_tree_content_cas, run_output_with_input_and_control, sha256_bytes,
-    sha256_file, CancellationToken, DiagnosticContext, Sha256Digest,
+    exit_signal, measure_tree_content_cas, publication_failure_class,
+    publish_prepared_tree_noclobber, run_output_with_input_and_control, sha256_bytes, sha256_file,
+    CancellationToken, DiagnosticContext, PublicationFailureClass, Sha256Digest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cargo_vendor::CargoVendorEnvironment;
@@ -34,6 +39,8 @@ use crate::{canonical, ContractError, Recipe};
 
 const CAPTURE_LIMIT: usize = 256 * 1024;
 const CONTRACT_PATH: &str = "toolchains/producer-executor-v1.toml";
+const STAGING_PREFIX: &str = ".aros-native-toolchain-stage";
+const PUBLISHED_PREFIX: &str = "toolchain";
 
 /// Execute the controlled native lifecycle for one local-only candidate.
 ///
@@ -199,7 +206,10 @@ fn run_owned(
         Some(&preflight_receipt),
     )?;
 
-    let prefix = lifecycle.output_root().join("toolchain");
+    // Build beneath an owned private staging leaf.  The final `toolchain`
+    // leaf remains absent until every producer phase and the collector have
+    // completed; the durable publication boundary below is its only writer.
+    let prefix = lifecycle.staging_prefix();
     fs::create_dir(&prefix)
         .map_err(|_| ContractError::state("cannot create fresh native candidate prefix"))?;
     let build = lifecycle.work_root().join("build");
@@ -287,7 +297,7 @@ fn run_owned(
         "compiler",
         &plan.identity,
         &compiler_input,
-        lifecycle.output_root(),
+        &prefix,
         &compiler_outputs,
         Some(&configure_receipt),
     )?;
@@ -346,9 +356,25 @@ fn run_owned(
         "collector",
         &plan.identity,
         &collector_input,
-        lifecycle.output_root(),
+        &prefix,
         std::slice::from_ref(&collector_output),
         Some(&compiler_receipt),
+    )?;
+    run_dirs.revalidate(cancellation)?;
+    publish_candidate(&prefix, &lifecycle.published_prefix())?;
+    let published_collector = measure_file(
+        &lifecycle.published_prefix().join("bin/aros-collect"),
+        "toolchain/bin/aros-collect",
+    )?;
+    let publish_input = phase_input("publish", &execution_context, Some(&collector_receipt))?;
+    let publish_receipt = persist_publish_receipt(
+        &lifecycle,
+        "publish",
+        &plan.identity,
+        &publish_input,
+        &lifecycle.published_prefix(),
+        std::slice::from_ref(&published_collector),
+        Some(&collector_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
 
@@ -359,13 +385,14 @@ fn run_owned(
         backend: Backend::Native,
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
-        outputs: vec![collector_output],
+        outputs: vec![published_collector],
         evidence: vec![
             receipt_evidence("preflight", preflight_receipt),
             receipt_evidence("environment", environment_receipt),
             receipt_evidence("configure", configure_receipt),
             receipt_evidence("compiler", compiler_receipt),
             receipt_evidence("collector", collector_receipt),
+            receipt_evidence("publish", publish_receipt),
             Evidence {
                 check: "origin",
                 status: "not-run",
@@ -477,7 +504,11 @@ fn resume_after_compiler(
         &[],
         Some(&preflight_receipt),
     )?;
-    let configure_outputs = measured_files(&lifecycle.work_root().join("build"), "build")?;
+    // Later compiler work legitimately adds files beneath the configure root.
+    // Revalidate the exact durable configure outputs instead of treating those
+    // later files as a mutation of the completed configure boundary.
+    let configure_outputs =
+        remeasure_receipt_outputs(&lifecycle, "configure", lifecycle.work_root())?;
     let configure_input = phase_input("configure", &execution_context, Some(&environment_receipt))?;
     let configure_receipt = revalidate_receipt(
         &lifecycle,
@@ -488,14 +519,14 @@ fn resume_after_compiler(
         &configure_outputs,
         Some(&environment_receipt),
     )?;
-    let compiler_outputs = measured_files(&lifecycle.output_root().join("toolchain"), "toolchain")?;
+    let compiler_outputs = measured_files(&lifecycle.staging_prefix(), "toolchain")?;
     let compiler_input = phase_input("compiler", &execution_context, Some(&configure_receipt))?;
     let compiler_receipt = revalidate_receipt(
         &lifecycle,
         "compiler",
         &plan.identity,
         &compiler_input,
-        lifecycle.output_root(),
+        &lifecycle.staging_prefix(),
         &compiler_outputs,
         Some(&configure_receipt),
     )?;
@@ -507,7 +538,7 @@ fn resume_after_compiler(
         &tools_root.join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
-    let prefix = lifecycle.output_root().join("toolchain");
+    let prefix = lifecycle.staging_prefix();
     require_real_directory(&prefix, "retained native candidate prefix")?;
     require_real_directory(&prefix.join("bin"), "retained compiler bin directory")?;
     for name in ["aros-collect", "collect-aros", "collect-aros32"] {
@@ -572,9 +603,25 @@ fn resume_after_compiler(
         "collector",
         &plan.identity,
         &collector_input,
-        lifecycle.output_root(),
+        &prefix,
         std::slice::from_ref(&collector_output),
         Some(&compiler_receipt),
+    )?;
+    run_dirs.revalidate(cancellation)?;
+    publish_candidate(&prefix, &lifecycle.published_prefix())?;
+    let published_collector = measure_file(
+        &lifecycle.published_prefix().join("bin/aros-collect"),
+        "toolchain/bin/aros-collect",
+    )?;
+    let publish_input = phase_input("publish", &execution_context, Some(&collector_receipt))?;
+    let publish_receipt = persist_publish_receipt(
+        &lifecycle,
+        "publish",
+        &plan.identity,
+        &publish_input,
+        &lifecycle.published_prefix(),
+        std::slice::from_ref(&published_collector),
+        Some(&collector_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
     plan.identity.executor.tools_commit = Some(declaration.tools_commit().clone());
@@ -584,13 +631,14 @@ fn resume_after_compiler(
         backend: Backend::Native,
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
-        outputs: vec![collector_output],
+        outputs: vec![published_collector],
         evidence: vec![
             receipt_evidence("preflight", preflight_receipt),
             receipt_evidence("environment", environment_receipt),
             receipt_evidence("configure", configure_receipt),
             receipt_evidence("compiler", compiler_receipt),
             receipt_evidence("collector", collector_receipt),
+            receipt_evidence("publish", publish_receipt),
             Evidence {
                 check: "origin",
                 status: "not-run",
@@ -733,6 +781,14 @@ impl LifecyclePaths {
             require_private_directory(path, label)?;
         }
         require_real_directory(output, "retained native output root")?;
+        require_real_directory(
+            &output.join(STAGING_PREFIX),
+            "retained native candidate staging prefix",
+        )?;
+        reject_existing_path(
+            &output.join(PUBLISHED_PREFIX),
+            "retained published native candidate",
+        )?;
         Ok(Self {
             root,
             output: output.clone(),
@@ -752,6 +808,19 @@ impl LifecyclePaths {
 
     fn output_root(&self) -> &Path {
         &self.output
+    }
+
+    /// Private compiler and collector destination.  This sibling is atomically
+    /// renamed to [`PUBLISHED_PREFIX`] only after all lifecycle phases have
+    /// completed and their receipts are durable.
+    fn staging_prefix(&self) -> PathBuf {
+        self.output.join(STAGING_PREFIX)
+    }
+
+    /// Consumer-visible candidate prefix.  It is intentionally absent until
+    /// [`publish_candidate`] proves the no-clobber durable commit boundary.
+    fn published_prefix(&self) -> PathBuf {
+        self.output.join(PUBLISHED_PREFIX)
     }
 
     fn require_absent_receipt(&self, phase: &str) -> Result<(), ContractError> {
@@ -1153,6 +1222,41 @@ fn reject_existing_path(path: &Path, label: &str) -> Result<(), ContractError> {
     }
 }
 
+/// Commit one fully built native candidate into its consumer-visible prefix.
+///
+/// Both leaves are siblings in the already locked private output root.  The
+/// shared publication primitive recursively syncs the prepared tree, performs
+/// a no-clobber rename and syncs the parent directory.  A failure before the
+/// rename leaves the staging tree intact; a failure after it is deliberately
+/// surfaced as an uncertain commit while retaining the complete final tree.
+fn publish_candidate(staging: &Path, destination: &Path) -> Result<(), ContractError> {
+    publish_prepared_tree_noclobber(staging, destination)
+        .map(|_| ())
+        .map_err(|error| {
+            let message = match publication_failure_class(&error) {
+            PublicationFailureClass::Conflict => {
+                "native candidate publication refused an existing final prefix; the staged candidate is retained"
+            }
+            PublicationFailureClass::CommitStateUncertain => {
+                "native candidate publication reached an uncertain durable commit state; inspect the retained final prefix and phase evidence"
+            }
+            PublicationFailureClass::UnsafeTarget => {
+                "native candidate publication rejected an unsafe staged or final prefix; the staged candidate is retained"
+            }
+            PublicationFailureClass::Unsupported => {
+                "native candidate publication requires unsupported durable filesystem operations; the staged candidate is retained"
+            }
+            PublicationFailureClass::RecoveryIncomplete => {
+                "native candidate publication recovery is incomplete; staged and final state are retained for inspection"
+            }
+            PublicationFailureClass::Io => {
+                "native candidate publication failed before a proven durable commit; the staged candidate is retained"
+            }
+            };
+            ContractError::state(message)
+        })
+}
+
 fn measured_files(root: &Path, prefix: &str) -> Result<Vec<Output>, ContractError> {
     let mut outputs = Vec::new();
     collect_files(root, prefix, &mut outputs)?;
@@ -1210,6 +1314,66 @@ fn measure_file(path: &Path, relative: &str) -> Result<Output, ContractError> {
         sha256: measured.digest,
         size: measured.size,
     })
+}
+
+/// Re-measure the completed regular-file outputs named by one durable receipt.
+///
+/// A later phase may append build-system artefacts below an earlier phase's
+/// root.  That does not alter the earlier boundary.  The recorded files still
+/// have to exist with their exact hashes and sizes; non-file outputs and unsafe
+/// paths are rejected before touching the filesystem.
+fn remeasure_receipt_outputs(
+    lifecycle: &LifecyclePaths,
+    phase: &str,
+    root: &Path,
+) -> Result<Vec<Output>, ContractError> {
+    #[derive(Deserialize)]
+    struct StoredOutput {
+        path: String,
+        kind: String,
+        sha256: String,
+        size: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct StoredReceipt {
+        outputs: Vec<StoredOutput>,
+    }
+
+    let path = lifecycle.receipts.join(format!("{phase}.json"));
+    let bytes = read_regular(path, "retained native phase receipt")?;
+    let receipt: StoredReceipt = serde_json::from_slice(&bytes)
+        .map_err(|_| ContractError::state("retained native phase receipt is not valid JSON"))?;
+    let mut seen = BTreeSet::new();
+    let mut remeasured = Vec::with_capacity(receipt.outputs.len());
+    for output in receipt.outputs {
+        if output.kind != "file"
+            || !safe_relative_output_path(&output.path)
+            || !seen.insert(output.path.clone())
+        {
+            return Err(ContractError::state(
+                "retained native phase receipt names an unsafe or unsupported output",
+            ));
+        }
+        let recorded = Sha256Digest::parse(&output.sha256).map_err(|_| {
+            ContractError::state("retained native phase receipt has an invalid output digest")
+        })?;
+        let current = measure_file(&root.join(&output.path), &output.path)?;
+        if current.sha256 != recorded || current.size != output.size {
+            return Err(ContractError::state(
+                "retained native phase output does not match its durable receipt",
+            ));
+        }
+        remeasured.push(current);
+    }
+    Ok(remeasured)
+}
+
+fn safe_relative_output_path(value: &str) -> bool {
+    !value.is_empty()
+        && Path::new(value).components().all(|component| {
+            matches!(component, std::path::Component::Normal(segment) if !segment.is_empty())
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -1366,6 +1530,35 @@ fn persist_receipt(
     }
     verify_receipt(&path, &digest)?;
     Ok(digest)
+}
+
+/// Record the last receipt without hiding a candidate that has already crossed
+/// the durable publication boundary.  Callers receive no success result: the
+/// final prefix is retained for explicit inspection and must not be rebuilt or
+/// overwritten automatically.
+fn persist_publish_receipt(
+    lifecycle: &LifecyclePaths,
+    phase: &'static str,
+    identity: &Identity,
+    input_sha256: &Sha256Digest,
+    output_root: &Path,
+    outputs: &[Output],
+    previous: Option<&Sha256Digest>,
+) -> Result<Sha256Digest, ContractError> {
+    persist_receipt(
+        lifecycle,
+        phase,
+        identity,
+        input_sha256,
+        output_root,
+        outputs,
+        previous,
+    )
+    .map_err(|_| {
+        ContractError::state(
+            "native candidate was durably published but its publish receipt could not be committed; the final prefix is retained and must be inspected before any new build",
+        )
+    })
 }
 
 /// Re-open a durable receipt and prove its self-digest rather than merely
