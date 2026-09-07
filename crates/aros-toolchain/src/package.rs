@@ -1190,6 +1190,9 @@ mod tests {
         };
         let verified = crate::package_verify::verify(&verification).unwrap();
         assert_eq!(verified.manifest, manifest);
+        let mut wrong_release = verification.clone();
+        wrong_release.release_id = "other-release".into();
+        assert!(crate::package_verify::verify(&wrong_release).is_err());
         let checksum = fs::read(&first.checksum).unwrap();
         fs::write(&first.checksum, b"wrong checksum\n").unwrap();
         assert!(crate::package_verify::verify(&verification).is_err());

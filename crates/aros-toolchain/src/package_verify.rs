@@ -6,12 +6,13 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{
-    finish_sha256, payload_casefold_path_key, sha256_file, toolchain_inventory_sha256,
-    ArosToolchainManifest, ArosToolchainManifestEntry, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
+    finish_sha256, open_regular_file_nofollow, payload_casefold_path_key, sha256_reader,
+    toolchain_inventory_sha256, ArosToolchainManifest, ArosToolchainManifestEntry, Sha256Digest,
+    AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -88,7 +89,7 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
     ];
     require_exact_outer_members(&request.package_dir, expected_members.iter())?;
 
-    let (archive_size, archive_sha256) = measure_archive(&archive)?;
+    let (archive_file, archive_size, archive_sha256) = measure_archive(&archive)?;
     let expected_checksum = format!("{archive_sha256}  {asset}\n");
     if read_metadata(&checksum_path, "checksum sidecar")? != expected_checksum.as_bytes() {
         return Err(ContractError::verification(
@@ -109,7 +110,7 @@ pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, C
         ));
     }
 
-    let archive_result = verify_archive_tree(&archive, &manifest, &request.forbidden_prefixes)?;
+    let archive_result = verify_archive_tree(archive_file, &manifest, &request.forbidden_prefixes)?;
     if archive_result.embedded_manifest != manifest_bytes {
         return Err(ContractError::verification(
             "embedded and external package manifests are not byte-identical",
@@ -186,40 +187,52 @@ fn require_exact_outer_members<'a>(
     Ok(())
 }
 
-fn measure_archive(path: &Path) -> Result<(u64, Sha256Digest), ContractError> {
-    let metadata = fs::symlink_metadata(path)
+fn measure_archive(path: &Path) -> Result<(File, u64, Sha256Digest), ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::verification("cannot safely open package archive"))?;
+    let metadata = file
+        .metadata()
         .map_err(|_| ContractError::verification("cannot inspect package archive"))?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_ARCHIVE_BYTES
-    {
+    if metadata.len() > MAX_ARCHIVE_BYTES {
         return Err(ContractError::verification(
             "package archive is not a regular file within the configured resource limit",
         ));
     }
-    let result = sha256_file(path)
+    let result = sha256_reader(&mut file.by_ref().take(MAX_ARCHIVE_BYTES + 1))
         .map_err(|_| ContractError::verification("cannot measure package archive"))?;
     if result.size != metadata.len() {
         return Err(ContractError::verification(
             "package archive changed while it was measured",
         ));
     }
-    Ok((result.size, result.digest))
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| ContractError::verification("cannot rewind package archive"))?;
+    Ok((file, result.size, result.digest))
 }
 
 fn read_metadata(path: &Path, kind: &str) -> Result<Vec<u8>, ContractError> {
-    let metadata = fs::symlink_metadata(path)
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::verification(format!("cannot safely open {kind}")))?;
+    let metadata = file
+        .metadata()
         .map_err(|_| ContractError::verification(format!("cannot inspect {kind}")))?;
-    if !metadata.is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > MAX_METADATA_BYTES
-    {
+    if metadata.len() > MAX_METADATA_BYTES {
         return Err(ContractError::verification(format!(
             "{kind} is not a regular file within the configured resource limit"
         )));
     }
-    let content =
-        fs::read(path).map_err(|_| ContractError::verification(format!("cannot read {kind}")))?;
+    let capacity = usize::try_from(metadata.len())
+        .map_err(|_| ContractError::verification(format!("{kind} exceeds addressable memory")))?;
+    let mut content = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut content)
+        .map_err(|_| ContractError::verification(format!("cannot read {kind}")))?;
+    if u64::try_from(content.len()).is_ok_and(|size| size > MAX_METADATA_BYTES) {
+        return Err(ContractError::verification(format!(
+            "{kind} exceeds the configured resource limit while it was read"
+        )));
+    }
     if u64::try_from(content.len()).ok() != Some(metadata.len()) {
         return Err(ContractError::verification(format!(
             "{kind} changed while it was read"
@@ -278,12 +291,10 @@ struct ArchiveTree {
 }
 
 fn verify_archive_tree(
-    path: &Path,
+    input: File,
     manifest: &ArosToolchainManifest,
     forbidden_prefixes: &[PathBuf],
 ) -> Result<ArchiveTree, ContractError> {
-    let input =
-        File::open(path).map_err(|_| ContractError::verification("cannot open package archive"))?;
     let stream = xz2::stream::Stream::new_stream_decoder(MAX_XZ_DECODER_MEMORY, 0)
         .map_err(|_| ContractError::verification("cannot initialize bounded package XZ decoder"))?;
     let decoder = XzDecoder::new_stream(input, stream);
@@ -409,6 +420,8 @@ fn verify_archive_tree(
             }
         }
     }
+    let mut decoder = archive.into_inner();
+    verify_archive_terminal(&mut decoder)?;
     let embedded_manifest = embedded_manifest.ok_or_else(|| {
         ContractError::verification("package tar does not contain an embedded manifest")
     })?;
@@ -419,6 +432,31 @@ fn verify_archive_tree(
         entries,
         tree_sha256,
     })
+}
+
+fn verify_archive_terminal(decoder: &mut XzDecoder<File>) -> Result<(), ContractError> {
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut trailer_size = 0_u64;
+    loop {
+        let read = decoder.read(&mut buffer).map_err(|_| {
+            ContractError::verification("package XZ stream is truncated or malformed")
+        })?;
+        if read == 0 {
+            return Ok(());
+        }
+        trailer_size = trailer_size
+            .checked_add(u64::try_from(read).map_err(io::Error::other).map_err(|_| {
+                ContractError::verification("package tar trailer byte count overflowed")
+            })?)
+            .ok_or_else(|| {
+                ContractError::verification("package tar trailer byte count overflowed")
+            })?;
+        if trailer_size > 20 * 512 || buffer[..read].iter().any(|byte| *byte != 0) {
+            return Err(ContractError::verification(
+                "package tar has a noncanonical trailing record",
+            ));
+        }
+    }
 }
 
 fn package_relative_path(path: &Path) -> Result<(Option<PathBuf>, bool), ContractError> {
@@ -614,6 +652,51 @@ impl ArchiveBudget {
 mod tests {
     use super::*;
 
+    fn fixture_manifest() -> ArosToolchainManifest {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/toolchain-producer/package-v1.json"
+        ))
+        .unwrap();
+        serde_json::from_value(fixture["manifest"].clone()).unwrap()
+    }
+
+    fn canonical_header(
+        path: &str,
+        entry_type: tar::EntryType,
+        size: u64,
+        mode: u32,
+    ) -> tar::Header {
+        let manifest = fixture_manifest();
+        let mut header = tar::Header::new_ustar();
+        header.set_path(path).unwrap();
+        header.set_entry_type(entry_type);
+        header.set_size(size);
+        header.set_mode(mode);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(manifest.source_date_epoch);
+        header.set_cksum();
+        header
+    }
+
+    fn write_xz_tar(path: &Path, append: impl FnOnce(&mut xz2::write::XzEncoder<File>)) {
+        use std::io::Write as _;
+
+        let output = File::create(path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(output, 6);
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append(
+                &canonical_header("toolchain", tar::EntryType::Directory, 0, 0o755),
+                &b""[..],
+            )
+            .unwrap();
+        builder.finish().unwrap();
+        let mut encoder = builder.into_inner().unwrap();
+        append(&mut encoder);
+        encoder.finish().unwrap().flush().unwrap();
+    }
+
     #[test]
     fn rejects_paths_outside_the_single_toolchain_root() {
         assert!(package_relative_path(Path::new("other/payload")).is_err());
@@ -657,12 +740,40 @@ mod tests {
         builder.append(&header, &b"x"[..]).unwrap();
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap().flush().unwrap();
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../scripts/fixtures/toolchain-producer/package-v1.json"
-        ))
-        .unwrap();
-        let manifest: ArosToolchainManifest =
-            serde_json::from_value(fixture["manifest"].clone()).unwrap();
-        assert!(verify_archive_tree(&archive_path, &manifest, &[]).is_err());
+        let manifest = fixture_manifest();
+        assert!(verify_archive_tree(File::open(&archive_path).unwrap(), &manifest, &[]).is_err());
+    }
+
+    #[test]
+    fn archive_reader_rejects_truncated_xz_and_nonzero_tar_trailers() {
+        use std::io::Write as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("trailer.tar.xz");
+        write_xz_tar(&archive, |encoder| {
+            encoder.write_all(b"untrusted trailing bytes").unwrap();
+        });
+        let manifest = fixture_manifest();
+        assert!(verify_archive_tree(File::open(&archive).unwrap(), &manifest, &[]).is_err());
+
+        let bytes = fs::read(&archive).unwrap();
+        fs::write(&archive, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(verify_archive_tree(File::open(&archive).unwrap(), &manifest, &[]).is_err());
+    }
+
+    #[test]
+    fn archive_reader_rejects_symlink_escapes_before_inventory_acceptance() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("escape.tar.xz");
+        write_xz_tar(&archive, |encoder| {
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = canonical_header("toolchain/link", tar::EntryType::Symlink, 0, 0o777);
+            header.set_link_name("../../escape").unwrap();
+            header.set_cksum();
+            builder.append(&header, &b""[..]).unwrap();
+            builder.finish().unwrap();
+        });
+        let manifest = fixture_manifest();
+        assert!(verify_archive_tree(File::open(&archive).unwrap(), &manifest, &[]).is_err());
     }
 }
