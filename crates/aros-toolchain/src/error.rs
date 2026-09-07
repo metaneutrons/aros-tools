@@ -126,6 +126,22 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn index(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerIndex,
+            message,
+            "treat the release directory as untrusted; retain it for inspection and regenerate every affected package or support file from the exact closed inputs instead of editing a checksum, manifest, or index to fit",
+        )
+    }
+
+    pub(crate) fn comparison(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerComparison,
+            message,
+            "treat the independent package sets as non-reproducible; retain both for inspection and rebuild from independently prepared closed inputs rather than copying one output over the other",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

@@ -26,6 +26,7 @@ pub mod producer_environment;
 pub mod profiles;
 pub mod python_environment;
 pub mod recipe;
+pub mod release_index;
 pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;

@@ -43,6 +43,12 @@ pub enum DiagnosticCode {
     /// Producer-controlled package read-back verification failure.
     #[serde(rename = "AX0602")]
     ProducerVerification,
+    /// Producer-controlled complete release inventory/index failure.
+    #[serde(rename = "AX0701")]
+    ProducerIndex,
+    /// Producer-controlled independent package comparison failure.
+    #[serde(rename = "AX0702")]
+    ProducerComparison,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
@@ -251,6 +257,8 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerCollector => "AX0503",
             Self::ProducerPackage => "AX0601",
             Self::ProducerVerification => "AX0602",
+            Self::ProducerIndex => "AX0701",
+            Self::ProducerComparison => "AX0702",
             Self::ProducerState => "AX0801",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
