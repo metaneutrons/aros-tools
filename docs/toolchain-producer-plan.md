@@ -1,7 +1,6 @@
 # Toolchain producer integration: architecture and delivery plan
 
-Status: producer implementation authorized; M0, M1 and M2 accepted. TCP-M3 is
-in implementation and is not accepted.
+Status: producer implementation authorized; M0, M1, M2 and M3 accepted.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
 percentage estimate. The plan distinguishes the implemented local preview
@@ -14,9 +13,10 @@ or the initial tools release. The extension is planned, not implemented.
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The M1 acceptance evidence is recorded below and its formal issue is
 [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
-[TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) is accepted;
-the active implementation gate is
-[TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31).
+[TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) is accepted.
+[TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31) is accepted
+with the measured native evidence recorded in
+[the TCP-M3 ledger](tcp-m3-native-evidence.md); TCP-M4 is next.
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
 its completed contract freeze. M1's experimental plan/CLI slice is now
 complete for its local-preview acceptance boundary. Native lifecycle work is
