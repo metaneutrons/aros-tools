@@ -2,13 +2,14 @@
 
 use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive,
-    require_absolute_state_path, tree_inventory, INSTALL_COMPLETE_FILE,
+    require_absolute_state_path, INSTALL_COMPLETE_FILE,
 };
 use crate::host_compiler::host_platform_key;
 use aros_common::target::TargetProfile;
 use aros_common::toolchain_manifest::{
     ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
+use aros_common::toolchain_tree_inventory;
 use console::{style, Emoji};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use std::fs;
@@ -426,7 +427,7 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
                 expected_triple
             );
         }
-        let (actual_tree, actual_files) = tree_inventory(&root)?;
+        let (actual_tree, actual_files) = toolchain_tree_inventory(&root).into_diagnostic()?;
         if actual_tree != manifest.tree_sha256 {
             bail!(
                 "local toolchain tree SHA256 mismatch: expected {}, got {}",
@@ -513,7 +514,7 @@ fn verify_locked_install(
     {
         bail!("embedded toolchain manifest does not match the lock entry");
     }
-    let (actual_tree, actual_files) = tree_inventory(root)?;
+    let (actual_tree, actual_files) = toolchain_tree_inventory(root).into_diagnostic()?;
     if actual_tree != artifact.tree_sha256 {
         bail!(
             "toolchain tree SHA256 mismatch: expected {}, got {}",
@@ -1034,7 +1035,7 @@ mod tests {
                 fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let (tree_sha256, files) = tree_inventory(&payload).unwrap();
+        let (tree_sha256, files) = toolchain_tree_inventory(&payload).unwrap();
         let manifest = ArosToolchainManifest {
             schema: AROS_TOOLCHAIN_MANIFEST_SCHEMA,
             release_id: "release-v1".into(),

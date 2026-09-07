@@ -2,10 +2,11 @@
 
 use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive,
-    require_absolute_state_path, require_sha256, tree_inventory_excluding,
+    require_absolute_state_path, require_sha256,
 };
 use aros_common::target::HostCompilerConfig;
 use aros_common::toolchain_manifest::ArosToolchainManifestEntry;
+use aros_common::toolchain_tree_inventory_excluding;
 use console::{style, Emoji};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
 use serde::{Deserialize, Serialize};
@@ -157,7 +158,8 @@ fn measure_host_compiler_payload(root: &Path) -> Result<HostCompilerMeasurement>
     let before = aros_common::measure_tree_content_cas(root)
         .into_diagnostic()
         .wrap_err("failed to measure host-compiler payload through no-follow descriptors")?;
-    let (inventory_sha256, files) = tree_inventory_excluding(root, &[INSTALL_METADATA_DIR])?;
+    let (inventory_sha256, files) =
+        toolchain_tree_inventory_excluding(root, &[INSTALL_METADATA_DIR]).into_diagnostic()?;
     let after = aros_common::measure_tree_content_cas(root)
         .into_diagnostic()
         .wrap_err("failed to re-measure host-compiler payload after inventory")?;
