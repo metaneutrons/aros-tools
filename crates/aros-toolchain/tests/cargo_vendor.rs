@@ -20,7 +20,12 @@ fn vendor_checksum(files: &[(&str, &[u8])]) -> Vec<u8> {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    serde_json::to_vec(&json!({"files": files, "package": PACKAGE_CHECKSUM})).unwrap()
+    serde_json::to_vec(&json!({
+        "$comment": "Cargo-generated checksum metadata",
+        "files": files,
+        "package": PACKAGE_CHECKSUM,
+    }))
+    .unwrap()
 }
 
 fn cache(root: &std::path::Path) {
@@ -86,6 +91,29 @@ fn rejects_a_vendor_file_that_disagrees_with_its_checksum_record() {
         b"tampered\n",
     )
     .unwrap();
+    let error = CargoVendorEnvironment::prepare(
+        &cache_root.canonicalize().unwrap(),
+        &cache_root.join("Cargo.lock").canonicalize().unwrap(),
+        &temporary.path().join("private-vendor"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.diagnostics().diagnostics[0].code.to_string(),
+        "AX0401"
+    );
+}
+
+#[test]
+fn rejects_unknown_checksum_record_fields_after_accepting_cargo_comment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cache_root = temporary.path().join("cache");
+    fs::create_dir(&cache_root).unwrap();
+    cache(&cache_root);
+    let checksum_path = cache_root.join("cargo-vendor/example-1.0.0/.cargo-checksum.json");
+    let mut checksum: serde_json::Value =
+        serde_json::from_slice(&fs::read(&checksum_path).unwrap()).unwrap();
+    checksum["unexpected"] = json!(true);
+    fs::write(&checksum_path, serde_json::to_vec(&checksum).unwrap()).unwrap();
     let error = CargoVendorEnvironment::prepare(
         &cache_root.canonicalize().unwrap(),
         &cache_root.join("Cargo.lock").canonicalize().unwrap(),
