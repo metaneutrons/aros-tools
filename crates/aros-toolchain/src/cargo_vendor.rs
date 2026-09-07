@@ -282,6 +282,12 @@ impl CopyBudget {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChecksumRecord {
+    // `cargo vendor` writes this informational string in every current
+    // checksum record. It has no authority over paths or hashes, but it is a
+    // documented part of Cargo's closed record shape and must not make a
+    // Cargo-produced offline cache unusable.
+    #[serde(rename = "$comment")]
+    _comment: Option<String>,
     files: BTreeMap<String, String>,
     package: Option<String>,
 }
