@@ -16,7 +16,7 @@ use aros_common::{
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::package::{canonical_asset_name, spdx_bytes};
+use crate::package::{canonical_asset_name, pretty_json, spdx_bytes};
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::Recipe;
 use crate::source_lock::SourceLock;
@@ -226,7 +226,8 @@ pub fn index_complete_v1(request: &IndexRequest) -> Result<IndexOutput, Contract
         tools_commit: recipe.tools().0.as_str().into(),
         artifacts,
     };
-    let index_bytes = pretty_json(&index)?;
+    let index_bytes = pretty_json(&index)
+        .map_err(|_| ContractError::index("cannot serialize the deterministic release index"))?;
     let index_path = directory.join(INDEX_NAME);
     let checksums_path = directory.join(CHECKSUMS_NAME);
 
@@ -618,13 +619,6 @@ fn require_json_object(bytes: &[u8], kind: &str) -> Result<(), ContractError> {
         )));
     }
     Ok(())
-}
-
-fn pretty_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|_| ContractError::index("cannot serialize the deterministic release index"))?;
-    bytes.push(b'\n');
-    Ok(bytes)
 }
 
 fn checksums_bytes(directory: &Path, names: &BTreeSet<String>) -> Result<Vec<u8>, ContractError> {

@@ -498,7 +498,7 @@ fn manifest(
     Ok(manifest)
 }
 
-fn pretty_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
+pub(crate) fn pretty_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
     // The legacy producer uses json.dumps(sort_keys=True, indent=2) with its
     // default ensure_ascii=True.  `serde_json` already represents maps in
     // lexicographic order here; escaping non-ASCII code points after rendering
