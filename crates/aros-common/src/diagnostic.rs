@@ -40,6 +40,9 @@ pub enum DiagnosticCode {
     /// Producer-controlled deterministic package construction failure.
     #[serde(rename = "AX0601")]
     ProducerPackage,
+    /// Producer-controlled package read-back verification failure.
+    #[serde(rename = "AX0602")]
+    ProducerVerification,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
@@ -247,6 +250,7 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerCompiler => "AX0502",
             Self::ProducerCollector => "AX0503",
             Self::ProducerPackage => "AX0601",
+            Self::ProducerVerification => "AX0602",
             Self::ProducerState => "AX0801",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
