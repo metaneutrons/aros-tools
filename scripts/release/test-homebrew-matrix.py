@@ -169,12 +169,12 @@ class MatrixPolicy(unittest.TestCase):
                 # Successful non-release qualification never publishes either.
                 self.assertFalse(release_gate(job, "four-hosts", is_release="false"))
 
-    def test_other_intel_builds_stay_in_the_workflows(self):
+    def test_other_intel_builds_stay_in_the_native_matrix_definitions(self):
         release = (ROOT / ".github/workflows/release.yml").read_text()
         native = release.split("\n  native:\n")[1].split("\n  native-ab:\n")[0]
         self.assertIn("runner: macos-15-intel", native)
-        ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("runner: macos-15-intel", ci)
+        ci_planner = (ROOT / "scripts/plan_ci_platform_matrix.py").read_text()
+        self.assertIn('"runner": "macos-15-intel"', ci_planner)
 
 
 class CommandLine(unittest.TestCase):

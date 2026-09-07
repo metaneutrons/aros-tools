@@ -53,6 +53,7 @@ export default defineConfig({
             { label: 'Standalone tools', slug: 'reference/standalone-tools' },
             { label: 'Configuration', slug: 'reference/configuration' },
             { label: 'Platform support', slug: 'reference/platform-support' },
+            { label: 'CI policy', slug: 'reference/ci-policy' },
             { label: 'Diagnostics and logs', slug: 'reference/diagnostics' },
           ],
         },

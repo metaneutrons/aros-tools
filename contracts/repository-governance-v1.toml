@@ -17,19 +17,11 @@ context = "Formatting, architecture and Clippy"
 app_id = 15368
 
 [[repositories."metaneutrons/aros-tools".required_status_checks]]
+context = "Commit hygiene"
+app_id = 15368
+
+[[repositories."metaneutrons/aros-tools".required_status_checks]]
 context = "Tests (linux-x86_64)"
-app_id = 15368
-
-[[repositories."metaneutrons/aros-tools".required_status_checks]]
-context = "Tests (linux-aarch64)"
-app_id = 15368
-
-[[repositories."metaneutrons/aros-tools".required_status_checks]]
-context = "Tests (macos-x86_64)"
-app_id = 15368
-
-[[repositories."metaneutrons/aros-tools".required_status_checks]]
-context = "Tests (macos-aarch64)"
 app_id = 15368
 
 [[repositories."metaneutrons/aros-tools".required_status_checks]]
