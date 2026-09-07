@@ -651,19 +651,20 @@ boundary; it is neither a fully native pipeline nor an automatic fallback.
 
 ### TCP-M4 — Native package, manifest and inventory engine
 
-- [ ] Port normalization, prefix scans, canonical tree inventory, `.tar.xz`
+- [x] Port normalization, prefix scans, canonical tree inventory, `.tar.xz`
   packaging, manifest/index, sidecar/SBOM and read-back verification.
-- [ ] Reuse existing common types; extract only proven shared primitives.
+- [x] Reuse existing common types; extract only proven shared primitives.
   Keep tools-suite `.tar.gz` packaging byte-compatible and independent.
-- [ ] Pass old/new golden vectors for files/directories/links, UTF-8 paths,
+- [x] Pass old/new golden vectors for files/directories/links, UTF-8 paths,
   modes, timestamps, tar headers, compression and manifest serialization.
   Treat intentional stricter validation as a documented contract decision.
-- [ ] Add malformed-archive, resource-exhaustion, mixed-recipe/matrix, missing
+- [x] Add malformed-archive, resource-exhaustion, mixed-recipe/matrix, missing
   SBOM/support-file and unsafe-asset tests. Verify the full 56-file v1 set.
 
-Exit evidence: reproducible synthetic packaging on all four hosts, both
-producer/consumer known-answer tests and complete positive/negative inventories.
-No new full compiler matrix is required for this packaging-only gate.
+Exit evidence: [TCP-M4 native package evidence](tcp-m4-native-evidence.md).
+It records reproducible synthetic packaging on all four hosts, producer and
+consumer known-answer tests, complete positive/negative inventories and the
+explicit absence of a new compiler matrix for this packaging-only gate.
 
 ### TCP-M5 — Compatibility, replay and recovery
 
@@ -880,8 +881,8 @@ tracking change.
 | TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | [Accepted evidence](toolchain-producer-baseline.md#m0-acceptance) |
 | TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | [Measured local lane evidence](#measured-tcp-m1-local-lane-evidence-2026-09-06) |
 | TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55) |
-| TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | Pending |
-| TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | Pending |
+| TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | [Accepted evidence](tcp-m3-native-evidence.md) |
+| TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | [Accepted evidence](tcp-m4-native-evidence.md) |
 | TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | Pending |
 | TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | Pending |
 | TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | Pending |
