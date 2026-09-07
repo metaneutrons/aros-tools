@@ -133,6 +133,70 @@ impl CargoVendorEnvironment {
         })
     }
 
+    /// Reopen one exact private vendor environment after an explicit resume
+    /// boundary has revalidated its owning lifecycle receipts.
+    ///
+    /// This never reconstructs, repairs, or updates a partial vendor tree. It
+    /// accepts only the layout emitted by [`Self::prepare`], rechecks every
+    /// Cargo checksum against the retained `Cargo.lock`, and proves that the
+    /// rendered offline configuration still matches the verified cache
+    /// template. Callers remain responsible for binding this environment to a
+    /// validated receipt chain and fresh collector target directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0401 if the retained environment, cache template, vendor
+    /// checksums, lockfile or private-directory permissions have changed or
+    /// cannot be verified. It never repairs or mutates retained state.
+    pub fn open_existing(
+        cache_root: &Path,
+        cargo_lock: &Path,
+        destination: &Path,
+    ) -> Result<Self, ContractError> {
+        let cache = open_existing_directory(cache_root, "selected source cache")?;
+        let cache_before = rfs::fstat(&cache).map_err(|_| {
+            ContractError::environment("cannot inspect selected source cache directory")
+        })?;
+        let template = read_direct_regular(&cache, VENDOR_TEMPLATE, MAX_TEMPLATE_BYTES)?;
+        let template = std::str::from_utf8(&template)
+            .map_err(|_| ContractError::environment("Cargo vendor configuration is not UTF-8"))?;
+
+        let _root = open_existing_directory(destination, "retained Cargo vendor environment")?;
+        ensure_private_directory(destination)?;
+        let vendor = destination.join(PRIVATE_VENDOR_DIRECTORY);
+        let cargo_home = destination.join(CARGO_HOME_DIRECTORY);
+        ensure_private_directory(&vendor)?;
+        ensure_private_directory(&cargo_home)?;
+        let cargo_home_file = open_directory(&cargo_home)
+            .map_err(|_| ContractError::environment("cannot reopen retained Cargo home"))?;
+        let configured = read_direct_regular(&cargo_home_file, CARGO_CONFIG, MAX_TEMPLATE_BYTES)?;
+        let expected = render_vendor_configuration(template, &vendor)?;
+        if configured != expected {
+            return Err(ContractError::environment(
+                "retained Cargo vendor configuration no longer matches the verified cache template",
+            ));
+        }
+        let packages = validate_vendor_tree(&vendor)?;
+        validate_cargo_lock(cargo_lock, &packages)?;
+        if !same_stat(
+            &cache_before,
+            &rfs::fstat(&cache).map_err(|_| {
+                ContractError::environment("cannot recheck selected source cache directory")
+            })?,
+        ) {
+            return Err(ContractError::environment(
+                "selected source cache changed during retained vendor revalidation",
+            ));
+        }
+        Ok(Self {
+            root: destination.to_owned(),
+            vendor,
+            cargo_home: cargo_home.clone(),
+            config: cargo_home.join(CARGO_CONFIG),
+            packages,
+        })
+    }
+
     /// Fresh private environment root.
     #[must_use]
     pub fn root(&self) -> &Path {

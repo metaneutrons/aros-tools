@@ -116,6 +116,42 @@ fn fresh_directories_are_private_locked_and_retained_on_drop() {
 }
 
 #[test]
+fn explicit_resume_reacquires_only_the_exact_retained_owned_roots() {
+    let fixture = Fixture::new();
+    let guard = fixture.reserve().unwrap();
+    fs::write(fixture.work().join("retained"), b"evidence").unwrap();
+    guard.release().unwrap();
+
+    let resumed = RunDirectories::resume(
+        &fixture.request,
+        &sha256_bytes(b"synthetic operation binding"),
+        &fixture.token,
+    )
+    .unwrap();
+    resumed.revalidate(&fixture.token).unwrap();
+    assert_eq!(
+        fs::read(fixture.work().join("retained")).unwrap(),
+        b"evidence"
+    );
+    resumed.release().unwrap();
+}
+
+#[test]
+fn explicit_resume_rejects_a_different_owner_without_mutation() {
+    let fixture = Fixture::new();
+    let guard = fixture.reserve().unwrap();
+    guard.release().unwrap();
+    let before = fixture.digest();
+    assert!(RunDirectories::resume(
+        &fixture.request,
+        &sha256_bytes(b"different operation binding"),
+        &fixture.token,
+    )
+    .is_err());
+    assert_eq!(fixture.digest(), before);
+}
+
+#[test]
 fn existing_work_or_output_is_never_adopted_even_when_empty() {
     for existing_output in [false, true] {
         for with_content in [false, true] {

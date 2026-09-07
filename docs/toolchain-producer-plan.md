@@ -624,10 +624,11 @@ at `89245f082f3e55a063d24d28b8b70425c5d2cbca`.
 
 ### TCP-M3 — Native build lifecycle
 
-Implementation status: the controlled local lifecycle and synthetic contract
-tests are in active review. The unchecked acceptance criteria, notably receipt
-revalidation/resume, fault coverage and six real host/profile runs, remain
-mandatory before issue #31 can close.
+Implementation status: the controlled local lifecycle now includes a narrowly
+reviewed collector-resume boundary: it revalidates retained ownership,
+snapshots, receipts and compiler outputs before rebuilding only the collector
+in a fresh Cargo target directory. The remaining fault/resource coverage and
+six real host/profile runs remain mandatory before issue #31 can close.
 
 - [ ] Implement configure, crosstools-release and exact-collector phases;
   preserve existing target flags, aliases, runtime closure and normalization

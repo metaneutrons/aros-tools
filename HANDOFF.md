@@ -7,39 +7,44 @@ instead of appending session history. Git history preserves earlier versions.
 
 ## Last verified implementation checkpoint
 
-- Baseline: [`1a77bc1ad24180893410d353792a20f98c4b489d`](https://github.com/metaneutrons/aros-tools/commit/1a77bc1ad24180893410d353792a20f98c4b489d),
-  the merge of [PR #59](https://github.com/metaneutrons/aros-tools/pull/59),
-  which establishes the risk-based CI matrix.
+- Baseline: [`6f2956bcbde283732a134de0f1aad3a8cab470e9`](https://github.com/metaneutrons/aros-tools/commit/6f2956bcbde283732a134de0f1aad3a8cab470e9),
+  the merged [PR #60](https://github.com/metaneutrons/aros-tools/pull/60),
+  which supplies the declaration-bound native local lifecycle.
 - TCP-M0, [TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29)
   and [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) are
   accepted. [TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31)
   is the active issue.
-- Branch `fix/tcp-m3-native-lifecycle` implements the native local lifecycle:
-  declaration-bound snapshots and cache, private locked Python/Cargo inputs,
-  source `configure`, source-owned `crosstools-release`, the internal verified
-  MetaMake fetch bridge, exact `aros-collect` installation, process-group
-  cancellation/deadlines and ordered self-verifying phase receipts. It produces
-  a local-only candidate; it has no packaging, publication or origin-attestation
-  authority.
-- The branch's local verification is green: `cargo check -p aros-toolchain -p
-  aros-cli`, `python3 scripts/toolchain_producer_contract_test.py`, the native
-  synthetic lifecycle test, executor tests, and CLI plan/fetch-bridge tests.
-  Re-run them after any change. These are not real compiler qualification.
+- Branch `fix/tcp-m3-completion` extends the merged lifecycle with one safe,
+  explicit recovery boundary: `--resume-from compiler` reacquires only the
+  retained private roots, revalidates the snapshot/cache/receipt/output chain,
+  then builds the collector in a fresh Cargo target root. It rejects partial
+  compiler state, completed collector state and all malformed or changed input.
+  The same change binds recursive snapshot digests and effective build flags to
+  phase inputs, gives Cargo the declared job budget, and adds native failure,
+  deadline, cancellation and retained-root tests.
+- Current local verification is green: `cargo fmt --check`, `cargo clippy
+  --workspace --all-targets --all-features --locked -- -D warnings`,
+  `cargo test --locked -p aros-toolchain --test native_lifecycle`, `cargo test
+  --locked -p aros-toolchain --test workspace_guards`, `cargo test --locked -p
+  aros-toolchain --test executor`, `cargo test --locked -p aros-cli --test
+  toolchain_plan_cli`, and `python3 scripts/toolchain_producer_contract_test.py`.
+  These are not real compiler qualification.
 
 ## Next bounded action
 
-Finish and review the TCP-M3 implementation PR before changing
-`aros-toolchains`. The official producer currently has no committed
-`toolchains/producer-executor-v1.toml`; add it only after the merged tools
-commit is known, so its contract digest and `tools_commit` are measured rather
-than fabricated. Then run the two required real single-build PC diagnostics:
-Linux x86-64 and macOS AArch64. Do not run a complete A/B matrix for this
+Merge the M3 completion change before changing `aros-toolchains`. The official
+producer currently has no committed `toolchains/producer-executor-v1.toml`; add
+it only after the merged tools commit is known, so its contract digest and
+`tools_commit` are measured rather than fabricated. Then create a clean recipe
+and execute the six required native single-build diagnostics: all three
+profiles on Linux x86-64 and macOS AArch64. Verify each produced local prefix
+with `aros toolchain verify --local`; do not run a complete A/B matrix for this
 milestone.
 
-Issue #31 remains open until it has the required receipt-revalidation/resume
-boundary, fault/resource coverage and the six requested host/profile reports.
-Do not claim M3 completion from the synthetic lifecycle or the two PC
-diagnostics alone.
+Issue #31 remains open until the M3 completion change is merged and the six
+requested host/profile reports have recorded exact identities, resource
+observations and local-prefix verification. Do not claim M3 completion from
+synthetic lifecycle tests or a partial host/profile set.
 
 ## Resume safely
 

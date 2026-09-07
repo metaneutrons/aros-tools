@@ -107,8 +107,13 @@ Build revalidates every selection after acquiring locks. `--offline` (including
 the existing `AROS_OFFLINE` policy) prohibits producer-controlled network use;
 compilation always uses prepared, verified inputs. No new ambient source,
 recipe, compiler-flag or credential overrides are introduced. The current CLI
-does not expose `--resume`: retained receipts are audit evidence only until a
-reviewed revalidation-and-resume implementation exists. Release jobs always
+exposes only `--resume-from compiler` for an interrupted local candidate. It
+reacquires the exact private roots only after owner-marker validation,
+remeasures the three retained snapshots and every compiler output, and validates
+every predecessor receipt against recomputed inputs, identities and predecessor
+digest. It then starts the collector in a fresh Cargo target directory. A
+partial compiler tree, a completed collector receipt, any altered
+receipt/input/output, and every other phase are rejected. Release jobs always
 select fresh work/install roots and no compiled-object cache.
 
 The implemented M1 preview accepts the explicit `build --backend legacy-preview`
@@ -270,7 +275,9 @@ domain is allowed. Native serialization must pass the captured UTF-8 vector;
 ordinary pretty-printed JSON is not interchangeable for hashing.
 
 Receipts are crash-consistency aids, not signed attestations. Recheck input and
-output digests, ownership and predecessor links before reuse. Never resume an
+output digests, ownership and predecessor links before reuse. The current
+implementation permits that only after the complete `compiler` receipt and
+only to rerun the collector with a fresh Cargo target tree. Never resume an
 incomplete make directory or use local receipts as independent A/B proof. A
 truncated receipt is retained as evidence, not silently repaired into success.
 

@@ -13,14 +13,14 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    exit_signal, run_output_with_input_and_control, sha256_bytes, sha256_file, CancellationToken,
-    DiagnosticContext, Sha256Digest,
+    exit_signal, measure_tree_content_cas, run_output_with_input_and_control, sha256_bytes,
+    sha256_file, CancellationToken, DiagnosticContext, Sha256Digest,
 };
 use serde::Serialize;
 use serde_json::json;
 
 use crate::cargo_vendor::CargoVendorEnvironment;
-use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ToolObservation};
+use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_declaration::NativeExecutorDeclaration;
 use crate::plan::{self, Backend, Identity, PlanRequest};
@@ -50,12 +50,6 @@ pub fn run(
         ));
     }
     validate_request(request)?;
-    let plan_request = plan_request(request);
-    let inspection_timeout = Duration::from_secs(request.timeout_seconds.min(900));
-    let plan = plan::inspect_with_timeout(&plan_request, inspection_timeout)?;
-    let recipe = Recipe::parse(
-        &fs::read(&request.recipe).map_err(|_| ContractError::preflight("cannot read recipe"))?,
-    )?;
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(request.timeout_seconds))
         .ok_or_else(|| ContractError::preflight("build timeout is not representable"))?;
@@ -64,9 +58,23 @@ pub fn run(
             "native toolchain build cancelled before reservation",
         ));
     }
+    let plan_request = plan_request(request);
+    let inspection_timeout = remaining(deadline)?.min(Duration::from_mins(15));
+    let plan = plan::inspect_with_timeout(&plan_request, inspection_timeout)?;
+    let recipe = Recipe::parse(
+        &fs::read(&request.recipe).map_err(|_| ContractError::preflight("cannot read recipe"))?,
+    )?;
     let owner = recipe.sha256().clone();
-    let run_dirs = RunDirectories::reserve(&plan_request, &owner, cancellation)?;
-    let result = run_owned(request, plan, &recipe, &run_dirs, deadline, cancellation);
+    let run_dirs = match request.resume_from {
+        None => RunDirectories::reserve(&plan_request, &owner, cancellation)?,
+        Some(ResumePhase::Compiler) => RunDirectories::resume(&plan_request, &owner, cancellation)?,
+    };
+    let result = match request.resume_from {
+        None => run_owned(request, plan, &recipe, &run_dirs, deadline, cancellation),
+        Some(ResumePhase::Compiler) => {
+            resume_after_compiler(request, plan, &recipe, &run_dirs, deadline, cancellation)
+        }
+    };
     let release = run_dirs.release();
     match (result, release) {
         (Ok(result), Ok(())) => Ok(result),
@@ -110,6 +118,7 @@ fn run_owned(
         cancellation,
     )?;
     run_dirs.revalidate(cancellation)?;
+    let snapshots = SnapshotDigests::measure(source.root(), producer.root(), tools.root())?;
 
     let declaration = NativeExecutorDeclaration::parse(&read_regular(
         producer.root().join(CONTRACT_PATH),
@@ -130,25 +139,6 @@ fn run_owned(
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
     let cache = source_cache::verify(&request.cache_dir, bound.source_lock())?;
-    let preflight_input = phase_input(
-        "preflight",
-        recipe,
-        &declaration,
-        Some(&host),
-        Some(&cache),
-        request.jobs,
-        None,
-    )?;
-    let preflight_receipt = persist_receipt(
-        &lifecycle,
-        "preflight",
-        &plan.identity,
-        &preflight_input,
-        lifecycle.work_root(),
-        &[],
-        None,
-    )?;
-
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -161,6 +151,30 @@ fn run_owned(
         recipe.source_date_epoch(),
         request.jobs,
     )?;
+    let preflight_context = PhaseInputContext {
+        recipe,
+        declaration: &declaration,
+        host: Some(&host),
+        cache: Some(&cache),
+        jobs: request.jobs,
+        snapshots: &snapshots,
+        environment: None,
+    };
+    let execution_context = PhaseInputContext {
+        environment: Some(&environment),
+        ..preflight_context
+    };
+    let preflight_input = phase_input("preflight", &preflight_context, None)?;
+    let preflight_receipt = persist_receipt(
+        &lifecycle,
+        "preflight",
+        &plan.identity,
+        &preflight_input,
+        lifecycle.work_root(),
+        &[],
+        None,
+    )?;
+
     let interpreter = python_interpreter(&host)?;
     let python = PythonEnvironment::prepare_with_interpreter(
         bound.source_lock(),
@@ -173,15 +187,8 @@ fn run_owned(
         &tools.root().join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
-    let environment_input = phase_input(
-        "environment",
-        recipe,
-        &declaration,
-        Some(&host),
-        Some(&cache),
-        request.jobs,
-        Some(&preflight_receipt),
-    )?;
+    let environment_input =
+        phase_input("environment", &execution_context, Some(&preflight_receipt))?;
     let environment_receipt = persist_receipt(
         &lifecycle,
         "environment",
@@ -229,15 +236,7 @@ fn run_owned(
         cancellation,
     )?;
     let configure_outputs = measured_files(&lifecycle.work_root().join("build"), "build")?;
-    let configure_input = phase_input(
-        "configure",
-        recipe,
-        &declaration,
-        Some(&host),
-        Some(&cache),
-        request.jobs,
-        Some(&environment_receipt),
-    )?;
+    let configure_input = phase_input("configure", &execution_context, Some(&environment_receipt))?;
     let configure_receipt = persist_receipt(
         &lifecycle,
         "configure",
@@ -282,15 +281,7 @@ fn run_owned(
     )?;
     usage.verify_complete(bound.source_lock())?;
     let compiler_outputs = measured_files(&prefix, "toolchain")?;
-    let compiler_input = phase_input(
-        "compiler",
-        recipe,
-        &declaration,
-        Some(&host),
-        Some(&cache),
-        request.jobs,
-        Some(&configure_receipt),
-    )?;
+    let compiler_input = phase_input("compiler", &execution_context, Some(&configure_receipt))?;
     let compiler_receipt = persist_receipt(
         &lifecycle,
         "compiler",
@@ -316,6 +307,8 @@ fn run_owned(
             "--package",
             "aros-collect",
         ])
+        .arg("--jobs")
+        .arg(request.jobs.to_string())
         .arg("--manifest-path")
         .arg(tools.root().join("Cargo.toml"))
         .arg("--target-dir")
@@ -325,7 +318,8 @@ fn run_owned(
     collector
         .env("HOME", &lifecycle.home)
         .env("TMPDIR", &lifecycle.tmp)
-        .env("RUSTFLAGS", environment.collector_rustflags());
+        .env("RUSTFLAGS", environment.collector_rustflags())
+        .env("CARGO_BUILD_JOBS", request.jobs.to_string());
     if let Some(rustup_home) = selected_rustup_home() {
         // `cargo` may be the rustup proxy. Preserve only the pre-existing
         // absolute toolchain store; Cargo's registry/configuration remains
@@ -346,15 +340,7 @@ fn run_owned(
     remove_producer_only_llvm_inputs(&prefix)?;
     let collector_path = prefix.join("bin/aros-collect");
     let collector_output = measure_file(&collector_path, "toolchain/bin/aros-collect")?;
-    let collector_input = phase_input(
-        "collector",
-        recipe,
-        &declaration,
-        Some(&host),
-        Some(&cache),
-        request.jobs,
-        Some(&compiler_receipt),
-    )?;
+    let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;
     let collector_receipt = persist_receipt(
         &lifecycle,
         "collector",
@@ -366,6 +352,231 @@ fn run_owned(
     )?;
     run_dirs.revalidate(cancellation)?;
 
+    plan.identity.executor.tools_commit = Some(declaration.tools_commit().clone());
+    Ok(BuildResult {
+        schema: "aros-toolchain-result-v1",
+        operation: "build",
+        backend: Backend::Native,
+        identity: plan.identity,
+        output_root: lifecycle.output_root().to_owned(),
+        outputs: vec![collector_output],
+        evidence: vec![
+            receipt_evidence("preflight", preflight_receipt),
+            receipt_evidence("environment", environment_receipt),
+            receipt_evidence("configure", configure_receipt),
+            receipt_evidence("compiler", compiler_receipt),
+            receipt_evidence("collector", collector_receipt),
+            Evidence {
+                check: "origin",
+                status: "not-run",
+                report_sha256: None,
+            },
+        ],
+        environment: host
+            .tools
+            .iter()
+            .map(|tool| ToolObservation {
+                name: tool.name,
+                version: tool.version.clone(),
+            })
+            .collect(),
+        qualification: "local-only",
+        commit_state: "committed",
+    })
+}
+
+/// Resume only the collector after a complete compiler receipt boundary.
+///
+/// A compiler failure is never a checkpoint: this path needs a completed,
+/// self-verifying compiler receipt, remeasures every predecessor output, and
+/// gives Cargo a new target directory. Any missing, malformed, stale or
+/// tampered state is retained and rejected without launching a child process.
+fn resume_after_compiler(
+    request: &BuildRequest,
+    mut plan: plan::Plan,
+    recipe: &Recipe,
+    run_dirs: &RunDirectories,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<BuildResult, ContractError> {
+    run_dirs.revalidate(cancellation)?;
+    let lifecycle = LifecyclePaths::open(run_dirs)?;
+    let work = run_dirs
+        .paths()
+        .work
+        .as_deref()
+        .ok_or_else(|| ContractError::state("retained work root is unavailable"))?;
+    let source_root = work.join("source");
+    let producer_root = work.join("producer");
+    let tools_root = work.join("tools");
+    let snapshots = SnapshotDigests::measure(&source_root, &producer_root, &tools_root)?;
+
+    let declaration = NativeExecutorDeclaration::parse(&read_regular(
+        producer_root.join(CONTRACT_PATH),
+        "retained native executor declaration",
+    )?)?;
+    let contract = read_regular(
+        tools_root.join(declaration.contract_path()),
+        "retained selected tools contract",
+    )?;
+    let lock_bytes = read_regular(
+        producer_root.join(declaration.source_lock_path()),
+        "retained selected source lock",
+    )?;
+    let profiles = read_regular(
+        producer_root.join(declaration.profiles_path()),
+        "retained selected profile matrix",
+    )?;
+    let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
+    let host = preflight::inspect(bound.selected_profile())?;
+    let cache = source_cache::verify(&request.cache_dir, bound.source_lock())?;
+    let environment = ProducerEnvironment::prepare(
+        &ReproducibilityRoots {
+            source: source_root,
+            producer: producer_root.clone(),
+            tools: tools_root.clone(),
+            work: lifecycle.work_root().to_owned(),
+            source_cache: request.cache_dir.clone(),
+        },
+        &host.tool_directories(),
+        recipe.source_date_epoch(),
+        request.jobs,
+    )?;
+    let preflight_context = PhaseInputContext {
+        recipe,
+        declaration: &declaration,
+        host: Some(&host),
+        cache: Some(&cache),
+        jobs: request.jobs,
+        snapshots: &snapshots,
+        environment: None,
+    };
+    let execution_context = PhaseInputContext {
+        environment: Some(&environment),
+        ..preflight_context
+    };
+
+    let preflight_input = phase_input("preflight", &preflight_context, None)?;
+    let preflight_receipt = revalidate_receipt(
+        &lifecycle,
+        "preflight",
+        &plan.identity,
+        &preflight_input,
+        lifecycle.work_root(),
+        &[],
+        None,
+    )?;
+    let environment_input =
+        phase_input("environment", &execution_context, Some(&preflight_receipt))?;
+    let environment_receipt = revalidate_receipt(
+        &lifecycle,
+        "environment",
+        &plan.identity,
+        &environment_input,
+        lifecycle.work_root(),
+        &[],
+        Some(&preflight_receipt),
+    )?;
+    let configure_outputs = measured_files(&lifecycle.work_root().join("build"), "build")?;
+    let configure_input = phase_input("configure", &execution_context, Some(&environment_receipt))?;
+    let configure_receipt = revalidate_receipt(
+        &lifecycle,
+        "configure",
+        &plan.identity,
+        &configure_input,
+        lifecycle.work_root(),
+        &configure_outputs,
+        Some(&environment_receipt),
+    )?;
+    let compiler_outputs = measured_files(&lifecycle.output_root().join("toolchain"), "toolchain")?;
+    let compiler_input = phase_input("compiler", &execution_context, Some(&configure_receipt))?;
+    let compiler_receipt = revalidate_receipt(
+        &lifecycle,
+        "compiler",
+        &plan.identity,
+        &compiler_input,
+        lifecycle.output_root(),
+        &compiler_outputs,
+        Some(&configure_receipt),
+    )?;
+    lifecycle.require_absent_receipt("collector")?;
+    run_dirs.revalidate(cancellation)?;
+
+    let cargo = CargoVendorEnvironment::open_existing(
+        &request.cache_dir,
+        &tools_root.join("Cargo.lock"),
+        &lifecycle.cargo,
+    )?;
+    let prefix = lifecycle.output_root().join("toolchain");
+    require_real_directory(&prefix, "retained native candidate prefix")?;
+    require_real_directory(&prefix.join("bin"), "retained compiler bin directory")?;
+    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+        reject_existing_path(
+            &prefix.join("bin").join(name),
+            "retained collector destination",
+        )?;
+    }
+    let cargo_program = host_tool(&host, "cargo")?;
+    let rust_target = lifecycle.fresh_resume_rust_target()?;
+    let mut collector = Command::new(cargo_program);
+    collector
+        .arg("--config")
+        .arg("net.offline=true")
+        .arg("--config")
+        .arg(cargo.config())
+        .args([
+            "build",
+            "--locked",
+            "--offline",
+            "--release",
+            "--package",
+            "aros-collect",
+        ])
+        .arg("--jobs")
+        .arg(request.jobs.to_string())
+        .arg("--manifest-path")
+        .arg(tools_root.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&rust_target);
+    environment.apply_to(&mut collector);
+    cargo.apply_to(&mut collector);
+    collector
+        .env("HOME", &lifecycle.home)
+        .env("TMPDIR", &lifecycle.tmp)
+        .env("RUSTFLAGS", environment.collector_rustflags())
+        .env("CARGO_BUILD_JOBS", request.jobs.to_string());
+    if let Some(rustup_home) = selected_rustup_home() {
+        collector.env("RUSTUP_HOME", rustup_home);
+    }
+    if let Some(channel) = selected_rust_channel(&producer_root)? {
+        collector.env("RUSTUP_TOOLCHAIN", channel);
+    }
+    let log_name = lifecycle.next_resume_log_name("collector")?;
+    run_phase_with_log(
+        "collector",
+        &log_name,
+        &mut collector,
+        &lifecycle,
+        deadline,
+        cancellation,
+    )?;
+    install_collector(&rust_target, &prefix, &request.preset)?;
+    remove_producer_only_llvm_inputs(&prefix)?;
+    let collector_output = measure_file(
+        &prefix.join("bin/aros-collect"),
+        "toolchain/bin/aros-collect",
+    )?;
+    let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;
+    let collector_receipt = persist_receipt(
+        &lifecycle,
+        "collector",
+        &plan.identity,
+        &collector_input,
+        lifecycle.output_root(),
+        std::slice::from_ref(&collector_output),
+        Some(&compiler_receipt),
+    )?;
+    run_dirs.revalidate(cancellation)?;
     plan.identity.executor.tools_commit = Some(declaration.tools_commit().clone());
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
@@ -491,6 +702,50 @@ impl LifecyclePaths {
         })
     }
 
+    fn open(run_dirs: &RunDirectories) -> Result<Self, ContractError> {
+        let work = run_dirs
+            .paths()
+            .work
+            .as_ref()
+            .ok_or_else(|| ContractError::state("owned work root is unavailable"))?;
+        let output = run_dirs
+            .paths()
+            .output
+            .as_ref()
+            .ok_or_else(|| ContractError::state("owned output root is unavailable"))?;
+        let root = work.join("native-lifecycle");
+        let logs = root.join("logs");
+        let receipts = root.join("receipts");
+        let home = root.join("home");
+        let tmp = root.join("tmp");
+        let python = root.join("python");
+        let cargo = root.join("cargo");
+        let rust_target = root.join("rust-target");
+        for (path, label) in [
+            (&root, "retained native lifecycle root"),
+            (&logs, "retained native lifecycle logs"),
+            (&receipts, "retained native lifecycle receipts"),
+            (&home, "retained native lifecycle home"),
+            (&tmp, "retained native lifecycle temporary directory"),
+            (&python, "retained native lifecycle Python environment"),
+            (&cargo, "retained native lifecycle Cargo environment"),
+        ] {
+            require_private_directory(path, label)?;
+        }
+        require_real_directory(output, "retained native output root")?;
+        Ok(Self {
+            root,
+            output: output.clone(),
+            logs,
+            receipts,
+            home,
+            tmp,
+            python,
+            cargo,
+            rust_target,
+        })
+    }
+
     fn work_root(&self) -> &Path {
         &self.root
     }
@@ -498,11 +753,67 @@ impl LifecyclePaths {
     fn output_root(&self) -> &Path {
         &self.output
     }
+
+    fn require_absent_receipt(&self, phase: &str) -> Result<(), ContractError> {
+        let path = self.receipts.join(format!("{phase}.json"));
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(ContractError::state(format!(
+                "retained {phase} receipt already exists; an explicit collector resume cannot overwrite completed or foreign state"
+            ))),
+            Err(_) => Err(ContractError::state("cannot inspect retained phase receipt")),
+        }
+    }
+
+    fn fresh_resume_rust_target(&self) -> Result<PathBuf, ContractError> {
+        for attempt in 1..=1024 {
+            let candidate = self.root.join(format!("rust-target-resume-{attempt}"));
+            match fs::symlink_metadata(&candidate) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+                Ok(_) => {}
+                Err(_) => {
+                    return Err(ContractError::state(
+                        "cannot inspect retained collector resume target directory",
+                    ))
+                }
+            }
+        }
+        Err(ContractError::state(
+            "retained collector has too many prior resume target directories",
+        ))
+    }
+
+    fn next_resume_log_name(&self, phase: &str) -> Result<String, ContractError> {
+        for attempt in 1..=1024 {
+            let name = format!("{phase}-resume-{attempt}");
+            let stdout = self.logs.join(format!("{name}.stdout.log"));
+            let stderr = self.logs.join(format!("{name}.stderr.log"));
+            let stdout_missing = matches!(fs::symlink_metadata(&stdout), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+            let stderr_missing = matches!(fs::symlink_metadata(&stderr), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+            if stdout_missing && stderr_missing {
+                return Ok(name);
+            }
+        }
+        Err(ContractError::state(
+            "retained collector has too many prior resume logs",
+        ))
+    }
 }
 
 fn restrict(path: &Path) -> Result<(), ContractError> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|_| ContractError::state("cannot restrict native lifecycle directory"))
+}
+
+fn require_private_directory(path: &Path, label: &str) -> Result<(), ContractError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ContractError::state(format!("{label} is unavailable")))?;
+    if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(ContractError::state(format!(
+            "{label} is not a private real directory"
+        )));
+    }
+    Ok(())
 }
 
 fn read_regular(path: PathBuf, label: &str) -> Result<Vec<u8>, ContractError> {
@@ -570,6 +881,17 @@ fn run_phase(
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<(), ContractError> {
+    run_phase_with_log(phase, phase, command, lifecycle, deadline, cancellation)
+}
+
+fn run_phase_with_log(
+    phase: &'static str,
+    log_name: &str,
+    command: &mut Command,
+    lifecycle: &LifecyclePaths,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<(), ContractError> {
     let output = run_output_with_input_and_control(
         command,
         &[],
@@ -583,7 +905,7 @@ fn run_phase(
             format!("cannot start or supervise native phase: {error}"),
         )
     })?;
-    persist_process_output(&lifecycle.logs, phase, &output)?;
+    persist_process_output(&lifecycle.logs, log_name, &output)?;
     if output.cancelled || cancellation.is_cancelled() {
         return Err(ContractError::state(format!(
             "native {phase} phase cancelled; owned material and logs are retained"
@@ -629,11 +951,11 @@ fn phase_error(phase: &str, message: String) -> ContractError {
 
 fn persist_process_output(
     logs: &Path,
-    phase: &str,
+    log_name: &str,
     output: &aros_common::ProcessOutput,
 ) -> Result<(Sha256Digest, Sha256Digest), ContractError> {
-    let stdout_path = logs.join(format!("{phase}.stdout.log"));
-    let stderr_path = logs.join(format!("{phase}.stderr.log"));
+    let stdout_path = logs.join(format!("{log_name}.stdout.log"));
+    let stderr_path = logs.join(format!("{log_name}.stderr.log"));
     let stdout = create_log(&stdout_path, &output.stdout)?;
     let stderr = create_log(&stderr_path, &output.stderr)?;
     Ok((stdout, stderr))
@@ -890,16 +1212,23 @@ fn measure_file(path: &Path, relative: &str) -> Result<Output, ContractError> {
     })
 }
 
+#[derive(Clone, Copy)]
+struct PhaseInputContext<'a> {
+    recipe: &'a Recipe,
+    declaration: &'a NativeExecutorDeclaration,
+    host: Option<&'a HostPreflight>,
+    cache: Option<&'a source_cache::CacheObservation>,
+    jobs: u64,
+    snapshots: &'a SnapshotDigests,
+    environment: Option<&'a ProducerEnvironment>,
+}
+
 fn phase_input(
     phase: &str,
-    recipe: &Recipe,
-    declaration: &NativeExecutorDeclaration,
-    host: Option<&HostPreflight>,
-    cache: Option<&source_cache::CacheObservation>,
-    jobs: u64,
+    context: &PhaseInputContext<'_>,
     previous_receipt_sha256: Option<&Sha256Digest>,
 ) -> Result<Sha256Digest, ContractError> {
-    let tools = host.map(|host| {
+    let tools = context.host.map(|host| {
         host.tools
             .iter()
             .map(|tool| {
@@ -912,7 +1241,7 @@ fn phase_input(
             })
             .collect::<Vec<_>>()
     });
-    let payloads = cache.map(|cache| {
+    let payloads = context.cache.map(|cache| {
         cache
             .payloads
             .iter()
@@ -922,19 +1251,57 @@ fn phase_input(
     let value = json!({
         "schema": "aros-toolchain-phase-input-v1",
         "phase": phase,
-        "recipe_sha256": recipe.sha256(),
-        "contract_id": declaration.contract_id(),
-        "contract_sha256": declaration.contract_sha256(),
-        "tools_commit": declaration.tools_commit(),
-        "host": host.map(|host| host.host),
-        "profile": host.map(|host| host.profile.clone()),
-        "jobs": jobs,
-        "source_date_epoch": recipe.source_date_epoch(),
+        "recipe_sha256": context.recipe.sha256(),
+        "contract_id": context.declaration.contract_id(),
+        "contract_sha256": context.declaration.contract_sha256(),
+        "tools_commit": context.declaration.tools_commit(),
+        "host": context.host.map(|host| host.host),
+        "profile": context.host.map(|host| host.profile.clone()),
+        "jobs": context.jobs,
+        "source_date_epoch": context.recipe.source_date_epoch(),
+        "snapshots": {
+            "source_sha256": context.snapshots.source,
+            "producer_sha256": context.snapshots.producer,
+            "tools_sha256": context.snapshots.tools,
+        },
+        "effective_environment": context.environment.map(|environment| json!({
+            "prefix_maps": environment.prefix_maps(),
+            "collector_rustflags": environment.collector_rustflags(),
+            "cargo_jobs": context.jobs,
+        })),
         "tools": tools,
         "payloads": payloads,
         "previous_receipt_sha256": previous_receipt_sha256,
     });
     Ok(sha256_bytes(&canonical::bytes(&value)?))
+}
+
+/// Content identities of the three retained metadata-free snapshots.
+///
+/// Receipt revalidation uses these as a no-follow whole-tree checksum. They
+/// bind a phase to the actual material passed to source tools, not merely to
+/// the original checkout identities that were used to create it.
+#[derive(Debug, Clone)]
+struct SnapshotDigests {
+    source: Sha256Digest,
+    producer: Sha256Digest,
+    tools: Sha256Digest,
+}
+
+impl SnapshotDigests {
+    fn measure(source: &Path, producer: &Path, tools: &Path) -> Result<Self, ContractError> {
+        Ok(Self {
+            source: snapshot_digest(source, "source")?,
+            producer: snapshot_digest(producer, "producer")?,
+            tools: snapshot_digest(tools, "tools")?,
+        })
+    }
+}
+
+fn snapshot_digest(root: &Path, role: &str) -> Result<Sha256Digest, ContractError> {
+    measure_tree_content_cas(root)
+        .map(|tree| tree.payload_digest_excluding(None))
+        .map_err(|_| ContractError::state(format!("cannot measure retained {role} snapshot")))
 }
 
 #[derive(Serialize)]
@@ -1032,6 +1399,60 @@ fn verify_receipt(path: &Path, expected: &Sha256Digest) -> Result<(), ContractEr
         ));
     }
     Ok(())
+}
+
+/// Revalidate a retained completed boundary before a narrowly permitted
+/// resume. The receipt's self-digest is necessary but insufficient: every
+/// identity, predecessor, recomputed effective input and measured output must
+/// also match the currently held roots.
+fn revalidate_receipt(
+    lifecycle: &LifecyclePaths,
+    phase: &'static str,
+    identity: &Identity,
+    input_sha256: &Sha256Digest,
+    output_root: &Path,
+    outputs: &[Output],
+    previous: Option<&Sha256Digest>,
+) -> Result<Sha256Digest, ContractError> {
+    let path = lifecycle.receipts.join(format!("{phase}.json"));
+    let bytes = read_regular(path.clone(), "retained native phase receipt")?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| ContractError::state("retained native phase receipt is not valid JSON"))?;
+    let recorded = value
+        .get("receipt_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            ContractError::state("retained native phase receipt omits its self-digest")
+        })?;
+    let recorded = Sha256Digest::parse(recorded).map_err(|_| {
+        ContractError::state("retained native phase receipt has an invalid self-digest")
+    })?;
+    verify_receipt(&path, &recorded)?;
+    let expected_identity = serde_json::to_value(identity)
+        .map_err(|_| ContractError::state("cannot encode current native receipt identity"))?;
+    let expected_outputs = serde_json::to_value(outputs)
+        .map_err(|_| ContractError::state("cannot encode current native receipt outputs"))?;
+    let expected_previous = previous.map_or(serde_json::Value::Null, |digest| {
+        serde_json::Value::String(digest.to_string())
+    });
+    let checks = [
+        ("schema", json!("aros-toolchain-receipt-v1")),
+        ("backend", json!(Backend::Native)),
+        ("identity", expected_identity),
+        ("phase", json!(phase)),
+        ("input_sha256", json!(input_sha256)),
+        ("output_root", json!(output_root)),
+        ("outputs", expected_outputs),
+        ("previous_receipt_sha256", expected_previous),
+    ];
+    for (field, expected) in checks {
+        if value.get(field) != Some(&expected) {
+            return Err(ContractError::state(format!(
+                "retained {phase} receipt does not match the current verified {field}"
+            )));
+        }
+    }
+    Ok(recorded)
 }
 
 const fn receipt_evidence(check: &'static str, digest: Sha256Digest) -> Evidence {
