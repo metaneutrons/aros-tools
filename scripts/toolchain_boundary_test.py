@@ -10,9 +10,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 # This is a closed architectural allow-list, not an unrestricted crates.io
-# exception. M4 additionally permits the statically linked XZ codec required
-# for the byte-defined native archive format; producer lifecycle/publication
-# owners remain forbidden below.
+# exception. M4 additionally permits the statically linked XZ codec and the
+# existing SHA-2 primitive required for bounded archive/content verification;
+# producer lifecycle/publication owners remain forbidden below.
 ALLOWED = {
     "aros-common",
     "aros-fetch",
@@ -22,6 +22,7 @@ ALLOWED = {
     "semver",
     "serde",
     "serde_json",
+    "sha2",
     "tar",
     "tempfile",
     "thiserror",
