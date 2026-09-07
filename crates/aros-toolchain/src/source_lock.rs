@@ -30,6 +30,41 @@ pub struct Payload<'a> {
     size: u64,
 }
 
+/// One source component recorded in the SPDX material relationship graph.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceComponent<'a> {
+    component: &'a str,
+    version: &'a str,
+    purpose: &'a SourcePurpose,
+    payload: Payload<'a>,
+}
+
+impl<'a> SourceComponent<'a> {
+    /// Producer-declared component name.
+    #[must_use]
+    pub const fn component(self) -> &'a str {
+        self.component
+    }
+
+    /// Producer-declared component version.
+    #[must_use]
+    pub const fn version(self) -> &'a str {
+        self.version
+    }
+
+    /// Role of this source in the native toolchain build.
+    #[must_use]
+    pub const fn purpose(self) -> SourcePurpose {
+        *self.purpose
+    }
+
+    /// Exact downloaded source payload.
+    #[must_use]
+    pub const fn payload(self) -> Payload<'a> {
+        self.payload
+    }
+}
+
 impl<'a> Payload<'a> {
     /// Portable basename selected by the lock.
     #[must_use]
@@ -137,6 +172,12 @@ impl SourceLock {
         self.0.sources.iter().map(|source| source.payload())
     }
 
+    /// Source components and their semantic build roles, in declaration order.
+    #[must_use]
+    pub fn source_components(&self) -> impl ExactSizeIterator<Item = SourceComponent<'_>> {
+        self.0.sources.iter().map(Source::component)
+    }
+
     /// Every host Python package, in the source-owned declaration order.
     #[must_use]
     pub fn host_python_packages(&self) -> &[HostPythonPackage] {
@@ -205,9 +246,9 @@ enum Family {
     Llvm,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Purpose {
+pub enum SourcePurpose {
     ToolchainComponent,
     TargetBuildDependency,
 }
@@ -217,7 +258,7 @@ enum Purpose {
 struct Source {
     component: String,
     version: String,
-    purpose: Purpose,
+    purpose: SourcePurpose,
     patch: Option<String>,
     filename: String,
     url: String,
@@ -233,6 +274,15 @@ impl Source {
             url: &self.url,
             sha256: &self.sha256,
             size: self.size,
+        }
+    }
+
+    fn component(&self) -> SourceComponent<'_> {
+        SourceComponent {
+            component: &self.component,
+            version: &self.version,
+            purpose: &self.purpose,
+            payload: self.payload(),
         }
     }
 }
