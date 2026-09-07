@@ -10,9 +10,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 # This is a closed architectural allow-list, not an unrestricted crates.io
-# exception. M2 adds only bounded parsing, archive, no-follow locking and
-# prerequisite-discovery primitives; producer lifecycle/publication owners
-# remain forbidden below.
+# exception. M4 additionally permits the statically linked XZ codec required
+# for the byte-defined native archive format; producer lifecycle/publication
+# owners remain forbidden below.
 ALLOWED = {
     "aros-common",
     "aros-fetch",
@@ -30,6 +30,7 @@ ALLOWED = {
     "tracing",
     "url",
     "which",
+    "xz2",
 }
 
 
