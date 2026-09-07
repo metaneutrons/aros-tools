@@ -301,6 +301,7 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerCompiler,
         DiagnosticCode::ProducerCollector,
         DiagnosticCode::ProducerPackage,
+        DiagnosticCode::ProducerVerification,
         DiagnosticCode::ProducerState,
     ]
     .iter()
@@ -325,6 +326,7 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerCompiler,
         DiagnosticCode::ProducerCollector,
         DiagnosticCode::ProducerPackage,
+        DiagnosticCode::ProducerVerification,
         DiagnosticCode::ProducerState,
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), code.to_string());

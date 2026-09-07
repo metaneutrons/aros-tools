@@ -118,6 +118,14 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn verification(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerVerification,
+            message,
+            "treat the package as untrusted, retain it for inspection and rebuild it from the exact candidate instead of changing a manifest or checksum to fit",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

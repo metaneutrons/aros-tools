@@ -59,8 +59,9 @@ pub use process::{
 pub use publication::{
     canonical_source_file, casefold_path_key, exchange_prepared_tree,
     exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_regular_file,
-    measure_tree_content_cas, publication_failure_class, publication_journal_path,
-    publish_atomic_file, publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
+    measure_tree_content_cas, open_regular_file_nofollow, payload_casefold_path_key,
+    publication_failure_class, publication_journal_path, publish_atomic_file,
+    publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
     publish_prepared_tree_noclobber, AtomicFilePolicy, DurableFileSet, FileIdentity,
     PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
     RecoveryOutcome, TreeContentCas,

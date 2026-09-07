@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use xz2::read::XzDecoder;
 
 use aros_common::{
-    casefold_path_key, normalized_toolchain_file_mode, parse_credential_free_https_url,
+    normalized_toolchain_file_mode, parse_credential_free_https_url, payload_casefold_path_key,
 };
 
 /// Marker published only after a toolchain envelope is complete.
@@ -341,7 +341,7 @@ pub fn extract_to_staging(
         let Some(relative_path) = safe_stripped_path(&source_path, strip_components)? else {
             continue;
         };
-        let portable_key = casefold_path_key(&relative_path)
+        let portable_key = payload_casefold_path_key(&relative_path)
             .into_diagnostic()
             .wrap_err_with(|| {
                 format!(
@@ -790,6 +790,32 @@ mod tests {
                 0o755
             );
         }
+    }
+
+    #[test]
+    fn extracts_utf8_payload_paths_without_relaxing_collision_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("utf8.tar.xz");
+        let output = File::create(&archive_path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(output, 6);
+        let mut builder = tar::Builder::new(encoder);
+        let data = b"UTF-8 payload\n";
+        let mut header = tar::Header::new_ustar();
+        header
+            .set_path("toolchain/share/Größe/marker-ä.txt")
+            .unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap().flush().unwrap();
+
+        let staging = extract_to_staging(&archive_path, directory.path(), 1).unwrap();
+        assert_eq!(
+            fs::read(staging.path().join("share/Größe/marker-ä.txt")).unwrap(),
+            data
+        );
     }
 
     #[test]

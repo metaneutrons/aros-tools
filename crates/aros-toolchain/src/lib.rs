@@ -19,6 +19,7 @@ pub mod native_declaration;
 #[cfg(unix)]
 mod native_lifecycle;
 pub mod package;
+pub mod package_verify;
 pub mod plan;
 pub mod preflight;
 pub mod producer_environment;
