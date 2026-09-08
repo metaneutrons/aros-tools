@@ -88,6 +88,39 @@ fn prepares_and_probes_the_exact_private_mako_environment() {
         .packages()
         .iter()
         .all(|package| package.size > 0));
+    let compatibility = environment.compatibility_environment().unwrap();
+    assert_eq!(
+        compatibility.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "PATH",
+            "PYTHON",
+            "PYTHONDONTWRITEBYTECODE",
+            "PYTHONHASHSEED",
+            "PYTHONNOUSERSITE",
+            "PYTHONPATH",
+        ]
+    );
+    assert_eq!(compatibility["PATH"], "/nonexistent");
+    assert_eq!(
+        compatibility["PYTHON"],
+        environment.interpreter().path.to_str().unwrap()
+    );
+    assert_eq!(
+        compatibility["PYTHONPATH"],
+        std::env::join_paths(
+            environment
+                .import_roots()
+                .iter()
+                .map(fs::canonicalize)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        )
+        .unwrap()
+        .into_string()
+        .unwrap()
+    );
+    assert!(!compatibility.contains_key("PYTHONHOME"));
+    assert!(!compatibility.contains_key("HOME"));
 
     let mut command = std::process::Command::new(&environment.interpreter().path);
     environment.apply_to(&mut command);
