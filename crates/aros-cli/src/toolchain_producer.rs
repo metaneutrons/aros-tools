@@ -22,7 +22,9 @@ use aros_toolchain::compatibility_source::{
 use aros_toolchain::profiles::Profiles;
 use aros_toolchain::python_environment::PythonEnvironment;
 use aros_toolchain::recipe_builder::{self, RecipeBuildRequest};
+use aros_toolchain::recovery::RecoveryRequest;
 use aros_toolchain::release_index::{self, IndexRequest, IndexStage};
+use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
 use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
 use aros_toolchain::{package, package_verify, Recipe};
@@ -56,6 +58,8 @@ enum ProducerCommand {
     VerifyPackage(PackageArgs),
     /// Compare two complete local package sets byte-for-byte
     Compare(CompareArgs),
+    /// Repackage one evidence-bound retained package into two fresh package sets
+    Repackage(RepackageArgs),
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
     /// Execute all six native package-compatibility phases locally
@@ -227,6 +231,59 @@ struct CompareArgs {
     format: ResultFormat,
 }
 
+/// Inputs for one evidence-bound, two-output local packaging recovery.
+#[derive(Args)]
+struct RepackageArgs {
+    /// Closed recovery-request-v1 document with isolated inventory and policy claims
+    #[arg(long)]
+    recovery_request: PathBuf,
+    /// Complete four-member retained source package set
+    #[arg(long)]
+    source_package_dir: PathBuf,
+    /// Immutable release identity embedded in the retained source package
+    #[arg(long)]
+    source_release_id: String,
+    /// Self-digesting recipe-v2 JSON document
+    #[arg(long)]
+    recipe: PathBuf,
+    /// Source-lock-v2 document bound by the selected recipe
+    #[arg(long)]
+    source_lock: PathBuf,
+    /// Profiles-v1 document bound by the selected recipe
+    #[arg(long)]
+    profiles: PathBuf,
+    /// Exact profile from the recipe-bound profiles matrix
+    #[arg(long)]
+    preset: String,
+    /// Closed v1 host selector for the retained source package
+    #[arg(long)]
+    host: String,
+    /// JSON object recording the retained package's measured build environment
+    #[arg(long)]
+    build_environment: PathBuf,
+    /// Absolute build root forbidden from package regular-file contents; repeatable
+    #[arg(long = "forbidden-prefix")]
+    forbidden_prefixes: Vec<PathBuf>,
+    /// Absent first owned extraction directory
+    #[arg(long)]
+    first_extraction_dir: PathBuf,
+    /// Absent second owned extraction directory
+    #[arg(long)]
+    second_extraction_dir: PathBuf,
+    /// Absent first recovered package-set directory
+    #[arg(long)]
+    first_output_dir: PathBuf,
+    /// Absent second recovered package-set directory
+    #[arg(long)]
+    second_output_dir: PathBuf,
+    /// Absent canonical receipt proving recovered package-set byte identity
+    #[arg(long)]
+    comparison_output: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
 /// Index operation stage selected explicitly by the protected workflow.
 #[derive(Clone, Copy, ValueEnum)]
 enum IndexStageArg {
@@ -345,6 +402,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Package(args) => package(args),
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
+        ProducerCommand::Repackage(args) => repackage(args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
@@ -618,6 +676,81 @@ fn compare(args: &CompareArgs) -> miette::Result<()> {
             "receipt_sha256": receipt.sha256,
             "package_set_sha256": comparison.package_set_sha256,
             "members": comparison.members,
+        }))?,
+    }
+    Ok(())
+}
+
+fn repackage(args: RepackageArgs) -> miette::Result<()> {
+    let recovery = RecoveryRequest::parse(&read_regular_input(
+        &args.recovery_request,
+        "recovery request",
+    )?)
+    .map_err(|error| native_error(&error))?;
+    let context = package_context(PackageContextArgs {
+        recipe: args.recipe,
+        source_lock: args.source_lock,
+        profiles: args.profiles,
+        preset: args.preset,
+        release_id: args.source_release_id,
+        host: args.host,
+        build_environment: args.build_environment,
+        forbidden_prefixes: args.forbidden_prefixes,
+    })?;
+    let output = repackage::repackage_verified_package(&VerifiedPackageRepackageRequest {
+        recovery,
+        source: package_verify::PackageVerificationRequest {
+            package_dir: args.source_package_dir,
+            release_id: context.release_id,
+            host: context.host,
+            recipe: context.recipe,
+            source_lock: context.source_lock,
+            profile: context.profile,
+            build_environment: context.build_environment,
+            forbidden_prefixes: context.forbidden_prefixes,
+        },
+        first_extraction_root: args.first_extraction_dir,
+        second_extraction_root: args.second_extraction_dir,
+        first_output_dir: args.first_output_dir,
+        second_output_dir: args.second_output_dir,
+    })
+    .map_err(|error| native_error(&error))?;
+    let comparison = release_index::compare_package_sets(
+        &output.repackaged.first.output_dir,
+        &output.repackaged.second.output_dir,
+    )
+    .map_err(|error| native_error(&error))?;
+    let receipt =
+        release_index::write_package_comparison_report(&args.comparison_output, &comparison)
+            .map_err(|error| native_error(&error))?;
+    let recovery_release_id = match &output.repackaged.decision {
+        aros_toolchain::recovery::RecoveryDecision::Repackage { release_id, .. } => release_id,
+        aros_toolchain::recovery::RecoveryDecision::ReplayCompatibility => {
+            return Err(miette::miette!(
+                "native repackage completed without packaging-recovery authority"
+            ));
+        }
+    };
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native repackage: {}\nFirst package: {}\nSecond package: {}\nComparison receipt: {}\nReceipt SHA-256: {}",
+            recovery_release_id,
+            output.repackaged.first.output_dir.display(),
+            output.repackaged.second.output_dir.display(),
+            receipt.path.display(),
+            receipt.sha256,
+        ),
+        ResultFormat::Json => print_json(&serde_json::json!({
+            "schema": "aros-toolchain-producer-stage-v1",
+            "operation": "repackage",
+            "source_archive_sha256": output.source.archive_sha256,
+            "source_archive_size": output.source.archive_size,
+            "release_id": recovery_release_id,
+            "first_package_dir": output.repackaged.first.output_dir,
+            "second_package_dir": output.repackaged.second.output_dir,
+            "comparison_receipt": receipt.path,
+            "comparison_receipt_sha256": receipt.sha256,
+            "package_set_sha256": comparison.package_set_sha256,
         }))?,
     }
     Ok(())
@@ -1033,6 +1166,41 @@ mod tests {
             "/evidence/comparison.json",
         ]);
         assert!(compare.is_ok());
+        let repackage = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "repackage",
+            "--recovery-request",
+            "/evidence/recovery.json",
+            "--source-package-dir",
+            "/packages/source",
+            "--source-release-id",
+            "toolchain-v1-source",
+            "--recipe",
+            "/producer/recipe.json",
+            "--source-lock",
+            "/producer/toolchains/lock.sources.json",
+            "--profiles",
+            "/producer/toolchains/profiles.json",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--build-environment",
+            "/evidence/environment.json",
+            "--first-extraction-dir",
+            "/work/extracted-a",
+            "--second-extraction-dir",
+            "/work/extracted-b",
+            "--first-output-dir",
+            "/packages/recovered-a",
+            "--second-output-dir",
+            "/packages/recovered-b",
+            "--comparison-output",
+            "/evidence/recovery-comparison.json",
+        ]);
+        assert!(repackage.is_ok());
         let source = Cli::try_parse_from([
             "aros",
             "toolchain",

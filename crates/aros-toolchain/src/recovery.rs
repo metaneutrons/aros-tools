@@ -702,6 +702,21 @@ mod tests {
     }
 
     #[test]
+    fn recovery_request_parser_rejects_unknown_fields_before_execution() {
+        let original = request(RecoveryOperation::PackagingRecovery, FailedStage::Packaging);
+        let bytes = serde_json::to_vec(&original).unwrap();
+        assert_eq!(
+            RecoveryRequest::parse(&bytes).unwrap().operation,
+            original.operation
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        changed["unexpected"] = json!(true);
+        assert_recovery(
+            &RecoveryRequest::parse(&serde_json::to_vec(&changed).unwrap()).unwrap_err(),
+        );
+    }
+
+    #[test]
     fn rejects_non_packaging_failures_and_release_authority_for_replay() {
         let invalid = request(RecoveryOperation::PackagingRecovery, FailedStage::Compiler);
         assert_recovery(&evaluate_recovery(&invalid).unwrap_err());
@@ -820,7 +835,7 @@ mod tests {
         })
         .unwrap();
         let original_verified = verify(&PackageVerificationRequest {
-            package_dir: original.output_dir,
+            package_dir: original.output_dir.clone(),
             release_id: "toolchain-v1-source".into(),
             host: "linux-x86_64".into(),
             recipe: recipe.clone(),
@@ -846,6 +861,35 @@ mod tests {
             &qualified,
             RecoveryOperation::PackagingRecovery,
             FailedStage::Packaging,
+        );
+        let source_request = PackageVerificationRequest {
+            package_dir: original.output_dir,
+            release_id: "toolchain-v1-source".into(),
+            host: "linux-x86_64".into(),
+            recipe: recipe.clone(),
+            source_lock: source_lock.clone(),
+            profile: profile.clone(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let from_package = crate::repackage::repackage_verified_package(
+            &crate::repackage::VerifiedPackageRepackageRequest {
+                recovery: recovery.clone(),
+                source: source_request,
+                first_extraction_root: temporary.path().join("first-extracted"),
+                second_extraction_root: temporary.path().join("second-extracted"),
+                first_output_dir: temporary.path().join("first-from-package"),
+                second_output_dir: temporary.path().join("second-from-package"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            from_package.repackaged.first_verified.manifest.tree_sha256,
+            expected_tree
+        );
+        assert_eq!(
+            from_package.repackaged.first.archive_sha256,
+            from_package.repackaged.second.archive_sha256
         );
         let first_candidate = temporary.path().join("first-candidate");
         let second_candidate = temporary.path().join("second-candidate");

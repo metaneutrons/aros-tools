@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use aros_common::Sha256Digest;
 
 use crate::package::{package, PackageOutput, PackageRequest};
+use crate::package_extract::{checked_absent_root, verify_and_extract, PackageExtractionRequest};
 use crate::package_verify::{verify, PackageVerificationRequest, VerifiedPackage};
-use crate::recovery::{evaluate_recovery, RecoveryDecision, RecoveryRequest};
+use crate::recovery::{evaluate_recovery, RecoveryDecision, RecoveryRequest, ReleaseAssetKind};
 use crate::release_index::{compare_package_sets, NativeReleaseArtifact, NativeReleaseIndex};
 use crate::ContractError;
 
@@ -49,6 +50,38 @@ pub struct RepackageOutput {
     pub first_verified: VerifiedPackage,
     /// Bounded read-back of the second package set.
     pub second_verified: VerifiedPackage,
+}
+
+/// Inputs for recovery from one retained, fully verified package set.
+///
+/// A source producer run normally retains packages rather than the much larger
+/// build candidates. This boundary verifies the retained package twice and
+/// extracts it to two independently owned roots before handing the results to
+/// the existing two-output recovery executor. It has no transport, tag,
+/// index, credential, or publication capability.
+#[derive(Debug, Clone)]
+pub struct VerifiedPackageRepackageRequest {
+    /// Complete recovery policy input, re-evaluated before any extraction.
+    pub recovery: RecoveryRequest,
+    /// Exact expected identity for the retained source package set.
+    pub source: PackageVerificationRequest,
+    /// Absent first owned extraction root.
+    pub first_extraction_root: PathBuf,
+    /// Absent second owned extraction root.
+    pub second_extraction_root: PathBuf,
+    /// Absent first output package-set directory.
+    pub first_output_dir: PathBuf,
+    /// Absent second output package-set directory.
+    pub second_output_dir: PathBuf,
+}
+
+/// Result of re-packaging one retained source package into two new sets.
+#[derive(Debug, Clone)]
+pub struct VerifiedPackageRepackageOutput {
+    /// The once-verified, evidence-bound retained source package identity.
+    pub source: VerifiedPackage,
+    /// The two independently re-packaged and compared output sets.
+    pub repackaged: RepackageOutput,
 }
 
 /// Execute an admitted packaging recovery as two independent local packages.
@@ -102,6 +135,142 @@ pub fn repackage(request: &RepackageRequest) -> Result<RepackageOutput, Contract
         first_verified,
         second_verified,
     })
+}
+
+/// Re-package a retained source package twice under a fresh recovery identity.
+///
+/// The source package must be one exact member of the full isolated release
+/// inventory named in the recovery request. It is verified in place and then
+/// extracted twice to distinct, caller-owned absent roots. The existing
+/// [`repackage`] boundary re-evaluates recovery eligibility, packages both
+/// roots, verifies both outputs, and proves their outer members are
+/// byte-identical.
+///
+/// # Errors
+///
+/// Returns AX0901 when recovery is no longer eligible or the retained package
+/// is not the exact evidence-bound source asset. Verification and package
+/// failures preserve their existing producer diagnostics.
+pub fn repackage_verified_package(
+    request: &VerifiedPackageRepackageRequest,
+) -> Result<VerifiedPackageRepackageOutput, ContractError> {
+    let decision = evaluate_recovery(&request.recovery)?;
+    let release_id = match &decision {
+        RecoveryDecision::Repackage { release_id, .. } => release_id.clone(),
+        RecoveryDecision::ReplayCompatibility => {
+            return Err(ContractError::recovery(
+                "compatibility replay evidence has no packaging-recovery authority",
+            ));
+        }
+    };
+    if request.source.release_id != request.recovery.evidence.release.release_id {
+        return Err(ContractError::recovery(
+            "retained package release identity differs from recovery evidence",
+        ));
+    }
+    validate_extraction_roots(request)?;
+
+    let source = verify(&request.source)?;
+    validate_source_archive(&request.recovery, &request.source, &source)?;
+    let first = verify_and_extract(&PackageExtractionRequest {
+        verification: request.source.clone(),
+        output_root: request.first_extraction_root.clone(),
+    })?;
+    let second = verify_and_extract(&PackageExtractionRequest {
+        verification: request.source.clone(),
+        output_root: request.second_extraction_root.clone(),
+    })?;
+    if first.verified != source || second.verified != source {
+        return Err(ContractError::recovery(
+            "retained package changed between recovery verification and extraction",
+        ));
+    }
+
+    let first_request = repackage_request_for(
+        &request.source,
+        first.root,
+        request.first_output_dir.clone(),
+        &release_id,
+    );
+    let second_request = repackage_request_for(
+        &request.source,
+        second.root,
+        request.second_output_dir.clone(),
+        &release_id,
+    );
+    let repackaged = repackage(&RepackageRequest {
+        recovery: request.recovery.clone(),
+        first: first_request,
+        second: second_request,
+    })?;
+    if repackaged.decision != decision {
+        return Err(ContractError::recovery(
+            "recovery decision changed between retained-package extraction and repackage",
+        ));
+    }
+    Ok(VerifiedPackageRepackageOutput { source, repackaged })
+}
+
+fn validate_extraction_roots(
+    request: &VerifiedPackageRepackageRequest,
+) -> Result<(), ContractError> {
+    let first = checked_absent_root(&request.first_extraction_root)?;
+    let second = checked_absent_root(&request.second_extraction_root)?;
+    if first == second || first.starts_with(&second) || second.starts_with(&first) {
+        return Err(ContractError::recovery(
+            "recovery extraction roots must be distinct and non-overlapping",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_archive(
+    recovery: &RecoveryRequest,
+    source_request: &PackageVerificationRequest,
+    source: &VerifiedPackage,
+) -> Result<(), ContractError> {
+    let asset = crate::package::canonical_asset_name(
+        source_request.source_lock.version(),
+        &source_request.host,
+        source_request.profile.name(),
+    )?;
+    let expected = recovery
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == asset)
+        .ok_or_else(|| {
+            ContractError::recovery(
+                "recovery evidence does not name the retained source package archive",
+            )
+        })?;
+    if expected.kind != ReleaseAssetKind::Regular
+        || expected.sha256 != source.archive_sha256
+        || expected.size != source.archive_size
+    {
+        return Err(ContractError::recovery(
+            "retained source package archive differs from the measured release inventory",
+        ));
+    }
+    Ok(())
+}
+
+fn repackage_request_for(
+    source: &PackageVerificationRequest,
+    candidate_root: PathBuf,
+    output_dir: PathBuf,
+    release_id: &str,
+) -> PackageRequest {
+    PackageRequest {
+        candidate_root,
+        output_dir,
+        release_id: release_id.into(),
+        host: source.host.clone(),
+        recipe: source.recipe.clone(),
+        source_lock: source.source_lock.clone(),
+        profile: source.profile.clone(),
+        build_environment: source.build_environment.clone(),
+        forbidden_prefixes: source.forbidden_prefixes.clone(),
+    }
 }
 
 fn validate_requests(request: &RepackageRequest, release_id: &str) -> Result<(), ContractError> {
