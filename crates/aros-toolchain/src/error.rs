@@ -142,6 +142,14 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn recovery(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerRecovery,
+            message,
+            "do not repackage, retarget a tag, or alter a release handoff; restore complete immutable evidence and use a fresh qualification when the failed stage was not packaging alone",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

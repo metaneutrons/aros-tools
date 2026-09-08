@@ -192,8 +192,8 @@ class ToolchainProducerContractTests(unittest.TestCase):
     def test_diagnostic_reservation_and_partial_registration_are_exact(self) -> None:
         diagnostics = self.contract["diagnostics"]
         self.assertEqual(diagnostics["envelope"], "aros-tool-diagnostics-v1")
-        self.assertEqual(diagnostics["registration"], "M4-native-release-inventory")
-        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0801"])
+        self.assertEqual(diagnostics["registration"], "M5-qualification-evidence")
+        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0703", "AX0801", "AX0901"])
         self.assertEqual(diagnostics["failure_exit"], 1)
         self.assertEqual(diagnostics["json_failure_stderr_documents"], 1)
         self.assertEqual(len(set(diagnostics["codes"])), len(diagnostics["codes"]))

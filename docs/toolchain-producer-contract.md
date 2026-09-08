@@ -379,11 +379,12 @@ Fixtures and rule ownership:
 | Forged receipt or compatibility report | Revalidate all references; receipts alone cannot prove origin, independence or release eligibility. |
 | Publication token leakage / partial matrix | Build library has no publishing capability; protected jobs revalidate exact inventory and signer evidence before exposure. |
 
-Reserve `AX` for producer diagnostics. The M2 input-contract library registers
-AX0101, AX0102, AX0201, AX0202, AX0301 (verified sources), AX0302
-(source-use closure), AX0401 (controlled external environment) and AX0801
-(work ownership); all remaining codes below stay reserved until their actual
-implementations land. The versioned contract records that exact subset.
+Reserve `AX` for producer diagnostics. M2 registered AX0101, AX0102, AX0201,
+AX0202, AX0301 (verified sources), AX0302 (source-use closure), AX0401
+(controlled external environment) and AX0801 (work ownership). M3/M4 added the
+build, package, verification, inventory and comparison codes; M5 now registers
+AX0703 for compatibility qualification and AX0901 for recovery eligibility.
+All other reserved codes remain unavailable until their implementations land.
 Existing nested AF/AC diagnostics retain their codes in one shared failure
 envelope. Use existing `DiagnosticContext` fields; richer producer identity,
 digest and retry classifications go in typed evidence and safe messages/hints,
@@ -397,9 +398,16 @@ not undocumented additions to the shared JSON envelope.
 | AX0301 / AX0302 / AX0401 | Verified sources / source-use closure / environment |
 | AX0501 / AX0502 / AX0503 | Configure / compiler-runtime build / collector |
 | AX0601 / AX0602 | Package / integrity verification |
-| AX0701 / AX0702 | Compatibility-relocation / byte comparison |
+| AX0701 / AX0702 / AX0703 | Release inventory / byte comparison / compatibility-relocation |
 | AX0801 / AX0802 | State-receipt / durable publication |
 | AX0901 / AX0999 | Recovery eligibility / internal invariant |
+
+TCP-M5 adds the closed, offline
+[qualification-evidence contract](toolchain-qualification-evidence.md). It
+binds a measured index, source run, signer claim and lane reports before a
+compatibility or recovery operation may rely on them. It does not parse or
+replace the external cryptographic attestation verifier, and it has no release
+or credential authority.
 
 Use existing semantic stages such as configuration, integrity_validation,
 build_execution, archive_packaging and release_integrity; phase identity belongs
@@ -411,12 +419,12 @@ opt-in, local and redacted. There is no remote telemetry.
 
 See [M0 acceptance evidence](toolchain-producer-baseline.md#m0-acceptance).
 These are fixture and source-review findings, not a new toolchain qualification.
-M0, M1 and M2 are accepted through PRs #37, #52 and #55. TCP-M3 is in active
-implementation; do not activate an official producer declaration or close its
-issue solely because the local lifecycle and synthetic fixtures exist. The
-native recipe input/canonical output cap is 1 MiB and canonical nesting is
-limited to 64 levels. These are parser safety limits, not measured compiler
-resource defaults.
+M0 through M4 are accepted; their linked evidence records implementation and
+explicit limits. TCP-M5 is in active implementation. Do not activate an
+official producer declaration or close a later milestone solely because local
+lifecycle, package or synthetic compatibility fixtures exist. The native recipe
+input/canonical output cap is 1 MiB and canonical nesting is limited to 64
+levels. These are parser safety limits, not measured compiler resource defaults.
 
 The subsequent lower-level guard slice adds operation-local shared cancellation
 and fresh advisory-locked work/output leaves with explicit ownership revalidation.

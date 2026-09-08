@@ -7,13 +7,13 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use aros_common::{
     open_regular_file_nofollow, parse_credential_free_https_url, sha256_bytes, sha256_reader,
     ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::package::{canonical_asset_name, pretty_json};
@@ -38,13 +38,15 @@ const MANIFEST_SCHEMA_BYTES: &[u8] =
 const TREE_FIXTURE_BYTES: &[u8] =
     include_bytes!("../../aros-common/tests/fixtures/tree-digest-v1.fixture.json");
 
-const V1_HOSTS: &[&str] = &[
+/// Closed host selectors of the v1 release matrix.
+pub const V1_HOSTS: &[&str] = &[
     "linux-aarch64",
     "linux-x86_64",
     "macos-aarch64",
     "macos-x86_64",
 ];
-const V1_PROFILES: &[&str] = &["arm-raspi", "pc-x86_64", "rpi-aarch64"];
+/// Closed target-profile selectors of the v1 release matrix.
+pub const V1_PROFILES: &[&str] = &["arm-raspi", "pc-x86_64", "rpi-aarch64"];
 const REQUIRED_TOOLS: &[&str] = &[
     "clang",
     "clang++",
@@ -96,7 +98,8 @@ pub struct IndexRequest {
 }
 
 /// Deterministic v1 release index written beside the release assets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeReleaseIndex {
     /// Index schema version.
     pub schema: u32,
@@ -115,7 +118,8 @@ pub struct NativeReleaseIndex {
 }
 
 /// One v1 archive reference in [`NativeReleaseIndex`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeReleaseArtifact {
     /// Archive filename.
     pub asset: String,
@@ -152,6 +156,139 @@ pub struct IndexOutput {
     pub checksums_path: PathBuf,
     /// SHA-256 of the exact checksum document written by this operation.
     pub checksums_sha256: Sha256Digest,
+}
+
+impl NativeReleaseIndex {
+    /// Parse and validate one bounded, closed v1 release-index document.
+    ///
+    /// This validates only the serialized index's internal release contract.
+    /// Callers still need the M4 package/read-back verifier and measured outer
+    /// asset hashes before accepting local or downloaded release material.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0701 for malformed, incomplete, noncanonical, or mixed v1
+    /// index material. It performs no filesystem, network, credential, tag,
+    /// provenance, or release-promotion operation.
+    pub fn parse(input: &[u8]) -> Result<Self, ContractError> {
+        if input.len() > MAX_METADATA_BYTES as usize {
+            return Err(ContractError::index(
+                "release index exceeds the configured metadata limit",
+            ));
+        }
+        let index: Self = serde_json::from_slice(input)
+            .map_err(|_| ContractError::index("release index is not a closed v1 JSON document"))?;
+        index.validate()?;
+        Ok(index)
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.schema != 1 || !safe_segment(&self.release_id) {
+            return Err(ContractError::index(
+                "release index has an unsupported schema or unsafe release identifier",
+            ));
+        }
+        if self.base_url != self.base_url.trim_end_matches('/') {
+            return Err(ContractError::index(
+                "release index base URL is not in canonical form",
+            ));
+        }
+        let base_url = parse_credential_free_https_url(&self.base_url)
+            .map_err(|_| ContractError::index("release index has an invalid base URL"))?;
+        if base_url.path() == "/" {
+            return Err(ContractError::index(
+                "release index base URL must name a release path",
+            ));
+        }
+        for identity in [
+            &self.source_commit,
+            &self.producer_commit,
+            &self.tools_commit,
+        ] {
+            let _: crate::recipe::GitObjectId = identity.clone().try_into().map_err(|_| {
+                ContractError::index("release index has a noncanonical Git identity")
+            })?;
+        }
+        if self.artifacts.len() != V1_HOSTS.len() * V1_PROFILES.len() {
+            return Err(ContractError::index(
+                "release index does not contain the complete v1 host/profile matrix",
+            ));
+        }
+        let expected = V1_HOSTS
+            .iter()
+            .flat_map(|host| {
+                V1_PROFILES
+                    .iter()
+                    .map(move |profile| ((*host).to_owned(), (*profile).to_owned()))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut actual = BTreeSet::new();
+        let mut previous_asset: Option<&str> = None;
+        for artifact in &self.artifacts {
+            validate_index_artifact(artifact)?;
+            if previous_asset.is_some_and(|previous| previous >= artifact.asset.as_str())
+                || !actual.insert((artifact.host.clone(), artifact.target_profile.clone()))
+            {
+                return Err(ContractError::index(
+                    "release index artifacts are unsorted or contain duplicate selectors",
+                ));
+            }
+            previous_asset = Some(&artifact.asset);
+        }
+        if actual != expected {
+            return Err(ContractError::index(
+                "release index host/profile selectors differ from the closed v1 matrix",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_index_artifact(artifact: &NativeReleaseArtifact) -> Result<(), ContractError> {
+    if artifact.size == 0
+        || !artifact.enabled
+        || artifact.strip_components != 1
+        || artifact.target_triple.is_empty()
+        || artifact.target_triple.len() > 128
+        || artifact
+            .target_triple
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_'))
+        || Sha256Digest::parse(&artifact.sha256).is_err()
+        || Sha256Digest::parse(&artifact.tree_sha256).is_err()
+    {
+        return Err(ContractError::index(
+            "release index artifact has invalid measured identity or consumer layout",
+        ));
+    }
+    let expected_asset = canonical_asset_name(
+        &artifact.llvm_version,
+        &artifact.host,
+        &artifact.target_profile,
+    )
+    .map_err(|_| ContractError::index("release index artifact name is not canonical"))?;
+    if artifact.asset != expected_asset
+        || artifact.required_paths.is_empty()
+        || artifact
+            .required_paths
+            .iter()
+            .any(|path| !safe_payload_path(path))
+    {
+        return Err(ContractError::index(
+            "release index artifact has unsafe or incomplete required payload paths",
+        ));
+    }
+    Ok(())
+}
+
+fn safe_payload_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.contains(['\\', '\0'])
+        && !value.split('/').any(str::is_empty)
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(segment) if !segment.is_empty()))
 }
 
 /// Compare two complete package sets byte-for-byte without copying either set.
@@ -1046,5 +1183,36 @@ mod tests {
         let request = write_complete_pre_attestation_fixture(temporary.path());
         fs::write(temporary.path().join(MANIFEST_SCHEMA_NAME), b"{}").unwrap();
         assert!(index_complete_v1(&request).is_err());
+    }
+
+    #[test]
+    fn serialized_index_parser_rejects_unknown_and_noncanonical_inventory_claims() {
+        let release = tempfile::tempdir().unwrap();
+        let request = write_complete_pre_attestation_fixture(release.path());
+        let output = index_complete_v1(&request).unwrap();
+        let encoded = pretty_json(&output.index).unwrap();
+        assert_eq!(NativeReleaseIndex::parse(&encoded).unwrap(), output.index);
+
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(NativeReleaseIndex::parse(
+            text.replacen('{', "{\"unexpected\":true,", 1).as_bytes()
+        )
+        .is_err());
+        assert!(NativeReleaseIndex::parse(
+            text.replace(
+                "\"release_id\": \"fixture-release\"",
+                "\"release_id\": \"..\""
+            )
+            .as_bytes()
+        )
+        .is_err());
+        assert!(NativeReleaseIndex::parse(
+            text.replace(
+                "\"base_url\": \"https://example.invalid/toolchains/fixture-release\"",
+                "\"base_url\": \"https://example.invalid/toolchains/fixture-release/\""
+            )
+            .as_bytes()
+        )
+        .is_err());
     }
 }
