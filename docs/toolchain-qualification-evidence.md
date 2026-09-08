@@ -63,3 +63,15 @@ comparison or compatibility failures.
 
 No field permits overwriting an artifact, moving a tag, creating a release,
 or using a credential. Those decisions stay in protected workflow code.
+
+## Compatibility preparation
+
+TCP-M5.2 begins with a separate, offline preparation boundary. It creates the
+embedded `aros-cmake-engine` below a fresh owned work root and reads every
+materialized file back against the compiled-in resource and digest. The probe
+source is explicitly engine-free: a top-level `cmake/` file, directory or link
+fails. Each required helper (`aros-transpiler`, `aros-genmodule`,
+`aros-collect`, `aros-ahi-runner`, `aros-fetch`) must be an executable regular
+file directly below one explicit fresh target root and is measured before later
+process phases may use it. It does not run a process or accept a shared Cargo
+target directory as origin evidence.
