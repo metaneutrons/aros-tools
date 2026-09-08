@@ -676,9 +676,11 @@ explicit absence of a new compiler matrix for this packaging-only gate.
   probes at `PATH=/nonexistent` because they require only explicit tool paths.
 - [ ] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
   target-runtime checks; preserve pristine-upstream and CMake consumer probes.
-- [ ] Implement native replay/repackage policy with bound evidence identities;
-  reject expired/missing/tampered artifacts and non-packaging failure recovery.
-- [ ] Test tag/draft conflicts, interrupted handoffs, changed assets, missing
+- [x] Implement native replay/repackage eligibility policy with bound evidence
+  identities; reject expired/missing/tampered artifacts and non-packaging
+  failure recovery. The policy is pure: it has no credentials, transport, tag,
+  release or archive-writing authority.
+- [x] Test tag/draft conflicts, interrupted handoffs, changed assets, missing
   attestations, incorrect signer/source claims and non-regular release assets.
   Exercise publication orchestration with fixtures, not real releases.
 
