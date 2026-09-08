@@ -75,3 +75,26 @@ fails. Each required helper (`aros-transpiler`, `aros-genmodule`,
 file directly below one explicit fresh target root and is measured before later
 process phases may use it. It does not run a process or accept a shared Cargo
 target directory as origin evidence.
+
+## Compatibility probe reports
+
+The next M5.2 boundary records one completed process per closed phase:
+consumer CMake configuration, pristine upstream configuration, upstream
+includes, upstream link libraries, standalone C and standalone C++. A caller
+supplies an absolute executable, explicit UTF-8 argument vector, real working
+directory, fresh report directory and positive deadline. The runner neither
+looks up `PATH` nor evaluates a shell command.
+
+Before a process starts, it revalidates the materialized embedded engine and
+all five helper file identities. It then binds the report to their API version,
+digest and measured helper hashes. Standard output and error are captured with
+the common bounded process supervisor and durably published under fixed,
+phase-specific no-clobber names. Successful reports use the closed
+`aros-toolchain-compatibility-report-v1` JSON schema and bind the executable,
+argument identity and both persisted log hashes.
+
+A nonzero exit, timeout or cancellation never yields a success report. Where a
+process started, its durable logs remain available for diagnosis. Existing
+report outputs are rejected rather than adopted or overwritten. This is still
+the reusable process/report boundary; the following M5 work supplies the
+concrete CMake, upstream, standalone and relocation commands.

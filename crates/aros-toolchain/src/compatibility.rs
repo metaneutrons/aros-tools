@@ -13,8 +13,15 @@ use std::fs;
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
-use aros_common::{open_regular_file_nofollow, sha256_reader, Sha256Digest};
+use aros_common::{
+    exit_signal, open_regular_file_nofollow, publish_atomic_file,
+    run_output_with_input_and_control, sha256_bytes, sha256_reader, AtomicFilePolicy,
+    CancellationToken, DiagnosticContext, Sha256Digest,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::filesystem::open_directory;
 use crate::ContractError;
@@ -31,6 +38,12 @@ pub const REQUIRED_HELPERS: &[&str] = &[
 const ENGINE_DIRECTORY: &str = "aros-cmake-engine";
 const MAX_ENGINE_ENTRIES: usize = 4_096;
 const MAX_ENGINE_DEPTH: usize = 32;
+const MAX_ENGINE_FILE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROBE_ARGUMENTS: usize = 256;
+const MAX_PROBE_ARGUMENT_BYTES: usize = 64 * 1024;
+const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
+const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
+const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v1";
 
 /// Explicit roots for preparing a tools-owned compatibility probe.
 #[derive(Debug, Clone)]
@@ -127,6 +140,538 @@ pub fn prepare(
     })
 }
 
+/// Closed phases that may emit a compatibility report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompatibilityPhase {
+    /// Configure a consumer through the embedded tools-owned CMake engine.
+    CmakeConsumer,
+    /// Configure the pristine upstream compatibility source tree.
+    UpstreamConfigure,
+    /// Build pristine upstream include material.
+    UpstreamIncludes,
+    /// Build pristine upstream link libraries.
+    UpstreamLinklibs,
+    /// Compile and link one standalone C consumer.
+    StandaloneC,
+    /// Compile and link one standalone C++ consumer.
+    StandaloneCxx,
+}
+
+impl CompatibilityPhase {
+    const fn file_stem(self) -> &'static str {
+        match self {
+            Self::CmakeConsumer => "cmake-consumer",
+            Self::UpstreamConfigure => "upstream-configure",
+            Self::UpstreamIncludes => "upstream-includes",
+            Self::UpstreamLinklibs => "upstream-linklibs",
+            Self::StandaloneC => "standalone-c",
+            Self::StandaloneCxx => "standalone-cxx",
+        }
+    }
+}
+
+/// Explicit, bounded process invocation for one compatibility phase.
+#[derive(Debug, Clone)]
+pub struct CompatibilityProbeRequest {
+    /// Closed probe phase determining fresh report names.
+    pub phase: CompatibilityPhase,
+    /// Absolute regular executable selected by the later runner.
+    pub program: PathBuf,
+    /// Explicit UTF-8 arguments. Raw command strings and shell evaluation are unsupported.
+    pub arguments: Vec<String>,
+    /// Absolute real working directory owned by the compatibility operation.
+    pub current_dir: PathBuf,
+    /// Absolute real report directory. Per-phase outputs must not exist yet.
+    pub reports_root: PathBuf,
+    /// Positive phase deadline, bounded by the caller's whole-operation policy.
+    pub timeout: Duration,
+    /// Already checked engine/helper identities this probe is bound to.
+    pub preparation: CompatibilityPreparation,
+}
+
+/// Measured helper identity written into a compatibility report without paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityHelperReport {
+    /// Measured executable SHA-256.
+    pub sha256: Sha256Digest,
+    /// Measured executable byte length.
+    pub size: u64,
+}
+
+/// Closed, persisted success report for one compatibility process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityProbeReport {
+    /// Closed schema name.
+    pub schema: String,
+    /// Executed compatibility phase.
+    pub phase: CompatibilityPhase,
+    /// Engine API version bound to this process.
+    pub engine_api_version: u32,
+    /// Embedded engine digest bound to this process.
+    pub engine_sha256: Sha256Digest,
+    /// Exact fixed helper identity set without workstation paths.
+    pub helpers: BTreeMap<String, CompatibilityHelperReport>,
+    /// SHA-256 of the validated program file.
+    pub program_sha256: Sha256Digest,
+    /// SHA-256 of the validated program/argument identity.
+    pub command_sha256: Sha256Digest,
+    /// SHA-256 of the durable rendered stdout log.
+    pub stdout_sha256: Sha256Digest,
+    /// SHA-256 of the durable rendered stderr log.
+    pub stderr_sha256: Sha256Digest,
+}
+
+impl CompatibilityProbeReport {
+    /// Parse and validate one bounded, closed compatibility success report.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0703 for malformed, incomplete or mixed report material.
+    pub fn parse(input: &[u8]) -> Result<Self, ContractError> {
+        if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
+            return Err(ContractError::compatibility(
+                "compatibility report exceeds the configured document limit",
+            ));
+        }
+        let report: Self = serde_json::from_slice(input).map_err(|_| {
+            ContractError::compatibility("compatibility report is not a closed v1 JSON document")
+        })?;
+        report.validate()?;
+        Ok(report)
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.schema != COMPATIBILITY_REPORT_SCHEMA || self.engine_api_version == 0 {
+            return Err(ContractError::compatibility(
+                "compatibility report has an unsupported schema or engine API version",
+            ));
+        }
+        let expected = REQUIRED_HELPERS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        if self.helpers.keys().cloned().collect::<BTreeSet<_>>() != expected
+            || self.helpers.values().any(|helper| helper.size == 0)
+        {
+            return Err(ContractError::compatibility(
+                "compatibility report does not contain the exact measured helper set",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Run one bounded compatibility phase and durably write its report and logs.
+///
+/// The phase receives only an absolute executable and an explicit argument
+/// vector. It never invokes a shell or reads `PATH`. The closed report binds
+/// the phase to the prepared embedded engine and helper digests. Logs and the
+/// report are created once beneath `reports_root`; existing material is never
+/// overwritten, adopted or deleted.
+///
+/// # Errors
+///
+/// Returns AX0703 when an input is unsafe, the process cannot be supervised,
+/// cancellation/deadline/failure occurs, durable logging fails, or a report
+/// cannot be written. Captured logs are retained for any process that starts.
+/// No operation here has source, cache, network, tag or publication authority.
+pub fn run_probe(
+    request: &CompatibilityProbeRequest,
+    cancellation: &CancellationToken,
+) -> Result<CompatibilityProbeReport, ContractError> {
+    validate_probe_request(request)?;
+    let program = checked_executable(&request.program)?;
+    let current_dir = checked_directory(&request.current_dir, "compatibility process directory")?;
+    let reports_root = checked_directory(&request.reports_root, "compatibility report directory")?;
+    let preparation_roots = validate_preparation(&request.preparation)?;
+    if current_dir == reports_root
+        || reports_root == preparation_roots.engine_root
+        || reports_root == preparation_roots.helpers_root
+    {
+        return Err(ContractError::compatibility(
+            "compatibility process, report, engine, and helper directories must remain separate",
+        ));
+    }
+    let (program_sha256, _) = measure_executable(&program)?;
+    let command_sha256 = command_identity(&program, &request.arguments)?;
+    let paths = ProbeReportPaths::new(&reports_root, request.phase);
+    paths.require_absent()?;
+
+    let mut command = Command::new(&program);
+    command.current_dir(&current_dir).args(&request.arguments);
+    let output = run_output_with_input_and_control(
+        &mut command,
+        &[],
+        PROBE_CAPTURE_LIMIT,
+        request.timeout,
+        cancellation,
+    )
+    .map_err(|_| ContractError::compatibility("cannot start or supervise compatibility process"))?;
+    let stdout_sha256 = ProbeReportPaths::write_log(&paths.stdout, &output.stdout)?;
+    let stderr_sha256 = ProbeReportPaths::write_log(&paths.stderr, &output.stderr)?;
+    if output.cancelled || cancellation.is_cancelled() {
+        return Err(ContractError::compatibility(
+            "compatibility process was cancelled; retained logs require inspection",
+        )
+        .context(DiagnosticContext {
+            tool: Some(request.phase.file_stem().into()),
+            ..DiagnosticContext::default()
+        }));
+    }
+    if output.timed_out {
+        return Err(ContractError::compatibility(
+            "compatibility process exceeded its explicit deadline; retained logs require inspection",
+        )
+        .context(DiagnosticContext {
+            tool: Some(request.phase.file_stem().into()),
+            timed_out: Some(true),
+            timeout_ms: Some(duration_millis(request.timeout)),
+            ..DiagnosticContext::default()
+        }));
+    }
+    if !output.status.success() {
+        return Err(ContractError::compatibility(
+            "compatibility process exited unsuccessfully; retained logs require inspection",
+        )
+        .context(DiagnosticContext {
+            tool: Some(request.phase.file_stem().into()),
+            exit_code: output.status.code(),
+            signal: exit_signal(output.status),
+            ..DiagnosticContext::default()
+        }));
+    }
+    let report = CompatibilityProbeReport {
+        schema: COMPATIBILITY_REPORT_SCHEMA.into(),
+        phase: request.phase,
+        engine_api_version: request.preparation.engine_api_version,
+        engine_sha256: request.preparation.engine_sha256.clone(),
+        helpers: request
+            .preparation
+            .helpers
+            .iter()
+            .map(|(name, helper)| {
+                (
+                    name.clone(),
+                    CompatibilityHelperReport {
+                        sha256: helper.sha256.clone(),
+                        size: helper.size,
+                    },
+                )
+            })
+            .collect(),
+        program_sha256,
+        command_sha256,
+        stdout_sha256,
+        stderr_sha256,
+    };
+    report.validate()?;
+    let encoded = crate::canonical::bytes(
+        &serde_json::to_value(&report)
+            .map_err(|_| ContractError::compatibility("cannot encode the compatibility report"))?,
+    )
+    .map_err(|_| {
+        ContractError::compatibility("cannot canonically encode the compatibility report")
+    })?;
+    let persisted = paths.write_report(&encoded)?;
+    let parsed = CompatibilityProbeReport::parse(&persisted)?;
+    if parsed != report {
+        return Err(ContractError::compatibility(
+            "persisted compatibility report differs from its in-memory identity",
+        ));
+    }
+    Ok(report)
+}
+
+#[derive(Debug)]
+struct CompatibilityPreparationRoots {
+    engine_root: PathBuf,
+    helpers_root: PathBuf,
+}
+
+fn validate_probe_request(request: &CompatibilityProbeRequest) -> Result<(), ContractError> {
+    if request.timeout.is_zero() {
+        return Err(ContractError::compatibility(
+            "compatibility process deadline must be positive",
+        ));
+    }
+    if request.arguments.len() > MAX_PROBE_ARGUMENTS {
+        return Err(ContractError::compatibility(
+            "compatibility process has more arguments than the configured limit",
+        ));
+    }
+    let argument_bytes = request
+        .arguments
+        .iter()
+        .try_fold(0_usize, |total, argument| {
+            if argument.chars().any(char::is_control) {
+                return Err(ContractError::compatibility(
+                    "compatibility process arguments cannot contain control characters",
+                ));
+            }
+            total.checked_add(argument.len()).ok_or_else(|| {
+                ContractError::compatibility("compatibility process argument length overflowed")
+            })
+        })?;
+    if argument_bytes > MAX_PROBE_ARGUMENT_BYTES {
+        return Err(ContractError::compatibility(
+            "compatibility process arguments exceed the configured byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_preparation(
+    preparation: &CompatibilityPreparation,
+) -> Result<CompatibilityPreparationRoots, ContractError> {
+    if preparation.engine_api_version != aros_cmake_engine::api_version() {
+        return Err(ContractError::compatibility(
+            "compatibility preparation uses an engine API different from this tools build",
+        ));
+    }
+    let compiled_digest = Sha256Digest::parse(aros_cmake_engine::digest()).map_err(|_| {
+        ContractError::compatibility("embedded CMake engine exposes an invalid compiled digest")
+    })?;
+    if preparation.engine_sha256 != compiled_digest {
+        return Err(ContractError::compatibility(
+            "compatibility preparation uses an engine digest different from this tools build",
+        ));
+    }
+    let engine_root = checked_directory(&preparation.engine_root, "compatibility engine root")?;
+    verify_materialized_engine(&engine_root, &preparation.engine_sha256)?;
+
+    let expected = REQUIRED_HELPERS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    if preparation.helpers.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(ContractError::compatibility(
+            "compatibility preparation does not provide the exact helper set",
+        ));
+    }
+    let mut helpers_root = None;
+    for (name, helper) in &preparation.helpers {
+        if helper.path.file_name().and_then(|value| value.to_str()) != Some(name) {
+            return Err(ContractError::compatibility(
+                "compatibility helper path does not match its fixed helper name",
+            ));
+        }
+        let parent = helper.path.parent().ok_or_else(|| {
+            ContractError::compatibility("compatibility helper path has no target-root parent")
+        })?;
+        let parent = checked_directory(parent, "compatibility helper root")?;
+        if let Some(previous) = &helpers_root {
+            if previous != &parent {
+                return Err(ContractError::compatibility(
+                    "compatibility helpers do not resolve from one exact target root",
+                ));
+            }
+        } else {
+            helpers_root = Some(parent);
+        }
+        let expected_root = helpers_root.as_deref().ok_or_else(|| {
+            ContractError::compatibility("compatibility helper root was not initialized")
+        })?;
+        let path = checked_executable(&helper.path)?;
+        if path.parent() != Some(expected_root) {
+            return Err(ContractError::compatibility(
+                "compatibility helper resolves outside its exact target root",
+            ));
+        }
+        let measured = measure_executable(&path)?;
+        if measured != (helper.sha256.clone(), helper.size) {
+            return Err(ContractError::compatibility(
+                "compatibility helper changed after preparation",
+            ));
+        }
+    }
+    let helpers_root = helpers_root.ok_or_else(|| {
+        ContractError::compatibility("compatibility preparation does not provide a helper root")
+    })?;
+    Ok(CompatibilityPreparationRoots {
+        engine_root,
+        helpers_root,
+    })
+}
+
+fn checked_executable(path: &Path) -> Result<PathBuf, ContractError> {
+    if !path.is_absolute() {
+        return Err(ContractError::compatibility(
+            "compatibility process program must be an absolute executable path",
+        ));
+    }
+    let canonical = path.canonicalize().map_err(|_| {
+        ContractError::compatibility("compatibility process program cannot be canonicalized")
+    })?;
+    let metadata = fs::symlink_metadata(&canonical).map_err(|_| {
+        ContractError::compatibility("cannot inspect the compatibility process program")
+    })?;
+    let executable = metadata.permissions().mode() & 0o111 != 0;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || !executable {
+        return Err(ContractError::compatibility(
+            "compatibility process program is not a regular executable",
+        ));
+    }
+    let file = open_regular_file_nofollow(&canonical).map_err(|_| {
+        ContractError::compatibility("cannot safely open the compatibility process program")
+    })?;
+    let opened = file.metadata().map_err(|_| {
+        ContractError::compatibility("cannot inspect the opened compatibility process program")
+    })?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err(ContractError::compatibility(
+            "compatibility process program changed while it was validated",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn measure_executable(path: &Path) -> Result<(Sha256Digest, u64), ContractError> {
+    let mut file = open_regular_file_nofollow(path).map_err(|_| {
+        ContractError::compatibility("cannot safely open the compatibility process program")
+    })?;
+    let metadata = file.metadata().map_err(|_| {
+        ContractError::compatibility("cannot inspect the opened compatibility process program")
+    })?;
+    let measured = sha256_reader(&mut file.by_ref()).map_err(|_| {
+        ContractError::compatibility("cannot measure the compatibility process program")
+    })?;
+    if !metadata.is_file() || measured.size == 0 || measured.size != metadata.len() {
+        return Err(ContractError::compatibility(
+            "compatibility process program changed while it was measured",
+        ));
+    }
+    Ok((measured.digest, measured.size))
+}
+
+fn command_identity(program: &Path, arguments: &[String]) -> Result<Sha256Digest, ContractError> {
+    let encoded = crate::canonical::bytes(&serde_json::json!({
+        "arguments": arguments,
+        "program": program.to_string_lossy(),
+    }))
+    .map_err(|_| {
+        ContractError::compatibility("cannot canonically encode the compatibility command")
+    })?;
+    Ok(sha256_bytes(&encoded))
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug)]
+struct ProbeReportPaths {
+    stdout: PathBuf,
+    stderr: PathBuf,
+    report: PathBuf,
+}
+
+impl ProbeReportPaths {
+    fn new(root: &Path, phase: CompatibilityPhase) -> Self {
+        let stem = phase.file_stem();
+        Self {
+            stdout: root.join(format!("{stem}.stdout.log")),
+            stderr: root.join(format!("{stem}.stderr.log")),
+            report: root.join(format!("{stem}.report.json")),
+        }
+    }
+
+    fn require_absent(&self) -> Result<(), ContractError> {
+        for path in [&self.stdout, &self.stderr, &self.report] {
+            match fs::symlink_metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(_) => {
+                    return Err(ContractError::compatibility(
+                        "compatibility report output already exists and cannot be adopted",
+                    ))
+                }
+                Err(_) => {
+                    return Err(ContractError::compatibility(
+                        "cannot safely inspect a compatibility report output path",
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_log(
+        path: &Path,
+        stream: &aros_common::CapturedStream,
+    ) -> Result<Sha256Digest, ContractError> {
+        let mut rendered = Vec::new();
+        stream.write_rendered(&mut rendered).map_err(|_| {
+            ContractError::compatibility("cannot render a compatibility process log")
+        })?;
+        write_new_regular(path, &rendered, "compatibility process log")?;
+        let persisted = read_regular_bounded(
+            path,
+            "persisted compatibility process log",
+            MAX_RENDERED_LOG_BYTES,
+        )?;
+        if persisted != rendered {
+            return Err(ContractError::compatibility(
+                "persisted compatibility process log bytes changed after publication",
+            ));
+        }
+        Ok(sha256_bytes(&persisted))
+    }
+
+    fn write_report(&self, encoded: &[u8]) -> Result<Vec<u8>, ContractError> {
+        write_new_regular(&self.report, encoded, "compatibility report")?;
+        let persisted = read_regular_bounded(
+            &self.report,
+            "persisted compatibility report",
+            crate::canonical::MAX_DOCUMENT_BYTES,
+        )?;
+        if persisted != encoded {
+            return Err(ContractError::compatibility(
+                "persisted compatibility report bytes changed after publication",
+            ));
+        }
+        Ok(persisted)
+    }
+}
+
+fn write_new_regular(path: &Path, contents: &[u8], label: &str) -> Result<(), ContractError> {
+    publish_atomic_file(path, contents, AtomicFilePolicy::NoClobber)
+        .map(|_| ())
+        .map_err(|_| ContractError::compatibility(format!("cannot durably create {label}")))
+}
+
+fn read_regular_bounded(path: &Path, label: &str, limit: usize) -> Result<Vec<u8>, ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::compatibility(format!("cannot safely open {label}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| ContractError::compatibility(format!("cannot inspect {label}")))?;
+    let limit = u64::try_from(limit)
+        .map_err(|_| ContractError::compatibility(format!("{label} limit is not representable")))?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(ContractError::compatibility(format!(
+            "{label} is not a regular file within its configured limit"
+        )));
+    }
+    let capacity = usize::try_from(metadata.len()).map_err(|_| {
+        ContractError::compatibility(format!(
+            "{label} is too large for this process address space"
+        ))
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ContractError::compatibility(format!("cannot read {label}")))?;
+    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
+        return Err(ContractError::compatibility(format!(
+            "{label} changed while it was read"
+        )));
+    }
+    Ok(bytes)
+}
+
 fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, ContractError> {
     if !path.is_absolute() {
         return Err(ContractError::compatibility(format!(
@@ -188,9 +733,11 @@ fn verify_materialized_engine(
                 "materialized CMake engine file length differs from the embedded tools resource",
             ));
         }
-        let contents = fs::read(&path).map_err(|_| {
-            ContractError::compatibility("cannot read back a materialized CMake engine file")
-        })?;
+        let contents = read_regular_bounded(
+            &path,
+            "materialized CMake engine file",
+            MAX_ENGINE_FILE_BYTES,
+        )?;
         if contents != expected_contents.as_bytes() {
             return Err(ContractError::compatibility(
                 "materialized CMake engine file differs from the embedded tools resource",
@@ -209,10 +756,12 @@ fn verify_materialized_engine(
             "materialized CMake engine contains missing, foreign, or unsafe files",
         ));
     }
-    let stamp =
-        fs::read_to_string(engine_root.join(aros_cmake_engine::STAMP_FILE)).map_err(|_| {
-            ContractError::compatibility("cannot read the materialized CMake engine stamp")
-        })?;
+    let stamp = String::from_utf8(read_regular_bounded(
+        &engine_root.join(aros_cmake_engine::STAMP_FILE),
+        "materialized CMake engine stamp",
+        MAX_ENGINE_FILE_BYTES,
+    )?)
+    .map_err(|_| ContractError::compatibility("materialized CMake engine stamp is not UTF-8"))?;
     if stamp != format!("{}\n", expected_digest.as_str()) {
         return Err(ContractError::compatibility(
             "materialized CMake engine stamp does not bind the embedded digest",
@@ -350,11 +899,14 @@ fn resolve_helpers(root: &Path) -> Result<BTreeMap<String, HelperIdentity>, Cont
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
+    use std::time::Duration;
 
-    use aros_common::DiagnosticCode;
+    use aros_common::{CancellationToken, DiagnosticCode};
 
     use super::{
-        prepare, verify_materialized_engine, CompatibilityPreparationRequest, REQUIRED_HELPERS,
+        prepare, run_probe, verify_materialized_engine, CompatibilityPhase,
+        CompatibilityPreparation, CompatibilityPreparationRequest, CompatibilityProbeReport,
+        CompatibilityProbeRequest, REQUIRED_HELPERS,
     };
 
     fn request(root: &std::path::Path) -> CompatibilityPreparationRequest {
@@ -423,6 +975,175 @@ mod tests {
         fs::write(engine.join("foreign.cmake"), b"unexpected\n").unwrap();
         let error = verify_materialized_engine(&engine, &digest).unwrap_err();
         assert_compatibility(&error);
+    }
+
+    #[test]
+    fn probe_persists_a_canonical_report_bound_to_the_preparation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_request = request(temporary.path());
+        let preparation = prepare(&first_request).unwrap();
+        let program = script(
+            temporary.path(),
+            "successful-probe",
+            "printf standard; printf error >&2",
+        );
+        let probe = probe_request(
+            temporary.path(),
+            preparation.clone(),
+            CompatibilityPhase::CmakeConsumer,
+            program,
+            Duration::from_secs(1),
+        );
+
+        let report = run_probe(&probe, &CancellationToken::default()).unwrap();
+        assert_eq!(report.engine_sha256, preparation.engine_sha256);
+        assert_eq!(report.helpers.len(), REQUIRED_HELPERS.len());
+        let bytes = fs::read(probe.reports_root.join("cmake-consumer.report.json")).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        assert_eq!(CompatibilityProbeReport::parse(&bytes).unwrap(), report);
+        assert_eq!(
+            fs::read(probe.reports_root.join("cmake-consumer.stdout.log")).unwrap(),
+            b"standard"
+        );
+        assert_eq!(
+            fs::read(probe.reports_root.join("cmake-consumer.stderr.log")).unwrap(),
+            b"error"
+        );
+
+        let rerun = run_probe(&probe, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&rerun);
+    }
+
+    #[test]
+    fn probe_preserves_diagnostics_for_exit_timeout_and_cancellation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = request(temporary.path());
+        let preparation = prepare(&request).unwrap();
+        let failing = probe_request(
+            temporary.path(),
+            preparation.clone(),
+            CompatibilityPhase::CmakeConsumer,
+            script(
+                temporary.path(),
+                "failing-probe",
+                "printf failure >&2; exit 7",
+            ),
+            Duration::from_secs(1),
+        );
+        let error = run_probe(&failing, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(failing
+            .reports_root
+            .join("cmake-consumer.stderr.log")
+            .is_file());
+        assert!(!failing
+            .reports_root
+            .join("cmake-consumer.report.json")
+            .exists());
+
+        let timed = probe_request(
+            temporary.path(),
+            preparation.clone(),
+            CompatibilityPhase::UpstreamConfigure,
+            script(temporary.path(), "timed-probe", "sleep 1"),
+            Duration::from_millis(20),
+        );
+        let error = run_probe(&timed, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(timed
+            .reports_root
+            .join("upstream-configure.stdout.log")
+            .is_file());
+        assert!(!timed
+            .reports_root
+            .join("upstream-configure.report.json")
+            .exists());
+
+        let cancelled = probe_request(
+            temporary.path(),
+            preparation,
+            CompatibilityPhase::StandaloneC,
+            script(temporary.path(), "cancelled-probe", "exit 0"),
+            Duration::from_secs(1),
+        );
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let error = run_probe(&cancelled, &cancellation).unwrap_err();
+        assert_compatibility(&error);
+        assert!(!cancelled
+            .reports_root
+            .join("standalone-c.report.json")
+            .exists());
+    }
+
+    #[test]
+    fn probe_rejects_changed_helper_control_arguments_and_foreign_report_fields() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first_request = request(temporary.path());
+        let preparation = prepare(&first_request).unwrap();
+        fs::write(
+            preparation.helpers["aros-fetch"].path.clone(),
+            b"changed helper\n",
+        )
+        .unwrap();
+        let changed = probe_request(
+            temporary.path(),
+            preparation,
+            CompatibilityPhase::CmakeConsumer,
+            script(temporary.path(), "changed-helper-probe", "exit 0"),
+            Duration::from_secs(1),
+        );
+        let error = run_probe(&changed, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
+        let separate = temporary.path().join("separate");
+        fs::create_dir(&separate).unwrap();
+        let second_request = request(&separate);
+        let preparation = prepare(&second_request).unwrap();
+        let mut invalid = probe_request(
+            &separate,
+            preparation,
+            CompatibilityPhase::CmakeConsumer,
+            script(temporary.path(), "invalid-argument-probe", "exit 0"),
+            Duration::from_secs(1),
+        );
+        invalid.arguments.push("line\nbreak".into());
+        let error = run_probe(&invalid, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
+        let malformed =
+            br#"{\"schema\":\"aros-toolchain-compatibility-report-v1\",\"unexpected\":true}"#;
+        let error = CompatibilityProbeReport::parse(malformed).unwrap_err();
+        assert_compatibility(&error);
+    }
+
+    fn probe_request(
+        root: &std::path::Path,
+        preparation: CompatibilityPreparation,
+        phase: CompatibilityPhase,
+        program: std::path::PathBuf,
+        timeout: Duration,
+    ) -> CompatibilityProbeRequest {
+        let current_dir = root.join("process");
+        let reports_root = root.join("reports");
+        fs::create_dir_all(&current_dir).unwrap();
+        fs::create_dir_all(&reports_root).unwrap();
+        CompatibilityProbeRequest {
+            phase,
+            program,
+            arguments: Vec::new(),
+            current_dir,
+            reports_root,
+            timeout,
+            preparation,
+        }
+    }
+
+    fn script(root: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = root.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
     }
 
     fn assert_compatibility(error: &crate::ContractError) {
