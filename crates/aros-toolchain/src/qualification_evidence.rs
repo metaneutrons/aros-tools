@@ -134,7 +134,8 @@ pub enum EvidenceCoverage {
 }
 
 /// Immutable policy claims a caller expects from qualification evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidencePolicy {
     /// Expected producer repository.
     pub source_repository: String,

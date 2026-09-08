@@ -28,6 +28,7 @@ mod toolchain;
 mod toolchain_build;
 mod toolchain_fetch_bridge;
 mod toolchain_plan;
+mod toolchain_producer;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -339,6 +340,8 @@ enum ToolchainCommands {
     Plan(toolchain_plan::PlanArgs),
     /// Build one local native or explicit legacy-preview candidate
     Build(toolchain_build::BuildArgs),
+    /// Run explicit native producer stages without a legacy adapter
+    Producer(toolchain_producer::ProducerArgs),
     /// Internal verified bridge used only by the native MetaMake lifecycle.
     #[command(name = "__metamake-fetch", hide = true)]
     MetaMakeFetch(toolchain_fetch_bridge::MetaMakeFetchArgs),
@@ -653,6 +656,7 @@ impl Commands {
                 command:
                     ToolchainCommands::Plan(_)
                     | ToolchainCommands::Build(_)
+                    | ToolchainCommands::Producer(_)
                     | ToolchainCommands::MetaMakeFetch(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
@@ -712,7 +716,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 | ToolchainCommands::Build(toolchain_build::BuildArgs { preset, .. }) => {
                     Some(preset.clone())
                 }
-                ToolchainCommands::List | ToolchainCommands::MetaMakeFetch(_) => None,
+                ToolchainCommands::List
+                | ToolchainCommands::Producer(_)
+                | ToolchainCommands::MetaMakeFetch(_) => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
             };
             (

@@ -10,18 +10,20 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{
-    open_regular_file_nofollow, parse_credential_free_https_url, sha256_bytes, sha256_reader,
-    ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
+    finish_sha256, open_regular_file_nofollow, parse_credential_free_https_url,
+    publish_atomic_file, sha256_bytes, sha256_reader, ArosToolchainManifest, AtomicFilePolicy,
+    Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::package::{canonical_asset_name, pretty_json};
 use crate::package_verify::{verify_members, PackageAssetPaths, PackageVerificationRequest};
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::Recipe;
 use crate::source_lock::SourceLock;
-use crate::ContractError;
+use crate::{canonical, ContractError};
 
 const INDEX_NAME: &str = "toolchain-index-v1.json";
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
@@ -291,30 +293,142 @@ fn safe_payload_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(segment) if !segment.is_empty()))
 }
 
+/// One measured package-set member proven byte-identical across two builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSetComparisonMember {
+    /// Portable package-set filename.
+    pub name: String,
+    /// SHA-256 measured while the two members were compared.
+    pub sha256: Sha256Digest,
+    /// Byte length measured while the two members were compared.
+    pub size: u64,
+}
+
+/// Durable in-memory result of one complete byte-identical package-set comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSetComparison {
+    /// Content address of the canonical measured member identity sequence.
+    pub package_set_sha256: Sha256Digest,
+    /// Every member of the exact four-file package set, sorted by name.
+    pub members: Vec<PackageSetComparisonMember>,
+}
+
+/// Canonical durable evidence for one successful independent package comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageComparisonReport {
+    /// Closed producer receipt schema revision.
+    pub schema: u32,
+    /// Fixed operation marker; no workflow-selected operation is accepted.
+    pub operation: String,
+    /// The comparison admitted byte equality.
+    pub byte_identical: bool,
+    /// Content address of the complete measured package set.
+    pub package_set_sha256: Sha256Digest,
+    /// Every compared member in portable lexical order.
+    pub members: Vec<PackageSetComparisonMember>,
+}
+
+/// Freshly persisted and read-back-verified comparison evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageComparisonReportOutput {
+    /// Canonical absolute receipt path.
+    pub path: PathBuf,
+    /// SHA-256 of the exact persisted receipt bytes.
+    pub sha256: Sha256Digest,
+    /// Strictly validated parsed receipt.
+    pub report: PackageComparisonReport,
+}
+
 /// Compare two complete package sets byte-for-byte without copying either set.
 ///
 /// # Errors
 ///
 /// Returns AX0702 unless both directories contain the same one closed package
-/// set and every corresponding member is byte-identical.
-pub fn compare_package_sets(left: &Path, right: &Path) -> Result<(), ContractError> {
-    let left_members = package_set_members(left)?;
-    let right_members = package_set_members(right)?;
+/// set and every corresponding member is byte-identical.  The returned member
+/// identities are measured from the exact byte streams that passed comparison,
+/// so a workflow can persist durable admission evidence without a shell pipe.
+pub fn compare_package_sets(
+    left: &Path,
+    right: &Path,
+) -> Result<PackageSetComparison, ContractError> {
+    let left = comparison_directory(left)?;
+    let right = comparison_directory(right)?;
+    if left == right {
+        return Err(ContractError::comparison(
+            "package comparison requires two distinct canonical directories",
+        ));
+    }
+    let left_members = package_set_members(&left)?;
+    let right_members = package_set_members(&right)?;
     if left_members != right_members {
         return Err(ContractError::comparison(
             "package-set member names differ between independent outputs",
         ));
     }
+    let mut members = Vec::with_capacity(left_members.len());
     for name in left_members {
         let left_path = left.join(&name);
         let right_path = right.join(&name);
-        if !files_equal(&left_path, &right_path)? {
-            return Err(ContractError::comparison(
-                "package-set members differ between independent outputs",
-            ));
-        }
+        members.push(compare_member(&name, &left_path, &right_path)?);
     }
-    Ok(())
+    let package_set_sha256 = sha256_bytes(&comparison_canonical_bytes(&members)?);
+    Ok(PackageSetComparison {
+        package_set_sha256,
+        members,
+    })
+}
+
+/// Persist canonical, read-back-verified admission evidence for a comparison.
+///
+/// The caller supplies the in-memory result returned by
+/// [`compare_package_sets`]. The receipt never records local paths, so its
+/// bytes are portable evidence of the compared four-member package identity.
+/// Existing outputs are never adopted or replaced.
+///
+/// # Errors
+///
+/// Returns AX0702 when the comparison result is noncanonical, the destination
+/// is unsafe or already exists, or durable write/read-back validation fails.
+pub fn write_package_comparison_report(
+    output: &Path,
+    comparison: &PackageSetComparison,
+) -> Result<PackageComparisonReportOutput, ContractError> {
+    let report = PackageComparisonReport {
+        schema: 1,
+        operation: "compare".into(),
+        byte_identical: true,
+        package_set_sha256: comparison.package_set_sha256.clone(),
+        members: comparison.members.clone(),
+    };
+    validate_comparison_report(&report)?;
+    let output = comparison_report_path(output)?;
+    let mut bytes = comparison_canonical_bytes(&report)?;
+    bytes.push(b'\n');
+    publish_atomic_file(&output, &bytes, AtomicFilePolicy::NoClobber)
+        .map_err(|_| ContractError::comparison("cannot durably create native comparison report"))?;
+    let persisted = read_comparison_report(&output)?;
+    if persisted != bytes {
+        return Err(ContractError::comparison(
+            "persisted native comparison report bytes changed after publication",
+        ));
+    }
+    let parsed: PackageComparisonReport = serde_json::from_slice(&persisted).map_err(|_| {
+        ContractError::comparison("persisted native comparison report is not valid JSON")
+    })?;
+    validate_comparison_report(&parsed)?;
+    if parsed != report {
+        return Err(ContractError::comparison(
+            "persisted native comparison report differs from its requested evidence",
+        ));
+    }
+    Ok(PackageComparisonReportOutput {
+        path: output,
+        sha256: sha256_bytes(&persisted),
+        report: parsed,
+    })
 }
 
 /// Validate and advance one complete v1 local release inventory.
@@ -891,7 +1005,161 @@ fn package_set_members(directory: &Path) -> Result<BTreeSet<String>, ContractErr
     Ok(names)
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
+fn comparison_directory(path: &Path) -> Result<PathBuf, ContractError> {
+    if !path.is_absolute() {
+        return Err(ContractError::comparison(
+            "package comparison directories must be absolute",
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ContractError::comparison("package comparison directory is inaccessible"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ContractError::comparison(
+            "package comparison directory must be a real directory",
+        ));
+    }
+    path.canonicalize().map_err(|_| {
+        ContractError::comparison("package comparison directory cannot be canonicalized")
+    })
+}
+
+fn comparison_report_path(path: &Path) -> Result<PathBuf, ContractError> {
+    if !path.is_absolute() {
+        return Err(ContractError::comparison(
+            "native comparison report output must be absolute",
+        ));
+    }
+    let leaf = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            ContractError::comparison("native comparison report output has no UTF-8 file name")
+        })?;
+    if !safe_segment(leaf)
+        || Path::new(leaf)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("json")
+    {
+        return Err(ContractError::comparison(
+            "native comparison report output must use one safe JSON basename",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        ContractError::comparison("native comparison report output has no parent directory")
+    })?;
+    let parent = parent.canonicalize().map_err(|_| {
+        ContractError::comparison("native comparison report output parent is unavailable")
+    })?;
+    let metadata = fs::symlink_metadata(&parent).map_err(|_| {
+        ContractError::comparison("native comparison report output parent is unavailable")
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ContractError::comparison(
+            "native comparison report output parent must be a real directory",
+        ));
+    }
+    let output = parent.join(leaf);
+    match fs::symlink_metadata(&output) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(output),
+        Ok(_) => Err(ContractError::comparison(
+            "native comparison report output already exists and cannot be adopted",
+        )),
+        Err(_) => Err(ContractError::comparison(
+            "cannot inspect native comparison report output",
+        )),
+    }
+}
+
+fn read_comparison_report(path: &Path) -> Result<Vec<u8>, ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::comparison("cannot safely open native comparison report"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| ContractError::comparison("cannot inspect native comparison report"))?;
+    if !metadata.is_file() || metadata.len() > MAX_METADATA_BYTES {
+        return Err(ContractError::comparison(
+            "native comparison report is not a regular bounded file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| {
+        ContractError::comparison("native comparison report exceeds addressable memory")
+    })?);
+    Read::by_ref(&mut file)
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ContractError::comparison("cannot read native comparison report"))?;
+    if bytes.len() as u64 != metadata.len() || bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(ContractError::comparison(
+            "native comparison report changed or exceeded its limit while it was read",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_comparison_report(report: &PackageComparisonReport) -> Result<(), ContractError> {
+    if report.schema != 1 || report.operation != "compare" || !report.byte_identical {
+        return Err(ContractError::comparison(
+            "native comparison report has an unsupported schema or operation",
+        ));
+    }
+    if report.members.len() != 4
+        || report
+            .members
+            .windows(2)
+            .any(|pair| pair[0].name >= pair[1].name)
+        || report.members.iter().any(|member| {
+            member.size == 0 || !safe_segment(&member.name) || member.name.contains('/')
+        })
+    {
+        return Err(ContractError::comparison(
+            "native comparison report members are incomplete or noncanonical",
+        ));
+    }
+    let names = report
+        .members
+        .iter()
+        .map(|member| member.name.clone())
+        .collect::<BTreeSet<_>>();
+    let archives = names
+        .iter()
+        .filter(|name| name.ends_with(".tar.xz"))
+        .collect::<Vec<_>>();
+    if archives.len() != 1
+        || names
+            != [
+                archives[0].clone(),
+                format!("{}.manifest.json", archives[0]),
+                format!("{}.sha256", archives[0]),
+                format!("{}.spdx.json", archives[0]),
+            ]
+            .into_iter()
+            .collect()
+    {
+        return Err(ContractError::comparison(
+            "native comparison report does not describe one exact package set",
+        ));
+    }
+    if sha256_bytes(&comparison_canonical_bytes(&report.members)?) != report.package_set_sha256 {
+        return Err(ContractError::comparison(
+            "native comparison report package-set digest is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn comparison_canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
+    let value = serde_json::to_value(value).map_err(|_| {
+        ContractError::comparison("cannot serialize native comparison report material")
+    })?;
+    canonical::bytes(&value)
+}
+
+fn compare_member(
+    name: &str,
+    left: &Path,
+    right: &Path,
+) -> Result<PackageSetComparisonMember, ContractError> {
     let mut left = open_regular_file_nofollow(left)
         .map_err(|_| ContractError::comparison("cannot safely open left package member"))?;
     let mut right = open_regular_file_nofollow(right)
@@ -910,10 +1178,13 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
         ));
     }
     if left_size != right_size {
-        return Ok(false);
+        return Err(ContractError::comparison(
+            "package-set members differ between independent outputs",
+        ));
     }
     let mut left_buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
     let mut right_buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
+    let mut hasher = Sha256::new();
     let mut read_total = 0_u64;
     loop {
         let left_read = left
@@ -923,8 +1194,11 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
             .read(&mut right_buffer)
             .map_err(|_| ContractError::comparison("cannot read right package member"))?;
         if left_read != right_read || left_buffer[..left_read] != right_buffer[..left_read] {
-            return Ok(false);
+            return Err(ContractError::comparison(
+                "package-set members differ between independent outputs",
+            ));
         }
+        hasher.update(&left_buffer[..left_read]);
         read_total = read_total
             .checked_add(u64::try_from(left_read).map_err(|_| {
                 ContractError::comparison("package comparison byte count overflowed")
@@ -936,7 +1210,16 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
             ));
         }
         if left_read == 0 {
-            return Ok(read_total == left_size);
+            if read_total != left_size {
+                return Err(ContractError::comparison(
+                    "package comparison member changed while it was read",
+                ));
+            }
+            return Ok(PackageSetComparisonMember {
+                name: name.to_owned(),
+                sha256: finish_sha256(hasher),
+                size: read_total,
+            });
         }
     }
 }
@@ -1103,11 +1386,50 @@ mod tests {
             fs::write(directory.join("archive.tar.xz.sha256"), b"checksum").unwrap();
             fs::write(directory.join("archive.tar.xz.spdx.json"), b"spdx").unwrap();
         }
-        assert!(compare_package_sets(&left, &right).is_ok());
+        let comparison = compare_package_sets(&left, &right).unwrap();
+        assert_eq!(comparison.members.len(), 4);
+        assert_eq!(
+            comparison.package_set_sha256,
+            sha256_bytes(&comparison_canonical_bytes(&comparison.members).unwrap())
+        );
+        assert_eq!(
+            comparison.members[0],
+            PackageSetComparisonMember {
+                name: "archive.tar.xz".into(),
+                sha256: sha256_bytes(b"archive"),
+                size: 7,
+            }
+        );
         fs::write(right.join("archive.tar.xz.spdx.json"), b"changed").unwrap();
         assert!(compare_package_sets(&left, &right).is_err());
         fs::write(right.join("extra"), b"unexpected").unwrap();
         assert!(compare_package_sets(&left, &right).is_err());
+    }
+
+    #[test]
+    fn comparison_report_is_canonical_and_non_overwriting() {
+        let temporary = tempfile::tempdir().unwrap();
+        let left = temporary.path().join("left");
+        let right = temporary.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        for directory in [&left, &right] {
+            fs::write(directory.join("archive.tar.xz"), b"archive").unwrap();
+            fs::write(directory.join("archive.tar.xz.manifest.json"), b"manifest").unwrap();
+            fs::write(directory.join("archive.tar.xz.sha256"), b"checksum").unwrap();
+            fs::write(directory.join("archive.tar.xz.spdx.json"), b"sbom").unwrap();
+        }
+        let comparison = compare_package_sets(&left, &right).unwrap();
+        let output = temporary.path().join("comparison.json");
+        let persisted = write_package_comparison_report(&output, &comparison).unwrap();
+        assert_eq!(persisted.path, output.canonicalize().unwrap());
+        assert_eq!(
+            persisted.report.package_set_sha256,
+            comparison.package_set_sha256
+        );
+        assert_eq!(persisted.sha256, sha256_bytes(&fs::read(&output).unwrap()));
+        assert!(write_package_comparison_report(&output, &comparison).is_err());
+        assert!(compare_package_sets(&left, &left).is_err());
     }
 
     #[test]

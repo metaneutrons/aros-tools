@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use aros_common::CancellationToken;
+use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
+use serde::{Deserialize, Serialize};
 
 use super::{
     checked_executable, run_probe_set, verify_standalone_outputs, CompatibilityCommand,
@@ -23,10 +24,15 @@ use super::{
 };
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
-use crate::ContractError;
+use crate::recipe::GitObjectId;
+use crate::source_audit::{self, Budget as SourceAuditBudget};
+use crate::{canonical, inspection, ContractError};
 
 const POISONED_PATH: &str = "/nonexistent";
 const MAX_MAKE_JOBS: usize = 64;
+const UPSTREAM_SOURCE_AUDIT_TIMEOUT: Duration = Duration::from_mins(5);
+const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v1";
+const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
 /// Explicit C and C++ fixture files compiled through the installed drivers.
 #[derive(Debug, Clone)]
@@ -58,6 +64,8 @@ pub struct NativeCompatibilityRequest {
     pub cmake_build_root: PathBuf,
     /// Separate pristine upstream source tree containing the `configure` script.
     pub upstream_source_root: PathBuf,
+    /// Exact upstream commit selected by the recipe-bound profiles matrix.
+    pub upstream_source_commit: GitObjectId,
     /// Empty upstream build directory to create.
     pub upstream_build_root: PathBuf,
     /// Exact closed Python runtime for upstream configure and Make.
@@ -83,6 +91,51 @@ pub struct NativeCompatibilityReport {
     pub probes: CompatibilityProbeSet,
     /// Post-process verification of C/C++ collector output identities.
     pub standalone: StandaloneOutputReport,
+    /// Durable aggregate receipt binding every phase report and standalone
+    /// collector result without workstation-local paths.
+    pub receipt: CompatibilityReceipt,
+}
+
+/// Durable aggregate evidence emitted by one complete compatibility execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityReceipt {
+    /// The one no-clobber receipt written below the operation's report root.
+    pub path: PathBuf,
+    /// SHA-256 of the exact canonical receipt bytes.
+    pub sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptDocument {
+    schema: String,
+    operation: String,
+    upstream_source_commit: String,
+    upstream_source_tree: String,
+    phase_reports: Vec<CompatibilityReceiptPhase>,
+    standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptPhase {
+    phase: CompatibilityPhase,
+    report_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptTarget {
+    c: CompatibilityReceiptArtifact,
+    cxx: CompatibilityReceiptArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptArtifact {
+    sha256: Sha256Digest,
+    size: u64,
+    class: String,
 }
 
 /// Execute the closed native compatibility harness.
@@ -111,7 +164,12 @@ pub fn execute_native_compatibility(
     }
     let inputs = validate_inputs(request)?;
     let outputs = create_output_roots(request, &inputs)?;
-    let upstream_environment = request.host_python.compatibility_environment()?;
+    let mut upstream_environment = request.host_python.compatibility_environment()?;
+    // Autoconf 2.73 can otherwise append a C23 dialect marker before the
+    // pinned upstream snapshot captures its compiler base name. That produces
+    // impossible LLVM helper names. This is an explicit, recorded upstream
+    // compatibility input rather than a runner-specific inherited default.
+    upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
     validate_upstream_environment(&upstream_environment, &request.host_tools)?;
     let sealed_environment = CompatibilityEnvironment::SealedHostTools {
         variables: upstream_environment,
@@ -188,7 +246,182 @@ pub fn execute_native_compatibility(
         output_root: outputs.standalone,
         targets: standalone.outputs,
     })?;
-    Ok(NativeCompatibilityReport { probes, standalone })
+    let revalidated_tree =
+        verify_pristine_upstream_source(&inputs.upstream_source, &inputs.upstream_source_commit)?;
+    if revalidated_tree != inputs.upstream_source_tree {
+        return Err(ContractError::compatibility(
+            "pristine upstream source tree changed during native compatibility execution",
+        ));
+    }
+    let receipt = write_compatibility_receipt(
+        &outputs.reports,
+        &probes,
+        &standalone,
+        &inputs.upstream_source_commit,
+        &inputs.upstream_source_tree,
+    )?;
+    Ok(NativeCompatibilityReport {
+        probes,
+        standalone,
+        receipt,
+    })
+}
+
+fn write_compatibility_receipt(
+    reports_root: &Path,
+    probes: &CompatibilityProbeSet,
+    standalone: &StandaloneOutputReport,
+    upstream_source_commit: &GitObjectId,
+    upstream_source_tree: &GitObjectId,
+) -> Result<CompatibilityReceipt, ContractError> {
+    let mut persisted_reports = BTreeMap::new();
+    let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
+    for phase in super::REQUIRED_PROBE_PHASES {
+        let expected = probes.reports.get(&phase).ok_or_else(|| {
+            ContractError::compatibility("native compatibility execution lost a required phase")
+        })?;
+        let report_path = reports_root.join(format!("{}.report.json", phase.file_stem()));
+        let bytes = super::read_regular_bounded(
+            &report_path,
+            "persisted native compatibility phase report",
+            crate::canonical::MAX_DOCUMENT_BYTES,
+        )?;
+        let parsed = super::CompatibilityProbeReport::parse(&bytes)?;
+        if &parsed != expected {
+            return Err(ContractError::compatibility(
+                "persisted native compatibility phase report differs from its execution identity",
+            ));
+        }
+        phase_reports.push(CompatibilityReceiptPhase {
+            phase,
+            report_sha256: sha256_bytes(&bytes),
+        });
+        persisted_reports.insert(phase, bytes);
+    }
+    let standalone_targets = standalone
+        .targets
+        .iter()
+        .map(|(triple, target)| {
+            (
+                triple.clone(),
+                CompatibilityReceiptTarget {
+                    c: receipt_artifact(&target.c),
+                    cxx: receipt_artifact(&target.cxx),
+                },
+            )
+        })
+        .collect();
+    let document = CompatibilityReceiptDocument {
+        schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
+        operation: "native-compatibility".into(),
+        upstream_source_commit: upstream_source_commit.as_str().into(),
+        upstream_source_tree: upstream_source_tree.as_str().into(),
+        phase_reports,
+        standalone_targets,
+    };
+    document.validate()?;
+    let encoded = canonical::bytes(
+        &serde_json::to_value(&document)
+            .map_err(|_| ContractError::compatibility("cannot encode compatibility receipt"))?,
+    )
+    .map_err(|_| ContractError::compatibility("cannot canonically encode compatibility receipt"))?;
+    let path = reports_root.join(COMPATIBILITY_RECEIPT_FILE);
+    super::write_new_regular(&path, &encoded, "native compatibility receipt")?;
+    let persisted = super::read_regular_bounded(
+        &path,
+        "persisted native compatibility receipt",
+        crate::canonical::MAX_DOCUMENT_BYTES,
+    )?;
+    if persisted != encoded {
+        return Err(ContractError::compatibility(
+            "persisted native compatibility receipt bytes changed after publication",
+        ));
+    }
+    let parsed: CompatibilityReceiptDocument = serde_json::from_slice(&persisted)
+        .map_err(|_| ContractError::compatibility("native compatibility receipt is not JSON"))?;
+    parsed.validate()?;
+    if parsed != document {
+        return Err(ContractError::compatibility(
+            "persisted native compatibility receipt differs from its execution identity",
+        ));
+    }
+    for (phase, expected) in persisted_reports {
+        let report_path = reports_root.join(format!("{}.report.json", phase.file_stem()));
+        let observed = super::read_regular_bounded(
+            &report_path,
+            "revalidated native compatibility phase report",
+            crate::canonical::MAX_DOCUMENT_BYTES,
+        )?;
+        if observed != expected {
+            return Err(ContractError::compatibility(
+                "native compatibility phase report changed while receipt was published",
+            ));
+        }
+    }
+    Ok(CompatibilityReceipt {
+        path,
+        sha256: sha256_bytes(&persisted),
+    })
+}
+
+impl CompatibilityReceiptDocument {
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.schema != COMPATIBILITY_RECEIPT_SCHEMA || self.operation != "native-compatibility" {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt has an unsupported schema or operation",
+            ));
+        }
+        for identity in [&self.upstream_source_commit, &self.upstream_source_tree] {
+            if GitObjectId::try_from(identity.clone()).is_err() {
+                return Err(ContractError::compatibility(
+                    "native compatibility receipt contains an invalid upstream source identity",
+                ));
+            }
+        }
+        if self.phase_reports.len() != super::REQUIRED_PROBE_PHASES.len()
+            || self
+                .phase_reports
+                .iter()
+                .map(|entry| entry.phase)
+                .ne(super::REQUIRED_PROBE_PHASES)
+        {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt does not contain the required ordered phase set",
+            ));
+        }
+        if self.standalone_targets.is_empty() || self.standalone_targets.len() > 2 {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt has an invalid standalone target set",
+            ));
+        }
+        for (triple, target) in &self.standalone_targets {
+            if !crate::profiles::identifier(triple)
+                || !valid_receipt_artifact(&target.c)
+                || !valid_receipt_artifact(&target.cxx)
+            {
+                return Err(ContractError::compatibility(
+                    "native compatibility receipt contains invalid standalone evidence",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn receipt_artifact(artifact: &super::StandaloneArtifactIdentity) -> CompatibilityReceiptArtifact {
+    CompatibilityReceiptArtifact {
+        sha256: artifact.sha256.clone(),
+        size: artifact.size,
+        class: match artifact.class {
+            aros_common::elf::Class::Elf32 => "elf32",
+            aros_common::elf::Class::Elf64 => "elf64",
+        }
+        .into(),
+    }
+}
+
+fn valid_receipt_artifact(artifact: &CompatibilityReceiptArtifact) -> bool {
+    artifact.size > 0 && matches!(artifact.class.as_str(), "elf32" | "elf64")
 }
 
 #[derive(Debug)]
@@ -196,6 +429,8 @@ struct Inputs {
     cmake_toolchain_root: PathBuf,
     upstream_toolchain_root: PathBuf,
     upstream_source: PathBuf,
+    upstream_source_commit: GitObjectId,
+    upstream_source_tree: GitObjectId,
     configure: PathBuf,
     cmake: PathBuf,
     ninja: PathBuf,
@@ -248,6 +483,8 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         &request.upstream_source_root,
         "pristine upstream compatibility source root",
     )?;
+    let upstream_source_tree =
+        verify_pristine_upstream_source(&upstream_source, &request.upstream_source_commit)?;
     if upstream_source == request.preparation.source_root
         || upstream_source == request.preparation.engine_root
         || upstream_source == cmake_toolchain_root
@@ -284,12 +521,37 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         cmake_toolchain_root,
         upstream_toolchain_root,
         upstream_source,
+        upstream_source_commit: request.upstream_source_commit.clone(),
+        upstream_source_tree,
         configure,
         cmake,
         ninja,
         standalone_c,
         standalone_cxx,
     })
+}
+
+fn verify_pristine_upstream_source(
+    root: &Path,
+    expected_commit: &GitObjectId,
+) -> Result<GitObjectId, ContractError> {
+    let deadline = Instant::now()
+        .checked_add(UPSTREAM_SOURCE_AUDIT_TIMEOUT)
+        .ok_or_else(|| {
+            ContractError::preflight("upstream source audit deadline is not representable")
+        })?;
+    let cancellation = CancellationToken::default();
+    let (commit, tree) = inspection::observed_identity(root, deadline, &cancellation)?;
+    if &commit != expected_commit {
+        return Err(ContractError::identity(
+            "pristine upstream source commit differs from the recipe-bound profiles matrix",
+        ));
+    }
+    let checkout =
+        inspection::Checkout::inspect_controlled(root, (&commit, &tree), deadline, &cancellation)?;
+    let mut budget = SourceAuditBudget::controlled(deadline, &cancellation);
+    source_audit::verify(&checkout, &mut budget, 0)?;
+    Ok(tree)
 }
 
 fn create_output_roots(
@@ -358,6 +620,7 @@ fn validate_upstream_environment(
     host_tools: &HostToolClosure,
 ) -> Result<(), ContractError> {
     let expected = BTreeSet::from([
+        "ac_cv_prog_cc_c23",
         "PATH",
         "PYTHON",
         "PYTHONDONTWRITEBYTECODE",
@@ -377,6 +640,7 @@ fn validate_upstream_environment(
             != Some("1")
         || environment.get("PYTHONHASHSEED").map(String::as_str) != Some("0")
         || environment.get("PYTHONNOUSERSITE").map(String::as_str) != Some("1")
+        || environment.get("ac_cv_prog_cc_c23").map(String::as_str) != Some("")
         || environment.get("PYTHONPATH").is_none_or(String::is_empty)
     {
         return Err(ContractError::compatibility(
@@ -701,9 +965,12 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::Duration;
 
-    use aros_common::{sha256_file, ArosToolchainManifest, CancellationToken};
+    use aros_common::{
+        run_output, run_status, sha256_file, ArosToolchainManifest, CancellationToken,
+    };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
     use tar::{Builder, Header};
@@ -750,6 +1017,21 @@ mod tests {
             .targets
             .contains_key("x86_64-unknown-aros"));
         assert!(report.standalone.targets.contains_key("i386-unknown-aros"));
+        assert!(report.receipt.path.is_file());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report.receipt.path).unwrap()).unwrap();
+        assert_eq!(
+            receipt["schema"],
+            "aros-toolchain-native-compatibility-receipt-v1"
+        );
+        assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
+        assert_eq!(receipt["standalone_targets"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            aros_common::sha256_file(&report.receipt.path)
+                .unwrap()
+                .digest,
+            report.receipt.sha256
+        );
 
         let cmake_arguments = fs::read_to_string(cmake_log).unwrap();
         assert!(cmake_arguments.contains("-S"));
@@ -771,6 +1053,22 @@ mod tests {
             error.diagnostics().diagnostics[0].code,
             aros_common::DiagnosticCode::ProducerCompatibility
         );
+    }
+
+    #[test]
+    fn rejects_a_dirty_or_mismatched_pristine_upstream_source_before_any_child_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (dirty, _, _) = request(temporary.path());
+        fs::write(dirty.upstream_source_root.join("configure"), "exit 0\n").unwrap();
+        assert!(execute_native_compatibility(&dirty, &CancellationToken::default()).is_err());
+        assert!(!dirty.reports_root.exists());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut mismatched, _, _) = request(temporary.path());
+        mismatched.upstream_source_commit =
+            crate::recipe::GitObjectId::try_from("f".repeat(40)).unwrap();
+        assert!(execute_native_compatibility(&mismatched, &CancellationToken::default()).is_err());
+        assert!(!mismatched.reports_root.exists());
     }
 
     fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, PathBuf) {
@@ -842,8 +1140,17 @@ mod tests {
         fs::create_dir(&upstream).unwrap();
         script(
             &upstream.join("configure"),
-            "[ \"$PATH\" != /nonexistent ] || exit 20\npython3 -S -P -c 'import mako, markupsafe'",
+            "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${ac_cv_prog_cc_c23+x}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\npython3 -S -P -c 'import mako, markupsafe'",
         );
+        git(&upstream, &["init", "-q"]);
+        git(&upstream, &["config", "user.email", "test@example.invalid"]);
+        git(&upstream, &["config", "user.name", "AROS Tools Test"]);
+        git(&upstream, &["add", "configure"]);
+        git(
+            &upstream,
+            &["commit", "-qm", "test: pristine upstream source"],
+        );
+        let upstream_commit = git_output(&upstream, &["rev-parse", "HEAD"]);
         let cmake_log = root.join("cmake-arguments.log");
         let cmake = root.join("cmake");
         script(
@@ -878,7 +1185,19 @@ mod tests {
         fs::write(&c_fixture, b"int main(void) { return 0; }\n").unwrap();
         fs::write(&cxx_fixture, b"int main() { return 0; }\n").unwrap();
         let profiles = Profiles::parse(
-            br#"{"schema":"aros-toolchain-profiles-v1","upstream_commit":"1111111111111111111111111111111111111111","profiles":[{"name":"pc-x86_64","configure_target":"pc-x86_64","upstream_output_target":"pc-x86_64","target_triple":"x86_64-unknown-aros","cpu":"x86_64","platform":"pc","float_abi":"","capabilities":["c","cxx","standalone-collector"]}]}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "aros-toolchain-profiles-v1",
+                "upstream_commit": upstream_commit,
+                "profiles": [{
+                    "name": "pc-x86_64", "configure_target": "pc-x86_64",
+                    "upstream_output_target": "pc-x86_64",
+                    "target_triple": "x86_64-unknown-aros", "cpu": "x86_64",
+                    "platform": "pc", "float_abi": "",
+                    "capabilities": ["c", "cxx", "standalone-collector"]
+                }]
+            }))
+            .unwrap()
+            .as_slice(),
         )
         .unwrap();
         (
@@ -890,6 +1209,7 @@ mod tests {
                 ninja_program: ninja,
                 cmake_build_root: root.join("cmake-build"),
                 upstream_source_root: upstream,
+                upstream_source_commit: profiles.upstream_commit().clone(),
                 upstream_build_root: root.join("upstream-build"),
                 host_python: python,
                 host_tools: closure,
@@ -905,6 +1225,24 @@ mod tests {
             cmake_log,
             make_log,
         )
+    }
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let mut command = Command::new("git");
+        command.args(arguments).current_dir(root);
+        let status = run_status(&mut command).unwrap();
+        assert!(status.status.success());
+    }
+
+    fn git_output(root: &Path, arguments: &[&str]) -> String {
+        let mut command = Command::new("git");
+        command.args(arguments).current_dir(root);
+        let output = run_output(&mut command).unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec())
+            .unwrap()
+            .trim()
+            .to_owned()
     }
 
     fn manifest() -> ArosToolchainManifest {

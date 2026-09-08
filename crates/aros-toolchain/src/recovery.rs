@@ -7,8 +7,12 @@
 //! it never turns a partial build or a changed draft into an eligible input.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Read as _;
+use std::path::Path;
 
-use aros_common::{sha256_bytes, Sha256Digest};
+use aros_common::{open_regular_file_nofollow, sha256_bytes, sha256_reader, Sha256Digest};
+use serde::{Deserialize, Serialize};
 
 use crate::qualification_evidence::{
     AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence,
@@ -25,7 +29,8 @@ const V1_CHECKSUM_SUBJECT_COUNT: usize = V1_FINAL_ASSET_COUNT - 1;
 const MAX_CHECKSUM_BYTES: usize = 2 * 1024 * 1024;
 
 /// The only recovery actions that may reuse a qualified candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RecoveryOperation {
     /// Re-run only a repaired compatibility harness against immutable packages.
     CompatibilityReplay,
@@ -34,7 +39,8 @@ pub enum RecoveryOperation {
 }
 
 /// The measured stage that failed in the original attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FailedStage {
     /// A tools-owned compatibility harness defect occurred after qualification.
     CompatibilityHarness,
@@ -55,7 +61,8 @@ pub enum FailedStage {
 }
 
 /// The observed filesystem type of a downloaded release member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReleaseAssetKind {
     /// A regular file measured by the isolated downloader.
     Regular,
@@ -68,7 +75,8 @@ pub enum ReleaseAssetKind {
 }
 
 /// One measured isolated-download release asset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseAsset {
     /// UTF-8 asset basename.
     pub name: String,
@@ -81,7 +89,8 @@ pub struct ReleaseAsset {
 }
 
 /// One observed immutable annotated tag identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedTag {
     /// Tag name.
     pub name: String,
@@ -92,7 +101,8 @@ pub struct ObservedTag {
 }
 
 /// The observed state of a prospective recovered release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReleaseHandoffState {
     /// No release object exists for the prospective identity.
     Absent,
@@ -105,7 +115,8 @@ pub enum ReleaseHandoffState {
 }
 
 /// Explicit fresh handoff identity for a packaging-only recovery.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryHandoff {
     /// New immutable release identity; it must differ from the source candidate.
     pub release_id: String,
@@ -116,7 +127,8 @@ pub struct RecoveryHandoff {
 }
 
 /// Complete, already-isolated input to one policy decision.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     /// Requested bounded recovery operation.
     pub operation: RecoveryOperation,
@@ -140,8 +152,34 @@ pub struct RecoveryRequest {
     pub handoff: Option<RecoveryHandoff>,
 }
 
+impl RecoveryRequest {
+    /// Parse one closed recovery request supplied to a local native boundary.
+    ///
+    /// Parsing intentionally performs no eligibility decision: callers must
+    /// invoke [`evaluate_recovery`] immediately before consuming any retained
+    /// package input, so expiry, source-tag and isolated-inventory claims are
+    /// checked at the execution boundary rather than at file-read time.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0901 when the input is oversized, malformed, or contains an
+    /// unknown field. Eligibility failures are reported by
+    /// [`evaluate_recovery`].
+    pub fn parse(input: &[u8]) -> Result<Self, ContractError> {
+        if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
+            return Err(ContractError::recovery(
+                "recovery request exceeds the configured document limit",
+            ));
+        }
+        serde_json::from_slice(input).map_err(|_| {
+            ContractError::recovery("recovery request is not a closed v1 JSON document")
+        })
+    }
+}
+
 /// An eligibility result; executing it requires a separate protected boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RecoveryDecision {
     /// Immutable candidate packages may be used for the one requested replay.
     ReplayCompatibility,
@@ -152,6 +190,32 @@ pub enum RecoveryDecision {
         /// The checked immutable tag to which the later protected handoff binds.
         tag: ObservedTag,
     },
+}
+
+/// Measured result of validating one isolated complete recovery inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryInventoryValidation {
+    /// Recovery operation admitted immediately before the inventory was read.
+    pub decision: RecoveryDecision,
+    /// Number of directly measured regular release assets.
+    pub asset_count: usize,
+}
+
+/// A complete, locally measured final v1 release inventory.
+///
+/// This is deliberately a read-only observation.  It records no release
+/// authority and performs no network, extraction, package, tag, or publication
+/// operation.  Both qualification recording and recovery execution use the
+/// same measurement boundary, so a recovery request cannot describe a weaker
+/// filesystem view than the one that was qualified.
+#[derive(Debug, Clone)]
+pub struct MeasuredReleaseInventory {
+    /// Exact bytes of the final native release index.
+    pub release_index_bytes: Vec<u8>,
+    /// Exact bytes of the final checksum document.
+    pub checksums_bytes: Vec<u8>,
+    /// Every direct, regular release asset measured through a no-follow handle.
+    pub assets: Vec<ReleaseAsset>,
 }
 
 /// Evaluate whether a candidate is eligible for M5 replay or recovery.
@@ -186,6 +250,201 @@ pub fn evaluate_recovery(request: &RecoveryRequest) -> Result<RecoveryDecision, 
             })
         }
     }
+}
+
+/// Re-evaluate recovery eligibility and measure every isolated release asset.
+///
+/// The release directory must contain exactly the regular direct children
+/// recorded by the closed recovery request. Each is opened through a
+/// no-follow descriptor and compared with the request's measured size and
+/// SHA-256 before its package payload can be reused. The final checksum and
+/// index files are also required to be byte-identical to the evidence fields,
+/// not merely hash-equivalent.
+///
+/// # Errors
+///
+/// Returns AX0901 if recovery is not eligible, the directory is unsafe, or a
+/// measured asset differs from the isolated inventory. This function has no
+/// extraction, package, network, tag, credential, or publication authority.
+pub fn validate_recovery_inventory(
+    request: &RecoveryRequest,
+    release_root: &Path,
+) -> Result<RecoveryInventoryValidation, ContractError> {
+    let decision = evaluate_recovery(request)?;
+    let inventory = measure_complete_release_inventory(release_root)?;
+    let expected = measured_assets(&request.assets)?;
+    let actual = measured_assets(&inventory.assets)?;
+    if actual != expected
+        || inventory.release_index_bytes != request.release_index_bytes
+        || inventory.checksums_bytes != request.checksums_bytes
+    {
+        return Err(ContractError::recovery(
+            "isolated recovery inventory differs from the measured recovery request",
+        ));
+    }
+    Ok(RecoveryInventoryValidation {
+        decision,
+        asset_count: actual.len(),
+    })
+}
+
+/// Measure and validate the complete final v1 inventory at an isolated path.
+///
+/// The root must be an absolute real directory and must contain exactly the 56
+/// direct regular files that are named by its final checksum document: the 55
+/// checksummed subjects plus `SHA256SUMS` itself.  Archive identity, every
+/// required sidecar, the final index and the provenance bundle are bound before
+/// a caller receives the observation.
+///
+/// # Errors
+///
+/// Returns AX0901 when the root is unsafe, incomplete, non-final, or changes
+/// while it is measured.  It does not attest origin or authorize recovery.
+pub fn measure_complete_release_inventory(
+    release_root: &Path,
+) -> Result<MeasuredReleaseInventory, ContractError> {
+    let paths = enumerate_release_assets(release_root)?;
+    let checksums_path = paths.get(CHECKSUMS_NAME).ok_or_else(|| {
+        ContractError::recovery("isolated recovery release inventory is missing SHA256SUMS")
+    })?;
+    let checksums_bytes = read_bounded_release_asset(checksums_path)?;
+    let expected_checksums = parse_checksums(&checksums_bytes)?;
+    let expected_names = expected_checksums
+        .keys()
+        .cloned()
+        .chain(std::iter::once(CHECKSUMS_NAME.into()))
+        .collect::<BTreeSet<_>>();
+    if expected_checksums.len() != V1_CHECKSUM_SUBJECT_COUNT
+        || paths.len() != V1_FINAL_ASSET_COUNT
+        || paths.keys().cloned().collect::<BTreeSet<_>>() != expected_names
+    {
+        return Err(ContractError::recovery(
+            "isolated recovery release inventory is not the exact complete v1 regular-file asset set",
+        ));
+    }
+
+    let mut assets = Vec::with_capacity(paths.len());
+    for (name, path) in &paths {
+        let (size, sha256) = measure_release_asset(path)?;
+        if let Some(expected) = expected_checksums.get(name) {
+            if sha256 != *expected {
+                return Err(ContractError::recovery(
+                    "isolated recovery release asset differs from the final checksum document",
+                ));
+            }
+        }
+        assets.push(ReleaseAsset {
+            name: name.clone(),
+            kind: ReleaseAssetKind::Regular,
+            sha256,
+            size,
+        });
+    }
+    let release_index_path = paths.get(INDEX_NAME).ok_or_else(|| {
+        ContractError::recovery(
+            "isolated recovery release inventory is missing the native release index",
+        )
+    })?;
+    let release_index_bytes = read_bounded_release_asset(release_index_path)?;
+    let index = NativeReleaseIndex::parse(&release_index_bytes).map_err(|_| {
+        ContractError::recovery("isolated recovery release has an invalid native release index")
+    })?;
+    validate_index_inventory(&index, &measured_assets(&assets)?)?;
+    Ok(MeasuredReleaseInventory {
+        release_index_bytes,
+        checksums_bytes,
+        assets,
+    })
+}
+
+fn enumerate_release_assets(
+    root: &Path,
+) -> Result<BTreeMap<String, std::path::PathBuf>, ContractError> {
+    if !root.is_absolute() {
+        return Err(ContractError::recovery(
+            "isolated recovery release directory must be absolute",
+        ));
+    }
+    let metadata = fs::symlink_metadata(root).map_err(|_| {
+        ContractError::recovery("isolated recovery release directory is unavailable")
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ContractError::recovery(
+            "isolated recovery release directory must be a real directory",
+        ));
+    }
+    let mut actual = BTreeMap::new();
+    for entry in fs::read_dir(root)
+        .map_err(|_| ContractError::recovery("cannot enumerate isolated recovery release assets"))?
+    {
+        let entry = entry
+            .map_err(|_| ContractError::recovery("cannot read isolated recovery release asset"))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            ContractError::recovery("isolated recovery release asset name is not UTF-8")
+        })?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|_| {
+            ContractError::recovery("cannot inspect isolated recovery release asset")
+        })?;
+        if !safe_asset_name(&name)
+            || !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || actual.insert(name, entry.path()).is_some()
+        {
+            return Err(ContractError::recovery(
+                "isolated recovery release contains a duplicate or non-regular asset",
+            ));
+        }
+    }
+    Ok(actual)
+}
+
+fn measure_release_asset(path: &Path) -> Result<(u64, Sha256Digest), ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::recovery("cannot safely open isolated recovery asset"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot inspect isolated recovery asset"))?
+        .len();
+    let measured = sha256_reader(&mut file)
+        .map_err(|_| ContractError::recovery("cannot measure isolated recovery asset"))?;
+    let after = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot re-inspect isolated recovery asset"))?
+        .len();
+    if before != after || after != measured.size {
+        return Err(ContractError::recovery(
+            "isolated recovery asset changed while it was measured",
+        ));
+    }
+    Ok((measured.size, measured.digest))
+}
+
+fn read_bounded_release_asset(path: &Path) -> Result<Vec<u8>, ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::recovery("cannot safely open recovery metadata asset"))?;
+    let size = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot inspect recovery metadata asset"))?
+        .len();
+    if size > MAX_CHECKSUM_BYTES as u64 {
+        return Err(ContractError::recovery(
+            "recovery metadata asset exceeds the configured document limit",
+        ));
+    }
+    let capacity = usize::try_from(size).map_err(|_| {
+        ContractError::recovery("recovery metadata asset exceeds addressable memory")
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(MAX_CHECKSUM_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ContractError::recovery("cannot read recovery metadata asset"))?;
+    if bytes.len() > MAX_CHECKSUM_BYTES || u64::try_from(bytes.len()).ok() != Some(size) {
+        return Err(ContractError::recovery(
+            "recovery metadata asset changed while it was read",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn validate_operation(request: &RecoveryRequest) -> Result<(), ContractError> {
@@ -293,6 +552,27 @@ fn validate_evidence_and_assets(request: &RecoveryRequest) -> Result<(), Contrac
     {
         return Err(ContractError::recovery(
             "recovery index or provenance asset differs from qualification evidence",
+        ));
+    }
+    validate_index_inventory(&index, &assets)
+}
+
+fn validate_index_inventory(
+    index: &NativeReleaseIndex,
+    assets: &BTreeMap<String, &ReleaseAsset>,
+) -> Result<(), ContractError> {
+    let index_asset = assets.get(INDEX_NAME).ok_or_else(|| {
+        ContractError::recovery("recovery inventory is missing the native release index")
+    })?;
+    let provenance_asset = assets.get(PROVENANCE_NAME).ok_or_else(|| {
+        ContractError::recovery("recovery inventory is missing the provenance bundle")
+    })?;
+    if index_asset.kind != ReleaseAssetKind::Regular
+        || provenance_asset.kind != ReleaseAssetKind::Regular
+        || provenance_asset.size == 0
+    {
+        return Err(ContractError::recovery(
+            "recovery inventory contains an invalid index or provenance asset",
         ));
     }
     for artifact in &index.artifacts {
@@ -406,6 +686,8 @@ fn safe_asset_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use aros_common::{sha256_bytes, DiagnosticCode, Sha256Digest};
     use serde_json::{json, Map};
 
@@ -667,6 +949,106 @@ mod tests {
     }
 
     #[test]
+    fn recovery_request_parser_rejects_unknown_fields_before_execution() {
+        let original = request(RecoveryOperation::PackagingRecovery, FailedStage::Packaging);
+        let bytes = serde_json::to_vec(&original).unwrap();
+        assert_eq!(
+            RecoveryRequest::parse(&bytes).unwrap().operation,
+            original.operation
+        );
+        let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        changed["unexpected"] = json!(true);
+        assert_recovery(
+            &RecoveryRequest::parse(&serde_json::to_vec(&changed).unwrap()).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn recovery_inventory_validation_refuses_an_incomplete_isolated_release() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = request(RecoveryOperation::PackagingRecovery, FailedStage::Packaging);
+        assert_recovery(
+            &super::validate_recovery_inventory(&request, temporary.path()).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn complete_isolated_inventory_is_measured_before_recovery_reuses_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let index = write_complete_release_fixture(temporary.path());
+        let inventory = super::measure_complete_release_inventory(temporary.path()).unwrap();
+        assert_eq!(inventory.assets.len(), super::V1_FINAL_ASSET_COUNT);
+        let provenance = inventory
+            .assets
+            .iter()
+            .find(|asset| asset.name == PROVENANCE_NAME)
+            .unwrap()
+            .sha256
+            .clone();
+        let mut request = request_for_index(
+            &index,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+        );
+        request.release_index_bytes = inventory.release_index_bytes.clone();
+        request.checksums_bytes = inventory.checksums_bytes.clone();
+        request.assets = inventory.assets;
+        request.evidence = evidence(
+            &request.release_index_bytes,
+            sha256_bytes(&request.checksums_bytes),
+            provenance,
+        );
+        request.verified_attestation = Some(request.evidence.attestation.clone());
+        let validation = super::validate_recovery_inventory(&request, temporary.path()).unwrap();
+        assert_eq!(validation.asset_count, super::V1_FINAL_ASSET_COUNT);
+    }
+
+    fn write_complete_release_fixture(root: &std::path::Path) -> NativeReleaseIndex {
+        let mut index = index();
+        let mut files = BTreeMap::new();
+        for (ordinal, artifact) in index.artifacts.iter_mut().enumerate() {
+            let archive = format!("archive-{ordinal}\n").into_bytes();
+            artifact.sha256 = sha256_bytes(&archive).to_string();
+            artifact.size = archive.len() as u64;
+            files.insert(artifact.asset.clone(), archive);
+            for (suffix, contents) in [
+                (".manifest.json", b"manifest\n".as_slice()),
+                (".sha256", b"checksum\n".as_slice()),
+                (".spdx.json", b"sbom\n".as_slice()),
+            ] {
+                files.insert(format!("{}{suffix}", artifact.asset), contents.to_vec());
+            }
+        }
+        for (name, contents) in [
+            ("profiles-v1.json", b"profiles\n".as_slice()),
+            ("source-lock-v1.json", b"source lock\n".as_slice()),
+            ("toolchain-manifest-v1.schema.json", b"schema\n".as_slice()),
+            ("toolchain-recipe-v2.json", b"recipe\n".as_slice()),
+            ("tree-digest-v1.fixture.json", b"tree\n".as_slice()),
+        ] {
+            files.insert(name.into(), contents.to_vec());
+        }
+        files.insert(INDEX_NAME.into(), serde_json::to_vec(&index).unwrap());
+        files.insert(PROVENANCE_NAME.into(), b"provenance\n".to_vec());
+        assert_eq!(files.len(), super::V1_CHECKSUM_SUBJECT_COUNT);
+        let checksums = files
+            .iter()
+            .fold(String::new(), |mut output, (name, bytes)| {
+                output.push_str(&sha256_bytes(bytes).to_string());
+                output.push_str("  ");
+                output.push_str(name);
+                output.push('\n');
+                output
+            });
+        files.insert(CHECKSUMS_NAME.into(), checksums.into_bytes());
+        assert_eq!(files.len(), super::V1_FINAL_ASSET_COUNT);
+        for (name, bytes) in files {
+            std::fs::write(root.join(name), bytes).unwrap();
+        }
+        index
+    }
+
+    #[test]
     fn rejects_non_packaging_failures_and_release_authority_for_replay() {
         let invalid = request(RecoveryOperation::PackagingRecovery, FailedStage::Compiler);
         assert_recovery(&evaluate_recovery(&invalid).unwrap_err());
@@ -785,7 +1167,7 @@ mod tests {
         })
         .unwrap();
         let original_verified = verify(&PackageVerificationRequest {
-            package_dir: original.output_dir,
+            package_dir: original.output_dir.clone(),
             release_id: "toolchain-v1-source".into(),
             host: "linux-x86_64".into(),
             recipe: recipe.clone(),
@@ -811,6 +1193,35 @@ mod tests {
             &qualified,
             RecoveryOperation::PackagingRecovery,
             FailedStage::Packaging,
+        );
+        let source_request = PackageVerificationRequest {
+            package_dir: original.output_dir,
+            release_id: "toolchain-v1-source".into(),
+            host: "linux-x86_64".into(),
+            recipe: recipe.clone(),
+            source_lock: source_lock.clone(),
+            profile: profile.clone(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let from_package = crate::repackage::repackage_verified_package(
+            &crate::repackage::VerifiedPackageRepackageRequest {
+                recovery: recovery.clone(),
+                source: source_request,
+                first_extraction_root: temporary.path().join("first-extracted"),
+                second_extraction_root: temporary.path().join("second-extracted"),
+                first_output_dir: temporary.path().join("first-from-package"),
+                second_output_dir: temporary.path().join("second-from-package"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            from_package.repackaged.first_verified.manifest.tree_sha256,
+            expected_tree
+        );
+        assert_eq!(
+            from_package.repackaged.first.archive_sha256,
+            from_package.repackaged.second.archive_sha256
         );
         let first_candidate = temporary.path().join("first-candidate");
         let second_candidate = temporary.path().join("second-candidate");

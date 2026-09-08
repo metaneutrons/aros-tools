@@ -61,6 +61,23 @@ Negative fixtures cover expired, missing and tampered evidence; non-packaging
 failure recovery; tag and draft conflicts; interrupted hand-offs; changed and
 non-regular assets; and missing or mismatched source and signer claims.
 
+## Closed recovery-input handoff
+
+The native producer records a recovery-eligible candidate in two deliberately
+separate steps. `record-qualification` measures the final 56-member inventory
+through no-follow file handles, verifies its checksum/index/package closure,
+and binds all 24 build, 12 comparison and 12 compatibility receipts to one
+short-lived qualification record. `prepare-recovery` then accepts that record
+only after the protected workflow has independently verified the original
+attestation and re-observed both annotated tags. It writes a closed recovery
+request, which `validate-recovery` measures again at the point of use.
+
+The recovery request cannot be constructed from twelve retained archives
+alone. A failed draft handoff without the complete final inventory, exact
+qualification record, valid attestation, or immutable new tag is therefore a
+fresh-qualification case. The native commands have no network, credential,
+tag, release or publication authority.
+
 ## Source-aware checkpoints
 
 The integrated Linux checkpoint was [Workspace CI run

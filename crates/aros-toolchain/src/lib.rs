@@ -11,6 +11,8 @@ pub mod canonical;
 pub mod cargo_vendor;
 #[cfg(unix)]
 pub mod compatibility;
+#[cfg(unix)]
+pub mod compatibility_source;
 mod error;
 pub mod executor;
 #[cfg(unix)]
@@ -31,6 +33,8 @@ pub mod profiles;
 pub mod python_environment;
 pub mod qualification_evidence;
 pub mod recipe;
+#[cfg(unix)]
+pub mod recipe_builder;
 pub mod recovery;
 pub mod release_index;
 pub mod repackage;
