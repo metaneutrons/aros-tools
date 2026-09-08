@@ -4,7 +4,7 @@
 //! module roots consumed by the selected upstream configure/build phase and
 //! proves that a host interpreter imports those exact extracted modules.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
@@ -195,6 +195,54 @@ impl PythonEnvironment {
             .env("PYTHONNOUSERSITE", "1")
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("PYTHONHASHSEED", "0");
+    }
+
+    /// Return the exact closed Python environment for a compatibility probe.
+    ///
+    /// The map is intended for a child launched with `env_clear()`. It never
+    /// admits user, virtual-environment, home-directory, or inherited Python
+    /// configuration. Callers must still invoke the interpreter with `-S` and
+    /// `-P` where their concrete upstream command needs to exclude global site
+    /// packages and the working directory from Python's import search.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0401 if the selected interpreter or private import roots no
+    /// longer have a safe, UTF-8 representable identity for the closed child
+    /// environment.
+    pub fn compatibility_environment(&self) -> Result<BTreeMap<String, String>, ContractError> {
+        let interpreter = revalidate_interpreter(&self.interpreter)?;
+        let python = utf8_environment_path(&interpreter.path, "host Python interpreter")?;
+        let import_roots = self
+            .import_roots
+            .iter()
+            .map(|root| compatibility_import_root(root))
+            .collect::<Result<Vec<_>, _>>()?;
+        let python_path = std::env::join_paths(import_roots)
+            .map_err(|_| {
+                ContractError::environment(
+                    "private host Python import roots cannot form a closed PYTHONPATH",
+                )
+            })?
+            .into_string()
+            .map_err(|_| {
+                ContractError::environment(
+                    "private host Python import roots are not UTF-8 representable",
+                )
+            })?;
+        if python_path.is_empty() || python_path.chars().any(char::is_control) {
+            return Err(ContractError::environment(
+                "private host Python import roots have an unsafe compatibility environment value",
+            ));
+        }
+        Ok(BTreeMap::from([
+            ("PATH".into(), "/nonexistent".into()),
+            ("PYTHON".into(), python),
+            ("PYTHONHASHSEED".into(), "0".into()),
+            ("PYTHONNOUSERSITE".into(), "1".into()),
+            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+            ("PYTHONPATH".into(), python_path),
+        ]))
     }
 
     fn verify_runtime(&self, lock: &SourceLock) -> Result<(), ContractError> {
@@ -507,6 +555,34 @@ fn package_import_root(root: &Path, package: &HostPythonPackage) -> Result<PathB
 
 fn joined_paths(paths: &[PathBuf]) -> OsString {
     std::env::join_paths(paths).unwrap_or_default()
+}
+
+fn compatibility_import_root(path: &Path) -> Result<PathBuf, ContractError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        ContractError::environment("private host Python import root cannot be inspected")
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ContractError::environment(
+            "private host Python import root is no longer a real directory",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| {
+        ContractError::environment("private host Python import root cannot be canonicalized")
+    })?;
+    let _ = utf8_environment_path(&canonical, "private host Python import root")?;
+    Ok(canonical)
+}
+
+fn utf8_environment_path(path: &Path, role: &str) -> Result<String, ContractError> {
+    let value = path.to_str().ok_or_else(|| {
+        ContractError::environment(format!("{role} path is not UTF-8 representable"))
+    })?;
+    if !path.is_absolute() || value.chars().any(char::is_control) {
+        return Err(ContractError::environment(format!(
+            "{role} path is not safe for a closed child environment"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 fn python_module_name(value: &str) -> bool {
