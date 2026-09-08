@@ -71,14 +71,14 @@ commit_states = ["rolled_back", "committed", "indeterminate"]
 [diagnostics]
 envelope = "aros-tool-diagnostics-v1"
 family = "AX"
-registration = "M4-native-release-inventory"
-registered_codes = ["AX0101", "AX0102", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0801"]
+registration = "M5-qualification-evidence"
+registered_codes = ["AX0101", "AX0102", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0703", "AX0801", "AX0901"]
 success_exit = 0
 failure_exit = 1
 failure_stdout = "empty"
 json_failure_stderr_documents = 1
 logging = "existing-opt-in-local-policy"
-codes = ["AX0001", "AX0002", "AX0101", "AX0102", "AX0103", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0801", "AX0802", "AX0901", "AX0999"]
+codes = ["AX0001", "AX0002", "AX0101", "AX0102", "AX0103", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0703", "AX0801", "AX0802", "AX0901", "AX0999"]
 
 [artifacts]
 manifest_schema = 1

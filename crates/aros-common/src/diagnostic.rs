@@ -49,9 +49,15 @@ pub enum DiagnosticCode {
     /// Producer-controlled independent package comparison failure.
     #[serde(rename = "AX0702")]
     ProducerComparison,
+    /// Producer-controlled compatibility or relocation qualification failure.
+    #[serde(rename = "AX0703")]
+    ProducerCompatibility,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
+    /// Producer recovery eligibility or immutable-handoff failure.
+    #[serde(rename = "AX0901")]
+    ProducerRecovery,
     #[serde(rename = "AT0001")]
     SourceWalk,
     #[serde(rename = "AT0002")]
@@ -259,7 +265,9 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerVerification => "AX0602",
             Self::ProducerIndex => "AX0701",
             Self::ProducerComparison => "AX0702",
+            Self::ProducerCompatibility => "AX0703",
             Self::ProducerState => "AX0801",
+            Self::ProducerRecovery => "AX0901",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
             Self::SourceParse => "AT0003",
