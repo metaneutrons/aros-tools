@@ -330,13 +330,13 @@ struct RecordQualificationArgs {
     /// Basename of the source-lock document in the final release inventory
     #[arg(long)]
     source_lock_filename: String,
-    /// Download root containing native-lifecycle-<host>-<profile>-{a,b} artifacts
+    /// Download root containing `native-lifecycle-<host>-<profile>-{a,b}` artifacts
     #[arg(long)]
     lifecycle_reports_dir: PathBuf,
-    /// Download root containing comparison-<host>-<profile> artifacts
+    /// Download root containing `comparison-<host>-<profile>` artifacts
     #[arg(long)]
     comparison_reports_dir: PathBuf,
-    /// Download root containing compatibility-<host>-<profile> artifacts
+    /// Download root containing `compatibility-<host>-<profile>` artifacts
     #[arg(long)]
     compatibility_reports_dir: PathBuf,
     /// Credential-free HTTPS repository that ran the producer workflow
