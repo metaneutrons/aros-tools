@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aros_common::{sha256_bytes, Sha256Digest};
+use serde::{Deserialize, Serialize};
 
 use crate::qualification_evidence::{
     AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence,
@@ -25,7 +26,8 @@ const V1_CHECKSUM_SUBJECT_COUNT: usize = V1_FINAL_ASSET_COUNT - 1;
 const MAX_CHECKSUM_BYTES: usize = 2 * 1024 * 1024;
 
 /// The only recovery actions that may reuse a qualified candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RecoveryOperation {
     /// Re-run only a repaired compatibility harness against immutable packages.
     CompatibilityReplay,
@@ -34,7 +36,8 @@ pub enum RecoveryOperation {
 }
 
 /// The measured stage that failed in the original attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FailedStage {
     /// A tools-owned compatibility harness defect occurred after qualification.
     CompatibilityHarness,
@@ -55,7 +58,8 @@ pub enum FailedStage {
 }
 
 /// The observed filesystem type of a downloaded release member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReleaseAssetKind {
     /// A regular file measured by the isolated downloader.
     Regular,
@@ -68,7 +72,8 @@ pub enum ReleaseAssetKind {
 }
 
 /// One measured isolated-download release asset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseAsset {
     /// UTF-8 asset basename.
     pub name: String,
@@ -81,7 +86,8 @@ pub struct ReleaseAsset {
 }
 
 /// One observed immutable annotated tag identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservedTag {
     /// Tag name.
     pub name: String,
@@ -92,7 +98,8 @@ pub struct ObservedTag {
 }
 
 /// The observed state of a prospective recovered release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReleaseHandoffState {
     /// No release object exists for the prospective identity.
     Absent,
@@ -105,7 +112,8 @@ pub enum ReleaseHandoffState {
 }
 
 /// Explicit fresh handoff identity for a packaging-only recovery.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryHandoff {
     /// New immutable release identity; it must differ from the source candidate.
     pub release_id: String,
@@ -116,7 +124,8 @@ pub struct RecoveryHandoff {
 }
 
 /// Complete, already-isolated input to one policy decision.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     /// Requested bounded recovery operation.
     pub operation: RecoveryOperation,
@@ -140,8 +149,34 @@ pub struct RecoveryRequest {
     pub handoff: Option<RecoveryHandoff>,
 }
 
+impl RecoveryRequest {
+    /// Parse one closed recovery request supplied to a local native boundary.
+    ///
+    /// Parsing intentionally performs no eligibility decision: callers must
+    /// invoke [`evaluate_recovery`] immediately before consuming any retained
+    /// package input, so expiry, source-tag and isolated-inventory claims are
+    /// checked at the execution boundary rather than at file-read time.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0901 when the input is oversized, malformed, or contains an
+    /// unknown field. Eligibility failures are reported by
+    /// [`evaluate_recovery`].
+    pub fn parse(input: &[u8]) -> Result<Self, ContractError> {
+        if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
+            return Err(ContractError::recovery(
+                "recovery request exceeds the configured document limit",
+            ));
+        }
+        serde_json::from_slice(input).map_err(|_| {
+            ContractError::recovery("recovery request is not a closed v1 JSON document")
+        })
+    }
+}
+
 /// An eligibility result; executing it requires a separate protected boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RecoveryDecision {
     /// Immutable candidate packages may be used for the one requested replay.
     ReplayCompatibility,
