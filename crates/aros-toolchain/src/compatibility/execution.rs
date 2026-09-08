@@ -164,7 +164,12 @@ pub fn execute_native_compatibility(
     }
     let inputs = validate_inputs(request)?;
     let outputs = create_output_roots(request, &inputs)?;
-    let upstream_environment = request.host_python.compatibility_environment()?;
+    let mut upstream_environment = request.host_python.compatibility_environment()?;
+    // Autoconf 2.73 can otherwise append a C23 dialect marker before the
+    // pinned upstream snapshot captures its compiler base name. That produces
+    // impossible LLVM helper names. This is an explicit, recorded upstream
+    // compatibility input rather than a runner-specific inherited default.
+    upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
     validate_upstream_environment(&upstream_environment, &request.host_tools)?;
     let sealed_environment = CompatibilityEnvironment::SealedHostTools {
         variables: upstream_environment,
@@ -615,6 +620,7 @@ fn validate_upstream_environment(
     host_tools: &HostToolClosure,
 ) -> Result<(), ContractError> {
     let expected = BTreeSet::from([
+        "ac_cv_prog_cc_c23",
         "PATH",
         "PYTHON",
         "PYTHONDONTWRITEBYTECODE",
@@ -634,6 +640,7 @@ fn validate_upstream_environment(
             != Some("1")
         || environment.get("PYTHONHASHSEED").map(String::as_str) != Some("0")
         || environment.get("PYTHONNOUSERSITE").map(String::as_str) != Some("1")
+        || environment.get("ac_cv_prog_cc_c23").map(String::as_str) != Some("")
         || environment.get("PYTHONPATH").is_none_or(String::is_empty)
     {
         return Err(ContractError::compatibility(
@@ -1131,7 +1138,7 @@ mod tests {
         fs::create_dir(&upstream).unwrap();
         script(
             &upstream.join("configure"),
-            "[ \"$PATH\" != /nonexistent ] || exit 20\npython3 -S -P -c 'import mako, markupsafe'",
+            "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${ac_cv_prog_cc_c23+x}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\npython3 -S -P -c 'import mako, markupsafe'",
         );
         git(&upstream, &["init", "-q"]);
         git(&upstream, &["config", "user.email", "test@example.invalid"]);

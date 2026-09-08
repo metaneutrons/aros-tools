@@ -153,6 +153,12 @@ fn validate_variables(environment: &BTreeMap<String, String>) -> Result<(), Cont
 }
 
 fn valid_name(name: &str) -> bool {
+    // Autoconf consumes this lower-case cache variable before it derives host
+    // compiler helper names. It is the sole non-portable spelling admitted by
+    // the closed native upstream-compatibility environment.
+    if name == "ac_cv_prog_cc_c23" {
+        return true;
+    }
     let mut characters = name.bytes();
     matches!(characters.next(), Some(b'A'..=b'Z' | b'_'))
         && characters.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
