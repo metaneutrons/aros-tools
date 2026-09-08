@@ -16,6 +16,9 @@ use aros_toolchain::compatibility::{
     self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
     NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
 };
+use aros_toolchain::compatibility_source::{
+    materialize_engine_free_source, EngineFreeSourceRequest,
+};
 use aros_toolchain::profiles::Profiles;
 use aros_toolchain::python_environment::PythonEnvironment;
 use aros_toolchain::recipe_builder::{self, RecipeBuildRequest};
@@ -43,6 +46,8 @@ enum ProducerCommand {
     Cache(CacheArgs),
     /// Write the deterministic build-environment receipt embedded in a package
     Environment(EnvironmentArgs),
+    /// Materialize an audited source snapshot without its source-tree CMake engine
+    MaterializeEngineFreeSource(MaterializeEngineFreeSourceArgs),
     /// Create one deterministic local package set from a completed candidate
     Package(PackageArgs),
     /// Read back and verify one complete deterministic local package set
@@ -124,6 +129,20 @@ struct EnvironmentArgs {
     format: ResultFormat,
 }
 
+/// Inputs for one engine-free compatibility source snapshot.
+#[derive(Args)]
+struct MaterializeEngineFreeSourceArgs {
+    /// Clean exact AROS checkout selected by the producer recipe
+    #[arg(long)]
+    source_dir: PathBuf,
+    /// Absent output directory for the engine-free compatibility snapshot
+    #[arg(long)]
+    output_dir: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
 /// Recipe-bound inputs shared by package creation and read-back verification.
 #[derive(Args, Clone)]
 struct PackageContextArgs {
@@ -178,6 +197,9 @@ struct CompareArgs {
     /// Complete independent second local package set
     #[arg(long)]
     right: PathBuf,
+    /// Absent durable receipt recording the exact compared package members
+    #[arg(long)]
+    output: PathBuf,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -294,12 +316,42 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Recipe(args) => recipe(args),
         ProducerCommand::Cache(args) => cache(args).await,
         ProducerCommand::Environment(args) => environment(&args),
+        ProducerCommand::MaterializeEngineFreeSource(args) => {
+            materialize_engine_free_source_stage(args)
+        }
         ProducerCommand::Package(args) => package(args),
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
+}
+
+fn materialize_engine_free_source_stage(
+    args: MaterializeEngineFreeSourceArgs,
+) -> miette::Result<()> {
+    let output = materialize_engine_free_source(&EngineFreeSourceRequest {
+        source_root: args.source_dir,
+        output_root: args.output_dir,
+    })
+    .map_err(|error| native_error(&error))?;
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native engine-free compatibility source: {}\nSource commit: {}\nSHA-256: {}",
+            output.root.display(),
+            output.source_commit,
+            output.source_tree_sha256
+        ),
+        ResultFormat::Json => print_json(&serde_json::json!({
+            "schema": "aros-toolchain-producer-stage-v1",
+            "operation": "materialize-engine-free-source",
+            "root": output.root,
+            "source_commit": output.source_commit,
+            "source_tree": output.source_tree,
+            "source_tree_sha256": output.source_tree_sha256,
+        }))?,
+    }
+    Ok(())
 }
 
 fn recipe(args: RecipeArgs) -> miette::Result<()> {
@@ -395,7 +447,7 @@ fn environment(args: &EnvironmentArgs) -> miette::Result<()> {
         "schema": "aros-toolchain-build-environment-v1",
         "host": args.host,
     });
-    let output = write_new_json(&args.output, &receipt)?;
+    let output = write_new_json(&args.output, &receipt, "build-environment receipt")?;
     match args.format {
         ResultFormat::Human => {
             aros_common::outputln!("Native build-environment receipt: {}", output.display());
@@ -485,14 +537,29 @@ fn verify_package(args: PackageArgs) -> miette::Result<()> {
 }
 
 fn compare(args: &CompareArgs) -> miette::Result<()> {
-    release_index::compare_package_sets(&args.left, &args.right)
+    let comparison = release_index::compare_package_sets(&args.left, &args.right)
         .map_err(|error| native_error(&error))?;
+    let output = write_new_json(
+        &args.output,
+        &serde_json::json!({
+            "schema": "aros-toolchain-producer-comparison-v1",
+            "operation": "compare",
+            "byte_identical": true,
+            "members": comparison.members,
+        }),
+        "comparison receipt",
+    )?;
     match args.format {
-        ResultFormat::Human => aros_common::outputln!("Native package comparison: byte-identical"),
+        ResultFormat::Human => aros_common::outputln!(
+            "Native package comparison: byte-identical\nReceipt: {}",
+            output.display()
+        ),
         ResultFormat::Json => print_json(&serde_json::json!({
             "schema": "aros-toolchain-producer-stage-v1",
             "operation": "compare",
             "byte_identical": true,
+            "receipt": output,
+            "members": comparison.members,
         }))?,
     }
     Ok(())
@@ -752,42 +819,46 @@ fn read_regular_input(path: &std::path::Path, label: &str) -> miette::Result<Vec
     fs::read(path).map_err(|_| miette::miette!("native producer {label} cannot be read"))
 }
 
-fn write_new_json(path: &std::path::Path, document: &serde_json::Value) -> miette::Result<PathBuf> {
+fn write_new_json(
+    path: &std::path::Path,
+    document: &serde_json::Value,
+    label: &str,
+) -> miette::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(miette::miette!(
-            "native producer receipt output must be an absolute path"
+            "native producer {label} output must be an absolute path"
         ));
     }
     let parent = path
         .parent()
-        .ok_or_else(|| miette::miette!("native producer receipt output has no parent"))?;
+        .ok_or_else(|| miette::miette!("native producer {label} output has no parent"))?;
     let parent = parent
         .canonicalize()
-        .map_err(|_| miette::miette!("native producer receipt parent is unavailable"))?;
+        .map_err(|_| miette::miette!("native producer {label} parent is unavailable"))?;
     let parent_metadata = fs::symlink_metadata(&parent)
         .map_err(|_| miette::miette!("native producer receipt parent is unavailable"))?;
     if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
         return Err(miette::miette!(
-            "native producer receipt parent must be a real directory"
+            "native producer {label} parent must be a real directory"
         ));
     }
     let output = parent.join(
         path.file_name()
-            .ok_or_else(|| miette::miette!("native producer receipt output has no file name"))?,
+            .ok_or_else(|| miette::miette!("native producer {label} output has no file name"))?,
     );
     let mut encoded = serde_json::to_vec_pretty(document)
-        .map_err(|_| miette::miette!("cannot serialize native build-environment receipt"))?;
+        .map_err(|_| miette::miette!("cannot serialize native producer {label}"))?;
     encoded.push(b'\n');
     let mut file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&output)
         .map_err(|_| {
-            miette::miette!("native producer receipt output already exists or is unavailable")
+            miette::miette!("native producer {label} output already exists or is unavailable")
         })?;
     file.write_all(&encoded)
         .and_then(|()| file.sync_all())
-        .map_err(|_| miette::miette!("cannot durably write native build-environment receipt"))?;
+        .map_err(|_| miette::miette!("cannot durably write native producer {label}"))?;
     Ok(output)
 }
 
@@ -808,7 +879,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{environment, EnvironmentArgs, ResultFormat};
+    use super::{compare, environment, CompareArgs, EnvironmentArgs, ResultFormat};
     use crate::Cli;
 
     #[test]
@@ -869,6 +940,30 @@ mod tests {
             "/packages/first",
         ]);
         assert!(package.is_ok());
+        let compare = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "compare",
+            "--left",
+            "/packages/left",
+            "--right",
+            "/packages/right",
+            "--output",
+            "/evidence/comparison.json",
+        ]);
+        assert!(compare.is_ok());
+        let source = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "materialize-engine-free-source",
+            "--source-dir",
+            "/source",
+            "--output-dir",
+            "/output/engine-free",
+        ]);
+        assert!(source.is_ok());
         let index = Cli::try_parse_from([
             "aros",
             "toolchain",
@@ -917,5 +1012,37 @@ mod tests {
             format: ResultFormat::Human,
         })
         .is_err());
+    }
+
+    #[test]
+    fn comparison_receipt_is_closed_and_non_overwriting() {
+        let temporary = tempfile::tempdir().unwrap();
+        let left = temporary.path().join("left");
+        let right = temporary.path().join("right");
+        fs::create_dir(&left).unwrap();
+        fs::create_dir(&right).unwrap();
+        for directory in [&left, &right] {
+            fs::write(directory.join("archive.tar.xz"), b"archive").unwrap();
+            fs::write(directory.join("archive.tar.xz.manifest.json"), b"manifest").unwrap();
+            fs::write(directory.join("archive.tar.xz.sha256"), b"checksum").unwrap();
+            fs::write(directory.join("archive.tar.xz.spdx.json"), b"sbom").unwrap();
+        }
+        let output = temporary
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("comparison.json");
+        let args = CompareArgs {
+            left,
+            right,
+            output: output.clone(),
+            format: ResultFormat::Human,
+        };
+        compare(&args).unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        assert_eq!(document["schema"], "aros-toolchain-producer-comparison-v1");
+        assert_eq!(document["members"].as_array().unwrap().len(), 4);
+        assert!(compare(&args).is_err());
     }
 }

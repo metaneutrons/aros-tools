@@ -11,6 +11,8 @@ pub mod canonical;
 pub mod cargo_vendor;
 #[cfg(unix)]
 pub mod compatibility;
+#[cfg(unix)]
+pub mod compatibility_source;
 mod error;
 pub mod executor;
 #[cfg(unix)]

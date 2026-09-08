@@ -10,11 +10,12 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use aros_common::{
-    open_regular_file_nofollow, parse_credential_free_https_url, sha256_bytes, sha256_reader,
-    ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
+    finish_sha256, open_regular_file_nofollow, parse_credential_free_https_url, sha256_bytes,
+    sha256_reader, ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::package::{canonical_asset_name, pretty_json};
 use crate::package_verify::{verify_members, PackageAssetPaths, PackageVerificationRequest};
@@ -291,13 +292,38 @@ fn safe_payload_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(segment) if !segment.is_empty()))
 }
 
+/// One measured package-set member proven byte-identical across two builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSetComparisonMember {
+    /// Portable package-set filename.
+    pub name: String,
+    /// SHA-256 measured while the two members were compared.
+    pub sha256: Sha256Digest,
+    /// Byte length measured while the two members were compared.
+    pub size: u64,
+}
+
+/// Durable in-memory result of one complete byte-identical package-set comparison.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageSetComparison {
+    /// Every member of the exact four-file package set, sorted by name.
+    pub members: Vec<PackageSetComparisonMember>,
+}
+
 /// Compare two complete package sets byte-for-byte without copying either set.
 ///
 /// # Errors
 ///
 /// Returns AX0702 unless both directories contain the same one closed package
-/// set and every corresponding member is byte-identical.
-pub fn compare_package_sets(left: &Path, right: &Path) -> Result<(), ContractError> {
+/// set and every corresponding member is byte-identical.  The returned member
+/// identities are measured from the exact byte streams that passed comparison,
+/// so a workflow can persist durable admission evidence without a shell pipe.
+pub fn compare_package_sets(
+    left: &Path,
+    right: &Path,
+) -> Result<PackageSetComparison, ContractError> {
     let left_members = package_set_members(left)?;
     let right_members = package_set_members(right)?;
     if left_members != right_members {
@@ -305,16 +331,13 @@ pub fn compare_package_sets(left: &Path, right: &Path) -> Result<(), ContractErr
             "package-set member names differ between independent outputs",
         ));
     }
+    let mut members = Vec::with_capacity(left_members.len());
     for name in left_members {
         let left_path = left.join(&name);
         let right_path = right.join(&name);
-        if !files_equal(&left_path, &right_path)? {
-            return Err(ContractError::comparison(
-                "package-set members differ between independent outputs",
-            ));
-        }
+        members.push(compare_member(&name, &left_path, &right_path)?);
     }
-    Ok(())
+    Ok(PackageSetComparison { members })
 }
 
 /// Validate and advance one complete v1 local release inventory.
@@ -891,7 +914,11 @@ fn package_set_members(directory: &Path) -> Result<BTreeSet<String>, ContractErr
     Ok(names)
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
+fn compare_member(
+    name: &str,
+    left: &Path,
+    right: &Path,
+) -> Result<PackageSetComparisonMember, ContractError> {
     let mut left = open_regular_file_nofollow(left)
         .map_err(|_| ContractError::comparison("cannot safely open left package member"))?;
     let mut right = open_regular_file_nofollow(right)
@@ -910,10 +937,13 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
         ));
     }
     if left_size != right_size {
-        return Ok(false);
+        return Err(ContractError::comparison(
+            "package-set members differ between independent outputs",
+        ));
     }
     let mut left_buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
     let mut right_buffer = vec![0_u8; 128 * 1024].into_boxed_slice();
+    let mut hasher = Sha256::new();
     let mut read_total = 0_u64;
     loop {
         let left_read = left
@@ -923,8 +953,11 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
             .read(&mut right_buffer)
             .map_err(|_| ContractError::comparison("cannot read right package member"))?;
         if left_read != right_read || left_buffer[..left_read] != right_buffer[..left_read] {
-            return Ok(false);
+            return Err(ContractError::comparison(
+                "package-set members differ between independent outputs",
+            ));
         }
+        hasher.update(&left_buffer[..left_read]);
         read_total = read_total
             .checked_add(u64::try_from(left_read).map_err(|_| {
                 ContractError::comparison("package comparison byte count overflowed")
@@ -936,7 +969,16 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, ContractError> {
             ));
         }
         if left_read == 0 {
-            return Ok(read_total == left_size);
+            if read_total != left_size {
+                return Err(ContractError::comparison(
+                    "package comparison member changed while it was read",
+                ));
+            }
+            return Ok(PackageSetComparisonMember {
+                name: name.to_owned(),
+                sha256: finish_sha256(hasher),
+                size: read_total,
+            });
         }
     }
 }
@@ -1103,7 +1145,16 @@ mod tests {
             fs::write(directory.join("archive.tar.xz.sha256"), b"checksum").unwrap();
             fs::write(directory.join("archive.tar.xz.spdx.json"), b"spdx").unwrap();
         }
-        assert!(compare_package_sets(&left, &right).is_ok());
+        let comparison = compare_package_sets(&left, &right).unwrap();
+        assert_eq!(comparison.members.len(), 4);
+        assert_eq!(
+            comparison.members[0],
+            PackageSetComparisonMember {
+                name: "archive.tar.xz".into(),
+                sha256: sha256_bytes(b"archive"),
+                size: 7,
+            }
+        );
         fs::write(right.join("archive.tar.xz.spdx.json"), b"changed").unwrap();
         assert!(compare_package_sets(&left, &right).is_err());
         fs::write(right.join("extra"), b"unexpected").unwrap();
