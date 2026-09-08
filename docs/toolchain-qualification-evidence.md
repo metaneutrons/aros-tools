@@ -134,3 +134,13 @@ standalone C++. Each phase occurs exactly once and binds the same revalidated
 engine/helper preparation. It runs them in this dependency order. A failed
 phase retains its diagnostic logs and every prior success report, then prevents
 later phases from starting; a caller cannot silently omit or retry a phase.
+
+Standalone output validation is independent of the process supervisor. It
+accepts one or two explicit target triples and distinct direct-child outputs
+only. Each output is opened through a no-follow descriptor, read within the
+fixed size budget and parsed through the shared ELF reader. Its ELF class must
+match the declared triple; its OS ABI and ABI revision must be AROS; and the C
+or C++ object must expose its respective collector symbol. The returned facts
+contain only measured size, digest and ELF class, ready for the later complete
+report. The concrete execution adapter will declare the PC x86-64 and i386
+pair together rather than relying on filename discovery or a host tool lookup.

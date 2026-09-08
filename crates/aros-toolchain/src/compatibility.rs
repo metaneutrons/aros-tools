@@ -17,6 +17,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use aros_common::{
+    elf::{self, AROS_ABI_VERSION, OS_ABI_AROS},
     exit_signal, measure_tree_content_cas, open_regular_file_nofollow, publish_atomic_file,
     run_output_with_input_and_control, sha256_bytes, sha256_reader, AtomicFilePolicy,
     CancellationToken, DiagnosticContext, Sha256Digest,
@@ -51,6 +52,10 @@ const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
 const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v3";
+const MAX_STANDALONE_TARGETS: usize = 2;
+const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+const C_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__$";
+const CXX_COLLECTOR_SYMBOL: &str = "__INIT_ARRAY_LIST__$";
 const REQUIRED_PROBE_PHASES: [CompatibilityPhase; 6] = [
     CompatibilityPhase::CmakeConsumer,
     CompatibilityPhase::UpstreamConfigure,
@@ -326,6 +331,101 @@ pub struct CompatibilityProbeSet {
     pub reports: BTreeMap<CompatibilityPhase, CompatibilityProbeReport>,
 }
 
+/// Explicit standalone C/C++ outputs for one selected target triple.
+#[derive(Debug, Clone)]
+pub struct StandaloneTargetArtifacts {
+    /// C object linked through the prefix-owned collector.
+    pub c: PathBuf,
+    /// C++ object linked through the prefix-owned collector.
+    pub cxx: PathBuf,
+}
+
+/// Closed standalone-output check for one or two declared target triples.
+///
+/// The PC profile supplies both `x86_64-unknown-aros` and its required
+/// `i386-unknown-aros` companion. Other current profiles supply their one
+/// configured target triple. Every output must be a distinct direct child of
+/// `output_root`; the verifier accepts no glob, link, or host search path.
+#[derive(Debug, Clone)]
+pub struct StandaloneOutputRequest {
+    /// Existing real directory containing only this probe's direct outputs.
+    pub output_root: PathBuf,
+    /// Exact target triples and their C/C++ output paths.
+    pub targets: BTreeMap<String, StandaloneTargetArtifacts>,
+}
+
+/// Measured identity of one standalone AROS ELF output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandaloneArtifactIdentity {
+    /// SHA-256 of the exact no-follow-read output bytes.
+    pub sha256: Sha256Digest,
+    /// Exact output byte length.
+    pub size: u64,
+    /// Parsed ELF class, derived from the output rather than the host.
+    pub class: elf::Class,
+}
+
+/// Measured C and C++ collector outputs for one target triple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandaloneTargetReport {
+    /// C output identity after AROS and collector-symbol validation.
+    pub c: StandaloneArtifactIdentity,
+    /// C++ output identity after AROS and collector-symbol validation.
+    pub cxx: StandaloneArtifactIdentity,
+}
+
+/// Measured standalone collector evidence keyed by target triple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandaloneOutputReport {
+    /// Closed, nonempty set of target-triple output reports.
+    pub targets: BTreeMap<String, StandaloneTargetReport>,
+}
+
+/// Verify the standalone C/C++ collector output contract without executing a process.
+///
+/// Every output is opened through a no-follow descriptor, read once within a
+/// fixed bound, and parsed with the shared ELF reader. The object must carry
+/// AROS' `EI_OSABI`/`EI_ABIVERSION`, have the class required by its target
+/// triple, and contain the language-specific collector symbol. This has no
+/// network, source, cache, tag, release or publication authority.
+///
+/// # Errors
+///
+/// Returns AX0703 for unsafe output paths, duplicate or unsupported target
+/// triples, changed files, malformed/non-AROS ELF objects, or missing
+/// collector symbols.
+pub fn verify_standalone_outputs(
+    request: &StandaloneOutputRequest,
+) -> Result<StandaloneOutputReport, ContractError> {
+    let output_root = checked_directory(&request.output_root, "standalone output root")?;
+    if request.targets.is_empty() || request.targets.len() > MAX_STANDALONE_TARGETS {
+        return Err(ContractError::compatibility(
+            "standalone output contract must contain one or two target triples",
+        ));
+    }
+    let mut paths = BTreeSet::new();
+    let mut targets = BTreeMap::new();
+    for (triple, artifacts) in &request.targets {
+        let class = standalone_target_class(triple)?;
+        let c = verify_standalone_artifact(
+            &output_root,
+            &artifacts.c,
+            class,
+            C_COLLECTOR_SYMBOL,
+            &mut paths,
+        )?;
+        let cxx = verify_standalone_artifact(
+            &output_root,
+            &artifacts.cxx,
+            class,
+            CXX_COLLECTOR_SYMBOL,
+            &mut paths,
+        )?;
+        targets.insert(triple.clone(), StandaloneTargetReport { c, cxx });
+    }
+    Ok(StandaloneOutputReport { targets })
+}
+
 /// Measured helper identity written into a compatibility report without paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -591,6 +691,118 @@ pub fn run_probe_set(
         reports.insert(phase, run_probe(probe, cancellation)?);
     }
     Ok(CompatibilityProbeSet { reports })
+}
+
+fn standalone_target_class(triple: &str) -> Result<elf::Class, ContractError> {
+    if !crate::profiles::identifier(triple) {
+        return Err(ContractError::compatibility(
+            "standalone output contract contains an unsafe target triple",
+        ));
+    }
+    match triple.split_once('-').map_or(triple, |(cpu, _)| cpu) {
+        "x86_64" | "aarch64" => Ok(elf::Class::Elf64),
+        "i386" | "arm" => Ok(elf::Class::Elf32),
+        _ => Err(ContractError::compatibility(
+            "standalone output contract contains an unsupported target triple",
+        )),
+    }
+}
+
+fn verify_standalone_artifact(
+    output_root: &Path,
+    path: &Path,
+    expected_class: elf::Class,
+    required_symbol: &str,
+    paths: &mut BTreeSet<PathBuf>,
+) -> Result<StandaloneArtifactIdentity, ContractError> {
+    let path = checked_direct_child(output_root, path, "standalone output")?;
+    if !paths.insert(path.clone()) {
+        return Err(ContractError::compatibility(
+            "standalone output contract reuses one artifact path",
+        ));
+    }
+    let mut file = open_regular_file_nofollow(&path).map_err(|_| {
+        ContractError::compatibility(
+            "cannot safely open a standalone output without following links",
+        )
+    })?;
+    let before = file
+        .metadata()
+        .map_err(|_| ContractError::compatibility("cannot inspect the opened standalone output"))?;
+    if !before.is_file() || before.len() == 0 || before.len() > MAX_STANDALONE_ARTIFACT_BYTES {
+        return Err(ContractError::compatibility(
+            "standalone output is empty, non-regular, or exceeds the configured size limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(before.len()).map_err(|_| {
+        ContractError::compatibility("standalone output length exceeds addressable memory")
+    })?);
+    file.read_to_end(&mut bytes)
+        .map_err(|_| ContractError::compatibility("cannot read the complete standalone output"))?;
+    let after = file.metadata().map_err(|_| {
+        ContractError::compatibility("cannot remeasure the opened standalone output")
+    })?;
+    if after.len() != before.len() || bytes.len() as u64 != before.len() {
+        return Err(ContractError::compatibility(
+            "standalone output changed while it was read",
+        ));
+    }
+    let object = elf::read(&bytes).map_err(|_| {
+        ContractError::compatibility(
+            "standalone output is not a supported little-endian ELF object",
+        )
+    })?;
+    if object.class != expected_class
+        || object.os_abi != OS_ABI_AROS
+        || object.abi_version != AROS_ABI_VERSION
+    {
+        return Err(ContractError::compatibility(
+            "standalone output does not carry the selected target's AROS ELF identity",
+        ));
+    }
+    if !object
+        .symbols
+        .iter()
+        .any(|symbol| symbol.name == required_symbol)
+    {
+        return Err(ContractError::compatibility(
+            "standalone output lacks its required collector symbol",
+        ));
+    }
+    Ok(StandaloneArtifactIdentity {
+        sha256: sha256_bytes(&bytes),
+        size: before.len(),
+        class: object.class,
+    })
+}
+
+fn checked_direct_child(root: &Path, path: &Path, label: &str) -> Result<PathBuf, ContractError> {
+    if !path.is_absolute() {
+        return Err(ContractError::compatibility(format!(
+            "{label} must be an absolute direct child of the standalone output root"
+        )));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        ContractError::compatibility(format!("{label} has no standalone output-root parent"))
+    })?;
+    let canonical_parent = parent.canonicalize().map_err(|_| {
+        ContractError::compatibility(format!(
+            "{label} parent cannot be canonicalized below the standalone output root"
+        ))
+    })?;
+    if canonical_parent != root || path.file_name().is_none() {
+        return Err(ContractError::compatibility(format!(
+            "{label} is not a direct child of the standalone output root"
+        )));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| ContractError::compatibility(format!("cannot inspect {label}")))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(ContractError::compatibility(format!(
+            "{label} is not a regular standalone output"
+        )));
+    }
+    Ok(path.to_owned())
 }
 
 #[derive(Debug)]
@@ -1174,15 +1386,20 @@ fn resolve_helpers(root: &Path) -> Result<BTreeMap<String, HelperIdentity>, Cont
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
     use std::time::Duration;
 
-    use aros_common::{CancellationToken, DiagnosticCode};
+    use aros_common::{
+        elf::{AROS_ABI_VERSION, OS_ABI_AROS},
+        CancellationToken, DiagnosticCode,
+    };
 
     use super::{
-        prepare, run_probe, run_probe_set, verify_materialized_engine, CompatibilityPhase,
-        CompatibilityPreparation, CompatibilityPreparationRequest, CompatibilityProbeReport,
-        CompatibilityProbeRequest, CompatibilityProbeSetRequest, REQUIRED_HELPERS,
+        prepare, run_probe, run_probe_set, verify_materialized_engine, verify_standalone_outputs,
+        CompatibilityPhase, CompatibilityPreparation, CompatibilityPreparationRequest,
+        CompatibilityProbeReport, CompatibilityProbeRequest, CompatibilityProbeSetRequest,
+        StandaloneOutputRequest, StandaloneTargetArtifacts, CXX_COLLECTOR_SYMBOL,
+        C_COLLECTOR_SYMBOL, REQUIRED_HELPERS,
     };
 
     fn request(root: &std::path::Path) -> CompatibilityPreparationRequest {
@@ -1202,6 +1419,127 @@ mod tests {
             work_root,
             helpers_root,
         }
+    }
+
+    #[test]
+    fn standalone_outputs_require_aros_elf_identity_and_collector_symbols() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output_root = temporary.path().join("standalone");
+        fs::create_dir(&output_root).unwrap();
+        let c = output_root.join("c-x86_64.o");
+        let cxx = output_root.join("cxx-x86_64.o");
+        fs::write(&c, fixture_elf64(C_COLLECTOR_SYMBOL, OS_ABI_AROS)).unwrap();
+        fs::write(&cxx, fixture_elf64(CXX_COLLECTOR_SYMBOL, OS_ABI_AROS)).unwrap();
+
+        let report = verify_standalone_outputs(&StandaloneOutputRequest {
+            output_root: output_root.clone(),
+            targets: BTreeMap::from([(
+                "x86_64-unknown-aros".into(),
+                StandaloneTargetArtifacts {
+                    c: c.clone(),
+                    cxx: cxx.clone(),
+                },
+            )]),
+        })
+        .unwrap();
+        let target = &report.targets["x86_64-unknown-aros"];
+        assert_eq!(target.c.class, aros_common::elf::Class::Elf64);
+        assert_eq!(target.cxx.class, aros_common::elf::Class::Elf64);
+        assert_ne!(target.c.sha256, target.cxx.sha256);
+
+        let linked = output_root.join("c-linked.o");
+        symlink(&c, &linked).unwrap();
+        let linked_error = verify_standalone_outputs(&StandaloneOutputRequest {
+            output_root: output_root.clone(),
+            targets: BTreeMap::from([(
+                "x86_64-unknown-aros".into(),
+                StandaloneTargetArtifacts {
+                    c: linked,
+                    cxx: cxx.clone(),
+                },
+            )]),
+        })
+        .unwrap_err();
+        assert_compatibility(&linked_error);
+
+        let duplicate = verify_standalone_outputs(&StandaloneOutputRequest {
+            output_root: output_root.clone(),
+            targets: BTreeMap::from([(
+                "x86_64-unknown-aros".into(),
+                StandaloneTargetArtifacts {
+                    c: c.clone(),
+                    cxx: c,
+                },
+            )]),
+        })
+        .unwrap_err();
+        assert_compatibility(&duplicate);
+
+        let non_aros = output_root.join("c-non-aros.o");
+        fs::write(&non_aros, fixture_elf64(C_COLLECTOR_SYMBOL, 0)).unwrap();
+        let non_aros_error = verify_standalone_outputs(&StandaloneOutputRequest {
+            output_root,
+            targets: BTreeMap::from([(
+                "x86_64-unknown-aros".into(),
+                StandaloneTargetArtifacts { c: non_aros, cxx },
+            )]),
+        })
+        .unwrap_err();
+        assert_compatibility(&non_aros_error);
+    }
+
+    fn fixture_elf64(symbol: &str, os_abi: u8) -> Vec<u8> {
+        let mut names = Vec::from([0_u8]);
+        names.extend_from_slice(symbol.as_bytes());
+        names.push(0);
+        let section_offset = 64_usize;
+        let section_size = 64_usize;
+        let strtab_offset = section_offset + 3 * section_size;
+        let symtab_offset = strtab_offset + names.len();
+        let mut object = vec![0_u8; symtab_offset + 2 * 24];
+        object[..4].copy_from_slice(b"\x7fELF");
+        object[4] = 2;
+        object[5] = 1;
+        object[6] = 1;
+        object[7] = os_abi;
+        object[8] = AROS_ABI_VERSION;
+        write_u64(&mut object, 0x28, section_offset as u64);
+        write_u16(&mut object, 0x34, 64);
+        write_u16(&mut object, 0x3a, section_size as u16);
+        write_u16(&mut object, 0x3c, 3);
+
+        let strtab = section_offset + section_size;
+        write_u32(&mut object, strtab + 4, 3);
+        write_u64(&mut object, strtab + 24, strtab_offset as u64);
+        write_u64(&mut object, strtab + 32, names.len() as u64);
+        write_u64(&mut object, strtab + 48, 1);
+
+        let symtab = strtab + section_size;
+        write_u32(&mut object, symtab + 4, 2);
+        write_u64(&mut object, symtab + 24, symtab_offset as u64);
+        write_u64(&mut object, symtab + 32, 48);
+        write_u32(&mut object, symtab + 40, 1);
+        write_u64(&mut object, symtab + 48, 8);
+        write_u64(&mut object, symtab + 56, 24);
+
+        object[strtab_offset..strtab_offset + names.len()].copy_from_slice(&names);
+        let symbol_entry = symtab_offset + 24;
+        write_u32(&mut object, symbol_entry, 1);
+        object[symbol_entry + 4] = 0x10;
+        write_u16(&mut object, symbol_entry + 6, 1);
+        object
+    }
+
+    fn write_u16(buffer: &mut [u8], offset: usize, value: u16) {
+        buffer[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32(buffer: &mut [u8], offset: usize, value: u32) {
+        buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(buffer: &mut [u8], offset: usize, value: u64) {
+        buffer[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 
     #[test]
