@@ -670,6 +670,10 @@ explicit absence of a new compiler matrix for this packaging-only gate.
 
 - [ ] Port the complete compatibility harness to explicit tools-owned engine
   and helper resolution; cover a source tree with no copied CMake engine.
+- [ ] Run upstream `configure`/Make only with a fresh, measured, tools-owned
+  host-command closure. It may expose exactly selected commands below an owned
+  `PATH`; it must never append the caller's `PATH`. Keep standalone C/C++
+  probes at `PATH=/nonexistent` because they require only explicit tool paths.
 - [ ] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
   target-runtime checks; preserve pristine-upstream and CMake consumer probes.
 - [ ] Implement native replay/repackage policy with bound evidence identities;

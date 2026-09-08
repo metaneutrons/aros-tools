@@ -111,18 +111,23 @@ supplies one or two absolute executables with explicit UTF-8 argument vectors,
 a closed child environment, real working directory, fresh report directory and
 positive deadline. This admits the two explicit PC x86-64/i386 collector
 invocations in one language phase without a shell wrapper or an unreported
-subprocess. The runner clears inherited environment and requires
-`PATH=/nonexistent`; it neither looks up `PATH` nor evaluates a shell command.
+subprocess. The runner always clears the inherited environment and never
+evaluates a shell command. Standalone C/C++ phases require
+`PATH=/nonexistent` and use only absolute tool paths. Upstream configure/Make
+phases may instead use a fresh private host-tool closure: its `PATH` contains
+only measured, revalidated symlinks selected for that phase, never a caller
+directory or an appended ambient path.
 
 Before every command starts and after every successful command, it revalidates
-the engine-free source tree, materialized embedded engine and all five helper
-file identities. It then binds the report
-to the source digest, engine API version and digest, measured helper hashes and
-canonical environment digest. Standard
+the engine-free source tree, materialized embedded engine, all five helper
+file identities and, where present, the complete private host-tool closure.
+It then binds the report to the source digest, engine API version and digest,
+measured helper and host-tool hashes, and a canonical environment digest that
+does not disclose local closure paths. Standard
 output and error are captured with
 the common bounded process supervisor and durably published under fixed,
 phase-specific no-clobber names. Successful reports use the closed
-`aros-toolchain-compatibility-report-v4` JSON schema and bind every executable,
+`aros-toolchain-compatibility-report-v5` JSON schema and bind every executable,
 argument identity and its persisted stdout/stderr log hashes in declaration
 order.
 
