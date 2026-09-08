@@ -668,13 +668,13 @@ explicit absence of a new compiler matrix for this packaging-only gate.
 
 ### TCP-M5 — Compatibility, replay and recovery
 
-- [ ] Port the complete compatibility harness to explicit tools-owned engine
+- [x] Port the complete compatibility harness to explicit tools-owned engine
   and helper resolution; cover a source tree with no copied CMake engine.
-- [ ] Run upstream `configure`/Make only with a fresh, measured, tools-owned
+- [x] Run upstream `configure`/Make only with a fresh, measured, tools-owned
   host-command closure. It may expose exactly selected commands below an owned
   `PATH`; it must never append the caller's `PATH`. Keep standalone C/C++
   probes at `PATH=/nonexistent` because they require only explicit tool paths.
-- [ ] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
+- [x] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
   target-runtime checks; preserve pristine-upstream and CMake consumer probes.
 - [x] Implement native replay/repackage eligibility policy with bound evidence
   identities; reject expired/missing/tampered artifacts and non-packaging
@@ -684,9 +684,9 @@ explicit absence of a new compiler matrix for this packaging-only gate.
   attestations, incorrect signer/source claims and non-regular release assets.
   Exercise publication orchestration with fixtures, not real releases.
 
-Exit evidence: compatibility reports for available native diagnostic lanes and
-complete offline replay/recovery tests. All twelve real compatibility lanes
-are mandatory at M7; unexecuted lanes remain explicitly pending until then.
+Exit evidence: [TCP-M5 native compatibility, replay and recovery evidence]
+(tcp-m5-native-evidence.md). All twelve real compatibility lanes are mandatory
+at M7; unexecuted lanes remain explicitly pending until then.
 
 ### TCP-M6 — Workflow cutover, retirement and usability
 
@@ -889,7 +889,7 @@ tracking change.
 | TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55) |
 | TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | [Accepted evidence](tcp-m3-native-evidence.md) |
 | TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | [Accepted evidence](tcp-m4-native-evidence.md) |
-| TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | Pending |
+| TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | [Accepted evidence](tcp-m5-native-evidence.md) |
 | TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | Pending |
 | TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | Pending |
 | TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | Pending |
