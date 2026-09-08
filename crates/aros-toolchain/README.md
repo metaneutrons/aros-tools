@@ -1,10 +1,10 @@
 # aros-toolchain
 
-TCP-M1 and TCP-M2 are accepted. TCP-M3 provides the controlled native local
-lifecycle behind `aros toolchain plan` and `aros toolchain build` when the
-selected producer publishes a matching `producer-executor-v1.toml`. It is not
-a package/release publisher and every successful local build remains a
-local-only candidate.
+TCP-M1 through TCP-M6 are accepted. The native local lifecycle is exposed by
+`aros toolchain plan`, `aros toolchain build`, and explicit
+`aros toolchain producer` operations when the selected producer publishes a
+matching `producer-executor-v1.toml`. It is not a package/release publisher and
+every successful local build remains a local-only candidate.
 
 Implemented:
 
@@ -44,12 +44,11 @@ No input helper alters an input cache.
 
 The library also parses and binds the closed `producer-executor-v1.toml`
 selection document to its exact contract, recipe, lock and profile bytes. The
-currently selected official producer does not yet publish that declaration.
-Accordingly, native planning and execution reject that selection with AX0202;
-no declaration is guessed from historical producer state. Once a selected
-producer commits a matching declaration, native planning may inspect it and the
-local lifecycle may run. Declaration binding is still not origin evidence, so
-that result remains local-only.
+selected official producer publishes that declaration and the cross-repository
+contract gate rechecks the exact source and tools commits before execution. A
+missing or mismatched declaration still fails with AX0202; no declaration is
+guessed from historical producer state. Declaration binding is not origin
+evidence, so a successful local result remains local-only.
 
 Recipe parsing performs no I/O. Planning inspects three explicit Git
 roots/commit/tree pairs, raw committed profile/lock/patch identities and
@@ -208,8 +207,9 @@ to release work. Trusted executor origin, full candidate inventory, real
 host/profile evidence and release qualification remain later gates.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
-[delivery plan](../../docs/toolchain-producer-plan.md) and
-[M1 issue](https://github.com/metaneutrons/aros-tools/issues/29).
+[delivery plan](../../docs/toolchain-producer-plan.md),
+[TCP-M6 evidence](../../docs/tcp-m6-native-evidence.md) and
+[M6 issue](https://github.com/metaneutrons/aros-tools/issues/34).
 
 Run the maintained native tests with:
 

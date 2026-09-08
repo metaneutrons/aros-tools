@@ -40,6 +40,7 @@ paths and board identifiers may be present.
 | `AG…` | module generation | Treat partial SDK output as invalid and rebuild after fixing the reported path |
 | `RM…` | ROM/package tool | Fix the input; the previous destination remains intact |
 | `AV…` | independent verifier | Inspect deterministic reports in the named work directory |
+| `AX…` | native toolchain producer | Preserve the work/output roots and inspect the lifecycle receipt named by the diagnostic |
 
 ## Checkout not found
 
@@ -74,6 +75,25 @@ Never copy an unmeasured archive into the cache.
 `--require-fetch-checksums` intentionally rejects an AROS recipe without a
 declared SHA-256. Add evidence to the source recipe or update the transpiler;
 do not invent a hash for a moving URL.
+
+## Native producer preflight or cache rejected
+
+`AX0102` means one of the explicit source, producer, tools, recipe, or executor
+identities does not agree. Recreate the recipe from clean, exact checkouts; do
+not substitute a branch name or edit a digest to make the plan continue.
+
+`AX0401` reports an unusable controlled external environment. For a local
+build, first verify the lock-selected source cache, then recreate the
+lock-matched Cargo vendor cache from the selected `aros-tools` checkout as
+described in the [native producer workflow](/aros-tools/workflows/toolchain-producer/).
+Do not add a package with `pip`, reuse ambient Python modules, or let an
+offline producer run fetch a missing Cargo crate.
+
+`AX0501`–`AX0503` identify configure, compiler/runtime, or collector stages.
+The command retains the owned work and output roots and writes a receipt after
+each completed stage. Preserve those receipts and the captured logs when
+reporting a fault. A retained directory is evidence, not permission to adopt
+or resume it automatically.
 
 ## Sync refused
 

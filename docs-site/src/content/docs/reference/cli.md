@@ -52,9 +52,9 @@ Use PATH for a source build or the verified archive installation procedure.
 
 ## Toolchains and helpers
 
-Consumer toolchain/host-compiler commands require an AROS checkout.
-Experimental producer planning instead requires three explicit source roots
-and works from any directory.
+Consumer toolchain/host-compiler commands require an AROS checkout. The
+experimental native producer instead requires three explicit source roots and
+works from any directory.
 
 | Command | Inputs and effect |
 | --- | --- |
@@ -65,7 +65,8 @@ and works from any directory.
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
-| `toolchain build` | Controlled local native candidate; explicit roots, prepared offline cache, fresh isolated snapshots and bounded cancellation |
+| `toolchain build` | Experimental controlled local native candidate; explicit roots, prepared offline cache, fresh isolated snapshots and bounded cancellation |
+| `toolchain producer` | Low-level native producer operations for exact recipe, cache, package, comparison, compatibility and recovery inputs; maintainer-only, never a publication shortcut |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
@@ -147,6 +148,10 @@ groups; retained material is never adopted or deleted. The command requires
 There is no backend switch or legacy fallback. Receipt reuse/resume, complete
 candidate inventory and real host/profile qualification remain separately
 qualified capabilities.
+
+For the required checkout layout, cache bootstrap, resource boundary and
+failure handling, follow the [native producer workflow](/aros-tools/workflows/toolchain-producer/).
+It is intentionally separate from the released-toolchain consumer guide.
 
 ## Build and inspect a product
 

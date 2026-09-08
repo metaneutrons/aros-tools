@@ -685,7 +685,7 @@ at M7; unexecuted lanes remain explicitly pending until then.
 
 ### TCP-M6 — Workflow cutover, retirement and usability
 
-- [ ] Pin a reviewed tools executor in the producer workflow and call the same
+- [x] Pin a reviewed tools executor in the producer workflow and call the same
   native `aros toolchain build` path used locally. Replace Python stage calls
   with native stage operations; preserve privilege separation and exact-input
   source-contract checks across repositories.
@@ -693,23 +693,25 @@ at M7; unexecuted lanes remain explicitly pending until then.
   fetch/environment/compatibility scripts from active paths. Retain relevant
   fixtures/tests; historical implementations remain available through Git.
   Document every remaining shell/Python dependency and its owner.
-- [ ] Exercise native frontend and fixtures on all four hosts, plus explicit
+- [x] Exercise native frontend and fixtures on all four hosts, plus explicit
   lean real-build diagnostics. Add dependency-direction, script-reference and
   shared-contract drift guards to the existing canonical gates.
-- [ ] Update command/help reference, local/offline build tutorial, prerequisites,
+- [x] Update command/help reference, local/offline build tutorial, prerequisites,
   upstream limits, troubleshooting, maintainer release/recovery instructions
   and producer README/handoff. Public docs describe implemented capabilities
   only and contain no hosting-service administration details.
-- [ ] Check installation/packaging fixtures for GitHub archives, Debian,
+- [x] Check installation/packaging fixtures for GitHub archives, Debian,
   Homebrew and AUR. Expensive source-build prerequisites are documented as
   optional rather than forced on ordinary binary-toolchain consumers.
-- [ ] Prepare a Conventional Commit/Release Please-compatible change set,
+- [x] Prepare a Conventional Commit/Release Please-compatible change set,
   close architectural risks and record a reviewed rollback plan before the
   first native producer tag. Do not hand-edit release versions to bypass it.
 
-Exit evidence: coordinated merged PRs, all applicable workspace/producer
-contracts green, documentation and install smoke tests, no active duplicate
-producer implementation. Full release evidence is still pending M7.
+Exit evidence: [TCP-M6 cutover evidence](tcp-m6-native-evidence.md) records
+the coordinated merges, all applicable workspace/producer contracts,
+documentation and installation-fixture checks, lean macOS/Linux PC proof and
+the rollback boundary. No active duplicate producer implementation remains.
+Full release evidence is still pending M7.
 
 ### TCP-M7 — Qualify once, publish and promote measured values
 
