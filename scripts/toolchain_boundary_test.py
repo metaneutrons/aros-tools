@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # existing SHA-2 primitive required for bounded archive/content verification;
 # producer lifecycle/publication owners remain forbidden below.
 ALLOWED = {
+    "aros-cmake-engine",
     "aros-common",
     "aros-fetch",
     "flate2",

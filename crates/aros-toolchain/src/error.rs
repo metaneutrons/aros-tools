@@ -142,6 +142,14 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn compatibility(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCompatibility,
+            message,
+            "retain the selected compatibility roots for inspection; rebuild helpers from the exact tools snapshot and materialize a fresh embedded engine instead of borrowing source-tree modules or shared target binaries",
+        )
+    }
+
     pub(crate) fn recovery(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerRecovery,

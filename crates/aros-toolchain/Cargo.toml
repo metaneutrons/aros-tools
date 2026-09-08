@@ -15,6 +15,7 @@ description = "Validated native AROS toolchain producer contracts"
 workspace = true
 
 [dependencies]
+aros-cmake-engine.workspace = true
 aros-common.workspace = true
 aros-fetch.workspace = true
 flate2.workspace = true
