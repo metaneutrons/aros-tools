@@ -1,6 +1,5 @@
 {
   "schema": "aros-toolchain-receipt-v1",
-  "backend": "native",
   "identity": {
     "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
     "source_commit": "1111111111111111111111111111111111111111",
@@ -21,5 +20,5 @@
   "output_root": "/workspace/work",
   "outputs": [],
   "previous_receipt_sha256": null,
-  "receipt_sha256": "65c1f6c6182f2270e8ca1fa1015e213b510a7d976aa01738e1a1d0c6d08d6d15"
+  "receipt_sha256": "8331524192f9a268b362641a373949a8a26c5ff6ef944fb8f34f3d0d84da0900"
 }

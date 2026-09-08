@@ -1,11 +1,10 @@
-//! Thin CLI frontend for the experimental local producer adapter.
+//! Thin CLI frontend for the controlled local native producer.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use aros_common::CancellationToken;
 use aros_toolchain::executor::{BuildRequest, ResumePhase};
-use aros_toolchain::plan::Backend;
 use clap::{Args, ValueEnum};
 
 use crate::observability;
@@ -19,7 +18,7 @@ pub enum ResultFormat {
     Json,
 }
 
-/// Explicit inputs for one local native or legacy-preview build.
+/// Explicit inputs for one local native build.
 #[derive(Args)]
 pub struct BuildArgs {
     /// Producer-owned target profile.
@@ -46,9 +45,6 @@ pub struct BuildArgs {
     /// Existing prepared source cache; it is never populated by this command.
     #[arg(long)]
     pub cache_dir: PathBuf,
-    /// Explicit lifecycle backend; native is the default and never falls back.
-    #[arg(long, default_value = "native", value_parser = parse_backend)]
-    pub backend: Backend,
     /// Positive producer parallelism.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub jobs: u64,
@@ -76,23 +72,12 @@ fn parse_resume_phase(value: &str) -> Result<ResumePhase, String> {
     }
 }
 
-fn parse_backend(value: &str) -> Result<Backend, String> {
-    match value {
-        "native" => Ok(Backend::Native),
-        "legacy-preview" => Ok(Backend::LegacyPreview),
-        _ => {
-            Err("expected native or legacy-preview; backends are never selected by fallback".into())
-        }
-    }
-}
-
-/// Run the adapter on a blocking thread and propagate Ctrl-C cooperatively.
+/// Run the native lifecycle on a blocking thread and propagate Ctrl-C cooperatively.
 pub async fn run(args: BuildArgs) -> miette::Result<()> {
     let fetch_bridge = std::env::current_exe().map_err(|_| {
         miette::miette!("cannot resolve the running aros executable for the native fetch bridge")
     })?;
     let request = BuildRequest {
-        backend: args.backend,
         preset: args.preset,
         recipe: args.recipe,
         source_dir: args.source_dir,

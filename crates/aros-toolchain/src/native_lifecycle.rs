@@ -28,7 +28,7 @@ use crate::cargo_vendor::CargoVendorEnvironment;
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_declaration::NativeExecutorDeclaration;
-use crate::plan::{self, Backend, Identity, PlanRequest};
+use crate::plan::{self, Identity, PlanRequest};
 use crate::preflight::{self, HostPreflight};
 use crate::producer_environment::{ProducerEnvironment, ReproducibilityRoots};
 use crate::python_environment::{PythonEnvironment, PythonInterpreter};
@@ -382,7 +382,6 @@ fn run_owned(
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
-        backend: Backend::Native,
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
         outputs: vec![published_collector],
@@ -628,7 +627,6 @@ fn resume_after_compiler(
     Ok(BuildResult {
         schema: "aros-toolchain-result-v1",
         operation: "build",
-        backend: Backend::Native,
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
         outputs: vec![published_collector],
@@ -681,7 +679,6 @@ fn validate_request(request: &BuildRequest) -> Result<(), ContractError> {
 
 fn plan_request(request: &BuildRequest) -> PlanRequest {
     PlanRequest {
-        backend: request.backend,
         preset: request.preset.clone(),
         recipe: request.recipe.clone(),
         source_dir: request.source_dir.clone(),
@@ -1471,7 +1468,6 @@ fn snapshot_digest(root: &Path, role: &str) -> Result<Sha256Digest, ContractErro
 #[derive(Serialize)]
 struct Receipt<'a> {
     schema: &'static str,
-    backend: Backend,
     identity: &'a Identity,
     phase: &'static str,
     input_sha256: &'a Sha256Digest,
@@ -1493,7 +1489,6 @@ fn persist_receipt(
 ) -> Result<Sha256Digest, ContractError> {
     let provisional = Receipt {
         schema: "aros-toolchain-receipt-v1",
-        backend: Backend::Native,
         identity,
         phase,
         input_sha256,
@@ -1630,7 +1625,6 @@ fn revalidate_receipt(
     });
     let checks = [
         ("schema", json!("aros-toolchain-receipt-v1")),
-        ("backend", json!(Backend::Native)),
         ("identity", expected_identity),
         ("phase", json!(phase)),
         ("input_sha256", json!(input_sha256)),

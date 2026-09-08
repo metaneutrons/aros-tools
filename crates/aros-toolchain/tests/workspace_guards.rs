@@ -7,7 +7,7 @@ use std::os::unix::fs::{symlink, PermissionsExt as _};
 use std::path::Path;
 
 use aros_common::{measure_tree_content_cas, sha256_bytes, CancellationToken, DiagnosticCode};
-use aros_toolchain::plan::{Backend, PlanRequest};
+use aros_toolchain::plan::PlanRequest;
 use aros_toolchain::workspace::RunDirectories;
 
 const MARKER: &str = ".aros-toolchain-owner-v1.json";
@@ -27,7 +27,6 @@ impl Fixture {
         }
         Self {
             request: PlanRequest {
-                backend: Backend::LegacyPreview,
                 preset: "fixture".into(),
                 recipe: path.join("not-read-by-ownership"),
                 source_dir: path.join("source"),
@@ -231,10 +230,7 @@ fn native_missing_budgets_and_cancellation_fail_before_mutation() {
     for case in 0..4 {
         let mut fixture = Fixture::new();
         match case {
-            0 => {
-                fixture.request.backend = Backend::Native;
-                fixture.request.source_dir = "/absent".into();
-            }
+            0 => fixture.request.source_dir = "/absent".into(),
             1 => fixture.request.jobs = Some(0),
             2 => fixture.request.timeout_seconds = None,
             _ => fixture.token.cancel(),

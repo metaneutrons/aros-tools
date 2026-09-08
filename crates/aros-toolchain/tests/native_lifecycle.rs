@@ -10,7 +10,6 @@ use std::process::{Command, Stdio};
 use aros_common::{sha256_bytes, CancellationToken};
 use aros_toolchain::canonical;
 use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
-use aros_toolchain::plan::Backend;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
@@ -222,7 +221,6 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
 
     fn request(&self) -> BuildRequest {
         BuildRequest {
-            backend: Backend::Native,
             preset: "pc-x86_64".into(),
             recipe: self.recipe.clone(),
             source_dir: self.root.join("source"),
@@ -279,7 +277,6 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
                 .join("\n");
             panic!("{error}\n{logs}");
         });
-    assert_eq!(result.backend, Backend::Native);
     assert_eq!(result.qualification, "local-only");
     assert_eq!(result.commit_state, "committed");
     assert_eq!(result.outputs.len(), 1);

@@ -65,7 +65,7 @@ and works from any directory.
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
-| `toolchain build` | Experimental local legacy-preview candidate; explicit roots, prepared offline cache, fresh isolated views and bounded cancellation |
+| `toolchain build` | Controlled local native candidate; explicit roots, prepared offline cache, fresh isolated snapshots and bounded cancellation |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
@@ -80,7 +80,7 @@ See [toolchain workflows](/aros-tools/workflows/toolchains/).
 ### Experimental producer inspection and local candidate build
 
 ```sh
-aros toolchain plan --backend legacy-preview --preset pc-x86_64 \
+aros toolchain plan --preset pc-x86_64 \
   --recipe /work/recipe.json --source-dir /work/AROS \
   --producer-dir /work/aros-toolchains --tools-dir /work/collector-tools \
   --format json --offline
@@ -108,7 +108,7 @@ missing, wrong-mode or uninitialized material is rejected. Even empty
 untracked directories count; keep build/cache directories outside the roots.
 Raw symlink targets are compared without following them. Git filters and index
 flags cannot hide changes, and inspection never cleans the checkouts.
-The default `native` backend requires a committed producer declaration at
+The native lifecycle requires a committed producer declaration at
 `toolchains/producer-executor-v1.toml`. It binds the selected contract, tools
 commit, source lock and profile matrix to the recipe. Without that exact
 declaration, native inspection returns AX0202 and never guesses historical
@@ -116,7 +116,7 @@ producer state. With it, `readiness` is `ready` only when all build roots and
 positive resource budgets are present and `--offline` is set; cache verification and root reservation
 still happen at build time. Every local result has `qualification: local-only`:
 there is no origin attestation or release authorization. `fetch-guard`
-describes the legacy policy, not a proven OS sandbox. Exit 0 means inspection
+describes the controlled no-network policy, not a proven OS sandbox. Exit 0 means inspection
 completed; inspect `readiness` and `findings`. Invalid inputs exit 1 with no
 result on stdout.
 
@@ -144,10 +144,9 @@ settings. Ctrl-C and the whole-operation deadline terminate and reap process
 groups; retained material is never adopted or deleted. The command requires
 `--offline`; it does not publish, tag, package or authorize a release.
 
-`--backend legacy-preview` remains available only as an explicit historical
-diagnostic path. Neither backend falls back to the other. Receipt reuse/resume,
-complete candidate inventory and real host/profile qualification are not yet
-available.
+There is no backend switch or legacy fallback. Receipt reuse/resume, complete
+candidate inventory and real host/profile qualification remain separately
+qualified capabilities.
 
 ## Build and inspect a product
 

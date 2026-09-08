@@ -23,12 +23,9 @@ complete for its local-preview acceptance boundary. Native lifecycle work is
 now explicitly assigned to M3; source-readiness remains accepted M2 scope and
 release gates remain assigned to M4–M7.
 
-The current M1 implementation now also exposes an explicit local
-`toolchain build --backend legacy-preview` adapter. It reuses the plan
-preflight, runs the reviewed legacy driver only from metadata-free snapshots,
-requires a prepared offline cache, binds the producer's Rust channel, and
-retains local candidate evidence. It is not a release executor or provenance
-attestation. The two required host proofs are recorded below. Trusted origin,
+M6 retires the former local legacy-preview adapter. The historical M1 evidence
+below remains an audit record only; it is not an executable path. The native
+Rust lifecycle is the sole local producer implementation. Trusted origin,
 native-executor and release-qualification evidence are later milestone gates,
 not prerequisites for accepting this experimental M1 boundary.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
@@ -37,7 +34,7 @@ for later implementation. Issues own execution status and remaining gates.
 
 ### Measured TCP-M1 local lane evidence (2026-09-06)
 
-The legacy-preview adapter was executed from the tools checkout against the
+The retired M1 adapter was executed from the tools checkout against the
 same producer contract on both requested native PC hosts. Each run used a
 fresh, owned work/output root, an explicitly prepared offline cache and the
 producer-declared Rust 1.96.1 channel. The result envelope reported
@@ -263,7 +260,7 @@ aros toolchain build --preset pc-x86_64 --recipe /work/recipe.json \
 ```
 
 The example deadline is a caller-selected budget, not a measured default.
-The first preview additionally requires explicit `--backend legacy-preview`.
+The retired M1 preview additionally required explicit backend selection.
 
 - Inputs are explicit; execution works from outside every checkout. Reject
   conflicting CLI/recipe selections. Do not infer a neighboring repository,
@@ -313,10 +310,9 @@ The separate lower-level `SourceSnapshot` now materializes one selected input
 under held run ownership, flattens recursive gitlinks without Git metadata and
 revalidates its exact raw inventory before/after durable no-clobber publication.
 It rejects unsafe link graphs and retains failed material without adoption.
-A consuming `LegacySourceView` now adds fresh shallow stores and independently
-checks their complete objects against those captured bytes; all metadata stays
-inside the exact material guard. No original Git metadata/history is copied.
-This does not complete the execution gate: integration across all selected
+The retired M1 conversion added fresh shallow stores and independently checked
+their complete objects against captured bytes. It no longer exists in the
+runtime. This does not alter the execution gate: integration across all selected
 roots, trusted origin/executor verification, and before/after execution
 checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
 
@@ -456,9 +452,8 @@ diagnostics rather than reducing them to an undifferentiated CLI error.
 - Separate operational duration/observation reports from deterministic
   diagnostics and archive metadata. Redact secrets before persistence and
   test logging failure, disk exhaustion, broken pipes and output limits.
-- The legacy preview adapter reports its real observable boundary. If an old
-  script does not provide a typed phase, report `legacy-driver` with retained
-  cause; never infer a precise diagnostic by fragile parsing of prose.
+- Native phases report their declared lifecycle boundary; do not infer a
+  precise diagnostic by fragile parsing of upstream prose.
 
 ## 6. Artifact compatibility, verification and recovery
 
@@ -548,7 +543,7 @@ an acceptance criterion.
 | Milestone | Deliverable | Depends on | Promotion boundary |
 | --- | --- | --- | --- |
 | TCP-M0 | Frozen contracts, baseline and threat model | None | Ready to implement |
-| TCP-M1 | CLI preview and isolated legacy adapter | M0 | Local experimental use only |
+| TCP-M1 | Historical CLI preview and isolated adapter | M0 | Retired at M6 |
 | TCP-M2 | Native identity, preflight, source and environment handling | M1 | Native input preparation |
 | TCP-M3 | Native build lifecycle and resource/error handling | M2 | Verified native build candidate |
 | TCP-M4 | Native toolchain envelope and complete verification | M3 | Artifact-format candidate |
@@ -587,11 +582,11 @@ at `abab341f259037ead9217181f39ba9384d014bab`; see the
 
 - [x] Introduce `aros-toolchain` and thin CLI modules with library/process
   dependency gates; preserve existing consumer commands and package inventory.
-- [x] Implement read-only planning and one explicit, temporary legacy-driver
-  adapter against the selected producer checkout. No copied shell logic,
-  moving branch resolution or fallback after a native failure.
+- [x] Implement read-only planning and the temporary legacy-driver adapter
+  used for M1 evidence. It was retired at M6; no copied shell logic, moving
+  branch resolution or fallback survives.
 - [x] Establish diagnostics/logging, cancellation and guarded work/output
-  ownership before launching real builds. Isolate all legacy mutations.
+  ownership before launching real builds.
 - [x] Exercise mock success/failure/cancellation and invocation from outside
   checkouts; demonstrate one single-build local PC lane on Linux x86-64 and
   macOS AArch64 when hosts are available, with verified local-prefix use.
@@ -694,7 +689,7 @@ at M7; unexecuted lanes remain explicitly pending until then.
   native `aros toolchain build` path used locally. Replace Python stage calls
   with native stage operations; preserve privilege separation and exact-input
   source-contract checks across repositories.
-- [ ] Retire the temporary legacy adapter and redundant owned build/package/
+- [x] Retire the temporary legacy adapter and redundant owned build/package/
   fetch/environment/compatibility scripts from active paths. Retain relevant
   fixtures/tests; historical implementations remain available through Git.
   Document every remaining shell/Python dependency and its owner.

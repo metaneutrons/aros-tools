@@ -1,6 +1,6 @@
 //! Thin producer planning frontend; all input inspection stays in the library.
 
-use aros_toolchain::plan::{Backend, PlanRequest};
+use aros_toolchain::plan::PlanRequest;
 use clap::{Args, ValueEnum};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -30,9 +30,6 @@ pub struct PlanArgs {
     /// Exact recipe-selected tools/collector checkout root
     #[arg(long)]
     tools_dir: PathBuf,
-    /// Native is the default; legacy-preview requires explicit selection
-    #[arg(long, default_value = "native", value_parser = parse_backend)]
-    backend: Backend,
     /// Proposed work root; not created or reserved
     #[arg(long)]
     work_dir: Option<PathBuf>,
@@ -62,19 +59,8 @@ impl PlanArgs {
     }
 }
 
-fn parse_backend(value: &str) -> Result<Backend, String> {
-    match value {
-        "native" => Ok(Backend::Native),
-        "legacy-preview" => Ok(Backend::LegacyPreview),
-        _ => {
-            Err("expected native or legacy-preview; backends are never selected by fallback".into())
-        }
-    }
-}
-
 pub fn run(args: PlanArgs) -> miette::Result<()> {
     let request = PlanRequest {
-        backend: args.backend,
         preset: args.preset,
         recipe: args.recipe,
         source_dir: args.source_dir,

@@ -19,12 +19,15 @@ instead of appending session history. Git history preserves earlier versions.
   publication, live A/B result or hardware evidence. The fresh 12-lane,
   four-host/three-profile release qualification remains TCP-M7 work.
 
-## Next bounded action
+## Current bounded action
 
-Begin TCP-M6 only after rechecking the accepted M5 boundary and its linked
-issues. Cut over workflow use without treating any synthetic envelope as a
-released toolchain. Keep all release, A/B and publication gates pending until
-TCP-M7.
+TCP-M6 is in progress. `aros-tools` PR #96 adds the native closed recovery
+qualification command; it must pass its four-host Workspace CI and merge before
+`aros-toolchains` PR #13 may replace its provisional executor commit with the
+exact merged `main` commit. This branch removes the retired public
+`legacy-preview` adapter and its isolated Git-view implementation; it is not
+mergeable before that dependency. Keep all release, A/B and publication gates
+pending until TCP-M7.
 
 ## Resume safely
 
@@ -44,9 +47,9 @@ TCP-M7.
 - [Producer plan](docs/toolchain-producer-plan.md#9-repository-tracking-and-handoff):
   design, dependencies and acceptance criteria; issues own live execution state.
 - [Implementation scope](crates/aros-toolchain/README.md),
-  [producer contract](docs/toolchain-producer-contract.md) and
-  [legacy-view evidence and limits](docs/toolchain-legacy-execution-view.md):
-  implemented guarantees, measured evidence and explicit omissions.
+  [producer contract](docs/toolchain-producer-contract.md) and the
+  [TCP-M5 evidence ledger](docs/tcp-m5-native-evidence.md): implemented
+  guarantees, measured evidence and explicit omissions.
 - Keep raw logs, machine-specific paths, private operations notes and credential
   references outside Git in a stable private state directory, not a disposable
   build directory. Retained snapshots are evidence, not resumable guards or
