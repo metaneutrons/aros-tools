@@ -178,6 +178,18 @@ impl SourceLock {
         self.0.sources.iter().map(Source::component)
     }
 
+    /// Source-root-relative patch paths required by the selected source closure.
+    ///
+    /// The parser has already rejected unsafe and duplicate declarations.  The
+    /// returned paths still need to be read as committed regular files from an
+    /// exact source checkout before a recipe can bind their measured bytes.
+    pub fn source_patch_paths(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .sources
+            .iter()
+            .filter_map(|source| source.patch.as_deref())
+    }
+
     /// Every host Python package, in the source-owned declaration order.
     #[must_use]
     pub fn host_python_packages(&self) -> &[HostPythonPackage] {

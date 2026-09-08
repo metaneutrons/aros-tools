@@ -311,7 +311,7 @@ impl<'a> Checkout<'a> {
     }
 }
 
-fn git(
+pub fn git(
     root: &Path,
     arguments: &[&str],
     input: &[u8],
