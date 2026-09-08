@@ -170,13 +170,12 @@ environment variable is `AROS_DIAGNOSTIC_FORMAT=human|json`.
 
 The experimental `aros toolchain build` command is deliberately explicit: it
 accepts immutable source/producer/tools paths, a recipe, a prepared offline
-cache, and fresh work/output roots. Its default `native` backend runs a
+cache, and fresh work/output roots. It runs a
 controlled local lifecycle only when the selected producer provides a matching
 `producer-executor-v1.toml`: AROS `configure`, source-owned
 `crosstools-release`, the verified MetaMake fetch bridge, and the exact
 `aros-collect` build. It never publishes or tags, and reports a local-only
-result. `legacy-preview` remains an explicit historical diagnostic backend;
-the command never falls back between backends.
+result. There is no backend option or historical producer fallback.
 
 After an interruption, native builds expose one deliberately narrow recovery
 boundary: `--resume-from compiler` revalidates the retained ownership markers,

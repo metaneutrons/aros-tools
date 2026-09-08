@@ -56,17 +56,31 @@ class ToolchainProducerContractTests(unittest.TestCase):
         self.assertFalse(self.contract["lifecycle"]["shared_compiled_cache"])
         self.assertTrue(self.contract["lifecycle"]["fresh_release_builds"])
 
-    def test_existing_format_versions_and_explicit_backend_are_preserved(self) -> None:
+    def test_existing_format_versions_and_native_lifecycle_are_preserved(self) -> None:
         inputs = self.contract["inputs"]
         self.assertEqual(inputs["recipe_schema"], "aros-toolchain-recipe-v2")
         self.assertEqual(inputs["source_lock_schema"], "aros-toolchain-source-lock-v2")
         self.assertEqual(inputs["source_target"], "crosstools-release")
-        self.assertTrue(inputs["legacy_preview_requires_explicit_selection"])
         self.assertEqual(self.contract["commands"]["preserved"], ["install", "list", "verify", "path"])
-        self.assertEqual(self.contract["commands"]["default_backend"], "native")
+        self.assertNotIn("backend", self.contract["commands"]["common_optional"])
         self.assertFalse(self.contract["artifacts"]["index_is_consumer_lock"])
         self.assertEqual(self.contract["artifacts"]["manifest_schema"], 1)
         self.assertEqual(self.contract["artifacts"]["consumer_lock_schema"], 1)
+
+    def test_public_native_surface_excludes_the_retired_adapter(self) -> None:
+        surfaces = [
+            ROOT / "crates/aros-cli/src/toolchain_build.rs",
+            ROOT / "crates/aros-cli/src/toolchain_plan.rs",
+            ROOT / "crates/aros-toolchain/src/executor.rs",
+            ROOT / "crates/aros-toolchain/src/plan.rs",
+        ]
+        for surface in surfaces:
+            text = surface.read_text(encoding="utf-8")
+            with self.subTest(surface=surface.relative_to(ROOT)):
+                self.assertNotIn("legacy-preview", text)
+                self.assertNotIn("LegacyPreview", text)
+                self.assertNotIn("LegacySourceView", text)
+        self.assertFalse((ROOT / "docs/toolchain-legacy-execution-view.md").exists())
 
     def test_release_inventory_has_no_self_hash_cycle(self) -> None:
         artifacts = self.contract["artifacts"]

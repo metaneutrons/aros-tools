@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use aros_common::{
-    exit_signal, run_output_with_input_and_control, sha256_bytes, sha256_reader, CancellationToken,
+    exit_signal, run_output_with_input_and_control, sha256_reader, CancellationToken,
     DiagnosticContext, Sha256Digest,
 };
 
@@ -154,10 +154,6 @@ pub struct Checkout<'a> {
 }
 
 impl<'a> Checkout<'a> {
-    #[cfg(unix)]
-    pub(crate) const fn identity(&self) -> (&GitObjectId, &GitObjectId) {
-        (&self.commit, &self.tree)
-    }
     pub(crate) fn inspect(
         root: &'a Path,
         identity: (&GitObjectId, &GitObjectId),
@@ -258,38 +254,6 @@ impl<'a> Checkout<'a> {
         })
     }
 
-    pub(crate) fn source_lock(&self, digest: &Sha256Digest) -> Result<(), ContractError> {
-        // Historical recipes lack a path selector. Select one direct committed
-        // lock by its measured identity, not an LLVM filename/version pin.
-        let tree = format!("{}:toolchains", self.tree.as_str());
-        let listing = self.git(&["ls-tree", "--name-only", "-z", &tree])?;
-        let mut selected = 0;
-        let entries: Vec<_> = text(&listing)?
-            .split('\0')
-            .filter(|name| !name.is_empty())
-            .collect();
-        if entries.len() > 128 {
-            return Err(ContractError::invalid(
-                "producer toolchains directory exceeds 128 entries",
-            ));
-        }
-        for name in entries {
-            if name.ends_with(".sources.json") {
-                let path = format!("toolchains/{name}");
-                let bytes = self.required_file(&path)?;
-                if sha256_bytes(&bytes) == *digest {
-                    selected += 1;
-                }
-            }
-        }
-        if selected != 1 {
-            return Err(ContractError::identity(
-                "recipe must select exactly one committed source lock by digest",
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn git(&self, arguments: &[&str]) -> Result<Vec<u8>, ContractError> {
         self.git_input(arguments, &[], MAX_DOCUMENT_BYTES)
     }
@@ -319,20 +283,7 @@ pub fn git(
     deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, ContractError> {
-    run_git(root, arguments, input, limit, deadline, cancellation, false)
-}
-
-/// Only call for an independently held, freshly created metadata store.
-#[cfg(unix)]
-pub fn prepare_git(
-    root: &Path,
-    arguments: &[&str],
-    input: &[u8],
-    limit: usize,
-    deadline: Instant,
-    cancellation: &CancellationToken,
-) -> Result<Vec<u8>, ContractError> {
-    run_git(root, arguments, input, limit, deadline, cancellation, true)
+    run_git(root, arguments, input, limit, deadline, cancellation)
 }
 
 fn run_git(
@@ -342,13 +293,8 @@ fn run_git(
     limit: usize,
     deadline: Instant,
     cancellation: &CancellationToken,
-    isolated_write: bool,
 ) -> Result<Vec<u8>, ContractError> {
-    let boundary = if isolated_write {
-        "isolated Git preparation"
-    } else {
-        "read-only Git inspection"
-    };
+    let boundary = "read-only Git inspection";
     // Static operation labels only: arguments can contain private paths/data.
     let step = match arguments.first().copied() {
         Some("index-pack") => "strict pack import",
@@ -365,7 +311,6 @@ fn run_git(
     let operation = format!("{boundary} ({step})");
     tracing::trace!(
         step,
-        isolated_write,
         input_bytes = input.len(),
         capture_limit = limit,
         "running bounded Git operation"
@@ -466,15 +411,6 @@ fn run_git(
                 ..DiagnosticContext::default()
             }),
         );
-    }
-    // Never forward potentially private Git stderr or truncate an identity.
-    if isolated_write
-        && result
-            .stderr
-            .exact_bytes()
-            .is_none_or(|bytes| !bytes.is_empty())
-    {
-        return Err(ContractError::identity(format!("{operation} reported diagnostics; refusing to treat a warning or truncated diagnostic as successful validation")));
     }
     result
         .stdout

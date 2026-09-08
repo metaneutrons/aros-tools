@@ -338,7 +338,7 @@ enum HostCompilerCommands {
 enum ToolchainCommands {
     /// Inspect explicit producer inputs without building (experimental)
     Plan(toolchain_plan::PlanArgs),
-    /// Build one local native or explicit legacy-preview candidate
+    /// Build one local native toolchain candidate
     Build(toolchain_build::BuildArgs),
     /// Run explicit native producer stages without a legacy adapter
     Producer(toolchain_producer::ProducerArgs),

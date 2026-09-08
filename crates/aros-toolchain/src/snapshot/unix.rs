@@ -28,7 +28,6 @@ pub(super) struct Material {
     pub root: PathBuf,
     pub(super) identity: (u64, u64),
     pub(super) entries: Inventory,
-    pub(super) repositories: Vec<super::legacy::Repository>,
 }
 
 impl Material {
@@ -103,22 +102,13 @@ pub(super) fn prepare(
         links: BTreeMap::new(),
         budget: Budget::controlled(deadline, cancellation),
     };
-    let mut repositories = Vec::new();
     source_audit::visit_repositories(
         &checkout,
         &mut Budget::controlled(deadline, cancellation),
         0,
         "",
         &mut |path, entry, bytes| writer.put(path, entry, bytes),
-        &mut |path, checkout, entries| {
-            if repositories.len() == 1024 {
-                return Err(ContractError::invalid(
-                    "snapshot exceeds 1024 repositories per input",
-                ));
-            }
-            repositories.push(super::legacy::Repository::capture(path, checkout, entries));
-            Ok(())
-        },
+        &mut |_path, _checkout, _entries| Ok(()),
     )?;
     super::links::validate(&writer.entries, &writer.links, &writer.budget)?;
     for (path, target) in &writer.links {
@@ -135,7 +125,6 @@ pub(super) fn prepare(
         root: work.join(&pending),
         identity: root_identity,
         entries: writer.entries,
-        repositories,
     };
     run.revalidate(cancellation)?;
     material.revalidate(deadline, cancellation)?;
