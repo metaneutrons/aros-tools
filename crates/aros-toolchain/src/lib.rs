@@ -31,6 +31,7 @@ pub mod profiles;
 pub mod python_environment;
 pub mod qualification_evidence;
 pub mod recipe;
+pub mod recovery;
 pub mod release_index;
 pub mod snapshot;
 #[cfg(unix)]
