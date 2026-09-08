@@ -13,12 +13,15 @@ use std::os::unix::fs::{symlink, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aros_common::{measure_tree_content_cas, CancellationToken, Sha256Digest};
+use aros_common::{
+    measure_tree_content_cas, publish_prepared_source_tree_noclobber, CancellationToken,
+    Sha256Digest,
+};
 
 use crate::filesystem::open_directory;
 use crate::inspection::{self, Checkout};
 use crate::package::validate_link_target;
-use crate::recipe::GitObjectId;
+use crate::recipe::{GitObjectId, Recipe};
 use crate::source_audit::{self, Budget};
 use crate::ContractError;
 
@@ -29,6 +32,8 @@ const MATERIALIZATION_TIMEOUT: Duration = Duration::from_mins(5);
 pub struct EngineFreeSourceRequest {
     /// Clean recursively audited AROS checkout selected by the producer recipe.
     pub source_root: PathBuf,
+    /// Recipe whose source commit and tree must bind the selected checkout.
+    pub recipe: Recipe,
     /// Absent output root for the source-owned (but engine-free) probe input.
     pub output_root: PathBuf,
 }
@@ -72,9 +77,14 @@ pub fn materialize_engine_free_source(
         })?;
     let source_root = inspection::directory(&request.source_root)?;
     let (commit, tree) = observed_identity(&source_root, deadline)?;
+    if request.recipe.source().0 != &commit || request.recipe.source().1 != &tree {
+        return Err(ContractError::identity(
+            "compatibility source checkout differs from the selected recipe source identity",
+        ));
+    }
     let checkout = Checkout::inspect(&source_root, (&commit, &tree), deadline)?;
-    let output_root = create_private_output_root(&request.output_root)?;
-    let mut copied = SourceCopy::new(&output_root);
+    let output = prepare_output(&source_root, &request.output_root)?;
+    let mut copied = SourceCopy::new(&output.staging);
     let mut budget = Budget::new(deadline);
     source_audit::visit(&checkout, &mut budget, 0, "", &mut |path, entry, bytes| {
         copied.copy(path, entry.mode, bytes)
@@ -84,18 +94,36 @@ pub fn materialize_engine_free_source(
             "selected compatibility source checkout has no committed top-level cmake directory",
         ));
     }
-    if fs::symlink_metadata(output_root.join("cmake")).is_ok() {
+    if fs::symlink_metadata(output.staging.join("cmake")).is_ok() {
         return Err(ContractError::compatibility(
             "engine-free compatibility source materialization retained a top-level cmake entry",
         ));
     }
-    let source_tree_sha256 = measure_tree_content_cas(&output_root)
+    copied.revalidate_links()?;
+    let source_tree_sha256 = measure_tree_content_cas(&output.staging)
         .map_err(|_| {
             ContractError::compatibility("cannot measure engine-free compatibility source material")
         })?
         .payload_digest_excluding(None);
+    publish_prepared_source_tree_noclobber(&output.staging, &output.destination).map_err(|_| {
+        ContractError::compatibility(
+            "cannot durably publish engine-free compatibility source material",
+        )
+    })?;
+    let published = measure_tree_content_cas(&output.destination)
+        .map_err(|_| {
+            ContractError::compatibility(
+                "cannot remeasure published engine-free compatibility source",
+            )
+        })?
+        .payload_digest_excluding(None);
+    if published != source_tree_sha256 {
+        return Err(ContractError::compatibility(
+            "published engine-free compatibility source differs from its staged digest",
+        ));
+    }
     Ok(EngineFreeSourceOutput {
-        root: output_root,
+        root: output.destination,
         source_commit: commit.as_str().to_owned(),
         source_tree: tree.as_str().to_owned(),
         source_tree_sha256,
@@ -134,7 +162,12 @@ fn observed_identity(
     ))
 }
 
-fn create_private_output_root(path: &Path) -> Result<PathBuf, ContractError> {
+struct PreparedOutput {
+    staging: PathBuf,
+    destination: PathBuf,
+}
+
+fn prepare_output(source_root: &Path, path: &Path) -> Result<PreparedOutput, ContractError> {
     if !path.is_absolute() {
         return Err(ContractError::compatibility(
             "engine-free compatibility source output must be absolute",
@@ -164,8 +197,13 @@ fn create_private_output_root(path: &Path) -> Result<PathBuf, ContractError> {
             "engine-free compatibility source output parent is not a real directory",
         )
     })?;
-    let root = parent.join(leaf);
-    match fs::symlink_metadata(&root) {
+    let destination = parent.join(leaf);
+    if destination.starts_with(source_root) || source_root.starts_with(&destination) {
+        return Err(ContractError::compatibility(
+            "engine-free compatibility source output cannot overlap the selected checkout",
+        ));
+    }
+    match fs::symlink_metadata(&destination) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Ok(_) => {
             return Err(ContractError::compatibility(
@@ -178,21 +216,42 @@ fn create_private_output_root(path: &Path) -> Result<PathBuf, ContractError> {
             ))
         }
     }
-    fs::create_dir(&root).map_err(|_| {
-        ContractError::compatibility("cannot create engine-free compatibility source output")
-    })?;
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|_| {
-        ContractError::compatibility("cannot make engine-free compatibility source output private")
-    })?;
-    open_directory(&root).map_err(|_| {
-        ContractError::compatibility("fresh engine-free compatibility source output is unsafe")
-    })?;
-    Ok(root)
+    for attempt in 1..=1024 {
+        let staging = parent.join(format!("aros-engine-free-source-stage-{attempt}"));
+        match fs::create_dir(&staging) {
+            Ok(()) => {
+                fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)).map_err(|_| {
+                    ContractError::compatibility(
+                        "cannot make engine-free compatibility source staging private",
+                    )
+                })?;
+                open_directory(&staging).map_err(|_| {
+                    ContractError::compatibility(
+                        "fresh engine-free compatibility source staging is unsafe",
+                    )
+                })?;
+                return Ok(PreparedOutput {
+                    staging,
+                    destination,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                return Err(ContractError::compatibility(
+                    "cannot create engine-free compatibility source staging",
+                ))
+            }
+        }
+    }
+    Err(ContractError::compatibility(
+        "cannot reserve a fresh engine-free compatibility source staging directory",
+    ))
 }
 
 struct SourceCopy<'a> {
     root: &'a Path,
     saw_engine_directory: bool,
+    links: Vec<PathBuf>,
 }
 
 impl<'a> SourceCopy<'a> {
@@ -200,6 +259,7 @@ impl<'a> SourceCopy<'a> {
         Self {
             root,
             saw_engine_directory: false,
+            links: Vec::new(),
         }
     }
 
@@ -233,11 +293,30 @@ impl<'a> SourceCopy<'a> {
                 )?;
             }
             "100644" | "100755" => write_regular(&destination, bytes, mode == "100755")?,
-            "120000" => write_symlink(self.root, path, &destination, bytes)?,
+            "120000" => {
+                write_symlink(self.root, path, &destination, bytes)?;
+                self.links.push(PathBuf::from(path));
+            }
             _ => {
                 return Err(ContractError::compatibility(
                     "committed compatibility source entry has an unsupported Git mode",
                 ))
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate_links(&self) -> Result<(), ContractError> {
+        for relative in &self.links {
+            let resolved = self.root.join(relative).canonicalize().map_err(|_| {
+                ContractError::compatibility(
+                    "committed compatibility source link is broken or forms a loop",
+                )
+            })?;
+            if !resolved.starts_with(self.root) || resolved.starts_with(self.root.join("cmake")) {
+                return Err(ContractError::compatibility(
+                    "committed compatibility source link resolves outside the engine-free snapshot",
+                ));
             }
         }
         Ok(())
@@ -300,7 +379,11 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use aros_common::sha256_bytes;
+    use serde_json::json;
+
     use super::{materialize_engine_free_source, EngineFreeSourceRequest};
+    use crate::recipe::Recipe;
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new("git")
@@ -319,6 +402,35 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    fn git_text(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn recipe_for(source: &Path) -> Recipe {
+        let mut document = json!({
+            "schema": "aros-toolchain-recipe-v2",
+            "source_commit": git_text(source, &["rev-parse", "HEAD^0"]),
+            "source_tree": git_text(source, &["rev-parse", "HEAD:"]),
+            "producer_commit": "1".repeat(40),
+            "producer_tree": "2".repeat(40),
+            "tools_commit": "3".repeat(40),
+            "tools_tree": "4".repeat(40),
+            "source_date_epoch": 946_684_800_u64,
+            "source_lock_sha256": "5".repeat(64),
+            "profiles_sha256": "6".repeat(64),
+            "patches": [],
+        });
+        let digest = sha256_bytes(&crate::canonical::bytes(&document).unwrap());
+        document["recipe_sha256"] = json!(digest.to_string());
+        Recipe::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
     }
 
     #[test]
@@ -343,21 +455,33 @@ mod tests {
         fs::set_permissions(source.join("configure"), mode).unwrap();
         git(&source, &["add", "."]);
         git(&source, &["commit", "-qm", "test: source"]);
+        let recipe = recipe_for(&source);
         fs::create_dir(source.join("untracked")).unwrap();
         fs::write(source.join("untracked/ignored"), "must not be copied").unwrap();
 
         let rejected_output = temporary.path().join("rejected-engine-free");
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: source.clone(),
+            recipe: recipe.clone(),
             output_root: rejected_output.clone(),
         })
         .is_err());
-        assert!(rejected_output.exists());
+        assert!(!rejected_output.exists());
         fs::remove_dir_all(source.join("untracked")).unwrap();
+
+        let overlap = source.join("engine-free-inside-source");
+        assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
+            source_root: source.clone(),
+            recipe: recipe.clone(),
+            output_root: overlap.clone(),
+        })
+        .is_err());
+        assert!(!overlap.exists());
 
         let output = temporary.path().join("engine-free");
         let result = materialize_engine_free_source(&EngineFreeSourceRequest {
-            source_root: source,
+            source_root: source.clone(),
+            recipe: recipe.clone(),
             output_root: output.clone(),
         })
         .unwrap();
@@ -377,11 +501,13 @@ mod tests {
         );
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
             source_root: result.root,
+            recipe: recipe.clone(),
             output_root: temporary.path().join("second"),
         })
         .is_err());
         assert!(materialize_engine_free_source(&EngineFreeSourceRequest {
-            source_root: temporary.path().join("source"),
+            source_root: source,
+            recipe,
             output_root: output,
         })
         .is_err());

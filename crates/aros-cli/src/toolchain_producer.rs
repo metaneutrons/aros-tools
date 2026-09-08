@@ -135,6 +135,9 @@ struct MaterializeEngineFreeSourceArgs {
     /// Clean exact AROS checkout selected by the producer recipe
     #[arg(long)]
     source_dir: PathBuf,
+    /// Self-digesting recipe-v2 binding the selected source checkout
+    #[arg(long)]
+    recipe: PathBuf,
     /// Absent output directory for the engine-free compatibility snapshot
     #[arg(long)]
     output_dir: PathBuf,
@@ -332,6 +335,8 @@ fn materialize_engine_free_source_stage(
 ) -> miette::Result<()> {
     let output = materialize_engine_free_source(&EngineFreeSourceRequest {
         source_root: args.source_dir,
+        recipe: Recipe::parse(&read_regular_input(&args.recipe, "recipe")?)
+            .map_err(|error| native_error(&error))?,
         output_root: args.output_dir,
     })
     .map_err(|error| native_error(&error))?;
@@ -539,26 +544,21 @@ fn verify_package(args: PackageArgs) -> miette::Result<()> {
 fn compare(args: &CompareArgs) -> miette::Result<()> {
     let comparison = release_index::compare_package_sets(&args.left, &args.right)
         .map_err(|error| native_error(&error))?;
-    let output = write_new_json(
-        &args.output,
-        &serde_json::json!({
-            "schema": "aros-toolchain-producer-comparison-v1",
-            "operation": "compare",
-            "byte_identical": true,
-            "members": comparison.members,
-        }),
-        "comparison receipt",
-    )?;
+    let receipt = release_index::write_package_comparison_report(&args.output, &comparison)
+        .map_err(|error| native_error(&error))?;
     match args.format {
         ResultFormat::Human => aros_common::outputln!(
-            "Native package comparison: byte-identical\nReceipt: {}",
-            output.display()
+            "Native package comparison: byte-identical\nReceipt: {}\nReceipt SHA-256: {}",
+            receipt.path.display(),
+            receipt.sha256
         ),
         ResultFormat::Json => print_json(&serde_json::json!({
             "schema": "aros-toolchain-producer-stage-v1",
             "operation": "compare",
             "byte_identical": true,
-            "receipt": output,
+            "receipt": receipt.path,
+            "receipt_sha256": receipt.sha256,
+            "package_set_sha256": comparison.package_set_sha256,
             "members": comparison.members,
         }))?,
     }
@@ -960,6 +960,8 @@ mod tests {
             "materialize-engine-free-source",
             "--source-dir",
             "/source",
+            "--recipe",
+            "/producer/recipe.json",
             "--output-dir",
             "/output/engine-free",
         ]);
@@ -1041,7 +1043,8 @@ mod tests {
         compare(&args).unwrap();
         let document: serde_json::Value =
             serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
-        assert_eq!(document["schema"], "aros-toolchain-producer-comparison-v1");
+        assert_eq!(document["schema"], 1);
+        assert_eq!(document["operation"], "compare");
         assert_eq!(document["members"].as_array().unwrap().len(), 4);
         assert!(compare(&args).is_err());
     }
