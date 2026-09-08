@@ -46,6 +46,8 @@ enum ProducerCommand {
     Cache(CacheArgs),
     /// Write the deterministic build-environment receipt embedded in a package
     Environment(EnvironmentArgs),
+    /// Read one recipe-bound producer profile without duplicating its selectors
+    Profile(ProfileArgs),
     /// Materialize an audited source snapshot without its source-tree CMake engine
     MaterializeEngineFreeSource(MaterializeEngineFreeSourceArgs),
     /// Create one deterministic local package set from a completed candidate
@@ -124,6 +126,23 @@ struct EnvironmentArgs {
     /// Absent receipt destination; an existing path is never replaced
     #[arg(long)]
     output: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
+/// Inputs for one recipe-bound profile selection.
+#[derive(Args)]
+struct ProfileArgs {
+    /// Self-digesting recipe-v2 JSON document
+    #[arg(long)]
+    recipe: PathBuf,
+    /// Profiles-v1 document bound by the selected recipe
+    #[arg(long)]
+    profiles: PathBuf,
+    /// Exact profile from the recipe-bound profiles matrix
+    #[arg(long)]
+    preset: String,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -319,6 +338,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Recipe(args) => recipe(args),
         ProducerCommand::Cache(args) => cache(args).await,
         ProducerCommand::Environment(args) => environment(&args),
+        ProducerCommand::Profile(args) => profile(&args),
         ProducerCommand::MaterializeEngineFreeSource(args) => {
             materialize_engine_free_source_stage(args)
         }
@@ -328,6 +348,44 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
+}
+
+fn profile(args: &ProfileArgs) -> miette::Result<()> {
+    let recipe = Recipe::parse(&read_regular_input(&args.recipe, "recipe")?)
+        .map_err(|error| native_error(&error))?;
+    let profiles_bytes = read_regular_input(&args.profiles, "profiles")?;
+    if sha256_bytes(&profiles_bytes) != *recipe.profiles_sha256() {
+        return Err(miette::miette!(
+            "native producer profiles differ from the selected recipe digest"
+        ));
+    }
+    let profiles = Profiles::parse(&profiles_bytes).map_err(|error| native_error(&error))?;
+    let selected = profiles
+        .select(&args.preset)
+        .map_err(|error| native_error(&error))?;
+    let document = serde_json::json!({
+        "schema": "aros-toolchain-producer-stage-v1",
+        "operation": "profile",
+        "preset": selected.name(),
+        "upstream_commit": profiles.upstream_commit(),
+        "configure_target": selected.configure_target(),
+        "upstream_output_target": selected.upstream_output_target(),
+        "target_triple": selected.target_triple(),
+        "cpu": selected.cpu(),
+        "platform": selected.platform(),
+        "float_abi": selected.float_abi(),
+        "capabilities": selected.capabilities(),
+    });
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native profile: {}\nUpstream commit: {}\nTarget: {}",
+            selected.name(),
+            profiles.upstream_commit().as_str(),
+            selected.target_triple(),
+        ),
+        ResultFormat::Json => print_json(&document)?,
+    }
+    Ok(())
 }
 
 fn materialize_engine_free_source_stage(
@@ -922,6 +980,21 @@ mod tests {
             "--verify-only",
         ]);
         assert!(cache.is_ok());
+        let profile = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "profile",
+            "--recipe",
+            "/producer/recipe.json",
+            "--profiles",
+            "/producer/toolchains/profiles.json",
+            "--preset",
+            "pc-x86_64",
+            "--format",
+            "json",
+        ]);
+        assert!(profile.is_ok());
         let package = Cli::try_parse_from([
             "aros",
             "toolchain",
