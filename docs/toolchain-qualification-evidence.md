@@ -120,3 +120,10 @@ process started, its durable logs remain available for diagnosis. Existing
 report outputs are rejected rather than adopted or overwritten. This is still
 the reusable process/report boundary; the following M5 work supplies the
 concrete CMake, upstream, standalone and relocation commands.
+
+The harness accepts only one closed probe set: consumer CMake, upstream
+configure, upstream includes, upstream link libraries, standalone C and
+standalone C++. Each phase occurs exactly once and binds the same revalidated
+engine/helper preparation. It runs them in this dependency order. A failed
+phase retains its diagnostic logs and every prior success report, then prevents
+later phases from starting; a caller cannot silently omit or retry a phase.

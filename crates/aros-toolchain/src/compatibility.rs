@@ -51,6 +51,14 @@ const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
 const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v2";
+const REQUIRED_PROBE_PHASES: [CompatibilityPhase; 6] = [
+    CompatibilityPhase::CmakeConsumer,
+    CompatibilityPhase::UpstreamConfigure,
+    CompatibilityPhase::UpstreamIncludes,
+    CompatibilityPhase::UpstreamLinklibs,
+    CompatibilityPhase::StandaloneC,
+    CompatibilityPhase::StandaloneCxx,
+];
 
 /// Explicit roots for preparing a tools-owned compatibility probe.
 #[derive(Debug, Clone)]
@@ -234,7 +242,7 @@ pub fn prepare(
 }
 
 /// Closed phases that may emit a compatibility report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompatibilityPhase {
     /// Configure a consumer through the embedded tools-owned CMake engine.
@@ -286,6 +294,23 @@ pub struct CompatibilityProbeRequest {
     pub timeout: Duration,
     /// Already checked engine/helper identities this probe is bound to.
     pub preparation: CompatibilityPreparation,
+}
+
+/// One closed, complete set of compatibility process requests.
+///
+/// Every M5.2 phase must appear exactly once. The set is a process harness
+/// boundary, not a source, package, toolchain, release or publication API.
+#[derive(Debug, Clone)]
+pub struct CompatibilityProbeSetRequest {
+    /// The six exact phase requests, in any caller-provided order.
+    pub probes: Vec<CompatibilityProbeRequest>,
+}
+
+/// Reports from one completed closed compatibility probe set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityProbeSet {
+    /// Exactly one successful report for every required M5.2 phase.
+    pub reports: BTreeMap<CompatibilityPhase, CompatibilityProbeReport>,
 }
 
 /// Measured helper identity written into a compatibility report without paths.
@@ -489,6 +514,63 @@ pub fn run_probe(
         ));
     }
     Ok(report)
+}
+
+/// Run the complete closed M5.2 compatibility probe set.
+///
+/// The request must name each consumer-CMake, upstream configure/includes/
+/// linklibs and standalone C/C++ phase exactly once. All phases must bind the
+/// same revalidated engine/helper preparation. Phases execute in their fixed
+/// dependency order. A failure retains every already-written log/report and
+/// starts no later phase; the function never skips, retries, overwrites or
+/// adopts a report.
+///
+/// # Errors
+///
+/// Returns AX0703 for an incomplete, duplicate or mixed request, or when a
+/// child phase fails. It has no source, cache, network, tag or publication
+/// authority.
+pub fn run_probe_set(
+    request: &CompatibilityProbeSetRequest,
+    cancellation: &CancellationToken,
+) -> Result<CompatibilityProbeSet, ContractError> {
+    let mut probes = BTreeMap::new();
+    for probe in &request.probes {
+        if probes.insert(probe.phase, probe).is_some() {
+            return Err(ContractError::compatibility(
+                "compatibility probe set repeats a closed phase",
+            ));
+        }
+    }
+    let required = REQUIRED_PROBE_PHASES.into_iter().collect::<BTreeSet<_>>();
+    if probes.keys().copied().collect::<BTreeSet<_>>() != required {
+        return Err(ContractError::compatibility(
+            "compatibility probe set does not contain every required phase exactly once",
+        ));
+    }
+    let expected_preparation = probes
+        .get(&CompatibilityPhase::CmakeConsumer)
+        .ok_or_else(|| {
+            ContractError::compatibility("compatibility probe set has no consumer CMake phase")
+        })?
+        .preparation
+        .clone();
+    if probes
+        .values()
+        .any(|probe| probe.preparation != expected_preparation)
+    {
+        return Err(ContractError::compatibility(
+            "compatibility probe set mixes engine or helper preparation identities",
+        ));
+    }
+    let mut reports = BTreeMap::new();
+    for phase in REQUIRED_PROBE_PHASES {
+        let probe = probes.get(&phase).ok_or_else(|| {
+            ContractError::compatibility("compatibility probe set lost a required phase")
+        })?;
+        reports.insert(phase, run_probe(probe, cancellation)?);
+    }
+    Ok(CompatibilityProbeSet { reports })
 }
 
 #[derive(Debug)]
@@ -1061,9 +1143,9 @@ mod tests {
     use aros_common::{CancellationToken, DiagnosticCode};
 
     use super::{
-        prepare, run_probe, verify_materialized_engine, CompatibilityPhase,
+        prepare, run_probe, run_probe_set, verify_materialized_engine, CompatibilityPhase,
         CompatibilityPreparation, CompatibilityPreparationRequest, CompatibilityProbeReport,
-        CompatibilityProbeRequest, REQUIRED_HELPERS,
+        CompatibilityProbeRequest, CompatibilityProbeSetRequest, REQUIRED_HELPERS,
     };
 
     fn request(root: &std::path::Path) -> CompatibilityPreparationRequest {
@@ -1288,6 +1370,91 @@ mod tests {
             br#"{\"schema\":\"aros-toolchain-compatibility-report-v2\",\"unexpected\":true}"#;
         let error = CompatibilityProbeReport::parse(malformed).unwrap_err();
         assert_compatibility(&error);
+    }
+
+    #[test]
+    fn probe_set_requires_every_phase_once_and_stops_after_a_failure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let preparation_request = request(temporary.path());
+        let preparation = prepare(&preparation_request).unwrap();
+        let successful = complete_probe_requests(temporary.path(), &preparation, None);
+        let completed = run_probe_set(
+            &CompatibilityProbeSetRequest {
+                probes: successful.clone(),
+            },
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        assert_eq!(completed.reports.len(), 6);
+        assert!(completed
+            .reports
+            .contains_key(&CompatibilityPhase::StandaloneCxx));
+
+        let incomplete = CompatibilityProbeSetRequest {
+            probes: successful[..5].to_vec(),
+        };
+        let error = run_probe_set(&incomplete, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
+        let mut repeated = successful.clone();
+        repeated.push(successful[0].clone());
+        let error = run_probe_set(
+            &CompatibilityProbeSetRequest { probes: repeated },
+            &CancellationToken::default(),
+        )
+        .unwrap_err();
+        assert_compatibility(&error);
+
+        let failed_root = tempfile::tempdir().unwrap();
+        let failed_request = request(failed_root.path());
+        let failed = complete_probe_requests(
+            failed_root.path(),
+            &prepare(&failed_request).unwrap(),
+            Some(CompatibilityPhase::UpstreamIncludes),
+        );
+        let error = run_probe_set(
+            &CompatibilityProbeSetRequest { probes: failed },
+            &CancellationToken::default(),
+        )
+        .unwrap_err();
+        assert_compatibility(&error);
+        let reports = failed_root.path().join("reports");
+        assert!(reports.join("cmake-consumer.report.json").is_file());
+        assert!(reports.join("upstream-configure.report.json").is_file());
+        assert!(reports.join("upstream-includes.stderr.log").is_file());
+        assert!(!reports.join("upstream-includes.report.json").exists());
+        assert!(!reports.join("upstream-linklibs.report.json").exists());
+    }
+
+    fn complete_probe_requests(
+        root: &std::path::Path,
+        preparation: &CompatibilityPreparation,
+        failing: Option<CompatibilityPhase>,
+    ) -> Vec<CompatibilityProbeRequest> {
+        [
+            CompatibilityPhase::CmakeConsumer,
+            CompatibilityPhase::UpstreamConfigure,
+            CompatibilityPhase::UpstreamIncludes,
+            CompatibilityPhase::UpstreamLinklibs,
+            CompatibilityPhase::StandaloneC,
+            CompatibilityPhase::StandaloneCxx,
+        ]
+        .into_iter()
+        .map(|phase| {
+            let body = if Some(phase) == failing {
+                "printf failure >&2; exit 7"
+            } else {
+                "[ \"$PATH\" = /nonexistent ] || exit 9; printf success"
+            };
+            probe_request(
+                root,
+                preparation.clone(),
+                phase,
+                script(root, &format!("{phase:?}"), body),
+                Duration::from_secs(1),
+            )
+        })
+        .collect()
     }
 
     fn probe_request(
