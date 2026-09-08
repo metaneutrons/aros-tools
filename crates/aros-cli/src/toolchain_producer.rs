@@ -354,6 +354,9 @@ struct RecordQualificationArgs {
     /// Observed annotated source tag object identity
     #[arg(long)]
     source_tag_object: String,
+    /// Observed peeled source tag commit identity
+    #[arg(long)]
+    source_tag_commit: String,
     /// Credential-free HTTPS repository accepted by the external attestation verifier
     #[arg(long)]
     attestation_repository: String,
@@ -987,6 +990,12 @@ fn record_qualification(args: &RecordQualificationArgs) -> miette::Result<()> {
         "provenance bundle",
     )?;
     let source_tag_object = parse_git_object(&args.source_tag_object, "source tag object")?;
+    let source_tag_commit = parse_git_object(&args.source_tag_commit, "source tag commit")?;
+    if source_tag_commit != producer_commit {
+        return Err(miette::miette!(
+            "native qualification evidence source tag does not peel to the release-index producer commit"
+        ));
+    }
     let attestation = AttestationClaim {
         repository: args.attestation_repository.clone(),
         workflow: args.attestation_workflow.clone(),
@@ -1812,6 +1821,8 @@ mod tests {
             "--source-tag",
             "toolchain-v1-source",
             "--source-tag-object",
+            "0123456789012345678901234567890123456789",
+            "--source-tag-commit",
             "0123456789012345678901234567890123456789",
             "--attestation-repository",
             "https://github.com/metaneutrons/aros-toolchains",
