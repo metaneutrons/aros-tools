@@ -1,31 +1,30 @@
 # Development handoff
 
-Checkpoint verified on 2026-09-07. This is a compact entry point, not a second
+Checkpoint verified on 2026-09-08. This is a compact entry point, not a second
 backlog, live CI dashboard or authorization to build, merge or publish.
 Recheck linked issues and runs before acting; replace stale checkpoint text
 instead of appending session history. Git history preserves earlier versions.
 
 ## Last verified implementation checkpoint
 
-- Baseline: [`0fa0a37375afc00aafe2c848f1a2a58896d05512`](https://github.com/metaneutrons/aros-tools/commit/0fa0a37375afc00aafe2c848f1a2a58896d05512),
-  the merged [PR #72](https://github.com/metaneutrons/aros-tools/pull/72).
-- TCP-M0 through TCP-M4 are accepted. M3 local-build limits are recorded in
+- Baseline: [`3a229c9ae76849393d9051edfcf298ca1b0d488f`](https://github.com/metaneutrons/aros-tools/commit/3a229c9ae76849393d9051edfcf298ca1b0d488f),
+  the merged [PR #93](https://github.com/metaneutrons/aros-tools/pull/93).
+- TCP-M0 through TCP-M5 are accepted. M3 local-build limits are recorded in
   [the TCP-M3 evidence ledger](docs/tcp-m3-native-evidence.md); M4 native
   packaging/read-back results and its strict boundary are recorded in
-  [the TCP-M4 evidence ledger](docs/tcp-m4-native-evidence.md).
-- M4 owns deterministic synthetic package inventory, manifests, sidecars,
-  SBOMs and bounded archive read-back. The integrated main checkpoint is
-  [Workspace CI run 34165692830](https://github.com/metaneutrons/aros-tools/actions/runs/34165692830),
-  green on exactly the baseline commit. Its preceding four-host M4
-  qualification is recorded in the evidence ledger.
-- This remains neither compiler nor release qualification: it creates no tag,
-  publication, attestation, A/B result or hardware evidence.
+  [the TCP-M4 evidence ledger](docs/tcp-m4-native-evidence.md). M5 native
+  compatibility execution, evidence-bound replay/repackage and source-aware
+  checkpoints are recorded in [the TCP-M5 evidence ledger](docs/tcp-m5-native-evidence.md).
+- M5 does not qualify a distributable compiler or release. There is no tag,
+  publication, live A/B result or hardware evidence. The fresh 12-lane,
+  four-host/three-profile release qualification remains TCP-M7 work.
 
 ## Next bounded action
 
-Begin TCP-M5 from the accepted M4 package boundary. Port compatibility,
-replay and recovery without treating the M4 synthetic envelopes as released
-toolchains. Keep all release, A/B and publication gates pending until TCP-M7.
+Begin TCP-M6 only after rechecking the accepted M5 boundary and its linked
+issues. Cut over workflow use without treating any synthetic envelope as a
+released toolchain. Keep all release, A/B and publication gates pending until
+TCP-M7.
 
 ## Resume safely
 
