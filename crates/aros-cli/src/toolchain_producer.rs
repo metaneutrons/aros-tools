@@ -1148,7 +1148,7 @@ fn inventory_document(
         .iter()
         .find(|asset| asset.name == name)
         .ok_or_else(|| miette::miette!("native qualification evidence is missing {label}"))?;
-    let bytes = read_regular_input(&release_dir.join(name), label)?;
+    let bytes = read_bounded_regular_input(&release_dir.join(name), label)?;
     if sha256_bytes(&bytes) != expected.sha256 || bytes.len() as u64 != expected.size {
         return Err(miette::miette!(
             "native qualification evidence {label} changed after final inventory measurement"
