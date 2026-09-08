@@ -1207,6 +1207,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn verified_package_extraction_revalidates_and_retains_a_fresh_payload_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        write_fixture_candidate(&candidate);
+        let package_request = PackageRequest {
+            candidate_root: candidate,
+            output_dir: temporary.path().join("package"),
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let packaged = package(&package_request).unwrap();
+        let verification = crate::package_verify::PackageVerificationRequest {
+            package_dir: packaged.output_dir,
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let extraction = crate::package_extract::PackageExtractionRequest {
+            verification,
+            output_root: temporary.path().join("relocated"),
+        };
+
+        let extracted = crate::package_extract::verify_and_extract(&extraction).unwrap();
+
+        assert_eq!(
+            fs::read(extracted.root.join("share/Größe/marker-ä.txt")).unwrap(),
+            b"AROS tree fixture\n"
+        );
+        assert_eq!(
+            fs::read_link(extracted.root.join("share/vector-link")).unwrap(),
+            PathBuf::from("Größe/marker-ä.txt")
+        );
+        assert!(extracted.root.join(AROS_TOOLCHAIN_MANIFEST_FILE).is_file());
+        assert!(crate::package_extract::verify_and_extract(&extraction).is_err());
+        assert!(extracted.root.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn package_rejects_cross_chunk_prefixes_case_collisions_and_existing_outputs() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("candidate");
