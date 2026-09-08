@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use aros_common::{
-    exit_signal, open_regular_file_nofollow, publish_atomic_file,
+    exit_signal, measure_tree_content_cas, open_regular_file_nofollow, publish_atomic_file,
     run_output_with_input_and_control, sha256_bytes, sha256_reader, AtomicFilePolicy,
     CancellationToken, DiagnosticContext, Sha256Digest,
 };
@@ -50,7 +50,7 @@ const MAX_PROBE_ENVIRONMENT_BYTES: usize = 64 * 1024;
 const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
-const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v2";
+const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v3";
 const REQUIRED_PROBE_PHASES: [CompatibilityPhase; 6] = [
     CompatibilityPhase::CmakeConsumer,
     CompatibilityPhase::UpstreamConfigure,
@@ -85,6 +85,10 @@ pub struct HelperIdentity {
 /// Verified tools-owned engine and helper identities for a later probe runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityPreparation {
+    /// Engine-free source tree selected for the compatibility run.
+    pub source_root: PathBuf,
+    /// Content-only digest of the selected source tree before any probe starts.
+    pub source_tree_sha256: Sha256Digest,
     /// Fresh materialized engine root, distinct from the source tree.
     pub engine_root: PathBuf,
     /// Embedded engine API version selected by this tools build.
@@ -209,6 +213,13 @@ pub fn prepare(
         ));
     }
     reject_source_tree_engine(&source_root)?;
+    let source_tree_sha256 = measure_tree_content_cas(&source_root)
+        .map_err(|_| {
+            ContractError::compatibility(
+                "cannot measure the engine-free compatibility source tree without following links",
+            )
+        })?
+        .payload_digest_excluding(None);
 
     let engine_root = work_root.join(ENGINE_DIRECTORY);
     if engine_root.exists() || fs::symlink_metadata(&engine_root).is_ok() {
@@ -234,6 +245,8 @@ pub fn prepare(
 
     let helpers = resolve_helpers(&helpers_root)?;
     Ok(CompatibilityPreparation {
+        source_root,
+        source_tree_sha256,
         engine_root,
         engine_api_version: aros_cmake_engine::api_version(),
         engine_sha256,
@@ -335,6 +348,8 @@ pub struct CompatibilityProbeReport {
     pub engine_api_version: u32,
     /// Embedded engine digest bound to this process.
     pub engine_sha256: Sha256Digest,
+    /// Content-only digest of the engine-free source tree bound to this process.
+    pub source_tree_sha256: Sha256Digest,
     /// Exact fixed helper identity set without workstation paths.
     pub helpers: BTreeMap<String, CompatibilityHelperReport>,
     /// SHA-256 of the validated program file.
@@ -413,8 +428,12 @@ pub fn run_probe(
     let reports_root = checked_directory(&request.reports_root, "compatibility report directory")?;
     let preparation_roots = validate_preparation(&request.preparation)?;
     if current_dir == reports_root
-        || reports_root == preparation_roots.engine_root
-        || reports_root == preparation_roots.helpers_root
+        || current_dir == preparation_roots.source
+        || current_dir == preparation_roots.engine
+        || current_dir == preparation_roots.helpers
+        || reports_root == preparation_roots.source
+        || reports_root == preparation_roots.engine
+        || reports_root == preparation_roots.helpers
     {
         return Err(ContractError::compatibility(
             "compatibility process, report, engine, and helper directories must remain separate",
@@ -478,6 +497,7 @@ pub fn run_probe(
         phase: request.phase,
         engine_api_version: request.preparation.engine_api_version,
         engine_sha256: request.preparation.engine_sha256.clone(),
+        source_tree_sha256: request.preparation.source_tree_sha256.clone(),
         helpers: request
             .preparation
             .helpers
@@ -575,8 +595,9 @@ pub fn run_probe_set(
 
 #[derive(Debug)]
 struct CompatibilityPreparationRoots {
-    engine_root: PathBuf,
-    helpers_root: PathBuf,
+    source: PathBuf,
+    engine: PathBuf,
+    helpers: PathBuf,
 }
 
 fn validate_probe_request(request: &CompatibilityProbeRequest) -> Result<(), ContractError> {
@@ -661,6 +682,21 @@ fn validate_preparation(
             "compatibility preparation uses an engine digest different from this tools build",
         ));
     }
+    let source_root = checked_directory(&preparation.source_root, "compatibility source root")?;
+    reject_source_tree_engine(&source_root)?;
+    let measured_source_tree_sha256 = measure_tree_content_cas(&source_root)
+        .map_err(|_| {
+            ContractError::compatibility(
+                "cannot remeasure the engine-free compatibility source tree without following links",
+            )
+        })?
+        .payload_digest_excluding(None);
+    if measured_source_tree_sha256 != preparation.source_tree_sha256 {
+        return Err(ContractError::compatibility(
+            "compatibility source tree changed after preparation",
+        ));
+    }
+
     let engine_root = checked_directory(&preparation.engine_root, "compatibility engine root")?;
     verify_materialized_engine(&engine_root, &preparation.engine_sha256)?;
 
@@ -713,8 +749,9 @@ fn validate_preparation(
         ContractError::compatibility("compatibility preparation does not provide a helper root")
     })?;
     Ok(CompatibilityPreparationRoots {
-        engine_root,
-        helpers_root,
+        source: source_root,
+        engine: engine_root,
+        helpers: helpers_root,
     })
 }
 
@@ -1236,6 +1273,7 @@ mod tests {
 
         let report = run_probe(&probe, &CancellationToken::default()).unwrap();
         assert_eq!(report.engine_sha256, preparation.engine_sha256);
+        assert_eq!(report.source_tree_sha256, preparation.source_tree_sha256);
         assert_eq!(report.helpers.len(), REQUIRED_HELPERS.len());
         let bytes = fs::read(probe.reports_root.join("cmake-consumer.report.json")).unwrap();
         assert!(bytes.ends_with(b"\n"));
@@ -1335,6 +1373,27 @@ mod tests {
         let error = run_probe(&changed, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
+        let source_changed_root = temporary.path().join("source-changed");
+        fs::create_dir(&source_changed_root).unwrap();
+        let source_changed_request = request(&source_changed_root);
+        let source_changed_preparation = prepare(&source_changed_request).unwrap();
+        fs::write(
+            source_changed_preparation
+                .source_root
+                .join("unexpected-source-change"),
+            b"changed source\n",
+        )
+        .unwrap();
+        let changed_source = probe_request(
+            &source_changed_root,
+            source_changed_preparation,
+            CompatibilityPhase::CmakeConsumer,
+            script(temporary.path(), "changed-source-probe", "exit 0"),
+            Duration::from_secs(1),
+        );
+        let error = run_probe(&changed_source, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
         let separate = temporary.path().join("separate");
         fs::create_dir(&separate).unwrap();
         let second_request = request(&separate);
@@ -1367,7 +1426,7 @@ mod tests {
         assert_compatibility(&error);
 
         let malformed =
-            br#"{\"schema\":\"aros-toolchain-compatibility-report-v2\",\"unexpected\":true}"#;
+            br#"{\"schema\":\"aros-toolchain-compatibility-report-v3\",\"unexpected\":true}"#;
         let error = CompatibilityProbeReport::parse(malformed).unwrap_err();
         assert_compatibility(&error);
     }
