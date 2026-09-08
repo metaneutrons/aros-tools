@@ -487,7 +487,10 @@ fn run_git(
         })
 }
 
-fn observed_identity(
+/// Read one checkout's current root, commit and tree through bounded Git
+/// plumbing. Callers that consume source bytes must still construct a
+/// [`Checkout`] and run the relevant raw-source audit.
+pub fn observed_identity(
     root: &Path,
     deadline: Instant,
     cancellation: &CancellationToken,

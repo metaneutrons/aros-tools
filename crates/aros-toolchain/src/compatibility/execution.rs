@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
 use serde::{Deserialize, Serialize};
@@ -24,10 +24,13 @@ use super::{
 };
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
-use crate::{canonical, ContractError};
+use crate::recipe::GitObjectId;
+use crate::source_audit::{self, Budget as SourceAuditBudget};
+use crate::{canonical, inspection, ContractError};
 
 const POISONED_PATH: &str = "/nonexistent";
 const MAX_MAKE_JOBS: usize = 64;
+const UPSTREAM_SOURCE_AUDIT_TIMEOUT: Duration = Duration::from_mins(5);
 const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v1";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
@@ -61,6 +64,8 @@ pub struct NativeCompatibilityRequest {
     pub cmake_build_root: PathBuf,
     /// Separate pristine upstream source tree containing the `configure` script.
     pub upstream_source_root: PathBuf,
+    /// Exact upstream commit selected by the recipe-bound profiles matrix.
+    pub upstream_source_commit: GitObjectId,
     /// Empty upstream build directory to create.
     pub upstream_build_root: PathBuf,
     /// Exact closed Python runtime for upstream configure and Make.
@@ -105,6 +110,8 @@ pub struct CompatibilityReceipt {
 struct CompatibilityReceiptDocument {
     schema: String,
     operation: String,
+    upstream_source_commit: String,
+    upstream_source_tree: String,
     phase_reports: Vec<CompatibilityReceiptPhase>,
     standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
 }
@@ -234,7 +241,20 @@ pub fn execute_native_compatibility(
         output_root: outputs.standalone,
         targets: standalone.outputs,
     })?;
-    let receipt = write_compatibility_receipt(&outputs.reports, &probes, &standalone)?;
+    let revalidated_tree =
+        verify_pristine_upstream_source(&inputs.upstream_source, &inputs.upstream_source_commit)?;
+    if revalidated_tree != inputs.upstream_source_tree {
+        return Err(ContractError::compatibility(
+            "pristine upstream source tree changed during native compatibility execution",
+        ));
+    }
+    let receipt = write_compatibility_receipt(
+        &outputs.reports,
+        &probes,
+        &standalone,
+        &inputs.upstream_source_commit,
+        &inputs.upstream_source_tree,
+    )?;
     Ok(NativeCompatibilityReport {
         probes,
         standalone,
@@ -246,6 +266,8 @@ fn write_compatibility_receipt(
     reports_root: &Path,
     probes: &CompatibilityProbeSet,
     standalone: &StandaloneOutputReport,
+    upstream_source_commit: &GitObjectId,
+    upstream_source_tree: &GitObjectId,
 ) -> Result<CompatibilityReceipt, ContractError> {
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
@@ -287,6 +309,8 @@ fn write_compatibility_receipt(
     let document = CompatibilityReceiptDocument {
         schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
         operation: "native-compatibility".into(),
+        upstream_source_commit: upstream_source_commit.as_str().into(),
+        upstream_source_tree: upstream_source_tree.as_str().into(),
         phase_reports,
         standalone_targets,
     };
@@ -342,6 +366,13 @@ impl CompatibilityReceiptDocument {
                 "native compatibility receipt has an unsupported schema or operation",
             ));
         }
+        for identity in [&self.upstream_source_commit, &self.upstream_source_tree] {
+            if GitObjectId::try_from(identity.clone()).is_err() {
+                return Err(ContractError::compatibility(
+                    "native compatibility receipt contains an invalid upstream source identity",
+                ));
+            }
+        }
         if self.phase_reports.len() != super::REQUIRED_PROBE_PHASES.len()
             || self
                 .phase_reports
@@ -393,6 +424,8 @@ struct Inputs {
     cmake_toolchain_root: PathBuf,
     upstream_toolchain_root: PathBuf,
     upstream_source: PathBuf,
+    upstream_source_commit: GitObjectId,
+    upstream_source_tree: GitObjectId,
     configure: PathBuf,
     cmake: PathBuf,
     ninja: PathBuf,
@@ -445,6 +478,8 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         &request.upstream_source_root,
         "pristine upstream compatibility source root",
     )?;
+    let upstream_source_tree =
+        verify_pristine_upstream_source(&upstream_source, &request.upstream_source_commit)?;
     if upstream_source == request.preparation.source_root
         || upstream_source == request.preparation.engine_root
         || upstream_source == cmake_toolchain_root
@@ -481,12 +516,37 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         cmake_toolchain_root,
         upstream_toolchain_root,
         upstream_source,
+        upstream_source_commit: request.upstream_source_commit.clone(),
+        upstream_source_tree,
         configure,
         cmake,
         ninja,
         standalone_c,
         standalone_cxx,
     })
+}
+
+fn verify_pristine_upstream_source(
+    root: &Path,
+    expected_commit: &GitObjectId,
+) -> Result<GitObjectId, ContractError> {
+    let deadline = Instant::now()
+        .checked_add(UPSTREAM_SOURCE_AUDIT_TIMEOUT)
+        .ok_or_else(|| {
+            ContractError::preflight("upstream source audit deadline is not representable")
+        })?;
+    let cancellation = CancellationToken::default();
+    let (commit, tree) = inspection::observed_identity(root, deadline, &cancellation)?;
+    if &commit != expected_commit {
+        return Err(ContractError::identity(
+            "pristine upstream source commit differs from the recipe-bound profiles matrix",
+        ));
+    }
+    let checkout =
+        inspection::Checkout::inspect_controlled(root, (&commit, &tree), deadline, &cancellation)?;
+    let mut budget = SourceAuditBudget::controlled(deadline, &cancellation);
+    source_audit::verify(&checkout, &mut budget, 0)?;
+    Ok(tree)
 }
 
 fn create_output_roots(
@@ -898,6 +958,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::Duration;
 
     use aros_common::{sha256_file, ArosToolchainManifest, CancellationToken};
@@ -985,6 +1046,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_a_dirty_or_mismatched_pristine_upstream_source_before_any_child_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (dirty, _, _) = request(temporary.path());
+        fs::write(dirty.upstream_source_root.join("configure"), "exit 0\n").unwrap();
+        assert!(execute_native_compatibility(&dirty, &CancellationToken::default()).is_err());
+        assert!(!dirty.reports_root.exists());
+
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut mismatched, _, _) = request(temporary.path());
+        mismatched.upstream_source_commit =
+            crate::recipe::GitObjectId::try_from("f".repeat(40)).unwrap();
+        assert!(execute_native_compatibility(&mismatched, &CancellationToken::default()).is_err());
+        assert!(!mismatched.reports_root.exists());
+    }
+
     fn request(root: &Path) -> (NativeCompatibilityRequest, PathBuf, PathBuf) {
         let source = root.join("engine-free-source");
         let engine_work = root.join("engine-work");
@@ -1056,6 +1133,15 @@ mod tests {
             &upstream.join("configure"),
             "[ \"$PATH\" != /nonexistent ] || exit 20\npython3 -S -P -c 'import mako, markupsafe'",
         );
+        git(&upstream, &["init", "-q"]);
+        git(&upstream, &["config", "user.email", "test@example.invalid"]);
+        git(&upstream, &["config", "user.name", "AROS Tools Test"]);
+        git(&upstream, &["add", "configure"]);
+        git(
+            &upstream,
+            &["commit", "-qm", "test: pristine upstream source"],
+        );
+        let upstream_commit = git_output(&upstream, &["rev-parse", "HEAD"]);
         let cmake_log = root.join("cmake-arguments.log");
         let cmake = root.join("cmake");
         script(
@@ -1090,7 +1176,19 @@ mod tests {
         fs::write(&c_fixture, b"int main(void) { return 0; }\n").unwrap();
         fs::write(&cxx_fixture, b"int main() { return 0; }\n").unwrap();
         let profiles = Profiles::parse(
-            br#"{"schema":"aros-toolchain-profiles-v1","upstream_commit":"1111111111111111111111111111111111111111","profiles":[{"name":"pc-x86_64","configure_target":"pc-x86_64","upstream_output_target":"pc-x86_64","target_triple":"x86_64-unknown-aros","cpu":"x86_64","platform":"pc","float_abi":"","capabilities":["c","cxx","standalone-collector"]}]}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "aros-toolchain-profiles-v1",
+                "upstream_commit": upstream_commit,
+                "profiles": [{
+                    "name": "pc-x86_64", "configure_target": "pc-x86_64",
+                    "upstream_output_target": "pc-x86_64",
+                    "target_triple": "x86_64-unknown-aros", "cpu": "x86_64",
+                    "platform": "pc", "float_abi": "",
+                    "capabilities": ["c", "cxx", "standalone-collector"]
+                }]
+            }))
+            .unwrap()
+            .as_slice(),
         )
         .unwrap();
         (
@@ -1102,6 +1200,7 @@ mod tests {
                 ninja_program: ninja,
                 cmake_build_root: root.join("cmake-build"),
                 upstream_source_root: upstream,
+                upstream_source_commit: profiles.upstream_commit().clone(),
                 upstream_build_root: root.join("upstream-build"),
                 host_python: python,
                 host_tools: closure,
@@ -1117,6 +1216,25 @@ mod tests {
             cmake_log,
             make_log,
         )
+    }
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn git_output(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
     fn manifest() -> ArosToolchainManifest {
