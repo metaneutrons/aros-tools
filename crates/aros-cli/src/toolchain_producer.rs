@@ -7,7 +7,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1323,7 +1323,9 @@ fn read_bounded_regular_input(path: &std::path::Path, label: &str) -> miette::Re
         ));
     }
     let mut bytes = Vec::with_capacity(before as usize);
-    std::io::Read::read_to_end(&mut file, &mut bytes)
+    std::io::Read::by_ref(&mut file)
+        .take(aros_toolchain::canonical::MAX_DOCUMENT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| miette::miette!("native qualification evidence {label} cannot be read"))?;
     let after = file
         .metadata()
@@ -1331,7 +1333,10 @@ fn read_bounded_regular_input(path: &std::path::Path, label: &str) -> miette::Re
             miette::miette!("native qualification evidence {label} cannot be re-inspected")
         })?
         .len();
-    if after != before || bytes.len() as u64 != before {
+    if bytes.len() > aros_toolchain::canonical::MAX_DOCUMENT_BYTES
+        || after != before
+        || bytes.len() as u64 != before
+    {
         return Err(miette::miette!(
             "native qualification evidence {label} changed while it was read"
         ));

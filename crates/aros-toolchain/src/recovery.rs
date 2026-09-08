@@ -435,9 +435,11 @@ fn read_bounded_release_asset(path: &Path) -> Result<Vec<u8>, ContractError> {
         ContractError::recovery("recovery metadata asset exceeds addressable memory")
     })?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)
+    file.by_ref()
+        .take(MAX_CHECKSUM_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| ContractError::recovery("cannot read recovery metadata asset"))?;
-    if u64::try_from(bytes.len()).ok() != Some(size) {
+    if bytes.len() > MAX_CHECKSUM_BYTES || u64::try_from(bytes.len()).ok() != Some(size) {
         return Err(ContractError::recovery(
             "recovery metadata asset changed while it was read",
         ));
