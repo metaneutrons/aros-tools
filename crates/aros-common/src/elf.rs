@@ -20,6 +20,11 @@ pub enum Class {
     Elf64,
 }
 
+/// ELF OS ABI value assigned to AROS.
+pub const OS_ABI_AROS: u8 = 15;
+/// AROS ABI revision emitted by the supported toolchains.
+pub const AROS_ABI_VERSION: u8 = 1;
+
 impl Class {
     /// Bytes per pointer.
     #[must_use]
@@ -105,6 +110,10 @@ pub struct Symbol {
 #[derive(Debug, Clone)]
 pub struct Object {
     pub class: Class,
+    /// ELF `EI_OSABI` byte from the object identity.
+    pub os_abi: u8,
+    /// ELF `EI_ABIVERSION` byte from the object identity.
+    pub abi_version: u8,
     /// Section headers in index order, index 0 included.
     pub sections: Vec<Section>,
     /// Symbols from `.symtab`, in symbol-table order.
@@ -207,6 +216,8 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
     if shoff == 0 || shentsize == 0 {
         return Ok(Object {
             class,
+            os_abi: bytes[7],
+            abi_version: bytes[8],
             sections: Vec::new(),
             symbols: Vec::new(),
         });
@@ -253,6 +264,8 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
 
     Ok(Object {
         class,
+        os_abi: bytes[7],
+        abi_version: bytes[8],
         sections,
         symbols,
     })
@@ -403,6 +416,21 @@ mod tests {
     #[test]
     fn a_truncated_header_is_refused() {
         assert!(read(b"\x7fELF\x02\x01").is_err());
+    }
+
+    #[test]
+    fn retains_the_aros_elf_identity() {
+        let mut object = vec![0_u8; 64];
+        object[..4].copy_from_slice(b"\x7fELF");
+        object[4] = 2;
+        object[5] = 1;
+        object[7] = OS_ABI_AROS;
+        object[8] = AROS_ABI_VERSION;
+
+        let parsed = read(&object).unwrap();
+        assert_eq!(parsed.class, Class::Elf64);
+        assert_eq!(parsed.os_abi, OS_ABI_AROS);
+        assert_eq!(parsed.abi_version, AROS_ABI_VERSION);
     }
 
     #[test]

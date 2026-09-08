@@ -76,6 +76,12 @@ file directly below one explicit fresh target root and is measured before later
 process phases may use it. It does not run a process or accept a shared Cargo
 target directory as origin evidence.
 
+Preparation also measures the complete engine-free source tree through
+no-follow directory descriptors. Every later phase remeasures it and refuses
+to run if its content-only digest changed or a source-side `cmake/` entry
+appeared. The source is therefore an explicit report identity, not merely a
+path passed to a process.
+
 ### Relocation package roots
 
 The native producer has a separate package-root boundary for the later
@@ -106,13 +112,14 @@ environment, real working directory, fresh report directory and positive
 deadline. The runner clears inherited environment and requires
 `PATH=/nonexistent`; it neither looks up `PATH` nor evaluates a shell command.
 
-Before a process starts, it revalidates the materialized embedded engine and
-all five helper file identities. It then binds the report to their API version,
-digest, measured helper hashes and canonical environment digest. Standard
+Before a process starts, it revalidates the engine-free source tree, materialized
+embedded engine and all five helper file identities. It then binds the report
+to the source digest, engine API version and digest, measured helper hashes and
+canonical environment digest. Standard
 output and error are captured with
 the common bounded process supervisor and durably published under fixed,
 phase-specific no-clobber names. Successful reports use the closed
-`aros-toolchain-compatibility-report-v2` JSON schema and bind the executable,
+`aros-toolchain-compatibility-report-v3` JSON schema and bind the executable,
 argument identity and both persisted log hashes.
 
 A nonzero exit, timeout or cancellation never yields a success report. Where a
@@ -127,3 +134,13 @@ standalone C++. Each phase occurs exactly once and binds the same revalidated
 engine/helper preparation. It runs them in this dependency order. A failed
 phase retains its diagnostic logs and every prior success report, then prevents
 later phases from starting; a caller cannot silently omit or retry a phase.
+
+Standalone output validation is independent of the process supervisor. It
+accepts one or two explicit target triples and distinct direct-child outputs
+only. Each output is opened through a no-follow descriptor, read within the
+fixed size budget and parsed through the shared ELF reader. Its ELF class must
+match the declared triple; its OS ABI and ABI revision must be AROS; and the C
+or C++ object must expose its respective collector symbol. The returned facts
+contain only measured size, digest and ELF class, ready for the later complete
+report. The concrete execution adapter will declare the PC x86-64 and i386
+pair together rather than relying on filename discovery or a host tool lookup.
