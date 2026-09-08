@@ -33,6 +33,7 @@ pub mod qualification_evidence;
 pub mod recipe;
 pub mod recovery;
 pub mod release_index;
+pub mod repackage;
 pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;

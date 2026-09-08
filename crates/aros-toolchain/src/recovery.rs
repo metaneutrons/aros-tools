@@ -407,6 +407,7 @@ fn safe_asset_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use aros_common::{sha256_bytes, DiagnosticCode, Sha256Digest};
+    use serde_json::{json, Map};
 
     use super::{
         evaluate_recovery, AttestationClaim, EvidenceCoverage, EvidencePolicy, FailedStage,
@@ -414,9 +415,14 @@ mod tests {
         RecoveryOperation, RecoveryRequest, ReleaseAsset, ReleaseAssetKind, ReleaseHandoffState,
         CHECKSUMS_NAME, INDEX_NAME, PROVENANCE_NAME,
     };
+    use crate::package::{package, PackageRequest};
+    use crate::package_verify::{verify, PackageVerificationRequest};
+    use crate::profiles::{Profile, Profiles};
     use crate::qualification_evidence::{QualificationLane, QUALIFICATION_EVIDENCE_SCHEMA};
     use crate::qualification_evidence::{ReleaseEvidence, SourceRunIdentity};
     use crate::release_index::{NativeReleaseArtifact, V1_HOSTS, V1_PROFILES};
+    use crate::source_lock::SourceLock;
+    use crate::Recipe;
 
     fn digest(value: u64) -> Sha256Digest {
         Sha256Digest::parse(&format!("{value:064x}")).unwrap()
@@ -565,7 +571,14 @@ mod tests {
     }
 
     fn request(operation: RecoveryOperation, failed_stage: FailedStage) -> RecoveryRequest {
-        let index = index();
+        request_for_index(&index(), operation, failed_stage)
+    }
+
+    fn request_for_index(
+        index: &NativeReleaseIndex,
+        operation: RecoveryOperation,
+        failed_stage: FailedStage,
+    ) -> RecoveryRequest {
         let index_bytes = serde_json::to_vec(&index).unwrap();
         let mut files = index
             .artifacts
@@ -716,6 +729,135 @@ mod tests {
             request(RecoveryOperation::PackagingRecovery, FailedStage::Packaging);
         tag_conflict.handoff.as_mut().unwrap().tag.peeled_commit = git(9);
         assert_recovery(&evaluate_recovery(&tag_conflict).unwrap_err());
+    }
+
+    fn package_inputs() -> (Recipe, SourceLock, Profile) {
+        let lock_bytes = serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
+            "sources": [{"component": "llvm", "version": "11.0.0", "purpose": "toolchain-component", "filename": "llvm.tar.xz", "url": "https://example.invalid/llvm.tar.xz", "sha256": "c".repeat(64), "size": 1}],
+            "host_python_packages": [{"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": "d".repeat(64), "size": 1, "source_root": "mako", "python_path": "."}]
+        }))
+        .unwrap();
+        let profiles_bytes = serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-profiles-v1", "upstream_commit": "1".repeat(40),
+            "profiles": [{"name": "pc-x86_64", "configure_target": "pc-x86_64", "upstream_output_target": "pc-x86_64", "target_triple": "x86_64-unknown-aros", "cpu": "x86_64", "platform": "pc", "float_abi": "", "capabilities": ["c"]}]
+        }))
+        .unwrap();
+        let mut value = json!({
+            "schema": "aros-toolchain-recipe-v2", "source_commit": "1".repeat(40), "source_tree": "2".repeat(40),
+            "producer_commit": "2".repeat(40), "producer_tree": "3".repeat(40), "tools_commit": "3".repeat(40), "tools_tree": "4".repeat(40),
+            "source_date_epoch": 946_684_800_u64, "source_lock_sha256": sha256_bytes(&lock_bytes).to_string(), "profiles_sha256": sha256_bytes(&profiles_bytes).to_string(), "patches": []
+        });
+        value["recipe_sha256"] =
+            json!(sha256_bytes(&crate::canonical::bytes(&value).unwrap()).to_string());
+        let recipe = Recipe::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let lock = SourceLock::parse(&lock_bytes).unwrap();
+        let profile = Profiles::parse(&profiles_bytes)
+            .unwrap()
+            .select("pc-x86_64")
+            .unwrap()
+            .clone();
+        (recipe, lock, profile)
+    }
+
+    fn write_candidate(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/clang"), b"recovery fixture\n").unwrap();
+    }
+
+    #[test]
+    fn repackage_requires_two_independent_verified_outputs_before_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (recipe, source_lock, profile) = package_inputs();
+        let original_candidate = temporary.path().join("original-candidate");
+        std::fs::create_dir(&original_candidate).unwrap();
+        write_candidate(&original_candidate);
+        let original = package(&PackageRequest {
+            candidate_root: original_candidate,
+            output_dir: temporary.path().join("original-package"),
+            release_id: "toolchain-v1-source".into(),
+            host: "linux-x86_64".into(),
+            recipe: recipe.clone(),
+            source_lock: source_lock.clone(),
+            profile: profile.clone(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        })
+        .unwrap();
+        let original_verified = verify(&PackageVerificationRequest {
+            package_dir: original.output_dir,
+            release_id: "toolchain-v1-source".into(),
+            host: "linux-x86_64".into(),
+            recipe: recipe.clone(),
+            source_lock: source_lock.clone(),
+            profile: profile.clone(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        })
+        .unwrap();
+        let mut qualified = index();
+        let lane = qualified
+            .artifacts
+            .iter_mut()
+            .find(|artifact| {
+                artifact.host == "linux-x86_64" && artifact.target_profile == "pc-x86_64"
+            })
+            .unwrap();
+        lane.sha256 = original.archive_sha256.to_string();
+        lane.size = original.archive_size;
+        lane.tree_sha256 = original_verified.manifest.tree_sha256;
+        let expected_tree = lane.tree_sha256.clone();
+        let recovery = request_for_index(
+            &qualified,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+        );
+        let first_candidate = temporary.path().join("first-candidate");
+        let second_candidate = temporary.path().join("second-candidate");
+        std::fs::create_dir(&first_candidate).unwrap();
+        std::fs::create_dir(&second_candidate).unwrap();
+        write_candidate(&first_candidate);
+        write_candidate(&second_candidate);
+        let request = crate::repackage::RepackageRequest {
+            recovery,
+            first: PackageRequest {
+                candidate_root: first_candidate,
+                output_dir: temporary.path().join("first-package"),
+                release_id: "toolchain-v1-recovered".into(),
+                host: "linux-x86_64".into(),
+                recipe: recipe.clone(),
+                source_lock: source_lock.clone(),
+                profile: profile.clone(),
+                build_environment: Map::new(),
+                forbidden_prefixes: vec![],
+            },
+            second: PackageRequest {
+                candidate_root: second_candidate,
+                output_dir: temporary.path().join("second-package"),
+                release_id: "toolchain-v1-recovered".into(),
+                host: "linux-x86_64".into(),
+                recipe,
+                source_lock,
+                profile,
+                build_environment: Map::new(),
+                forbidden_prefixes: vec![],
+            },
+        };
+        let output = crate::repackage::repackage(&request).unwrap();
+        assert_eq!(
+            output.first_verified.manifest.tree_sha256,
+            output.second_verified.manifest.tree_sha256
+        );
+        assert_eq!(output.first_verified.manifest.tree_sha256, expected_tree);
+        assert!(output.first.output_dir.exists() && output.second.output_dir.exists());
+        let first_archive = std::fs::read(&output.first.archive).unwrap();
+        let second_archive = std::fs::read(&output.second.archive).unwrap();
+        assert!(crate::repackage::repackage(&request).is_err());
+        assert_eq!(std::fs::read(&output.first.archive).unwrap(), first_archive);
+        assert_eq!(
+            std::fs::read(&output.second.archive).unwrap(),
+            second_archive
+        );
     }
 
     fn assert_recovery(error: &crate::ContractError) {
