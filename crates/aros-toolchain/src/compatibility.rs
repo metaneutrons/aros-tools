@@ -14,10 +14,9 @@ use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aros_common::{
-    elf::{self, AROS_ABI_VERSION, OS_ABI_AROS},
     exit_signal, measure_tree_content_cas, open_regular_file_nofollow, publish_atomic_file,
     run_output_with_input_and_control, sha256_bytes, sha256_reader, AtomicFilePolicy,
     CancellationToken, DiagnosticContext, Sha256Digest,
@@ -30,6 +29,15 @@ use crate::package_extract::{
 };
 use crate::package_verify::PackageVerificationRequest;
 use crate::ContractError;
+
+mod standalone;
+
+pub use standalone::{
+    verify_standalone_outputs, StandaloneArtifactIdentity, StandaloneOutputReport,
+    StandaloneOutputRequest, StandaloneTargetArtifacts, StandaloneTargetReport,
+};
+#[cfg(test)]
+use standalone::{CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL};
 
 /// Helpers a compatibility probe must resolve from one exact fresh target root.
 pub const REQUIRED_HELPERS: &[&str] = &[
@@ -51,11 +59,8 @@ const MAX_PROBE_ENVIRONMENT_BYTES: usize = 64 * 1024;
 const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
-const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v3";
-const MAX_STANDALONE_TARGETS: usize = 2;
-const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
-const C_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__$";
-const CXX_COLLECTOR_SYMBOL: &str = "__INIT_ARRAY_LIST__$";
+const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v4";
+const MAX_PROBE_COMMANDS: usize = 2;
 const REQUIRED_PROBE_PHASES: [CompatibilityPhase; 6] = [
     CompatibilityPhase::CmakeConsumer,
     CompatibilityPhase::UpstreamConfigure,
@@ -290,15 +295,26 @@ impl CompatibilityPhase {
     }
 }
 
-/// Explicit, bounded process invocation for one compatibility phase.
+/// One explicit, bounded process invocation in a compatibility phase.
 #[derive(Debug, Clone)]
-pub struct CompatibilityProbeRequest {
-    /// Closed probe phase determining fresh report names.
-    pub phase: CompatibilityPhase,
+pub struct CompatibilityCommand {
     /// Absolute regular executable selected by the later runner.
     pub program: PathBuf,
     /// Explicit UTF-8 arguments. Raw command strings and shell evaluation are unsupported.
     pub arguments: Vec<String>,
+}
+
+/// Explicit, bounded process batch for one compatibility phase.
+#[derive(Debug, Clone)]
+pub struct CompatibilityProbeRequest {
+    /// Closed probe phase determining fresh report names.
+    pub phase: CompatibilityPhase,
+    /// One or two explicit commands, executed in declaration order.
+    ///
+    /// The PC profile uses two same-language commands for its x86-64 and i386
+    /// collector probes. A phase report is written only once every command
+    /// succeeds.
+    pub commands: Vec<CompatibilityCommand>,
     /// Closed environment for the child process; inherited environment is forbidden.
     ///
     /// `PATH` is required to equal `/nonexistent` so every later tool path is
@@ -331,101 +347,6 @@ pub struct CompatibilityProbeSet {
     pub reports: BTreeMap<CompatibilityPhase, CompatibilityProbeReport>,
 }
 
-/// Explicit standalone C/C++ outputs for one selected target triple.
-#[derive(Debug, Clone)]
-pub struct StandaloneTargetArtifacts {
-    /// C object linked through the prefix-owned collector.
-    pub c: PathBuf,
-    /// C++ object linked through the prefix-owned collector.
-    pub cxx: PathBuf,
-}
-
-/// Closed standalone-output check for one or two declared target triples.
-///
-/// The PC profile supplies both `x86_64-unknown-aros` and its required
-/// `i386-unknown-aros` companion. Other current profiles supply their one
-/// configured target triple. Every output must be a distinct direct child of
-/// `output_root`; the verifier accepts no glob, link, or host search path.
-#[derive(Debug, Clone)]
-pub struct StandaloneOutputRequest {
-    /// Existing real directory containing only this probe's direct outputs.
-    pub output_root: PathBuf,
-    /// Exact target triples and their C/C++ output paths.
-    pub targets: BTreeMap<String, StandaloneTargetArtifacts>,
-}
-
-/// Measured identity of one standalone AROS ELF output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StandaloneArtifactIdentity {
-    /// SHA-256 of the exact no-follow-read output bytes.
-    pub sha256: Sha256Digest,
-    /// Exact output byte length.
-    pub size: u64,
-    /// Parsed ELF class, derived from the output rather than the host.
-    pub class: elf::Class,
-}
-
-/// Measured C and C++ collector outputs for one target triple.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StandaloneTargetReport {
-    /// C output identity after AROS and collector-symbol validation.
-    pub c: StandaloneArtifactIdentity,
-    /// C++ output identity after AROS and collector-symbol validation.
-    pub cxx: StandaloneArtifactIdentity,
-}
-
-/// Measured standalone collector evidence keyed by target triple.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StandaloneOutputReport {
-    /// Closed, nonempty set of target-triple output reports.
-    pub targets: BTreeMap<String, StandaloneTargetReport>,
-}
-
-/// Verify the standalone C/C++ collector output contract without executing a process.
-///
-/// Every output is opened through a no-follow descriptor, read once within a
-/// fixed bound, and parsed with the shared ELF reader. The object must carry
-/// AROS' `EI_OSABI`/`EI_ABIVERSION`, have the class required by its target
-/// triple, and contain the language-specific collector symbol. This has no
-/// network, source, cache, tag, release or publication authority.
-///
-/// # Errors
-///
-/// Returns AX0703 for unsafe output paths, duplicate or unsupported target
-/// triples, changed files, malformed/non-AROS ELF objects, or missing
-/// collector symbols.
-pub fn verify_standalone_outputs(
-    request: &StandaloneOutputRequest,
-) -> Result<StandaloneOutputReport, ContractError> {
-    let output_root = checked_directory(&request.output_root, "standalone output root")?;
-    if request.targets.is_empty() || request.targets.len() > MAX_STANDALONE_TARGETS {
-        return Err(ContractError::compatibility(
-            "standalone output contract must contain one or two target triples",
-        ));
-    }
-    let mut paths = BTreeSet::new();
-    let mut targets = BTreeMap::new();
-    for (triple, artifacts) in &request.targets {
-        let class = standalone_target_class(triple)?;
-        let c = verify_standalone_artifact(
-            &output_root,
-            &artifacts.c,
-            class,
-            C_COLLECTOR_SYMBOL,
-            &mut paths,
-        )?;
-        let cxx = verify_standalone_artifact(
-            &output_root,
-            &artifacts.cxx,
-            class,
-            CXX_COLLECTOR_SYMBOL,
-            &mut paths,
-        )?;
-        targets.insert(triple.clone(), StandaloneTargetReport { c, cxx });
-    }
-    Ok(StandaloneOutputReport { targets })
-}
-
 /// Measured helper identity written into a compatibility report without paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -434,6 +355,20 @@ pub struct CompatibilityHelperReport {
     pub sha256: Sha256Digest,
     /// Measured executable byte length.
     pub size: u64,
+}
+
+/// One measured command and its durable logs in a successful phase report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityCommandReport {
+    /// SHA-256 of the validated executable file.
+    pub program_sha256: Sha256Digest,
+    /// SHA-256 of the exact executable/argument identity.
+    pub command_sha256: Sha256Digest,
+    /// SHA-256 of the durable rendered stdout log.
+    pub stdout_sha256: Sha256Digest,
+    /// SHA-256 of the durable rendered stderr log.
+    pub stderr_sha256: Sha256Digest,
 }
 
 /// Closed, persisted success report for one compatibility process.
@@ -452,16 +387,10 @@ pub struct CompatibilityProbeReport {
     pub source_tree_sha256: Sha256Digest,
     /// Exact fixed helper identity set without workstation paths.
     pub helpers: BTreeMap<String, CompatibilityHelperReport>,
-    /// SHA-256 of the validated program file.
-    pub program_sha256: Sha256Digest,
-    /// SHA-256 of the validated program/argument identity.
-    pub command_sha256: Sha256Digest,
     /// SHA-256 of the closed child environment, including the poisoned PATH.
     pub environment_sha256: Sha256Digest,
-    /// SHA-256 of the durable rendered stdout log.
-    pub stdout_sha256: Sha256Digest,
-    /// SHA-256 of the durable rendered stderr log.
-    pub stderr_sha256: Sha256Digest,
+    /// One or two commands and their durable logs in declaration order.
+    pub commands: Vec<CompatibilityCommandReport>,
 }
 
 impl CompatibilityProbeReport {
@@ -487,6 +416,11 @@ impl CompatibilityProbeReport {
         if self.schema != COMPATIBILITY_REPORT_SCHEMA || self.engine_api_version == 0 {
             return Err(ContractError::compatibility(
                 "compatibility report has an unsupported schema or engine API version",
+            ));
+        }
+        if self.commands.is_empty() || self.commands.len() > MAX_PROBE_COMMANDS {
+            return Err(ContractError::compatibility(
+                "compatibility report has an invalid command batch size",
             ));
         }
         let expected = REQUIRED_HELPERS
@@ -523,7 +457,6 @@ pub fn run_probe(
     cancellation: &CancellationToken,
 ) -> Result<CompatibilityProbeReport, ContractError> {
     validate_probe_request(request)?;
-    let program = checked_executable(&request.program)?;
     let current_dir = checked_directory(&request.current_dir, "compatibility process directory")?;
     let reports_root = checked_directory(&request.reports_root, "compatibility report directory")?;
     let preparation_roots = validate_preparation(&request.preparation)?;
@@ -539,59 +472,86 @@ pub fn run_probe(
             "compatibility process, report, engine, and helper directories must remain separate",
         ));
     }
-    let (program_sha256, _) = measure_executable(&program)?;
-    let command_sha256 = command_identity(&program, &request.arguments)?;
     let environment_sha256 = environment_identity(&request.environment)?;
-    let paths = ProbeReportPaths::new(&reports_root, request.phase);
+    let paths = ProbeReportPaths::new(&reports_root, request.phase, request.commands.len());
     paths.require_absent()?;
-
-    let mut command = Command::new(&program);
-    command
-        .env_clear()
-        .envs(&request.environment)
-        .current_dir(&current_dir)
-        .args(&request.arguments);
-    let output = run_output_with_input_and_control(
-        &mut command,
-        &[],
-        PROBE_CAPTURE_LIMIT,
-        request.timeout,
-        cancellation,
-    )
-    .map_err(|_| ContractError::compatibility("cannot start or supervise compatibility process"))?;
-    let stdout_sha256 = ProbeReportPaths::write_log(&paths.stdout, &output.stdout)?;
-    let stderr_sha256 = ProbeReportPaths::write_log(&paths.stderr, &output.stderr)?;
-    if output.cancelled || cancellation.is_cancelled() {
-        return Err(ContractError::compatibility(
-            "compatibility process was cancelled; retained logs require inspection",
+    let phase_started = Instant::now();
+    let mut commands = Vec::with_capacity(request.commands.len());
+    for (index, command) in request.commands.iter().enumerate() {
+        validate_preparation(&request.preparation)?;
+        validate_probe_directories(request, &current_dir, &reports_root)?;
+        let program = checked_executable(&command.program)?;
+        let (program_sha256, _) = measure_executable(&program)?;
+        let command_sha256 = command_identity(&program, &command.arguments)?;
+        let command_paths = paths.command(index).ok_or_else(|| {
+            ContractError::compatibility("compatibility command batch lost a required log path")
+        })?;
+        let mut process = Command::new(&program);
+        process
+            .env_clear()
+            .envs(&request.environment)
+            .current_dir(&current_dir)
+            .args(&command.arguments);
+        let remaining_timeout = remaining_phase_timeout(phase_started, request.timeout)?;
+        let output = run_output_with_input_and_control(
+            &mut process,
+            &[],
+            PROBE_CAPTURE_LIMIT,
+            remaining_timeout,
+            cancellation,
         )
-        .context(DiagnosticContext {
-            tool: Some(request.phase.file_stem().into()),
-            ..DiagnosticContext::default()
-        }));
+        .map_err(|_| {
+            ContractError::compatibility("cannot start or supervise compatibility process")
+        })?;
+        validate_probe_directories(request, &current_dir, &reports_root)?;
+        let stdout_sha256 = ProbeReportPaths::write_log(&command_paths.stdout, &output.stdout)?;
+        let stderr_sha256 = ProbeReportPaths::write_log(&command_paths.stderr, &output.stderr)?;
+        let tool = if request.commands.len() == 1 {
+            request.phase.file_stem().to_owned()
+        } else {
+            format!("{}-{}", request.phase.file_stem(), index + 1)
+        };
+        if output.cancelled || cancellation.is_cancelled() {
+            return Err(ContractError::compatibility(
+                "compatibility process was cancelled; retained logs require inspection",
+            )
+            .context(DiagnosticContext {
+                tool: Some(tool),
+                ..DiagnosticContext::default()
+            }));
+        }
+        if output.timed_out {
+            return Err(ContractError::compatibility(
+                "compatibility process exceeded its explicit deadline; retained logs require inspection",
+            )
+            .context(DiagnosticContext {
+                tool: Some(tool),
+                timed_out: Some(true),
+                timeout_ms: Some(duration_millis(request.timeout)),
+                ..DiagnosticContext::default()
+            }));
+        }
+        if !output.status.success() {
+            return Err(ContractError::compatibility(
+                "compatibility process exited unsuccessfully; retained logs require inspection",
+            )
+            .context(DiagnosticContext {
+                tool: Some(tool),
+                exit_code: output.status.code(),
+                signal: exit_signal(output.status),
+                ..DiagnosticContext::default()
+            }));
+        }
+        validate_preparation(&request.preparation)?;
+        validate_probe_directories(request, &current_dir, &reports_root)?;
+        commands.push(CompatibilityCommandReport {
+            program_sha256,
+            command_sha256,
+            stdout_sha256,
+            stderr_sha256,
+        });
     }
-    if output.timed_out {
-        return Err(ContractError::compatibility(
-            "compatibility process exceeded its explicit deadline; retained logs require inspection",
-        )
-        .context(DiagnosticContext {
-            tool: Some(request.phase.file_stem().into()),
-            timed_out: Some(true),
-            timeout_ms: Some(duration_millis(request.timeout)),
-            ..DiagnosticContext::default()
-        }));
-    }
-    if !output.status.success() {
-        return Err(ContractError::compatibility(
-            "compatibility process exited unsuccessfully; retained logs require inspection",
-        )
-        .context(DiagnosticContext {
-            tool: Some(request.phase.file_stem().into()),
-            exit_code: output.status.code(),
-            signal: exit_signal(output.status),
-            ..DiagnosticContext::default()
-        }));
-    }
+    validate_probe_directories(request, &current_dir, &reports_root)?;
     let report = CompatibilityProbeReport {
         schema: COMPATIBILITY_REPORT_SCHEMA.into(),
         phase: request.phase,
@@ -612,11 +572,8 @@ pub fn run_probe(
                 )
             })
             .collect(),
-        program_sha256,
-        command_sha256,
         environment_sha256,
-        stdout_sha256,
-        stderr_sha256,
+        commands,
     };
     report.validate()?;
     let encoded = crate::canonical::bytes(
@@ -693,118 +650,6 @@ pub fn run_probe_set(
     Ok(CompatibilityProbeSet { reports })
 }
 
-fn standalone_target_class(triple: &str) -> Result<elf::Class, ContractError> {
-    if !crate::profiles::identifier(triple) {
-        return Err(ContractError::compatibility(
-            "standalone output contract contains an unsafe target triple",
-        ));
-    }
-    match triple.split_once('-').map_or(triple, |(cpu, _)| cpu) {
-        "x86_64" | "aarch64" => Ok(elf::Class::Elf64),
-        "i386" | "arm" => Ok(elf::Class::Elf32),
-        _ => Err(ContractError::compatibility(
-            "standalone output contract contains an unsupported target triple",
-        )),
-    }
-}
-
-fn verify_standalone_artifact(
-    output_root: &Path,
-    path: &Path,
-    expected_class: elf::Class,
-    required_symbol: &str,
-    paths: &mut BTreeSet<PathBuf>,
-) -> Result<StandaloneArtifactIdentity, ContractError> {
-    let path = checked_direct_child(output_root, path, "standalone output")?;
-    if !paths.insert(path.clone()) {
-        return Err(ContractError::compatibility(
-            "standalone output contract reuses one artifact path",
-        ));
-    }
-    let mut file = open_regular_file_nofollow(&path).map_err(|_| {
-        ContractError::compatibility(
-            "cannot safely open a standalone output without following links",
-        )
-    })?;
-    let before = file
-        .metadata()
-        .map_err(|_| ContractError::compatibility("cannot inspect the opened standalone output"))?;
-    if !before.is_file() || before.len() == 0 || before.len() > MAX_STANDALONE_ARTIFACT_BYTES {
-        return Err(ContractError::compatibility(
-            "standalone output is empty, non-regular, or exceeds the configured size limit",
-        ));
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(before.len()).map_err(|_| {
-        ContractError::compatibility("standalone output length exceeds addressable memory")
-    })?);
-    file.read_to_end(&mut bytes)
-        .map_err(|_| ContractError::compatibility("cannot read the complete standalone output"))?;
-    let after = file.metadata().map_err(|_| {
-        ContractError::compatibility("cannot remeasure the opened standalone output")
-    })?;
-    if after.len() != before.len() || bytes.len() as u64 != before.len() {
-        return Err(ContractError::compatibility(
-            "standalone output changed while it was read",
-        ));
-    }
-    let object = elf::read(&bytes).map_err(|_| {
-        ContractError::compatibility(
-            "standalone output is not a supported little-endian ELF object",
-        )
-    })?;
-    if object.class != expected_class
-        || object.os_abi != OS_ABI_AROS
-        || object.abi_version != AROS_ABI_VERSION
-    {
-        return Err(ContractError::compatibility(
-            "standalone output does not carry the selected target's AROS ELF identity",
-        ));
-    }
-    if !object
-        .symbols
-        .iter()
-        .any(|symbol| symbol.name == required_symbol)
-    {
-        return Err(ContractError::compatibility(
-            "standalone output lacks its required collector symbol",
-        ));
-    }
-    Ok(StandaloneArtifactIdentity {
-        sha256: sha256_bytes(&bytes),
-        size: before.len(),
-        class: object.class,
-    })
-}
-
-fn checked_direct_child(root: &Path, path: &Path, label: &str) -> Result<PathBuf, ContractError> {
-    if !path.is_absolute() {
-        return Err(ContractError::compatibility(format!(
-            "{label} must be an absolute direct child of the standalone output root"
-        )));
-    }
-    let parent = path.parent().ok_or_else(|| {
-        ContractError::compatibility(format!("{label} has no standalone output-root parent"))
-    })?;
-    let canonical_parent = parent.canonicalize().map_err(|_| {
-        ContractError::compatibility(format!(
-            "{label} parent cannot be canonicalized below the standalone output root"
-        ))
-    })?;
-    if canonical_parent != root || path.file_name().is_none() {
-        return Err(ContractError::compatibility(format!(
-            "{label} is not a direct child of the standalone output root"
-        )));
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| ContractError::compatibility(format!("cannot inspect {label}")))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(ContractError::compatibility(format!(
-            "{label} is not a regular standalone output"
-        )));
-    }
-    Ok(path.to_owned())
-}
-
 #[derive(Debug)]
 struct CompatibilityPreparationRoots {
     source: PathBuf,
@@ -818,28 +663,35 @@ fn validate_probe_request(request: &CompatibilityProbeRequest) -> Result<(), Con
             "compatibility process deadline must be positive",
         ));
     }
-    if request.arguments.len() > MAX_PROBE_ARGUMENTS {
+    if request.commands.is_empty() || request.commands.len() > MAX_PROBE_COMMANDS {
         return Err(ContractError::compatibility(
-            "compatibility process has more arguments than the configured limit",
+            "compatibility phase must contain one or two explicit commands",
         ));
     }
-    let argument_bytes = request
-        .arguments
-        .iter()
-        .try_fold(0_usize, |total, argument| {
-            if argument.chars().any(char::is_control) {
-                return Err(ContractError::compatibility(
-                    "compatibility process arguments cannot contain control characters",
-                ));
-            }
-            total.checked_add(argument.len()).ok_or_else(|| {
-                ContractError::compatibility("compatibility process argument length overflowed")
-            })
-        })?;
-    if argument_bytes > MAX_PROBE_ARGUMENT_BYTES {
-        return Err(ContractError::compatibility(
-            "compatibility process arguments exceed the configured byte limit",
-        ));
+    for command in &request.commands {
+        if command.arguments.len() > MAX_PROBE_ARGUMENTS {
+            return Err(ContractError::compatibility(
+                "compatibility command has more arguments than the configured limit",
+            ));
+        }
+        let argument_bytes = command
+            .arguments
+            .iter()
+            .try_fold(0_usize, |total, argument| {
+                if argument.chars().any(char::is_control) {
+                    return Err(ContractError::compatibility(
+                        "compatibility process arguments cannot contain control characters",
+                    ));
+                }
+                total.checked_add(argument.len()).ok_or_else(|| {
+                    ContractError::compatibility("compatibility process argument length overflowed")
+                })
+            })?;
+        if argument_bytes > MAX_PROBE_ARGUMENT_BYTES {
+            return Err(ContractError::compatibility(
+                "compatibility process arguments exceed the configured byte limit",
+            ));
+        }
     }
     if request.environment.len() > MAX_PROBE_ENVIRONMENT_ENTRIES {
         return Err(ContractError::compatibility(
@@ -1048,25 +900,79 @@ fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn remaining_phase_timeout(started: Instant, timeout: Duration) -> Result<Duration, ContractError> {
+    timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            ContractError::compatibility(
+                "compatibility phase exhausted its explicit deadline before starting the next command",
+            )
+        })
+}
+
+fn validate_probe_directories(
+    request: &CompatibilityProbeRequest,
+    expected_current_dir: &Path,
+    expected_reports_root: &Path,
+) -> Result<(), ContractError> {
+    let current_dir = checked_directory(&request.current_dir, "compatibility process directory")?;
+    let reports_root = checked_directory(&request.reports_root, "compatibility report directory")?;
+    if current_dir != expected_current_dir || reports_root != expected_reports_root {
+        return Err(ContractError::compatibility(
+            "compatibility process or report directory changed after probe validation",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ProbeReportPaths {
+    commands: Vec<ProbeCommandPaths>,
+    report: PathBuf,
+    all_outputs: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct ProbeCommandPaths {
     stdout: PathBuf,
     stderr: PathBuf,
-    report: PathBuf,
 }
 
 impl ProbeReportPaths {
-    fn new(root: &Path, phase: CompatibilityPhase) -> Self {
+    fn new(root: &Path, phase: CompatibilityPhase, command_count: usize) -> Self {
         let stem = phase.file_stem();
+        let report = root.join(format!("{stem}.report.json"));
+        let mut all_outputs = vec![report.clone()];
+        for name in std::iter::once(stem.to_owned())
+            .chain((1..=MAX_PROBE_COMMANDS).map(|index| format!("{stem}.{index}")))
+        {
+            all_outputs.extend([
+                root.join(format!("{name}.stdout.log")),
+                root.join(format!("{name}.stderr.log")),
+            ]);
+        }
         Self {
-            stdout: root.join(format!("{stem}.stdout.log")),
-            stderr: root.join(format!("{stem}.stderr.log")),
-            report: root.join(format!("{stem}.report.json")),
+            commands: (0..command_count)
+                .map(|index| {
+                    let name = if command_count == 1 {
+                        stem.to_owned()
+                    } else {
+                        format!("{stem}.{}", index + 1)
+                    };
+                    ProbeCommandPaths {
+                        stdout: root.join(format!("{name}.stdout.log")),
+                        stderr: root.join(format!("{name}.stderr.log")),
+                    }
+                })
+                .collect(),
+            report,
+            all_outputs,
         }
     }
 
     fn require_absent(&self) -> Result<(), ContractError> {
-        for path in [&self.stdout, &self.stderr, &self.report] {
+        for path in &self.all_outputs {
             match fs::symlink_metadata(path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Ok(_) => {
@@ -1082,6 +988,10 @@ impl ProbeReportPaths {
             }
         }
         Ok(())
+    }
+
+    fn command(&self, index: usize) -> Option<&ProbeCommandPaths> {
+        self.commands.get(index)
     }
 
     fn write_log(
@@ -1396,10 +1306,10 @@ mod tests {
 
     use super::{
         prepare, run_probe, run_probe_set, verify_materialized_engine, verify_standalone_outputs,
-        CompatibilityPhase, CompatibilityPreparation, CompatibilityPreparationRequest,
-        CompatibilityProbeReport, CompatibilityProbeRequest, CompatibilityProbeSetRequest,
-        StandaloneOutputRequest, StandaloneTargetArtifacts, CXX_COLLECTOR_SYMBOL,
-        C_COLLECTOR_SYMBOL, REQUIRED_HELPERS,
+        CompatibilityCommand, CompatibilityPhase, CompatibilityPreparation,
+        CompatibilityPreparationRequest, CompatibilityProbeReport, CompatibilityProbeRequest,
+        CompatibilityProbeSetRequest, StandaloneOutputRequest, StandaloneTargetArtifacts,
+        CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL, REQUIRED_HELPERS,
     };
 
     fn request(root: &std::path::Path) -> CompatibilityPreparationRequest {
@@ -1630,6 +1540,164 @@ mod tests {
     }
 
     #[test]
+    fn probe_batch_binds_each_command_and_retains_failed_command_logs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let preparation_request = request(temporary.path());
+        let preparation = prepare(&preparation_request).unwrap();
+        let mut successful = probe_request(
+            temporary.path(),
+            preparation,
+            CompatibilityPhase::StandaloneC,
+            script(temporary.path(), "batch-first", "printf first"),
+            Duration::from_secs(5),
+        );
+        successful.commands.push(CompatibilityCommand {
+            program: script(temporary.path(), "batch-second", "printf second >&2"),
+            arguments: Vec::new(),
+        });
+        let report = run_probe(&successful, &CancellationToken::default()).unwrap();
+        assert_eq!(report.commands.len(), 2);
+        assert!(successful
+            .reports_root
+            .join("standalone-c.1.stdout.log")
+            .is_file());
+        assert!(successful
+            .reports_root
+            .join("standalone-c.2.stderr.log")
+            .is_file());
+
+        let failing_root = tempfile::tempdir().unwrap();
+        let failing_request = request(failing_root.path());
+        let mut failing = probe_request(
+            failing_root.path(),
+            prepare(&failing_request).unwrap(),
+            CompatibilityPhase::StandaloneCxx,
+            script(failing_root.path(), "batch-success", "printf first"),
+            Duration::from_secs(1),
+        );
+        failing.commands.push(CompatibilityCommand {
+            program: script(
+                failing_root.path(),
+                "batch-failure",
+                "printf second >&2; exit 7",
+            ),
+            arguments: Vec::new(),
+        });
+        let error = run_probe(&failing, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(failing
+            .reports_root
+            .join("standalone-cxx.1.stdout.log")
+            .is_file());
+        assert!(failing
+            .reports_root
+            .join("standalone-cxx.2.stderr.log")
+            .is_file());
+        assert!(!failing
+            .reports_root
+            .join("standalone-cxx.report.json")
+            .exists());
+        let stale_retry = probe_request(
+            failing_root.path(),
+            failing.preparation.clone(),
+            CompatibilityPhase::StandaloneCxx,
+            script(failing_root.path(), "single-retry", "exit 0"),
+            Duration::from_secs(1),
+        );
+        let error = run_probe(&stale_retry, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
+        let deadline_root = tempfile::tempdir().unwrap();
+        let deadline_request = request(deadline_root.path());
+        let mut deadline = probe_request(
+            deadline_root.path(),
+            prepare(&deadline_request).unwrap(),
+            CompatibilityPhase::StandaloneC,
+            script(
+                deadline_root.path(),
+                "deadline-first",
+                "exec /bin/sleep 0.5",
+            ),
+            Duration::from_secs(2),
+        );
+        deadline.commands.push(CompatibilityCommand {
+            program: script(deadline_root.path(), "deadline-second", "exec /bin/sleep 2"),
+            arguments: Vec::new(),
+        });
+        let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(deadline
+            .reports_root
+            .join("standalone-c.2.stdout.log")
+            .is_file());
+
+        let changed_root = tempfile::tempdir().unwrap();
+        let changed_request = request(changed_root.path());
+        let changed_preparation = prepare(&changed_request).unwrap();
+        let changed_helper = changed_preparation.helpers["aros-fetch"]
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let mut changed = probe_request(
+            changed_root.path(),
+            changed_preparation,
+            CompatibilityPhase::StandaloneC,
+            script(
+                changed_root.path(),
+                "batch-mutator",
+                "printf changed > \"$1\"",
+            ),
+            Duration::from_secs(1),
+        );
+        changed.commands[0].arguments.push(changed_helper);
+        changed.commands.push(CompatibilityCommand {
+            program: script(changed_root.path(), "batch-after-mutation", "exit 0"),
+            arguments: Vec::new(),
+        });
+        let error = run_probe(&changed, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(changed
+            .reports_root
+            .join("standalone-c.1.stdout.log")
+            .is_file());
+        assert!(!changed
+            .reports_root
+            .join("standalone-c.2.stdout.log")
+            .exists());
+        assert!(!changed
+            .reports_root
+            .join("standalone-c.report.json")
+            .exists());
+
+        let moved_root = tempfile::tempdir().unwrap();
+        let moved_request = request(moved_root.path());
+        let mut moved = probe_request(
+            moved_root.path(),
+            prepare(&moved_request).unwrap(),
+            CompatibilityPhase::StandaloneC,
+            script(
+                moved_root.path(),
+                "move-working-directory",
+                "exec /bin/mv \"$1\" \"$1-moved\"",
+            ),
+            Duration::from_secs(1),
+        );
+        moved.commands[0]
+            .arguments
+            .push(moved.current_dir.to_string_lossy().into_owned());
+        moved.commands.push(CompatibilityCommand {
+            program: script(moved_root.path(), "after-working-directory-move", "exit 0"),
+            arguments: Vec::new(),
+        });
+        let error = run_probe(&moved, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+        assert!(!moved
+            .reports_root
+            .join("standalone-c.2.stdout.log")
+            .exists());
+    }
+
+    #[test]
     fn probe_preserves_diagnostics_for_exit_timeout_and_cancellation() {
         let temporary = tempfile::tempdir().unwrap();
         let request = request(temporary.path());
@@ -1660,15 +1728,19 @@ mod tests {
             temporary.path(),
             preparation.clone(),
             CompatibilityPhase::UpstreamConfigure,
-            script(temporary.path(), "timed-probe", "while :; do :; done"),
-            Duration::from_millis(20),
+            script(
+                temporary.path(),
+                "timed-probe",
+                "printf started; exec /bin/sleep 30",
+            ),
+            Duration::from_secs(5),
         );
         let error = run_probe(&timed, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
-        assert!(timed
-            .reports_root
-            .join("upstream-configure.stdout.log")
-            .is_file());
+        assert_eq!(
+            fs::read(timed.reports_root.join("upstream-configure.stdout.log")).unwrap(),
+            b"started"
+        );
         assert!(!timed
             .reports_root
             .join("upstream-configure.report.json")
@@ -1743,7 +1815,7 @@ mod tests {
             script(temporary.path(), "invalid-argument-probe", "exit 0"),
             Duration::from_secs(1),
         );
-        invalid.arguments.push("line\nbreak".into());
+        invalid.commands[0].arguments.push("line\nbreak".into());
         let error = run_probe(&invalid, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
@@ -1848,7 +1920,7 @@ mod tests {
                 preparation.clone(),
                 phase,
                 script(root, &format!("{phase:?}"), body),
-                Duration::from_secs(1),
+                Duration::from_secs(5),
             )
         })
         .collect()
@@ -1867,8 +1939,10 @@ mod tests {
         fs::create_dir_all(&reports_root).unwrap();
         CompatibilityProbeRequest {
             phase,
-            program,
-            arguments: Vec::new(),
+            commands: vec![CompatibilityCommand {
+                program,
+                arguments: Vec::new(),
+            }],
             environment: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
             current_dir,
             reports_root,

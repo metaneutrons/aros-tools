@@ -104,27 +104,32 @@ it must not reuse one extracted tree.
 
 ## Compatibility probe reports
 
-The next M5.2 boundary records one completed process per closed phase:
+The next M5.2 boundary records one completed command batch per closed phase:
 consumer CMake configuration, pristine upstream configuration, upstream
 includes, upstream link libraries, standalone C and standalone C++. A caller
-supplies an absolute executable, explicit UTF-8 argument vector, closed child
-environment, real working directory, fresh report directory and positive
-deadline. The runner clears inherited environment and requires
+supplies one or two absolute executables with explicit UTF-8 argument vectors,
+a closed child environment, real working directory, fresh report directory and
+positive deadline. This admits the two explicit PC x86-64/i386 collector
+invocations in one language phase without a shell wrapper or an unreported
+subprocess. The runner clears inherited environment and requires
 `PATH=/nonexistent`; it neither looks up `PATH` nor evaluates a shell command.
 
-Before a process starts, it revalidates the engine-free source tree, materialized
-embedded engine and all five helper file identities. It then binds the report
+Before every command starts and after every successful command, it revalidates
+the engine-free source tree, materialized embedded engine and all five helper
+file identities. It then binds the report
 to the source digest, engine API version and digest, measured helper hashes and
 canonical environment digest. Standard
 output and error are captured with
 the common bounded process supervisor and durably published under fixed,
 phase-specific no-clobber names. Successful reports use the closed
-`aros-toolchain-compatibility-report-v3` JSON schema and bind the executable,
-argument identity and both persisted log hashes.
+`aros-toolchain-compatibility-report-v4` JSON schema and bind every executable,
+argument identity and its persisted stdout/stderr log hashes in declaration
+order.
 
 A nonzero exit, timeout or cancellation never yields a success report. Where a
-process started, its durable logs remain available for diagnosis. Existing
-report outputs are rejected rather than adopted or overwritten. This is still
+command started, its durable logs remain available for diagnosis; a failed
+batch command prevents all later commands in that phase. Existing report
+outputs are rejected rather than adopted or overwritten. This is still
 the reusable process/report boundary; the following M5 work supplies the
 concrete CMake, upstream, standalone and relocation commands.
 
