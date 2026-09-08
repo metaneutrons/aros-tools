@@ -12,7 +12,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aros_common::CancellationToken;
+use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
+use serde::{Deserialize, Serialize};
 
 use super::{
     checked_executable, run_probe_set, verify_standalone_outputs, CompatibilityCommand,
@@ -23,10 +24,12 @@ use super::{
 };
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
-use crate::ContractError;
+use crate::{canonical, ContractError};
 
 const POISONED_PATH: &str = "/nonexistent";
 const MAX_MAKE_JOBS: usize = 64;
+const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v1";
+const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
 /// Explicit C and C++ fixture files compiled through the installed drivers.
 #[derive(Debug, Clone)]
@@ -83,6 +86,49 @@ pub struct NativeCompatibilityReport {
     pub probes: CompatibilityProbeSet,
     /// Post-process verification of C/C++ collector output identities.
     pub standalone: StandaloneOutputReport,
+    /// Durable aggregate receipt binding every phase report and standalone
+    /// collector result without workstation-local paths.
+    pub receipt: CompatibilityReceipt,
+}
+
+/// Durable aggregate evidence emitted by one complete compatibility execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityReceipt {
+    /// The one no-clobber receipt written below the operation's report root.
+    pub path: PathBuf,
+    /// SHA-256 of the exact canonical receipt bytes.
+    pub sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptDocument {
+    schema: String,
+    operation: String,
+    phase_reports: Vec<CompatibilityReceiptPhase>,
+    standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptPhase {
+    phase: CompatibilityPhase,
+    report_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptTarget {
+    c: CompatibilityReceiptArtifact,
+    cxx: CompatibilityReceiptArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptArtifact {
+    sha256: Sha256Digest,
+    size: u64,
+    class: String,
 }
 
 /// Execute the closed native compatibility harness.
@@ -188,7 +234,158 @@ pub fn execute_native_compatibility(
         output_root: outputs.standalone,
         targets: standalone.outputs,
     })?;
-    Ok(NativeCompatibilityReport { probes, standalone })
+    let receipt = write_compatibility_receipt(&outputs.reports, &probes, &standalone)?;
+    Ok(NativeCompatibilityReport {
+        probes,
+        standalone,
+        receipt,
+    })
+}
+
+fn write_compatibility_receipt(
+    reports_root: &Path,
+    probes: &CompatibilityProbeSet,
+    standalone: &StandaloneOutputReport,
+) -> Result<CompatibilityReceipt, ContractError> {
+    let mut persisted_reports = BTreeMap::new();
+    let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
+    for phase in super::REQUIRED_PROBE_PHASES {
+        let expected = probes.reports.get(&phase).ok_or_else(|| {
+            ContractError::compatibility("native compatibility execution lost a required phase")
+        })?;
+        let report_path = reports_root.join(format!("{}.report.json", phase.file_stem()));
+        let bytes = super::read_regular_bounded(
+            &report_path,
+            "persisted native compatibility phase report",
+            crate::canonical::MAX_DOCUMENT_BYTES,
+        )?;
+        let parsed = super::CompatibilityProbeReport::parse(&bytes)?;
+        if &parsed != expected {
+            return Err(ContractError::compatibility(
+                "persisted native compatibility phase report differs from its execution identity",
+            ));
+        }
+        phase_reports.push(CompatibilityReceiptPhase {
+            phase,
+            report_sha256: sha256_bytes(&bytes),
+        });
+        persisted_reports.insert(phase, bytes);
+    }
+    let standalone_targets = standalone
+        .targets
+        .iter()
+        .map(|(triple, target)| {
+            (
+                triple.clone(),
+                CompatibilityReceiptTarget {
+                    c: receipt_artifact(&target.c),
+                    cxx: receipt_artifact(&target.cxx),
+                },
+            )
+        })
+        .collect();
+    let document = CompatibilityReceiptDocument {
+        schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
+        operation: "native-compatibility".into(),
+        phase_reports,
+        standalone_targets,
+    };
+    document.validate()?;
+    let encoded = canonical::bytes(
+        &serde_json::to_value(&document)
+            .map_err(|_| ContractError::compatibility("cannot encode compatibility receipt"))?,
+    )
+    .map_err(|_| ContractError::compatibility("cannot canonically encode compatibility receipt"))?;
+    let path = reports_root.join(COMPATIBILITY_RECEIPT_FILE);
+    super::write_new_regular(&path, &encoded, "native compatibility receipt")?;
+    let persisted = super::read_regular_bounded(
+        &path,
+        "persisted native compatibility receipt",
+        crate::canonical::MAX_DOCUMENT_BYTES,
+    )?;
+    if persisted != encoded {
+        return Err(ContractError::compatibility(
+            "persisted native compatibility receipt bytes changed after publication",
+        ));
+    }
+    let parsed: CompatibilityReceiptDocument = serde_json::from_slice(&persisted)
+        .map_err(|_| ContractError::compatibility("native compatibility receipt is not JSON"))?;
+    parsed.validate()?;
+    if parsed != document {
+        return Err(ContractError::compatibility(
+            "persisted native compatibility receipt differs from its execution identity",
+        ));
+    }
+    for (phase, expected) in persisted_reports {
+        let report_path = reports_root.join(format!("{}.report.json", phase.file_stem()));
+        let observed = super::read_regular_bounded(
+            &report_path,
+            "revalidated native compatibility phase report",
+            crate::canonical::MAX_DOCUMENT_BYTES,
+        )?;
+        if observed != expected {
+            return Err(ContractError::compatibility(
+                "native compatibility phase report changed while receipt was published",
+            ));
+        }
+    }
+    Ok(CompatibilityReceipt {
+        path,
+        sha256: sha256_bytes(&persisted),
+    })
+}
+
+impl CompatibilityReceiptDocument {
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.schema != COMPATIBILITY_RECEIPT_SCHEMA || self.operation != "native-compatibility" {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt has an unsupported schema or operation",
+            ));
+        }
+        if self.phase_reports.len() != super::REQUIRED_PROBE_PHASES.len()
+            || self
+                .phase_reports
+                .iter()
+                .map(|entry| entry.phase)
+                .ne(super::REQUIRED_PROBE_PHASES)
+        {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt does not contain the required ordered phase set",
+            ));
+        }
+        if self.standalone_targets.is_empty() || self.standalone_targets.len() > 2 {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt has an invalid standalone target set",
+            ));
+        }
+        for (triple, target) in &self.standalone_targets {
+            if !crate::profiles::identifier(triple)
+                || !valid_receipt_artifact(&target.c)
+                || !valid_receipt_artifact(&target.cxx)
+            {
+                return Err(ContractError::compatibility(
+                    "native compatibility receipt contains invalid standalone evidence",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn receipt_artifact(artifact: &super::StandaloneArtifactIdentity) -> CompatibilityReceiptArtifact {
+    CompatibilityReceiptArtifact {
+        sha256: artifact.sha256.clone(),
+        size: artifact.size,
+        class: match artifact.class {
+            aros_common::elf::Class::Elf32 => "elf32",
+            aros_common::elf::Class::Elf64 => "elf64",
+        }
+        .into(),
+    }
+}
+
+fn valid_receipt_artifact(artifact: &CompatibilityReceiptArtifact) -> bool {
+    artifact.size > 0 && matches!(artifact.class.as_str(), "elf32" | "elf64")
 }
 
 #[derive(Debug)]
@@ -750,6 +947,21 @@ mod tests {
             .targets
             .contains_key("x86_64-unknown-aros"));
         assert!(report.standalone.targets.contains_key("i386-unknown-aros"));
+        assert!(report.receipt.path.is_file());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(&report.receipt.path).unwrap()).unwrap();
+        assert_eq!(
+            receipt["schema"],
+            "aros-toolchain-native-compatibility-receipt-v1"
+        );
+        assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
+        assert_eq!(receipt["standalone_targets"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            aros_common::sha256_file(&report.receipt.path)
+                .unwrap()
+                .digest,
+            report.receipt.sha256
+        );
 
         let cmake_arguments = fs::read_to_string(cmake_log).unwrap();
         assert!(cmake_arguments.contains("-S"));

@@ -630,15 +630,19 @@ async fn compatibility(args: CompatibilityArgs) -> miette::Result<()> {
         .collect::<Vec<_>>();
     match format {
         ResultFormat::Human => aros_common::outputln!(
-            "Native compatibility: {} phases, {} standalone target(s)",
+            "Native compatibility: {} phases, {} standalone target(s)\nReceipt: {}\nSHA-256: {}",
             phases.len(),
-            standalone_targets.len()
+            standalone_targets.len(),
+            report.receipt.path.display(),
+            report.receipt.sha256,
         ),
         ResultFormat::Json => print_json(&serde_json::json!({
             "schema": "aros-toolchain-producer-stage-v1",
             "operation": "compatibility",
             "phases": phases,
             "standalone_targets": standalone_targets,
+            "receipt": report.receipt.path,
+            "receipt_sha256": report.receipt.sha256,
         }))?,
     }
     Ok(())
