@@ -69,11 +69,10 @@ Native plans bind a declared contract and profile and report `ready` only when
 the caller supplied `--offline`, disjoint work/output/cache roots and positive
 resource budgets. A plan never reserves those roots or verifies cache payload bytes; the
 lifecycle repeats all binding after reservation and performs those checks.
-The [legacy execution-view implementation](../../docs/toolchain-legacy-execution-view.md)
-remains an explicit historical adapter. Both paths are local-only: neither
-attests executor origin, publishes, resumes, or claims release readiness. A
-valid inspection exits 0; invalid input exits 1 without a result. Neither a
-plan nor a valid self-digest grants release permission. The recursive read-only check
+The native lifecycle is the only local build implementation. It does not attest
+executor origin, publish, or claim release readiness. A valid inspection exits
+0; invalid input exits 1 without a result. Neither a plan nor a valid
+self-digest grants release permission. The recursive read-only check
 does not freeze a concurrently mutable tree, create an isolated snapshot,
 re-hash Git's object database independently, or establish trusted origin.
 It compares against the raw material returned by the selected local Git
@@ -190,48 +189,6 @@ shared publication traversal are not preemptible; timeout/cancellation observed
 after publication is a failure with the complete tree retained, never success.
 This is neither a same-user sandbox nor independent Git-object/origin verification.
 
-## Isolated legacy Git view primitive
-
-`snapshot::LegacySourceView::prepare(snapshot, timeout, cancellation)` consumes
-one metadata-free guard. It relocates our owned `<role>` to fresh
-`.<role>-legacy-pending`, reconstructs independent shallow Git stores for the
-root and every recorded gitlink, verifies the complete objects against the raw
-inventory, then durably publishes `<role>-legacy` without replacement. It never
-copies original Git metadata, history, remotes, configuration, hooks or alternates.
-The original checkout must still supply the selected local objects during this
-conversion; later view revalidation does not consult it.
-
-Only the selected commit, trees and blobs are transferred through bounded Git
-pack operations; no fetch, checkout, filters or source scripts run. Strict import,
-full fsck, exact object-set comparison and remeasured blob SHA-256 bind the freshly
-imported ODB to the captured snapshot. Git metadata has its own material records,
-not invented Git object IDs. Every metadata file/directory is included in the
-same exact byte/mode/membership guard: there are **no `.git` exemptions** in a
-view. Even optional Git index-cache writes invalidate it; controlled queries
-disable them, and any future adapter must preserve that environment.
-
-Limits are explicit per role: at most 1,024 repositories; 200,000 transferred
-objects / 8 GiB declared bytes in aggregate; 64 MiB per object; 32 MiB per
-generated index and object listing. Batches normally contain at most 8 MiB
-declared bytes plus framing (one larger allowed object can occupy a batch) and
-4,096 objects. The existing material/depth/path limits also apply **including**
-generated metadata. Git children share the operation deadline with at most ten
-seconds each. Rechecking existing pack bytes before each Git operation favors
-integrity over throughput; large/debug builds may exhaust a caller's budget.
-Kernel filesystem I/O/fsync is not preemptible. Failures retain the raw, staged
-or complete tree, never adopt it or issue a successful use guard.
-
-Maintained fault tests cover empty/partial metadata writes on storage exhaustion,
-both relocation boundaries, retained bytes and rejected reuse across all roles.
-Separate source-publisher tests exercise its real uncertain-commit error mapping.
-These are deterministic boundary tests, not actual volume exhaustion or power-loss
-evidence; see [the fault model and limits](../../docs/toolchain-legacy-execution-view.md#storage-and-publication-failure-boundaries).
-
-This API is Unix-only, in-process, non-resumable and separate from planning.
-It establishes source/object consistency, not trusted origin, executor identity,
-cache readiness, an OS sandbox or compiler qualification. All three guards and
-the remaining execution gates must be integrated before enabling the driver.
-
 ## Current CLI scope
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
@@ -242,9 +199,9 @@ source-owned `crosstools-release` target and a hidden Rust fetch bridge that
 serves only declared cache payloads, then builds the exact vendored
 `aros-collect`. Every phase writes a canonical self-verifying receipt and the
 candidate removes producer-only LLVM configuration inputs before returning a
-measured collector. `legacy-preview` is explicit and remains only a historical
-diagnostic adapter. No extra executable is exposed. `--resume-from compiler`
-is the sole local recovery boundary: it remeasures the retained snapshots and
+measured collector. There is no legacy execution adapter. No extra executable
+is exposed. `--resume-from compiler` is the sole local recovery boundary: it
+remeasures the retained snapshots and
 compiler output, revalidates every predecessor receipt and starts the collector
 in a fresh Cargo target root. It never reuses a failed compiler tree or applies
 to release work. Trusted executor origin, full candidate inventory, real

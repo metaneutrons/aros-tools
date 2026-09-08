@@ -53,8 +53,6 @@ executor's embedded identity plus measured binary hash is necessary but not
 proof of origin: release jobs also bind a verified, credential-free source
 build or trusted artifact evidence. A caller-provided digest is not an
 attestation. Local runs lacking trusted origin evidence stay `local-only`.
-The explicit legacy preview reports its real frontend identity separately;
-it must not claim the old collector commit identifies the new frontend.
 Verification, compatibility replay and packaging-only recovery may use a
 reviewed newer harness. Their executor record identifies that actual harness;
 artifact `tools_commit` continues to identify original production. Qualification
@@ -85,15 +83,13 @@ or compiler-timeout default. The deadline covers the whole operation and is
 propagated as remaining time to children. M1 evidence may justify a later,
 reviewed default; nested build tools must not multiply the job budget.
 
-`--backend native` is the default. It requires a selected committed
+The native lifecycle requires a selected committed
 `producer-executor-v1.toml` whose contract, tools commit, source lock and
 profiles bind exactly to the recipe. It then requires `--offline`, a verified
 prepared cache, fresh work/output roots, positive jobs/deadline and the
 frontend's internal verified MetaMake bridge. It runs only unchanged source
 programs (`configure` and `crosstools-release`) inside the controlled Rust
-lifecycle. `legacy-preview` remains explicit; never automatically choose it
-after a native failure. Remove the historical adapter at M6 with documented
-update guidance rather than keeping an indefinite second implementation.
+lifecycle. There is no backend option and no historical producer fallback.
 
 `plan` may omit output/resource choices; their fields are null and readiness is
 `incomplete`. It does not fetch, execute source scripts, bootstrap helpers,
@@ -115,19 +111,6 @@ digest. It then starts the collector in a fresh Cargo target directory. A
 partial compiler tree, a completed collector receipt, any altered
 receipt/input/output, and every other phase are rejected. Release jobs always
 select fresh work/install roots and no compiled-object cache.
-
-The implemented M1 preview accepts the explicit `build --backend legacy-preview`
-surface. It probes `git`, Python, CMake, Rust/Cargo and make before reservation,
-requires an existing cache directory, then uses fresh work/output leaves and
-three metadata-free snapshots converted to independent shallow Git views. The
-legacy driver receives only those views, a copied recipe, the selected lock and
-profiles, and a sanitized child environment (`PATH`, private `HOME`/`TMPDIR`,
-`LC_ALL=C`, `LANG=C`, `TZ=UTC`, offline Git/Cargo settings). The shared bounded
-process runner propagates the explicit deadline and Ctrl-C cancellation and
-reaps the process group. Partial or complete material is retained on every
-failure. A successful local result measures regular output files and host-tool
-versions, marks `qualification` as `local-only`, and records executor origin as
-`not-run`; it cannot publish or satisfy release provenance.
 
 The implemented M3 native path preserves the upstream build boundary rather
 than translating it: after new ownership reservations and three isolated
@@ -193,13 +176,9 @@ state is not a log: no wall-clock timestamps, environment dump or secret values.
   both are required. They are never null in build phase receipts.
 - `executor`: contract ID/digest, actual tools commit and executable digest;
   origin-evidence digest is nullable for local work, required for release proof.
-  Legacy preview can have null contract fields but must identify the frontend.
-  Read-only inspection may additionally report a null executor `tools_commit`
-  when no verifiable frontend build metadata exists, **only with blocked
-  readiness and an explicit finding**. Its measured on-disk executable digest
-  is an observation, not in-memory origin proof. This plan-only clarification
-  does not permit null executor commit identities in execution results,
-  receipts or release evidence, or substitution of the old collector commit.
+  Native inspection always binds contract ID/digest and tools commit through the
+  selected declaration. Its measured on-disk executable digest is an observation,
+  not in-memory origin proof.
 - `output`: relative path, `kind` (`file` or `tree`), SHA-256, size. File size is
   measured bytes; tree size is null and its digest uses the existing inventory
   algorithm. Output entries are unique and sorted by path.
@@ -210,40 +189,20 @@ state is not a log: no wall-clock timestamps, environment dump or secret values.
 
 ### Plan: `aros-toolchain-plan-v1`
 
-`operation` is `plan`; `backend` is the selected backend. `identity` uses the
-shared record. `paths` contains source/producer/tools/work/output/cache roots;
+`operation` is `plan`. `identity` uses the shared record. `paths` contains
+source/producer/tools/work/output/cache roots;
 only the last three may be null. `resources` contains jobs/deadline (nullable
 when omitted), offline (boolean), network isolation (`fetch-guard` or a future
-independently verified `os-enforced` backend), free bytes (nullable when not
+independently verified `os-enforced` mode), free bytes (nullable when not
 measurable). Do not report an OS sandbox that has not been implemented.
 
-`steps` is the ordered list of applicable phase names; preview uses the one
-honest `legacy-driver` boundary, not inferred internal stages. `readiness` is
-`ready`, `incomplete` or `blocked`. `findings` uses the existing diagnostic item
-shape with warnings/errors and hints. A valid inspection may report blocked
-readiness with exit 0; execution must refuse it. No filesystem reservation is
-encoded in a plan. JSON result is one complete document plus newline.
-
-The legacy M1 inspector returns `blocked` for valid inspected inputs:
-it checks root commit/tree identities, selected raw committed metadata, root
-overlaps and complete recursive raw worktree/index material. The latter rejects
-dirty, ignored, untracked, missing, wrong-mode and changed/uninitialized
-submodule inputs without filters, source execution, fetching or cleanup.
-This read-only comparison is not an isolated snapshot, an independent Git
-object-database integrity audit or trusted origin proof; it cannot freeze a
-concurrently mutable checkout. Source capabilities, lock semantics,
-prerequisites/cache and executor/build lifecycle remain gates.
-`network_isolation: fetch-guard` is the selected future legacy policy, not an
-active OS isolation claim. Native selection reads only the matching committed
-declaration and its bound inputs; it never guesses a declaration or driver from
-historical producer state. Native readiness is `incomplete` when required
-roots/resources are omitted and `ready` only after complete declaration-bound
-inspection. Cache byte verification and reservations remain lifecycle work.
-Legacy recipes lack lock paths: inspection requires exactly one direct
-committed `toolchains/*.sources.json` matching the recipe digest, and uses
-the historical `toolchains/profiles-v1.json` path. It does not pin an LLVM
-version or accept an uncommitted lock/profile copy. Native declaration-based
-resolution remains M2; full snapshot/source validation still gates execution.
+`steps` is the ordered native lifecycle. `readiness` is `ready` or
+`incomplete`. `findings` uses the existing diagnostic item shape with warnings
+and hints. Native selection reads only the matching committed declaration and
+its bound inputs; it never guesses a declaration or driver from historical
+producer state. Cache byte verification and reservations remain lifecycle work.
+No filesystem reservation is encoded in a plan. JSON result is one complete
+document plus newline.
 
 ### Result: `aros-toolchain-result-v1`
 
@@ -453,16 +412,7 @@ are rejected before any link is created. Failures retain evidence. Each role is
 independent, not a three-root transaction, phase receipt or execution permission.
 See the [snapshot limits](../crates/aros-toolchain/README.md#isolated-source-material-primitive).
 
-The unchanged legacy driver additionally requires real Git HEAD/tree/status
-queries in all three roots. Raw snapshots do not supply that interface. The
-[isolated execution view](toolchain-legacy-execution-view.md) consumes one raw
-snapshot and reconstructs independently verified shallow stores for every
-recorded repository. Raw bytes and every generated metadata byte remain guarded;
-there is no metadata exemption or copied user configuration. This library-only
-conversion does not enable an adapter or compiler execution.
-
-Remaining implementation gates include: private MetaMake fetch integration,
-trusted executor evidence, integrated snapshot/adapter lifecycle, actual four-host process
+Remaining implementation gates include: trusted executor evidence, actual four-host process
 and filesystem behavior, xz-library byte parity, archive resource limits, exact
 native source-lock/parser fixtures, tools-owned compatibility engine and
 measured CPU/RAM/storage/time defaults. None is waived by a specification test.
