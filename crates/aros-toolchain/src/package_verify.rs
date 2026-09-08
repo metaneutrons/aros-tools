@@ -1,13 +1,20 @@
 //! Bounded read-back verification for one native toolchain package set.
 //!
-//! This module has no extraction or installation side effects. It reads the
-//! completed package in place, validates every outer member, and recomputes
-//! the embedded payload inventory directly from the bounded tar stream.
+//! Its public verification entry point has no extraction or installation side
+//! effects. It reads the completed package in place, validates every outer
+//! member, and recomputes the embedded payload inventory directly from the
+//! bounded tar stream. The crate-private stream reader is also used by the
+//! separate fresh-extraction boundary so both operations retain one parser.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt as _};
 
 use aros_common::{
     finish_sha256, open_regular_file_nofollow, payload_casefold_path_key, sha256_reader,
@@ -236,7 +243,7 @@ fn require_exact_outer_members<'a>(
     Ok(())
 }
 
-fn measure_archive(path: &Path) -> Result<(File, u64, Sha256Digest), ContractError> {
+pub(crate) fn measure_archive(path: &Path) -> Result<(File, u64, Sha256Digest), ContractError> {
     let mut file = open_regular_file_nofollow(path)
         .map_err(|_| ContractError::verification("cannot safely open package archive"))?;
     let metadata = file
@@ -344,6 +351,37 @@ fn verify_archive_tree(
     manifest: &ArosToolchainManifest,
     forbidden_prefixes: &[PathBuf],
 ) -> Result<ArchiveTree, ContractError> {
+    scan_archive(
+        input,
+        manifest,
+        forbidden_prefixes,
+        &mut VerifyingArchiveConsumer,
+    )
+}
+
+/// Revalidate and materialize one already measured native package archive.
+///
+/// The caller creates one fresh, owned extraction root. This operation streams
+/// the archive through the same parser as package verification and retains the
+/// root on every failure for diagnosis. It never adopts, overwrites or removes
+/// existing material.
+#[cfg(unix)]
+pub(crate) fn extract_verified_archive(
+    input: File,
+    manifest: &ArosToolchainManifest,
+    forbidden_prefixes: &[PathBuf],
+    destination: &Path,
+) -> Result<(), ContractError> {
+    let mut consumer = ExtractingArchiveConsumer::new(destination)?;
+    scan_archive(input, manifest, forbidden_prefixes, &mut consumer).map(|_| ())
+}
+
+fn scan_archive<C: ArchiveConsumer>(
+    input: File,
+    manifest: &ArosToolchainManifest,
+    forbidden_prefixes: &[PathBuf],
+    consumer: &mut C,
+) -> Result<ArchiveTree, ContractError> {
     let stream = xz2::stream::Stream::new_stream_decoder(MAX_XZ_DECODER_MEMORY, 0)
         .map_err(|_| ContractError::verification("cannot initialize bounded package XZ decoder"))?;
     let decoder = XzDecoder::new_stream(input, stream);
@@ -411,6 +449,7 @@ fn verify_archive_tree(
         match entry_type.as_byte() {
             b'5' => {
                 verify_header(&header, manifest.source_date_epoch, Some(0o755), 0)?;
+                consumer.directory(&relative)?;
                 entries.push(directory_entry(relative_text));
             }
             b'2' => {
@@ -427,6 +466,7 @@ fn verify_archive_tree(
                 let target = target.to_str().ok_or_else(|| {
                     ContractError::verification("package tar symlink target is not UTF-8")
                 })?;
+                consumer.symlink(&relative, Path::new(target))?;
                 entries.push(ArosToolchainManifestEntry {
                     path: relative_text,
                     mode: "0777".into(),
@@ -444,14 +484,15 @@ fn verify_archive_tree(
                             "package tar embedded manifest is missing, duplicated, or too large",
                         ));
                     }
-                    let bytes = read_exact_entry(&mut entry, size)?;
+                    let bytes = consumer.embedded_manifest(&relative, &mut entry, size)?;
                     embedded_manifest = Some(bytes);
                 } else {
                     let mode = header.mode().map_err(|_| {
                         ContractError::verification("package tar entry has an invalid mode")
                     })?;
                     let mode = if mode & 0o111 == 0 { "0644" } else { "0755" };
-                    let sha256 = hash_entry(&mut entry, size, forbidden_prefixes)?;
+                    let sha256 =
+                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?;
                     entries.push(ArosToolchainManifestEntry {
                         path: relative_text,
                         mode: mode.into(),
@@ -481,6 +522,219 @@ fn verify_archive_tree(
         entries,
         tree_sha256,
     })
+}
+
+trait ArchiveConsumer {
+    fn directory(&mut self, relative: &Path) -> Result<(), ContractError>;
+
+    fn symlink(&mut self, relative: &Path, target: &Path) -> Result<(), ContractError>;
+
+    fn embedded_manifest(
+        &mut self,
+        relative: &Path,
+        entry: &mut dyn Read,
+        size: u64,
+    ) -> Result<Vec<u8>, ContractError>;
+
+    fn regular(
+        &mut self,
+        relative: &Path,
+        mode: &str,
+        entry: &mut dyn Read,
+        size: u64,
+        forbidden_prefixes: &[PathBuf],
+    ) -> Result<Sha256Digest, ContractError>;
+}
+
+struct VerifyingArchiveConsumer;
+
+impl ArchiveConsumer for VerifyingArchiveConsumer {
+    fn directory(&mut self, _relative: &Path) -> Result<(), ContractError> {
+        Ok(())
+    }
+
+    fn symlink(&mut self, _relative: &Path, _target: &Path) -> Result<(), ContractError> {
+        Ok(())
+    }
+
+    fn embedded_manifest(
+        &mut self,
+        _relative: &Path,
+        entry: &mut dyn Read,
+        size: u64,
+    ) -> Result<Vec<u8>, ContractError> {
+        read_exact_entry(entry, size)
+    }
+
+    fn regular(
+        &mut self,
+        _relative: &Path,
+        _mode: &str,
+        entry: &mut dyn Read,
+        size: u64,
+        forbidden_prefixes: &[PathBuf],
+    ) -> Result<Sha256Digest, ContractError> {
+        hash_entry(entry, size, forbidden_prefixes)
+    }
+}
+
+#[cfg(unix)]
+struct ExtractingArchiveConsumer<'a> {
+    root: &'a Path,
+    directories: BTreeSet<PathBuf>,
+}
+
+#[cfg(unix)]
+impl<'a> ExtractingArchiveConsumer<'a> {
+    fn new(root: &'a Path) -> Result<Self, ContractError> {
+        crate::filesystem::open_directory(root).map_err(|_| {
+            ContractError::verification("package extraction root is not a safe real directory")
+        })?;
+        let mut directories = BTreeSet::new();
+        directories.insert(PathBuf::new());
+        Ok(Self { root, directories })
+    }
+
+    fn require_parent(&self, relative: &Path) -> Result<(), ContractError> {
+        let parent = relative.parent().ok_or_else(|| {
+            ContractError::verification("package extraction entry has no relative parent")
+        })?;
+        if !self.directories.contains(parent) {
+            return Err(ContractError::verification(
+                "package extraction entry has no previously materialized real parent directory",
+            ));
+        }
+        crate::filesystem::open_directory(&self.root.join(parent)).map_err(|_| {
+            ContractError::verification(
+                "package extraction parent changed or is not a real directory",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn create_directory(&mut self, relative: &Path) -> Result<(), ContractError> {
+        self.require_parent(relative)?;
+        let path = self.root.join(relative);
+        fs::create_dir(&path).map_err(|_| {
+            ContractError::verification("cannot create a fresh package extraction directory")
+        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|_| {
+            ContractError::verification("cannot normalize a package extraction directory mode")
+        })?;
+        crate::filesystem::open_directory(&path).map_err(|_| {
+            ContractError::verification("package extraction directory is not a real directory")
+        })?;
+        self.directories.insert(relative.to_path_buf());
+        Ok(())
+    }
+
+    fn write_regular(
+        &self,
+        relative: &Path,
+        mode: u32,
+        entry: &mut dyn Read,
+        size: u64,
+        forbidden_prefixes: &[PathBuf],
+    ) -> Result<Sha256Digest, ContractError> {
+        self.require_parent(relative)?;
+        let path = self.root.join(relative);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| {
+                ContractError::verification("cannot create a fresh package extraction file")
+            })?;
+        let digest = hash_entry_to(entry, size, forbidden_prefixes, &mut output)?;
+        output.sync_all().map_err(|_| {
+            ContractError::verification("cannot durably write a package extraction file")
+        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).map_err(|_| {
+            ContractError::verification("cannot normalize a package extraction file mode")
+        })?;
+        Ok(digest)
+    }
+
+    fn write_manifest(
+        &self,
+        relative: &Path,
+        entry: &mut dyn Read,
+        size: u64,
+    ) -> Result<Vec<u8>, ContractError> {
+        let contents = read_exact_entry(entry, size)?;
+        self.require_parent(relative)?;
+        let path = self.root.join(relative);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| {
+                ContractError::verification("cannot create the extracted package manifest")
+            })?;
+        std::io::Write::write_all(&mut output, &contents).map_err(|_| {
+            ContractError::verification("cannot write the extracted package manifest")
+        })?;
+        output.sync_all().map_err(|_| {
+            ContractError::verification("cannot durably write the extracted package manifest")
+        })?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).map_err(|_| {
+            ContractError::verification("cannot normalize the extracted package manifest mode")
+        })?;
+        Ok(contents)
+    }
+}
+
+#[cfg(unix)]
+impl ArchiveConsumer for ExtractingArchiveConsumer<'_> {
+    fn directory(&mut self, relative: &Path) -> Result<(), ContractError> {
+        self.create_directory(relative)
+    }
+
+    fn symlink(&mut self, relative: &Path, target: &Path) -> Result<(), ContractError> {
+        self.require_parent(relative)?;
+        let path = self.root.join(relative);
+        symlink(target, &path).map_err(|_| {
+            ContractError::verification("cannot create a fresh package extraction symlink")
+        })?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| {
+            ContractError::verification("cannot inspect a package extraction symlink")
+        })?;
+        if !metadata.file_type().is_symlink() {
+            return Err(ContractError::verification(
+                "package extraction symlink changed while it was created",
+            ));
+        }
+        Ok(())
+    }
+
+    fn embedded_manifest(
+        &mut self,
+        relative: &Path,
+        entry: &mut dyn Read,
+        size: u64,
+    ) -> Result<Vec<u8>, ContractError> {
+        self.write_manifest(relative, entry, size)
+    }
+
+    fn regular(
+        &mut self,
+        relative: &Path,
+        mode: &str,
+        entry: &mut dyn Read,
+        size: u64,
+        forbidden_prefixes: &[PathBuf],
+    ) -> Result<Sha256Digest, ContractError> {
+        let mode = match mode {
+            "0644" => 0o644,
+            "0755" => 0o755,
+            _ => {
+                return Err(ContractError::verification(
+                    "package extraction received a noncanonical regular-file mode",
+                ))
+            }
+        };
+        self.write_regular(relative, mode, entry, size, forbidden_prefixes)
+    }
 }
 
 fn verify_archive_terminal(decoder: &mut XzDecoder<File>) -> Result<(), ContractError> {
@@ -590,7 +844,10 @@ fn directory_entry(path: String) -> ArosToolchainManifestEntry {
     }
 }
 
-fn read_exact_entry<R: Read>(entry: &mut R, expected_size: u64) -> Result<Vec<u8>, ContractError> {
+fn read_exact_entry<R: Read + ?Sized>(
+    entry: &mut R,
+    expected_size: u64,
+) -> Result<Vec<u8>, ContractError> {
     let capacity = usize::try_from(expected_size).map_err(|_| {
         ContractError::verification("package metadata size exceeds addressable memory")
     })?;
@@ -606,10 +863,29 @@ fn read_exact_entry<R: Read>(entry: &mut R, expected_size: u64) -> Result<Vec<u8
     Ok(output)
 }
 
-fn hash_entry<R: Read>(
+fn hash_entry<R: Read + ?Sized>(
     entry: &mut R,
     expected_size: u64,
     forbidden_prefixes: &[PathBuf],
+) -> Result<Sha256Digest, ContractError> {
+    hash_entry_with_output(entry, expected_size, forbidden_prefixes, None)
+}
+
+#[cfg(unix)]
+fn hash_entry_to<R: Read + ?Sized>(
+    entry: &mut R,
+    expected_size: u64,
+    forbidden_prefixes: &[PathBuf],
+    output: &mut File,
+) -> Result<Sha256Digest, ContractError> {
+    hash_entry_with_output(entry, expected_size, forbidden_prefixes, Some(output))
+}
+
+fn hash_entry_with_output<R: Read + ?Sized>(
+    entry: &mut R,
+    expected_size: u64,
+    forbidden_prefixes: &[PathBuf],
+    mut output: Option<&mut File>,
 ) -> Result<Sha256Digest, ContractError> {
     let needles = forbidden_prefixes
         .iter()
@@ -640,6 +916,11 @@ fn hash_entry<R: Read>(
             return Err(ContractError::verification(
                 "package regular-file entry exceeds its declared size",
             ));
+        }
+        if let Some(output) = output.as_deref_mut() {
+            std::io::Write::write_all(output, &buffer[..read]).map_err(|_| {
+                ContractError::verification("cannot write package regular-file extraction bytes")
+            })?;
         }
         digest.update(&buffer[..read]);
         if !needles.is_empty() {
@@ -874,5 +1155,105 @@ mod tests {
                 .unwrap();
         });
         assert!(verify_archive_tree(File::open(&special).unwrap(), &manifest, &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extraction_materializes_a_safe_archive_in_a_retained_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("safe.tar.xz");
+        write_xz_tar_entries(&archive, |builder| {
+            builder
+                .append(
+                    &canonical_header("toolchain/bin", tar::EntryType::Directory, 0, 0o755),
+                    &b""[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/bin/clang", tar::EntryType::Regular, 5, 0o755),
+                    &b"clang"[..],
+                )
+                .unwrap();
+            builder
+                .append(
+                    &canonical_header(
+                        "toolchain/toolchain-manifest.json",
+                        tar::EntryType::Regular,
+                        2,
+                        0o644,
+                    ),
+                    &b"{}"[..],
+                )
+                .unwrap();
+        });
+        let root = temporary
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("retained-root");
+        fs::create_dir(&root).unwrap();
+
+        extract_verified_archive(
+            File::open(&archive).unwrap(),
+            &fixture_manifest(),
+            &[],
+            &root,
+        )
+        .unwrap();
+
+        let clang = root.join("bin/clang");
+        assert_eq!(fs::read(&clang).unwrap(), b"clang");
+        assert_eq!(
+            fs::metadata(&clang).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::read(root.join("toolchain-manifest.json")).unwrap(),
+            b"{}"
+        );
+        assert!(root.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extraction_rejects_children_below_a_retained_symlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("symlink-child.tar.xz");
+        write_xz_tar_entries(&archive, |builder| {
+            let mut link = canonical_header("toolchain/link", tar::EntryType::Symlink, 0, 0o777);
+            link.set_link_name("safe").unwrap();
+            link.set_cksum();
+            builder.append(&link, &b""[..]).unwrap();
+            builder
+                .append(
+                    &canonical_header("toolchain/link/escape", tar::EntryType::Regular, 1, 0o644),
+                    &b"x"[..],
+                )
+                .unwrap();
+        });
+        let root = temporary
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("retained-root");
+        fs::create_dir(&root).unwrap();
+
+        assert!(extract_verified_archive(
+            File::open(&archive).unwrap(),
+            &fixture_manifest(),
+            &[],
+            &root,
+        )
+        .is_err());
+
+        assert!(fs::symlink_metadata(root.join("link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!root.join("link/escape").exists());
+        assert!(root.is_dir());
     }
 }

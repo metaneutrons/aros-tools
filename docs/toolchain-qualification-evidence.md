@@ -76,6 +76,25 @@ file directly below one explicit fresh target root and is measured before later
 process phases may use it. It does not run a process or accept a shared Cargo
 target directory as origin evidence.
 
+### Relocation package roots
+
+The native producer has a separate package-root boundary for the later
+two-root relocation probe. For each root it first verifies one complete native
+package set in place: the archive, external manifest, checksum sidecar and
+SBOM must be the exact closed four-member set. It then creates one absent,
+owned destination, remeasures the archive through a no-follow descriptor, and
+requires that its measured size and SHA-256 still equal the just-verified
+package identity. The same bounded tar parser used by package verification
+streams that descriptor into the fresh root; it rechecks canonical headers,
+ordering, paths, links, resource limits and forbidden producer prefixes.
+
+The extracted manifest and complete tree inventory are read back before the
+root is accepted. A pre-existing output is never adopted or overwritten. If
+creation has begun and a later check fails, the root and its partial material
+remain for diagnosis. This is producer-owned compatibility preparation, not
+the `aros-cli` installation path. A future two-root probe invokes it twice
+with independently owned destinations; it must not reuse one extracted tree.
+
 ## Compatibility probe reports
 
 The next M5.2 boundary records one completed process per closed phase:
