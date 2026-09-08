@@ -75,7 +75,13 @@ pub fn verify_and_extract(
     Ok(ExtractedPackage { root, verified })
 }
 
-fn create_fresh_root(path: &Path) -> Result<PathBuf, ContractError> {
+/// Resolve one absent output root without creating it.
+///
+/// The returned path has a canonical real parent and one normal final segment.
+/// Callers use this to reject overlapping destinations before the first
+/// retained extraction begins; [`verify_and_extract`] repeats the same check
+/// immediately before creation.
+pub(crate) fn checked_absent_root(path: &Path) -> Result<PathBuf, ContractError> {
     if !path.is_absolute() {
         return Err(ContractError::verification(
             "package extraction root must be an absolute path",
@@ -103,18 +109,18 @@ fn create_fresh_root(path: &Path) -> Result<PathBuf, ContractError> {
     })?;
     let root = parent.join(name);
     match fs::symlink_metadata(&root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => {
-            return Err(ContractError::verification(
-                "package extraction root already exists and cannot be adopted",
-            ))
-        }
-        Err(_) => {
-            return Err(ContractError::verification(
-                "cannot safely inspect the package extraction root",
-            ))
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(root),
+        Ok(_) => Err(ContractError::verification(
+            "package extraction root already exists and cannot be adopted",
+        )),
+        Err(_) => Err(ContractError::verification(
+            "cannot safely inspect the package extraction root",
+        )),
     }
+}
+
+fn create_fresh_root(path: &Path) -> Result<PathBuf, ContractError> {
+    let root = checked_absent_root(path)?;
     fs::create_dir(&root).map_err(|_| {
         ContractError::verification("cannot create the fresh package extraction root")
     })?;

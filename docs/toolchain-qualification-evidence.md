@@ -93,7 +93,8 @@ root is accepted. A pre-existing output is never adopted or overwritten. If
 creation has begun and a later check fails, the root and its partial material
 remain for diagnosis. This is producer-owned compatibility preparation, not
 the `aros-cli` installation path. A future two-root probe invokes it twice
-with independently owned destinations; it must not reuse one extracted tree.
+with independently owned destinations outside the verified package directory;
+it must not reuse one extracted tree.
 
 ## Compatibility probe reports
 

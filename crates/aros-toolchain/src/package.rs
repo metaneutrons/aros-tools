@@ -1256,6 +1256,76 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn two_root_relocation_reverifies_one_package_identity_without_adoption() {
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        write_fixture_candidate(&candidate);
+        let packaged = package(&PackageRequest {
+            candidate_root: candidate,
+            output_dir: temporary.path().join("package"),
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        })
+        .unwrap();
+        let package_dir = packaged.output_dir.clone();
+        let verification = crate::package_verify::PackageVerificationRequest {
+            package_dir: packaged.output_dir,
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        let duplicate_root = temporary.path().join("duplicate");
+        let duplicate = crate::compatibility::TwoRootRelocationRequest {
+            verification: verification.clone(),
+            first_root: duplicate_root.clone(),
+            second_root: duplicate_root.clone(),
+        };
+        assert!(crate::compatibility::extract_two_roots(&duplicate).is_err());
+        assert!(!duplicate_root.exists());
+
+        let nested_root = package_dir.join("relocated-in-package");
+        let nested = crate::compatibility::TwoRootRelocationRequest {
+            verification: verification.clone(),
+            first_root: nested_root.clone(),
+            second_root: temporary.path().join("other-root"),
+        };
+        assert!(crate::compatibility::extract_two_roots(&nested).is_err());
+        assert!(!nested_root.exists());
+
+        let relocation = crate::compatibility::TwoRootRelocationRequest {
+            verification,
+            first_root: temporary.path().join("relocated-a"),
+            second_root: temporary.path().join("relocated-b"),
+        };
+        let extracted = crate::compatibility::extract_two_roots(&relocation).unwrap();
+
+        assert_ne!(extracted.first.root, extracted.second.root);
+        assert_eq!(extracted.first.verified, extracted.second.verified);
+        for root in [&extracted.first.root, &extracted.second.root] {
+            assert_eq!(
+                fs::read(root.join("share/Größe/marker-ä.txt")).unwrap(),
+                b"AROS tree fixture\n"
+            );
+            assert_eq!(
+                fs::read_link(root.join("share/vector-link")).unwrap(),
+                PathBuf::from("Größe/marker-ä.txt")
+            );
+            assert!(root.join(AROS_TOOLCHAIN_MANIFEST_FILE).is_file());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn package_rejects_cross_chunk_prefixes_case_collisions_and_existing_outputs() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("candidate");
