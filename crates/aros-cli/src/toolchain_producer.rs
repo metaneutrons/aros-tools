@@ -11,7 +11,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use aros_common::{sha256_bytes, CancellationToken};
+use aros_common::{open_regular_file_nofollow, sha256_bytes, CancellationToken, Sha256Digest};
 use aros_toolchain::compatibility::{
     self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
     NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
@@ -21,9 +21,18 @@ use aros_toolchain::compatibility_source::{
 };
 use aros_toolchain::profiles::Profiles;
 use aros_toolchain::python_environment::PythonEnvironment;
+use aros_toolchain::qualification_evidence::{
+    AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence, QualificationLane,
+    ReleaseEvidence, SourceRunIdentity, QUALIFICATION_EVIDENCE_SCHEMA,
+};
 use aros_toolchain::recipe_builder::{self, RecipeBuildRequest};
-use aros_toolchain::recovery::{self, RecoveryRequest};
-use aros_toolchain::release_index::{self, IndexRequest, IndexStage};
+use aros_toolchain::recovery::{
+    self, FailedStage, ObservedTag, RecoveryHandoff, RecoveryOperation, RecoveryRequest,
+    ReleaseHandoffState,
+};
+use aros_toolchain::release_index::{
+    self, IndexRequest, IndexStage, NativeReleaseIndex, V1_HOSTS, V1_PROFILES,
+};
 use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
 use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
@@ -62,6 +71,10 @@ enum ProducerCommand {
     Repackage(RepackageArgs),
     /// Re-evaluate recovery eligibility against one isolated complete release inventory
     ValidateRecovery(ValidateRecoveryArgs),
+    /// Record complete native qualification evidence from an isolated final release
+    RecordQualification(RecordQualificationArgs),
+    /// Create one closed recovery request after external attestation verification
+    PrepareRecovery(PrepareRecoveryArgs),
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
     /// Execute all six native package-compatibility phases locally
@@ -303,6 +316,122 @@ struct ValidateRecoveryArgs {
     format: ResultFormat,
 }
 
+/// Inputs for recording a complete final native qualification candidate.
+///
+/// The three report roots use the default names produced by the pinned GitHub
+/// artifact action.  Keeping this layout explicit means the native command,
+/// rather than workflow string processing, owns the four-host/three-profile
+/// evidence closure.
+#[derive(Args)]
+struct RecordQualificationArgs {
+    /// Complete isolated 56-member final release inventory
+    #[arg(long)]
+    release_dir: PathBuf,
+    /// Basename of the source-lock document in the final release inventory
+    #[arg(long)]
+    source_lock_filename: String,
+    /// Download root containing native-lifecycle-<host>-<profile>-{a,b} artifacts
+    #[arg(long)]
+    lifecycle_reports_dir: PathBuf,
+    /// Download root containing comparison-<host>-<profile> artifacts
+    #[arg(long)]
+    comparison_reports_dir: PathBuf,
+    /// Download root containing compatibility-<host>-<profile> artifacts
+    #[arg(long)]
+    compatibility_reports_dir: PathBuf,
+    /// Credential-free HTTPS repository that ran the producer workflow
+    #[arg(long)]
+    source_repository: String,
+    /// Repository-relative producer workflow path
+    #[arg(long)]
+    source_workflow: String,
+    /// Immutable GitHub Actions producer run identifier
+    #[arg(long)]
+    source_run_id: u64,
+    /// Immutable source tag used by the producer run
+    #[arg(long)]
+    source_tag: String,
+    /// Observed annotated source tag object identity
+    #[arg(long)]
+    source_tag_object: String,
+    /// Credential-free HTTPS repository accepted by the external attestation verifier
+    #[arg(long)]
+    attestation_repository: String,
+    /// Repository-relative signer workflow accepted by the external verifier
+    #[arg(long)]
+    attestation_workflow: String,
+    /// Signer identity accepted by the external verifier
+    #[arg(long)]
+    attestation_signer: String,
+    /// Unix time at which the protected workflow recorded the evidence
+    #[arg(long)]
+    created_at: u64,
+    /// Strict expiration time for later replay or packaging recovery
+    #[arg(long)]
+    expires_at: u64,
+    /// Absent durable qualification-evidence-v1 output
+    #[arg(long)]
+    output: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
+/// Inputs for converting measured qualification evidence into one recovery request.
+///
+/// The protected workflow must cryptographically verify the attestation before
+/// calling this local command.  This command records the verifier's fixed
+/// policy claims and rejects a mismatch; it does not have network or forge
+/// authority of its own.
+#[derive(Args)]
+struct PrepareRecoveryArgs {
+    /// Closed qualification-evidence-v1 document from the qualified source run
+    #[arg(long)]
+    qualification_evidence: PathBuf,
+    /// Complete isolated 56-member final release inventory from that source run
+    #[arg(long)]
+    release_dir: PathBuf,
+    /// Re-observed annotated source tag object identity
+    #[arg(long)]
+    source_tag_object: String,
+    /// Re-observed peeled source tag commit identity
+    #[arg(long)]
+    source_tag_commit: String,
+    /// Fresh immutable recovery release and annotated tag name
+    #[arg(long)]
+    recovery_release_id: String,
+    /// Re-observed annotated recovery tag object identity
+    #[arg(long)]
+    recovery_tag_object: String,
+    /// Re-observed peeled recovery tag commit identity
+    #[arg(long)]
+    recovery_tag_commit: String,
+    /// Credential-free HTTPS repository expected for the source workflow
+    #[arg(long)]
+    source_repository: String,
+    /// Repository-relative source workflow expected for the qualified run
+    #[arg(long)]
+    source_workflow: String,
+    /// Credential-free HTTPS repository accepted by the external verifier
+    #[arg(long)]
+    attestation_repository: String,
+    /// Repository-relative signer workflow accepted by the external verifier
+    #[arg(long)]
+    attestation_workflow: String,
+    /// Signer identity accepted by the external verifier
+    #[arg(long)]
+    attestation_signer: String,
+    /// Unix time at the protected recovery boundary
+    #[arg(long)]
+    now: u64,
+    /// Absent durable recovery-request-v1 output
+    #[arg(long)]
+    output: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
 /// Index operation stage selected explicitly by the protected workflow.
 #[derive(Clone, Copy, ValueEnum)]
 enum IndexStageArg {
@@ -423,6 +552,8 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::Compare(args) => compare(&args),
         ProducerCommand::Repackage(args) => repackage(args),
         ProducerCommand::ValidateRecovery(args) => validate_recovery(&args),
+        ProducerCommand::RecordQualification(args) => record_qualification(&args),
+        ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
@@ -805,6 +936,398 @@ fn validate_recovery(args: &ValidateRecoveryArgs) -> miette::Result<()> {
         }))?,
     }
     Ok(())
+}
+
+fn record_qualification(args: &RecordQualificationArgs) -> miette::Result<()> {
+    let inventory = recovery::measure_complete_release_inventory(&args.release_dir)
+        .map_err(|error| native_error(&error))?;
+    let index = NativeReleaseIndex::parse(&inventory.release_index_bytes)
+        .map_err(|error| native_error(&error))?;
+    let recipe_bytes = inventory_document(
+        &args.release_dir,
+        &inventory,
+        "toolchain-recipe-v2.json",
+        "recipe",
+    )?;
+    let recipe = Recipe::parse(&recipe_bytes).map_err(|error| native_error(&error))?;
+    let source_lock_bytes = inventory_document(
+        &args.release_dir,
+        &inventory,
+        &args.source_lock_filename,
+        "source lock",
+    )?;
+    let _source_lock =
+        SourceLock::parse(&source_lock_bytes).map_err(|error| native_error(&error))?;
+    let profiles_bytes = inventory_document(
+        &args.release_dir,
+        &inventory,
+        "profiles-v1.json",
+        "profiles",
+    )?;
+    let _profiles = Profiles::parse(&profiles_bytes).map_err(|error| native_error(&error))?;
+
+    let source_commit = parse_git_object(&index.source_commit, "release index source commit")?;
+    let producer_commit =
+        parse_git_object(&index.producer_commit, "release index producer commit")?;
+    let tools_commit = parse_git_object(&index.tools_commit, "release index tools commit")?;
+    if recipe.source().0 != &source_commit
+        || recipe.producer().0 != &producer_commit
+        || recipe.tools().0 != &tools_commit
+        || sha256_bytes(&source_lock_bytes) != *recipe.source_lock_sha256()
+        || sha256_bytes(&profiles_bytes) != *recipe.profiles_sha256()
+    {
+        return Err(miette::miette!(
+            "native qualification evidence inputs do not match the final recipe and release index"
+        ));
+    }
+    let checksums_sha256 = sha256_bytes(&inventory.checksums_bytes);
+    let provenance_sha256 = inventory_asset_digest(
+        &inventory,
+        "toolchain-provenance.sigstore.json",
+        "provenance bundle",
+    )?;
+    let source_tag_object = parse_git_object(&args.source_tag_object, "source tag object")?;
+    let attestation = AttestationClaim {
+        repository: args.attestation_repository.clone(),
+        workflow: args.attestation_workflow.clone(),
+        signer: args.attestation_signer.clone(),
+        subject_sha256: checksums_sha256.clone(),
+    };
+    let evidence = QualificationEvidence {
+        schema: QUALIFICATION_EVIDENCE_SCHEMA.into(),
+        created_at: args.created_at,
+        expires_at: args.expires_at,
+        source_run: SourceRunIdentity {
+            repository: args.source_repository.clone(),
+            workflow: args.source_workflow.clone(),
+            run_id: args.source_run_id,
+            producer_commit: producer_commit.clone(),
+            source_commit: source_commit.clone(),
+            source_tag: args.source_tag.clone(),
+            tag_object: source_tag_object,
+        },
+        release: ReleaseEvidence {
+            release_id: index.release_id.clone(),
+            base_url: index.base_url.clone(),
+            release_index_sha256: sha256_bytes(&inventory.release_index_bytes),
+            checksums_sha256,
+            provenance_sha256,
+            recipe_sha256: recipe.sha256().clone(),
+            source_lock_sha256: recipe.source_lock_sha256().clone(),
+            profiles_sha256: recipe.profiles_sha256().clone(),
+            source_commit,
+            producer_commit,
+            tools_commit,
+        },
+        attestation,
+        lanes: qualification_lanes(args, &index)?,
+        coverage: EvidenceCoverage::ReleaseCandidate,
+    };
+    let policy = EvidencePolicy {
+        source_repository: args.source_repository.clone(),
+        source_workflow: args.source_workflow.clone(),
+        signer_repository: args.attestation_repository.clone(),
+        signer_workflow: args.attestation_workflow.clone(),
+        signer: args.attestation_signer.clone(),
+        now: args.created_at,
+    };
+    evidence
+        .validate_against_index(&inventory.release_index_bytes, &policy)
+        .map_err(|error| native_error(&error))?;
+    let output = write_new_json(
+        &args.output,
+        &serde_json::to_value(&evidence)
+            .map_err(|_| miette::miette!("cannot serialize native qualification evidence"))?,
+        "qualification evidence",
+    )?;
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native qualification evidence: 12 lanes\nReceipt: {}\nRelease: {}",
+            output.display(),
+            evidence.release.release_id,
+        ),
+        ResultFormat::Json => print_json(&serde_json::json!({
+            "schema": "aros-toolchain-producer-stage-v1",
+            "operation": "record-qualification",
+            "receipt": output,
+            "release_id": evidence.release.release_id,
+            "lanes": evidence.lanes.len(),
+        }))?,
+    }
+    Ok(())
+}
+
+fn prepare_recovery(args: &PrepareRecoveryArgs) -> miette::Result<()> {
+    let evidence = QualificationEvidence::parse(&read_regular_input(
+        &args.qualification_evidence,
+        "qualification evidence",
+    )?)
+    .map_err(|error| native_error(&error))?;
+    let inventory = recovery::measure_complete_release_inventory(&args.release_dir)
+        .map_err(|error| native_error(&error))?;
+    let checksums_sha256 = sha256_bytes(&inventory.checksums_bytes);
+    let source_tag = ObservedTag {
+        name: evidence.source_run.source_tag.clone(),
+        tag_object: parse_git_object(&args.source_tag_object, "source tag object")?,
+        peeled_commit: parse_git_object(&args.source_tag_commit, "source tag commit")?,
+    };
+    let handoff = RecoveryHandoff {
+        release_id: args.recovery_release_id.clone(),
+        tag: ObservedTag {
+            name: args.recovery_release_id.clone(),
+            tag_object: parse_git_object(&args.recovery_tag_object, "recovery tag object")?,
+            peeled_commit: parse_git_object(&args.recovery_tag_commit, "recovery tag commit")?,
+        },
+        state: ReleaseHandoffState::Absent,
+    };
+    let verified_attestation = AttestationClaim {
+        repository: args.attestation_repository.clone(),
+        workflow: args.attestation_workflow.clone(),
+        signer: args.attestation_signer.clone(),
+        subject_sha256: checksums_sha256,
+    };
+    let request = RecoveryRequest {
+        operation: RecoveryOperation::PackagingRecovery,
+        failed_stage: FailedStage::Packaging,
+        evidence,
+        release_index_bytes: inventory.release_index_bytes,
+        checksums_bytes: inventory.checksums_bytes,
+        assets: inventory.assets,
+        verified_attestation: Some(verified_attestation),
+        evidence_policy: EvidencePolicy {
+            source_repository: args.source_repository.clone(),
+            source_workflow: args.source_workflow.clone(),
+            signer_repository: args.attestation_repository.clone(),
+            signer_workflow: args.attestation_workflow.clone(),
+            signer: args.attestation_signer.clone(),
+            now: args.now,
+        },
+        source_tag,
+        handoff: Some(handoff),
+    };
+    let decision = recovery::evaluate_recovery(&request).map_err(|error| native_error(&error))?;
+    let output = write_new_json(
+        &args.output,
+        &serde_json::to_value(&request)
+            .map_err(|_| miette::miette!("cannot serialize native recovery request"))?,
+        "recovery request",
+    )?;
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native recovery request prepared\nReceipt: {}\nDecision: {:?}",
+            output.display(),
+            decision,
+        ),
+        ResultFormat::Json => print_json(&serde_json::json!({
+            "schema": "aros-toolchain-producer-stage-v1",
+            "operation": "prepare-recovery",
+            "recovery_request": output,
+            "decision": decision,
+        }))?,
+    }
+    Ok(())
+}
+
+fn inventory_document(
+    release_dir: &std::path::Path,
+    inventory: &recovery::MeasuredReleaseInventory,
+    name: &str,
+    label: &str,
+) -> miette::Result<Vec<u8>> {
+    let expected = inventory
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .ok_or_else(|| miette::miette!("native qualification evidence is missing {label}"))?;
+    let bytes = read_regular_input(&release_dir.join(name), label)?;
+    if sha256_bytes(&bytes) != expected.sha256 || bytes.len() as u64 != expected.size {
+        return Err(miette::miette!(
+            "native qualification evidence {label} changed after final inventory measurement"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn inventory_asset_digest(
+    inventory: &recovery::MeasuredReleaseInventory,
+    name: &str,
+    label: &str,
+) -> miette::Result<Sha256Digest> {
+    inventory
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .map(|asset| asset.sha256.clone())
+        .ok_or_else(|| miette::miette!("native qualification evidence is missing {label}"))
+}
+
+fn parse_git_object(
+    value: &str,
+    label: &str,
+) -> miette::Result<aros_toolchain::recipe::GitObjectId> {
+    aros_toolchain::recipe::GitObjectId::try_from(value.to_owned()).map_err(|_| {
+        miette::miette!(
+            "native qualification evidence {label} must be lowercase 40-hex Git identity"
+        )
+    })
+}
+
+fn qualification_lanes(
+    args: &RecordQualificationArgs,
+    index: &NativeReleaseIndex,
+) -> miette::Result<Vec<QualificationLane>> {
+    let mut lanes = Vec::with_capacity(V1_HOSTS.len() * V1_PROFILES.len());
+    for host in V1_HOSTS {
+        for profile in V1_PROFILES {
+            let artifact = index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.host == *host && artifact.target_profile == *profile)
+                .ok_or_else(|| {
+                    miette::miette!(
+                        "native qualification evidence release index is missing {host}/{profile}"
+                    )
+                })?;
+            let lifecycle_a = args
+                .lifecycle_reports_dir
+                .join(format!("native-lifecycle-{host}-{profile}-a"))
+                .join("publish.json");
+            let lifecycle_b = args
+                .lifecycle_reports_dir
+                .join(format!("native-lifecycle-{host}-{profile}-b"))
+                .join("publish.json");
+            let comparison = args
+                .comparison_reports_dir
+                .join(format!("comparison-{host}-{profile}"))
+                .join(format!("comparison-{host}-{profile}.json"));
+            let compatibility = args
+                .compatibility_reports_dir
+                .join(format!("compatibility-{host}-{profile}"))
+                .join("native-compatibility.receipt.json");
+            lanes.push(QualificationLane {
+                host: (*host).into(),
+                target_profile: (*profile).into(),
+                target_triple: artifact.target_triple.clone(),
+                build_a_report_sha256: lifecycle_report_digest(&lifecycle_a)?,
+                build_b_report_sha256: lifecycle_report_digest(&lifecycle_b)?,
+                comparison_report_sha256: comparison_report_digest(&comparison)?,
+                compatibility_report_sha256: compatibility_report_digest(&compatibility)?,
+            });
+        }
+    }
+    Ok(lanes)
+}
+
+fn lifecycle_report_digest(path: &std::path::Path) -> miette::Result<Sha256Digest> {
+    let (value, digest) = evidence_report(path, "native lifecycle publish receipt")?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("aros-toolchain-receipt-v1")
+        || value.get("backend").and_then(serde_json::Value::as_str) != Some("native")
+        || value.get("phase").and_then(serde_json::Value::as_str) != Some("publish")
+    {
+        return Err(miette::miette!(
+            "native qualification evidence lifecycle report is not a native publish receipt"
+        ));
+    }
+    let recorded = value
+        .get("receipt_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| miette::miette!("native lifecycle publish receipt has no self-digest"))?;
+    let recorded = Sha256Digest::parse(recorded).map_err(|_| {
+        miette::miette!("native lifecycle publish receipt has an invalid self-digest")
+    })?;
+    let mut material = value;
+    material
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("native lifecycle publish receipt is not an object"))?
+        .remove("receipt_sha256");
+    let calculated =
+        sha256_bytes(&aros_toolchain::canonical::bytes(&material).map_err(|_| {
+            miette::miette!("cannot canonicalize native lifecycle publish receipt")
+        })?);
+    if calculated != recorded {
+        return Err(miette::miette!(
+            "native lifecycle publish receipt self-digest verification failed"
+        ));
+    }
+    Ok(digest)
+}
+
+fn comparison_report_digest(path: &std::path::Path) -> miette::Result<Sha256Digest> {
+    let (value, digest) = evidence_report(path, "native comparison receipt")?;
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || value.get("operation").and_then(serde_json::Value::as_str) != Some("compare")
+        || value
+            .get("byte_identical")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || value
+            .get("members")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|members| members.len() != 4)
+    {
+        return Err(miette::miette!(
+            "native qualification evidence comparison report is incomplete or noncanonical"
+        ));
+    }
+    Ok(digest)
+}
+
+fn compatibility_report_digest(path: &std::path::Path) -> miette::Result<Sha256Digest> {
+    let (value, digest) = evidence_report(path, "native compatibility receipt")?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("aros-toolchain-native-compatibility-receipt-v1")
+        || value.get("operation").and_then(serde_json::Value::as_str)
+            != Some("native-compatibility")
+        || value
+            .get("phase_reports")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|reports| reports.len() != 6)
+    {
+        return Err(miette::miette!(
+            "native qualification evidence compatibility report is incomplete or noncanonical"
+        ));
+    }
+    Ok(digest)
+}
+
+fn evidence_report(
+    path: &std::path::Path,
+    label: &str,
+) -> miette::Result<(serde_json::Value, Sha256Digest)> {
+    let bytes = read_bounded_regular_input(path, label)?;
+    let digest = sha256_bytes(&bytes);
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|_| miette::miette!("native qualification evidence {label} is not valid JSON"))?;
+    Ok((value, digest))
+}
+
+fn read_bounded_regular_input(path: &std::path::Path, label: &str) -> miette::Result<Vec<u8>> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| miette::miette!("native qualification evidence {label} is unavailable"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| miette::miette!("native qualification evidence {label} cannot be inspected"))?
+        .len();
+    if before == 0 || before > aros_toolchain::canonical::MAX_DOCUMENT_BYTES as u64 {
+        return Err(miette::miette!(
+            "native qualification evidence {label} is empty or exceeds the document limit"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(before as usize);
+    std::io::Read::read_to_end(&mut file, &mut bytes)
+        .map_err(|_| miette::miette!("native qualification evidence {label} cannot be read"))?;
+    let after = file
+        .metadata()
+        .map_err(|_| {
+            miette::miette!("native qualification evidence {label} cannot be re-inspected")
+        })?
+        .len();
+    if after != before || bytes.len() as u64 != before {
+        return Err(miette::miette!(
+            "native qualification evidence {label} changed while it was read"
+        ));
+    }
+    Ok(bytes)
 }
 
 fn index(args: IndexArgs) -> miette::Result<()> {
@@ -1265,6 +1788,80 @@ mod tests {
             "/evidence/recovery-validation.json",
         ]);
         assert!(validation.is_ok());
+        let qualification = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "record-qualification",
+            "--release-dir",
+            "/release/source",
+            "--source-lock-filename",
+            "llvm-11.0.0.sources.json",
+            "--lifecycle-reports-dir",
+            "/evidence/lifecycle",
+            "--comparison-reports-dir",
+            "/evidence/comparison",
+            "--compatibility-reports-dir",
+            "/evidence/compatibility",
+            "--source-repository",
+            "https://github.com/metaneutrons/aros-toolchains",
+            "--source-workflow",
+            ".github/workflows/toolchain-release.yml",
+            "--source-run-id",
+            "42",
+            "--source-tag",
+            "toolchain-v1-source",
+            "--source-tag-object",
+            "0123456789012345678901234567890123456789",
+            "--attestation-repository",
+            "https://github.com/metaneutrons/aros-toolchains",
+            "--attestation-workflow",
+            ".github/workflows/toolchain-release.yml",
+            "--attestation-signer",
+            "github-actions",
+            "--created-at",
+            "100",
+            "--expires-at",
+            "200",
+            "--output",
+            "/evidence/qualification.json",
+        ]);
+        assert!(qualification.is_ok());
+        let recovery_request = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "prepare-recovery",
+            "--qualification-evidence",
+            "/evidence/qualification.json",
+            "--release-dir",
+            "/release/source",
+            "--source-tag-object",
+            "0123456789012345678901234567890123456789",
+            "--source-tag-commit",
+            "0123456789012345678901234567890123456789",
+            "--recovery-release-id",
+            "toolchain-v1-recovered",
+            "--recovery-tag-object",
+            "1234567890123456789012345678901234567890",
+            "--recovery-tag-commit",
+            "0123456789012345678901234567890123456789",
+            "--source-repository",
+            "https://github.com/metaneutrons/aros-toolchains",
+            "--source-workflow",
+            ".github/workflows/toolchain-release.yml",
+            "--attestation-repository",
+            "https://github.com/metaneutrons/aros-toolchains",
+            "--attestation-workflow",
+            ".github/workflows/toolchain-release.yml",
+            "--attestation-signer",
+            "github-actions",
+            "--now",
+            "150",
+            "--output",
+            "/evidence/recovery.json",
+        ]);
+        assert!(recovery_request.is_ok());
         let source = Cli::try_parse_from([
             "aros",
             "toolchain",
