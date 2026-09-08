@@ -325,6 +325,8 @@ entry points. Scripts remain active until replacement parity and M6 cutover.
 | safe_extract, executable, run_probe, verify_tree, command_verify | toolchain verify through existing safe archive/process primitives |
 | command_compare, command_index | toolchain qualification/inventory |
 | command_repackage | toolchain recovery; policy authorization stays in workflows |
+| record-qualification | bounded final-inventory measurement plus complete 4×3 receipt binding; no attestation verification or release authority |
+| prepare-recovery / validate-recovery | typed recovery request from externally verified claims, re-observed tags and isolated final inventory; no network or publication authority |
 | build-release.sh: usage, embedded version probe and full shell body | CLI options; environment observations; toolchain driver/state/package |
 | offline-fetch.py: die, value and module body | toolchain source bridge; upstream fetch dependencies remain declared |
 | host-python-env.py: die, _inside, _safe_extract, _prepare_package, _verify_runtime, main | toolchain environment using fetch/extraction primitives; Python runtime remains |
@@ -341,7 +343,7 @@ Workflow call-site destinations (including inline policy, not merely scripts):
 | toolchain-release.yml compare / compatibility | Native compare / compatibility; provenance of independent inputs required |
 | toolchain-release.yml draft-release: support copies, index (twice), attestation, upload | Index library; GitHub identity, OIDC and promotion remain protected workflow responsibilities |
 | toolchain-compatibility-replay.yml compatibility | Native harness, exact verified existing archive input; no compiler rebuild implied |
-| toolchain-release-recovery.yml eligibility, repackage, compare, index (twice), attestation, tag checks | Native recovery/verification; sole-packaging-failure authorization and immutable tag checks remain workflow-owned |
+| toolchain-release-recovery.yml source-run eligibility, attestation verification, recovery request, repackage, index (twice), tag checks | Native recovery/verification; only an already persisted 56-member candidate plus 4×3 qualification record can be reused; GitHub attestation and immutable-tag observation remain protected workflow responsibilities |
 
 Fixtures and rule ownership:
 
