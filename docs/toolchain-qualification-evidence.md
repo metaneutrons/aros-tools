@@ -101,16 +101,18 @@ it must not reuse one extracted tree.
 The next M5.2 boundary records one completed process per closed phase:
 consumer CMake configuration, pristine upstream configuration, upstream
 includes, upstream link libraries, standalone C and standalone C++. A caller
-supplies an absolute executable, explicit UTF-8 argument vector, real working
-directory, fresh report directory and positive deadline. The runner neither
-looks up `PATH` nor evaluates a shell command.
+supplies an absolute executable, explicit UTF-8 argument vector, closed child
+environment, real working directory, fresh report directory and positive
+deadline. The runner clears inherited environment and requires
+`PATH=/nonexistent`; it neither looks up `PATH` nor evaluates a shell command.
 
 Before a process starts, it revalidates the materialized embedded engine and
 all five helper file identities. It then binds the report to their API version,
-digest and measured helper hashes. Standard output and error are captured with
+digest, measured helper hashes and canonical environment digest. Standard
+output and error are captured with
 the common bounded process supervisor and durably published under fixed,
 phase-specific no-clobber names. Successful reports use the closed
-`aros-toolchain-compatibility-report-v1` JSON schema and bind the executable,
+`aros-toolchain-compatibility-report-v2` JSON schema and bind the executable,
 argument identity and both persisted log hashes.
 
 A nonzero exit, timeout or cancellation never yields a success report. Where a

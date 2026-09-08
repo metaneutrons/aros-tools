@@ -45,9 +45,12 @@ const MAX_ENGINE_DEPTH: usize = 32;
 const MAX_ENGINE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROBE_ARGUMENTS: usize = 256;
 const MAX_PROBE_ARGUMENT_BYTES: usize = 64 * 1024;
+const MAX_PROBE_ENVIRONMENT_ENTRIES: usize = 64;
+const MAX_PROBE_ENVIRONMENT_BYTES: usize = 64 * 1024;
+const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
-const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v1";
+const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v2";
 
 /// Explicit roots for preparing a tools-owned compatibility probe.
 #[derive(Debug, Clone)]
@@ -270,6 +273,11 @@ pub struct CompatibilityProbeRequest {
     pub program: PathBuf,
     /// Explicit UTF-8 arguments. Raw command strings and shell evaluation are unsupported.
     pub arguments: Vec<String>,
+    /// Closed environment for the child process; inherited environment is forbidden.
+    ///
+    /// `PATH` is required to equal `/nonexistent` so every later tool path is
+    /// selected explicitly rather than inherited from a runner image.
+    pub environment: BTreeMap<String, String>,
     /// Absolute real working directory owned by the compatibility operation.
     pub current_dir: PathBuf,
     /// Absolute real report directory. Per-phase outputs must not exist yet.
@@ -308,6 +316,8 @@ pub struct CompatibilityProbeReport {
     pub program_sha256: Sha256Digest,
     /// SHA-256 of the validated program/argument identity.
     pub command_sha256: Sha256Digest,
+    /// SHA-256 of the closed child environment, including the poisoned PATH.
+    pub environment_sha256: Sha256Digest,
     /// SHA-256 of the durable rendered stdout log.
     pub stdout_sha256: Sha256Digest,
     /// SHA-256 of the durable rendered stderr log.
@@ -387,11 +397,16 @@ pub fn run_probe(
     }
     let (program_sha256, _) = measure_executable(&program)?;
     let command_sha256 = command_identity(&program, &request.arguments)?;
+    let environment_sha256 = environment_identity(&request.environment)?;
     let paths = ProbeReportPaths::new(&reports_root, request.phase);
     paths.require_absent()?;
 
     let mut command = Command::new(&program);
-    command.current_dir(&current_dir).args(&request.arguments);
+    command
+        .env_clear()
+        .envs(&request.environment)
+        .current_dir(&current_dir)
+        .args(&request.arguments);
     let output = run_output_with_input_and_control(
         &mut command,
         &[],
@@ -454,6 +469,7 @@ pub fn run_probe(
             .collect(),
         program_sha256,
         command_sha256,
+        environment_sha256,
         stdout_sha256,
         stderr_sha256,
     };
@@ -508,6 +524,40 @@ fn validate_probe_request(request: &CompatibilityProbeRequest) -> Result<(), Con
     if argument_bytes > MAX_PROBE_ARGUMENT_BYTES {
         return Err(ContractError::compatibility(
             "compatibility process arguments exceed the configured byte limit",
+        ));
+    }
+    if request.environment.len() > MAX_PROBE_ENVIRONMENT_ENTRIES {
+        return Err(ContractError::compatibility(
+            "compatibility process has more environment entries than the configured limit",
+        ));
+    }
+    let environment_bytes =
+        request
+            .environment
+            .iter()
+            .try_fold(0_usize, |total, (name, value)| {
+                if !valid_environment_name(name) || value.chars().any(char::is_control) {
+                    return Err(ContractError::compatibility(
+                        "compatibility process environment contains an unsafe name or value",
+                    ));
+                }
+                total
+                    .checked_add(name.len())
+                    .and_then(|total| total.checked_add(value.len()))
+                    .ok_or_else(|| {
+                        ContractError::compatibility(
+                            "compatibility process environment length overflowed",
+                        )
+                    })
+            })?;
+    if environment_bytes > MAX_PROBE_ENVIRONMENT_BYTES {
+        return Err(ContractError::compatibility(
+            "compatibility process environment exceeds the configured byte limit",
+        ));
+    }
+    if request.environment.get("PATH").map(String::as_str) != Some(POISONED_PATH) {
+        return Err(ContractError::compatibility(
+            "compatibility process must use the required poisoned PATH",
         ));
     }
     Ok(())
@@ -645,6 +695,22 @@ fn command_identity(program: &Path, arguments: &[String]) -> Result<Sha256Digest
         ContractError::compatibility("cannot canonically encode the compatibility command")
     })?;
     Ok(sha256_bytes(&encoded))
+}
+
+fn environment_identity(
+    environment: &BTreeMap<String, String>,
+) -> Result<Sha256Digest, ContractError> {
+    let encoded = crate::canonical::bytes(&serde_json::json!({"environment": environment}))
+        .map_err(|_| {
+            ContractError::compatibility("cannot canonically encode the compatibility environment")
+        })?;
+    Ok(sha256_bytes(&encoded))
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.bytes();
+    matches!(characters.next(), Some(b'A'..=b'Z' | b'_'))
+        && characters.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -987,6 +1053,7 @@ fn resolve_helpers(root: &Path) -> Result<BTreeMap<String, HelperIdentity>, Cont
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::Duration;
@@ -1075,7 +1142,7 @@ mod tests {
         let program = script(
             temporary.path(),
             "successful-probe",
-            "printf standard; printf error >&2",
+            "[ \"$PATH\" = /nonexistent ] && [ -z \"${HOME+x}\" ] || exit 9; printf standard; printf error >&2",
         );
         let probe = probe_request(
             temporary.path(),
@@ -1135,7 +1202,7 @@ mod tests {
             temporary.path(),
             preparation.clone(),
             CompatibilityPhase::UpstreamConfigure,
-            script(temporary.path(), "timed-probe", "sleep 1"),
+            script(temporary.path(), "timed-probe", "while :; do :; done"),
             Duration::from_millis(20),
         );
         let error = run_probe(&timed, &CancellationToken::default()).unwrap_err();
@@ -1201,8 +1268,24 @@ mod tests {
         let error = run_probe(&invalid, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
+        let third = temporary.path().join("third");
+        fs::create_dir(&third).unwrap();
+        let third_request = request(&third);
+        let mut invalid_environment = probe_request(
+            &third,
+            prepare(&third_request).unwrap(),
+            CompatibilityPhase::StandaloneCxx,
+            script(temporary.path(), "invalid-environment-probe", "exit 0"),
+            Duration::from_secs(1),
+        );
+        invalid_environment
+            .environment
+            .insert("PATH".into(), "/bin".into());
+        let error = run_probe(&invalid_environment, &CancellationToken::default()).unwrap_err();
+        assert_compatibility(&error);
+
         let malformed =
-            br#"{\"schema\":\"aros-toolchain-compatibility-report-v1\",\"unexpected\":true}"#;
+            br#"{\"schema\":\"aros-toolchain-compatibility-report-v2\",\"unexpected\":true}"#;
         let error = CompatibilityProbeReport::parse(malformed).unwrap_err();
         assert_compatibility(&error);
     }
@@ -1222,6 +1305,7 @@ mod tests {
             phase,
             program,
             arguments: Vec::new(),
+            environment: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
             current_dir,
             reports_root,
             timeout,
