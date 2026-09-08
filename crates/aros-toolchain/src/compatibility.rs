@@ -1,12 +1,12 @@
-//! Tools-owned compatibility-probe preparation.
+//! Tools-owned compatibility-probe preparation and execution.
 //!
-//! This M5 building block prepares the two identities a later compatibility
-//! runner is allowed to use: a fresh materialization of the embedded CMake
-//! engine and one exact directory of helpers built from the selected tools
-//! snapshot. It deliberately does not execute CMake, `configure`, `make`, a
-//! compiler, a Python generator, or a release operation. Those later probe
-//! phases consume this checked preparation rather than selecting their own
-//! source-tree engine or shared Cargo target directory.
+//! [`prepare`] establishes the two identities a later runner may use: a fresh
+//! materialization of the embedded CMake engine and one exact directory of
+//! helpers built from the selected tools snapshot. [`execute_native_compatibility`]
+//! then composes those checked inputs into the six bounded M5 process phases.
+//! Neither boundary has source-fetch, cache, tag, publication, or release
+//! authority; execution never selects a source-tree engine or shared Cargo
+//! target directory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -31,10 +31,15 @@ use crate::package_verify::PackageVerificationRequest;
 use crate::ContractError;
 
 mod environment;
+mod execution;
 mod host_tools;
 mod standalone;
 
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
+pub use execution::{
+    execute_native_compatibility, NativeCompatibilityReport, NativeCompatibilityRequest,
+    StandaloneFixtures,
+};
 pub use host_tools::{
     prepare_host_tool_closure, CompatibilityHostTool, HostToolClosure, HostToolClosureRequest,
     HostToolIdentity,
