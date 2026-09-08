@@ -30,8 +30,15 @@ use crate::package_extract::{
 use crate::package_verify::PackageVerificationRequest;
 use crate::ContractError;
 
+mod environment;
+mod host_tools;
 mod standalone;
 
+pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
+pub use host_tools::{
+    prepare_host_tool_closure, CompatibilityHostTool, HostToolClosure, HostToolClosureRequest,
+    HostToolIdentity,
+};
 pub use standalone::{
     verify_standalone_outputs, StandaloneArtifactIdentity, StandaloneOutputReport,
     StandaloneOutputRequest, StandaloneTargetArtifacts, StandaloneTargetReport,
@@ -54,12 +61,9 @@ const MAX_ENGINE_DEPTH: usize = 32;
 const MAX_ENGINE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROBE_ARGUMENTS: usize = 256;
 const MAX_PROBE_ARGUMENT_BYTES: usize = 64 * 1024;
-const MAX_PROBE_ENVIRONMENT_ENTRIES: usize = 64;
-const MAX_PROBE_ENVIRONMENT_BYTES: usize = 64 * 1024;
-const POISONED_PATH: &str = "/nonexistent";
 const PROBE_CAPTURE_LIMIT: usize = 256 * 1024;
 const MAX_RENDERED_LOG_BYTES: usize = PROBE_CAPTURE_LIMIT + 256;
-const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v4";
+const COMPATIBILITY_REPORT_SCHEMA: &str = "aros-toolchain-compatibility-report-v5";
 const MAX_PROBE_COMMANDS: usize = 2;
 const REQUIRED_PROBE_PHASES: [CompatibilityPhase; 6] = [
     CompatibilityPhase::CmakeConsumer,
@@ -315,11 +319,8 @@ pub struct CompatibilityProbeRequest {
     /// collector probes. A phase report is written only once every command
     /// succeeds.
     pub commands: Vec<CompatibilityCommand>,
-    /// Closed environment for the child process; inherited environment is forbidden.
-    ///
-    /// `PATH` is required to equal `/nonexistent` so every later tool path is
-    /// selected explicitly rather than inherited from a runner image.
-    pub environment: BTreeMap<String, String>,
+    /// Closed child-environment policy; inherited environment is forbidden.
+    pub environment: CompatibilityEnvironment,
     /// Absolute real working directory owned by the compatibility operation.
     pub current_dir: PathBuf,
     /// Absolute real report directory. Per-phase outputs must not exist yet.
@@ -387,7 +388,9 @@ pub struct CompatibilityProbeReport {
     pub source_tree_sha256: Sha256Digest,
     /// Exact fixed helper identity set without workstation paths.
     pub helpers: BTreeMap<String, CompatibilityHelperReport>,
-    /// SHA-256 of the closed child environment, including the poisoned PATH.
+    /// Measured host tools admitted to PATH; empty for poisoned standalone phases.
+    pub host_tools: BTreeMap<String, CompatibilityHostToolReport>,
+    /// SHA-256 of the closed child environment without workstation paths.
     pub environment_sha256: Sha256Digest,
     /// One or two commands and their durable logs in declaration order.
     pub commands: Vec<CompatibilityCommandReport>,
@@ -434,6 +437,15 @@ impl CompatibilityProbeReport {
                 "compatibility report does not contain the exact measured helper set",
             ));
         }
+        if self
+            .host_tools
+            .iter()
+            .any(|(name, tool)| !host_tools::valid_tool_name(name) || tool.size == 0)
+        {
+            return Err(ContractError::compatibility(
+                "compatibility report contains an invalid measured host-tool identity",
+            ));
+        }
         Ok(())
     }
 }
@@ -472,7 +484,8 @@ pub fn run_probe(
             "compatibility process, report, engine, and helper directories must remain separate",
         ));
     }
-    let environment_sha256 = environment_identity(&request.environment)?;
+    let environment = environment::resolve(&request.environment)?;
+    let environment_sha256 = environment::identity(&environment)?;
     let paths = ProbeReportPaths::new(&reports_root, request.phase, request.commands.len());
     paths.require_absent()?;
     let phase_started = Instant::now();
@@ -480,6 +493,7 @@ pub fn run_probe(
     for (index, command) in request.commands.iter().enumerate() {
         validate_preparation(&request.preparation)?;
         validate_probe_directories(request, &current_dir, &reports_root)?;
+        let command_environment = environment::resolve(&request.environment)?;
         let program = checked_executable(&command.program)?;
         let (program_sha256, _) = measure_executable(&program)?;
         let command_sha256 = command_identity(&program, &command.arguments)?;
@@ -489,7 +503,7 @@ pub fn run_probe(
         let mut process = Command::new(&program);
         process
             .env_clear()
-            .envs(&request.environment)
+            .envs(&command_environment.variables)
             .current_dir(&current_dir)
             .args(&command.arguments);
         let remaining_timeout = remaining_phase_timeout(phase_started, request.timeout)?;
@@ -504,6 +518,7 @@ pub fn run_probe(
             ContractError::compatibility("cannot start or supervise compatibility process")
         })?;
         validate_probe_directories(request, &current_dir, &reports_root)?;
+        environment::resolve(&request.environment)?;
         let stdout_sha256 = ProbeReportPaths::write_log(&command_paths.stdout, &output.stdout)?;
         let stderr_sha256 = ProbeReportPaths::write_log(&command_paths.stderr, &output.stderr)?;
         let tool = if request.commands.len() == 1 {
@@ -572,6 +587,7 @@ pub fn run_probe(
                 )
             })
             .collect(),
+        host_tools: environment.host_tools,
         environment_sha256,
         commands,
     };
@@ -693,40 +709,7 @@ fn validate_probe_request(request: &CompatibilityProbeRequest) -> Result<(), Con
             ));
         }
     }
-    if request.environment.len() > MAX_PROBE_ENVIRONMENT_ENTRIES {
-        return Err(ContractError::compatibility(
-            "compatibility process has more environment entries than the configured limit",
-        ));
-    }
-    let environment_bytes =
-        request
-            .environment
-            .iter()
-            .try_fold(0_usize, |total, (name, value)| {
-                if !valid_environment_name(name) || value.chars().any(char::is_control) {
-                    return Err(ContractError::compatibility(
-                        "compatibility process environment contains an unsafe name or value",
-                    ));
-                }
-                total
-                    .checked_add(name.len())
-                    .and_then(|total| total.checked_add(value.len()))
-                    .ok_or_else(|| {
-                        ContractError::compatibility(
-                            "compatibility process environment length overflowed",
-                        )
-                    })
-            })?;
-    if environment_bytes > MAX_PROBE_ENVIRONMENT_BYTES {
-        return Err(ContractError::compatibility(
-            "compatibility process environment exceeds the configured byte limit",
-        ));
-    }
-    if request.environment.get("PATH").map(String::as_str) != Some(POISONED_PATH) {
-        return Err(ContractError::compatibility(
-            "compatibility process must use the required poisoned PATH",
-        ));
-    }
+    environment::resolve(&request.environment)?;
     Ok(())
 }
 
@@ -878,22 +861,6 @@ fn command_identity(program: &Path, arguments: &[String]) -> Result<Sha256Digest
         ContractError::compatibility("cannot canonically encode the compatibility command")
     })?;
     Ok(sha256_bytes(&encoded))
-}
-
-fn environment_identity(
-    environment: &BTreeMap<String, String>,
-) -> Result<Sha256Digest, ContractError> {
-    let encoded = crate::canonical::bytes(&serde_json::json!({"environment": environment}))
-        .map_err(|_| {
-            ContractError::compatibility("cannot canonically encode the compatibility environment")
-        })?;
-    Ok(sha256_bytes(&encoded))
-}
-
-fn valid_environment_name(name: &str) -> bool {
-    let mut characters = name.bytes();
-    matches!(characters.next(), Some(b'A'..=b'Z' | b'_'))
-        && characters.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -1305,11 +1272,12 @@ mod tests {
     };
 
     use super::{
-        prepare, run_probe, run_probe_set, verify_materialized_engine, verify_standalone_outputs,
-        CompatibilityCommand, CompatibilityPhase, CompatibilityPreparation,
+        prepare, prepare_host_tool_closure, run_probe, run_probe_set, verify_materialized_engine,
+        verify_standalone_outputs, CompatibilityCommand, CompatibilityEnvironment,
+        CompatibilityHostTool, CompatibilityPhase, CompatibilityPreparation,
         CompatibilityPreparationRequest, CompatibilityProbeReport, CompatibilityProbeRequest,
-        CompatibilityProbeSetRequest, StandaloneOutputRequest, StandaloneTargetArtifacts,
-        CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL, REQUIRED_HELPERS,
+        CompatibilityProbeSetRequest, HostToolClosureRequest, StandaloneOutputRequest,
+        StandaloneTargetArtifacts, CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL, REQUIRED_HELPERS,
     };
 
     fn request(root: &std::path::Path) -> CompatibilityPreparationRequest {
@@ -1537,6 +1505,62 @@ mod tests {
 
         let rerun = run_probe(&probe, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&rerun);
+    }
+
+    #[test]
+    fn probe_executes_a_revalidated_sealed_host_tool_closure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let preparation_request = request(temporary.path());
+        let preparation = prepare(&preparation_request).unwrap();
+        let selected_tool = script(temporary.path(), "selected-tool-source", "printf closure");
+        let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("host-tool-closure"),
+            tools: vec![CompatibilityHostTool {
+                name: "selected-tool".into(),
+                program: selected_tool,
+            }],
+        })
+        .unwrap();
+        let mut probe = probe_request(
+            temporary.path(),
+            preparation,
+            CompatibilityPhase::UpstreamConfigure,
+            script(
+                temporary.path(),
+                "sealed-host-tool-probe",
+                "[ \"$PATH\" = \"$1\" ] && [ -z \"${HOME+x}\" ] || exit 9; selected-tool",
+            ),
+            Duration::from_secs(5),
+        );
+        probe.commands[0]
+            .arguments
+            .push(closure.root.to_string_lossy().into_owned());
+        probe.environment = CompatibilityEnvironment::SealedHostTools {
+            variables: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
+            host_tools: closure.clone(),
+        };
+
+        let mut missing_marker = probe.clone();
+        missing_marker.reports_root = temporary.path().join("missing-host-tool-marker-reports");
+        fs::create_dir(&missing_marker.reports_root).unwrap();
+        missing_marker.environment = CompatibilityEnvironment::SealedHostTools {
+            variables: BTreeMap::new(),
+            host_tools: closure.clone(),
+        };
+        assert_compatibility(
+            &run_probe(&missing_marker, &CancellationToken::default()).unwrap_err(),
+        );
+
+        let report = run_probe(&probe, &CancellationToken::default()).unwrap();
+        assert_eq!(
+            fs::read(probe.reports_root.join("upstream-configure.stdout.log")).unwrap(),
+            b"closure"
+        );
+        assert_eq!(report.host_tools.len(), 1);
+        assert_eq!(
+            report.host_tools["selected-tool"].sha256,
+            closure.tools["selected-tool"].sha256
+        );
     }
 
     #[test]
@@ -1829,9 +1853,11 @@ mod tests {
             script(temporary.path(), "invalid-environment-probe", "exit 0"),
             Duration::from_secs(1),
         );
-        invalid_environment
-            .environment
-            .insert("PATH".into(), "/bin".into());
+        let CompatibilityEnvironment::Poisoned { variables } = &mut invalid_environment.environment
+        else {
+            panic!("fixture must use a poisoned compatibility environment");
+        };
+        variables.insert("PATH".into(), "/bin".into());
         let error = run_probe(&invalid_environment, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
@@ -1943,7 +1969,9 @@ mod tests {
                 program,
                 arguments: Vec::new(),
             }],
-            environment: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
+            environment: CompatibilityEnvironment::Poisoned {
+                variables: BTreeMap::from([("PATH".into(), "/nonexistent".into())]),
+            },
             current_dir,
             reports_root,
             timeout,
