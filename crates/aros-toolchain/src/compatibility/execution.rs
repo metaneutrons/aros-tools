@@ -968,7 +968,9 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
-    use aros_common::{sha256_file, ArosToolchainManifest, CancellationToken};
+    use aros_common::{
+        run_output, run_status, sha256_file, ArosToolchainManifest, CancellationToken,
+    };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
     use tar::{Builder, Header};
@@ -1226,22 +1228,21 @@ mod tests {
     }
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .args(arguments)
-            .current_dir(root)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let mut command = Command::new("git");
+        command.args(arguments).current_dir(root);
+        let status = run_status(&mut command).unwrap();
+        assert!(status.status.success());
     }
 
     fn git_output(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(arguments)
-            .current_dir(root)
-            .output()
-            .unwrap();
+        let mut command = Command::new("git");
+        command.args(arguments).current_dir(root);
+        let output = run_output(&mut command).unwrap();
         assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec())
+            .unwrap()
+            .trim()
+            .to_owned()
     }
 
     fn manifest() -> ArosToolchainManifest {

@@ -379,39 +379,38 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use aros_common::sha256_bytes;
+    use aros_common::{run_output, run_status, sha256_bytes};
     use serde_json::json;
 
     use super::{materialize_engine_free_source, EngineFreeSourceRequest};
     use crate::recipe::Recipe;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args([
-                "-c",
-                "user.name=AROS test",
-                "-c",
-                "user.email=aros-test@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-            ])
-            .args(arguments)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let mut command = Command::new("git");
+        command.current_dir(root).args([
+            "-c",
+            "user.name=AROS test",
+            "-c",
+            "user.email=aros-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ]);
+        command.args(arguments);
+        let status = run_status(&mut command).unwrap();
+        assert!(status.status.success());
     }
 
     fn git_text(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(root)
-            .args(arguments)
-            .output()
-            .unwrap();
+        let mut command = Command::new("git");
+        command.current_dir(root).args(arguments);
+        let output = run_output(&mut command).unwrap();
         assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        String::from_utf8(output.stdout.exact_bytes().unwrap().to_vec())
+            .unwrap()
+            .trim()
+            .to_owned()
     }
 
     fn recipe_for(source: &Path) -> Recipe {

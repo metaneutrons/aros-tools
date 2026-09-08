@@ -293,24 +293,22 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use aros_common::sha256_bytes;
+    use aros_common::{run_status, sha256_bytes};
 
     use super::{build, RecipeBuildRequest};
     use crate::recipe::Recipe;
 
     fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args([
-                "-c",
-                "user.name=Recipe fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-            ])
-            .args(arguments)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let mut command = Command::new("git");
+        command.current_dir(root).args([
+            "-c",
+            "user.name=Recipe fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+        ]);
+        command.args(arguments);
+        let status = run_status(&mut command).unwrap();
+        assert!(status.status.success());
     }
 
     fn checkout(root: &Path, files: &[(&str, &str)]) {
