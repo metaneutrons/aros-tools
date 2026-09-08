@@ -22,7 +22,7 @@ use aros_toolchain::compatibility_source::{
 use aros_toolchain::profiles::Profiles;
 use aros_toolchain::python_environment::PythonEnvironment;
 use aros_toolchain::recipe_builder::{self, RecipeBuildRequest};
-use aros_toolchain::recovery::RecoveryRequest;
+use aros_toolchain::recovery::{self, RecoveryRequest};
 use aros_toolchain::release_index::{self, IndexRequest, IndexStage};
 use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
 use aros_toolchain::source_cache;
@@ -60,6 +60,8 @@ enum ProducerCommand {
     Compare(CompareArgs),
     /// Repackage one evidence-bound retained package into two fresh package sets
     Repackage(RepackageArgs),
+    /// Re-evaluate recovery eligibility against one isolated complete release inventory
+    ValidateRecovery(ValidateRecoveryArgs),
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
     /// Execute all six native package-compatibility phases locally
@@ -284,6 +286,23 @@ struct RepackageArgs {
     format: ResultFormat,
 }
 
+/// Inputs for one isolated recovery inventory revalidation.
+#[derive(Args)]
+struct ValidateRecoveryArgs {
+    /// Closed recovery-request-v1 document with isolated inventory and policy claims
+    #[arg(long)]
+    recovery_request: PathBuf,
+    /// Complete isolated 56-member source release inventory
+    #[arg(long)]
+    release_dir: PathBuf,
+    /// Absent durable receipt for the exact revalidated recovery inventory
+    #[arg(long)]
+    output: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
 /// Index operation stage selected explicitly by the protected workflow.
 #[derive(Clone, Copy, ValueEnum)]
 enum IndexStageArg {
@@ -403,6 +422,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::VerifyPackage(args) => verify_package(args),
         ProducerCommand::Compare(args) => compare(&args),
         ProducerCommand::Repackage(args) => repackage(args),
+        ProducerCommand::ValidateRecovery(args) => validate_recovery(&args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
@@ -751,6 +771,37 @@ fn repackage(args: RepackageArgs) -> miette::Result<()> {
             "comparison_receipt": receipt.path,
             "comparison_receipt_sha256": receipt.sha256,
             "package_set_sha256": comparison.package_set_sha256,
+        }))?,
+    }
+    Ok(())
+}
+
+fn validate_recovery(args: &ValidateRecoveryArgs) -> miette::Result<()> {
+    let request_bytes = read_regular_input(&args.recovery_request, "recovery request")?;
+    let request = RecoveryRequest::parse(&request_bytes).map_err(|error| native_error(&error))?;
+    let validation = recovery::validate_recovery_inventory(&request, &args.release_dir)
+        .map_err(|error| native_error(&error))?;
+    let receipt = serde_json::json!({
+        "schema": "aros-toolchain-recovery-validation-v1",
+        "operation": "validate-recovery",
+        "recovery_request_sha256": sha256_bytes(&request_bytes),
+        "release_id": request.evidence.release.release_id,
+        "asset_count": validation.asset_count,
+        "decision": validation.decision,
+    });
+    let output = write_new_json(&args.output, &receipt, "recovery validation receipt")?;
+    match args.format {
+        ResultFormat::Human => aros_common::outputln!(
+            "Native recovery inventory validated: {} assets\nReceipt: {}",
+            validation.asset_count,
+            output.display(),
+        ),
+        ResultFormat::Json => print_json(&serde_json::json!({
+            "schema": "aros-toolchain-producer-stage-v1",
+            "operation": "validate-recovery",
+            "receipt": output,
+            "recovery_request_sha256": sha256_bytes(&request_bytes),
+            "asset_count": validation.asset_count,
         }))?,
     }
     Ok(())
@@ -1201,6 +1252,19 @@ mod tests {
             "/evidence/recovery-comparison.json",
         ]);
         assert!(repackage.is_ok());
+        let validation = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "validate-recovery",
+            "--recovery-request",
+            "/evidence/recovery.json",
+            "--release-dir",
+            "/release/source",
+            "--output",
+            "/evidence/recovery-validation.json",
+        ]);
+        assert!(validation.is_ok());
         let source = Cli::try_parse_from([
             "aros",
             "toolchain",

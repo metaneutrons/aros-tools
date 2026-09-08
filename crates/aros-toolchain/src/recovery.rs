@@ -7,8 +7,11 @@
 //! it never turns a partial build or a changed draft into an eligible input.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Read as _;
+use std::path::Path;
 
-use aros_common::{sha256_bytes, Sha256Digest};
+use aros_common::{open_regular_file_nofollow, sha256_bytes, sha256_reader, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 use crate::qualification_evidence::{
@@ -189,6 +192,15 @@ pub enum RecoveryDecision {
     },
 }
 
+/// Measured result of validating one isolated complete recovery inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryInventoryValidation {
+    /// Recovery operation admitted immediately before the inventory was read.
+    pub decision: RecoveryDecision,
+    /// Number of directly measured regular release assets.
+    pub asset_count: usize,
+}
+
 /// Evaluate whether a candidate is eligible for M5 replay or recovery.
 ///
 /// The result is deliberately not an execution capability. The caller must
@@ -221,6 +233,139 @@ pub fn evaluate_recovery(request: &RecoveryRequest) -> Result<RecoveryDecision, 
             })
         }
     }
+}
+
+/// Re-evaluate recovery eligibility and measure every isolated release asset.
+///
+/// The release directory must contain exactly the regular direct children
+/// recorded by the closed recovery request. Each is opened through a
+/// no-follow descriptor and compared with the request's measured size and
+/// SHA-256 before its package payload can be reused. The final checksum and
+/// index files are also required to be byte-identical to the evidence fields,
+/// not merely hash-equivalent.
+///
+/// # Errors
+///
+/// Returns AX0901 if recovery is not eligible, the directory is unsafe, or a
+/// measured asset differs from the isolated inventory. This function has no
+/// extraction, package, network, tag, credential, or publication authority.
+pub fn validate_recovery_inventory(
+    request: &RecoveryRequest,
+    release_root: &Path,
+) -> Result<RecoveryInventoryValidation, ContractError> {
+    let decision = evaluate_recovery(request)?;
+    let expected = measured_assets(&request.assets)?;
+    validate_release_root(release_root, &expected)?;
+    for (name, asset) in &expected {
+        let (size, sha256) = measure_release_asset(&release_root.join(name))?;
+        if size != asset.size || sha256 != asset.sha256 {
+            return Err(ContractError::recovery(
+                "isolated recovery release asset differs from the measured inventory",
+            ));
+        }
+    }
+    if read_bounded_release_asset(&release_root.join(INDEX_NAME))? != request.release_index_bytes
+        || read_bounded_release_asset(&release_root.join(CHECKSUMS_NAME))?
+            != request.checksums_bytes
+    {
+        return Err(ContractError::recovery(
+            "isolated recovery index or checksum bytes differ from the recovery request",
+        ));
+    }
+    Ok(RecoveryInventoryValidation {
+        decision,
+        asset_count: expected.len(),
+    })
+}
+
+fn validate_release_root(
+    root: &Path,
+    expected: &BTreeMap<String, &ReleaseAsset>,
+) -> Result<(), ContractError> {
+    if !root.is_absolute() {
+        return Err(ContractError::recovery(
+            "isolated recovery release directory must be absolute",
+        ));
+    }
+    let metadata = fs::symlink_metadata(root).map_err(|_| {
+        ContractError::recovery("isolated recovery release directory is unavailable")
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ContractError::recovery(
+            "isolated recovery release directory must be a real directory",
+        ));
+    }
+    let mut actual = BTreeSet::new();
+    for entry in fs::read_dir(root)
+        .map_err(|_| ContractError::recovery("cannot enumerate isolated recovery release assets"))?
+    {
+        let entry = entry
+            .map_err(|_| ContractError::recovery("cannot read isolated recovery release asset"))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            ContractError::recovery("isolated recovery release asset name is not UTF-8")
+        })?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|_| {
+            ContractError::recovery("cannot inspect isolated recovery release asset")
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || !actual.insert(name) {
+            return Err(ContractError::recovery(
+                "isolated recovery release contains a duplicate or non-regular asset",
+            ));
+        }
+    }
+    if actual != expected.keys().cloned().collect() {
+        return Err(ContractError::recovery(
+            "isolated recovery release inventory is incomplete or contains unexpected assets",
+        ));
+    }
+    Ok(())
+}
+
+fn measure_release_asset(path: &Path) -> Result<(u64, Sha256Digest), ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::recovery("cannot safely open isolated recovery asset"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot inspect isolated recovery asset"))?
+        .len();
+    let measured = sha256_reader(&mut file)
+        .map_err(|_| ContractError::recovery("cannot measure isolated recovery asset"))?;
+    let after = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot re-inspect isolated recovery asset"))?
+        .len();
+    if before != after || after != measured.size {
+        return Err(ContractError::recovery(
+            "isolated recovery asset changed while it was measured",
+        ));
+    }
+    Ok((measured.size, measured.digest))
+}
+
+fn read_bounded_release_asset(path: &Path) -> Result<Vec<u8>, ContractError> {
+    let mut file = open_regular_file_nofollow(path)
+        .map_err(|_| ContractError::recovery("cannot safely open recovery metadata asset"))?;
+    let size = file
+        .metadata()
+        .map_err(|_| ContractError::recovery("cannot inspect recovery metadata asset"))?
+        .len();
+    if size > MAX_CHECKSUM_BYTES as u64 {
+        return Err(ContractError::recovery(
+            "recovery metadata asset exceeds the configured document limit",
+        ));
+    }
+    let capacity = usize::try_from(size).map_err(|_| {
+        ContractError::recovery("recovery metadata asset exceeds addressable memory")
+    })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.read_to_end(&mut bytes)
+        .map_err(|_| ContractError::recovery("cannot read recovery metadata asset"))?;
+    if u64::try_from(bytes.len()).ok() != Some(size) {
+        return Err(ContractError::recovery(
+            "recovery metadata asset changed while it was read",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn validate_operation(request: &RecoveryRequest) -> Result<(), ContractError> {
@@ -713,6 +858,15 @@ mod tests {
         changed["unexpected"] = json!(true);
         assert_recovery(
             &RecoveryRequest::parse(&serde_json::to_vec(&changed).unwrap()).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn recovery_inventory_validation_refuses_an_incomplete_isolated_release() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = request(RecoveryOperation::PackagingRecovery, FailedStage::Packaging);
+        assert_recovery(
+            &super::validate_recovery_inventory(&request, temporary.path()).unwrap_err(),
         );
     }
 
