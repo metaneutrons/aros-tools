@@ -112,6 +112,12 @@ const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &["xcode-select", "xcrun"
 /// reject an otherwise valid Linux runner before compatibility begins. The
 /// host selector is deliberately validated against the released v1 matrix so
 /// an unknown platform cannot silently receive the wrong closure.
+///
+/// # Errors
+///
+/// Returns AX0703 when `host` is not one of the closed v1 build-host
+/// selectors. It performs no filesystem, process, network, credential, tag,
+/// or release operation.
 pub fn native_compatibility_host_tools(host: &str) -> Result<Vec<&'static str>, ContractError> {
     if !crate::release_index::V1_HOSTS.contains(&host) {
         return Err(ContractError::compatibility(format!(
