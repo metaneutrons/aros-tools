@@ -20,7 +20,7 @@ use super::{
     CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
     CompatibilityProbeRequest, CompatibilityProbeSet, CompatibilityProbeSetRequest,
     HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
-    TwoRootRelocation,
+    TwoRootRelocation, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
@@ -663,12 +663,21 @@ fn validate_host_environment(
             "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
         ));
     };
-    if python != host_python.program
-        || !host_tools.tools.contains_key("cc")
-        || !host_tools.tools.contains_key("make")
-    {
+    let missing_roles = REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
+        .iter()
+        .copied()
+        .filter(|role| !host_tools.tools.contains_key(*role))
+        .collect::<Vec<_>>();
+    if python != host_python.program || !missing_roles.is_empty() {
         return Err(ContractError::compatibility(
-            "native compatibility host-tool closure does not bind C compiler, Python, and Make exactly",
+            format!(
+                "native compatibility host-tool closure does not bind the complete measured command set{}",
+                if missing_roles.is_empty() {
+                    String::new()
+                } else {
+                    format!(": missing {}", missing_roles.join(", "))
+                }
+            ),
         ));
     }
     Ok(())
@@ -994,7 +1003,7 @@ mod tests {
     use super::{execute_native_compatibility, NativeCompatibilityRequest, StandaloneFixtures};
     use crate::compatibility::{
         prepare, prepare_host_tool_closure, CompatibilityHostTool, CompatibilityPreparationRequest,
-        HostToolClosureRequest, TwoRootRelocation,
+        HostToolClosureRequest, TwoRootRelocation, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
     };
     use crate::package_extract::ExtractedPackage;
     use crate::package_verify::VerifiedPackage;
@@ -1020,7 +1029,7 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["cc", "make", "python3"]
+            REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
         );
         assert_eq!(
             report.probes.reports[&crate::compatibility::CompatibilityPhase::UpstreamConfigure]
@@ -1028,7 +1037,7 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["cc", "make", "python3"]
+            REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
         );
         assert_eq!(report.standalone.targets.len(), 2);
         assert!(report
@@ -1221,22 +1230,26 @@ mod tests {
         let cc = root.join("cc");
         script(&cc, "exit 0");
         let python = python_environment(root);
+        let mut closure_tools = Vec::new();
+        for role in crate::compatibility::REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS {
+            let program = match *role {
+                "cc" => cc.clone(),
+                "make" => make.clone(),
+                "python3" => python.interpreter().path.clone(),
+                role => {
+                    let program = root.join(format!("host-{role}"));
+                    script(&program, "exit 0");
+                    program
+                }
+            };
+            closure_tools.push(CompatibilityHostTool {
+                name: (*role).into(),
+                program,
+            });
+        }
         let closure = prepare_host_tool_closure(&HostToolClosureRequest {
             output_root: root.join("host-tools"),
-            tools: vec![
-                CompatibilityHostTool {
-                    name: "cc".into(),
-                    program: cc,
-                },
-                CompatibilityHostTool {
-                    name: "make".into(),
-                    program: make,
-                },
-                CompatibilityHostTool {
-                    name: "python3".into(),
-                    program: python.interpreter().path.clone(),
-                },
-            ],
+            tools: closure_tools,
         })
         .unwrap();
         let c_fixture = root.join("smoke.c");
