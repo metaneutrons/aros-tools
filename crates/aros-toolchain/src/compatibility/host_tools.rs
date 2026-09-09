@@ -39,9 +39,9 @@ const MAX_HOST_TOOLS: usize = 64;
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "ar", "as", "awk", "basename", "bison", "c++", "cat", "cc", "chmod", "cmp", "cp", "cut",
     "date", "diff", "dirname", "echo", "egrep", "expr", "false", "fgrep", "file", "find", "flex",
-    "grep", "head", "id", "install", "ld", "ln", "ls", "m4", "make", "mkdir", "mv", "patch",
-    "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed", "sh", "sleep", "sort", "tail",
-    "test", "touch", "tr", "true", "uname", "wc", "xargs",
+    "gawk", "grep", "head", "id", "install", "ld", "ln", "ls", "m4", "make", "mkdir", "mv",
+    "patch", "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed", "sh", "sleep", "sort",
+    "tail", "test", "touch", "tr", "true", "uname", "wc", "xargs",
 ];
 
 /// One explicitly selected upstream host-command role and executable.
@@ -311,7 +311,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt as _};
 
-    use super::{prepare_host_tool_closure, CompatibilityHostTool, HostToolClosureRequest};
+    use super::{
+        prepare_host_tool_closure, CompatibilityHostTool, HostToolClosureRequest,
+        REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+    };
 
     fn executable(root: &std::path::Path, name: &str, contents: &[u8]) -> std::path::PathBuf {
         let path = root.join(name);
@@ -406,5 +409,10 @@ mod tests {
         fs::set_permissions(&closure.root, fs::Permissions::from_mode(0o700)).unwrap();
         symlink(selected, closure.root.join("tool")).unwrap();
         assert!(closure.revalidate().is_err());
+    }
+
+    #[test]
+    fn required_roles_include_gnu_awk_for_upstream_configure() {
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"gawk"));
     }
 }
