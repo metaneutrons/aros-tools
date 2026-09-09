@@ -35,13 +35,15 @@ const MAX_HOST_TOOLS: usize = 64;
 /// macOS may expose Homebrew `gmake` as `make` without changing the child
 /// contract.  Likewise, `cc` remains the source-owned host-compiler spelling
 /// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
-/// binutils dependencies.
+/// binutils dependencies.  The current upstream `configure` also rejects a
+/// closure without `aclocal` and `automake`, even though it merely discovers
+/// those Autotools programs during configuration.
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
-    "ar", "as", "awk", "basename", "bison", "c++", "cat", "cc", "chmod", "cmp", "cp", "cut",
-    "date", "diff", "dirname", "echo", "egrep", "expr", "false", "fgrep", "file", "find", "flex",
-    "gawk", "grep", "head", "id", "install", "ld", "ln", "ls", "m4", "make", "mkdir", "mv",
-    "patch", "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed", "sh", "sleep", "sort",
-    "tail", "test", "touch", "tr", "true", "uname", "wc", "xargs",
+    "aclocal", "ar", "as", "automake", "awk", "basename", "bison", "c++", "cat", "cc", "chmod",
+    "cmp", "cp", "cut", "date", "diff", "dirname", "echo", "egrep", "expr", "false", "fgrep",
+    "file", "find", "flex", "gawk", "grep", "head", "id", "install", "ld", "ln", "ls", "m4",
+    "make", "mkdir", "mv", "patch", "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed",
+    "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname", "wc", "xargs",
 ];
 
 /// One explicitly selected upstream host-command role and executable.
@@ -414,5 +416,11 @@ mod tests {
     #[test]
     fn required_roles_include_gnu_awk_for_upstream_configure() {
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"gawk"));
+    }
+
+    #[test]
+    fn required_roles_include_autotools_required_by_upstream_configure() {
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"aclocal"));
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"automake"));
     }
 }
