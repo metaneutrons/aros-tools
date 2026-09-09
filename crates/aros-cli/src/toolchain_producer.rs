@@ -1456,14 +1456,10 @@ fn execute_compatibility(
     host_tool_entries: Vec<CompatibilityHostTool>,
     cancellation: &CancellationToken,
 ) -> Result<compatibility::NativeCompatibilityReport, aros_toolchain::ContractError> {
-    let required_host_tools = native_compatibility_host_tools(&context.host)?
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
     let verification = package_verify::PackageVerificationRequest {
         package_dir: args.package_dir,
         release_id: context.release_id,
-        host: context.host,
+        host: context.host.clone(),
         recipe: context.recipe,
         source_lock: context.source_lock,
         profile: context.profile,
@@ -1502,7 +1498,7 @@ fn execute_compatibility(
             upstream_build_root: args.upstream_build_dir,
             host_python: python,
             host_tools,
-            required_host_tools,
+            host: context.host,
             make_jobs: args.jobs,
             standalone_fixtures: StandaloneFixtures {
                 c: args.c_fixture,

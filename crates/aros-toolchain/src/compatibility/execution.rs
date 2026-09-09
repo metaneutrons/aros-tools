@@ -16,8 +16,8 @@ use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    checked_executable, run_probe_set, verify_standalone_outputs, CompatibilityCommand,
-    CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
+    checked_executable, native_compatibility_host_tools, run_probe_set, verify_standalone_outputs,
+    CompatibilityCommand, CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
     CompatibilityProbeRequest, CompatibilityProbeSet, CompatibilityProbeSetRequest,
     HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
     TwoRootRelocation,
@@ -73,10 +73,9 @@ pub struct NativeCompatibilityRequest {
     /// Fresh measured host command closure for CMake host tools and upstream
     /// configure and Make.
     pub host_tools: HostToolClosure,
-    /// Exact command roles selected for this build host before the closure was
-    /// prepared. This keeps platform-specific SDK commands explicit while
-    /// rejecting a closure that omits any selected role.
-    pub required_host_tools: Vec<String>,
+    /// Closed v1 build-host selector used to derive the exact platform-specific
+    /// command-role contract. The caller cannot weaken that contract.
+    pub host: String,
     /// Explicit bounded parallelism for the two upstream Make invocations.
     pub make_jobs: usize,
     /// Fixture sources for standalone C and C++ collector probes.
@@ -176,10 +175,11 @@ pub fn execute_native_compatibility(
     // impossible LLVM helper names. This is an explicit, recorded upstream
     // compatibility input rather than a runner-specific inherited default.
     upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
+    let required_host_tools = native_compatibility_host_tools(&request.host)?;
     validate_host_environment(
         &upstream_environment,
         &request.host_tools,
-        &request.required_host_tools,
+        &required_host_tools,
     )?;
     let sealed_environment = CompatibilityEnvironment::SealedHostTools {
         variables: upstream_environment,
@@ -631,7 +631,7 @@ fn create_output_roots(
 fn validate_host_environment(
     environment: &BTreeMap<String, String>,
     host_tools: &HostToolClosure,
-    required_host_tools: &[String],
+    required_host_tools: &[&str],
 ) -> Result<(), ContractError> {
     let expected = BTreeSet::from([
         "ac_cv_prog_cc_c23",
@@ -672,10 +672,7 @@ fn validate_host_environment(
             "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
         ));
     };
-    let expected_roles = required_host_tools
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
+    let expected_roles = required_host_tools.iter().copied().collect::<BTreeSet<_>>();
     let actual_roles = host_tools
         .tools
         .keys()
@@ -1337,10 +1334,7 @@ mod tests {
                 upstream_build_root: root.join("upstream-build"),
                 host_python: python,
                 host_tools: closure,
-                required_host_tools: crate::compatibility::REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
-                    .iter()
-                    .map(|role| (*role).to_owned())
-                    .collect(),
+                host: "linux-x86_64".into(),
                 make_jobs: 2,
                 standalone_fixtures: StandaloneFixtures {
                     c: c_fixture,
