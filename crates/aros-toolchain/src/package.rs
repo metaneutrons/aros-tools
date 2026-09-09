@@ -569,6 +569,12 @@ fn write_archive(path: &Path, root: &Path, epoch: u64) -> Result<(), ContractErr
     append_entry(&mut archive, root, Path::new(""), epoch)?;
     let mut paths = Vec::new();
     collect_paths(root, Path::new(""), &mut paths)?;
+    // `collect_paths` must recurse to discover the complete staged tree, but
+    // recursion order is not global lexical order when a directory and a file
+    // share a name prefix (for example `Refactoring/` and `Refactoring.h`).
+    // The verifier consumes the tar stream in strict lexical order, so sort
+    // only after discovery and before serializing any payload member.
+    paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
     for relative in paths {
         append_entry(&mut archive, root, &relative, epoch)?;
     }
@@ -1121,6 +1127,58 @@ mod tests {
         let measured = sha256_file(&archive).unwrap();
         assert_eq!(measured.size, fixture["archive_size"].as_u64().unwrap());
         assert_eq!(measured.digest.as_str(), fixture["archive_sha256"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_members_are_globally_lexical_when_a_directory_and_file_share_a_prefix() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("toolchain");
+        fs::create_dir_all(root.join("include/clang/Tooling/Refactoring/Rename")).unwrap();
+        fs::write(
+            root.join("include/clang/Tooling/Refactoring/Rename/USRLocFinder.h"),
+            b"nested header\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("include/clang/Tooling/Refactoring.h"),
+            b"sibling header\n",
+        )
+        .unwrap();
+        let archive = temporary.path().join("fixture.tar.xz");
+        write_archive(&archive, &root, 946_684_800).unwrap();
+
+        let decoder = xz2::read::XzDecoder::new(File::open(archive).unwrap());
+        let mut tar = tar::Archive::new(decoder);
+        let members = tar
+            .entries()
+            .unwrap()
+            .skip(1)
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let relative = entry
+                    .path()
+                    .unwrap()
+                    .strip_prefix(ARCHIVE_ROOT)
+                    .unwrap()
+                    .to_path_buf();
+                relative.to_str().unwrap().replace('\\', "/")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            members.windows(2).all(|pair| pair[0] < pair[1]),
+            "archive members are not globally lexical: {members:?}"
+        );
+        let sibling = members
+            .iter()
+            .position(|member| member == "include/clang/Tooling/Refactoring.h")
+            .unwrap();
+        let nested = members
+            .iter()
+            .position(|member| member == "include/clang/Tooling/Refactoring/Rename")
+            .unwrap();
+        assert!(sibling < nested);
     }
 
     #[test]
