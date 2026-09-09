@@ -672,26 +672,29 @@ fn validate_host_environment(
             "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
         ));
     };
-    let missing_roles = required_host_tools
+    let expected_roles = required_host_tools
         .iter()
-        .filter(|role| !host_tools.tools.contains_key(role.as_str()))
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let actual_roles = host_tools
+        .tools
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_roles = expected_roles
+        .difference(&actual_roles)
+        .copied()
         .collect::<Vec<_>>();
-    if python != host_python.program || !missing_roles.is_empty() {
+    let unexpected_roles = actual_roles
+        .difference(&expected_roles)
+        .copied()
+        .collect::<Vec<_>>();
+    if python != host_python.program || !missing_roles.is_empty() || !unexpected_roles.is_empty() {
         return Err(ContractError::compatibility(
             format!(
-                "native compatibility host-tool closure does not bind the complete measured command set{}",
-                if missing_roles.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        ": missing {}",
-                        missing_roles
-                            .iter()
-                            .map(|role| role.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                }
+                "native compatibility host-tool closure does not bind the exact measured command set{}{}",
+                if missing_roles.is_empty() { String::new() } else { format!(": missing {}", missing_roles.join(", ")) },
+                if unexpected_roles.is_empty() { String::new() } else { format!("; unexpected {}", unexpected_roles.join(", ")) },
             ),
         ));
     }
@@ -1120,6 +1123,40 @@ mod tests {
                     program: python3,
                 },
             ],
+        })
+        .unwrap();
+
+        let error =
+            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code,
+            aros_common::DiagnosticCode::ProducerCompatibility
+        );
+        assert!(!cmake_log.exists());
+    }
+
+    #[test]
+    fn rejects_an_unselected_measured_host_tool_before_cmake_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut request, cmake_log, _) = request(temporary.path());
+        let mut tools = request
+            .host_tools
+            .tools
+            .iter()
+            .map(|(name, identity)| CompatibilityHostTool {
+                name: name.clone(),
+                program: identity.program.clone(),
+            })
+            .collect::<Vec<_>>();
+        let extra = temporary.path().join("unexpected-host-tool");
+        script(&extra, "exit 0");
+        tools.push(CompatibilityHostTool {
+            name: "unexpected".into(),
+            program: extra,
+        });
+        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("host-tools-with-unexpected-entry"),
+            tools,
         })
         .unwrap();
 
