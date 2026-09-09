@@ -42,6 +42,12 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         Commands::Toolchain {
             command: ToolchainCommands::Build(args),
         } => crate::toolchain_build::run(args).await,
+        Commands::Toolchain {
+            command: ToolchainCommands::Producer(args),
+        } => crate::toolchain_producer::run(args).await,
+        Commands::Toolchain {
+            command: ToolchainCommands::MetaMakeFetch(args),
+        } => crate::toolchain_fetch_bridge::run(&args),
         Commands::Toolchain { command } => {
             toolchain_command(required_repo(repo_root)?, command).await
         }
@@ -184,6 +190,8 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
     match command {
         ToolchainCommands::Plan(args) => return crate::toolchain_plan::run(args),
         ToolchainCommands::Build(args) => return crate::toolchain_build::run(args).await,
+        ToolchainCommands::Producer(args) => return crate::toolchain_producer::run(args).await,
+        ToolchainCommands::MetaMakeFetch(args) => return crate::toolchain_fetch_bridge::run(&args),
         ToolchainCommands::Install {
             preset,
             force,

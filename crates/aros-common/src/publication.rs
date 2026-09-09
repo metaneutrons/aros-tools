@@ -174,6 +174,8 @@ pub struct FileIdentity {
 mod tree_cas;
 pub use tree_cas::TreeContentCas;
 use tree_cas::{TreeContentEntry, TreeNodeSnapshot};
+mod payload_path;
+pub use payload_path::payload_casefold_path_key;
 
 /// Existing-target policy for one-file publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -292,6 +294,32 @@ pub fn measure_regular_file(path: &Path) -> std::io::Result<Option<(FileIdentity
     #[cfg(unix)]
     {
         unix::read_regular(&absolute_path(path)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(unsupported_durability())
+    }
+}
+
+/// Open one existing regular file through a descriptor-relative no-follow
+/// path walk.
+///
+/// The returned descriptor remains bound to the file opened during validation,
+/// so a later path replacement cannot redirect a caller's read. Callers that
+/// need a stable content snapshot must still compare their own measured
+/// length/digest after reading: an already-open regular file can be modified
+/// in place by another writer.
+///
+/// # Errors
+///
+/// Returns an I/O or file-type error when a parent component or the final leaf
+/// is a symlink, when the path is not a regular file, or on non-Unix hosts
+/// where this no-follow contract is unavailable.
+pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        unix::open_regular_file_nofollow(&absolute_path(path)?)
     }
     #[cfg(not(unix))]
     {
@@ -704,6 +732,27 @@ mod unix {
     pub(super) fn read_regular(path: &Path) -> std::io::Result<Option<(FileIdentity, Vec<u8>)>> {
         read_regular_with_mode(path)
             .map(|snapshot| snapshot.map(|(identity, bytes, _mode)| (identity, bytes)))
+    }
+
+    pub(super) fn open_regular_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+        let parent = open_parent(path, false)?;
+        let fd = rfs::openat(
+            &parent.fd,
+            Path::new(&parent.leaf),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let stat = rfs::fstat(&fd)?;
+        if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "publication target '{}' is not a regular file",
+                    path.display()
+                ),
+            ));
+        }
+        Ok(std::fs::File::from(fd))
     }
 
     pub(super) fn read_regular_with_mode(

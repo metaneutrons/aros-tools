@@ -9,7 +9,31 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED = {"aros-common", "aros-fetch", "serde", "serde_json", "thiserror", "toml", "rustix", "tempfile", "tracing"}
+# This is a closed architectural allow-list, not an unrestricted crates.io
+# exception. M4 additionally permits the statically linked XZ codec and the
+# existing SHA-2 primitive required for bounded archive/content verification;
+# producer lifecycle/publication owners remain forbidden below.
+ALLOWED = {
+    "aros-cmake-engine",
+    "aros-common",
+    "aros-fetch",
+    "flate2",
+    "fs2",
+    "rustix",
+    "semver",
+    "serde",
+    "serde_json",
+    "sha2",
+    "tar",
+    "tempfile",
+    "thiserror",
+    "tokio",
+    "toml",
+    "tracing",
+    "url",
+    "which",
+    "xz2",
+}
 
 
 def dependency_names(manifest: dict, workspace: dict) -> set[str]:

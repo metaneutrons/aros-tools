@@ -3,7 +3,6 @@
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -11,8 +10,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use xz2::read::XzDecoder;
 
-use aros_common::toolchain_manifest::{ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE};
-use aros_common::{casefold_path_key, parse_credential_free_https_url};
+use aros_common::{
+    normalized_toolchain_file_mode, parse_credential_free_https_url, payload_casefold_path_key,
+};
 
 /// Marker published only after a toolchain envelope is complete.
 pub const INSTALL_COMPLETE_FILE: &str = ".complete";
@@ -341,7 +341,7 @@ pub fn extract_to_staging(
         let Some(relative_path) = safe_stripped_path(&source_path, strip_components)? else {
             continue;
         };
-        let portable_key = casefold_path_key(&relative_path)
+        let portable_key = payload_casefold_path_key(&relative_path)
             .into_diagnostic()
             .wrap_err_with(|| {
                 format!(
@@ -417,7 +417,7 @@ fn normalize_extracted_permissions(root: &Path) -> Result<()> {
                 set_portable_permissions(&path, 0o755)?;
                 pending.push(path);
             } else if metadata.is_file() {
-                let mode = if normalized_file_mode(&metadata) == 0o755 {
+                let mode = if normalized_toolchain_file_mode(&metadata) == 0o755 {
                     0o755
                 } else {
                     0o644
@@ -503,203 +503,6 @@ pub fn commit_staging(staging: &TempDir, destination: &Path) -> Result<()> {
                 )
             })
         }
-    }
-}
-
-/// Compute the producer-compatible tree digest over canonical JSON inventory
-/// lines. The embedded manifest is excluded to avoid a hash cycle.
-#[cfg(test)]
-/// Compute the canonical digest of a directory inventory.
-///
-/// # Errors
-///
-/// Returns an error when the tree contains unsupported or unreadable entries.
-pub fn tree_sha256(root: &Path) -> Result<String> {
-    tree_inventory(root).map(|(digest, _)| digest)
-}
-
-/// Return a canonical tree digest and its sorted manifest entries.
-///
-/// # Errors
-///
-/// Returns an error for missing roots, unsafe paths, symbolic links, or files
-/// that cannot be read completely.
-pub fn tree_inventory(root: &Path) -> Result<(String, Vec<ArosToolchainManifestEntry>)> {
-    tree_inventory_excluding(root, &[AROS_TOOLCHAIN_MANIFEST_FILE])
-}
-
-/// Return a canonical tree digest and sorted manifest entries while omitting
-/// explicit top-level metadata namespaces.
-///
-/// Exclusions are validated portable relative paths and remove the named node
-/// plus its complete subtree. This is intended for self-describing installed
-/// payloads whose receipt must not participate in its own digest.
-///
-/// # Errors
-///
-/// Returns an error for invalid exclusions, missing roots, unsafe paths, or
-/// entries that cannot be read as one stable no-follow inventory.
-pub fn tree_inventory_excluding(
-    root: &Path,
-    exclusions: &[&str],
-) -> Result<(String, Vec<ArosToolchainManifestEntry>)> {
-    let exclusions = exclusions
-        .iter()
-        .map(|value| {
-            let path = PathBuf::from(value);
-            portable_relative_path(&path)?;
-            Ok(path)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut entries = Vec::new();
-    collect_tree_entries(root, Path::new(""), &exclusions, &mut entries)?;
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok((inventory_sha256(&entries)?, entries))
-}
-
-fn inventory_sha256(entries: &[ArosToolchainManifestEntry]) -> Result<String> {
-    let mut tree = Sha256::new();
-    for entry in entries {
-        tree.update(serde_json::to_vec(&canonical_entry(entry)).into_diagnostic()?);
-        tree.update(b"\n");
-    }
-    Ok(aros_common::finish_sha256(tree).to_string())
-}
-
-fn collect_tree_entries(
-    root: &Path,
-    relative: &Path,
-    exclusions: &[PathBuf],
-    output: &mut Vec<ArosToolchainManifestEntry>,
-) -> Result<()> {
-    let directory = root.join(relative);
-    let mut entries = fs::read_dir(&directory)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read '{}'", directory.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .into_diagnostic()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let child_relative = relative.join(entry.file_name());
-        if exclusions
-            .iter()
-            .any(|excluded| child_relative == *excluded || child_relative.starts_with(excluded))
-        {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(entry.path()).into_diagnostic()?;
-        let path = portable_relative_path(&child_relative)?;
-        if metadata.file_type().is_symlink() {
-            let target = fs::read_link(entry.path()).into_diagnostic()?;
-            let target = target.to_str().ok_or_else(|| {
-                miette::miette!("symlink target is not UTF-8: {}", target.display())
-            })?;
-            output.push(ArosToolchainManifestEntry {
-                path,
-                mode: "0777".into(),
-                kind: "symlink".into(),
-                sha256: None,
-                size: None,
-                target: Some(target.into()),
-            });
-        } else if metadata.is_dir() {
-            output.push(ArosToolchainManifestEntry {
-                path,
-                mode: "0755".into(),
-                kind: "directory".into(),
-                sha256: None,
-                size: None,
-                target: None,
-            });
-            collect_tree_entries(root, &child_relative, exclusions, output)?;
-        } else if metadata.is_file() {
-            let Some((_, contents)) = aros_common::measure_regular_file(&entry.path())
-                .into_diagnostic()
-                .wrap_err_with(|| {
-                    format!(
-                        "failed to measure regular payload file '{}' without following links",
-                        entry.path().display()
-                    )
-                })?
-            else {
-                bail!("payload file '{}' disappeared", child_relative.display());
-            };
-            let measured = fs::symlink_metadata(entry.path()).into_diagnostic()?;
-            if !measured.is_file()
-                || measured.file_type().is_symlink()
-                || measured.len() != u64::try_from(contents.len()).into_diagnostic()?
-            {
-                bail!(
-                    "payload file '{}' changed while it was inventoried",
-                    child_relative.display()
-                );
-            }
-            output.push(ArosToolchainManifestEntry {
-                path,
-                mode: format!("{:04o}", normalized_file_mode(&measured)),
-                kind: "file".into(),
-                sha256: Some(aros_common::sha256_bytes(&contents).to_string()),
-                size: Some(measured.len()),
-                target: None,
-            });
-        } else {
-            bail!("unsupported payload entry '{}'", child_relative.display());
-        }
-    }
-    Ok(())
-}
-
-fn canonical_entry(
-    entry: &ArosToolchainManifestEntry,
-) -> std::collections::BTreeMap<&'static str, serde_json::Value> {
-    let mut object = std::collections::BTreeMap::new();
-    object.insert("mode", serde_json::Value::String(entry.mode.clone()));
-    object.insert("path", serde_json::Value::String(entry.path.clone()));
-    if let Some(sha256) = &entry.sha256 {
-        object.insert("sha256", serde_json::Value::String(sha256.clone()));
-    }
-    if let Some(size) = entry.size {
-        object.insert("size", serde_json::Value::Number(size.into()));
-    }
-    if let Some(target) = &entry.target {
-        object.insert("target", serde_json::Value::String(target.clone()));
-    }
-    object.insert("type", serde_json::Value::String(entry.kind.clone()));
-    object
-}
-
-fn portable_relative_path(path: &Path) -> Result<String> {
-    path.components()
-        .map(|component| match component {
-            Component::Normal(value) => value
-                .to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| miette::miette!("toolchain path is not UTF-8: {}", path.display())),
-            _ => bail!(
-                "toolchain inventory path is not relative: {}",
-                path.display()
-            ),
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|components| components.join("/"))
-}
-
-#[cfg(unix)]
-fn normalized_file_mode(metadata: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    if metadata.permissions().mode() & 0o111 == 0 {
-        0o644
-    } else {
-        0o755
-    }
-}
-
-#[cfg(not(unix))]
-fn normalized_file_mode(metadata: &fs::Metadata) -> u32 {
-    if metadata.permissions().readonly() {
-        0o644
-    } else {
-        0o755
     }
 }
 
@@ -828,7 +631,55 @@ pub fn command_exists(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aros_common::{toolchain_tree_inventory, ArosToolchainManifest};
+    use serde_json::Value;
     use std::io::Write;
+
+    fn decode_base64(value: &str) -> Vec<u8> {
+        fn sextet(byte: u8) -> Option<u8> {
+            match byte {
+                b'A'..=b'Z' => Some(byte - b'A'),
+                b'a'..=b'z' => Some(byte - b'a' + 26),
+                b'0'..=b'9' => Some(byte - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        }
+
+        let encoded = value
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        let (quartets, remainder) = encoded.as_chunks::<4>();
+        assert!(
+            remainder.is_empty(),
+            "fixture Base64 must use whole quartets"
+        );
+        let mut decoded = Vec::with_capacity(quartets.len() * 3);
+        for quartet in quartets {
+            let first = sextet(quartet[0]).expect("fixture Base64 has an invalid first sextet");
+            let second = sextet(quartet[1]).expect("fixture Base64 has an invalid second sextet");
+            let third = if quartet[2] == b'=' {
+                0
+            } else {
+                sextet(quartet[2]).expect("fixture Base64 has an invalid third sextet")
+            };
+            let fourth = if quartet[3] == b'=' {
+                0
+            } else {
+                sextet(quartet[3]).expect("fixture Base64 has an invalid fourth sextet")
+            };
+            decoded.push(first << 2 | second >> 4);
+            if quartet[2] != b'=' {
+                decoded.push(second << 4 | third >> 2);
+            }
+            if quartet[3] != b'=' {
+                decoded.push(third << 6 | fourth);
+            }
+        }
+        decoded
+    }
 
     #[test]
     fn state_paths_must_be_absolute() {
@@ -849,17 +700,13 @@ mod tests {
     }
 
     #[test]
-    fn verifies_sha256_and_tree_changes() {
+    fn verifies_sha256() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("payload");
         fs::write(&file, b"first").unwrap();
         let digest = sha256_file(&file).unwrap();
         verify_archive(&file, &digest, Some(5)).unwrap();
         assert!(verify_archive(&file, &"0".repeat(64), Some(5)).is_err());
-
-        let first_tree = tree_sha256(directory.path()).unwrap();
-        fs::write(&file, b"second").unwrap();
-        assert_ne!(first_tree, tree_sha256(directory.path()).unwrap());
     }
 
     #[test]
@@ -994,6 +841,68 @@ mod tests {
     }
 
     #[test]
+    fn consumes_the_native_producer_known_answer_archive() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/toolchain-producer/package-v1.json"
+        ))
+        .unwrap();
+        let archive_bytes = decode_base64(fixture["archive_base64"].as_str().unwrap());
+        assert_eq!(
+            archive_bytes.len(),
+            fixture["archive_size"].as_u64().unwrap() as usize
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("legacy-native-vector.tar.xz");
+        fs::write(&archive, &archive_bytes).unwrap();
+        verify_archive(
+            &archive,
+            fixture["archive_sha256"].as_str().unwrap(),
+            fixture["archive_size"].as_u64(),
+        )
+        .unwrap();
+
+        let staging = extract_to_staging(&archive, directory.path(), 1).unwrap();
+        let manifest = ArosToolchainManifest::load(staging.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&manifest).unwrap(),
+            fixture["manifest"].clone()
+        );
+        let (tree_sha256, entries) = toolchain_tree_inventory(staging.path()).unwrap();
+        assert_eq!(tree_sha256, manifest.tree_sha256);
+        assert_eq!(entries, manifest.files);
+        assert_eq!(
+            fs::read(staging.path().join("share/Größe/marker-ä.txt")).unwrap(),
+            b"AROS tree fixture\n"
+        );
+    }
+
+    #[test]
+    fn extracts_utf8_payload_paths_without_relaxing_collision_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("utf8.tar.xz");
+        let output = File::create(&archive_path).unwrap();
+        let encoder = xz2::write::XzEncoder::new(output, 6);
+        let mut builder = tar::Builder::new(encoder);
+        let data = b"UTF-8 payload\n";
+        let mut header = tar::Header::new_ustar();
+        header
+            .set_path("toolchain/share/Größe/marker-ä.txt")
+            .unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, &data[..]).unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap().flush().unwrap();
+
+        let staging = extract_to_staging(&archive_path, directory.path(), 1).unwrap();
+        assert_eq!(
+            fs::read(staging.path().join("share/Größe/marker-ä.txt")).unwrap(),
+            data
+        );
+    }
+
+    #[test]
     fn extraction_rejects_casefolding_path_collisions() {
         let directory = tempfile::tempdir().unwrap();
         let archive_path = directory.path().join("collision.tar.xz");
@@ -1012,90 +921,5 @@ mod tests {
         encoder.finish().unwrap().flush().unwrap();
 
         assert!(extract_to_staging(&archive_path, directory.path(), 1).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn matches_producer_known_answer_with_unicode_and_symlink() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        for path in [
-            "bin",
-            "include/c++/v1",
-            "lib/clang/11.0.0/lib/aros",
-            "share/Größe",
-        ] {
-            fs::create_dir_all(root.join(path)).unwrap();
-        }
-
-        let mock_tool = include_bytes!("../tests/fixtures/mock-tool.sh");
-        for tool in [
-            "clang",
-            "clang++",
-            "ld.lld",
-            "llvm-ar",
-            "llvm-ranlib",
-            "llvm-nm",
-            "llvm-strip",
-            "llvm-objcopy",
-            "llvm-objdump",
-        ] {
-            let path = root.join("bin").join(tool);
-            fs::write(&path, mock_tool).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        fs::write(
-            root.join("include/c++/v1/vector"),
-            b"// deterministic producer fixture\n",
-        )
-        .unwrap();
-        for library in ["libc++.a", "libc++abi.a", "libunwind.a"] {
-            fs::write(
-                root.join("lib").join(library),
-                format!("fixture {library}\n"),
-            )
-            .unwrap();
-        }
-        fs::write(
-            root.join("lib/clang/11.0.0/lib/aros/libclang_rt.builtins-x86_64.a"),
-            b"fixture x86_64 builtins\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("lib/clang/11.0.0/lib/aros/libclang_rt.builtins-i386.a"),
-            b"fixture i386 builtins\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("share/Größe/marker-ä.txt"),
-            b"UTF-8 inventory fixture\n",
-        )
-        .unwrap();
-        symlink("../include/c++/v1/vector", root.join("share/vector-link")).unwrap();
-
-        assert_eq!(
-            tree_sha256(root).unwrap(),
-            "4f78bdbc52ffbab2c6b337bb47d8c40b716574a82a03c2b0ac031ecca16fecef"
-        );
-    }
-
-    #[test]
-    fn matches_language_neutral_tree_digest_vector() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/tree-digest-v1.fixture.json"
-        ))
-        .unwrap();
-        assert_eq!(fixture["schema"], "aros-toolchain-tree-digest-fixture-v1");
-        let entries: Vec<ArosToolchainManifestEntry> =
-            serde_json::from_value(fixture["entries"].clone()).unwrap();
-        let expected = fixture["tree_sha256"].as_str().unwrap();
-        assert_eq!(
-            inventory_sha256(&entries).unwrap(),
-            "11cbd45962f89c54c02fc9c1ae55eb283774b76425c08564da060bd5ca9c840b"
-        );
-        assert_eq!(inventory_sha256(&entries).unwrap(), expected);
     }
 }

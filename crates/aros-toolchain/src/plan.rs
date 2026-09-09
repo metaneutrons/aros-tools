@@ -1,35 +1,25 @@
-//! Experimental read-only legacy planning, not execution authorization.
+//! Read-only producer planning, not execution authorization.
 //!
 //! Validates explicit identities and selected committed metadata. It never
 //! runs source-provided code, fetches objects, scans/changes caches or reserves
-//! output roots. Isolated snapshots and build eligibility remain M1/M2 gates.
+//! output roots. Isolated snapshots and full build eligibility remain lifecycle
+//! gates even for a native `ready` plan.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aros_common::{sha256_bytes, Diagnostic, DiagnosticCode, DiagnosticStage, Sha256Digest};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::inspection::{self, Checkout};
+use crate::native_declaration::NativeExecutorDeclaration;
+use crate::profiles::identifier;
 use crate::recipe::GitObjectId;
 use crate::{ContractError, Recipe};
-
-/// Explicit producer implementation choice; no automatic fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Backend {
-    /// Reserved native path: fails before inspecting or mutating inputs.
-    Native,
-    /// Read-only preview of the selected historical producer inputs.
-    LegacyPreview,
-}
 
 /// Explicit arguments, resolved against the invocation directory only.
 #[derive(Debug)]
 pub struct PlanRequest {
-    /// Chosen backend; callers must not infer a fallback.
-    pub backend: Backend,
     /// Producer-owned profile name.
     pub preset: String,
     /// Recipe-v2 regular file.
@@ -40,15 +30,15 @@ pub struct PlanRequest {
     pub producer_dir: PathBuf,
     /// Exact recipe-selected tools/collector root, not the frontend source.
     pub tools_dir: PathBuf,
-    /// Optional future work root; never reserved.
+    /// Optional work root; planning never reserves it.
     pub work_dir: Option<PathBuf>,
-    /// Optional future candidate root; never reserved.
+    /// Optional candidate root; planning never reserves it.
     pub output_dir: Option<PathBuf>,
-    /// Optional future source cache; never scanned or changed by this slice.
+    /// Optional source cache; planning never scans or changes it.
     pub cache_dir: Option<PathBuf>,
-    /// Future build job budget, never an inferred default.
+    /// Build job budget, never an inferred default.
     pub jobs: Option<u64>,
-    /// Future whole-build deadline, not the bounded inspection timeout.
+    /// Whole-build deadline, not the bounded inspection timeout.
     pub timeout_seconds: Option<u64>,
     /// Effective frontend offline policy. Planning is always offline.
     pub offline: bool,
@@ -61,15 +51,13 @@ pub struct Plan {
     pub schema: &'static str,
     /// Always `plan`.
     pub operation: &'static str,
-    /// Actual inspected backend.
-    pub backend: Backend,
     /// Checked recipe identity claims and explicitly unknown executor origin.
     pub identity: Identity,
     /// Canonical paths, without an ownership reservation.
     pub paths: Paths,
     /// Selected budgets and deliberately unmeasured resources.
     pub resources: Resources,
-    /// Honest coarse legacy phase; no inferred internal stage names.
+    /// Native lifecycle phases selected by the closed executor declaration.
     pub steps: Vec<&'static str>,
     /// This slice always blocks execution pending the remaining safety gates.
     pub readiness: &'static str,
@@ -99,11 +87,11 @@ pub struct Identity {
 /// Unverified frontend file observation, insufficient for execution/release.
 #[derive(Debug, Serialize, Clone)]
 pub struct Executor {
-    /// Native contract is not selected by a legacy recipe.
+    /// Native producer contract selected by the recipe-bound declaration.
     pub contract_id: Option<&'static str>,
-    /// Native contract digest is unavailable for this legacy preview.
+    /// Native contract digest bound by the declaration.
     pub contract_sha256: Option<Sha256Digest>,
-    /// Null only in blocked read-only plans lacking verifiable build metadata.
+    /// Exact tools commit selected by the native declaration.
     pub tools_commit: Option<GitObjectId>,
     /// Measured on-disk frontend file; does not establish in-memory origin.
     pub binary_sha256: Sha256Digest,
@@ -147,8 +135,8 @@ pub struct Resources {
 ///
 /// # Errors
 /// Returns structured contract/identity/preflight/prerequisite diagnostics for
-/// invalid inputs. Missing build readiness is a successful *blocked inspection*,
-/// never a successful build. Native selection fails before all filesystem reads.
+/// invalid inputs. Missing build readiness is a successful *incomplete*
+/// inspection, never a successful build.
 pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
     inspect_with_timeout(request, Duration::from_secs(60))
 }
@@ -162,8 +150,8 @@ pub fn inspect(request: &PlanRequest) -> Result<Plan, ContractError> {
 ///
 /// # Errors
 ///
-/// Returns a typed contract error when the selected backend, resources,
-/// checkout identities, recipe, or bounded inspection cannot be validated.
+/// Returns a typed contract error when resources, checkout identities, recipe,
+/// native executor declaration, or bounded inspection cannot be validated.
 pub fn inspect_with_timeout(
     request: &PlanRequest,
     timeout: Duration,
@@ -172,9 +160,6 @@ pub fn inspect_with_timeout(
         return Err(ContractError::preflight(
             "producer inspection timeout must be positive",
         ));
-    }
-    if request.backend != Backend::LegacyPreview {
-        return Err(ContractError::invalid("native toolchain planning is not implemented; select --backend legacy-preview explicitly for experimental read-only inspection"));
     }
     validate_resources(request)?;
     let host = aros_common::target::native_host_key().ok_or_else(|| {
@@ -192,18 +177,30 @@ pub fn inspect_with_timeout(
         .map_err(|error| error.input("--producer-dir"))?;
     let tools = Checkout::inspect(&paths.tools, recipe.tools(), deadline)
         .map_err(|error| error.input("--tools-dir"))?;
+    let declaration_bytes = producer
+        .required_file("toolchains/producer-executor-v1.toml")
+        .map_err(|error| error.input("--producer-dir"))?;
+    let declaration = NativeExecutorDeclaration::parse(&declaration_bytes)
+        .map_err(|error| error.input("--producer-dir"))?;
+    let contract = tools
+        .required_file(declaration.contract_path())
+        .map_err(|error| error.input("--tools-dir"))?;
+    let source_lock = producer
+        .required_file(declaration.source_lock_path())
+        .map_err(|error| error.input("--producer-dir"))?;
     let profiles = producer
-        .required_file("toolchains/profiles-v1.json")
+        .required_file(declaration.profiles_path())
         .map_err(|error| error.input("--producer-dir"))?;
-    if sha256_bytes(&profiles) != *recipe.profiles_sha256() {
-        return Err(ContractError::identity(
-            "selected profiles differ from the recipe digest",
-        ));
-    }
-    check_profile(&profiles, &request.preset)?;
-    producer
-        .source_lock(recipe.source_lock_sha256())
+    declaration
+        .bind(&recipe, &contract, &source_lock, &profiles, &request.preset)
         .map_err(|error| error.input("--producer-dir"))?;
+    let executor = Executor {
+        contract_id: Some("aros-toolchain-producer-v1"),
+        contract_sha256: Some(declaration.contract_sha256().clone()),
+        tools_commit: Some(declaration.tools_commit().clone()),
+        binary_sha256: inspection::frontend_digest()?,
+        origin_evidence_sha256: None,
+    };
     // M2 owns source-lock semantics and completeness. Here only the exact
     // recipe-declared patch identities are checked, never applied.
     for patch in recipe.patches() {
@@ -218,10 +215,6 @@ pub fn inspect_with_timeout(
             ));
         }
     }
-    let driver_present = producer
-        .file("scripts/toolchain/build-release.sh")
-        .map_err(|error| error.input("--producer-dir"))?
-        .is_some();
     #[cfg(unix)]
     {
         let mut budget = crate::source_audit::Budget::new(deadline);
@@ -234,18 +227,13 @@ pub fn inspect_with_timeout(
                 .map_err(|error| error.input(label))?;
         }
     }
-    let mut findings = findings(request, driver_present);
-    findings.push(Diagnostic::error(
-        DiagnosticCode::ProducerIdentity, DiagnosticStage::Configuration,
-        "Frontend source/origin evidence is unavailable; executor.tools_commit is null, not the recipe's collector commit.",
-    ).with_hint("Use this result only for inspection; verified executor identity remains required before any build can launch."));
+    let findings = findings(request);
     source.recheck()?;
     producer.recheck()?;
     tools.recheck()?;
     Ok(Plan {
         schema: "aros-toolchain-plan-v1",
         operation: "plan",
-        backend: request.backend,
         identity: Identity {
             recipe_sha256: recipe.sha256().clone(),
             source_commit: recipe.source().0.clone(),
@@ -253,13 +241,7 @@ pub fn inspect_with_timeout(
             tools_commit: recipe.tools().0.clone(),
             host,
             target_profile: request.preset.clone(),
-            executor: Executor {
-                contract_id: None,
-                contract_sha256: None,
-                tools_commit: None,
-                binary_sha256: inspection::frontend_digest()?,
-                origin_evidence_sha256: None,
-            },
+            executor,
         },
         paths,
         resources: Resources {
@@ -269,8 +251,8 @@ pub fn inspect_with_timeout(
             network_isolation: "fetch-guard",
             free_bytes: None,
         },
-        steps: vec!["legacy-driver"],
-        readiness: "blocked",
+        steps: steps(),
+        readiness: readiness(request),
         findings,
     })
 }
@@ -347,16 +329,13 @@ pub(crate) fn resolve_paths(request: &PlanRequest) -> Result<Paths, ContractErro
     Ok(paths)
 }
 
-fn findings(request: &PlanRequest, driver_present: bool) -> Vec<Diagnostic> {
-    let mut findings = vec![Diagnostic::error(
-        DiagnosticCode::ProducerContract, DiagnosticStage::Configuration,
-        "Build execution is not implemented. Recursive raw worktree/index checks do not create isolated execution snapshots. Source capabilities, source-lock semantics, prerequisites, cache integrity, integrated ownership and cancellation remain unqualified.",
-    ).with_hint("Do not execute this plan as a build authorization. Continue TCP-M1/M2; no cache was scanned, no prerequisite installed and no directory reserved.")];
-    if !driver_present {
-        findings.push(Diagnostic::error(DiagnosticCode::ProducerContract, DiagnosticStage::Configuration,
-            "The selected producer has no committed legacy build driver.")
-            .with_hint("Select a compatible reviewed producer recipe; no fallback or source switch is performed."));
-    }
+fn findings(request: &PlanRequest) -> Vec<Diagnostic> {
+    let mut findings = Vec::new();
+    findings.push(Diagnostic::warning(
+        DiagnosticCode::ProducerIdentity,
+        DiagnosticStage::Configuration,
+        "Native local execution has no trusted executor-origin attestation and remains local-only.",
+    ).with_hint("A protected release workflow must bind independent executor-origin evidence; a local result cannot publish."));
     if request.work_dir.is_none()
         || request.output_dir.is_none()
         || request.cache_dir.is_none()
@@ -367,81 +346,37 @@ fn findings(request: &PlanRequest, driver_present: bool) -> Vec<Diagnostic> {
             "Work/output/cache roots or explicit resource budgets are incomplete.")
             .with_hint("Select --work-dir, --output-dir, --cache-dir, --jobs and --timeout-seconds; this does not remove the other blockers."));
     }
+    if !request.offline {
+        findings.push(Diagnostic::warning(
+            DiagnosticCode::ProducerPreflight,
+            DiagnosticStage::Configuration,
+            "Native execution requires the explicit offline policy.",
+        ).with_hint("Pass --offline after preparing the verified source cache; the lifecycle never falls back to producer-controlled network access."));
+    }
     findings
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileDocument {
-    schema: String,
-    #[serde(rename = "upstream_commit")]
-    _upstream_commit: GitObjectId,
-    profiles: Vec<Profile>,
+fn steps() -> Vec<&'static str> {
+    vec![
+        "preflight",
+        "sources",
+        "environment",
+        "configure",
+        "compiler",
+        "collector",
+    ]
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Profile {
-    name: String,
-    configure_target: String,
-    upstream_output_target: String,
-    target_triple: String,
-    cpu: String,
-    platform: String,
-    float_abi: String,
-    capabilities: Vec<String>,
-}
-
-fn check_profile(input: &[u8], selected: &str) -> Result<(), ContractError> {
-    let profiles: ProfileDocument = serde_json::from_slice(input).map_err(|_| {
-        ContractError::invalid("invalid or unsupported closed profiles-v1 document")
-    })?;
-    if profiles.schema != "aros-toolchain-profiles-v1"
-        || profiles.profiles.is_empty()
-        || profiles.profiles.len() > 128
+const fn readiness(request: &PlanRequest) -> &'static str {
+    if request.work_dir.is_none()
+        || request.output_dir.is_none()
+        || request.cache_dir.is_none()
+        || request.jobs.is_none()
+        || request.timeout_seconds.is_none()
+        || !request.offline
     {
-        return Err(ContractError::invalid(
-            "expected profiles-v1 with 1..128 entries",
-        ));
+        "incomplete"
+    } else {
+        "ready"
     }
-    let mut names = BTreeSet::new();
-    for profile in &profiles.profiles {
-        if !names.insert(&profile.name)
-            || [
-                &profile.name,
-                &profile.configure_target,
-                &profile.upstream_output_target,
-                &profile.target_triple,
-                &profile.cpu,
-                &profile.platform,
-            ]
-            .iter()
-            .any(|value| !identifier(value))
-            || (!profile.float_abi.is_empty() && !identifier(&profile.float_abi))
-            || profile.capabilities.is_empty()
-            || profile.capabilities.iter().any(|value| !identifier(value))
-            || profile.capabilities.iter().collect::<BTreeSet<_>>().len()
-                != profile.capabilities.len()
-        {
-            return Err(ContractError::invalid(
-                "profiles contain duplicate or invalid identifiers/capabilities",
-            ));
-        }
-    }
-    if !names.iter().any(|name| name.as_str() == selected) {
-        return Err(ContractError::invalid(
-            "preset is not present in the recipe-selected profiles",
-        ));
-    }
-    Ok(())
-}
-
-fn identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        && value != "."
-        && value != ".."
 }

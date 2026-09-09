@@ -19,9 +19,45 @@ pub enum DiagnosticCode {
     ProducerPrerequisite,
     #[serde(rename = "AX0202")]
     ProducerPreflight,
+    /// Producer source/cache declaration or verified payload failure.
+    #[serde(rename = "AX0301")]
+    ProducerSources,
+    /// Producer source-use closure failure.
+    #[serde(rename = "AX0302")]
+    ProducerSourceUse,
+    /// Producer-controlled external build environment failure.
+    #[serde(rename = "AX0401")]
+    ProducerEnvironment,
+    /// Producer-controlled upstream configure phase failure.
+    #[serde(rename = "AX0501")]
+    ProducerConfigure,
+    /// Producer-controlled upstream compiler/runtime phase failure.
+    #[serde(rename = "AX0502")]
+    ProducerCompiler,
+    /// Producer-controlled exact collector phase failure.
+    #[serde(rename = "AX0503")]
+    ProducerCollector,
+    /// Producer-controlled deterministic package construction failure.
+    #[serde(rename = "AX0601")]
+    ProducerPackage,
+    /// Producer-controlled package read-back verification failure.
+    #[serde(rename = "AX0602")]
+    ProducerVerification,
+    /// Producer-controlled complete release inventory/index failure.
+    #[serde(rename = "AX0701")]
+    ProducerIndex,
+    /// Producer-controlled independent package comparison failure.
+    #[serde(rename = "AX0702")]
+    ProducerComparison,
+    /// Producer-controlled compatibility or relocation qualification failure.
+    #[serde(rename = "AX0703")]
+    ProducerCompatibility,
     /// Producer work ownership or operation-state failure.
     #[serde(rename = "AX0801")]
     ProducerState,
+    /// Producer recovery eligibility or immutable-handoff failure.
+    #[serde(rename = "AX0901")]
+    ProducerRecovery,
     #[serde(rename = "AT0001")]
     SourceWalk,
     #[serde(rename = "AT0002")]
@@ -219,7 +255,19 @@ impl fmt::Display for DiagnosticCode {
             Self::ProducerIdentity => "AX0102",
             Self::ProducerPrerequisite => "AX0201",
             Self::ProducerPreflight => "AX0202",
+            Self::ProducerSources => "AX0301",
+            Self::ProducerSourceUse => "AX0302",
+            Self::ProducerEnvironment => "AX0401",
+            Self::ProducerConfigure => "AX0501",
+            Self::ProducerCompiler => "AX0502",
+            Self::ProducerCollector => "AX0503",
+            Self::ProducerPackage => "AX0601",
+            Self::ProducerVerification => "AX0602",
+            Self::ProducerIndex => "AX0701",
+            Self::ProducerComparison => "AX0702",
+            Self::ProducerCompatibility => "AX0703",
             Self::ProducerState => "AX0801",
+            Self::ProducerRecovery => "AX0901",
             Self::SourceWalk => "AT0001",
             Self::FetchDiscovery => "AT0002",
             Self::SourceParse => "AT0003",

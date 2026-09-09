@@ -14,6 +14,84 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn enable_native(&mut self) {
+        let patch_path = "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff";
+        fs::create_dir_all(self.root.join("source/tools/crosstools/llvm")).unwrap();
+        fs::write(
+            self.root.join("source").join(patch_path),
+            b"fixture native patch\n",
+        )
+        .unwrap();
+        self.recipe["patches"] = json!([{
+            "path": patch_path,
+            "sha256": sha256_bytes(b"fixture native patch\n"),
+        }]);
+        self.recommit("source");
+        let lock = serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
+            "sources": [{
+                "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
+                "patch": patch_path,
+                "filename": "llvm-11.0.0.src.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
+                "sha256": "a".repeat(64), "size": 1
+            }],
+            "host_python_packages": [
+                {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": "b".repeat(64), "size": 1, "source_root": "mako", "python_path": "."},
+                {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": "c".repeat(64), "size": 1, "source_root": "markupsafe", "python_path": "."}
+            ]
+        }))
+        .unwrap();
+        let contract = b"fixture native contract\n";
+        fs::create_dir_all(self.root.join("tools/contracts")).unwrap();
+        fs::write(
+            self.root.join("tools/contracts/toolchain-producer-v1.toml"),
+            contract,
+        )
+        .unwrap();
+        self.recommit("tools");
+        fs::write(
+            self.root
+                .join("producer/toolchains/arbitrary-version.sources.json"),
+            &lock,
+        )
+        .unwrap();
+        fs::write(
+            self.root.join("producer/toolchains/producer-executor-v1.toml"),
+            format!(
+                "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"toolchains/arbitrary-version.sources.json\"\nprofiles = \"toolchains/profiles-v1.json\"\n",
+                sha256_bytes(contract),
+                self.recipe["tools_commit"].as_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        self.recipe["source_lock_sha256"] = json!(sha256_bytes(&lock));
+        self.recommit("producer");
+    }
+
+    fn refresh_native_tools_commit(&mut self) {
+        let declaration = self
+            .root
+            .join("producer/toolchains/producer-executor-v1.toml");
+        let replacement = format!(
+            "tools_commit = \"{}\"",
+            self.recipe["tools_commit"].as_str().unwrap()
+        );
+        let updated = fs::read_to_string(&declaration)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                if line.starts_with("tools_commit = ") {
+                    replacement.as_str()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&declaration, format!("{updated}\n")).unwrap();
+        self.recommit("producer");
+    }
+
     fn recommit(&mut self, name: &str) {
         let checkout = self.root.join(name);
         git(&checkout, &["add", "."]);
@@ -87,12 +165,13 @@ impl Fixture {
             "patches": [{"path":"patch.diff", "sha256":sha256_bytes(b"fixture patch\n")}]
         });
         sign(&mut recipe);
-        let fixture = Self {
+        let mut fixture = Self {
             _temporary: temporary,
             root,
             recipe,
         };
         fixture.save();
+        fixture.enable_native();
         fixture
     }
 
@@ -117,7 +196,6 @@ impl Fixture {
                 "toolchain",
                 "plan",
                 "--format=json",
-                "--backend=legacy-preview",
                 "--preset=pc-x86_64",
                 "--recipe=recipe.json",
                 "--source-dir=source",
@@ -208,14 +286,26 @@ fn global_json_plan_has_exact_identity_and_no_filesystem_mutation() {
     assert_eq!(inventory(&fixture.root), before);
     assert_eq!(plan["schema"], "aros-toolchain-plan-v1");
     assert_eq!(plan["operation"], "plan");
-    assert_eq!(plan["backend"], "legacy-preview");
-    assert_eq!(plan["readiness"], "blocked");
-    assert_eq!(plan["steps"], json!(["legacy-driver"]));
+    assert_eq!(plan["readiness"], "incomplete");
+    assert_eq!(
+        plan["steps"],
+        json!([
+            "preflight",
+            "sources",
+            "environment",
+            "configure",
+            "compiler",
+            "collector"
+        ])
+    );
     assert_eq!(
         plan["identity"]["tools_commit"],
         fixture.recipe["tools_commit"]
     );
-    assert!(plan["identity"]["executor"]["tools_commit"].is_null());
+    assert_eq!(
+        plan["identity"]["executor"]["tools_commit"],
+        fixture.recipe["tools_commit"]
+    );
     assert!(plan["identity"]["executor"]["origin_evidence_sha256"].is_null());
     assert_eq!(
         plan["identity"]["executor"]["binary_sha256"]
@@ -237,7 +327,6 @@ fn global_json_plan_has_exact_identity_and_no_filesystem_mutation() {
     assert_eq!(
         keys,
         [
-            "backend",
             "findings",
             "identity",
             "operation",
@@ -272,7 +361,7 @@ fn complete_budgets_remain_blocked_and_do_not_create_roots() {
     );
     assert!(!fixture.root.join("missing").exists());
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["readiness"], "blocked");
+    assert_eq!(plan["readiness"], "ready");
     assert_eq!(plan["resources"]["jobs"], 2);
     assert_eq!(plan["resources"]["offline"], true);
     assert_eq!(
@@ -502,6 +591,7 @@ fn raw_blob_batches_accept_binary_content_and_cross_batch_boundary() {
     fs::write(fixture.root.join("tools/empty"), []).unwrap();
     fixture.recommit("source");
     fixture.recommit("tools");
+    fixture.refresh_native_tools_commit();
     fixture.plan();
 }
 
@@ -611,7 +701,7 @@ fn overlapping_roots_are_errors_not_successful_plans() {
 
 #[cfg(unix)]
 #[test]
-fn aliases_are_resolved_for_ownership_but_input_links_and_fifos_are_refused() {
+fn input_links_and_fifos_are_refused_without_following_them() {
     use std::os::unix::fs::symlink;
     let fixture = Fixture::new();
     symlink(fixture.root.join("source"), fixture.root.join("alias")).unwrap();
@@ -629,7 +719,7 @@ fn aliases_are_resolved_for_ownership_but_input_links_and_fifos_are_refused() {
         fixture.root.join("source/patch.diff"),
     )
     .unwrap();
-    failure(&fixture.command().output().unwrap(), "AX0202");
+    failure(&fixture.command().output().unwrap(), "AX0102");
     fs::remove_file(fixture.root.join("recipe.json")).unwrap();
     assert!(Command::new("mkfifo")
         .arg(fixture.root.join("recipe.json"))
@@ -640,7 +730,7 @@ fn aliases_are_resolved_for_ownership_but_input_links_and_fifos_are_refused() {
 }
 
 #[test]
-fn native_default_fails_before_discovering_or_opening_paths() {
+fn native_default_requires_real_selected_inputs_without_creating_paths() {
     let temporary = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_aros"))
         .current_dir(temporary.path())
@@ -658,8 +748,89 @@ fn native_default_fails_before_discovering_or_opening_paths() {
         ])
         .output()
         .unwrap();
-    failure(&output, "AX0101");
+    failure(&output, "AX0202");
     assert!(fs::read_dir(temporary.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn public_toolchain_commands_do_not_expose_a_legacy_backend_switch() {
+    for command in ["plan", "build"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_aros"))
+            .args(["toolchain", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(!String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("--backend"));
+    }
+}
+
+#[test]
+fn native_plan_binds_its_declared_contract_without_mutation() {
+    let fixture = Fixture::new();
+    let before = inventory(&fixture.root);
+    let output = fixture.command().output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(inventory(&fixture.root), before);
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["readiness"], "incomplete");
+    assert_eq!(
+        plan["steps"],
+        json!([
+            "preflight",
+            "sources",
+            "environment",
+            "configure",
+            "compiler",
+            "collector"
+        ])
+    );
+    assert_eq!(
+        plan["identity"]["executor"]["tools_commit"],
+        fixture.recipe["tools_commit"]
+    );
+    assert!(plan["identity"]["executor"]["contract_sha256"].is_string());
+}
+
+#[test]
+fn native_plan_requires_offline_policy_before_reporting_ready() {
+    let fixture = Fixture::new();
+    let mut command = fixture.command();
+    command.args([
+        "--work-dir=work",
+        "--output-dir=output",
+        "--cache-dir=cache",
+        "--jobs=1",
+        "--timeout-seconds=60",
+    ]);
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["readiness"], "incomplete");
+    assert!(plan["findings"].as_array().unwrap().iter().any(|finding| {
+        finding["message"] == "Native execution requires the explicit offline policy."
+    }));
+
+    let output = fixture
+        .command()
+        .args([
+            "--work-dir=work",
+            "--output-dir=output",
+            "--cache-dir=cache",
+            "--jobs=1",
+            "--timeout-seconds=60",
+            "--offline",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["readiness"], "ready");
 }
 
 #[test]
@@ -713,7 +884,7 @@ fn offline_environment_is_reflected_without_fetching() {
 }
 
 #[test]
-fn two_digest_matching_locks_are_ambiguous_not_a_hidden_pin() {
+fn selected_native_lock_is_unambiguous_even_with_a_matching_sibling() {
     let mut fixture = Fixture::new();
     fs::copy(
         fixture
@@ -735,7 +906,7 @@ fn two_digest_matching_locks_are_ambiguous_not_a_hidden_pin() {
     ));
     sign(&mut fixture.recipe);
     fixture.save();
-    failure(&fixture.command().output().unwrap(), "AX0102");
+    fixture.plan();
 }
 
 #[cfg(unix)]
@@ -784,7 +955,7 @@ fn explicit_logging_keeps_machine_result_and_diagnostics_separate() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["readiness"], "blocked");
+    assert_eq!(plan["readiness"], "incomplete");
     let events = fs::read_to_string(fixture.root.join("inspection.jsonl")).unwrap();
     assert!(events
         .lines()

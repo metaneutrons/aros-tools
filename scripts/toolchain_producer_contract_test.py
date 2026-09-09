@@ -47,7 +47,7 @@ class ToolchainProducerContractTests(unittest.TestCase):
 
     def test_scope_does_not_advertise_a_runtime_implementation(self) -> None:
         self.assertEqual(self.contract["schema_version"], 1)
-        self.assertEqual(self.contract["status"], "read-only-legacy-inspection")
+        self.assertEqual(self.contract["status"], "native-input-contract")
         self.assertEqual(self.contract["new_executables"], [])
         self.assertEqual(self.contract["dependencies"], ["aros-common", "aros-fetch"])
         self.assertEqual(self.contract["forbidden_dependencies"], ["aros-cli", "aros-release"])
@@ -56,17 +56,31 @@ class ToolchainProducerContractTests(unittest.TestCase):
         self.assertFalse(self.contract["lifecycle"]["shared_compiled_cache"])
         self.assertTrue(self.contract["lifecycle"]["fresh_release_builds"])
 
-    def test_existing_format_versions_and_explicit_backend_are_preserved(self) -> None:
+    def test_existing_format_versions_and_native_lifecycle_are_preserved(self) -> None:
         inputs = self.contract["inputs"]
         self.assertEqual(inputs["recipe_schema"], "aros-toolchain-recipe-v2")
         self.assertEqual(inputs["source_lock_schema"], "aros-toolchain-source-lock-v2")
         self.assertEqual(inputs["source_target"], "crosstools-release")
-        self.assertTrue(inputs["legacy_preview_requires_explicit_selection"])
         self.assertEqual(self.contract["commands"]["preserved"], ["install", "list", "verify", "path"])
-        self.assertEqual(self.contract["commands"]["default_backend"], "native")
+        self.assertNotIn("backend", self.contract["commands"]["common_optional"])
         self.assertFalse(self.contract["artifacts"]["index_is_consumer_lock"])
         self.assertEqual(self.contract["artifacts"]["manifest_schema"], 1)
         self.assertEqual(self.contract["artifacts"]["consumer_lock_schema"], 1)
+
+    def test_public_native_surface_excludes_the_retired_adapter(self) -> None:
+        surfaces = [
+            ROOT / "crates/aros-cli/src/toolchain_build.rs",
+            ROOT / "crates/aros-cli/src/toolchain_plan.rs",
+            ROOT / "crates/aros-toolchain/src/executor.rs",
+            ROOT / "crates/aros-toolchain/src/plan.rs",
+        ]
+        for surface in surfaces:
+            text = surface.read_text(encoding="utf-8")
+            with self.subTest(surface=surface.relative_to(ROOT)):
+                self.assertNotIn("legacy-preview", text)
+                self.assertNotIn("LegacyPreview", text)
+                self.assertNotIn("LegacySourceView", text)
+        self.assertFalse((ROOT / "docs/toolchain-legacy-execution-view.md").exists())
 
     def test_release_inventory_has_no_self_hash_cycle(self) -> None:
         artifacts = self.contract["artifacts"]
@@ -192,8 +206,8 @@ class ToolchainProducerContractTests(unittest.TestCase):
     def test_diagnostic_reservation_and_partial_registration_are_exact(self) -> None:
         diagnostics = self.contract["diagnostics"]
         self.assertEqual(diagnostics["envelope"], "aros-tool-diagnostics-v1")
-        self.assertEqual(diagnostics["registration"], "partial-M1")
-        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202", "AX0801"])
+        self.assertEqual(diagnostics["registration"], "M5-qualification-evidence")
+        self.assertEqual(diagnostics["registered_codes"], ["AX0101", "AX0102", "AX0201", "AX0202", "AX0301", "AX0302", "AX0401", "AX0501", "AX0502", "AX0503", "AX0601", "AX0602", "AX0701", "AX0702", "AX0703", "AX0801", "AX0901"])
         self.assertEqual(diagnostics["failure_exit"], 1)
         self.assertEqual(diagnostics["json_failure_stderr_documents"], 1)
         self.assertEqual(len(set(diagnostics["codes"])), len(diagnostics["codes"]))

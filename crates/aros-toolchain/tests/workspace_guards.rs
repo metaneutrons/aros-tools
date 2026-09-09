@@ -7,7 +7,7 @@ use std::os::unix::fs::{symlink, PermissionsExt as _};
 use std::path::Path;
 
 use aros_common::{measure_tree_content_cas, sha256_bytes, CancellationToken, DiagnosticCode};
-use aros_toolchain::plan::{Backend, PlanRequest};
+use aros_toolchain::plan::PlanRequest;
 use aros_toolchain::workspace::RunDirectories;
 
 const MARKER: &str = ".aros-toolchain-owner-v1.json";
@@ -27,7 +27,6 @@ impl Fixture {
         }
         Self {
             request: PlanRequest {
-                backend: Backend::LegacyPreview,
                 preset: "fixture".into(),
                 recipe: path.join("not-read-by-ownership"),
                 source_dir: path.join("source"),
@@ -116,6 +115,42 @@ fn fresh_directories_are_private_locked_and_retained_on_drop() {
 }
 
 #[test]
+fn explicit_resume_reacquires_only_the_exact_retained_owned_roots() {
+    let fixture = Fixture::new();
+    let guard = fixture.reserve().unwrap();
+    fs::write(fixture.work().join("retained"), b"evidence").unwrap();
+    guard.release().unwrap();
+
+    let resumed = RunDirectories::resume(
+        &fixture.request,
+        &sha256_bytes(b"synthetic operation binding"),
+        &fixture.token,
+    )
+    .unwrap();
+    resumed.revalidate(&fixture.token).unwrap();
+    assert_eq!(
+        fs::read(fixture.work().join("retained")).unwrap(),
+        b"evidence"
+    );
+    resumed.release().unwrap();
+}
+
+#[test]
+fn explicit_resume_rejects_a_different_owner_without_mutation() {
+    let fixture = Fixture::new();
+    let guard = fixture.reserve().unwrap();
+    guard.release().unwrap();
+    let before = fixture.digest();
+    assert!(RunDirectories::resume(
+        &fixture.request,
+        &sha256_bytes(b"different operation binding"),
+        &fixture.token,
+    )
+    .is_err());
+    assert_eq!(fixture.digest(), before);
+}
+
+#[test]
 fn existing_work_or_output_is_never_adopted_even_when_empty() {
     for existing_output in [false, true] {
         for with_content in [false, true] {
@@ -195,10 +230,7 @@ fn native_missing_budgets_and_cancellation_fail_before_mutation() {
     for case in 0..4 {
         let mut fixture = Fixture::new();
         match case {
-            0 => {
-                fixture.request.backend = Backend::Native;
-                fixture.request.source_dir = "/absent".into();
-            }
+            0 => fixture.request.source_dir = "/absent".into(),
             1 => fixture.request.jobs = Some(0),
             2 => fixture.request.timeout_seconds = None,
             _ => fixture.token.cancel(),

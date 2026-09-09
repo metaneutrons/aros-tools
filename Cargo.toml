@@ -31,7 +31,7 @@ readme = "README.md"
 # software backend otherwise dominates those checks on hosts without SHA CPU
 # instructions. Optimize only that dependency; preserve all debug safety checks,
 # workspace code debuggability, operation budgets and the unchanged release profile.
-# See docs/toolchain-legacy-execution-view.md for the measured regression.
+# The optimization is bounded to checksum work and does not weaken debug checks.
 [profile.dev.package.sha2]
 opt-level = 2
 debug-assertions = true
@@ -59,6 +59,7 @@ doc_markdown = "allow"
 aros-board = { path = "crates/aros-board" }
 aros-cmake-engine = { path = "crates/aros-cmake-engine" }
 aros-common = { path = "crates/aros-common" }
+aros-fetch = { path = "crates/aros-fetch" }
 aros-toolchain = { path = "crates/aros-toolchain" }
 aros-release = { path = "crates/aros-release" }
 aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
@@ -99,6 +100,10 @@ glob = "0.3"
 which = "8.0"
 regex = "1.11"
 sha2 = "0.11"
+# Canonical Unicode normalization closes APFS/HFS+ decomposed-name aliases in
+# cross-host payload collision detection without delegating path policy to host
+# filesystem behavior.
+unicode-normalization = "0.1.25"
 tempfile = "3.17"
 semver = "1.0"
 fs2 = "0.4"

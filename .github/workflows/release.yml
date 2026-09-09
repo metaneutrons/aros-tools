@@ -1,22 +1,6 @@
 name: Release qualification
 
 on:
-  pull_request:
-    paths:
-      - '.github/actions/**'
-      - '.github/workflows/release-please.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/publish-ecosystem.yml'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - '.release-please-manifest.json'
-      - 'release-please-config.json'
-      - 'CHANGELOG.md'
-      - 'rust-toolchain.toml'
-      - 'crates/**'
-      - 'scripts/release/**'
-      - 'README.md'
-      - 'LICENSE'
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'

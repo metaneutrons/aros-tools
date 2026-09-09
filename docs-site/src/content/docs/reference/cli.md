@@ -52,9 +52,9 @@ Use PATH for a source build or the verified archive installation procedure.
 
 ## Toolchains and helpers
 
-Consumer toolchain/host-compiler commands require an AROS checkout.
-Experimental producer planning instead requires three explicit source roots
-and works from any directory.
+Consumer toolchain/host-compiler commands require an AROS checkout. The
+experimental native producer instead requires three explicit source roots and
+works from any directory.
 
 | Command | Inputs and effect |
 | --- | --- |
@@ -65,7 +65,8 @@ and works from any directory.
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
-| `toolchain build` | Experimental local legacy-preview candidate; explicit roots, prepared offline cache, fresh isolated views and bounded cancellation |
+| `toolchain build` | Experimental controlled local native candidate; explicit roots, prepared offline cache, fresh isolated snapshots and bounded cancellation |
+| `toolchain producer` | Low-level native producer operations for exact recipe, cache, package, comparison, compatibility and recovery inputs; maintainer-only, never a publication shortcut |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
 
@@ -77,10 +78,10 @@ For helper source builds set `AROS_TOOLS_SOURCE_DIR` to the tools checkout.
 Installed suites normally need only `build-tools check`.
 See [toolchain workflows](/aros-tools/workflows/toolchains/).
 
-### Experimental producer inspection
+### Experimental producer inspection and local candidate build
 
 ```sh
-aros toolchain plan --backend legacy-preview --preset pc-x86_64 \
+aros toolchain plan --preset pc-x86_64 \
   --recipe /work/recipe.json --source-dir /work/AROS \
   --producer-dir /work/aros-toolchains --tools-dir /work/collector-tools \
   --format json --offline
@@ -94,7 +95,7 @@ locally prepared Git objects are required; inspection never fetches them.
 Use regular recipe/input files without symlink ancestors.
 
 Optional `--work-dir`, `--output-dir`, `--cache-dir`, positive `--jobs` and
-positive `--timeout-seconds` describe a future build; omitted values stay null.
+positive `--timeout-seconds` describe a native build; omitted values stay null.
 No directories are created, no locks reserved and no cache contents scanned.
 `--offline` also honors `AROS_OFFLINE`; planning itself is always offline.
 `--format human|json` controls stdout independently of `--diagnostic-format`.
@@ -108,18 +109,22 @@ missing, wrong-mode or uninitialized material is rejected. Even empty
 untracked directories count; keep build/cache directories outside the roots.
 Raw symlink targets are compared without following them. Git filters and index
 flags cannot hide changes, and inspection never cleans the checkouts.
-Plans currently report `blocked`: integrated execution snapshots, source capabilities,
-source-lock semantics, prerequisites/cache, executor origin and safe build
-lifecycle remain unqualified. The frontend's unknown source commit is null,
-not the old collector commit. `fetch-guard` describes the intended legacy
-policy, not a proven OS sandbox. Exit 0 means inspection completed; inspect
-`readiness` and `findings`. Invalid inputs exit 1 with no result on stdout.
+The native lifecycle requires a committed producer declaration at
+`toolchains/producer-executor-v1.toml`. It binds the selected contract, tools
+commit, source lock and profile matrix to the recipe. Without that exact
+declaration, native inspection returns AX0202 and never guesses historical
+producer state. With it, `readiness` is `ready` only when all build roots and
+positive resource budgets are present and `--offline` is set; cache verification and root reservation
+still happen at build time. Every local result has `qualification: local-only`:
+there is no origin attestation or release authorization. `fetch-guard`
+describes the controlled no-network policy, not a proven OS sandbox. Exit 0 means inspection
+completed; inspect `readiness` and `findings`. Invalid inputs exit 1 with no
+result on stdout.
 
-The default `native` backend is not implemented and fails before file reads;
-it never falls back. The legacy preview is explicit and local-only:
+The native lifecycle is explicit about all material it controls:
 
 ```sh
-aros toolchain build --backend legacy-preview --preset pc-x86_64 \
+aros toolchain build --preset pc-x86_64 \
   --recipe /work/recipe.json --source-dir /work/AROS \
   --producer-dir /work/aros-toolchains --tools-dir /work/aros-tools \
   --work-dir /work/toolchain-run --output-dir /work/toolchain-candidate \
@@ -127,19 +132,26 @@ aros toolchain build --backend legacy-preview --preset pc-x86_64 \
   --release-id local-pc-2026-09-06 --offline --format json
 ```
 
-`toolchain build` rechecks every selected checkout, probes Git/Python/CMake/
-Rust/Cargo/make, requires an existing prepared cache, and reserves fresh
-non-overlapping work/output leaves. It materializes metadata-free snapshots and
-independent shallow Git views before invoking the reviewed
-`build-release.sh`. The child gets a cleared environment with explicit PATH,
-HOME, TMPDIR, locale, timezone, Git and Cargo offline settings. Ctrl-C and the
-whole-operation deadline terminate and reap the child process group; retained
-work/output material is never adopted or deleted. Results report measured files,
-host-tool versions and `qualification: local-only`; executor origin is
-explicitly `not-run`, so no local result authorizes a release or publication.
-The command requires `--offline` because the current legacy driver consumes a
-prepared cache and is not a network sandbox. The lower-level source-snapshot
-library is not called by `plan` and does not change its read-only behavior.
+`toolchain build` rechecks every selection, verifies the prepared cache, and
+reserves fresh non-overlapping work/output leaves. It snapshots committed source,
+producer and tools material, prepares private locked Python/Cargo environments,
+then runs unchanged AROS `configure` and source-owned
+`crosstools-release`. A hidden Rust MetaMake bridge supplies only declared cache
+payloads and records exact source use before calling the upstream helper. The
+same lifecycle builds the vendored `aros-collect`, installs the collector aliases
+and writes a canonical receipt after each completed phase. The child environment
+has explicit PATH, HOME, TMPDIR, locale, timezone, Git and Cargo offline
+settings. Ctrl-C and the whole-operation deadline terminate and reap process
+groups; retained material is never adopted or deleted. The command requires
+`--offline`; it does not publish, tag, package or authorize a release.
+
+There is no backend switch or legacy fallback. Receipt reuse/resume, complete
+candidate inventory and real host/profile qualification remain separately
+qualified capabilities.
+
+For the required checkout layout, cache bootstrap, resource boundary and
+failure handling, follow the [native producer workflow](/aros-tools/workflows/toolchain-producer/).
+It is intentionally separate from the released-toolchain consumer guide.
 
 ## Build and inspect a product
 

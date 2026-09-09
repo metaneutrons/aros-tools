@@ -1,6 +1,6 @@
 # Toolchain producer integration: architecture and delivery plan
 
-Status: producer implementation authorized; M0 accepted on 2026-09-06.
+Status: producer implementation authorized; M0, M1, M2 and M3 accepted.
 Planning baseline: 2026-09-05. Maintainer and scope owner: Fabian Schmieder.
 Tracking prefix: `TCP`. The acceptance gates below define completion, not a
 percentage estimate. The plan distinguishes the implemented local preview
@@ -12,19 +12,20 @@ or the initial tools release. The extension is planned, not implemented.
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The M1 acceptance evidence is recorded below and its formal issue is
-[TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29). The next
-implementation gate is [TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30).
+[TCP-M1 / #29](https://github.com/metaneutrons/aros-tools/issues/29).
+[TCP-M2 / #30](https://github.com/metaneutrons/aros-tools/issues/30) is accepted.
+[TCP-M3 / #31](https://github.com/metaneutrons/aros-tools/issues/31) is accepted
+with the measured native evidence recorded in
+[the TCP-M3 ledger](tcp-m3-native-evidence.md); TCP-M4 is next.
 The [M0 evidence ledger](toolchain-producer-baseline.md#m0-acceptance) records
 its completed contract freeze. M1's experimental plan/CLI slice is now
-complete for its local-preview acceptance boundary; native lifecycle,
-source-readiness and release gates remain explicitly assigned to M2–M7.
+complete for its local-preview acceptance boundary. Native lifecycle work is
+now explicitly assigned to M3; source-readiness remains accepted M2 scope and
+release gates remain assigned to M4–M7.
 
-The current M1 implementation now also exposes an explicit local
-`toolchain build --backend legacy-preview` adapter. It reuses the plan
-preflight, runs the reviewed legacy driver only from metadata-free snapshots,
-requires a prepared offline cache, binds the producer's Rust channel, and
-retains local candidate evidence. It is not a release executor or provenance
-attestation. The two required host proofs are recorded below. Trusted origin,
+M6 retires the former local legacy-preview adapter. The historical M1 evidence
+below remains an audit record only; it is not an executable path. The native
+Rust lifecycle is the sole local producer implementation. Trusted origin,
 native-executor and release-qualification evidence are later milestone gates,
 not prerequisites for accepting this experimental M1 boundary.
 The accepted [interface and ownership contract](toolchain-producer-contract.md)
@@ -33,7 +34,7 @@ for later implementation. Issues own execution status and remaining gates.
 
 ### Measured TCP-M1 local lane evidence (2026-09-06)
 
-The legacy-preview adapter was executed from the tools checkout against the
+The retired M1 adapter was executed from the tools checkout against the
 same producer contract on both requested native PC hosts. Each run used a
 fresh, owned work/output root, an explicitly prepared offline cache and the
 producer-declared Rust 1.96.1 channel. The result envelope reported
@@ -259,7 +260,7 @@ aros toolchain build --preset pc-x86_64 --recipe /work/recipe.json \
 ```
 
 The example deadline is a caller-selected budget, not a measured default.
-The first preview additionally requires explicit `--backend legacy-preview`.
+The retired M1 preview additionally required explicit backend selection.
 
 - Inputs are explicit; execution works from outside every checkout. Reject
   conflicting CLI/recipe selections. Do not infer a neighboring repository,
@@ -309,10 +310,9 @@ The separate lower-level `SourceSnapshot` now materializes one selected input
 under held run ownership, flattens recursive gitlinks without Git metadata and
 revalidates its exact raw inventory before/after durable no-clobber publication.
 It rejects unsafe link graphs and retains failed material without adoption.
-A consuming `LegacySourceView` now adds fresh shallow stores and independently
-checks their complete objects against those captured bytes; all metadata stays
-inside the exact material guard. No original Git metadata/history is copied.
-This does not complete the execution gate: integration across all selected
+The retired M1 conversion added fresh shallow stores and independently checked
+their complete objects against captured bytes. It no longer exists in the
+runtime. This does not alter the execution gate: integration across all selected
 roots, trusted origin/executor verification, and before/after execution
 checks remain open. See the [implemented bounds and limitations](../crates/aros-toolchain/README.md).
 
@@ -452,9 +452,8 @@ diagnostics rather than reducing them to an undifferentiated CLI error.
 - Separate operational duration/observation reports from deterministic
   diagnostics and archive metadata. Redact secrets before persistence and
   test logging failure, disk exhaustion, broken pipes and output limits.
-- The legacy preview adapter reports its real observable boundary. If an old
-  script does not provide a typed phase, report `legacy-driver` with retained
-  cause; never infer a precise diagnostic by fragile parsing of prose.
+- Native phases report their declared lifecycle boundary; do not infer a
+  precise diagnostic by fragile parsing of upstream prose.
 
 ## 6. Artifact compatibility, verification and recovery
 
@@ -544,7 +543,7 @@ an acceptance criterion.
 | Milestone | Deliverable | Depends on | Promotion boundary |
 | --- | --- | --- | --- |
 | TCP-M0 | Frozen contracts, baseline and threat model | None | Ready to implement |
-| TCP-M1 | CLI preview and isolated legacy adapter | M0 | Local experimental use only |
+| TCP-M1 | Historical CLI preview and isolated adapter | M0 | Retired at M6 |
 | TCP-M2 | Native identity, preflight, source and environment handling | M1 | Native input preparation |
 | TCP-M3 | Native build lifecycle and resource/error handling | M2 | Verified native build candidate |
 | TCP-M4 | Native toolchain envelope and complete verification | M3 | Artifact-format candidate |
@@ -583,11 +582,11 @@ at `abab341f259037ead9217181f39ba9384d014bab`; see the
 
 - [x] Introduce `aros-toolchain` and thin CLI modules with library/process
   dependency gates; preserve existing consumer commands and package inventory.
-- [x] Implement read-only planning and one explicit, temporary legacy-driver
-  adapter against the selected producer checkout. No copied shell logic,
-  moving branch resolution or fallback after a native failure.
+- [x] Implement read-only planning and the temporary legacy-driver adapter
+  used for M1 evidence. It was retired at M6; no copied shell logic, moving
+  branch resolution or fallback survives.
 - [x] Establish diagnostics/logging, cancellation and guarded work/output
-  ownership before launching real builds. Isolate all legacy mutations.
+  ownership before launching real builds.
 - [x] Exercise mock success/failure/cancellation and invocation from outside
   checkouts; demonstrate one single-build local PC lane on Linux x86-64 and
   macOS AArch64 when hosts are available, with verified local-prefix use.
@@ -601,13 +600,13 @@ local-preview boundary; no native or release claim is implied.
 
 ### TCP-M2 — Native input and environment contracts
 
-- [ ] Implement recipe/lock/profile parsing, identity checks, preflight and
+- [x] Implement recipe/lock/profile parsing, identity checks, preflight and
   capability diagnostics; clean snapshots include recursive source material.
-- [ ] Use `aros-fetch` through a reviewed API boundary for verified acquisition;
+- [x] Use `aros-fetch` through a reviewed API boundary for verified acquisition;
   implement the locked MetaMake fetch adapter and exact source-use accounting.
-- [ ] Prepare the selected Rust vendor tree and private host Python runtime,
+- [x] Prepare the selected Rust vendor tree and private host Python runtime,
   with an explicit, sanitized execution environment and preserved prefix maps.
-- [ ] Cover stale/poisoned caches, missing hashes, undeclared sources/patches,
+- [x] Cover stale/poisoned caches, missing hashes, undeclared sources/patches,
   mutated checkouts, wrong executor, unsupported source contracts and offline
   cache misses. Verify that none reaches compiler execution.
 
@@ -615,7 +614,16 @@ Exit evidence: native preflight/source tests on all four hosts; locked offline
 fixtures prove controlled network paths cannot be used. Do not claim an OS
 sandbox unless it has independent platform evidence.
 
+Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55)
+at `89245f082f3e55a063d24d28b8b70425c5d2cbca`.
+
 ### TCP-M3 — Native build lifecycle
+
+Implementation status: the controlled local lifecycle now includes a narrowly
+reviewed collector-resume boundary: it revalidates retained ownership,
+snapshots, receipts and compiler outputs before rebuilding only the collector
+in a fresh Cargo target directory. The remaining fault/resource coverage and
+six real host/profile runs remain mandatory before issue #31 can close.
 
 - [ ] Implement configure, crosstools-release and exact-collector phases;
   preserve existing target flags, aliases, runtime closure and normalization
@@ -638,63 +646,72 @@ boundary; it is neither a fully native pipeline nor an automatic fallback.
 
 ### TCP-M4 — Native package, manifest and inventory engine
 
-- [ ] Port normalization, prefix scans, canonical tree inventory, `.tar.xz`
+- [x] Port normalization, prefix scans, canonical tree inventory, `.tar.xz`
   packaging, manifest/index, sidecar/SBOM and read-back verification.
-- [ ] Reuse existing common types; extract only proven shared primitives.
+- [x] Reuse existing common types; extract only proven shared primitives.
   Keep tools-suite `.tar.gz` packaging byte-compatible and independent.
-- [ ] Pass old/new golden vectors for files/directories/links, UTF-8 paths,
+- [x] Pass old/new golden vectors for files/directories/links, UTF-8 paths,
   modes, timestamps, tar headers, compression and manifest serialization.
   Treat intentional stricter validation as a documented contract decision.
-- [ ] Add malformed-archive, resource-exhaustion, mixed-recipe/matrix, missing
+- [x] Add malformed-archive, resource-exhaustion, mixed-recipe/matrix, missing
   SBOM/support-file and unsafe-asset tests. Verify the full 56-file v1 set.
 
-Exit evidence: reproducible synthetic packaging on all four hosts, both
-producer/consumer known-answer tests and complete positive/negative inventories.
-No new full compiler matrix is required for this packaging-only gate.
+Exit evidence: [TCP-M4 native package evidence](tcp-m4-native-evidence.md).
+It records reproducible synthetic packaging on all four hosts, producer and
+consumer known-answer tests, complete positive/negative inventories and the
+explicit absence of a new compiler matrix for this packaging-only gate.
 
 ### TCP-M5 — Compatibility, replay and recovery
 
-- [ ] Port the complete compatibility harness to explicit tools-owned engine
+- [x] Port the complete compatibility harness to explicit tools-owned engine
   and helper resolution; cover a source tree with no copied CMake engine.
-- [ ] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
+- [x] Run upstream `configure`/Make only with a fresh, measured, tools-owned
+  host-command closure. It may expose exactly selected commands below an owned
+  `PATH`; it must never append the caller's `PATH`. Keep standalone C/C++
+  probes at `PATH=/nonexistent` because they require only explicit tool paths.
+- [x] Verify two-root relocation, standalone C/C++ links, PC i386 aliases and
   target-runtime checks; preserve pristine-upstream and CMake consumer probes.
-- [ ] Implement native replay/repackage policy with bound evidence identities;
-  reject expired/missing/tampered artifacts and non-packaging failure recovery.
-- [ ] Test tag/draft conflicts, interrupted handoffs, changed assets, missing
+- [x] Implement native replay/repackage eligibility policy with bound evidence
+  identities; reject expired/missing/tampered artifacts and non-packaging
+  failure recovery. The policy is pure: it has no credentials, transport, tag,
+  release or archive-writing authority.
+- [x] Test tag/draft conflicts, interrupted handoffs, changed assets, missing
   attestations, incorrect signer/source claims and non-regular release assets.
   Exercise publication orchestration with fixtures, not real releases.
 
-Exit evidence: compatibility reports for available native diagnostic lanes and
-complete offline replay/recovery tests. All twelve real compatibility lanes
-are mandatory at M7; unexecuted lanes remain explicitly pending until then.
+Exit evidence: [TCP-M5 native compatibility, replay and recovery evidence]
+(tcp-m5-native-evidence.md). All twelve real compatibility lanes are mandatory
+at M7; unexecuted lanes remain explicitly pending until then.
 
 ### TCP-M6 — Workflow cutover, retirement and usability
 
-- [ ] Pin a reviewed tools executor in the producer workflow and call the same
+- [x] Pin a reviewed tools executor in the producer workflow and call the same
   native `aros toolchain build` path used locally. Replace Python stage calls
   with native stage operations; preserve privilege separation and exact-input
   source-contract checks across repositories.
-- [ ] Retire the temporary legacy adapter and redundant owned build/package/
+- [x] Retire the temporary legacy adapter and redundant owned build/package/
   fetch/environment/compatibility scripts from active paths. Retain relevant
   fixtures/tests; historical implementations remain available through Git.
   Document every remaining shell/Python dependency and its owner.
-- [ ] Exercise native frontend and fixtures on all four hosts, plus explicit
+- [x] Exercise native frontend and fixtures on all four hosts, plus explicit
   lean real-build diagnostics. Add dependency-direction, script-reference and
   shared-contract drift guards to the existing canonical gates.
-- [ ] Update command/help reference, local/offline build tutorial, prerequisites,
+- [x] Update command/help reference, local/offline build tutorial, prerequisites,
   upstream limits, troubleshooting, maintainer release/recovery instructions
   and producer README/handoff. Public docs describe implemented capabilities
   only and contain no hosting-service administration details.
-- [ ] Check installation/packaging fixtures for GitHub archives, Debian,
+- [x] Check installation/packaging fixtures for GitHub archives, Debian,
   Homebrew and AUR. Expensive source-build prerequisites are documented as
   optional rather than forced on ordinary binary-toolchain consumers.
-- [ ] Prepare a Conventional Commit/Release Please-compatible change set,
+- [x] Prepare a Conventional Commit/Release Please-compatible change set,
   close architectural risks and record a reviewed rollback plan before the
   first native producer tag. Do not hand-edit release versions to bypass it.
 
-Exit evidence: coordinated merged PRs, all applicable workspace/producer
-contracts green, documentation and install smoke tests, no active duplicate
-producer implementation. Full release evidence is still pending M7.
+Exit evidence: [TCP-M6 cutover evidence](tcp-m6-native-evidence.md) records
+the coordinated merges, all applicable workspace/producer contracts,
+documentation and installation-fixture checks, lean macOS/Linux PC proof and
+the rollback boundary. No active duplicate producer implementation remains.
+Full release evidence is still pending M7.
 
 ### TCP-M7 — Qualify once, publish and promote measured values
 
@@ -866,10 +883,10 @@ tracking change.
 | --- | --- | --- |
 | TCP-M0 | [#28](https://github.com/metaneutrons/aros-tools/issues/28) | [Accepted evidence](toolchain-producer-baseline.md#m0-acceptance) |
 | TCP-M1 | [#29](https://github.com/metaneutrons/aros-tools/issues/29) | [Measured local lane evidence](#measured-tcp-m1-local-lane-evidence-2026-09-06) |
-| TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Pending |
-| TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | Pending |
-| TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | Pending |
-| TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | Pending |
+| TCP-M2 | [#30](https://github.com/metaneutrons/aros-tools/issues/30) | Accepted through [PR #55](https://github.com/metaneutrons/aros-tools/pull/55) |
+| TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | [Accepted evidence](tcp-m3-native-evidence.md) |
+| TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | [Accepted evidence](tcp-m4-native-evidence.md) |
+| TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | [Accepted evidence](tcp-m5-native-evidence.md) |
 | TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | Pending |
 | TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | Pending |
 | TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | Pending |

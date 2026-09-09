@@ -54,13 +54,25 @@ The previous full default remains available only through explicit `all`.
 | Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible CMake fixture. |
 | Feature/milestone acceptance or release candidate | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh all` | Quality + docs + integration; requires the host coverage below. |
 
-PR CI retains all four required host-test jobs. Linux x86-64 runs the full
-source-coupled Rust suite; the other three hosts run `portable-test`. No
-failing test is hidden by a path filter, label, job skip or check-name change.
-On a push to `main`, and on an explicit **Workspace CI → Run workflow** start,
-the Linux source lane also runs all compatible CMake fixtures. Thus repeated
-PR iterations do not rebuild unrelated products. Quality, documentation and
-the separate four-host release/package qualification policies are unchanged.
+Every pull request retains commit hygiene, the stable Linux x86-64 check,
+quality gate and documentation build. A deliberately narrow documentation-only
+change set
+(`README.md`, `CONTRIBUTING.md`, `docs/**` or `docs-site/**`) uses that Linux
+lane's source-independent `portable-test`. Every other change — including an
+unknown path, a workflow, contract, dependency, script or Rust change — uses
+all four native hosts. Linux x86-64 runs the source-coupled Rust suite; the
+other three hosts run `portable-test`. The planner is fail-closed: an empty,
+malformed or unclassified change list selects all four hosts.
+
+On a push to `main`, the Linux source lane also runs all compatible CMake
+fixtures. **Workspace CI → Run workflow** defaults to all four hosts and makes
+the cheaper Linux-only scope an explicit operator choice. A weekly four-host
+sweep detects runner and toolchain drift. Thus repeated documentation edits do
+not consume macOS capacity, while executable changes retain native coverage.
+The separate four-host release/package qualification runs only for immutable
+tags or an explicit Release qualification dispatch; ordinary PRs validate the
+release policy in the Linux quality gate without rebuilding distributable
+archives.
 
 Before merging changes to the CMake engine, source translation, AROS source
 contract, fetch/build runner boundaries or this gate itself, run `test` once
@@ -89,7 +101,8 @@ AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
 
 This policy schedules existing tests; it does not grant release authority,
 replace toolchain A/B/compatibility checks, change pins or waive a failing
-required check. No periodic expensive sweep is scheduled by default.
+required check. The weekly host sweep is coverage evidence, not release
+evidence.
 
 `AROS_TEST_SOURCE_ROOT` enables the otherwise skipped real
 `aros source init` → `aros source sync` → `aros-transpiler` integration case.

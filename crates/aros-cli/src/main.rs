@@ -26,7 +26,9 @@ mod repo;
 mod source;
 mod toolchain;
 mod toolchain_build;
+mod toolchain_fetch_bridge;
 mod toolchain_plan;
+mod toolchain_producer;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -336,8 +338,13 @@ enum HostCompilerCommands {
 enum ToolchainCommands {
     /// Inspect explicit producer inputs without building (experimental)
     Plan(toolchain_plan::PlanArgs),
-    /// Build one local experimental legacy-preview candidate
+    /// Build one local native toolchain candidate
     Build(toolchain_build::BuildArgs),
+    /// Run explicit native producer stages without a legacy adapter
+    Producer(toolchain_producer::ProducerArgs),
+    /// Internal verified bridge used only by the native MetaMake lifecycle.
+    #[command(name = "__metamake-fetch", hide = true)]
+    MetaMakeFetch(toolchain_fetch_bridge::MetaMakeFetchArgs),
     /// Install the exact host + target artifact selected by the lock file
     Install {
         /// Target profile whose locked artifact should be installed
@@ -646,7 +653,11 @@ impl Commands {
             Self::Ccache { .. }
             | Self::Install { .. }
             | Self::Toolchain {
-                command: ToolchainCommands::Plan(_) | ToolchainCommands::Build(_),
+                command:
+                    ToolchainCommands::Plan(_)
+                    | ToolchainCommands::Build(_)
+                    | ToolchainCommands::Producer(_)
+                    | ToolchainCommands::MetaMakeFetch(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
@@ -705,7 +716,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 | ToolchainCommands::Build(toolchain_build::BuildArgs { preset, .. }) => {
                     Some(preset.clone())
                 }
-                ToolchainCommands::List => None,
+                ToolchainCommands::List
+                | ToolchainCommands::Producer(_)
+                | ToolchainCommands::MetaMakeFetch(_) => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
             };
             (

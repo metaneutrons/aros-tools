@@ -70,6 +70,27 @@ Node.js, npm, ShellCheck and the Rust audit helpers are needed to
 [contribute to the tools](/aros-tools/contributing/development/), not to run
 an already built suite.
 
+## Local native producer candidates
+
+This section applies only to maintainers building a compiler candidate from
+source. It is not a prerequisite for installing a released cross-toolchain.
+
+In addition to the AROS workflow tools above, install the Rust toolchain named
+by the selected `aros-tools` checkout, Cargo, GNU Make (or a compatible
+`make`), and enough local storage for isolated source snapshots. The current
+`pc-x86_64` proof consumed about 2.6 GB for the work tree, 0.42 GB for the
+verified cache, and 0.17–0.21 GB for the resulting prefix, excluding the three
+input checkouts. These are observed values, not a capacity guarantee; reserve
+more space for retained diagnostics and other profiles.
+
+The unchanged upstream AROS build uses a host Python interpreter and the
+lock-selected Mako modules. The producer creates a private import environment
+from verified cache archives; it does not use `pip`, ambient site packages, or
+an inferred virtual environment. Cargo similarly resolves from a lock-matched
+vendor tree during the offline build. See the
+[native producer workflow](/aros-tools/workflows/toolchain-producer/) for the
+explicit cache preparation sequence.
+
 ## Network and storage
 
 Initial source and compiler downloads need access to their declared origins.

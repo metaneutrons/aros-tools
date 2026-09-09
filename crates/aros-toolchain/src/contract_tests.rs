@@ -294,7 +294,19 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerIdentity,
         DiagnosticCode::ProducerPrerequisite,
         DiagnosticCode::ProducerPreflight,
+        DiagnosticCode::ProducerSources,
+        DiagnosticCode::ProducerSourceUse,
+        DiagnosticCode::ProducerEnvironment,
+        DiagnosticCode::ProducerConfigure,
+        DiagnosticCode::ProducerCompiler,
+        DiagnosticCode::ProducerCollector,
+        DiagnosticCode::ProducerPackage,
+        DiagnosticCode::ProducerVerification,
+        DiagnosticCode::ProducerIndex,
+        DiagnosticCode::ProducerComparison,
+        DiagnosticCode::ProducerCompatibility,
         DiagnosticCode::ProducerState,
+        DiagnosticCode::ProducerRecovery,
     ]
     .iter()
     .map(ToString::to_string)
@@ -311,7 +323,19 @@ fn registered_diagnostics_match_the_versioned_contract() {
         DiagnosticCode::ProducerIdentity,
         DiagnosticCode::ProducerPrerequisite,
         DiagnosticCode::ProducerPreflight,
+        DiagnosticCode::ProducerSources,
+        DiagnosticCode::ProducerSourceUse,
+        DiagnosticCode::ProducerEnvironment,
+        DiagnosticCode::ProducerConfigure,
+        DiagnosticCode::ProducerCompiler,
+        DiagnosticCode::ProducerCollector,
+        DiagnosticCode::ProducerPackage,
+        DiagnosticCode::ProducerVerification,
+        DiagnosticCode::ProducerIndex,
+        DiagnosticCode::ProducerComparison,
+        DiagnosticCode::ProducerCompatibility,
         DiagnosticCode::ProducerState,
+        DiagnosticCode::ProducerRecovery,
     ] {
         assert_eq!(serde_json::to_value(code).unwrap(), code.to_string());
     }

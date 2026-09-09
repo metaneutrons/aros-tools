@@ -178,18 +178,34 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertEqual(result.returncode, 29)
         self.assertNotIn("engine tests passed", result.stdout)
 
-    def test_ci_preserves_required_host_jobs_and_routes_only_the_source_lane(self):
+    def test_ci_uses_a_fail_closed_host_planner_and_routes_only_the_source_lane(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        planner = (ROOT / "scripts/plan_ci_platform_matrix.py").read_text()
         self.assertIn("name: Tests (${{ matrix.name }})", workflow)
+        self.assertIn("name: Plan host matrix", workflow)
+        self.assertIn("needs: platform-plan", workflow)
+        self.assertIn("matrix: ${{ fromJSON(needs.platform-plan.outputs.matrix) }}", workflow)
+        self.assertIn("scripts/plan_ci_platform_matrix.py", workflow)
+        self.assertIn("- cron: '41 3 * * 1'", workflow)
+        self.assertIn("options: [fast, full]", workflow)
         self.assertIn("run: scripts/check-workspace.sh portable-test", workflow)
         for name in ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64"):
-            self.assertIn("- name: " + name, workflow)
+            self.assertIn('"name": "' + name + '"', planner)
+        self.assertIn("documentation-only pull request", planner)
+        self.assertIn("pull request changes executable or unclassified inputs", planner)
         for event, gate in (("==", "source-test"), ("!=", "test")):
             condition = f"if: matrix.source_qualification && github.event_name {event} 'pull_request'"
             block = workflow.split(condition, 1)[1].split("      - name:", 1)[0]
             self.assertIn("run: scripts/check-workspace.sh " + gate + "\n", block)
             self.assertIn("AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source", block)
         self.assertNotIn("continue-on-error", workflow)
+
+    def test_release_qualification_is_explicit_or_tag_addressed(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        trigger = workflow.split("permissions:", 1)[0]
+        self.assertNotIn("pull_request:", trigger)
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertIn("tags:", trigger)
 
 
 if __name__ == "__main__":

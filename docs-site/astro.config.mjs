@@ -40,6 +40,7 @@ export default defineConfig({
           items: [
             { label: 'Manage source checkouts', slug: 'workflows/source' },
             { label: 'Choose and verify a toolchain', slug: 'workflows/toolchains' },
+            { label: 'Build a local toolchain candidate', slug: 'workflows/toolchain-producer' },
             { label: 'Pristine upstream AROS', slug: 'workflows/upstream-aros' },
             { label: 'Build with AROS-NX', slug: 'workflows/aros-nx' },
             { label: 'Cross-development', slug: 'workflows/cross-development' },
@@ -53,6 +54,7 @@ export default defineConfig({
             { label: 'Standalone tools', slug: 'reference/standalone-tools' },
             { label: 'Configuration', slug: 'reference/configuration' },
             { label: 'Platform support', slug: 'reference/platform-support' },
+            { label: 'CI policy', slug: 'reference/ci-policy' },
             { label: 'Diagnostics and logs', slug: 'reference/diagnostics' },
           ],
         },

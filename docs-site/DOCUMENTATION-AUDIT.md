@@ -14,6 +14,18 @@ their distinct 1 MiB/10-second Git bounds are documented; the historical
 29-command and visual audit below is unchanged, not claimed as a fresh
 browser sweep. The updated documentation build checks 1,654 generated links.
 
+## Native-producer addendum — 2026-09-08
+
+The historical command-count measurement below is not reused as proof for the
+native producer. `toolchain build` and the visible `toolchain producer`
+namespace are covered by the command reference and the dedicated local producer
+guide. The hidden `__metamake-fetch` bridge remains deliberately undocumented
+as a public command: it is an internal lifecycle child and accepts only
+controlled environment inputs. The guide distinguishes cache bootstrap from the
+mandatory offline execution stage, records that a local candidate has no release
+provenance, and links stable AX diagnostic handling. The fresh M6 build evidence
+is maintained in `../docs/tcp-m6-native-evidence.md`.
+
 ## Coverage and source boundaries
 
 | Area | Evidence inspected | Result documented |

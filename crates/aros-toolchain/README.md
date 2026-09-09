@@ -1,9 +1,10 @@
 # aros-toolchain
 
-TCP-M1 producer inspection and local legacy-preview execution behind
-`aros toolchain plan` and `aros toolchain build`, accepted as an experimental
-local-preview boundary. It is not a native compiler driver, release publisher
-or released management feature.
+TCP-M1 through TCP-M6 are accepted. The native local lifecycle is exposed by
+`aros toolchain plan`, `aros toolchain build`, and explicit
+`aros toolchain producer` operations when the selected producer publishes a
+matching `producer-executor-v1.toml`. It is not a package/release publisher and
+every successful local build remains a local-only candidate.
 
 Implemented:
 
@@ -11,10 +12,43 @@ Implemented:
   lowercase identities, strict integer fields and safe, sorted patch paths;
 - bounded recipe input and canonical UTF-8 JSON self-digest verification;
 - the shared envelope with AX0101 (contract), AX0102 (identity), AX0201 (Git
-  prerequisites), AX0202 (roots/resources) and AX0801 (work ownership/state),
+  prerequisites), AX0202 (roots/resources), AX0301 (verified source cache),
+  AX0302 (source-use closure), AX0401 (controlled external environment),
+  AX0501/AX0502/AX0503 (configure/compiler/collector) and AX0801 (state),
   without input-document dumps;
 - maintained native conformance/counter-probes against the independent M0
   encoding vectors. No second SHA-256 implementation or source-lock copy.
+
+The accepted TCP-M2 library boundary owns closed
+`aros-toolchain-source-lock-v2` parsing, recipe/lock patch-closure binding,
+no-follow verification of every direct source-cache payload through
+`aros-fetch`, exact source-use ledgers and preparation of a fresh private host
+Python import tree.  The environment accepts only the source-contract's locked
+Mako and MarkupSafe source archives, never invokes `pip`, and proves module
+version and private import origin with the selected host Python 3 interpreter.
+It retains the interpreter plus lock-verified package filename/hash/version/size
+observations for a later receipt rather than treating host site packages as proof.
+The Cargo
+vendor input is copied through no-follow descriptors into a fresh private tree,
+validated against every `.cargo-checksum.json` and the selected tools
+`Cargo.lock` closure, and supplied only by a generated offline Cargo home.
+The private MetaMake adapter accepts one source-lock archive
+from an explicitly identical cache root, records it once in a durable ledger,
+and rejects every other candidate before an upstream fetch script could run.
+The environment builder clears inherited variables, retains only explicitly
+selected host tool directories plus an explicit POSIX utility baseline, and
+applies deterministic locale/time/archive/CMake
+settings, reproduces the source/producer/tools/work compiler prefix maps, and
+retains the source-cache/tools/work Rust remaps for the later collector phase.
+No input helper alters an input cache.
+
+The library also parses and binds the closed `producer-executor-v1.toml`
+selection document to its exact contract, recipe, lock and profile bytes. The
+selected official producer publishes that declaration and the cross-repository
+contract gate rechecks the exact source and tools commits before execution. A
+missing or mismatched declaration still fails with AX0202; no declaration is
+guessed from historical producer state. Declaration binding is not origin
+evidence, so a successful local result remains local-only.
 
 Recipe parsing performs no I/O. Planning inspects three explicit Git
 roots/commit/tree pairs, raw committed profile/lock/patch identities and
@@ -30,15 +64,14 @@ bounded trusted Git queries disable filters, fsmonitor, hooks, lazy
 fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
-Plans currently have `readiness: blocked`, even with complete resource options.
-The [legacy execution-view implementation](../../docs/toolchain-legacy-execution-view.md)
-is now consumed by the explicit local preview adapter. The adapter probes host
-prerequisites, requires a prepared offline cache, seals a sanitized child
-environment, runs the reviewed legacy driver with bounded cancellation and
-returns a measured local-only candidate. It does not attest executor origin,
-publish, resume or claim release readiness. A blocked
-inspection exits 0; invalid input exits 1 without a result. Neither a plan nor
-a valid self-digest grants build permission. The recursive read-only check
+Native plans bind a declared contract and profile and report `ready` only when
+the caller supplied `--offline`, disjoint work/output/cache roots and positive
+resource budgets. A plan never reserves those roots or verifies cache payload bytes; the
+lifecycle repeats all binding after reservation and performs those checks.
+The native lifecycle is the only local build implementation. It does not attest
+executor origin, publish, or claim release readiness. A valid inspection exits
+0; invalid input exits 1 without a result. Neither a plan nor a valid
+self-digest grants release permission. The recursive read-only check
 does not freeze a concurrently mutable tree, create an isolated snapshot,
 re-hash Git's object database independently, or establish trusted origin.
 It compares against the raw material returned by the selected local Git
@@ -89,8 +122,13 @@ Only the creating process may unlock; an inherited non-owner guard closes its
 own descriptor without releasing the parent's still-active lock.
 The lock guard exists before fallible marker construction, so partial setup
 failures receive the same fallback cleanup. There is no implicit resume,
-stale-state adoption, automatic cleanup, phase receipt or candidate publication. The caller-provided
-owner digest binds its chosen operation, not trusted executor origin. Locks and
+stale-state adoption, automatic cleanup or candidate publication. The native
+lifecycle alone may explicitly reacquire roots at its reviewed compiler receipt
+boundary; it must revalidate every retained identity before any child starts.
+This primitive
+itself does not issue phase receipts; the native lifecycle writes its own
+retained receipt chain after completed phases. The caller-provided owner digest
+binds its chosen operation, not trusted executor origin. Locks and
 boundary checks do not sandbox a hostile process with the same user's access.
 
 The shared process runner now provides a one-way `CancellationToken` and bounded
@@ -100,10 +138,10 @@ cleanup. A stdin pipe closed by cancellation/timeout preserves that outcome
 and captured output; normal exit still requires complete input delivery.
 Unix pipe workers wait for OS readiness instead of imposing a fixed sleep on
 each temporary `WouldBlock`; the existing post-cleanup drain bound is unchanged.
-Other pipe/drain/cleanup failures remain errors. The frontend's signal handling,
-complete build deadline, source/executor readiness
-and isolated adapter still need integration before any compiler can launch.
-Guard tests and subprocess fixtures do not qualify a real toolchain build.
+Other pipe/drain/cleanup failures remain errors. The native lifecycle integrates
+the frontend bridge, complete build deadline, source/executor binding and
+isolated snapshots before a compiler can launch. Guard tests and subprocess
+fixtures still do not qualify a real toolchain build.
 
 ## Isolated source material primitive
 
@@ -150,71 +188,37 @@ shared publication traversal are not preemptible; timeout/cancellation observed
 after publication is a failure with the complete tree retained, never success.
 This is neither a same-user sandbox nor independent Git-object/origin verification.
 
-## Isolated legacy Git view primitive
-
-`snapshot::LegacySourceView::prepare(snapshot, timeout, cancellation)` consumes
-one metadata-free guard. It relocates our owned `<role>` to fresh
-`.<role>-legacy-pending`, reconstructs independent shallow Git stores for the
-root and every recorded gitlink, verifies the complete objects against the raw
-inventory, then durably publishes `<role>-legacy` without replacement. It never
-copies original Git metadata, history, remotes, configuration, hooks or alternates.
-The original checkout must still supply the selected local objects during this
-conversion; later view revalidation does not consult it.
-
-Only the selected commit, trees and blobs are transferred through bounded Git
-pack operations; no fetch, checkout, filters or source scripts run. Strict import,
-full fsck, exact object-set comparison and remeasured blob SHA-256 bind the freshly
-imported ODB to the captured snapshot. Git metadata has its own material records,
-not invented Git object IDs. Every metadata file/directory is included in the
-same exact byte/mode/membership guard: there are **no `.git` exemptions** in a
-view. Even optional Git index-cache writes invalidate it; controlled queries
-disable them, and any future adapter must preserve that environment.
-
-Limits are explicit per role: at most 1,024 repositories; 200,000 transferred
-objects / 8 GiB declared bytes in aggregate; 64 MiB per object; 32 MiB per
-generated index and object listing. Batches normally contain at most 8 MiB
-declared bytes plus framing (one larger allowed object can occupy a batch) and
-4,096 objects. The existing material/depth/path limits also apply **including**
-generated metadata. Git children share the operation deadline with at most ten
-seconds each. Rechecking existing pack bytes before each Git operation favors
-integrity over throughput; large/debug builds may exhaust a caller's budget.
-Kernel filesystem I/O/fsync is not preemptible. Failures retain the raw, staged
-or complete tree, never adopt it or issue a successful use guard.
-
-Maintained fault tests cover empty/partial metadata writes on storage exhaustion,
-both relocation boundaries, retained bytes and rejected reuse across all roles.
-Separate source-publisher tests exercise its real uncertain-commit error mapping.
-These are deterministic boundary tests, not actual volume exhaustion or power-loss
-evidence; see [the fault model and limits](../../docs/toolchain-legacy-execution-view.md#storage-and-publication-failure-boundaries).
-
-This API is Unix-only, in-process, non-resumable and separate from planning.
-It establishes source/object consistency, not trusted origin, executor identity,
-cache readiness, an OS sandbox or compiler qualification. All three guards and
-the remaining execution gates must be integrated before enabling the driver.
-
 ## Current CLI scope
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
-The implemented plan requires explicit `--backend legacy-preview`; native
-fails before file reads. `toolchain build --backend legacy-preview` is the
-explicit experimental adapter and requires `--offline`; native execution,
-trusted executor origin and release qualification remain later gates. The
-required real Linux x86-64 and macOS AArch64 preview lanes, including local
-prefix verification through `toolchain verify --local`, are recorded as the
-M1 acceptance evidence. No extra executable is exposed. `aros-fetch` is added
-as a dependency only when native transport is actually implemented, not as an
-unused promise.
+`toolchain build` defaults to the native lifecycle and requires `--offline`, a
+prepared verified source cache, an exact declaration, fresh work/output roots,
+and explicit jobs/deadline. It invokes unchanged AROS `configure`, MetaMake's
+source-owned `crosstools-release` target and a hidden Rust fetch bridge that
+serves only declared cache payloads, then builds the exact vendored
+`aros-collect`. Every phase writes a canonical self-verifying receipt and the
+candidate removes producer-only LLVM configuration inputs before returning a
+measured collector. There is no legacy execution adapter. No extra executable
+is exposed. `--resume-from compiler` is the sole local recovery boundary: it
+remeasures the retained snapshots and
+compiler output, revalidates every predecessor receipt and starts the collector
+in a fresh Cargo target root. It never reuses a failed compiler tree or applies
+to release work. Trusted executor origin, full candidate inventory, real
+host/profile evidence and release qualification remain later gates.
 
 See the [producer contract](../../docs/toolchain-producer-contract.md),
-[delivery plan](../../docs/toolchain-producer-plan.md) and
-[M1 issue](https://github.com/metaneutrons/aros-tools/issues/29).
+[delivery plan](../../docs/toolchain-producer-plan.md),
+[TCP-M6 evidence](../../docs/tcp-m6-native-evidence.md) and
+[M6 issue](https://github.com/metaneutrons/aros-tools/issues/34).
 
 Run the maintained native tests with:
 
 ```sh
 cargo test --locked -p aros-toolchain
 cargo test --locked -p aros-cli --test toolchain_plan_cli
+cargo test --locked -p aros-cli --test toolchain_fetch_bridge_cli
 ```
 
 The normal workspace test gate includes this library on each native CI host.
-No compiler build or full A/B matrix is needed for this non-executing change.
+The synthetic lifecycle test does not replace the two M3 real PC build
+diagnostics or a release qualification matrix.

@@ -1,11 +1,10 @@
-//! Thin CLI frontend for the experimental local producer adapter.
+//! Thin CLI frontend for the controlled local native producer.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use aros_common::CancellationToken;
-use aros_toolchain::executor::BuildRequest;
-use aros_toolchain::plan::Backend;
+use aros_toolchain::executor::{BuildRequest, ResumePhase};
 use clap::{Args, ValueEnum};
 
 use crate::observability;
@@ -19,7 +18,7 @@ pub enum ResultFormat {
     Json,
 }
 
-/// Explicit inputs for one local legacy-preview build.
+/// Explicit inputs for one local native build.
 #[derive(Args)]
 pub struct BuildArgs {
     /// Producer-owned target profile.
@@ -37,18 +36,15 @@ pub struct BuildArgs {
     /// Exact tools/collector checkout root.
     #[arg(long)]
     pub tools_dir: PathBuf,
-    /// Fresh work root; this final path must not already exist.
+    /// Fresh work root; with --resume-from it must be the exact retained root.
     #[arg(long)]
     pub work_dir: PathBuf,
-    /// Fresh output root; this final path must not already exist.
+    /// Fresh output root; with --resume-from it must be the exact retained root.
     #[arg(long)]
     pub output_dir: PathBuf,
     /// Existing prepared source cache; it is never populated by this command.
     #[arg(long)]
     pub cache_dir: PathBuf,
-    /// Experimental backend; native is not implemented yet.
-    #[arg(long, default_value = "native", value_parser = parse_backend)]
-    pub backend: Backend,
     /// Positive producer parallelism.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub jobs: u64,
@@ -61,25 +57,27 @@ pub struct BuildArgs {
     /// Explicit local candidate identifier; this does not publish or tag.
     #[arg(long)]
     pub release_id: String,
+    /// Re-enter one verified native phase boundary. Only `compiler` is currently safe.
+    #[arg(long, value_parser = parse_resume_phase)]
+    pub resume_from: Option<ResumePhase>,
     /// Result representation on stdout.
     #[arg(long, value_enum, default_value = "human")]
     pub format: ResultFormat,
 }
 
-fn parse_backend(value: &str) -> Result<Backend, String> {
+fn parse_resume_phase(value: &str) -> Result<ResumePhase, String> {
     match value {
-        "native" => Ok(Backend::Native),
-        "legacy-preview" => Ok(Backend::LegacyPreview),
-        _ => {
-            Err("expected native or legacy-preview; backends are never selected by fallback".into())
-        }
+        "compiler" => Ok(ResumePhase::Compiler),
+        _ => Err("expected compiler; incomplete compiler trees are never resumable".into()),
     }
 }
 
-/// Run the adapter on a blocking thread and propagate Ctrl-C cooperatively.
+/// Run the native lifecycle on a blocking thread and propagate Ctrl-C cooperatively.
 pub async fn run(args: BuildArgs) -> miette::Result<()> {
+    let fetch_bridge = std::env::current_exe().map_err(|_| {
+        miette::miette!("cannot resolve the running aros executable for the native fetch bridge")
+    })?;
     let request = BuildRequest {
-        backend: args.backend,
         preset: args.preset,
         recipe: args.recipe,
         source_dir: args.source_dir,
@@ -92,6 +90,8 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
         timeout_seconds: args.timeout_seconds,
         offline: args.offline,
         release_id: args.release_id,
+        fetch_bridge: Some(fetch_bridge),
+        resume_from: args.resume_from,
     };
     let cancellation = CancellationToken::default();
     let worker_token = cancellation.clone();

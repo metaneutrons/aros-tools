@@ -62,6 +62,102 @@ impl ContractError {
         )
     }
 
+    pub(crate) fn sources(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerSources,
+            message,
+            "restore the exact selected source lock and its verified offline cache entries; do not infer a checksum, alter a cache object or fall back to the network",
+        )
+    }
+
+    pub(crate) fn source_use(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerSourceUse,
+            message,
+            "use only the exact source closure declared by the selected lock; regenerate and review a new lock when the source build reaches a new input",
+        )
+    }
+
+    pub(crate) fn environment(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerEnvironment,
+            message,
+            "select a supported host interpreter and the exact lock-owned modules; do not install packages or use a host site-packages fallback during the producer run",
+        )
+    }
+
+    pub(crate) fn configure(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerConfigure,
+            message,
+            "inspect the retained configure work and phase log; do not reuse the compilation root or bypass the selected source contract",
+        )
+    }
+
+    pub(crate) fn compiler(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCompiler,
+            message,
+            "inspect the retained compiler work and phase log; do not adopt a partial compiler tree as a successful candidate",
+        )
+    }
+
+    pub(crate) fn collector(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCollector,
+            message,
+            "inspect the retained collector work and phase log; restore the exact tools snapshot and verified vendor closure before retrying in fresh roots",
+        )
+    }
+
+    pub(crate) fn package(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerPackage,
+            message,
+            "inspect the retained package staging and explicitly selected candidate; do not alter the candidate or overwrite an existing package output",
+        )
+    }
+
+    pub(crate) fn verification(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerVerification,
+            message,
+            "treat the package as untrusted, retain it for inspection and rebuild it from the exact candidate instead of changing a manifest or checksum to fit",
+        )
+    }
+
+    pub(crate) fn index(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerIndex,
+            message,
+            "treat the release directory as untrusted; retain it for inspection and regenerate every affected package or support file from the exact closed inputs instead of editing a checksum, manifest, or index to fit",
+        )
+    }
+
+    pub(crate) fn comparison(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerComparison,
+            message,
+            "treat the independent package sets as non-reproducible; retain both for inspection and rebuild from independently prepared closed inputs rather than copying one output over the other",
+        )
+    }
+
+    pub(crate) fn compatibility(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerCompatibility,
+            message,
+            "retain the selected compatibility roots for inspection; rebuild helpers from the exact tools snapshot and materialize a fresh embedded engine instead of borrowing source-tree modules or shared target binaries",
+        )
+    }
+
+    pub(crate) fn recovery(message: impl Into<String>) -> Self {
+        Self::new(
+            DiagnosticCode::ProducerRecovery,
+            message,
+            "do not repackage, retarget a tag, or alter a release handoff; restore complete immutable evidence and use a fresh qualification when the failed stage was not packaging alone",
+        )
+    }
+
     pub(crate) fn prerequisite(message: impl Into<String>) -> Self {
         Self::new(
             DiagnosticCode::ProducerPrerequisite,

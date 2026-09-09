@@ -1,7 +1,6 @@
 {
   "schema": "aros-toolchain-plan-v1",
   "operation": "plan",
-  "backend": "native",
   "identity": {
     "recipe_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
     "source_commit": "1111111111111111111111111111111111111111",

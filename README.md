@@ -104,13 +104,20 @@ staged and never reuses an existing destination.
 | Inputs and external contracts | `aros-fetch`, `aros-ahi-runner` | verified source transport, safe extraction, patches and validated AHI builds |
 | Hardware workflows | `aros-board`, `aros-macos-disk-claim` | board identity, deploy/network boot/removable-media safety, and the narrow macOS disk-claim lifetime |
 | Shared foundations | `aros-common` | diagnostics, opt-in logging, hashes, ELF and toolchain contracts |
-| Producer inspection (experimental) | `aros-toolchain` | read-only `toolchain plan`; build execution remains in development |
+| Local native producer (experimental) | `aros-toolchain` | explicit `toolchain plan`, `toolchain build`, and lifecycle operations; results are local-only candidates |
 | Build engine | `aros-cmake-engine` | embedded CMake integration, materialized in each selected build directory |
 
 `aros-cli` is intentionally an orchestrator, not a monolith: it executes the
 other tools rather than linking their implementations. `aros-verify` is
 intentionally independent from the transpiler, so a shared implementation bug
 cannot validate itself.
+
+The native producer is available for maintainers who need to construct a local
+candidate from exact AROS, producer, and tools checkouts. It is deliberately
+separate from ordinary toolchain installation: a local candidate is not a
+release, has no provenance claim, and never publishes. The complete, offline
+workflow and its prerequisites are documented in the
+[local native-producer guide](https://aros.metaneutrons.cc/aros-tools/workflows/toolchain-producer/).
 
 ## Trust, reproducibility, and failure behavior
 
@@ -168,8 +175,10 @@ qualified AROS-NX checkout. The expensive CMake-engine sweep is reserved for
 explicit `test`/`all` integration checkpoints and the integrated `main` CI lane,
 not every PR iteration. `all` also includes quality and documentation.
 The real GRUB fixture runs only on Darwin/arm64; Linux reports that omission
-rather than claiming full host coverage. All four required PR host jobs remain.
-See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
+rather than claiming full host coverage. PRs always receive the stable Linux
+gate; only a narrow, tested documentation-only path avoids the additional three
+native hosts. Executable, workflow, contract and unclassified changes remain
+four-host. See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
 for when full Linux and macOS evidence is mandatory.
 
 The qualified source is never inferred from a neighbouring directory or a

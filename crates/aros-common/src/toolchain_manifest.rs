@@ -306,7 +306,17 @@ impl ArosToolchainManifest {
         Ok(manifest)
     }
 
-    fn validate(&self) -> std::result::Result<(), String> {
+    /// Validate the fully decoded manifest against the stable v1 contract.
+    ///
+    /// This is public so native producers can validate the exact manifest
+    /// bytes they are about to embed and publish using the same rules as
+    /// consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable explanatory message when any field, identity, or
+    /// inventory entry violates the v1 manifest contract.
+    pub fn validate(&self) -> std::result::Result<(), String> {
         if self.schema != AROS_TOOLCHAIN_MANIFEST_SCHEMA {
             return Err(format!(
                 "unsupported AROS toolchain manifest schema {}; expected {}",
@@ -386,18 +396,16 @@ impl ArosToolchainManifest {
                     )?;
                 }
                 "symlink"
-                    if entry.mode == "0777"
-                        && entry.sha256.is_none()
-                        && entry.size.is_none()
-                        && entry
-                            .target
-                            .as_deref()
-                            .is_some_and(|target| !target.is_empty()) =>
+                    if entry.mode == "0777" && entry.sha256.is_none() && entry.size.is_none() =>
                 {
-                    validate_symlink_target(
-                        &entry.path,
-                        entry.target.as_deref().expect("guarded symlink target"),
-                    )?;
+                    let target = entry
+                        .target
+                        .as_deref()
+                        .filter(|target| !target.is_empty())
+                        .ok_or_else(|| {
+                            "symlink inventory entry must contain a nonempty target".to_string()
+                        })?;
+                    validate_symlink_target(&entry.path, target)?;
                 }
                 _ => {
                     return Err(format!(

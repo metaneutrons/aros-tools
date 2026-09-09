@@ -1,6 +1,6 @@
 //! Shared source snapshot fixtures for unit and integration tests.
 
-use super::{canonical, Backend, PlanRequest, Recipe, RunDirectories};
+use super::{canonical, PlanRequest, Recipe, RunDirectories};
 use aros_common::{sha256_bytes, CancellationToken};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt as _;
@@ -32,7 +32,6 @@ impl Fixture {
         }
         Self {
             request: PlanRequest {
-                backend: Backend::LegacyPreview,
                 preset: "fixture".into(),
                 recipe: root.join("unused-recipe-path"),
                 source_dir: root.join("source"),

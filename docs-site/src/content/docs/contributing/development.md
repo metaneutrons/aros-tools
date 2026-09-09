@@ -70,14 +70,17 @@ Do not substitute a moving branch. Tests use that source as input and create
 their own temporary work where needed. CMake-engine fixtures require clang,
 CMake and Ninja; platform-specific omissions are reported explicitly.
 
-PR CI keeps its four required host jobs: one Linux lane runs the source-coupled
-Rust suite, while the other hosts run portable tests. The full Linux CMake
-sweep runs after integration into `main` or an explicit Workspace CI dispatch,
-not on every PR revision. Engine/source-boundary changes require a full check
-of their final candidate before merge; cross-cutting milestone acceptance and
+Every PR has a stable Linux x86-64 check. A narrow documentation-only set
+(`README.md`, `CONTRIBUTING.md`, `docs/**` and `docs-site/**`) uses that lane's
+portable test; all other changes are fail-closed to the four real native hosts.
+The full Linux CMake sweep runs after integration into `main`. An explicit
+Workspace CI dispatch defaults to four hosts, and a weekly four-host sweep
+catches platform drift. Engine/source-boundary changes require a full check of
+their final candidate before merge; cross-cutting milestone acceptance and
 release candidates require Linux and Darwin/arm64 evidence. The real GRUB
 fixture runs only on Darwin/arm64, so Linux success alone cannot prove it.
-See the authoritative [integration checkpoint policy](https://github.com/metaneutrons/aros-tools/blob/main/CONTRIBUTING.md#test-stages-and-integration-checkpoints).
+See the authoritative [CI policy](/aros-tools/reference/ci-policy/) and
+[integration checkpoint policy](https://github.com/metaneutrons/aros-tools/blob/main/CONTRIBUTING.md#test-stages-and-integration-checkpoints).
 
 Successful partial stages are not full qualification. Do not repeat a GRUB
 build for docs-only changes; run `docs`. Do not replace a failed integration

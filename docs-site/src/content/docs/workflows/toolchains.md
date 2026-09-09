@@ -6,6 +6,11 @@ description: Use the checkout's measured release lock or explicitly opt into a l
 Run these commands from the AROS checkout you intend to build.
 A tools release and a cross-toolchain release are independent products.
 
+Maintainers who need to build a local compiler candidate from exact source
+checkouts use the separate [native producer workflow](/aros-tools/workflows/toolchain-producer/).
+That is not a substitute for installing a released compiler and never gives a
+local prefix release provenance.
+
 ## Inspect the selected inputs
 
 ```sh

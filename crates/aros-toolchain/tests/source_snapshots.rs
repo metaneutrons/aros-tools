@@ -1,10 +1,10 @@
 //! Real Git/filesystem proofs for material isolation, not compiler qualification.
 #![cfg(unix)]
 
-use aros_common::{CancellationToken, DiagnosticCode};
+use aros_common::DiagnosticCode;
 use aros_toolchain::{
     canonical,
-    plan::{Backend, PlanRequest},
+    plan::PlanRequest,
     snapshot::{SourceRole, SourceSnapshot},
     workspace::RunDirectories,
     Recipe,
@@ -14,8 +14,6 @@ use std::{fs, path::Path, process::Command, time::Duration};
 
 #[path = "../src/snapshot/fixture_tests.rs"]
 mod fixture;
-#[path = "source_snapshots/legacy_views.rs"]
-mod legacy_views;
 use fixture::{git, Fixture, TIMEOUT};
 
 #[test]

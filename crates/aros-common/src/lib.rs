@@ -33,6 +33,7 @@ pub mod publication;
 pub mod target;
 pub mod text;
 pub mod toolchain;
+pub mod toolchain_inventory;
 pub mod toolchain_manifest;
 
 pub use arch::Architecture;
@@ -58,8 +59,9 @@ pub use process::{
 pub use publication::{
     canonical_source_file, casefold_path_key, exchange_prepared_tree,
     exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_regular_file,
-    measure_tree_content_cas, publication_failure_class, publication_journal_path,
-    publish_atomic_file, publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
+    measure_tree_content_cas, open_regular_file_nofollow, payload_casefold_path_key,
+    publication_failure_class, publication_journal_path, publish_atomic_file,
+    publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
     publish_prepared_tree_noclobber, AtomicFilePolicy, DurableFileSet, FileIdentity,
     PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
     RecoveryOutcome, TreeContentCas,
@@ -67,7 +69,12 @@ pub use publication::{
 pub use target::{TargetProfile, TranspilerProfile};
 pub use text::read_source;
 pub use toolchain::Toolchain;
+pub use toolchain_inventory::{
+    normalized_toolchain_file_mode, toolchain_inventory_sha256, toolchain_tree_inventory,
+    toolchain_tree_inventory_excluding, ToolchainInventoryError,
+};
 pub use toolchain_manifest::{
     parse_credential_free_https_url, ArosToolchainArtifact, ArosToolchainLock,
-    ArosToolchainManifest, ArosToolchainManifestEntry,
+    ArosToolchainManifest, ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE,
+    AROS_TOOLCHAIN_MANIFEST_SCHEMA,
 };

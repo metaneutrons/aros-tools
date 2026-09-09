@@ -59,7 +59,7 @@ public = [
 
 # Standard host variables consumed as documented fallback/discovery inputs;
 # they are not AROS-specific API names.
-ambient = ["CARGO", "HOME", "PATH", "XDG_CONFIG_HOME"]
+ambient = ["CARGO", "HOME", "PATH", "RUSTUP_HOME", "XDG_CONFIG_HOME"]
 
 # Debug-build failpoints and qualification inputs. These are not supported
 # end-user configuration and must never silently migrate into `public`.

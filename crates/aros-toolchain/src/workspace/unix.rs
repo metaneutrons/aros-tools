@@ -44,6 +44,84 @@ impl Parent {
         Ok(result)
     }
 
+    /// Reopen an existing root only after proving its original private marker
+    /// matches the exact expected owner and role.
+    pub(super) fn resume(
+        root: &Path,
+        owner: &Sha256Digest,
+        role: &str,
+    ) -> Result<OwnedDirectory, ContractError> {
+        let path = root
+            .parent()
+            .ok_or_else(|| ContractError::state("work root has no parent"))?;
+        let leaf = root
+            .file_name()
+            .ok_or_else(|| ContractError::state("work root has no leaf"))?;
+        let file = open_directory(path)
+            .map_err(|error| state_io("open existing resume parent", path, &error))?;
+        let parent = Self {
+            path: path.to_owned(),
+            leaf: leaf.to_owned(),
+            identity: identity(&file)
+                .map_err(|error| state_io("inspect resume parent", path, &error))?,
+            file,
+        };
+        parent.revalidate()?;
+        let root_path = parent.path.join(&parent.leaf);
+        let file = File::from(
+            fs::openat(&parent.file, &parent.leaf, DIRECTORY, Mode::empty()).map_err(|error| {
+                state_io("open retained resume root", &root_path, &error.into())
+            })?,
+        );
+        let lock = DirectoryLock::acquire(file)
+            .map_err(|error| state_io("lock retained resume root", &root_path, &error))?;
+        let root_identity = identity(lock.file())
+            .map_err(|error| state_io("inspect retained resume root", &root_path, &error))?;
+        let record = format!("{{\"schema\":\"aros-toolchain-owner-v1\",\"role\":\"{role}\",\"owner_sha256\":\"{owner}\"}}\n").into_bytes();
+        let marker = File::from(
+            fs::openat(
+                lock.file(),
+                MARKER,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                state_io("open retained ownership marker", &root_path, &error.into())
+            })?,
+        );
+        let marker_metadata = marker
+            .metadata()
+            .map_err(|error| state_io("inspect retained ownership marker", &root_path, &error))?;
+        if !marker_metadata.is_file()
+            || marker_metadata.nlink() != 1
+            || marker_metadata.mode() & 0o077 != 0
+        {
+            return Err(ContractError::state(
+                "retained ownership marker is not a private unlinked regular file",
+            ));
+        }
+        let marker_identity = (marker_metadata.dev(), marker_metadata.ino());
+        let mut actual = Vec::new();
+        marker
+            .take(record.len() as u64 + 1)
+            .read_to_end(&mut actual)
+            .map_err(|error| state_io("read retained ownership marker", &root_path, &error))?;
+        if actual != record {
+            return Err(ContractError::state(
+                "retained ownership marker does not authorize this explicit resume",
+            ));
+        }
+        let reservation = OwnedDirectory {
+            parent,
+            lock,
+            identity: root_identity,
+            marker_identity,
+            record,
+        };
+        reservation.revalidate()?;
+        Ok(reservation)
+    }
+
     fn require_absent(&self) -> Result<(), ContractError> {
         match fs::statat(&self.file, &self.leaf, AtFlags::SYMLINK_NOFOLLOW) {
             Err(rustix::io::Errno::NOENT) => Ok(()),
