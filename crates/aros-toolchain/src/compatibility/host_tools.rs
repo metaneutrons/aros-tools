@@ -22,6 +22,28 @@ use crate::ContractError;
 
 const MAX_HOST_TOOLS: usize = 64;
 
+/// Exact command roles admitted to the sealed native-compatibility closure.
+///
+/// The CMake consumer compiles source-owned host utilities, applies declared
+/// source patches, and configures an unmodified upstream tree.  The latter
+/// invokes the standard Autoconf and Make utility set by basename.  Keep this
+/// list explicit and platform-neutral: the caller measures one absolute
+/// executable for every role before a child process starts; the closure never
+/// inherits a directory from the runner's ambient `PATH`.
+///
+/// `make` deliberately names the role rather than the selected executable, so
+/// macOS may expose Homebrew `gmake` as `make` without changing the child
+/// contract.  Likewise, `cc` remains the source-owned host-compiler spelling
+/// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
+/// binutils dependencies.
+pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
+    "ar", "as", "awk", "basename", "bison", "c++", "cat", "cc", "chmod", "cmp", "cp", "cut",
+    "date", "diff", "dirname", "echo", "egrep", "expr", "false", "fgrep", "file", "find", "flex",
+    "grep", "head", "id", "install", "ld", "ln", "ls", "m4", "make", "mkdir", "mv", "patch",
+    "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed", "sh", "sleep", "sort", "tail",
+    "test", "touch", "tr", "true", "uname", "wc", "xargs",
+];
+
 /// One explicitly selected upstream host-command role and executable.
 #[derive(Debug, Clone)]
 pub struct CompatibilityHostTool {

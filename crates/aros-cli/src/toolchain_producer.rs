@@ -15,6 +15,7 @@ use aros_common::{open_regular_file_nofollow, sha256_bytes, CancellationToken, S
 use aros_toolchain::compatibility::{
     self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
     NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
+    REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
 use aros_toolchain::compatibility_source::{
     materialize_engine_free_source, EngineFreeSourceRequest,
@@ -77,6 +78,8 @@ enum ProducerCommand {
     PrepareRecovery(PrepareRecoveryArgs),
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
+    /// Print the exact measured command roles required by native compatibility
+    CompatibilityHostTools,
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<CompatibilityArgs>),
 }
@@ -559,7 +562,17 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
+        ProducerCommand::CompatibilityHostTools => {
+            compatibility_host_tools();
+            Ok(())
+        }
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
+    }
+}
+
+fn compatibility_host_tools() {
+    for role in REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS {
+        aros_common::outputln!("{role}");
     }
 }
 
@@ -1909,6 +1922,9 @@ mod tests {
             "pre-attestation",
         ]);
         assert!(index.is_ok());
+        let host_tools =
+            Cli::try_parse_from(["aros", "toolchain", "producer", "compatibility-host-tools"]);
+        assert!(host_tools.is_ok());
     }
 
     #[test]

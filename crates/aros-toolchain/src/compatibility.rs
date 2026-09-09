@@ -42,7 +42,7 @@ pub use execution::{
 };
 pub use host_tools::{
     prepare_host_tool_closure, CompatibilityHostTool, HostToolClosure, HostToolClosureRequest,
-    HostToolIdentity,
+    HostToolIdentity, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
 pub use standalone::{
     verify_standalone_outputs, StandaloneArtifactIdentity, StandaloneOutputReport,
