@@ -508,7 +508,8 @@ struct CompatibilityArgs {
     /// Absent private host Python environment directory
     #[arg(long)]
     python_environment_dir: PathBuf,
-    /// Absent private host-command closure directory
+    /// Absent private host-command closure directory for CMake host tools and
+    /// upstream configure/Make
     #[arg(long)]
     host_tools_dir: PathBuf,
     /// Exact host command closure entry as NAME=ABSOLUTE_PATH; repeatable
