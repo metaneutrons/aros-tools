@@ -38,8 +38,9 @@ const MAX_HOST_TOOLS: usize = 64;
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
 /// those Autotools programs during configuration. It also requires the host
-/// `strip`, `uniq`, and Netpbm conversion programs. macOS has two additional
-/// SDK-discovery commands; see [`native_compatibility_host_tools`].
+/// `strip`, `uniq`, the `libpng-config` discovery program, and Netpbm
+/// conversion programs. macOS has two additional SDK-discovery commands; see
+/// [`native_compatibility_host_tools`].
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "aclocal",
     "ar",
@@ -72,6 +73,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "id",
     "install",
     "ld",
+    "libpng-config",
     "ln",
     "ls",
     "m4",
@@ -512,7 +514,7 @@ mod tests {
 
     #[test]
     fn required_roles_include_unconditional_upstream_configure_tools() {
-        for role in ["strip", "uniq", "pngtopnm", "ppmtoilbm"] {
+        for role in ["strip", "uniq", "libpng-config", "pngtopnm", "ppmtoilbm"] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }
     }
