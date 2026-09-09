@@ -215,7 +215,7 @@ The native producer compatibility harness never inherits the runner's `PATH`.
 Its exact, measured command roles are available to CI and local diagnostics:
 
 ```console
-aros toolchain producer compatibility-host-tools
+aros toolchain producer compatibility-host-tools --host linux-x86_64
 ```
 
 Supply each listed role once with `compatibility --host-tool NAME=/absolute/path`.

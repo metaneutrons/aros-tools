@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use aros_common::{open_regular_file_nofollow, sha256_bytes, CancellationToken, Sha256Digest};
 use aros_toolchain::compatibility::{
-    self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
-    NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
-    REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+    self, native_compatibility_host_tools, CompatibilityHostTool, CompatibilityPreparationRequest,
+    HostToolClosureRequest, NativeCompatibilityRequest, StandaloneFixtures,
+    TwoRootRelocationRequest,
 };
 use aros_toolchain::compatibility_source::{
     materialize_engine_free_source, EngineFreeSourceRequest,
@@ -79,7 +79,7 @@ enum ProducerCommand {
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
     /// Print the exact measured command roles required by native compatibility
-    CompatibilityHostTools,
+    CompatibilityHostTools(CompatibilityHostToolsArgs),
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<CompatibilityArgs>),
 }
@@ -91,6 +91,14 @@ enum ResultFormat {
     Human,
     /// Structured JSON for a workflow handoff.
     Json,
+}
+
+/// Inputs for listing the sealed host-command contract of one v1 build host.
+#[derive(Args)]
+struct CompatibilityHostToolsArgs {
+    /// Closed v1 build-host selector whose native configure closure is listed
+    #[arg(long)]
+    host: String,
 }
 
 /// Inputs for native closed recipe construction.
@@ -562,18 +570,19 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
-        ProducerCommand::CompatibilityHostTools => {
-            compatibility_host_tools();
+        ProducerCommand::CompatibilityHostTools(args) => {
+            compatibility_host_tools(&args.host)?;
             Ok(())
         }
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
 }
 
-fn compatibility_host_tools() {
-    for role in REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS {
+fn compatibility_host_tools(host: &str) -> miette::Result<()> {
+    for role in native_compatibility_host_tools(host).map_err(|error| native_error(&error))? {
         aros_common::outputln!("{role}");
     }
+    Ok(())
 }
 
 fn profile(args: &ProfileArgs) -> miette::Result<()> {
@@ -1447,6 +1456,10 @@ fn execute_compatibility(
     host_tool_entries: Vec<CompatibilityHostTool>,
     cancellation: &CancellationToken,
 ) -> Result<compatibility::NativeCompatibilityReport, aros_toolchain::ContractError> {
+    let required_host_tools = native_compatibility_host_tools(&context.host)?
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     let verification = package_verify::PackageVerificationRequest {
         package_dir: args.package_dir,
         release_id: context.release_id,
@@ -1489,6 +1502,7 @@ fn execute_compatibility(
             upstream_build_root: args.upstream_build_dir,
             host_python: python,
             host_tools,
+            required_host_tools,
             make_jobs: args.jobs,
             standalone_fixtures: StandaloneFixtures {
                 c: args.c_fixture,
@@ -1922,8 +1936,14 @@ mod tests {
             "pre-attestation",
         ]);
         assert!(index.is_ok());
-        let host_tools =
-            Cli::try_parse_from(["aros", "toolchain", "producer", "compatibility-host-tools"]);
+        let host_tools = Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "compatibility-host-tools",
+            "--host",
+            "linux-x86_64",
+        ]);
         assert!(host_tools.is_ok());
     }
 

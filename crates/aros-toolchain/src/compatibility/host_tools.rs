@@ -38,9 +38,8 @@ const MAX_HOST_TOOLS: usize = 64;
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
 /// those Autotools programs during configuration. It also requires the host
-/// `strip`, `uniq`, and Netpbm conversion programs. On macOS it invokes
-/// `xcode-select` and `xcrun` to discover the SDK, so those calls must remain
-/// equally explicit.
+/// `strip`, `uniq`, and Netpbm conversion programs. macOS has two additional
+/// SDK-discovery commands; see [`native_compatibility_host_tools`].
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "aclocal",
     "ar",
@@ -102,9 +101,30 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "uniq",
     "wc",
     "xargs",
-    "xcode-select",
-    "xcrun",
 ];
+
+const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &["xcode-select", "xcrun"];
+
+/// Return the exact closed native-compatibility command roles for one v1 host.
+///
+/// The AROS upstream `configure` invokes `xcode-select` and `xcrun` only on
+/// Darwin. Requiring either program on Linux would make the measured closure
+/// reject an otherwise valid Linux runner before compatibility begins. The
+/// host selector is deliberately validated against the released v1 matrix so
+/// an unknown platform cannot silently receive the wrong closure.
+pub fn native_compatibility_host_tools(host: &str) -> Result<Vec<&'static str>, ContractError> {
+    if !crate::release_index::V1_HOSTS.contains(&host) {
+        return Err(ContractError::compatibility(format!(
+            "native compatibility host-tool closure does not support host '{host}'"
+        )));
+    }
+
+    let mut roles = REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.to_vec();
+    if host.starts_with("macos-") {
+        roles.extend_from_slice(MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS);
+    }
+    Ok(roles)
+}
 
 /// One explicitly selected upstream host-command role and executable.
 #[derive(Debug, Clone)]
@@ -374,8 +394,8 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt as _};
 
     use super::{
-        prepare_host_tool_closure, CompatibilityHostTool, HostToolClosureRequest,
-        REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+        native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
+        HostToolClosureRequest, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
     };
 
     fn executable(root: &std::path::Path, name: &str, contents: &[u8]) -> std::path::PathBuf {
@@ -493,7 +513,17 @@ mod tests {
 
     #[test]
     fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
-        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"xcode-select"));
-        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"xcrun"));
+        let macos = native_compatibility_host_tools("macos-aarch64").unwrap();
+        assert!(macos.contains(&"xcode-select"));
+        assert!(macos.contains(&"xcrun"));
+
+        let linux = native_compatibility_host_tools("linux-x86_64").unwrap();
+        assert!(!linux.contains(&"xcode-select"));
+        assert!(!linux.contains(&"xcrun"));
+    }
+
+    #[test]
+    fn required_roles_reject_unknown_host_selectors() {
+        assert!(native_compatibility_host_tools("freebsd-x86_64").is_err());
     }
 }
