@@ -37,13 +37,73 @@ const MAX_HOST_TOOLS: usize = 64;
 /// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
-/// those Autotools programs during configuration.
+/// those Autotools programs during configuration. It also requires the host
+/// `strip`, `uniq`, and Netpbm conversion programs. On macOS it invokes
+/// `xcode-select` and `xcrun` to discover the SDK, so those calls must remain
+/// equally explicit.
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
-    "aclocal", "ar", "as", "automake", "awk", "basename", "bison", "c++", "cat", "cc", "chmod",
-    "cmp", "cp", "cut", "date", "diff", "dirname", "echo", "egrep", "expr", "false", "fgrep",
-    "file", "find", "flex", "gawk", "grep", "head", "id", "install", "ld", "ln", "ls", "m4",
-    "make", "mkdir", "mv", "patch", "perl", "printf", "pwd", "python3", "ranlib", "rm", "sed",
-    "sh", "sleep", "sort", "tail", "test", "touch", "tr", "true", "uname", "wc", "xargs",
+    "aclocal",
+    "ar",
+    "as",
+    "automake",
+    "awk",
+    "basename",
+    "bison",
+    "c++",
+    "cat",
+    "cc",
+    "chmod",
+    "cmp",
+    "cp",
+    "cut",
+    "date",
+    "diff",
+    "dirname",
+    "echo",
+    "egrep",
+    "expr",
+    "false",
+    "fgrep",
+    "file",
+    "find",
+    "flex",
+    "gawk",
+    "grep",
+    "head",
+    "id",
+    "install",
+    "ld",
+    "ln",
+    "ls",
+    "m4",
+    "make",
+    "mkdir",
+    "mv",
+    "patch",
+    "perl",
+    "pngtopnm",
+    "ppmtoilbm",
+    "printf",
+    "pwd",
+    "python3",
+    "ranlib",
+    "rm",
+    "sed",
+    "sh",
+    "sleep",
+    "sort",
+    "strip",
+    "tail",
+    "test",
+    "touch",
+    "tr",
+    "true",
+    "uname",
+    "uniq",
+    "wc",
+    "xargs",
+    "xcode-select",
+    "xcrun",
 ];
 
 /// One explicitly selected upstream host-command role and executable.
@@ -422,5 +482,18 @@ mod tests {
     fn required_roles_include_autotools_required_by_upstream_configure() {
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"aclocal"));
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"automake"));
+    }
+
+    #[test]
+    fn required_roles_include_unconditional_upstream_configure_tools() {
+        for role in ["strip", "uniq", "pngtopnm", "ppmtoilbm"] {
+            assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
+        }
+    }
+
+    #[test]
+    fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"xcode-select"));
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"xcrun"));
     }
 }
