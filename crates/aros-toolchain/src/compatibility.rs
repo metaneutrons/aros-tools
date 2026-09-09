@@ -34,7 +34,6 @@ mod environment;
 mod execution;
 mod host_tools;
 mod standalone;
-
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use execution::{
     execute_native_compatibility, NativeCompatibilityReport, NativeCompatibilityRequest,

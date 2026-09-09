@@ -79,7 +79,10 @@ enum ProducerCommand {
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
     /// Print the exact measured command roles required by native compatibility
-    CompatibilityHostTools(CompatibilityHostToolsArgs),
+    CompatibilityHostTools {
+        #[arg(long)]
+        host: String,
+    },
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<CompatibilityArgs>),
 }
@@ -91,14 +94,6 @@ enum ResultFormat {
     Human,
     /// Structured JSON for a workflow handoff.
     Json,
-}
-
-/// Inputs for listing the sealed host-command contract of one v1 build host.
-#[derive(Args)]
-struct CompatibilityHostToolsArgs {
-    /// Closed v1 build-host selector whose native configure closure is listed
-    #[arg(long)]
-    host: String,
 }
 
 /// Inputs for native closed recipe construction.
@@ -570,10 +565,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
-        ProducerCommand::CompatibilityHostTools(args) => {
-            compatibility_host_tools(&args.host)?;
-            Ok(())
-        }
+        ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
 }
@@ -584,7 +576,6 @@ fn compatibility_host_tools(host: &str) -> miette::Result<()> {
     }
     Ok(())
 }
-
 fn profile(args: &ProfileArgs) -> miette::Result<()> {
     let recipe = Recipe::parse(&read_regular_input(&args.recipe, "recipe")?)
         .map_err(|error| native_error(&error))?;
@@ -1932,15 +1923,15 @@ mod tests {
             "pre-attestation",
         ]);
         assert!(index.is_ok());
-        let host_tools = Cli::try_parse_from([
+        assert!(Cli::try_parse_from([
             "aros",
             "toolchain",
             "producer",
             "compatibility-host-tools",
             "--host",
             "linux-x86_64",
-        ]);
-        assert!(host_tools.is_ok());
+        ])
+        .is_ok());
     }
 
     #[test]
