@@ -70,7 +70,8 @@ pub struct NativeCompatibilityRequest {
     pub upstream_build_root: PathBuf,
     /// Exact closed Python runtime for upstream configure and Make.
     pub host_python: PythonEnvironment,
-    /// Fresh measured host command closure for upstream configure and Make.
+    /// Fresh measured host command closure for CMake host tools and upstream
+    /// configure and Make.
     pub host_tools: HostToolClosure,
     /// Explicit bounded parallelism for the two upstream Make invocations.
     pub make_jobs: usize,
@@ -141,9 +142,10 @@ struct CompatibilityReceiptArtifact {
 /// Execute the closed native compatibility harness.
 ///
 /// CMake always uses the materialized engine rather than a source-tree CMake
-/// directory. Configure, includes and linklibs use the second relocation root
-/// and receive only a sealed host-command closure plus the verified private
-/// Python environment. Standalone consumers use absolute prefix compilers and
+/// directory and resolves its source-owned host tools through the sealed
+/// measured closure. Configure, includes and linklibs use the second
+/// relocation root and the same closure plus the verified private Python
+/// environment. Standalone consumers use absolute prefix compilers and
 /// `PATH=/nonexistent`; their outputs are parsed for AROS ELF and collector
 /// evidence after the six process reports succeed.
 ///
@@ -170,7 +172,7 @@ pub fn execute_native_compatibility(
     // impossible LLVM helper names. This is an explicit, recorded upstream
     // compatibility input rather than a runner-specific inherited default.
     upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
-    validate_upstream_environment(&upstream_environment, &request.host_tools)?;
+    validate_host_environment(&upstream_environment, &request.host_tools)?;
     let sealed_environment = CompatibilityEnvironment::SealedHostTools {
         variables: upstream_environment,
         host_tools: request.host_tools.clone(),
@@ -188,7 +190,10 @@ pub fn execute_native_compatibility(
             CompatibilityProbeRequest {
                 phase: CompatibilityPhase::CmakeConsumer,
                 commands: vec![cmake_command],
-                environment: poisoned_environment.clone(),
+                // The AROS CMake engine builds host tools. Its selected host
+                // compiler is an explicit measured closure entry, so this
+                // phase must not inherit an ambient runner PATH.
+                environment: sealed_environment.clone(),
                 current_dir: outputs.cmake_build.clone(),
                 reports_root: outputs.reports.clone(),
                 timeout: request.timeout,
@@ -615,7 +620,7 @@ fn create_output_roots(
     })
 }
 
-fn validate_upstream_environment(
+fn validate_host_environment(
     environment: &BTreeMap<String, String>,
     host_tools: &HostToolClosure,
 ) -> Result<(), ContractError> {
@@ -658,9 +663,12 @@ fn validate_upstream_environment(
             "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
         ));
     };
-    if python != host_python.program || !host_tools.tools.contains_key("make") {
+    if python != host_python.program
+        || !host_tools.tools.contains_key("cc")
+        || !host_tools.tools.contains_key("make")
+    {
         return Err(ContractError::compatibility(
-            "upstream compatibility host-tool closure does not bind Python and Make exactly",
+            "native compatibility host-tool closure does not bind C compiler, Python, and Make exactly",
         ));
     }
     Ok(())
@@ -712,6 +720,13 @@ fn cmake_command(
             .join("toolchains/AROS.cmake"),
         "materialized CMake toolchain file",
     )?;
+    // This is a revalidated entry in the measured closure. Passing it
+    // explicitly prevents the CMake engine's `cc` default from resolving an
+    // ambient or cross compiler.
+    let host_cc = utf8_path(
+        &request.host_tools.root.join("cc"),
+        "measured compatibility host C compiler",
+    )?;
     Ok(CompatibilityCommand {
         program: inputs.cmake.clone(),
         arguments: vec![
@@ -729,6 +744,7 @@ fn cmake_command(
             format!("-DAROS_TARGET_PLATFORM={}", request.profile.platform()),
             format!("-DGCC_CONFIG_FLOAT_ABI={}", request.profile.float_abi()),
             format!("-DAROS_RUST_TOOLS_DIR={helpers}"),
+            format!("-DAROS_HOST_CC={host_cc}"),
             "-DAROS_ENABLE_MMU=ON".into(),
             "-DCMAKE_BUILD_TYPE=Release".into(),
         ],
@@ -998,10 +1014,13 @@ mod tests {
             .reports
             .values()
             .all(|probe| !probe.commands.is_empty()));
-        assert!(
+        assert_eq!(
             report.probes.reports[&crate::compatibility::CompatibilityPhase::CmakeConsumer]
                 .host_tools
-                .is_empty()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["cc", "make", "python3"]
         );
         assert_eq!(
             report.probes.reports[&crate::compatibility::CompatibilityPhase::UpstreamConfigure]
@@ -1009,7 +1028,7 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["make", "python3"]
+            ["cc", "make", "python3"]
         );
         assert_eq!(report.standalone.targets.len(), 2);
         assert!(report
@@ -1037,6 +1056,10 @@ mod tests {
         assert!(cmake_arguments.contains("-S"));
         assert!(cmake_arguments.contains("aros-cmake-engine"));
         assert!(cmake_arguments.contains("AROS_SOURCE_DIR="));
+        assert!(cmake_arguments.contains(&format!(
+            "-DAROS_HOST_CC={}",
+            request.host_tools.root.join("cc").display()
+        )));
         let make_arguments = fs::read_to_string(make_log).unwrap();
         assert!(make_arguments.contains("includes"));
         assert!(make_arguments.contains("linklibs"));
@@ -1053,6 +1076,36 @@ mod tests {
             error.diagnostics().diagnostics[0].code,
             aros_common::DiagnosticCode::ProducerCompatibility
         );
+    }
+
+    #[test]
+    fn rejects_a_missing_measured_host_c_compiler_before_cmake_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut request, cmake_log, _) = request(temporary.path());
+        let make = request.host_tools.tools["make"].program.clone();
+        let python3 = request.host_tools.tools["python3"].program.clone();
+        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("host-tools-without-cc"),
+            tools: vec![
+                CompatibilityHostTool {
+                    name: "make".into(),
+                    program: make,
+                },
+                CompatibilityHostTool {
+                    name: "python3".into(),
+                    program: python3,
+                },
+            ],
+        })
+        .unwrap();
+
+        let error =
+            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code,
+            aros_common::DiagnosticCode::ProducerCompatibility
+        );
+        assert!(!cmake_log.exists());
     }
 
     #[test]
@@ -1165,10 +1218,16 @@ mod tests {
             &make,
             &format!("printf '%s\\n' \"$@\" >> '{}'", make_log.display()),
         );
+        let cc = root.join("cc");
+        script(&cc, "exit 0");
         let python = python_environment(root);
         let closure = prepare_host_tool_closure(&HostToolClosureRequest {
             output_root: root.join("host-tools"),
             tools: vec![
+                CompatibilityHostTool {
+                    name: "cc".into(),
+                    program: cc,
+                },
                 CompatibilityHostTool {
                     name: "make".into(),
                     program: make,

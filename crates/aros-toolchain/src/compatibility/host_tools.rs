@@ -1,10 +1,12 @@
-//! Measured host-command closures for upstream compatibility phases.
+//! Measured host-command closures for native compatibility phases that need
+//! host command resolution.
 //!
-//! Upstream `configure` and its generated Makefiles necessarily resolve a
-//! bounded POSIX tool set by name. This module never inherits that search path
-//! into a build: it creates an owned directory containing only measured
-//! symlinks to caller-selected absolute executables. Standalone C/C++ probes
-//! deliberately do not use this closure and retain their poisoned `PATH`.
+//! The AROS CMake engine and upstream `configure`/generated Makefiles
+//! necessarily resolve a bounded POSIX tool set by name. This module never
+//! inherits that search path into a build: it creates an owned directory
+//! containing only measured symlinks to caller-selected absolute executables.
+//! Standalone C/C++ probes deliberately do not use this closure and retain
+//! their poisoned `PATH`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -49,7 +51,8 @@ pub struct HostToolIdentity {
     pub size: u64,
 }
 
-/// Owned, revalidatable host-command closure for configure and Make phases.
+/// Owned, revalidatable host-command closure for CMake, configure, and Make
+/// phases.
 #[derive(Debug, Clone)]
 pub struct HostToolClosure {
     /// Canonical owned directory to use as the complete child `PATH`.

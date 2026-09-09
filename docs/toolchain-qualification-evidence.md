@@ -113,10 +113,13 @@ positive deadline. This admits the two explicit PC x86-64/i386 collector
 invocations in one language phase without a shell wrapper or an unreported
 subprocess. The runner always clears the inherited environment and never
 evaluates a shell command. Standalone C/C++ phases require
-`PATH=/nonexistent` and use only absolute tool paths. Upstream configure/Make
-phases may instead use a fresh private host-tool closure: its `PATH` contains
-only measured, revalidated symlinks selected for that phase, never a caller
-directory or an appended ambient path.
+`PATH=/nonexistent` and use only absolute tool paths. The CMake consumer and
+upstream configure/Make phases instead use one fresh private host-tool
+closure: its `PATH` contains only measured, revalidated symlinks selected for
+those phases, never a caller directory or an appended ambient path. The CMake
+command also receives the closure's explicit `cc` entry as `AROS_HOST_CC`, so
+source-owned host tools cannot resolve a cross compiler or ambient runner
+compiler by name.
 
 Before every command starts and after every successful command, it revalidates
 the engine-free source tree, materialized embedded engine, all five helper
