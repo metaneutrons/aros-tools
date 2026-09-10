@@ -20,7 +20,7 @@ use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 64;
+const MAX_HOST_TOOLS: usize = 65;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -37,8 +37,10 @@ const MAX_HOST_TOOLS: usize = 64;
 /// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
-/// those Autotools programs during configuration. It also requires the host
-/// `strip`, `uniq`, the `libpng-config` discovery program, and Netpbm
+/// those Autotools programs during configuration. Its generated MetaMake
+/// source later runs `autoconf`, so that program is part of the same closure.
+/// It also requires the host `strip`, `uniq`, the `libpng-config` discovery
+/// program, and Netpbm
 /// conversion programs. Its generated MetaMake rules invoke `env` to bind
 /// their explicit configuration variables before they build `archtool`.
 /// macOS has two additional SDK-discovery commands; see
@@ -47,6 +49,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "aclocal",
     "ar",
     "as",
+    "autoconf",
     "automake",
     "awk",
     "basename",
@@ -406,7 +409,7 @@ mod tests {
 
     use super::{
         native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
-        HostToolClosureRequest, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+        HostToolClosureRequest, MAX_HOST_TOOLS, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
     };
 
     fn executable(root: &std::path::Path, name: &str, contents: &[u8]) -> std::path::PathBuf {
@@ -510,9 +513,17 @@ mod tests {
     }
 
     #[test]
-    fn required_roles_include_autotools_required_by_upstream_configure() {
+    fn required_roles_include_autotools_required_by_upstream_configure_and_metamake() {
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"aclocal"));
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"autoconf"));
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"automake"));
+    }
+
+    #[test]
+    fn every_supported_host_role_set_fits_the_closed_closure_capacity() {
+        for host in crate::release_index::V1_HOSTS {
+            assert!(native_compatibility_host_tools(host).unwrap().len() <= MAX_HOST_TOOLS);
+        }
     }
 
     #[test]
