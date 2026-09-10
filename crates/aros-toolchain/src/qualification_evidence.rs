@@ -13,7 +13,7 @@ use aros_common::{parse_credential_free_https_url, sha256_bytes, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 use crate::recipe::GitObjectId;
-use crate::release_index::{NativeReleaseIndex, V1_HOSTS, V1_PROFILES};
+use crate::release_index::{NativeReleaseIndex, ACTIVE_V1_HOSTS, V1_HOSTS, V1_PROFILES};
 use crate::{canonical, ContractError};
 
 /// Closed schema name for M5 qualification-evidence records.
@@ -246,11 +246,13 @@ impl QualificationEvidence {
                 "qualification evidence has inconsistent source, signer, or release claims",
             ));
         }
-        let expected = matrix_selectors();
+        let supported = matrix_selectors(V1_HOSTS);
+        let active_release = matrix_selectors(ACTIVE_V1_HOSTS);
+        let historical_release = matrix_selectors(V1_HOSTS);
         let mut actual = BTreeSet::new();
         let mut report_digests = BTreeSet::new();
         for lane in &self.lanes {
-            if !expected.contains(&(lane.host.clone(), lane.target_profile.clone()))
+            if !supported.contains(&(lane.host.clone(), lane.target_profile.clone()))
                 || lane.target_triple.is_empty()
                 || lane.target_triple.len() > 128
                 || lane
@@ -270,9 +272,16 @@ impl QualificationEvidence {
                 "diagnostic qualification evidence must contain at least one lane",
             )),
             EvidenceCoverage::Diagnostic => Ok(()),
-            EvidenceCoverage::ReleaseCandidate if actual == expected => Ok(()),
+            // New records qualify the active three-host matrix.  Parsing also
+            // accepts a complete historical four-host record so that immutable
+            // published releases remain recoverable and auditable.
+            EvidenceCoverage::ReleaseCandidate
+                if actual == active_release || actual == historical_release =>
+            {
+                Ok(())
+            }
             EvidenceCoverage::ReleaseCandidate => Err(ContractError::recovery(
-                "release-candidate evidence does not contain the complete v1 matrix",
+                "release-candidate evidence does not contain a complete supported v1 matrix",
             )),
         }
     }
@@ -286,6 +295,23 @@ impl QualificationEvidence {
         {
             return Err(ContractError::recovery(
                 "qualification evidence differs from the measured release-index identity",
+            ));
+        }
+        let evidence_selectors = self
+            .lanes
+            .iter()
+            .map(|lane| (lane.host.clone(), lane.target_profile.clone()))
+            .collect::<BTreeSet<_>>();
+        let index_selectors = index
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.host.clone(), artifact.target_profile.clone()))
+            .collect::<BTreeSet<_>>();
+        if self.coverage == EvidenceCoverage::ReleaseCandidate
+            && evidence_selectors != index_selectors
+        {
+            return Err(ContractError::recovery(
+                "release-candidate evidence matrix differs from the measured release index",
             ));
         }
         for lane in &self.lanes {
@@ -382,8 +408,8 @@ fn safe_signer(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
-fn matrix_selectors() -> BTreeSet<(String, String)> {
-    V1_HOSTS
+fn matrix_selectors(hosts: &[&str]) -> BTreeSet<(String, String)> {
+    hosts
         .iter()
         .flat_map(|host| {
             V1_PROFILES
@@ -413,7 +439,9 @@ mod tests {
         QualificationLane, ReleaseEvidence, SourceRunIdentity, QUALIFICATION_EVIDENCE_SCHEMA,
     };
     use crate::recipe::GitObjectId;
-    use crate::release_index::{NativeReleaseArtifact, NativeReleaseIndex, V1_HOSTS, V1_PROFILES};
+    use crate::release_index::{
+        NativeReleaseArtifact, NativeReleaseIndex, ACTIVE_V1_HOSTS, V1_HOSTS, V1_PROFILES,
+    };
 
     fn digest(value: u64) -> Sha256Digest {
         Sha256Digest::parse(&format!("{value:064x}")).unwrap()
@@ -423,8 +451,8 @@ mod tests {
         GitObjectId::try_from(format!("{value:x}").repeat(40)).unwrap()
     }
 
-    fn index() -> NativeReleaseIndex {
-        let artifacts = V1_HOSTS
+    fn index_for_hosts(hosts: &[&str]) -> NativeReleaseIndex {
+        let artifacts = hosts
             .iter()
             .flat_map(|host| {
                 V1_PROFILES
@@ -461,8 +489,15 @@ mod tests {
         }
     }
 
-    fn evidence(index_bytes: &[u8], coverage: EvidenceCoverage) -> QualificationEvidence {
-        let index = index();
+    fn index() -> NativeReleaseIndex {
+        index_for_hosts(ACTIVE_V1_HOSTS)
+    }
+
+    fn evidence(
+        index: &NativeReleaseIndex,
+        index_bytes: &[u8],
+        coverage: EvidenceCoverage,
+    ) -> QualificationEvidence {
         let lanes = index
             .artifacts
             .iter()
@@ -529,7 +564,7 @@ mod tests {
     fn complete_release_candidate_binds_exact_index_and_policy() {
         let index = index();
         let index_bytes = serde_json::to_vec(&index).unwrap();
-        let original = evidence(&index_bytes, EvidenceCoverage::ReleaseCandidate);
+        let original = evidence(&index, &index_bytes, EvidenceCoverage::ReleaseCandidate);
         let parsed = QualificationEvidence::parse(&serde_json::to_vec(&original).unwrap()).unwrap();
         assert_eq!(parsed, original);
         parsed
@@ -539,9 +574,10 @@ mod tests {
 
     #[test]
     fn evidence_rejects_tampered_index_expiry_and_signer_claims() {
-        let index_bytes = serde_json::to_vec(&index()).unwrap();
-        let evidence = evidence(&index_bytes, EvidenceCoverage::ReleaseCandidate);
-        let mut changed_index = index();
+        let index = index();
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let evidence = evidence(&index, &index_bytes, EvidenceCoverage::ReleaseCandidate);
+        let mut changed_index = index.clone();
         changed_index.base_url = "https://example.invalid/toolchains/other-candidate".into();
         let changed_index = serde_json::to_vec(&changed_index).unwrap();
         assert!(crate::release_index::NativeReleaseIndex::parse(&changed_index).is_ok());
@@ -563,8 +599,9 @@ mod tests {
 
     #[test]
     fn parser_rejects_unknown_duplicate_and_incomplete_release_coverage() {
-        let index_bytes = serde_json::to_vec(&index()).unwrap();
-        let evidence = evidence(&index_bytes, EvidenceCoverage::ReleaseCandidate);
+        let index = index();
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let evidence = evidence(&index, &index_bytes, EvidenceCoverage::ReleaseCandidate);
         let original = String::from_utf8(serde_json::to_vec(&evidence).unwrap()).unwrap();
         let trailing_error =
             QualificationEvidence::parse(format!("{original} {{}}").as_bytes()).unwrap_err();
@@ -583,6 +620,16 @@ mod tests {
         assert_recovery(&incomplete_error);
         incomplete.coverage = EvidenceCoverage::Diagnostic;
         assert!(QualificationEvidence::parse(&serde_json::to_vec(&incomplete).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn complete_historical_release_candidate_remains_readable() {
+        let index = index_for_hosts(V1_HOSTS);
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let evidence = evidence(&index, &index_bytes, EvidenceCoverage::ReleaseCandidate);
+        evidence
+            .validate_against_index(&index_bytes, &policy(150))
+            .unwrap();
     }
 
     fn assert_recovery(error: &crate::ContractError) {

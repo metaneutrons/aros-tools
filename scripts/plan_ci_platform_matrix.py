@@ -3,7 +3,9 @@
 
 The planner is deliberately fail-closed.  Only a narrow documentation-only
 allowlist may use the inexpensive Linux lane; an empty, malformed or unfamiliar
-change list always receives the full native four-host matrix.
+change list always receives the active native three-host matrix. Intel macOS
+qualification is intentionally suspended until the initial toolchain release
+has been published; see metaneutrons/aros-toolchains#27.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from typing import Final
 HOSTS: Final = (
     {"name": "linux-x86_64", "runner": "ubuntu-24.04"},
     {"name": "linux-aarch64", "runner": "ubuntu-24.04-arm"},
-    {"name": "macos-x86_64", "runner": "macos-15-intel"},
     {"name": "macos-aarch64", "runner": "macos-15"},
 )
 DOCUMENTATION_FILES: Final = {

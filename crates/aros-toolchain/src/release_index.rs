@@ -40,13 +40,23 @@ const MANIFEST_SCHEMA_BYTES: &[u8] =
 const TREE_FIXTURE_BYTES: &[u8] =
     include_bytes!("../../aros-common/tests/fixtures/tree-digest-v1.fixture.json");
 
-/// Closed host selectors of the v1 release matrix.
+/// All host selectors accepted by the v1 archive format.
+///
+/// This set includes the historical Intel macOS releases. It must remain
+/// stable so existing published v1 indexes remain readable.
 pub const V1_HOSTS: &[&str] = &[
     "linux-aarch64",
     "linux-x86_64",
     "macos-aarch64",
     "macos-x86_64",
 ];
+/// Hosts actively qualified for newly produced v1 releases.
+///
+/// Intel macOS qualification is intentionally suspended until
+/// metaneutrons/aros-toolchains#27 is completed. The release producer emits
+/// exactly this matrix, while the parser continues to accept the historical
+/// four-host matrix above.
+pub const ACTIVE_V1_HOSTS: &[&str] = &["linux-aarch64", "linux-x86_64", "macos-aarch64"];
 /// Closed target-profile selectors of the v1 release matrix.
 pub const V1_PROFILES: &[&str] = &["arm-raspi", "pc-x86_64", "rpi-aarch64"];
 const REQUIRED_TOOLS: &[&str] = &[
@@ -115,7 +125,7 @@ pub struct NativeReleaseIndex {
     pub producer_commit: String,
     /// aros-tools revision shared by all package manifests.
     pub tools_commit: String,
-    /// The closed four-host, three-profile package matrix.
+    /// The closed active or historical v1 host/profile package matrix.
     pub artifacts: Vec<NativeReleaseArtifact>,
 }
 
@@ -211,19 +221,8 @@ impl NativeReleaseIndex {
                 ContractError::index("release index has a noncanonical Git identity")
             })?;
         }
-        if self.artifacts.len() != V1_HOSTS.len() * V1_PROFILES.len() {
-            return Err(ContractError::index(
-                "release index does not contain the complete v1 host/profile matrix",
-            ));
-        }
-        let expected = V1_HOSTS
-            .iter()
-            .flat_map(|host| {
-                V1_PROFILES
-                    .iter()
-                    .map(move |profile| ((*host).to_owned(), (*profile).to_owned()))
-            })
-            .collect::<BTreeSet<_>>();
+        let active_expected = expected_matrix(ACTIVE_V1_HOSTS);
+        let historical_expected = expected_matrix(V1_HOSTS);
         let mut actual = BTreeSet::new();
         let mut previous_asset: Option<&str> = None;
         for artifact in &self.artifacts {
@@ -237,13 +236,24 @@ impl NativeReleaseIndex {
             }
             previous_asset = Some(&artifact.asset);
         }
-        if actual != expected {
+        if actual != active_expected && actual != historical_expected {
             return Err(ContractError::index(
-                "release index host/profile selectors differ from the closed v1 matrix",
+                "release index host/profile selectors differ from an accepted v1 matrix",
             ));
         }
         Ok(())
     }
+}
+
+fn expected_matrix(hosts: &[&str]) -> BTreeSet<(String, String)> {
+    hosts
+        .iter()
+        .flat_map(|host| {
+            V1_PROFILES
+                .iter()
+                .map(move |profile| ((*host).to_owned(), (*profile).to_owned()))
+        })
+        .collect()
 }
 
 fn validate_index_artifact(artifact: &NativeReleaseArtifact) -> Result<(), ContractError> {
@@ -431,11 +441,11 @@ pub fn write_package_comparison_report(
     })
 }
 
-/// Validate and advance one complete v1 local release inventory.
+/// Validate and advance one complete active v1 local release inventory.
 ///
-/// At the pre-attestation stage, the directory must contain 48 package assets
+/// At the pre-attestation stage, the directory must contain 36 package assets
 /// plus five support files. This function then writes the index and a checksum
-/// file covering those 54 attestation subjects. At the final stage it requires
+/// file covering those 42 attestation subjects. At the final stage it requires
 /// the exact existing pre-attestation set plus one provenance bundle, verifies
 /// the old checksum document, and atomically replaces it with a checksum set
 /// covering every other final asset.
@@ -620,8 +630,8 @@ fn expected_package_names(
     source_lock: &SourceLock,
     profiles: &Profiles,
 ) -> Result<Vec<String>, ContractError> {
-    let mut names = Vec::with_capacity(V1_HOSTS.len() * V1_PROFILES.len());
-    for host in V1_HOSTS {
+    let mut names = Vec::with_capacity(ACTIVE_V1_HOSTS.len() * V1_PROFILES.len());
+    for host in ACTIVE_V1_HOSTS {
         for profile_name in V1_PROFILES {
             profiles.select(profile_name).map_err(|_| {
                 ContractError::index("published profiles do not provide the complete v1 matrix")
@@ -1327,7 +1337,7 @@ mod tests {
         let profiles = Profiles::parse(&profiles_bytes).unwrap();
         let recipe = Recipe::parse(&recipe_bytes).unwrap();
         let staging = tempfile::tempdir().unwrap();
-        for host in V1_HOSTS {
+        for host in ACTIVE_V1_HOSTS {
             for profile_name in V1_PROFILES {
                 let profile = profiles.select(profile_name).unwrap().clone();
                 let candidate = staging
@@ -1437,31 +1447,31 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let mut request = write_complete_pre_attestation_fixture(temporary.path());
         let pre = index_complete_v1(&request).unwrap();
-        assert_eq!(pre.index.artifacts.len(), 12);
-        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 55);
+        assert_eq!(pre.index.artifacts.len(), 9);
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 43);
         assert_eq!(
             String::from_utf8(fs::read(&pre.checksums_path).unwrap())
                 .unwrap()
                 .lines()
                 .count(),
-            54
+            42
         );
 
         fs::write(temporary.path().join(PROVENANCE_NAME), b"{}").unwrap();
         request.stage = IndexStage::Final;
         let final_output = index_complete_v1(&request).unwrap();
-        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 56);
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 44);
         assert_eq!(
             String::from_utf8(fs::read(&final_output.checksums_path).unwrap())
                 .unwrap()
                 .lines()
                 .count(),
-            55
+            43
         );
         let index: Value =
             serde_json::from_slice(&fs::read(final_output.index_path).unwrap()).unwrap();
         assert_eq!(index["release_id"], "fixture-release");
-        assert_eq!(index["artifacts"].as_array().unwrap().len(), 12);
+        assert_eq!(index["artifacts"].as_array().unwrap().len(), 9);
         assert!(index["artifacts"]
             .as_array()
             .unwrap()
@@ -1536,5 +1546,31 @@ mod tests {
             .as_bytes()
         )
         .is_err());
+    }
+
+    #[test]
+    fn serialized_index_parser_accepts_the_historical_four_host_matrix() {
+        let release = tempfile::tempdir().unwrap();
+        let request = write_complete_pre_attestation_fixture(release.path());
+        let output = index_complete_v1(&request).unwrap();
+        let mut historical = output.index;
+        for profile in V1_PROFILES {
+            let mut artifact = historical
+                .artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.host == "macos-aarch64" && artifact.target_profile == *profile
+                })
+                .unwrap()
+                .clone();
+            artifact.host = "macos-x86_64".into();
+            artifact.asset = canonical_asset_name("11.0.0", &artifact.host, profile).unwrap();
+            historical.artifacts.push(artifact);
+        }
+        historical
+            .artifacts
+            .sort_by(|left, right| left.asset.cmp(&right.asset));
+        let encoded = pretty_json(&historical).unwrap();
+        assert_eq!(NativeReleaseIndex::parse(&encoded).unwrap(), historical);
     }
 }
