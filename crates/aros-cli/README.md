@@ -211,6 +211,18 @@ hint, and optional deterministic context. The schema is
 | `AR0901` | output publication, cleanup, deployment, or golden data |
 | `AR0999` | internal invariant |
 
+The native producer compatibility harness never inherits the runner's `PATH`.
+Its exact, measured command roles are available to CI and local diagnostics:
+
+```console
+aros toolchain producer compatibility-host-tools --host linux-x86_64
+```
+
+Supply each listed role once with `compatibility --host-tool NAME=/absolute/path`.
+The generated private closure binds the host compiler and its binutils helpers,
+patch application, Flex/Bison, and the baseline Autoconf/Make utilities without
+admitting an ambient command directory.
+
 Child-process exit codes and signals are preserved as structured context. In
 JSON mode, non-interactive child output is isolated from the diagnostic
 stream. A failed child's standard output and error are included in the

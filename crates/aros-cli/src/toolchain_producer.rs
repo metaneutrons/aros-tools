@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use aros_common::{open_regular_file_nofollow, sha256_bytes, CancellationToken, Sha256Digest};
 use aros_toolchain::compatibility::{
-    self, CompatibilityHostTool, CompatibilityPreparationRequest, HostToolClosureRequest,
-    NativeCompatibilityRequest, StandaloneFixtures, TwoRootRelocationRequest,
+    self, native_compatibility_host_tools, CompatibilityHostTool, CompatibilityPreparationRequest,
+    HostToolClosureRequest, NativeCompatibilityRequest, StandaloneFixtures,
+    TwoRootRelocationRequest,
 };
 use aros_toolchain::compatibility_source::{
     materialize_engine_free_source, EngineFreeSourceRequest,
@@ -77,6 +78,11 @@ enum ProducerCommand {
     PrepareRecovery(PrepareRecoveryArgs),
     /// Advance a complete local release inventory through one index stage
     Index(IndexArgs),
+    /// Print the exact measured command roles required by native compatibility
+    CompatibilityHostTools {
+        #[arg(long)]
+        host: String,
+    },
     /// Execute all six native package-compatibility phases locally
     Compatibility(Box<CompatibilityArgs>),
 }
@@ -508,7 +514,8 @@ struct CompatibilityArgs {
     /// Absent private host Python environment directory
     #[arg(long)]
     python_environment_dir: PathBuf,
-    /// Absent private host-command closure directory
+    /// Absent private host-command closure directory for CMake host tools and
+    /// upstream configure/Make
     #[arg(long)]
     host_tools_dir: PathBuf,
     /// Exact host command closure entry as NAME=ABSOLUTE_PATH; repeatable
@@ -558,10 +565,17 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::RecordQualification(args) => record_qualification(&args),
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
+        ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
         ProducerCommand::Compatibility(args) => compatibility(*args).await,
     }
 }
 
+fn compatibility_host_tools(host: &str) -> miette::Result<()> {
+    for role in native_compatibility_host_tools(host).map_err(|error| native_error(&error))? {
+        aros_common::outputln!("{role}");
+    }
+    Ok(())
+}
 fn profile(args: &ProfileArgs) -> miette::Result<()> {
     let recipe = Recipe::parse(&read_regular_input(&args.recipe, "recipe")?)
         .map_err(|error| native_error(&error))?;
@@ -1436,7 +1450,7 @@ fn execute_compatibility(
     let verification = package_verify::PackageVerificationRequest {
         package_dir: args.package_dir,
         release_id: context.release_id,
-        host: context.host,
+        host: context.host.clone(),
         recipe: context.recipe,
         source_lock: context.source_lock,
         profile: context.profile,
@@ -1475,6 +1489,7 @@ fn execute_compatibility(
             upstream_build_root: args.upstream_build_dir,
             host_python: python,
             host_tools,
+            host: context.host,
             make_jobs: args.jobs,
             standalone_fixtures: StandaloneFixtures {
                 c: args.c_fixture,
@@ -1908,6 +1923,15 @@ mod tests {
             "pre-attestation",
         ]);
         assert!(index.is_ok());
+        assert!(Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "producer",
+            "compatibility-host-tools",
+            "--host",
+            "linux-x86_64",
+        ])
+        .is_ok());
     }
 
     #[test]

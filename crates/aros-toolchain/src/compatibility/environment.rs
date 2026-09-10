@@ -23,7 +23,8 @@ pub enum CompatibilityEnvironment {
         /// Explicit child variables, including the required poisoned `PATH`.
         variables: BTreeMap<String, String>,
     },
-    /// Upstream configure/Make may resolve only measured closure entries.
+    /// CMake host tools and upstream configure/Make may resolve only measured
+    /// closure entries.
     ///
     /// The supplied map must declare `PATH=/nonexistent`. Resolution replaces
     /// that poisoned marker with the revalidated owned closure; callers cannot

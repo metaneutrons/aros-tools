@@ -1,10 +1,12 @@
-//! Measured host-command closures for upstream compatibility phases.
+//! Measured host-command closures for native compatibility phases that need
+//! host command resolution.
 //!
-//! Upstream `configure` and its generated Makefiles necessarily resolve a
-//! bounded POSIX tool set by name. This module never inherits that search path
-//! into a build: it creates an owned directory containing only measured
-//! symlinks to caller-selected absolute executables. Standalone C/C++ probes
-//! deliberately do not use this closure and retain their poisoned `PATH`.
+//! The AROS CMake engine and upstream `configure`/generated Makefiles
+//! necessarily resolve a bounded POSIX tool set by name. This module never
+//! inherits that search path into a build: it creates an owned directory
+//! containing only measured symlinks to caller-selected absolute executables.
+//! Standalone C/C++ probes deliberately do not use this closure and retain
+//! their poisoned `PATH`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -19,6 +21,121 @@ use crate::filesystem::open_directory;
 use crate::ContractError;
 
 const MAX_HOST_TOOLS: usize = 64;
+
+/// Exact command roles admitted to the sealed native-compatibility closure.
+///
+/// The CMake consumer compiles source-owned host utilities, applies declared
+/// source patches, and configures an unmodified upstream tree.  The latter
+/// invokes the standard Autoconf and Make utility set by basename.  Keep this
+/// list explicit and platform-neutral: the caller measures one absolute
+/// executable for every role before a child process starts; the closure never
+/// inherits a directory from the runner's ambient `PATH`.
+///
+/// `make` deliberately names the role rather than the selected executable, so
+/// macOS may expose Homebrew `gmake` as `make` without changing the child
+/// contract.  Likewise, `cc` remains the source-owned host-compiler spelling
+/// while `as`, `ld`, `ar`, and `ranlib` provide its explicitly measured
+/// binutils dependencies.  The current upstream `configure` also rejects a
+/// closure without `aclocal` and `automake`, even though it merely discovers
+/// those Autotools programs during configuration. It also requires the host
+/// `strip`, `uniq`, the `libpng-config` discovery program, and Netpbm
+/// conversion programs. Its generated MetaMake rules invoke `env` to bind
+/// their explicit configuration variables before they build `archtool`.
+/// macOS has two additional SDK-discovery commands; see
+/// [`native_compatibility_host_tools`].
+pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
+    "aclocal",
+    "ar",
+    "as",
+    "automake",
+    "awk",
+    "basename",
+    "bison",
+    "c++",
+    "cat",
+    "cc",
+    "chmod",
+    "cmp",
+    "cp",
+    "cut",
+    "date",
+    "diff",
+    "dirname",
+    "echo",
+    "egrep",
+    "env",
+    "expr",
+    "false",
+    "fgrep",
+    "file",
+    "find",
+    "flex",
+    "gawk",
+    "grep",
+    "head",
+    "id",
+    "install",
+    "ld",
+    "libpng-config",
+    "ln",
+    "ls",
+    "m4",
+    "make",
+    "mkdir",
+    "mv",
+    "patch",
+    "perl",
+    "pngtopnm",
+    "ppmtoilbm",
+    "printf",
+    "pwd",
+    "python3",
+    "ranlib",
+    "rm",
+    "sed",
+    "sh",
+    "sleep",
+    "sort",
+    "strip",
+    "tail",
+    "test",
+    "touch",
+    "tr",
+    "true",
+    "uname",
+    "uniq",
+    "wc",
+    "xargs",
+];
+
+const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &["xcode-select", "xcrun"];
+
+/// Return the exact closed native-compatibility command roles for one v1 host.
+///
+/// The AROS upstream `configure` invokes `xcode-select` and `xcrun` only on
+/// Darwin. Requiring either program on Linux would make the measured closure
+/// reject an otherwise valid Linux runner before compatibility begins. The
+/// host selector is deliberately validated against the released v1 matrix so
+/// an unknown platform cannot silently receive the wrong closure.
+///
+/// # Errors
+///
+/// Returns AX0703 when `host` is not one of the closed v1 build-host
+/// selectors. It performs no filesystem, process, network, credential, tag,
+/// or release operation.
+pub fn native_compatibility_host_tools(host: &str) -> Result<Vec<&'static str>, ContractError> {
+    if !crate::release_index::V1_HOSTS.contains(&host) {
+        return Err(ContractError::compatibility(format!(
+            "native compatibility host-tool closure does not support host '{host}'"
+        )));
+    }
+
+    let mut roles = REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.to_vec();
+    if host.starts_with("macos-") {
+        roles.extend_from_slice(MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS);
+    }
+    Ok(roles)
+}
 
 /// One explicitly selected upstream host-command role and executable.
 #[derive(Debug, Clone)]
@@ -49,7 +166,8 @@ pub struct HostToolIdentity {
     pub size: u64,
 }
 
-/// Owned, revalidatable host-command closure for configure and Make phases.
+/// Owned, revalidatable host-command closure for CMake, configure, and Make
+/// phases.
 #[derive(Debug, Clone)]
 pub struct HostToolClosure {
     /// Canonical owned directory to use as the complete child `PATH`.
@@ -286,7 +404,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt as _};
 
-    use super::{prepare_host_tool_closure, CompatibilityHostTool, HostToolClosureRequest};
+    use super::{
+        native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
+        HostToolClosureRequest, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+    };
 
     fn executable(root: &std::path::Path, name: &str, contents: &[u8]) -> std::path::PathBuf {
         let path = root.join(name);
@@ -381,5 +502,46 @@ mod tests {
         fs::set_permissions(&closure.root, fs::Permissions::from_mode(0o700)).unwrap();
         symlink(selected, closure.root.join("tool")).unwrap();
         assert!(closure.revalidate().is_err());
+    }
+
+    #[test]
+    fn required_roles_include_gnu_awk_for_upstream_configure() {
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"gawk"));
+    }
+
+    #[test]
+    fn required_roles_include_autotools_required_by_upstream_configure() {
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"aclocal"));
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"automake"));
+    }
+
+    #[test]
+    fn required_roles_include_unconditional_upstream_make_tools() {
+        for role in [
+            "env",
+            "strip",
+            "uniq",
+            "libpng-config",
+            "pngtopnm",
+            "ppmtoilbm",
+        ] {
+            assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
+        }
+    }
+
+    #[test]
+    fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
+        let macos = native_compatibility_host_tools("macos-aarch64").unwrap();
+        assert!(macos.contains(&"xcode-select"));
+        assert!(macos.contains(&"xcrun"));
+
+        let linux = native_compatibility_host_tools("linux-x86_64").unwrap();
+        assert!(!linux.contains(&"xcode-select"));
+        assert!(!linux.contains(&"xcrun"));
+    }
+
+    #[test]
+    fn required_roles_reject_unknown_host_selectors() {
+        assert!(native_compatibility_host_tools("freebsd-x86_64").is_err());
     }
 }

@@ -34,15 +34,15 @@ mod environment;
 mod execution;
 mod host_tools;
 mod standalone;
-
 pub use environment::{CompatibilityEnvironment, CompatibilityHostToolReport};
 pub use execution::{
     execute_native_compatibility, NativeCompatibilityReport, NativeCompatibilityRequest,
     StandaloneFixtures,
 };
 pub use host_tools::{
-    prepare_host_tool_closure, CompatibilityHostTool, HostToolClosure, HostToolClosureRequest,
-    HostToolIdentity,
+    native_compatibility_host_tools, prepare_host_tool_closure, CompatibilityHostTool,
+    HostToolClosure, HostToolClosureRequest, HostToolIdentity,
+    REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
 };
 pub use standalone::{
     verify_standalone_outputs, StandaloneArtifactIdentity, StandaloneOutputReport,
