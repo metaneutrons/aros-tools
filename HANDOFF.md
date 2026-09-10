@@ -23,17 +23,19 @@ instead of appending session history. Git history preserves earlier versions.
   and the final [four-host workspace run](https://github.com/metaneutrons/aros-tools/actions/runs/34259378712)
   are green.
 - M6 does not qualify a distributable compiler or release. There is no tag,
-  publication or live A/B result. The fresh 12-lane, four-host/three-profile
-  release qualification remains TCP-M7 work.
+  publication or live A/B result. The fresh nine-lane active
+  three-host/three-profile release qualification remains TCP-M7 work. Intel
+  macOS qualification is deliberately deferred to
+  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
 
 ## Current bounded action
 
 TCP-M7 is next. Start only with clean, explicitly selected AROS-NX,
 `aros-toolchains`, and `aros-tools` identities. It alone may select a new
-immutable annotated toolchain tag and run the complete four-host,
+immutable annotated toolchain tag and run the active three-host,
 three-profile A/B, compatibility, draft-verification and consumer-promotion
 sequence. Do not use M6 local candidates or a retained build root as a release
-input.
+input. Intel macOS is an explicit follow-up, not a release blocker.
 
 ## Resume safely
 

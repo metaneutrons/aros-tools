@@ -89,9 +89,13 @@ complete application SDK or evidence that a physical board boots.
 
 ### Scope boundaries
 
-- Support the currently qualified four native hosts: Linux x86-64/AArch64 and
-  macOS x86-64/AArch64. Build for the running host; do not introduce host
-  cross-compilation, remote execution or emulation.
+- Keep all four native host selectors schema-supported: Linux x86-64/AArch64
+  and macOS x86-64/AArch64. Build for the running host; do not introduce host
+  cross-compilation, remote execution or emulation. The initial M7 release
+  actively qualifies Linux x86-64/AArch64 and macOS ARM64 only; Intel macOS is
+  fully suspended under
+  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)
+  until the initial release has completed.
 - Preserve the three release profiles: `pc-x86_64`, `arm-raspi` and
   `rpi-aarch64`. The PC profile includes its existing i386 runtime/collector
   contract. RISC-V and new LLVM versions require separate qualification work.
@@ -654,7 +658,8 @@ boundary; it is neither a fully native pipeline nor an automatic fallback.
   modes, timestamps, tar headers, compression and manifest serialization.
   Treat intentional stricter validation as a documented contract decision.
 - [x] Add malformed-archive, resource-exhaustion, mixed-recipe/matrix, missing
-  SBOM/support-file and unsafe-asset tests. Verify the full 56-file v1 set.
+  SBOM/support-file and unsafe-asset tests. Verify the active 44-file v1 set
+  and read compatibility with the historical 56-file four-host format.
 
 Exit evidence: [TCP-M4 native package evidence](tcp-m4-native-evidence.md).
 It records reproducible synthetic packaging on all four hosts, producer and
@@ -680,8 +685,9 @@ explicit absence of a new compiler matrix for this packaging-only gate.
   Exercise publication orchestration with fixtures, not real releases.
 
 Exit evidence: [TCP-M5 native compatibility, replay and recovery evidence]
-(tcp-m5-native-evidence.md). All twelve real compatibility lanes are mandatory
-at M7; unexecuted lanes remain explicitly pending until then.
+(tcp-m5-native-evidence.md). All nine active real compatibility lanes are
+mandatory at M7; Intel macOS remains explicitly deferred under
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
 
 ### TCP-M6 — Workflow cutover, retirement and usability
 
@@ -718,8 +724,12 @@ Full release evidence is still pending M7.
 - [ ] Select the exact clean `P1/T1/S1` identities and a new immutable annotated
   toolchain tag through the existing maintainer gate. No tag is selected or
   authorized by this planning document.
-- [ ] Run the full four-host/three-profile matrix once: 24 independent builds,
-  12 byte comparisons and all 12 compatibility/relocation lanes must succeed.
+- [ ] Run the active three-host/three-profile matrix once: 18 independent
+  builds, 9 byte comparisons and all 9 compatibility/relocation lanes must
+  succeed. Intel macOS is explicitly deferred to
+  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)
+  after the initial release; it is neither silently omitted nor evidence for
+  this initial qualification.
 - [ ] Verify the full inventory, every hash/size, manifests, SBOMs, recipe and
   cryptographic provenance from an isolated complete draft download. Fail on
   any missing, mixed or altered subject.
@@ -815,9 +825,9 @@ and does not authorize real installation cleanup, compiler builds or releases.
 | Tier | Scope | Trigger | What it proves |
 | --- | --- | --- | --- |
 | T0 | Unit, parser/schema, golden and fault-injection fixtures | Every affected PR | Contracts and failure behavior; no compiler qualification claim |
-| T1 | Native CLI/mock lifecycle, package vectors, install fixtures on four hosts | Normal relevant CI | Host support of orchestration and formats |
+| T1 | Native CLI/mock lifecycle, package vectors, install fixtures on three active hosts | Normal relevant CI | Active host support of orchestration and formats; Intel macOS is deferred under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27) |
 | T2 | One real host/profile build by default; broader Linux diagnostics explicitly selected | Local development or explicit diagnostic dispatch | A measured native lane, no publication |
-| T3 | 4 hosts x 3 profiles x 2 independent builds, all compatibility checks | New immutable toolchain release tag | Full release reproducibility/compatibility |
+| T3 | 3 active hosts x 3 profiles x 2 independent builds, all compatibility checks | New immutable toolchain release tag | Initial-release reproducibility/compatibility; Intel macOS remains deferred under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27) |
 
 Keep the existing restriction on manual full-matrix dispatch. Do not run a
 full prequalification and then repeat it for the tag. Source-cache acceleration

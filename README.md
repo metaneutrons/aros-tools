@@ -177,8 +177,11 @@ not every PR iteration. `all` also includes quality and documentation.
 The real GRUB fixture runs only on Darwin/arm64; Linux reports that omission
 rather than claiming full host coverage. PRs always receive the stable Linux
 gate; only a narrow, tested documentation-only path avoids the additional three
-native hosts. Executable, workflow, contract and unclassified changes remain
-four-host. See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
+native hosts. Executable, workflow, contract and unclassified changes use the
+active three-host matrix. Intel macOS qualification is suspended until the
+initial M7 release is complete; see
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
 for when full Linux and macOS evidence is mandatory.
 
 The qualified source is never inferred from a neighbouring directory or a

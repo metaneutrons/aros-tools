@@ -189,8 +189,10 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("- cron: '41 3 * * 1'", workflow)
         self.assertIn("options: [fast, full]", workflow)
         self.assertIn("run: scripts/check-workspace.sh portable-test", workflow)
-        for name in ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64"):
+        for name in ("linux-x86_64", "linux-aarch64", "macos-aarch64"):
             self.assertIn('"name": "' + name + '"', planner)
+        self.assertNotIn("macos-15-intel", planner)
+        self.assertIn("metaneutrons/aros-toolchains#27", planner)
         self.assertIn("documentation-only pull request", planner)
         self.assertIn("pull request changes executable or unclassified inputs", planner)
         for event, gate in (("==", "source-test"), ("!=", "test")):
