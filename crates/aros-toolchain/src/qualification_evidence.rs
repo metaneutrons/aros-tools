@@ -577,7 +577,7 @@ mod tests {
         let index = index();
         let index_bytes = serde_json::to_vec(&index).unwrap();
         let evidence = evidence(&index, &index_bytes, EvidenceCoverage::ReleaseCandidate);
-        let mut changed_index = index.clone();
+        let mut changed_index = index;
         changed_index.base_url = "https://example.invalid/toolchains/other-candidate".into();
         let changed_index = serde_json::to_vec(&changed_index).unwrap();
         assert!(crate::release_index::NativeReleaseIndex::parse(&changed_index).is_ok());
