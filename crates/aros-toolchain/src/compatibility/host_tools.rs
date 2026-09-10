@@ -39,7 +39,9 @@ const MAX_HOST_TOOLS: usize = 64;
 /// closure without `aclocal` and `automake`, even though it merely discovers
 /// those Autotools programs during configuration. It also requires the host
 /// `strip`, `uniq`, the `libpng-config` discovery program, and Netpbm
-/// conversion programs. macOS has two additional SDK-discovery commands; see
+/// conversion programs. Its generated MetaMake rules invoke `env` to bind
+/// their explicit configuration variables before they build `archtool`.
+/// macOS has two additional SDK-discovery commands; see
 /// [`native_compatibility_host_tools`].
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "aclocal",
@@ -61,6 +63,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "dirname",
     "echo",
     "egrep",
+    "env",
     "expr",
     "false",
     "fgrep",
@@ -513,8 +516,15 @@ mod tests {
     }
 
     #[test]
-    fn required_roles_include_unconditional_upstream_configure_tools() {
-        for role in ["strip", "uniq", "libpng-config", "pngtopnm", "ppmtoilbm"] {
+    fn required_roles_include_unconditional_upstream_make_tools() {
+        for role in [
+            "env",
+            "strip",
+            "uniq",
+            "libpng-config",
+            "pngtopnm",
+            "ppmtoilbm",
+        ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }
     }
