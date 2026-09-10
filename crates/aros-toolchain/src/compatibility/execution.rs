@@ -16,11 +16,11 @@ use aros_common::{sha256_bytes, CancellationToken, Sha256Digest};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    checked_executable, run_probe_set, verify_standalone_outputs, CompatibilityCommand,
-    CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
+    checked_executable, native_compatibility_host_tools, run_probe_set, verify_standalone_outputs,
+    CompatibilityCommand, CompatibilityEnvironment, CompatibilityPhase, CompatibilityPreparation,
     CompatibilityProbeRequest, CompatibilityProbeSet, CompatibilityProbeSetRequest,
     HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
-    TwoRootRelocation, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+    TwoRootRelocation,
 };
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
@@ -73,6 +73,9 @@ pub struct NativeCompatibilityRequest {
     /// Fresh measured host command closure for CMake host tools and upstream
     /// configure and Make.
     pub host_tools: HostToolClosure,
+    /// Closed v1 build-host selector used to derive the exact platform-specific
+    /// command-role contract. The caller cannot weaken that contract.
+    pub host: String,
     /// Explicit bounded parallelism for the two upstream Make invocations.
     pub make_jobs: usize,
     /// Fixture sources for standalone C and C++ collector probes.
@@ -172,7 +175,12 @@ pub fn execute_native_compatibility(
     // impossible LLVM helper names. This is an explicit, recorded upstream
     // compatibility input rather than a runner-specific inherited default.
     upstream_environment.insert("ac_cv_prog_cc_c23".into(), String::new());
-    validate_host_environment(&upstream_environment, &request.host_tools)?;
+    let required_host_tools = native_compatibility_host_tools(&request.host)?;
+    validate_host_environment(
+        &upstream_environment,
+        &request.host_tools,
+        &required_host_tools,
+    )?;
     let sealed_environment = CompatibilityEnvironment::SealedHostTools {
         variables: upstream_environment,
         host_tools: request.host_tools.clone(),
@@ -623,6 +631,7 @@ fn create_output_roots(
 fn validate_host_environment(
     environment: &BTreeMap<String, String>,
     host_tools: &HostToolClosure,
+    required_host_tools: &[&str],
 ) -> Result<(), ContractError> {
     let expected = BTreeSet::from([
         "ac_cv_prog_cc_c23",
@@ -663,20 +672,26 @@ fn validate_host_environment(
             "upstream compatibility host-tool closure does not expose the checked python3 interpreter",
         ));
     };
-    let missing_roles = REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS
-        .iter()
+    let expected_roles = required_host_tools.iter().copied().collect::<BTreeSet<_>>();
+    let actual_roles = host_tools
+        .tools
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_roles = expected_roles
+        .difference(&actual_roles)
         .copied()
-        .filter(|role| !host_tools.tools.contains_key(*role))
         .collect::<Vec<_>>();
-    if python != host_python.program || !missing_roles.is_empty() {
+    let unexpected_roles = actual_roles
+        .difference(&expected_roles)
+        .copied()
+        .collect::<Vec<_>>();
+    if python != host_python.program || !missing_roles.is_empty() || !unexpected_roles.is_empty() {
         return Err(ContractError::compatibility(
             format!(
-                "native compatibility host-tool closure does not bind the complete measured command set{}",
-                if missing_roles.is_empty() {
-                    String::new()
-                } else {
-                    format!(": missing {}", missing_roles.join(", "))
-                }
+                "native compatibility host-tool closure does not bind the exact measured command set{}{}",
+                if missing_roles.is_empty() { String::new() } else { format!(": missing {}", missing_roles.join(", ")) },
+                if unexpected_roles.is_empty() { String::new() } else { format!("; unexpected {}", unexpected_roles.join(", ")) },
             ),
         ));
     }
@@ -1118,6 +1133,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_unselected_measured_host_tool_before_cmake_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (mut request, cmake_log, _) = request(temporary.path());
+        let mut tools = request
+            .host_tools
+            .tools
+            .iter()
+            .map(|(name, identity)| CompatibilityHostTool {
+                name: name.clone(),
+                program: identity.program.clone(),
+            })
+            .collect::<Vec<_>>();
+        let extra = temporary.path().join("unexpected-host-tool");
+        script(&extra, "exit 0");
+        tools.push(CompatibilityHostTool {
+            name: "unexpected".into(),
+            program: extra,
+        });
+        request.host_tools = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("host-tools-with-unexpected-entry"),
+            tools,
+        })
+        .unwrap();
+
+        let error =
+            execute_native_compatibility(&request, &CancellationToken::default()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code,
+            aros_common::DiagnosticCode::ProducerCompatibility
+        );
+        assert!(!cmake_log.exists());
+    }
+
+    #[test]
     fn rejects_a_dirty_or_mismatched_pristine_upstream_source_before_any_child_starts() {
         let temporary = tempfile::tempdir().unwrap();
         let (dirty, _, _) = request(temporary.path());
@@ -1285,6 +1334,7 @@ mod tests {
                 upstream_build_root: root.join("upstream-build"),
                 host_python: python,
                 host_tools: closure,
+                host: "linux-x86_64".into(),
                 make_jobs: 2,
                 standalone_fixtures: StandaloneFixtures {
                     c: c_fixture,
