@@ -22,7 +22,11 @@ use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 72;
+// This is a hard resource bound for an owned, revalidated closure, not a
+// guessed ambient-tool allowance. It equals the largest reviewed v1 role set
+// (macOS, including its SDK aliases); enlarging it requires an explicit
+// source-graph review and keeps the bounded invariant auditable.
+const MAX_HOST_TOOLS: usize = 74;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -48,8 +52,10 @@ const MAX_HOST_TOOLS: usize = 72;
 /// they must resolve inside the same closure rather than through an ambient
 /// runner path. Its generated MetaMake rules invoke `env` to bind their
 /// explicit configuration variables before they build `archtool`.
-/// The bzip2 port is unpacked by the selected upstream `fetch.sh`, so `tar`
-/// is also a literal requirement of the same sealed child. On Darwin,
+/// The selected upstream `fetch.sh` extracts gzip- and XZ-compressed source
+/// archives through `tar`, which delegates to `gzip` and `xz` on GNU tar.
+/// All three programs are therefore literal requirements of the same sealed
+/// child. On Darwin,
 /// upstream configure explicitly selects GNU sed as `gsed`.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
@@ -87,6 +93,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "gawk",
     "gcc",
     "grep",
+    "gzip",
     "head",
     "id",
     "install",
@@ -122,6 +129,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "uniq",
     "wc",
     "xargs",
+    "xz",
 ];
 
 // The pinned upstream configure script appends the host compiler suffix `cc`
@@ -237,9 +245,9 @@ pub fn prepare_host_tool_closure(
     request: &HostToolClosureRequest,
 ) -> Result<HostToolClosure, ContractError> {
     if request.tools.is_empty() || request.tools.len() > MAX_HOST_TOOLS {
-        return Err(ContractError::compatibility(
-            "compatibility host-tool closure exceeds its explicit 72-tool capacity",
-        ));
+        return Err(ContractError::compatibility(format!(
+            "compatibility host-tool closure exceeds its explicit {MAX_HOST_TOOLS}-tool capacity"
+        )));
     }
     let output_root = checked_absent_root(&request.output_root)?;
     let mut names = BTreeSet::new();
@@ -732,6 +740,16 @@ mod tests {
     }
 
     #[test]
+    fn closure_capacity_tracks_the_largest_reviewed_v1_role_set() {
+        assert_eq!(
+            native_compatibility_host_tools("macos-aarch64")
+                .unwrap()
+                .len(),
+            MAX_HOST_TOOLS
+        );
+    }
+
+    #[test]
     fn required_roles_include_unconditional_upstream_make_tools() {
         for role in [
             "bash",
@@ -743,6 +761,8 @@ mod tests {
             "pngtopnm",
             "ppmtoilbm",
             "tar",
+            "gzip",
+            "xz",
         ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }
