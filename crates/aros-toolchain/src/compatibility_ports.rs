@@ -662,7 +662,7 @@ fn canonical_tar_gzip_filename(value: &str) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("tgz"))
 }
 
-fn safe_relative_path(value: &str) -> bool {
+pub(crate) fn safe_relative_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512
         && !value.starts_with('/')
@@ -672,7 +672,7 @@ fn safe_relative_path(value: &str) -> bool {
             .all(|part| portable_filename(part) && part != "." && part != "..")
 }
 
-fn safe_fetch_marker_path(value: &str) -> bool {
+pub(crate) fn safe_fetch_marker_path(value: &str) -> bool {
     let basename = value.rsplit('/').next().unwrap_or_default();
     safe_relative_path(value) && basename.starts_with('.') && basename.ends_with("-fetched")
 }
