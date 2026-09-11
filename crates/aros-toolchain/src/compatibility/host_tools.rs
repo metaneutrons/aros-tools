@@ -20,7 +20,7 @@ use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 65;
+const MAX_HOST_TOOLS: usize = 68;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -38,18 +38,21 @@ const MAX_HOST_TOOLS: usize = 65;
 /// binutils dependencies.  The current upstream `configure` also rejects a
 /// closure without `aclocal` and `automake`, even though it merely discovers
 /// those Autotools programs during configuration. Its generated MetaMake
-/// source later runs `autoconf`, so that program is part of the same closure.
+/// source later runs `autoconf` through its `autom4te` runner, so both programs
+/// are part of the same closure.
 /// It also requires the host `strip`, `uniq`, the `libpng-config` discovery
 /// program, and Netpbm
 /// conversion programs. Its generated MetaMake rules invoke `env` to bind
 /// their explicit configuration variables before they build `archtool`.
-/// macOS has two additional SDK-discovery commands; see
+/// macOS has two SDK-discovery commands and two measured compatibility aliases;
+/// see
 /// [`native_compatibility_host_tools`].
 pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "aclocal",
     "ar",
     "as",
     "autoconf",
+    "autom4te",
     "automake",
     "awk",
     "basename",
@@ -111,7 +114,13 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "xargs",
 ];
 
-const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &["xcode-select", "xcrun"];
+// The pinned upstream configure script appends the host compiler suffix `cc`
+// to its LLVM binutils candidates on macOS.  For Apple Clang this probes the
+// historical spellings `llvm-arcc` and `llvm-ranlibcc`.  They are not ambient
+// commands: the workflow maps them to the already measured `ar` and `ranlib`
+// executables before this owned closure exposes the names to upstream.
+const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] =
+    &["llvm-arcc", "llvm-ranlibcc", "xcode-select", "xcrun"];
 
 /// Return the exact closed native-compatibility command roles for one v1 host.
 ///
@@ -208,7 +217,7 @@ pub fn prepare_host_tool_closure(
 ) -> Result<HostToolClosure, ContractError> {
     if request.tools.is_empty() || request.tools.len() > MAX_HOST_TOOLS {
         return Err(ContractError::compatibility(
-            "compatibility host-tool closure must contain one to 64 explicit tools",
+            "compatibility host-tool closure exceeds its explicit 68-tool capacity",
         ));
     }
     let output_root = checked_absent_root(&request.output_root)?;
@@ -516,6 +525,7 @@ mod tests {
     fn required_roles_include_autotools_required_by_upstream_configure_and_metamake() {
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"aclocal"));
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"autoconf"));
+        assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"autom4te"));
         assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&"automake"));
     }
 
@@ -543,10 +553,14 @@ mod tests {
     #[test]
     fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
         let macos = native_compatibility_host_tools("macos-aarch64").unwrap();
+        assert!(macos.contains(&"llvm-arcc"));
+        assert!(macos.contains(&"llvm-ranlibcc"));
         assert!(macos.contains(&"xcode-select"));
         assert!(macos.contains(&"xcrun"));
 
         let linux = native_compatibility_host_tools("linux-x86_64").unwrap();
+        assert!(!linux.contains(&"llvm-arcc"));
+        assert!(!linux.contains(&"llvm-ranlibcc"));
         assert!(!linux.contains(&"xcode-select"));
         assert!(!linux.contains(&"xcrun"));
     }
