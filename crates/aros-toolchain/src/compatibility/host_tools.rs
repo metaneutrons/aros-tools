@@ -26,7 +26,7 @@ use crate::ContractError;
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
 // (macOS, including its SDK aliases); enlarging it requires an explicit
 // source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 77;
+const MAX_HOST_TOOLS: usize = 78;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -57,7 +57,9 @@ const MAX_HOST_TOOLS: usize = 77;
 /// path unnecessary. Its gzip-, bzip2-, and XZ-compressed source archives go
 /// through `tar`, which delegates to `gzip`, `bzip2`, and `xz` on GNU tar.
 /// These five programs are therefore literal requirements of the same sealed
-/// child. On Darwin,
+/// child. The ARM SoftFloat dependency is distributed as a ZIP archive, so
+/// upstream `fetch.sh` also invokes literal `unzip` while it materializes the
+/// reviewed source closure. On Darwin,
 /// upstream configure explicitly selects GNU sed as `gsed`.
 /// The generated MetaMake rules from upstream `config/make.tmpl` invoke
 /// literal `tee` to retain compiler and linker diagnostics, including during
@@ -136,6 +138,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "true",
     "uname",
     "uniq",
+    "unzip",
     "wc",
     "xargs",
     "xz",
@@ -775,6 +778,7 @@ mod tests {
             "gzip",
             "bzip2",
             "xz",
+            "unzip",
         ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }

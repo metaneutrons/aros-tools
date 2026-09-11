@@ -22,7 +22,10 @@ use super::{
     HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
     TwoRootRelocation,
 };
-use crate::compatibility_ports::{CompatibilityPortsPayload, CompatibilityPortsSources};
+use crate::compatibility_ports::{
+    safe_fetch_marker_path, safe_relative_path, CompatibilityPortsPayload,
+    CompatibilityPortsSources,
+};
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
 use crate::recipe::GitObjectId;
@@ -434,17 +437,9 @@ impl CompatibilityReceiptDocument {
             || self.ports_sources.iter().any(|source| {
                 !crate::profiles::identifier(&source.id)
                     || source.cache_filename.is_empty()
-                    || source.relative_path.is_empty()
-                    || source.relative_path.starts_with('/')
-                    || source
-                        .relative_path
-                        .split('/')
-                        .any(|part| part == "." || part == "..")
+                    || !safe_relative_path(&source.relative_path)
                     || (!source.fetch_marker.is_empty()
-                        && (!source.fetch_marker.starts_with('.')
-                            || !source.fetch_marker.ends_with("-fetched")
-                            || source.fetch_marker.contains('/')
-                            || source.fetch_marker.contains('\\')))
+                        && !safe_fetch_marker_path(&source.fetch_marker))
                     || source.size == 0
             })
         {
@@ -1105,6 +1100,7 @@ fn utf8_path(path: &Path, label: &str) -> Result<String, ContractError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
@@ -1112,13 +1108,17 @@ mod tests {
     use std::time::Duration;
 
     use aros_common::{
-        run_output, run_status, sha256_file, ArosToolchainManifest, CancellationToken,
+        run_output, run_status, sha256_file, ArosToolchainManifest, CancellationToken, Sha256Digest,
     };
     use flate2::{write::GzEncoder, Compression};
     use serde_json::json;
     use tar::{Builder, Header};
 
-    use super::{execute_native_compatibility, NativeCompatibilityRequest, StandaloneFixtures};
+    use super::{
+        execute_native_compatibility, CompatibilityReceiptDocument,
+        CompatibilityReceiptPortsSource, NativeCompatibilityRequest, StandaloneFixtures,
+        COMPATIBILITY_RECEIPT_SCHEMA,
+    };
     use crate::compatibility::{
         prepare, prepare_host_tool_closure, CompatibilityHostTool, CompatibilityPreparationRequest,
         HostToolClosureRequest, TwoRootRelocation, CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL,
@@ -1132,6 +1132,30 @@ mod tests {
     use crate::profiles::Profiles;
     use crate::python_environment::PythonEnvironment;
     use crate::source_lock::SourceLock;
+
+    #[test]
+    fn receipt_accepts_safe_nested_upstream_fetch_markers() {
+        let digest = Sha256Digest::parse(&"a".repeat(64)).unwrap();
+        let document = CompatibilityReceiptDocument {
+            schema: COMPATIBILITY_RECEIPT_SCHEMA.into(),
+            operation: "native-compatibility".into(),
+            upstream_source_commit: "b".repeat(40),
+            upstream_source_tree: "c".repeat(40),
+            ports_sources: vec![CompatibilityReceiptPortsSource {
+                id: "codesets-6-22".into(),
+                cache_filename: "codesets-6.22.tar.gz".into(),
+                relative_path: "codesets/6.22.tar.gz".into(),
+                fetch_marker: "codesets/.6.22-fetched".into(),
+                sha256: digest,
+                size: 1,
+            }],
+            phase_reports: Vec::new(),
+            standalone_targets: BTreeMap::new(),
+        };
+
+        let error = document.validate().unwrap_err();
+        assert!(error.to_string().contains("required ordered phase set"));
+    }
 
     #[test]
     fn executes_every_phase_with_two_roots_and_closed_environments() {
