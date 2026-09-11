@@ -26,7 +26,7 @@ use crate::ContractError;
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
 // (macOS, including its SDK aliases); enlarging it requires an explicit
 // source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 75;
+const MAX_HOST_TOOLS: usize = 76;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -52,10 +52,12 @@ const MAX_HOST_TOOLS: usize = 75;
 /// they must resolve inside the same closure rather than through an ambient
 /// runner path. Its generated MetaMake rules invoke `env` to bind their
 /// explicit configuration variables before they build `archtool`.
-/// The selected upstream `fetch.sh` extracts gzip-, bzip2-, and XZ-compressed
-/// source archives through `tar`, which delegates to `gzip`, `bzip2`, and
-/// `xz` on GNU tar. All four programs are therefore literal requirements of
-/// the same sealed child. On Darwin,
+/// The selected upstream `fetch.sh` falls back to `curl` for declared source
+/// origins, even when the verified local cache normally makes that transport
+/// path unnecessary. Its gzip-, bzip2-, and XZ-compressed source archives go
+/// through `tar`, which delegates to `gzip`, `bzip2`, and `xz` on GNU tar.
+/// These five programs are therefore literal requirements of the same sealed
+/// child. On Darwin,
 /// upstream configure explicitly selects GNU sed as `gsed`.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
@@ -78,6 +80,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "chmod",
     "cmp",
     "cp",
+    "curl",
     "cut",
     "date",
     "diff",
@@ -755,6 +758,7 @@ mod tests {
         for role in [
             "bash",
             "env",
+            "curl",
             "gcc",
             "strip",
             "uniq",
