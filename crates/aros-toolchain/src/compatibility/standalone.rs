@@ -15,8 +15,11 @@ use crate::ContractError;
 
 const MAX_STANDALONE_TARGETS: usize = 2;
 const MAX_STANDALONE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
-pub(super) const C_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__$";
-pub(super) const CXX_COLLECTOR_SYMBOL: &str = "__INIT_ARRAY_LIST__$";
+// `collect-aros` defines the list bounds as ordinary ELF symbols. The `$`
+// commonly shown after them is a shell-regex end anchor, not part of either
+// upstream symbol name.
+pub(super) const C_COLLECTOR_SYMBOL: &str = "__TOOLCHAIN_LIST__";
+pub(super) const CXX_COLLECTOR_SYMBOL: &str = "__INIT_ARRAY_LIST__";
 
 /// Explicit standalone C/C++ outputs for one selected target triple.
 #[derive(Debug, Clone)]

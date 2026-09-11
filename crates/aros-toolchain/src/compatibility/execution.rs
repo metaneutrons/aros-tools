@@ -1121,7 +1121,8 @@ mod tests {
     use super::{execute_native_compatibility, NativeCompatibilityRequest, StandaloneFixtures};
     use crate::compatibility::{
         prepare, prepare_host_tool_closure, CompatibilityHostTool, CompatibilityPreparationRequest,
-        HostToolClosureRequest, TwoRootRelocation, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
+        HostToolClosureRequest, TwoRootRelocation, CXX_COLLECTOR_SYMBOL, C_COLLECTOR_SYMBOL,
+        REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
     };
     use crate::compatibility_ports::{
         materialize, CompatibilityPortsLock, CompatibilityPortsSources,
@@ -1316,10 +1317,10 @@ mod tests {
         let cxx_elf = root.join("cxx.elf");
         let c_elf32 = root.join("c-i386.elf");
         let cxx_elf32 = root.join("cxx-i386.elf");
-        fs::write(&c_elf, fixture_elf64("__TOOLCHAIN_LIST__$")).unwrap();
-        fs::write(&cxx_elf, fixture_elf64("__INIT_ARRAY_LIST__$")).unwrap();
-        fs::write(&c_elf32, fixture_elf32("__TOOLCHAIN_LIST__$")).unwrap();
-        fs::write(&cxx_elf32, fixture_elf32("__INIT_ARRAY_LIST__$")).unwrap();
+        fs::write(&c_elf, fixture_elf64(C_COLLECTOR_SYMBOL)).unwrap();
+        fs::write(&cxx_elf, fixture_elf64(CXX_COLLECTOR_SYMBOL)).unwrap();
+        fs::write(&c_elf32, fixture_elf32(C_COLLECTOR_SYMBOL)).unwrap();
+        fs::write(&cxx_elf32, fixture_elf32(CXX_COLLECTOR_SYMBOL)).unwrap();
         for toolchain in [&first, &second] {
             script(
                 &toolchain.join("bin/clang"),
