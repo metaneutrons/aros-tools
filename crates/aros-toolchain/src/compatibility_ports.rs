@@ -48,7 +48,8 @@ pub struct CompatibilityPortsPayload {
     pub cache_filename: String,
     /// Safe relative path below the private upstream source directory.
     pub relative_path: String,
-    /// Exact empty marker name which upstream records after unpacking, if any.
+    /// Exact safe relative path of the empty marker which upstream records
+    /// after unpacking, if any.
     pub fetch_marker: String,
     /// Official immutable HTTPS location.
     pub url: String,
@@ -563,7 +564,7 @@ fn validate(record: &Record) -> Result<(), ContractError> {
             || !portable_filename(&input.cache_filename)
             || !safe_relative_path(&input.relative_path)
             || (!input.fetch_marker.is_empty()
-                && (!fetch_marker_name(&input.fetch_marker)
+                && (!safe_fetch_marker_path(&input.fetch_marker)
                     || !fetch_markers.insert(input.fetch_marker.as_str())))
             || !https_url(&input.url)
             || !identifiers.insert(input.id.as_str())
@@ -648,8 +649,9 @@ fn safe_relative_path(value: &str) -> bool {
             .all(|part| portable_filename(part) && part != "." && part != "..")
 }
 
-fn fetch_marker_name(value: &str) -> bool {
-    portable_filename(value) && value.starts_with('.') && value.ends_with("-fetched")
+fn safe_fetch_marker_path(value: &str) -> bool {
+    let basename = value.rsplit('/').next().unwrap_or_default();
+    safe_relative_path(value) && basename.starts_with('.') && basename.ends_with("-fetched")
 }
 
 fn https_url(value: &str) -> bool {
@@ -903,7 +905,7 @@ mod tests {
                 "bzip2",
                 "bzip2-1.0.8.tar.gz",
                 "ports/bzip2-1.0.8.tar.gz",
-                ".bzip2-1.0.8-fetched",
+                "ports/.bzip2-1.0.8-fetched",
                 bzip2,
             ),
         ]);
@@ -949,10 +951,10 @@ mod tests {
         .unwrap();
         assert!(sources.revalidate().is_err());
         fs::remove_file(sources.root.join("ports/bzip2-1.0.8.tar.gz.fetch")).unwrap();
-        fs::write(sources.root.join(".bzip2-1.0.8-fetched"), b"").unwrap();
+        fs::write(sources.root.join("ports/.bzip2-1.0.8-fetched"), b"").unwrap();
         assert!(sources.revalidate().is_err());
         sources.clear_upstream_fetch_markers().unwrap();
-        assert!(!sources.root.join(".bzip2-1.0.8-fetched").exists());
+        assert!(!sources.root.join("ports/.bzip2-1.0.8-fetched").exists());
         sources.revalidate().unwrap();
         assert_eq!(verify_cache(&cache, &lock).unwrap().payloads.len(), 3);
     }
