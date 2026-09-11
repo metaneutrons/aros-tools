@@ -22,6 +22,7 @@ use super::{
     HostToolClosure, StandaloneOutputReport, StandaloneOutputRequest, StandaloneTargetArtifacts,
     TwoRootRelocation,
 };
+use crate::compatibility_ports::{CompatibilityPortsPayload, CompatibilityPortsSources};
 use crate::profiles::Profile;
 use crate::python_environment::PythonEnvironment;
 use crate::recipe::GitObjectId;
@@ -73,6 +74,9 @@ pub struct NativeCompatibilityRequest {
     /// Fresh measured host command closure for CMake host tools and upstream
     /// configure and Make.
     pub host_tools: HostToolClosure,
+    /// Exact, private Unicode input directory supplied to the pinned upstream
+    /// `includes` rules.  It replaces their mutable network download path.
+    pub ports_sources: CompatibilityPortsSources,
     /// Closed v1 build-host selector used to derive the exact platform-specific
     /// command-role contract. The caller cannot weaken that contract.
     pub host: String,
@@ -116,6 +120,7 @@ struct CompatibilityReceiptDocument {
     operation: String,
     upstream_source_commit: String,
     upstream_source_tree: String,
+    ports_sources: Vec<CompatibilityReceiptPortsSource>,
     phase_reports: Vec<CompatibilityReceiptPhase>,
     standalone_targets: BTreeMap<String, CompatibilityReceiptTarget>,
 }
@@ -125,6 +130,14 @@ struct CompatibilityReceiptDocument {
 struct CompatibilityReceiptPhase {
     phase: CompatibilityPhase,
     report_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceiptPortsSource {
+    filename: String,
+    sha256: Sha256Digest,
+    size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +268,7 @@ pub fn execute_native_compatibility(
         ],
     };
     let probes = run_probe_set(&probes, cancellation)?;
+    request.ports_sources.revalidate()?;
     let standalone = verify_standalone_outputs(&StandaloneOutputRequest {
         output_root: outputs.standalone,
         targets: standalone.outputs,
@@ -272,6 +286,7 @@ pub fn execute_native_compatibility(
         &standalone,
         &inputs.upstream_source_commit,
         &inputs.upstream_source_tree,
+        &inputs.ports_sources,
     )?;
     Ok(NativeCompatibilityReport {
         probes,
@@ -286,6 +301,7 @@ fn write_compatibility_receipt(
     standalone: &StandaloneOutputReport,
     upstream_source_commit: &GitObjectId,
     upstream_source_tree: &GitObjectId,
+    ports_sources: &CompatibilityPortsSources,
 ) -> Result<CompatibilityReceipt, ContractError> {
     let mut persisted_reports = BTreeMap::new();
     let mut phase_reports = Vec::with_capacity(super::REQUIRED_PROBE_PHASES.len());
@@ -329,6 +345,7 @@ fn write_compatibility_receipt(
         operation: "native-compatibility".into(),
         upstream_source_commit: upstream_source_commit.as_str().into(),
         upstream_source_tree: upstream_source_tree.as_str().into(),
+        ports_sources: receipt_ports_sources(ports_sources)?,
         phase_reports,
         standalone_targets,
     };
@@ -384,6 +401,19 @@ impl CompatibilityReceiptDocument {
                 "native compatibility receipt has an unsupported schema or operation",
             ));
         }
+        if self.ports_sources.len() != 2
+            || self
+                .ports_sources
+                .iter()
+                .map(|source| source.filename.as_str())
+                .collect::<BTreeSet<_>>()
+                != BTreeSet::from(["SpecialCasing.txt", "UnicodeData.txt"])
+            || self.ports_sources.iter().any(|source| source.size == 0)
+        {
+            return Err(ContractError::compatibility(
+                "native compatibility receipt does not bind the exact Unicode input closure",
+            ));
+        }
         for identity in [&self.upstream_source_commit, &self.upstream_source_tree] {
             if GitObjectId::try_from(identity.clone()).is_err() {
                 return Err(ContractError::compatibility(
@@ -433,6 +463,24 @@ fn receipt_artifact(artifact: &super::StandaloneArtifactIdentity) -> Compatibili
     }
 }
 
+fn receipt_ports_sources(
+    ports_sources: &CompatibilityPortsSources,
+) -> Result<Vec<CompatibilityReceiptPortsSource>, ContractError> {
+    ports_sources.revalidate()?;
+    let sources = ports_sources
+        .payloads()
+        .into_iter()
+        .map(
+            |source: CompatibilityPortsPayload| CompatibilityReceiptPortsSource {
+                filename: source.filename,
+                sha256: source.sha256,
+                size: source.size,
+            },
+        )
+        .collect::<Vec<_>>();
+    Ok(sources)
+}
+
 fn valid_receipt_artifact(artifact: &CompatibilityReceiptArtifact) -> bool {
     artifact.size > 0 && matches!(artifact.class.as_str(), "elf32" | "elf64")
 }
@@ -449,6 +497,7 @@ struct Inputs {
     ninja: PathBuf,
     standalone_c: PathBuf,
     standalone_cxx: PathBuf,
+    ports_sources: CompatibilityPortsSources,
 }
 
 #[derive(Debug)]
@@ -498,10 +547,16 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
     )?;
     let upstream_source_tree =
         verify_pristine_upstream_source(&upstream_source, &request.upstream_source_commit)?;
+    request.ports_sources.revalidate()?;
+    let ports_sources = checked_directory(
+        &request.ports_sources.root,
+        "compatibility ports source directory",
+    )?;
     if upstream_source == request.preparation.source_root
         || upstream_source == request.preparation.engine_root
         || upstream_source == cmake_toolchain_root
         || upstream_source == upstream_toolchain_root
+        || upstream_source == ports_sources
     {
         return Err(ContractError::compatibility(
             "pristine upstream source must be distinct from tools-owned and package roots",
@@ -541,6 +596,7 @@ fn validate_inputs(request: &NativeCompatibilityRequest) -> Result<Inputs, Contr
         ninja,
         standalone_c,
         standalone_cxx,
+        ports_sources: request.ports_sources.clone(),
     })
 }
 
@@ -597,6 +653,7 @@ fn create_output_roots(
         &inputs.standalone_c,
         &inputs.standalone_cxx,
         &request.host_tools.root,
+        &inputs.ports_sources.root,
     ];
     protected.extend(request.host_python.import_roots());
     if roots.iter().any(|root| {
@@ -785,6 +842,10 @@ fn upstream_commands(
         "second compatibility package root",
     )?;
     let build = utf8_path(&outputs.upstream_build, "upstream compatibility build root")?;
+    let ports_sources = utf8_path(
+        &inputs.ports_sources.root,
+        "verified compatibility ports source directory",
+    )?;
     let manifest = &request.relocation.second.verified.manifest;
     let llvm_version = manifest.llvm_version.as_deref().ok_or_else(|| {
         ContractError::compatibility(
@@ -818,6 +879,7 @@ fn upstream_commands(
                 "--with-toolchain=llvm".into(),
                 format!("--with-llvm-version={llvm_version}"),
                 "--with-aros-toolchain=yes".into(),
+                format!("--with-portssources={ports_sources}"),
                 format!("--with-aros-toolchain-install={toolchain}"),
             ],
         },
@@ -1020,6 +1082,9 @@ mod tests {
         prepare, prepare_host_tool_closure, CompatibilityHostTool, CompatibilityPreparationRequest,
         HostToolClosureRequest, TwoRootRelocation, REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS,
     };
+    use crate::compatibility_ports::{
+        materialize, CompatibilityPortsLock, CompatibilityPortsSources,
+    };
     use crate::package_extract::ExtractedPackage;
     use crate::package_verify::VerifiedPackage;
     use crate::profiles::Profiles;
@@ -1068,6 +1133,7 @@ mod tests {
             "aros-toolchain-native-compatibility-receipt-v1"
         );
         assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
+        assert_eq!(receipt["ports_sources"].as_array().unwrap().len(), 2);
         assert_eq!(receipt["standalone_targets"].as_object().unwrap().len(), 2);
         assert_eq!(
             aros_common::sha256_file(&report.receipt.path)
@@ -1246,12 +1312,16 @@ mod tests {
                 verified,
             },
         };
+        let ports_sources = ports_sources(root);
 
         let upstream = root.join("upstream-source");
         fs::create_dir(&upstream).unwrap();
         script(
             &upstream.join("configure"),
-            "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${ac_cv_prog_cc_c23+x}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\npython3 -S -P -c 'import mako, markupsafe'",
+            &format!(
+                "[ \"$PATH\" != /nonexistent ] || exit 20\n[ \"${{ac_cv_prog_cc_c23+x}}\" = x ] && [ -z \"$ac_cv_prog_cc_c23\" ] || exit 21\ncase \" $* \" in *\" --with-portssources={} \"*) ;; *) exit 22;; esac\npython3 -S -P -c 'import mako, markupsafe'",
+                ports_sources.root.display(),
+            ),
         );
         git(&upstream, &["init", "-q"]);
         git(&upstream, &["config", "user.email", "test@example.invalid"]);
@@ -1334,6 +1404,7 @@ mod tests {
                 upstream_build_root: root.join("upstream-build"),
                 host_python: python,
                 host_tools: closure,
+                ports_sources,
                 host: "linux-x86_64".into(),
                 make_jobs: 2,
                 standalone_fixtures: StandaloneFixtures {
@@ -1432,6 +1503,35 @@ mod tests {
             ]
         })).unwrap()).unwrap();
         PythonEnvironment::prepare(&lock, &cache, &root.join("python-environment")).unwrap()
+    }
+
+    fn ports_sources(root: &Path) -> CompatibilityPortsSources {
+        let cache = root.join("ports-cache");
+        fs::create_dir(&cache).unwrap();
+        let unicode = b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n";
+        let special = b"# SpecialCasing-16.0.0.txt\n";
+        fs::write(cache.join("UnicodeData.txt"), unicode).unwrap();
+        fs::write(cache.join("SpecialCasing.txt"), special).unwrap();
+        let measured = |filename: &str| {
+            let measured = sha256_file(&cache.join(filename)).unwrap();
+            json!({
+                "filename": filename,
+                "url": format!("https://www.unicode.org/Public/16.0.0/ucd/{filename}"),
+                "sha256": measured.digest,
+                "size": measured.size,
+            })
+        };
+        let lock = CompatibilityPortsLock::parse(
+            serde_json::to_vec(&json!({
+                "schema": "aros-toolchain-compatibility-ports-v1",
+                "unicode_version": "16.0.0",
+                "inputs": [measured("UnicodeData.txt"), measured("SpecialCasing.txt")],
+            }))
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+        materialize(&cache, &lock, &root.join("ports-sources")).unwrap()
     }
 
     fn archive(path: &Path, entries: &[(&str, &[u8])]) {
