@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 
 use aros_common::{open_regular_file_nofollow, sha256_reader, Sha256Digest, Sha256Result};
 use aros_fetch::engine::cache::{
-    acquire_https_cache_payload, snapshot_verified_cache_payload, VerifiedCachePayload,
+    acquire_https_cache_payload_with_normalization, snapshot_verified_cache_payload,
+    CachePayloadNormalization, VerifiedCachePayload,
 };
 use serde::Deserialize;
 use url::Url;
@@ -51,6 +52,8 @@ pub struct CompatibilityPortsPayload {
     /// Exact safe relative path of the empty marker which upstream records
     /// after unpacking, if any.
     pub fetch_marker: String,
+    /// Explicit transport representation policy for the measured cache object.
+    pub normalization: CachePayloadNormalization,
     /// Official immutable HTTPS location.
     pub url: String,
     /// Complete SHA-256 identity.
@@ -91,6 +94,8 @@ struct Input {
     cache_filename: String,
     relative_path: String,
     fetch_marker: String,
+    #[serde(default)]
+    normalization: CachePayloadNormalization,
     url: String,
     #[serde(deserialize_with = "digest")]
     sha256: Sha256Digest,
@@ -146,6 +151,7 @@ impl CompatibilityPortsLock {
                 cache_filename: input.cache_filename.clone(),
                 relative_path: input.relative_path.clone(),
                 fetch_marker: input.fetch_marker.clone(),
+                normalization: input.normalization,
                 url: input.url.clone(),
                 sha256: input.sha256.clone(),
                 size: input.size,
@@ -202,6 +208,7 @@ impl CompatibilityPortsLock {
                     cache_filename: input.cache_filename.clone(),
                     relative_path: input.relative_path.clone(),
                     fetch_marker: input.fetch_marker.clone(),
+                    normalization: input.normalization,
                     url: input.url.clone(),
                     sha256: input.sha256.clone(),
                     size: input.size,
@@ -245,22 +252,27 @@ pub async fn acquire_cache(
 ) -> Result<CompatibilityPortsCache, ContractError> {
     let cache = checked_cache(cache)?;
     for payload in lock.payloads() {
-        let snapshot = acquire_https_cache_payload(
+        let snapshot = acquire_https_cache_payload_with_normalization(
             &cache,
             &payload.cache_filename,
             &payload.url,
             payload.size,
             &payload.sha256,
+            payload.normalization,
             offline,
         )
         .await
-        .map_err(|_| {
-            ContractError::sources(
-                "a compatibility ports input is missing, unsafe, changed, or could not be acquired",
-            )
+        .map_err(|error| {
+            ContractError::sources(format!(
+                "compatibility ports input '{}' could not be acquired or verified: {error}",
+                payload.id
+            ))
         })?;
         snapshot.revalidate().map_err(|_| {
-            ContractError::sources("a compatibility ports input changed after acquisition")
+            ContractError::sources(format!(
+                "compatibility ports input '{}' changed after acquisition",
+                payload.id
+            ))
         })?;
     }
     verify_cache(&cache, lock)
@@ -563,6 +575,8 @@ fn validate(record: &Record) -> Result<(), ContractError> {
         if !identifier(&input.id)
             || !portable_filename(&input.cache_filename)
             || !safe_relative_path(&input.relative_path)
+            || (input.normalization == CachePayloadNormalization::CanonicalTarGzipV1
+                && !canonical_tar_gzip_filename(&input.cache_filename))
             || (!input.fetch_marker.is_empty()
                 && (!safe_fetch_marker_path(&input.fetch_marker)
                     || !fetch_markers.insert(input.fetch_marker.as_str())))
@@ -637,6 +651,15 @@ fn portable_filename(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"+._-".contains(&byte))
+}
+
+fn canonical_tar_gzip_filename(value: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(".tar.gz".len())..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".tar.gz"))
+        || Path::new(value)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tgz"))
 }
 
 fn safe_relative_path(value: &str) -> bool {
@@ -835,7 +858,7 @@ mod tests {
     use aros_common::sha256_bytes;
     use serde_json::json;
 
-    use super::{materialize, verify_cache, CompatibilityPortsLock};
+    use super::{acquire_cache, materialize, verify_cache, CompatibilityPortsLock};
     use crate::recipe::GitObjectId;
 
     fn lock(payloads: &[(&str, &str, &str, &str, &[u8])]) -> CompatibilityPortsLock {
@@ -980,6 +1003,27 @@ mod tests {
     }
 
     #[test]
+    fn canonical_normalization_requires_a_gzip_tar_cache_filename() {
+        let document = json!({
+            "schema": "aros-toolchain-compatibility-ports-v2",
+            "upstream_commit": "a".repeat(40),
+            "inputs": [
+                {
+                    "id": "unicode-data",
+                    "cache_filename": "UnicodeData.txt",
+                    "relative_path": "UnicodeData.txt",
+                    "fetch_marker": "",
+                    "normalization": "canonical-tar-gzip-v1",
+                    "url": "https://example.invalid/UnicodeData.txt",
+                    "sha256": "a".repeat(64), "size": 1
+                }
+            ],
+            "profiles": [{"name": "pc-x86_64", "inputs": ["unicode-data"]}],
+        });
+        assert!(CompatibilityPortsLock::parse(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+
+    #[test]
     fn rejects_a_profile_that_selects_an_undeclared_input() {
         let document = json!({
             "schema": "aros-toolchain-compatibility-ports-v2",
@@ -1017,5 +1061,24 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn acquisition_names_the_missing_locked_input() {
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let lock = lock(&[(
+            "unicode-data",
+            "UnicodeData.txt",
+            "UnicodeData.txt",
+            "",
+            b"unicode",
+        )]);
+
+        let error = acquire_cache(&cache, &lock, true).await.unwrap_err();
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("unicode-data"));
+        assert!(diagnostic.contains("offline mode forbids acquisition"));
     }
 }
