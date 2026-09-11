@@ -26,7 +26,7 @@ use crate::ContractError;
 // guessed ambient-tool allowance. It equals the largest reviewed v1 role set
 // (macOS, including its SDK aliases); enlarging it requires an explicit
 // source-graph review and keeps the bounded invariant auditable.
-const MAX_HOST_TOOLS: usize = 76;
+const MAX_HOST_TOOLS: usize = 77;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -59,6 +59,10 @@ const MAX_HOST_TOOLS: usize = 76;
 /// These five programs are therefore literal requirements of the same sealed
 /// child. On Darwin,
 /// upstream configure explicitly selects GNU sed as `gsed`.
+/// The generated MetaMake rules from upstream `config/make.tmpl` invoke
+/// literal `tee` to retain compiler and linker diagnostics, including during
+/// otherwise successful commands that emit warnings. It is therefore also a
+/// required command inside this closure, not an ambient reporting helper.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
 /// [`native_compatibility_host_tools`].
@@ -125,6 +129,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "strip",
     "tail",
     "tar",
+    "tee",
     "test",
     "touch",
     "tr",
@@ -766,6 +771,7 @@ mod tests {
             "pngtopnm",
             "ppmtoilbm",
             "tar",
+            "tee",
             "gzip",
             "bzip2",
             "xz",
