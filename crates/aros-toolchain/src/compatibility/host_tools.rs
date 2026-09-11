@@ -22,7 +22,7 @@ use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 70;
+const MAX_HOST_TOOLS: usize = 72;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -48,6 +48,9 @@ const MAX_HOST_TOOLS: usize = 70;
 /// they must resolve inside the same closure rather than through an ambient
 /// runner path. Its generated MetaMake rules invoke `env` to bind their
 /// explicit configuration variables before they build `archtool`.
+/// The bzip2 port is unpacked by the selected upstream `fetch.sh`, so `tar`
+/// is also a literal requirement of the same sealed child. On Darwin,
+/// upstream configure explicitly selects GNU sed as `gsed`.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
 /// [`native_compatibility_host_tools`].
@@ -110,6 +113,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "sort",
     "strip",
     "tail",
+    "tar",
     "test",
     "touch",
     "tr",
@@ -128,8 +132,13 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
 // names to upstream. Pointing these aliases at the `/usr/bin` xcrun shims
 // would leak their alias names through argv[0] and make them search for their
 // own nonexistent names.
-const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] =
-    &["llvm-arcc", "llvm-ranlibcc", "xcode-select", "xcrun"];
+const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
+    "gsed",
+    "llvm-arcc",
+    "llvm-ranlibcc",
+    "xcode-select",
+    "xcrun",
+];
 
 /// Return the exact closed native-compatibility command roles for one v1 host.
 ///
@@ -229,7 +238,7 @@ pub fn prepare_host_tool_closure(
 ) -> Result<HostToolClosure, ContractError> {
     if request.tools.is_empty() || request.tools.len() > MAX_HOST_TOOLS {
         return Err(ContractError::compatibility(
-            "compatibility host-tool closure exceeds its explicit 70-tool capacity",
+            "compatibility host-tool closure exceeds its explicit 72-tool capacity",
         ));
     }
     let output_root = checked_absent_root(&request.output_root)?;
@@ -733,6 +742,7 @@ mod tests {
             "libpng-config",
             "pngtopnm",
             "ppmtoilbm",
+            "tar",
         ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }
@@ -741,12 +751,14 @@ mod tests {
     #[test]
     fn required_roles_include_macos_sdk_tools_required_by_upstream_configure() {
         let macos = native_compatibility_host_tools("macos-aarch64").unwrap();
+        assert!(macos.contains(&"gsed"));
         assert!(macos.contains(&"llvm-arcc"));
         assert!(macos.contains(&"llvm-ranlibcc"));
         assert!(macos.contains(&"xcode-select"));
         assert!(macos.contains(&"xcrun"));
 
         let linux = native_compatibility_host_tools("linux-x86_64").unwrap();
+        assert!(!linux.contains(&"gsed"));
         assert!(!linux.contains(&"llvm-arcc"));
         assert!(!linux.contains(&"llvm-ranlibcc"));
         assert!(!linux.contains(&"xcode-select"));

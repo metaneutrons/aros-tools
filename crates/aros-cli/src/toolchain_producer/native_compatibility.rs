@@ -24,10 +24,10 @@ use super::{
     PackageContextArgs, ResultFormat,
 };
 
-/// Inputs for the exact source-input closure consumed by upstream `includes`.
+/// Inputs for the exact source-input closure consumed by upstream Make phases.
 #[derive(Args)]
 pub(super) struct CompatibilityPortsArgs {
-    /// Compatibility-ports-v1 document selecting the exact immutable upstream inputs
+    /// Compatibility-ports-v2 document selecting exact immutable upstream inputs
     #[arg(long)]
     ports_lock: PathBuf,
     /// Existing local cache root; only ports-lock-selected direct children are used
@@ -82,7 +82,7 @@ pub(super) struct CompatibilityArgs {
     /// Prepared source cache containing the lock-owned host Python packages
     #[arg(long)]
     python_cache_dir: PathBuf,
-    /// Compatibility-ports-v1 lock selecting the exact upstream source inputs
+    /// Compatibility-ports-v2 lock selecting the exact upstream source inputs
     #[arg(long)]
     ports_lock: PathBuf,
     /// Prepared direct cache containing the ports-lock-owned source inputs
@@ -127,7 +127,7 @@ pub(super) struct CompatibilityArgs {
     format: ResultFormat,
 }
 
-/// Acquire or verify the versioned Unicode closure used by compatibility builds.
+/// Acquire or verify the complete versioned upstream source closure.
 pub(super) async fn compatibility_ports(args: CompatibilityPortsArgs) -> miette::Result<()> {
     let lock = CompatibilityPortsLock::parse(&read_regular_input(
         &args.ports_lock,
@@ -154,8 +154,8 @@ pub(super) async fn compatibility_ports(args: CompatibilityPortsArgs) -> miette:
             for payload in observation.payloads {
                 let _ = write!(
                     text,
-                    "\n  {} {} ({})",
-                    payload.sha256, payload.size, payload.filename
+                    "\n  {} {} ({} -> {})",
+                    payload.sha256, payload.size, payload.cache_filename, payload.relative_path
                 );
             }
             aros_common::outputln!("{text}");
@@ -165,7 +165,10 @@ pub(super) async fn compatibility_ports(args: CompatibilityPortsArgs) -> miette:
                 "schema": "aros-toolchain-producer-stage-v1",
                 "operation": if args.verify_only { "compatibility-ports-verify" } else { "compatibility-ports-acquire" },
                 "payloads": observation.payloads.into_iter().map(|payload| serde_json::json!({
-                    "filename": payload.filename,
+                    "id": payload.id,
+                    "cache_filename": payload.cache_filename,
+                    "relative_path": payload.relative_path,
+                    "fetch_marker": payload.fetch_marker,
                     "sha256": payload.sha256,
                     "size": payload.size,
                 })).collect::<Vec<_>>(),
@@ -268,6 +271,8 @@ fn execute_compatibility(
     let ports_sources = compatibility_ports::materialize(
         &args.ports_cache_dir,
         &ports_lock,
+        &context.upstream_commit,
+        verification.profile.name(),
         &args.ports_sources_dir,
     )?;
     drop(ports_lock);
