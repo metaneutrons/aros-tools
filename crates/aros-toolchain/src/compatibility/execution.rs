@@ -32,7 +32,7 @@ use crate::{canonical, inspection, ContractError};
 const POISONED_PATH: &str = "/nonexistent";
 const MAX_MAKE_JOBS: usize = 64;
 const UPSTREAM_SOURCE_AUDIT_TIMEOUT: Duration = Duration::from_mins(5);
-const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v1";
+const COMPATIBILITY_RECEIPT_SCHEMA: &str = "aros-toolchain-native-compatibility-receipt-v2";
 const COMPATIBILITY_RECEIPT_FILE: &str = "native-compatibility.receipt.json";
 
 /// Explicit C and C++ fixture files compiled through the installed drivers.
@@ -74,8 +74,8 @@ pub struct NativeCompatibilityRequest {
     /// Fresh measured host command closure for CMake host tools and upstream
     /// configure and Make.
     pub host_tools: HostToolClosure,
-    /// Exact, private Unicode input directory supplied to the pinned upstream
-    /// `includes` rules.  It replaces their mutable network download path.
+    /// Exact, private source closure supplied to pinned upstream `includes` and
+    /// `linklibs` rules. It replaces their mutable network download paths.
     pub ports_sources: CompatibilityPortsSources,
     /// Closed v1 build-host selector used to derive the exact platform-specific
     /// command-role contract. The caller cannot weaken that contract.
@@ -135,7 +135,10 @@ struct CompatibilityReceiptPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompatibilityReceiptPortsSource {
-    filename: String,
+    id: String,
+    cache_filename: String,
+    relative_path: String,
+    fetch_marker: String,
     sha256: Sha256Digest,
     size: u64,
 }
@@ -268,6 +271,7 @@ pub fn execute_native_compatibility(
         ],
     };
     let probes = run_probe_set(&probes, cancellation)?;
+    request.ports_sources.clear_upstream_fetch_markers()?;
     request.ports_sources.revalidate()?;
     let standalone = verify_standalone_outputs(&StandaloneOutputRequest {
         output_root: outputs.standalone,
@@ -401,14 +405,48 @@ impl CompatibilityReceiptDocument {
                 "native compatibility receipt has an unsupported schema or operation",
             ));
         }
-        if self.ports_sources.len() != 3
-            || self
-                .ports_sources
-                .iter()
-                .map(|source| source.filename.as_str())
-                .collect::<BTreeSet<_>>()
-                != BTreeSet::from(["SpecialCasing.txt", "UnicodeData.txt", "bzip2-1.0.8.tar.gz"])
-            || self.ports_sources.iter().any(|source| source.size == 0)
+        let ports_ids = self
+            .ports_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let ports_paths = self
+            .ports_sources
+            .iter()
+            .map(|source| source.relative_path.as_str())
+            .collect::<BTreeSet<_>>();
+        let declared_marker_count = self
+            .ports_sources
+            .iter()
+            .filter(|source| !source.fetch_marker.is_empty())
+            .count();
+        let ports_markers = self
+            .ports_sources
+            .iter()
+            .filter(|source| !source.fetch_marker.is_empty())
+            .map(|source| source.fetch_marker.as_str())
+            .collect::<BTreeSet<_>>();
+        if self.ports_sources.is_empty()
+            || self.ports_sources.len() > 128
+            || ports_ids.len() != self.ports_sources.len()
+            || ports_paths.len() != self.ports_sources.len()
+            || ports_markers.len() != declared_marker_count
+            || self.ports_sources.iter().any(|source| {
+                !crate::profiles::identifier(&source.id)
+                    || source.cache_filename.is_empty()
+                    || source.relative_path.is_empty()
+                    || source.relative_path.starts_with('/')
+                    || source
+                        .relative_path
+                        .split('/')
+                        .any(|part| part == "." || part == "..")
+                    || (!source.fetch_marker.is_empty()
+                        && (!source.fetch_marker.starts_with('.')
+                            || !source.fetch_marker.ends_with("-fetched")
+                            || source.fetch_marker.contains('/')
+                            || source.fetch_marker.contains('\\')))
+                    || source.size == 0
+            })
         {
             return Err(ContractError::compatibility(
                 "native compatibility receipt does not bind the exact upstream source-input closure",
@@ -472,7 +510,10 @@ fn receipt_ports_sources(
         .into_iter()
         .map(
             |source: CompatibilityPortsPayload| CompatibilityReceiptPortsSource {
-                filename: source.filename,
+                id: source.id,
+                cache_filename: source.cache_filename,
+                relative_path: source.relative_path,
+                fetch_marker: source.fetch_marker,
                 sha256: source.sha256,
                 size: source.size,
             },
@@ -1130,7 +1171,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&report.receipt.path).unwrap()).unwrap();
         assert_eq!(
             receipt["schema"],
-            "aros-toolchain-native-compatibility-receipt-v1"
+            "aros-toolchain-native-compatibility-receipt-v2"
         );
         assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
         assert_eq!(receipt["ports_sources"].as_array().unwrap().len(), 3);
@@ -1514,7 +1555,7 @@ mod tests {
         fs::write(cache.join("UnicodeData.txt"), unicode).unwrap();
         fs::write(cache.join("SpecialCasing.txt"), special).unwrap();
         fs::write(cache.join("bzip2-1.0.8.tar.gz"), bzip2).unwrap();
-        let measured = |filename: &str| {
+        let measured = |id: &str, filename: &str| {
             let measured = sha256_file(&cache.join(filename)).unwrap();
             let url = if filename == "bzip2-1.0.8.tar.gz" {
                 "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz".to_owned()
@@ -1522,7 +1563,10 @@ mod tests {
                 format!("https://www.unicode.org/Public/16.0.0/ucd/{filename}")
             };
             json!({
-                "filename": filename,
+                "id": id,
+                "cache_filename": filename,
+                "relative_path": filename,
+                "fetch_marker": if filename == "bzip2-1.0.8.tar.gz" { ".bzip2-1.0.8-fetched" } else { "" },
                 "url": url,
                 "sha256": measured.digest,
                 "size": measured.size,
@@ -1530,19 +1574,31 @@ mod tests {
         };
         let lock = CompatibilityPortsLock::parse(
             serde_json::to_vec(&json!({
-                "schema": "aros-toolchain-compatibility-ports-v1",
-                "unicode_version": "16.0.0",
+                "schema": "aros-toolchain-compatibility-ports-v2",
+                "upstream_commit": "a".repeat(40),
                 "inputs": [
-                    measured("UnicodeData.txt"),
-                    measured("SpecialCasing.txt"),
-                    measured("bzip2-1.0.8.tar.gz"),
+                    measured("unicode-data", "UnicodeData.txt"),
+                    measured("special-casing", "SpecialCasing.txt"),
+                    measured("bzip2", "bzip2-1.0.8.tar.gz"),
                 ],
+                "profiles": [{
+                    "name": "pc-x86_64",
+                    "inputs": ["unicode-data", "special-casing", "bzip2"],
+                }],
             }))
             .unwrap()
             .as_slice(),
         )
         .unwrap();
-        materialize(&cache, &lock, &root.join("ports-sources")).unwrap()
+        let upstream_commit = lock.upstream_commit().clone();
+        materialize(
+            &cache,
+            &lock,
+            &upstream_commit,
+            "pc-x86_64",
+            &root.join("ports-sources"),
+        )
+        .unwrap()
     }
 
     fn archive(path: &Path, entries: &[(&str, &[u8])]) {

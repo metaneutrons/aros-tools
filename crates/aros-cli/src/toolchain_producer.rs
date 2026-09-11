@@ -28,6 +28,7 @@ use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
 use aros_toolchain::{package, package_verify, Recipe};
 use clap::{Args, Subcommand, ValueEnum};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -51,7 +52,7 @@ enum ProducerCommand {
     Recipe(RecipeArgs),
     /// Acquire or verify the exact source-cache closure selected by a lock
     Cache(CacheArgs),
-    /// Acquire or verify exact Unicode ports inputs for upstream compatibility
+    /// Acquire or verify the exact upstream ports-source closure for compatibility
     CompatibilityPorts(native_compatibility::CompatibilityPortsArgs),
     /// Write the deterministic build-environment receipt embedded in a package
     Environment(EnvironmentArgs),
@@ -1231,37 +1232,112 @@ fn compatibility_report_digest(path: &std::path::Path) -> miette::Result<Sha256D
                 "native qualification evidence compatibility report omits its upstream source-input closure"
             )
         })?;
-    let exact_ports_sources = ports_sources.len() == 3
-        && ["SpecialCasing.txt", "UnicodeData.txt", "bzip2-1.0.8.tar.gz"]
-            .into_iter()
-            .all(|filename| {
-                ports_sources.iter().any(|source| {
-                    source.get("filename").and_then(serde_json::Value::as_str) == Some(filename)
-                        && source
-                            .get("sha256")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|digest| Sha256Digest::parse(digest).is_ok())
-                        && source
-                            .get("size")
-                            .and_then(serde_json::Value::as_u64)
-                            .is_some_and(|size| size > 0)
-                })
-            });
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("aros-toolchain-native-compatibility-receipt-v1")
+        != Some("aros-toolchain-native-compatibility-receipt-v2")
         || value.get("operation").and_then(serde_json::Value::as_str)
             != Some("native-compatibility")
         || value
             .get("phase_reports")
             .and_then(serde_json::Value::as_array)
             .is_none_or(|reports| reports.len() != 6)
-        || !exact_ports_sources
+        || !compatibility_ports_source_closure(ports_sources)
     {
         return Err(miette::miette!(
             "native qualification evidence compatibility report is incomplete or noncanonical"
         ));
     }
     Ok(digest)
+}
+
+fn compatibility_ports_source_closure(sources: &[serde_json::Value]) -> bool {
+    if sources.is_empty() || sources.len() > 128 {
+        return false;
+    }
+    let mut ids = BTreeSet::new();
+    let mut cache_filenames = BTreeSet::new();
+    let mut relative_paths = BTreeSet::new();
+    let mut fetch_markers = BTreeSet::new();
+    sources.iter().all(|source| {
+        let Some(record) = source.as_object() else {
+            return false;
+        };
+        if record.len() != 6
+            || !record.contains_key("id")
+            || !record.contains_key("cache_filename")
+            || !record.contains_key("relative_path")
+            || !record.contains_key("fetch_marker")
+            || !record.contains_key("sha256")
+            || !record.contains_key("size")
+        {
+            return false;
+        }
+        let Some(id) = record.get("id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(cache_filename) = record
+            .get("cache_filename")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(relative_path) = record
+            .get("relative_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(fetch_marker) = record
+            .get("fetch_marker")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let valid_id = !id.is_empty()
+            && id.len() <= 96
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let valid_filename = portable_compatibility_filename(cache_filename);
+        let valid_path = !relative_path.is_empty()
+            && relative_path.len() <= 512
+            && !relative_path.starts_with('/')
+            && !relative_path.contains('\\')
+            && relative_path
+                .split('/')
+                .all(portable_compatibility_filename);
+        let valid_marker = fetch_marker.is_empty()
+            || (portable_compatibility_filename(fetch_marker)
+                && fetch_marker.starts_with('.')
+                && fetch_marker.ends_with("-fetched"));
+        valid_id
+            && valid_filename
+            && valid_path
+            && valid_marker
+            && ids.insert(id)
+            && cache_filenames.insert(cache_filename)
+            && relative_paths.insert(relative_path)
+            && (fetch_marker.is_empty() || fetch_markers.insert(fetch_marker))
+            && record
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|digest| Sha256Digest::parse(digest).is_ok())
+            && record
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|size| size > 0)
+    })
+}
+
+fn portable_compatibility_filename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+._-".contains(&byte))
 }
 
 fn evidence_report(
@@ -1481,7 +1557,10 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{compare, environment, CompareArgs, EnvironmentArgs, ResultFormat};
+    use super::{
+        compare, compatibility_ports_source_closure, environment, CompareArgs, EnvironmentArgs,
+        ResultFormat,
+    };
     use crate::Cli;
 
     #[test]
@@ -1797,5 +1876,36 @@ mod tests {
         assert_eq!(document["operation"], "compare");
         assert_eq!(document["members"].as_array().unwrap().len(), 4);
         assert!(compare(&args).is_err());
+    }
+
+    #[test]
+    fn compatibility_receipt_closure_accepts_profiled_sources_and_rejects_tampering() {
+        let sources = vec![
+            serde_json::json!({
+                "id": "unicode-data",
+                "cache_filename": "UnicodeData.txt",
+                "relative_path": "UnicodeData.txt",
+                "fetch_marker": "",
+                "sha256": "a".repeat(64),
+                "size": 1,
+            }),
+            serde_json::json!({
+                "id": "mesa",
+                "cache_filename": "mesa-20.0.8.tar.xz",
+                "relative_path": "ports/mesa-20.0.8.tar.xz",
+                "fetch_marker": ".mesa-20.0.8-fetched",
+                "sha256": "b".repeat(64),
+                "size": 2,
+            }),
+        ];
+        assert!(compatibility_ports_source_closure(&sources));
+
+        let mut duplicate_path = sources.clone();
+        duplicate_path[1]["relative_path"] = serde_json::json!("UnicodeData.txt");
+        assert!(!compatibility_ports_source_closure(&duplicate_path));
+
+        let mut unsafe_path = sources;
+        unsafe_path[1]["relative_path"] = serde_json::json!("../mesa-20.0.8.tar.xz");
+        assert!(!compatibility_ports_source_closure(&unsafe_path));
     }
 }
