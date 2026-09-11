@@ -1,7 +1,7 @@
 //! Closed native compatibility producer commands.
 //!
 //! This module owns the compatibility-only CLI surface: explicit host-tool
-//! closure entries, the versioned Unicode input closure, and execution of the
+//! closure entries, the versioned upstream source-input closure, and execution of the
 //! six-phase native compatibility probe. Keeping it separate prevents the
 //! general producer command router from becoming the owner of consumer policy.
 
@@ -24,10 +24,10 @@ use super::{
     PackageContextArgs, ResultFormat,
 };
 
-/// Inputs for the exact Unicode closure consumed by upstream `includes`.
+/// Inputs for the exact source-input closure consumed by upstream `includes`.
 #[derive(Args)]
 pub(super) struct CompatibilityPortsArgs {
-    /// Compatibility-ports-v1 document selecting the two immutable Unicode inputs
+    /// Compatibility-ports-v1 document selecting the exact immutable upstream inputs
     #[arg(long)]
     ports_lock: PathBuf,
     /// Existing local cache root; only ports-lock-selected direct children are used
@@ -82,10 +82,10 @@ pub(super) struct CompatibilityArgs {
     /// Prepared source cache containing the lock-owned host Python packages
     #[arg(long)]
     python_cache_dir: PathBuf,
-    /// Compatibility-ports-v1 lock selecting the exact upstream Unicode inputs
+    /// Compatibility-ports-v1 lock selecting the exact upstream source inputs
     #[arg(long)]
     ports_lock: PathBuf,
-    /// Prepared direct cache containing the ports-lock-owned Unicode inputs
+    /// Prepared direct cache containing the ports-lock-owned source inputs
     #[arg(long)]
     ports_cache_dir: PathBuf,
     /// Absent private directory materialized for upstream --with-portssources
