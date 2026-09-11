@@ -1,9 +1,11 @@
-//! Exact offline Unicode inputs for the upstream compatibility `includes` phase.
+//! Exact offline compatibility inputs for the upstream `includes` phase.
 //!
 //! The pinned upstream Makefile otherwise downloads the mutable Unicode
 //! `latest` files itself.  A release qualification must never permit that
-//! implicit network input.  This module therefore owns a deliberately small
-//! lock format, verifies or acquires its two direct cache payloads, and
+//! implicit network input. The same upstream phase fetches the fixed bzip2
+//! source archive through `PORTSSOURCEDIR`. This module therefore owns a
+//! deliberately small lock format, verifies or acquires all direct cache
+//! payloads, and
 //! materializes a fresh read-only ports-source directory for `configure`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,18 +26,21 @@ use crate::ContractError;
 const SCHEMA: &str = "aros-toolchain-compatibility-ports-v1";
 const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024;
-const REQUIRED_FILENAMES: [&str; 2] = ["SpecialCasing.txt", "UnicodeData.txt"];
+const UNICODE_FILENAMES: [&str; 2] = ["SpecialCasing.txt", "UnicodeData.txt"];
+const BZIP2_FILENAME: &str = "bzip2-1.0.8.tar.gz";
+const BZIP2_URL: &str = "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz";
+const REQUIRED_FILENAMES: [&str; 3] = ["SpecialCasing.txt", "UnicodeData.txt", BZIP2_FILENAME];
 
-/// Exact declared Unicode input closure for the upstream `includes` phase.
+/// Exact declared source-input closure for the upstream `includes` phase.
 #[derive(Debug, Clone)]
 pub struct CompatibilityPortsLock(Record);
 
-/// One measured direct Unicode input selected by a ports lock.
+/// One measured direct source input selected by a ports lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatibilityPortsPayload {
     /// Portable filename consumed by upstream Make rules.
     pub filename: String,
-    /// Official immutable Unicode HTTPS location.
+    /// Official immutable HTTPS location.
     pub url: String,
     /// Complete SHA-256 identity.
     pub sha256: Sha256Digest,
@@ -77,15 +82,16 @@ struct Input {
 }
 
 impl CompatibilityPortsLock {
-    /// Parse and close the small Unicode-input contract without I/O.
+    /// Parse and close the small source-input contract without I/O.
     ///
-    /// The only accepted files are the two files called by the selected
-    /// upstream Makefiles, from an explicitly versioned Unicode release.
+    /// The only accepted inputs are the two files called by the selected
+    /// upstream Unicode Makefiles from an explicitly versioned release and
+    /// the bzip2 archive named by the same selected upstream tree.
     ///
     /// # Errors
     ///
     /// Returns AX0101 when the document is malformed, non-canonical, mutable,
-    /// or does not declare the exact two-file Unicode input closure.
+    /// or does not declare the exact upstream source-input closure.
     pub fn parse(bytes: &[u8]) -> Result<Self, ContractError> {
         if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(ContractError::invalid(
@@ -117,7 +123,7 @@ impl CompatibilityPortsLock {
     }
 }
 
-/// Verify that every selected Unicode payload is already present in `cache`.
+/// Verify that every selected compatibility payload is already present in `cache`.
 ///
 /// # Errors
 ///
@@ -135,7 +141,7 @@ pub fn verify_cache(
     Ok(CompatibilityPortsCache { payloads })
 }
 
-/// Acquire only missing lock-selected Unicode payloads, then verify all of them.
+/// Acquire only missing lock-selected compatibility payloads, then verify all of them.
 ///
 /// # Errors
 ///
@@ -393,7 +399,7 @@ fn validate(record: &Record) -> Result<(), ContractError> {
     }
     if record.inputs.len() != REQUIRED_FILENAMES.len() {
         return Err(ContractError::invalid(
-            "compatibility ports lock must declare exactly UnicodeData.txt and SpecialCasing.txt",
+            "compatibility ports lock must declare UnicodeData.txt, SpecialCasing.txt, and bzip2-1.0.8.tar.gz",
         ));
     }
     let mut names = BTreeSet::new();
@@ -404,22 +410,26 @@ fn validate(record: &Record) -> Result<(), ContractError> {
             || input.size > MAX_PAYLOAD_BYTES
         {
             return Err(ContractError::invalid(
-                "compatibility ports lock contains an invalid or duplicate Unicode input",
+                "compatibility ports lock contains an invalid or duplicate source input",
             ));
         }
-        let expected_url = format!(
-            "https://www.unicode.org/Public/{}/ucd/{}",
-            record.unicode_version, input.filename
-        );
+        let expected_url = if UNICODE_FILENAMES.contains(&input.filename.as_str()) {
+            format!(
+                "https://www.unicode.org/Public/{}/ucd/{}",
+                record.unicode_version, input.filename
+            )
+        } else {
+            BZIP2_URL.into()
+        };
         if input.url != expected_url {
             return Err(ContractError::invalid(
-                "compatibility ports lock input is not an official versioned Unicode URL",
+                "compatibility ports lock input is not an allowed immutable upstream URL",
             ));
         }
     }
     if names != BTreeSet::from(REQUIRED_FILENAMES) {
         return Err(ContractError::invalid(
-            "compatibility ports lock does not declare the required Unicode input set",
+            "compatibility ports lock does not declare the required upstream source input set",
         ));
     }
     Ok(())
@@ -501,7 +511,7 @@ mod tests {
 
     use super::{materialize, verify_cache, CompatibilityPortsLock};
 
-    fn lock(unicode: &[u8], special: &[u8]) -> CompatibilityPortsLock {
+    fn lock(unicode: &[u8], special: &[u8], bzip2: &[u8]) -> CompatibilityPortsLock {
         CompatibilityPortsLock::parse(
             serde_json::to_vec(&json!({
                 "schema": "aros-toolchain-compatibility-ports-v1",
@@ -516,6 +526,11 @@ mod tests {
                         "filename": "SpecialCasing.txt",
                         "url": "https://www.unicode.org/Public/16.0.0/ucd/SpecialCasing.txt",
                         "sha256": sha256_bytes(special), "size": special.len()
+                    },
+                    {
+                        "filename": "bzip2-1.0.8.tar.gz",
+                        "url": "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz",
+                        "sha256": sha256_bytes(bzip2), "size": bzip2.len()
                     }
                 ]
             }))
@@ -526,15 +541,17 @@ mod tests {
     }
 
     #[test]
-    fn materializes_exact_read_only_unicode_inputs_from_verified_cache() {
+    fn materializes_exact_read_only_compatibility_inputs_from_verified_cache() {
         let temporary = tempfile::tempdir().unwrap();
         let cache = temporary.path().join("cache");
         fs::create_dir(&cache).unwrap();
         let unicode = b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n";
         let special = b"# SpecialCasing-16.0.0.txt\n";
+        let bzip2 = b"bzip2 source archive";
         fs::write(cache.join("UnicodeData.txt"), unicode).unwrap();
         fs::write(cache.join("SpecialCasing.txt"), special).unwrap();
-        let lock = lock(unicode, special);
+        fs::write(cache.join("bzip2-1.0.8.tar.gz"), bzip2).unwrap();
+        let lock = lock(unicode, special, bzip2);
 
         let sources = materialize(&cache, &lock, &temporary.path().join("ports")).unwrap();
         assert_eq!(
@@ -545,12 +562,16 @@ mod tests {
             fs::read(sources.root.join("SpecialCasing.txt")).unwrap(),
             special
         );
+        assert_eq!(
+            fs::read(sources.root.join("bzip2-1.0.8.tar.gz")).unwrap(),
+            bzip2
+        );
         sources.revalidate().unwrap();
-        assert_eq!(verify_cache(&cache, &lock).unwrap().payloads.len(), 2);
+        assert_eq!(verify_cache(&cache, &lock).unwrap().payloads.len(), 3);
     }
 
     #[test]
-    fn rejects_a_mutable_or_wrong_unicode_origin() {
+    fn rejects_a_mutable_or_wrong_upstream_origin() {
         let document = json!({
             "schema": "aros-toolchain-compatibility-ports-v1",
             "unicode_version": "16.0.0",
@@ -564,6 +585,37 @@ mod tests {
                     "filename": "SpecialCasing.txt",
                     "url": "https://www.unicode.org/Public/16.0.0/ucd/SpecialCasing.txt",
                     "sha256": "b".repeat(64), "size": 1
+                },
+                {
+                    "filename": "bzip2-1.0.8.tar.gz",
+                    "url": "https://sourceware.org/pub/bzip2/latest.tar.gz",
+                    "sha256": "c".repeat(64), "size": 1
+                }
+            ]
+        });
+        assert!(CompatibilityPortsLock::parse(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_a_bzip2_archive_outside_the_pinned_upstream_origin() {
+        let document = json!({
+            "schema": "aros-toolchain-compatibility-ports-v1",
+            "unicode_version": "16.0.0",
+            "inputs": [
+                {
+                    "filename": "UnicodeData.txt",
+                    "url": "https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt",
+                    "sha256": "a".repeat(64), "size": 1
+                },
+                {
+                    "filename": "SpecialCasing.txt",
+                    "url": "https://www.unicode.org/Public/16.0.0/ucd/SpecialCasing.txt",
+                    "sha256": "b".repeat(64), "size": 1
+                },
+                {
+                    "filename": "bzip2-1.0.8.tar.gz",
+                    "url": "https://mirror.invalid/bzip2-1.0.8.tar.gz",
+                    "sha256": "c".repeat(64), "size": 1
                 }
             ]
         });

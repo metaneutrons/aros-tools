@@ -1228,11 +1228,11 @@ fn compatibility_report_digest(path: &std::path::Path) -> miette::Result<Sha256D
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
             miette::miette!(
-                "native qualification evidence compatibility report omits its Unicode input closure"
+                "native qualification evidence compatibility report omits its upstream source-input closure"
             )
         })?;
-    let exact_ports_sources = ports_sources.len() == 2
-        && ["SpecialCasing.txt", "UnicodeData.txt"]
+    let exact_ports_sources = ports_sources.len() == 3
+        && ["SpecialCasing.txt", "UnicodeData.txt", "bzip2-1.0.8.tar.gz"]
             .into_iter()
             .all(|filename| {
                 ports_sources.iter().any(|source| {

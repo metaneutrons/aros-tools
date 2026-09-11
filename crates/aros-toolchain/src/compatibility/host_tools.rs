@@ -3,24 +3,26 @@
 //!
 //! The AROS CMake engine and upstream `configure`/generated Makefiles
 //! necessarily resolve a bounded POSIX tool set by name. This module never
-//! inherits that search path into a build: it creates an owned directory
-//! containing only measured symlinks to caller-selected absolute executables.
+//! inherits that search path into a build: it creates an owned directory with
+//! measured symlinks to caller-selected absolute executables, plus two sealed
+//! Darwin argv-zero normalization wrappers where upstream requires them.
 //! Standalone C/C++ probes deliberately do not use this closure and retain
 //! their poisoned `PATH`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aros_common::Sha256Digest;
+use aros_common::{open_regular_file_nofollow, Sha256Digest};
 
 use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 68;
+const MAX_HOST_TOOLS: usize = 70;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -40,10 +42,12 @@ const MAX_HOST_TOOLS: usize = 68;
 /// those Autotools programs during configuration. Its generated MetaMake
 /// source later runs `autoconf` through its `autom4te` runner, so both programs
 /// are part of the same closure.
-/// It also requires the host `strip`, `uniq`, the `libpng-config` discovery
-/// program, and Netpbm
-/// conversion programs. Its generated MetaMake rules invoke `env` to bind
-/// their explicit configuration variables before they build `archtool`.
+/// It also requires the host `strip`, `uniq`, `gcc`, `bash`, the `libpng-config`
+/// discovery program, and Netpbm conversion programs. Some checked upstream
+/// helper rules retain the literal `gcc` and `/usr/bin/env bash` spellings;
+/// they must resolve inside the same closure rather than through an ambient
+/// runner path. Its generated MetaMake rules invoke `env` to bind their
+/// explicit configuration variables before they build `archtool`.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
 /// [`native_compatibility_host_tools`].
@@ -56,6 +60,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "automake",
     "awk",
     "basename",
+    "bash",
     "bison",
     "c++",
     "cat",
@@ -77,6 +82,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "find",
     "flex",
     "gawk",
+    "gcc",
     "grep",
     "head",
     "id",
@@ -117,8 +123,11 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
 // The pinned upstream configure script appends the host compiler suffix `cc`
 // to its LLVM binutils candidates on macOS.  For Apple Clang this probes the
 // historical spellings `llvm-arcc` and `llvm-ranlibcc`.  They are not ambient
-// commands: the workflow maps them to the already measured `ar` and `ranlib`
-// executables before this owned closure exposes the names to upstream.
+// commands: the workflow resolves the underlying Xcode tool paths through the
+// separately measured `xcrun` role before this owned closure exposes the
+// names to upstream. Pointing these aliases at the `/usr/bin` xcrun shims
+// would leak their alias names through argv[0] and make them search for their
+// own nonexistent names.
 const MACOS_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] =
     &["llvm-arcc", "llvm-ranlibcc", "xcode-select", "xcrun"];
 
@@ -176,6 +185,9 @@ pub struct HostToolIdentity {
     pub sha256: Sha256Digest,
     /// Exact selected executable size.
     pub size: u64,
+    /// Original executable name restored by a sealed wrapper when a Darwin
+    /// multi-call tool would otherwise inspect the compatibility alias name.
+    pub invocation_name: Option<&'static str>,
 }
 
 /// Owned, revalidatable host-command closure for CMake, configure, and Make
@@ -217,7 +229,7 @@ pub fn prepare_host_tool_closure(
 ) -> Result<HostToolClosure, ContractError> {
     if request.tools.is_empty() || request.tools.len() > MAX_HOST_TOOLS {
         return Err(ContractError::compatibility(
-            "compatibility host-tool closure exceeds its explicit 68-tool capacity",
+            "compatibility host-tool closure exceeds its explicit 70-tool capacity",
         ));
     }
     let output_root = checked_absent_root(&request.output_root)?;
@@ -237,8 +249,18 @@ pub fn prepare_host_tool_closure(
                 program,
                 sha256,
                 size,
+                invocation_name: normalized_invocation_name(&tool.name),
             },
         );
+    }
+    if tools
+        .values()
+        .any(|identity| identity.invocation_name.is_some())
+        && !tools.contains_key("bash")
+    {
+        return Err(ContractError::compatibility(
+            "compatibility host-tool alias wrappers require an explicit bash entry",
+        ));
     }
 
     fs::create_dir(&output_root).map_err(|_| {
@@ -260,11 +282,15 @@ pub fn prepare_host_tool_closure(
     let directory_identity = private_directory_identity(&output_root, &root_handle)?;
     for (name, identity) in &tools {
         let destination = output_root.join(name);
-        symlink(&identity.program, &destination).map_err(|_| {
-            ContractError::compatibility(
-                "cannot materialize a measured compatibility host-tool closure entry",
-            )
-        })?;
+        if let Some(invocation_name) = identity.invocation_name {
+            write_normalized_alias_wrapper(&destination, &identity.program, invocation_name)?;
+        } else {
+            symlink(&identity.program, &destination).map_err(|_| {
+                ContractError::compatibility(
+                    "cannot materialize a measured compatibility host-tool closure entry",
+                )
+            })?;
+        }
     }
     let closure = HostToolClosure {
         root: output_root,
@@ -277,7 +303,7 @@ pub fn prepare_host_tool_closure(
 }
 
 impl HostToolClosure {
-    /// Recheck every closure symlink and executable identity before a child starts.
+    /// Recheck every closure entry and executable identity before a child starts.
     ///
     /// # Errors
     ///
@@ -329,7 +355,18 @@ impl HostToolClosure {
                     "compatibility host-tool closure entry cannot be inspected",
                 )
             })?;
-            if !metadata.file_type().is_symlink()
+            if let Some(invocation_name) = expected.invocation_name {
+                if !valid_normalized_alias_wrapper(
+                    &destination,
+                    &metadata,
+                    &expected.program,
+                    invocation_name,
+                )? {
+                    return Err(ContractError::compatibility(
+                        "compatibility host-tool alias wrapper changed after preparation",
+                    ));
+                }
+            } else if !metadata.file_type().is_symlink()
                 || fs::read_link(&destination).ok().as_deref() != Some(expected.program.as_path())
             {
                 return Err(ContractError::compatibility(
@@ -346,6 +383,99 @@ impl HostToolClosure {
         }
         Ok(())
     }
+}
+
+fn normalized_invocation_name(name: &str) -> Option<&'static str> {
+    match name {
+        "llvm-arcc" => Some("ar"),
+        "llvm-ranlibcc" => Some("ranlib"),
+        _ => None,
+    }
+}
+
+fn write_normalized_alias_wrapper(
+    destination: &Path,
+    program: &Path,
+    invocation_name: &str,
+) -> Result<(), ContractError> {
+    let bytes = normalized_alias_wrapper_bytes(program, invocation_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|_| {
+            ContractError::compatibility(
+                "cannot create a normalized compatibility host-tool alias wrapper",
+            )
+        })?;
+    file.write_all(&bytes).map_err(|_| {
+        ContractError::compatibility(
+            "cannot write a normalized compatibility host-tool alias wrapper",
+        )
+    })?;
+    file.sync_all().map_err(|_| {
+        ContractError::compatibility(
+            "cannot durably write a normalized compatibility host-tool alias wrapper",
+        )
+    })?;
+    drop(file);
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o500)).map_err(|_| {
+        ContractError::compatibility(
+            "cannot seal a normalized compatibility host-tool alias wrapper",
+        )
+    })
+}
+
+fn valid_normalized_alias_wrapper(
+    destination: &Path,
+    metadata: &fs::Metadata,
+    program: &Path,
+    invocation_name: &str,
+) -> Result<bool, ContractError> {
+    let expected = normalized_alias_wrapper_bytes(program, invocation_name);
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o777 != 0o500
+        || metadata.len() != expected.len() as u64
+    {
+        return Ok(false);
+    }
+    let mut file = open_regular_file_nofollow(destination).map_err(|_| {
+        ContractError::compatibility(
+            "cannot safely open a normalized compatibility host-tool alias wrapper",
+        )
+    })?;
+    let opened = file.metadata().map_err(|_| {
+        ContractError::compatibility(
+            "cannot inspect a normalized compatibility host-tool alias wrapper",
+        )
+    })?;
+    if !opened.is_file()
+        || opened.permissions().mode() & 0o777 != 0o500
+        || opened.len() != expected.len() as u64
+    {
+        return Ok(false);
+    }
+    let mut actual = Vec::with_capacity(expected.len());
+    file.read_to_end(&mut actual).map_err(|_| {
+        ContractError::compatibility(
+            "cannot read a normalized compatibility host-tool alias wrapper",
+        )
+    })?;
+    Ok(actual == expected)
+}
+
+fn normalized_alias_wrapper_bytes(program: &Path, invocation_name: &str) -> Vec<u8> {
+    format!(
+        "#!/usr/bin/env bash\nexec -a {} {} \"$@\"\n",
+        shell_quote(invocation_name),
+        shell_quote(&program.to_string_lossy()),
+    )
+    .into_bytes()
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn checked_absent_root(path: &Path) -> Result<PathBuf, ContractError> {
@@ -459,6 +589,62 @@ mod tests {
     }
 
     #[test]
+    fn darwin_aliases_are_owned_argv_zero_normalizing_wrappers() {
+        let temporary = tempfile::tempdir().unwrap();
+        let inputs = temporary.path().join("inputs");
+        fs::create_dir(&inputs).unwrap();
+        let bash = executable(&inputs, "bash", b"#!/bin/sh\nexit 0\n");
+        let ar = executable(&inputs, "ar", b"#!/bin/sh\nexit 0\n");
+        let ranlib = executable(&inputs, "ranlib", b"#!/bin/sh\nexit 0\n");
+        let closure = prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("closure"),
+            tools: vec![
+                CompatibilityHostTool {
+                    name: "bash".into(),
+                    program: bash,
+                },
+                CompatibilityHostTool {
+                    name: "llvm-arcc".into(),
+                    program: ar,
+                },
+                CompatibilityHostTool {
+                    name: "llvm-ranlibcc".into(),
+                    program: ranlib,
+                },
+            ],
+        })
+        .unwrap();
+        for (name, original_name) in [("llvm-arcc", "ar"), ("llvm-ranlibcc", "ranlib")] {
+            let wrapper = closure.root.join(name);
+            assert!(!wrapper.is_symlink());
+            assert!(String::from_utf8(fs::read(&wrapper).unwrap())
+                .unwrap()
+                .contains(&format!("exec -a '{original_name}'")));
+        }
+        closure.revalidate().unwrap();
+        let ranlib_wrapper = closure.root.join("llvm-ranlibcc");
+        fs::remove_file(&ranlib_wrapper).unwrap();
+        fs::write(ranlib_wrapper, b"modified\n").unwrap();
+        assert!(closure.revalidate().is_err());
+    }
+
+    #[test]
+    fn darwin_alias_wrappers_require_a_measured_bash_runner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let inputs = temporary.path().join("inputs");
+        fs::create_dir(&inputs).unwrap();
+        let ar = executable(&inputs, "ar", b"#!/bin/sh\nexit 0\n");
+        assert!(prepare_host_tool_closure(&HostToolClosureRequest {
+            output_root: temporary.path().join("closure"),
+            tools: vec![CompatibilityHostTool {
+                name: "llvm-arcc".into(),
+                program: ar,
+            }],
+        })
+        .is_err());
+    }
+
+    #[test]
     fn closure_rejects_unsafe_names_duplicate_roles_and_reused_roots() {
         let temporary = tempfile::tempdir().unwrap();
         let program = executable(temporary.path(), "tool", b"#!/bin/sh\nexit 0\n");
@@ -539,7 +725,9 @@ mod tests {
     #[test]
     fn required_roles_include_unconditional_upstream_make_tools() {
         for role in [
+            "bash",
             "env",
+            "gcc",
             "strip",
             "uniq",
             "libpng-config",

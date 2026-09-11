@@ -401,17 +401,17 @@ impl CompatibilityReceiptDocument {
                 "native compatibility receipt has an unsupported schema or operation",
             ));
         }
-        if self.ports_sources.len() != 2
+        if self.ports_sources.len() != 3
             || self
                 .ports_sources
                 .iter()
                 .map(|source| source.filename.as_str())
                 .collect::<BTreeSet<_>>()
-                != BTreeSet::from(["SpecialCasing.txt", "UnicodeData.txt"])
+                != BTreeSet::from(["SpecialCasing.txt", "UnicodeData.txt", "bzip2-1.0.8.tar.gz"])
             || self.ports_sources.iter().any(|source| source.size == 0)
         {
             return Err(ContractError::compatibility(
-                "native compatibility receipt does not bind the exact Unicode input closure",
+                "native compatibility receipt does not bind the exact upstream source-input closure",
             ));
         }
         for identity in [&self.upstream_source_commit, &self.upstream_source_tree] {
@@ -1133,7 +1133,7 @@ mod tests {
             "aros-toolchain-native-compatibility-receipt-v1"
         );
         assert_eq!(receipt["phase_reports"].as_array().unwrap().len(), 6);
-        assert_eq!(receipt["ports_sources"].as_array().unwrap().len(), 2);
+        assert_eq!(receipt["ports_sources"].as_array().unwrap().len(), 3);
         assert_eq!(receipt["standalone_targets"].as_object().unwrap().len(), 2);
         assert_eq!(
             aros_common::sha256_file(&report.receipt.path)
@@ -1510,13 +1510,20 @@ mod tests {
         fs::create_dir(&cache).unwrap();
         let unicode = b"0000;<control>;Cc;0;BN;;;;;N;NULL;;;;\n";
         let special = b"# SpecialCasing-16.0.0.txt\n";
+        let bzip2 = b"bzip2 source archive";
         fs::write(cache.join("UnicodeData.txt"), unicode).unwrap();
         fs::write(cache.join("SpecialCasing.txt"), special).unwrap();
+        fs::write(cache.join("bzip2-1.0.8.tar.gz"), bzip2).unwrap();
         let measured = |filename: &str| {
             let measured = sha256_file(&cache.join(filename)).unwrap();
+            let url = if filename == "bzip2-1.0.8.tar.gz" {
+                "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz".to_owned()
+            } else {
+                format!("https://www.unicode.org/Public/16.0.0/ucd/{filename}")
+            };
             json!({
                 "filename": filename,
-                "url": format!("https://www.unicode.org/Public/16.0.0/ucd/{filename}"),
+                "url": url,
                 "sha256": measured.digest,
                 "size": measured.size,
             })
@@ -1525,7 +1532,11 @@ mod tests {
             serde_json::to_vec(&json!({
                 "schema": "aros-toolchain-compatibility-ports-v1",
                 "unicode_version": "16.0.0",
-                "inputs": [measured("UnicodeData.txt"), measured("SpecialCasing.txt")],
+                "inputs": [
+                    measured("UnicodeData.txt"),
+                    measured("SpecialCasing.txt"),
+                    measured("bzip2-1.0.8.tar.gz"),
+                ],
             }))
             .unwrap()
             .as_slice(),
