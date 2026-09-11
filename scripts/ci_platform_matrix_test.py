@@ -48,7 +48,7 @@ class PlatformMatrixTests(unittest.TestCase):
                 )
                 self.assertEqual(scope, "full")
                 self.assertEqual([entry["name"] for entry in value["include"]], [
-                    "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64",
+                    "linux-x86_64", "linux-aarch64", "macos-aarch64",
                 ])
                 self.assertTrue(value["include"][0]["source_qualification"])
                 self.assertFalse(any(entry["source_qualification"] for entry in value["include"][1:]))
@@ -69,7 +69,7 @@ class PlatformMatrixTests(unittest.TestCase):
         scope, reason, value = planner.plan(event="schedule", changed_paths=None, dispatch_scope="fast")
         self.assertEqual(scope, "full")
         self.assertEqual(reason, "scheduled native host sweep")
-        self.assertEqual(len(value["include"]), 4)
+        self.assertEqual(len(value["include"]), 3)
 
     def test_empty_malformed_or_unsafe_path_input_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

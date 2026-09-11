@@ -5,23 +5,12 @@
 //! source cache, and operate on already-built candidates; none can tag or
 //! publish a toolchain release.
 
-use std::fmt::Write as _;
-use std::fs;
-use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
-use std::time::Duration;
-
-use aros_common::{open_regular_file_nofollow, sha256_bytes, CancellationToken, Sha256Digest};
-use aros_toolchain::compatibility::{
-    self, native_compatibility_host_tools, CompatibilityHostTool, CompatibilityPreparationRequest,
-    HostToolClosureRequest, NativeCompatibilityRequest, StandaloneFixtures,
-    TwoRootRelocationRequest,
-};
+use aros_common::{open_regular_file_nofollow, sha256_bytes, Sha256Digest};
+use aros_toolchain::compatibility::native_compatibility_host_tools;
 use aros_toolchain::compatibility_source::{
     materialize_engine_free_source, EngineFreeSourceRequest,
 };
 use aros_toolchain::profiles::Profiles;
-use aros_toolchain::python_environment::PythonEnvironment;
 use aros_toolchain::qualification_evidence::{
     AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence, QualificationLane,
     ReleaseEvidence, SourceRunIdentity, QUALIFICATION_EVIDENCE_SCHEMA,
@@ -39,8 +28,15 @@ use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
 use aros_toolchain::{package, package_verify, Recipe};
 use clap::{Args, Subcommand, ValueEnum};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::fs;
+use std::io::{Read as _, Write as _};
+use std::path::PathBuf;
 
 use crate::observability;
+
+mod native_compatibility;
 
 /// Closed native producer stages exposed by `aros toolchain producer`.
 #[derive(Args)]
@@ -56,6 +52,8 @@ enum ProducerCommand {
     Recipe(RecipeArgs),
     /// Acquire or verify the exact source-cache closure selected by a lock
     Cache(CacheArgs),
+    /// Acquire or verify the exact upstream ports-source closure for compatibility
+    CompatibilityPorts(native_compatibility::CompatibilityPortsArgs),
     /// Write the deterministic build-environment receipt embedded in a package
     Environment(EnvironmentArgs),
     /// Read one recipe-bound producer profile without duplicating its selectors
@@ -84,7 +82,7 @@ enum ProducerCommand {
         host: String,
     },
     /// Execute all six native package-compatibility phases locally
-    Compatibility(Box<CompatibilityArgs>),
+    Compatibility(Box<native_compatibility::CompatibilityArgs>),
 }
 
 /// Machine- or human-readable local stage result.
@@ -473,85 +471,14 @@ struct IndexArgs {
     format: ResultFormat,
 }
 
-/// Inputs for one complete native six-phase package compatibility execution.
-#[derive(Args)]
-struct CompatibilityArgs {
-    #[command(flatten)]
-    context: PackageContextArgs,
-    /// Complete verified package set to extract twice independently
-    #[arg(long)]
-    package_dir: PathBuf,
-    /// Absent first relocation root for the CMake consumer
-    #[arg(long)]
-    first_root: PathBuf,
-    /// Absent second relocation root for upstream and standalone consumers
-    #[arg(long)]
-    second_root: PathBuf,
-    /// Engine-free source directory used for the tools-owned CMake consumer
-    #[arg(long)]
-    source_dir: PathBuf,
-    /// Existing work root where the embedded engine receives one fresh leaf
-    #[arg(long)]
-    engine_work_dir: PathBuf,
-    /// Fresh Cargo release directory containing the exact required helpers
-    #[arg(long)]
-    helpers_dir: PathBuf,
-    /// Explicit absolute CMake executable
-    #[arg(long)]
-    cmake_program: PathBuf,
-    /// Explicit absolute Ninja executable
-    #[arg(long)]
-    ninja_program: PathBuf,
-    /// Pristine upstream source tree containing the source-owned configure script
-    #[arg(long)]
-    upstream_source_dir: PathBuf,
-    /// Absent upstream build directory
-    #[arg(long)]
-    upstream_build_dir: PathBuf,
-    /// Prepared source cache containing the lock-owned host Python packages
-    #[arg(long)]
-    python_cache_dir: PathBuf,
-    /// Absent private host Python environment directory
-    #[arg(long)]
-    python_environment_dir: PathBuf,
-    /// Absent private host-command closure directory for CMake host tools and
-    /// upstream configure/Make
-    #[arg(long)]
-    host_tools_dir: PathBuf,
-    /// Exact host command closure entry as NAME=ABSOLUTE_PATH; repeatable
-    #[arg(long = "host-tool", value_name = "NAME=PATH")]
-    host_tools: Vec<String>,
-    /// Absent CMake consumer build directory
-    #[arg(long)]
-    cmake_build_dir: PathBuf,
-    /// C standalone fixture source
-    #[arg(long)]
-    c_fixture: PathBuf,
-    /// C++ standalone fixture source
-    #[arg(long)]
-    cxx_fixture: PathBuf,
-    /// Absent standalone-output directory
-    #[arg(long)]
-    standalone_output_dir: PathBuf,
-    /// Absent durable phase-report directory
-    #[arg(long)]
-    reports_dir: PathBuf,
-    /// Positive explicit Make parallelism
-    #[arg(long, value_parser = parse_compatibility_jobs)]
-    jobs: usize,
-    /// Positive per-phase deadline in seconds
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    timeout_seconds: u64,
-    /// Result representation on stdout
-    #[arg(long, value_enum, default_value = "human")]
-    format: ResultFormat,
-}
-
 /// Run one explicit native producer-input stage.
 pub async fn run(args: ProducerArgs) -> miette::Result<()> {
     match args.command {
         ProducerCommand::Recipe(args) => recipe(args),
         ProducerCommand::Cache(args) => cache(args).await,
+        ProducerCommand::CompatibilityPorts(args) => {
+            native_compatibility::compatibility_ports(args).await
+        }
         ProducerCommand::Environment(args) => environment(&args),
         ProducerCommand::Profile(args) => profile(&args),
         ProducerCommand::MaterializeEngineFreeSource(args) => {
@@ -566,7 +493,7 @@ pub async fn run(args: ProducerArgs) -> miette::Result<()> {
         ProducerCommand::PrepareRecovery(args) => prepare_recovery(&args),
         ProducerCommand::Index(args) => index(args),
         ProducerCommand::CompatibilityHostTools { host } => compatibility_host_tools(&host),
-        ProducerCommand::Compatibility(args) => compatibility(*args).await,
+        ProducerCommand::Compatibility(args) => native_compatibility::compatibility(*args).await,
     }
 }
 
@@ -1297,20 +1224,120 @@ fn comparison_report_digest(path: &std::path::Path) -> miette::Result<Sha256Dige
 
 fn compatibility_report_digest(path: &std::path::Path) -> miette::Result<Sha256Digest> {
     let (value, digest) = evidence_report(path, "native compatibility receipt")?;
+    let ports_sources = value
+        .get("ports_sources")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            miette::miette!(
+                "native qualification evidence compatibility report omits its upstream source-input closure"
+            )
+        })?;
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("aros-toolchain-native-compatibility-receipt-v1")
+        != Some("aros-toolchain-native-compatibility-receipt-v2")
         || value.get("operation").and_then(serde_json::Value::as_str)
             != Some("native-compatibility")
         || value
             .get("phase_reports")
             .and_then(serde_json::Value::as_array)
             .is_none_or(|reports| reports.len() != 6)
+        || !compatibility_ports_source_closure(ports_sources)
     {
         return Err(miette::miette!(
             "native qualification evidence compatibility report is incomplete or noncanonical"
         ));
     }
     Ok(digest)
+}
+
+fn compatibility_ports_source_closure(sources: &[serde_json::Value]) -> bool {
+    if sources.is_empty() || sources.len() > 128 {
+        return false;
+    }
+    let mut ids = BTreeSet::new();
+    let mut cache_filenames = BTreeSet::new();
+    let mut relative_paths = BTreeSet::new();
+    let mut fetch_markers = BTreeSet::new();
+    sources.iter().all(|source| {
+        let Some(record) = source.as_object() else {
+            return false;
+        };
+        if record.len() != 6
+            || !record.contains_key("id")
+            || !record.contains_key("cache_filename")
+            || !record.contains_key("relative_path")
+            || !record.contains_key("fetch_marker")
+            || !record.contains_key("sha256")
+            || !record.contains_key("size")
+        {
+            return false;
+        }
+        let Some(id) = record.get("id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(cache_filename) = record
+            .get("cache_filename")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(relative_path) = record
+            .get("relative_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(fetch_marker) = record
+            .get("fetch_marker")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let valid_id = !id.is_empty()
+            && id.len() <= 96
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let valid_filename = portable_compatibility_filename(cache_filename);
+        let valid_path = !relative_path.is_empty()
+            && relative_path.len() <= 512
+            && !relative_path.starts_with('/')
+            && !relative_path.contains('\\')
+            && relative_path
+                .split('/')
+                .all(portable_compatibility_filename);
+        let valid_marker = fetch_marker.is_empty()
+            || (portable_compatibility_filename(fetch_marker)
+                && fetch_marker.starts_with('.')
+                && fetch_marker.ends_with("-fetched"));
+        valid_id
+            && valid_filename
+            && valid_path
+            && valid_marker
+            && ids.insert(id)
+            && cache_filenames.insert(cache_filename)
+            && relative_paths.insert(relative_path)
+            && (fetch_marker.is_empty() || fetch_markers.insert(fetch_marker))
+            && record
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|digest| Sha256Digest::parse(digest).is_ok())
+            && record
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|size| size > 0)
+    })
+}
+
+fn portable_compatibility_filename(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+._-".contains(&byte))
 }
 
 fn evidence_report(
@@ -1388,156 +1415,6 @@ fn index(args: IndexArgs) -> miette::Result<()> {
         }))?,
     }
     Ok(())
-}
-
-async fn compatibility(args: CompatibilityArgs) -> miette::Result<()> {
-    let format = args.format;
-    let context = package_context(args.context.clone())?;
-    let host_tools = parse_host_tools(&args.host_tools)?;
-    let cancellation = CancellationToken::default();
-    let worker_token = cancellation.clone();
-    let mut worker = tokio::task::spawn_blocking(move || {
-        execute_compatibility(context, args, host_tools, &worker_token)
-    });
-    let report = tokio::select! {
-        result = &mut worker => result.map_err(|_| miette::miette!("native compatibility worker terminated unexpectedly"))?,
-        signal = tokio::signal::ctrl_c() => {
-            if signal.is_ok() {
-                cancellation.cancel();
-            }
-            (&mut worker).await.map_err(|_| miette::miette!("native compatibility worker terminated unexpectedly"))?
-        }
-    }
-    .map_err(|error| native_error(&error))?;
-    let phases = report
-        .probes
-        .reports
-        .keys()
-        .map(|phase| format!("{phase:?}"))
-        .collect::<Vec<_>>();
-    let standalone_targets = report
-        .standalone
-        .targets
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    match format {
-        ResultFormat::Human => aros_common::outputln!(
-            "Native compatibility: {} phases, {} standalone target(s)\nReceipt: {}\nSHA-256: {}",
-            phases.len(),
-            standalone_targets.len(),
-            report.receipt.path.display(),
-            report.receipt.sha256,
-        ),
-        ResultFormat::Json => print_json(&serde_json::json!({
-            "schema": "aros-toolchain-producer-stage-v1",
-            "operation": "compatibility",
-            "phases": phases,
-            "standalone_targets": standalone_targets,
-            "receipt": report.receipt.path,
-            "receipt_sha256": report.receipt.sha256,
-        }))?,
-    }
-    Ok(())
-}
-
-fn execute_compatibility(
-    context: PackageContext,
-    args: CompatibilityArgs,
-    host_tool_entries: Vec<CompatibilityHostTool>,
-    cancellation: &CancellationToken,
-) -> Result<compatibility::NativeCompatibilityReport, aros_toolchain::ContractError> {
-    let verification = package_verify::PackageVerificationRequest {
-        package_dir: args.package_dir,
-        release_id: context.release_id,
-        host: context.host.clone(),
-        recipe: context.recipe,
-        source_lock: context.source_lock,
-        profile: context.profile,
-        build_environment: context.build_environment,
-        forbidden_prefixes: context.forbidden_prefixes,
-    };
-    let relocation = compatibility::extract_two_roots(&TwoRootRelocationRequest {
-        verification: verification.clone(),
-        first_root: args.first_root,
-        second_root: args.second_root,
-    })?;
-    let preparation = compatibility::prepare(&CompatibilityPreparationRequest {
-        source_root: args.source_dir,
-        work_root: args.engine_work_dir,
-        helpers_root: args.helpers_dir,
-    })?;
-    let python = PythonEnvironment::prepare(
-        &verification.source_lock,
-        &args.python_cache_dir,
-        &args.python_environment_dir,
-    )?;
-    let host_tools = compatibility::prepare_host_tool_closure(&HostToolClosureRequest {
-        output_root: args.host_tools_dir,
-        tools: host_tool_entries,
-    })?;
-    compatibility::execute_native_compatibility(
-        &NativeCompatibilityRequest {
-            preparation,
-            relocation,
-            profile: verification.profile,
-            cmake_program: args.cmake_program,
-            ninja_program: args.ninja_program,
-            cmake_build_root: args.cmake_build_dir,
-            upstream_source_root: args.upstream_source_dir,
-            upstream_source_commit: context.upstream_commit,
-            upstream_build_root: args.upstream_build_dir,
-            host_python: python,
-            host_tools,
-            host: context.host,
-            make_jobs: args.jobs,
-            standalone_fixtures: StandaloneFixtures {
-                c: args.c_fixture,
-                cxx: args.cxx_fixture,
-            },
-            standalone_output_root: args.standalone_output_dir,
-            reports_root: args.reports_dir,
-            timeout: Duration::from_secs(args.timeout_seconds),
-        },
-        cancellation,
-    )
-}
-
-fn parse_host_tools(entries: &[String]) -> miette::Result<Vec<CompatibilityHostTool>> {
-    if entries.is_empty() {
-        return Err(miette::miette!(
-            "native compatibility requires at least one explicit --host-tool NAME=PATH entry"
-        ));
-    }
-    entries
-        .iter()
-        .map(|entry| {
-            let (name, program) = entry.split_once('=').ok_or_else(|| {
-                miette::miette!(
-                    "native compatibility host-tool entries must use NAME=ABSOLUTE_PATH"
-                )
-            })?;
-            if name.is_empty() || program.is_empty() {
-                return Err(miette::miette!(
-                    "native compatibility host-tool entries must use nonempty NAME=ABSOLUTE_PATH"
-                ));
-            }
-            Ok(CompatibilityHostTool {
-                name: name.to_owned(),
-                program: PathBuf::from(program),
-            })
-        })
-        .collect()
-}
-
-fn parse_compatibility_jobs(value: &str) -> Result<usize, String> {
-    let jobs = value
-        .parse::<usize>()
-        .map_err(|_| "expected an integer from 1 through 64".to_owned())?;
-    if !(1..=64).contains(&jobs) {
-        return Err("expected an integer from 1 through 64".to_owned());
-    }
-    Ok(jobs)
 }
 
 struct PackageContext {
@@ -1680,7 +1557,10 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{compare, environment, CompareArgs, EnvironmentArgs, ResultFormat};
+    use super::{
+        compare, compatibility_ports_source_closure, environment, CompareArgs, EnvironmentArgs,
+        ResultFormat,
+    };
     use crate::Cli;
 
     #[test]
@@ -1996,5 +1876,36 @@ mod tests {
         assert_eq!(document["operation"], "compare");
         assert_eq!(document["members"].as_array().unwrap().len(), 4);
         assert!(compare(&args).is_err());
+    }
+
+    #[test]
+    fn compatibility_receipt_closure_accepts_profiled_sources_and_rejects_tampering() {
+        let sources = vec![
+            serde_json::json!({
+                "id": "unicode-data",
+                "cache_filename": "UnicodeData.txt",
+                "relative_path": "UnicodeData.txt",
+                "fetch_marker": "",
+                "sha256": "a".repeat(64),
+                "size": 1,
+            }),
+            serde_json::json!({
+                "id": "mesa",
+                "cache_filename": "mesa-20.0.8.tar.xz",
+                "relative_path": "ports/mesa-20.0.8.tar.xz",
+                "fetch_marker": ".mesa-20.0.8-fetched",
+                "sha256": "b".repeat(64),
+                "size": 2,
+            }),
+        ];
+        assert!(compatibility_ports_source_closure(&sources));
+
+        let mut duplicate_path = sources.clone();
+        duplicate_path[1]["relative_path"] = serde_json::json!("UnicodeData.txt");
+        assert!(!compatibility_ports_source_closure(&duplicate_path));
+
+        let mut unsafe_path = sources;
+        unsafe_path[1]["relative_path"] = serde_json::json!("../mesa-20.0.8.tar.xz");
+        assert!(!compatibility_ports_source_closure(&unsafe_path));
     }
 }

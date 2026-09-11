@@ -60,17 +60,21 @@ change set
 (`README.md`, `CONTRIBUTING.md`, `docs/**` or `docs-site/**`) uses that Linux
 lane's source-independent `portable-test`. Every other change — including an
 unknown path, a workflow, contract, dependency, script or Rust change — uses
-all four native hosts. Linux x86-64 runs the source-coupled Rust suite; the
-other three hosts run `portable-test`. The planner is fail-closed: an empty,
-malformed or unclassified change list selects all four hosts.
+the active three native hosts. Linux x86-64 runs the source-coupled Rust suite;
+Linux ARM64 and macOS ARM64 run `portable-test`. The planner is fail-closed: an
+empty, malformed or unclassified change list selects all three active hosts.
 
 On a push to `main`, the Linux source lane also runs all compatible CMake
-fixtures. **Workspace CI → Run workflow** defaults to all four hosts and makes
-the cheaper Linux-only scope an explicit operator choice. A weekly four-host
-sweep detects runner and toolchain drift. Thus repeated documentation edits do
-not consume macOS capacity, while executable changes retain native coverage.
-The separate four-host release/package qualification runs only for immutable
-tags or an explicit Release qualification dispatch; ordinary PRs validate the
+fixtures. **Workspace CI → Run workflow** defaults to the active Linux
+x86-64/Linux ARM64/macOS ARM64 matrix and makes the cheaper Linux-only scope an
+explicit operator choice. A weekly three-host sweep detects runner and
+toolchain drift. Intel macOS qualification is suspended until the initial M7
+release is published; restoration is tracked in
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+Thus repeated documentation edits do not consume macOS capacity, while
+executable changes retain native coverage. The separate tools
+release/package qualification runs only for immutable tags or an explicit
+Release qualification dispatch; ordinary PRs validate the
 release policy in the Linux quality gate without rebuilding distributable
 archives.
 

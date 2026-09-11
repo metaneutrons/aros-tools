@@ -4,7 +4,10 @@ Status: accepted implementation evidence, recorded 2026-09-08.
 
 This ledger qualifies the M5 implementation boundary only. It is not a
 toolchain release, a publication record, or a substitution for TCP-M7's live
-four-host, three-profile qualification.
+three-host, three-profile qualification. Intel macOS remains schema-supported
+and historical four-host evidence remains readable, but new Intel macOS
+qualification is suspended until the initial release under
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
 
 ## Immutable identities
 
@@ -64,15 +67,18 @@ non-regular assets; and missing or mismatched source and signer claims.
 ## Closed recovery-input handoff
 
 The native producer records a recovery-eligible candidate in two deliberately
-separate steps. `record-qualification` measures the final 56-member inventory
-through no-follow file handles, verifies its checksum/index/package closure,
-and binds all 24 build, 12 comparison and 12 compatibility receipts to one
-short-lived qualification record. `prepare-recovery` then accepts that record
-only after the protected workflow has independently verified the original
-attestation and re-observed both annotated tags. It writes a closed recovery
-request, which `validate-recovery` measures again at the point of use.
+separate steps. For the active initial-release matrix,
+`record-qualification` measures the final 44-member inventory through
+no-follow file handles, verifies its checksum/index/package closure, and binds
+all 18 build, 9 comparison and 9 compatibility receipts to one short-lived
+qualification record. `prepare-recovery` then accepts that record only after
+the protected workflow has independently verified the original attestation and
+re-observed both annotated tags. It writes a closed recovery request, which
+`validate-recovery` measures again at the point of use. The parser and recovery
+validator retain the historical 56-member/four-host format only when its
+measured release index proves that exact complete matrix.
 
-The recovery request cannot be constructed from twelve retained archives
+The active recovery request cannot be constructed from nine retained archives
 alone. A failed draft handoff without the complete final inventory, exact
 qualification record, valid attestation, or immutable new tag is therefore a
 fresh-qualification case. The native commands have no network, credential,
@@ -103,6 +109,8 @@ omission(s)`, including the GRUB build and ISO-assets probes.
 
 These results establish native compatibility/replay/recovery parity at the M5
 boundary. They do **not** establish a distributable toolchain. TCP-M7 still
-requires one fresh live run of all twelve compatibility and relocation lanes,
-24 independent builds, 12 byte comparisons, isolated complete-draft download
-verification, and unchanged publication plus consumer-promotion checks.
+requires one fresh live run of all nine active compatibility and relocation
+lanes, 18 independent builds, 9 byte comparisons, isolated complete-draft
+download verification, and unchanged publication plus consumer-promotion
+checks. Intel macOS is deferred under
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).

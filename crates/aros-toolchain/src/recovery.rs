@@ -18,15 +18,23 @@ use crate::qualification_evidence::{
     AttestationClaim, EvidenceCoverage, EvidencePolicy, QualificationEvidence,
 };
 use crate::recipe::GitObjectId;
-use crate::release_index::NativeReleaseIndex;
+use crate::release_index::{NativeReleaseIndex, ACTIVE_V1_HOSTS, V1_HOSTS, V1_PROFILES};
 use crate::ContractError;
 
 const CHECKSUMS_NAME: &str = "SHA256SUMS";
 const INDEX_NAME: &str = "toolchain-index-v1.json";
 const PROVENANCE_NAME: &str = "toolchain-provenance.sigstore.json";
-const V1_FINAL_ASSET_COUNT: usize = 56;
-const V1_CHECKSUM_SUBJECT_COUNT: usize = V1_FINAL_ASSET_COUNT - 1;
+const ACTIVE_V1_FINAL_ASSET_COUNT: usize = 44;
+const ACTIVE_V1_CHECKSUM_SUBJECT_COUNT: usize = ACTIVE_V1_FINAL_ASSET_COUNT - 1;
+const HISTORICAL_V1_FINAL_ASSET_COUNT: usize = 56;
+const HISTORICAL_V1_CHECKSUM_SUBJECT_COUNT: usize = HISTORICAL_V1_FINAL_ASSET_COUNT - 1;
 const MAX_CHECKSUM_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseInventoryShape {
+    final_asset_count: usize,
+    checksum_subject_count: usize,
+}
 
 /// The only recovery actions that may reuse a qualified candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,9 +298,11 @@ pub fn validate_recovery_inventory(
 
 /// Measure and validate the complete final v1 inventory at an isolated path.
 ///
-/// The root must be an absolute real directory and must contain exactly the 56
-/// direct regular files that are named by its final checksum document: the 55
-/// checksummed subjects plus `SHA256SUMS` itself.  Archive identity, every
+/// The root must be an absolute real directory and must contain exactly the
+/// direct regular files named by its final checksum document. The accepted
+/// inventory size is selected from the parsed index: active releases contain
+/// 44 files (43 checksummed subjects), while historical four-host releases
+/// contain 56 files (55 checksummed subjects). Archive identity, every
 /// required sidecar, the final index and the provenance bundle are bound before
 /// a caller receives the observation.
 ///
@@ -304,6 +314,16 @@ pub fn measure_complete_release_inventory(
     release_root: &Path,
 ) -> Result<MeasuredReleaseInventory, ContractError> {
     let paths = enumerate_release_assets(release_root)?;
+    let release_index_path = paths.get(INDEX_NAME).ok_or_else(|| {
+        ContractError::recovery(
+            "isolated recovery release inventory is missing the native release index",
+        )
+    })?;
+    let release_index_bytes = read_bounded_release_asset(release_index_path)?;
+    let index = NativeReleaseIndex::parse(&release_index_bytes).map_err(|_| {
+        ContractError::recovery("isolated recovery release has an invalid native release index")
+    })?;
+    let shape = expected_inventory_shape(&index)?;
     let checksums_path = paths.get(CHECKSUMS_NAME).ok_or_else(|| {
         ContractError::recovery("isolated recovery release inventory is missing SHA256SUMS")
     })?;
@@ -314,8 +334,8 @@ pub fn measure_complete_release_inventory(
         .cloned()
         .chain(std::iter::once(CHECKSUMS_NAME.into()))
         .collect::<BTreeSet<_>>();
-    if expected_checksums.len() != V1_CHECKSUM_SUBJECT_COUNT
-        || paths.len() != V1_FINAL_ASSET_COUNT
+    if expected_checksums.len() != shape.checksum_subject_count
+        || paths.len() != shape.final_asset_count
         || paths.keys().cloned().collect::<BTreeSet<_>>() != expected_names
     {
         return Err(ContractError::recovery(
@@ -340,21 +360,48 @@ pub fn measure_complete_release_inventory(
             size,
         });
     }
-    let release_index_path = paths.get(INDEX_NAME).ok_or_else(|| {
-        ContractError::recovery(
-            "isolated recovery release inventory is missing the native release index",
-        )
-    })?;
-    let release_index_bytes = read_bounded_release_asset(release_index_path)?;
-    let index = NativeReleaseIndex::parse(&release_index_bytes).map_err(|_| {
-        ContractError::recovery("isolated recovery release has an invalid native release index")
-    })?;
     validate_index_inventory(&index, &measured_assets(&assets)?)?;
     Ok(MeasuredReleaseInventory {
         release_index_bytes,
         checksums_bytes,
         assets,
     })
+}
+
+fn expected_inventory_shape(
+    index: &NativeReleaseIndex,
+) -> Result<ReleaseInventoryShape, ContractError> {
+    let selectors = index
+        .artifacts
+        .iter()
+        .map(|artifact| (artifact.host.clone(), artifact.target_profile.clone()))
+        .collect::<BTreeSet<_>>();
+    if selectors == matrix_selectors(ACTIVE_V1_HOSTS) {
+        Ok(ReleaseInventoryShape {
+            final_asset_count: ACTIVE_V1_FINAL_ASSET_COUNT,
+            checksum_subject_count: ACTIVE_V1_CHECKSUM_SUBJECT_COUNT,
+        })
+    } else if selectors == matrix_selectors(V1_HOSTS) {
+        Ok(ReleaseInventoryShape {
+            final_asset_count: HISTORICAL_V1_FINAL_ASSET_COUNT,
+            checksum_subject_count: HISTORICAL_V1_CHECKSUM_SUBJECT_COUNT,
+        })
+    } else {
+        Err(ContractError::recovery(
+            "release index does not prove an accepted active or historical v1 matrix",
+        ))
+    }
+}
+
+fn matrix_selectors(hosts: &[&str]) -> BTreeSet<(String, String)> {
+    hosts
+        .iter()
+        .flat_map(|host| {
+            V1_PROFILES
+                .iter()
+                .map(move |profile| ((*host).to_owned(), (*profile).to_owned()))
+        })
+        .collect()
 }
 
 fn enumerate_release_assets(
@@ -501,6 +548,7 @@ fn validate_evidence_and_assets(request: &RecoveryRequest) -> Result<(), Contrac
     let index = NativeReleaseIndex::parse(&request.release_index_bytes).map_err(|_| {
         ContractError::recovery("recovery input has an invalid measured native release index")
     })?;
+    let shape = expected_inventory_shape(&index)?;
     let assets = measured_assets(&request.assets)?;
     if sha256_bytes(&request.release_index_bytes) != request.evidence.release.release_index_sha256
         || sha256_bytes(&request.checksums_bytes) != request.evidence.release.checksums_sha256
@@ -523,8 +571,8 @@ fn validate_evidence_and_assets(request: &RecoveryRequest) -> Result<(), Contrac
         .cloned()
         .chain(std::iter::once(CHECKSUMS_NAME.into()))
         .collect::<BTreeSet<_>>();
-    if expected_checksums.len() != V1_CHECKSUM_SUBJECT_COUNT
-        || assets.len() != V1_FINAL_ASSET_COUNT
+    if expected_checksums.len() != shape.checksum_subject_count
+        || assets.len() != shape.final_asset_count
         || assets.keys().cloned().collect::<BTreeSet<_>>() != expected_names
     {
         return Err(ContractError::recovery(
@@ -702,7 +750,7 @@ mod tests {
     use crate::profiles::{Profile, Profiles};
     use crate::qualification_evidence::{QualificationLane, QUALIFICATION_EVIDENCE_SCHEMA};
     use crate::qualification_evidence::{ReleaseEvidence, SourceRunIdentity};
-    use crate::release_index::{NativeReleaseArtifact, V1_HOSTS, V1_PROFILES};
+    use crate::release_index::{NativeReleaseArtifact, ACTIVE_V1_HOSTS, V1_HOSTS, V1_PROFILES};
     use crate::source_lock::SourceLock;
     use crate::Recipe;
 
@@ -715,7 +763,11 @@ mod tests {
     }
 
     fn index() -> NativeReleaseIndex {
-        let mut artifacts = V1_HOSTS
+        index_for_hosts(ACTIVE_V1_HOSTS)
+    }
+
+    fn index_for_hosts(hosts: &[&str]) -> NativeReleaseIndex {
+        let mut artifacts = hosts
             .iter()
             .flat_map(|host| {
                 V1_PROFILES
@@ -724,7 +776,7 @@ mod tests {
                         asset: crate::package::canonical_asset_name("11.0.0", host, profile)
                             .unwrap(),
                         sha256: digest(
-                            1 + V1_HOSTS
+                            1 + hosts
                                 .iter()
                                 .position(|candidate| candidate == host)
                                 .unwrap() as u64
@@ -766,11 +818,11 @@ mod tests {
     }
 
     fn evidence(
+        index: &NativeReleaseIndex,
         index_bytes: &[u8],
         checksums: Sha256Digest,
         provenance: Sha256Digest,
     ) -> QualificationEvidence {
-        let index = index();
         QualificationEvidence {
             schema: QUALIFICATION_EVIDENCE_SCHEMA.into(),
             created_at: 100,
@@ -882,12 +934,12 @@ mod tests {
             ("toolchain-recipe-v2.json".into(), digest(206), 17),
             ("tree-digest-v1.fixture.json".into(), digest(207), 18),
         ]);
-        assert_eq!(files.len(), 53);
+        assert_eq!(files.len(), index.artifacts.len() * 4 + 5);
         let index_digest = sha256_bytes(&index_bytes);
         files.push((INDEX_NAME.into(), index_digest, index_bytes.len() as u64));
         let provenance = digest(208);
         files.push((PROVENANCE_NAME.into(), provenance.clone(), 19));
-        assert_eq!(files.len(), 55);
+        assert_eq!(files.len(), index.artifacts.len() * 4 + 7);
         files.sort_by(|left, right| left.0.cmp(&right.0));
         let checksums_bytes = files
             .iter()
@@ -915,7 +967,7 @@ mod tests {
             sha256: checksums_digest.clone(),
             size: checksums_bytes.len() as u64,
         });
-        let evidence = evidence(&index_bytes, checksums_digest, provenance);
+        let evidence = evidence(index, &index_bytes, checksums_digest, provenance);
         RecoveryRequest {
             operation,
             failed_stage,
@@ -977,7 +1029,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let index = write_complete_release_fixture(temporary.path());
         let inventory = super::measure_complete_release_inventory(temporary.path()).unwrap();
-        assert_eq!(inventory.assets.len(), super::V1_FINAL_ASSET_COUNT);
+        assert_eq!(inventory.assets.len(), super::ACTIVE_V1_FINAL_ASSET_COUNT);
         let provenance = inventory
             .assets
             .iter()
@@ -994,17 +1046,63 @@ mod tests {
         request.checksums_bytes = inventory.checksums_bytes.clone();
         request.assets = inventory.assets;
         request.evidence = evidence(
+            &index,
             &request.release_index_bytes,
             sha256_bytes(&request.checksums_bytes),
             provenance,
         );
         request.verified_attestation = Some(request.evidence.attestation.clone());
         let validation = super::validate_recovery_inventory(&request, temporary.path()).unwrap();
-        assert_eq!(validation.asset_count, super::V1_FINAL_ASSET_COUNT);
+        assert_eq!(validation.asset_count, super::ACTIVE_V1_FINAL_ASSET_COUNT);
+    }
+
+    #[test]
+    fn complete_historical_inventory_remains_recoverable_when_index_proves_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let index = write_complete_release_fixture_for_hosts(temporary.path(), V1_HOSTS);
+        let inventory = super::measure_complete_release_inventory(temporary.path()).unwrap();
+        assert_eq!(
+            inventory.assets.len(),
+            super::HISTORICAL_V1_FINAL_ASSET_COUNT
+        );
+        let provenance = inventory
+            .assets
+            .iter()
+            .find(|asset| asset.name == PROVENANCE_NAME)
+            .unwrap()
+            .sha256
+            .clone();
+        let mut request = request_for_index(
+            &index,
+            RecoveryOperation::PackagingRecovery,
+            FailedStage::Packaging,
+        );
+        request.release_index_bytes = inventory.release_index_bytes.clone();
+        request.checksums_bytes = inventory.checksums_bytes.clone();
+        request.assets = inventory.assets;
+        request.evidence = evidence(
+            &index,
+            &request.release_index_bytes,
+            sha256_bytes(&request.checksums_bytes),
+            provenance,
+        );
+        request.verified_attestation = Some(request.evidence.attestation.clone());
+        let validation = super::validate_recovery_inventory(&request, temporary.path()).unwrap();
+        assert_eq!(
+            validation.asset_count,
+            super::HISTORICAL_V1_FINAL_ASSET_COUNT
+        );
     }
 
     fn write_complete_release_fixture(root: &std::path::Path) -> NativeReleaseIndex {
-        let mut index = index();
+        write_complete_release_fixture_for_hosts(root, ACTIVE_V1_HOSTS)
+    }
+
+    fn write_complete_release_fixture_for_hosts(
+        root: &std::path::Path,
+        hosts: &[&str],
+    ) -> NativeReleaseIndex {
+        let mut index = index_for_hosts(hosts);
         let mut files = BTreeMap::new();
         for (ordinal, artifact) in index.artifacts.iter_mut().enumerate() {
             let archive = format!("archive-{ordinal}\n").into_bytes();
@@ -1030,7 +1128,7 @@ mod tests {
         }
         files.insert(INDEX_NAME.into(), serde_json::to_vec(&index).unwrap());
         files.insert(PROVENANCE_NAME.into(), b"provenance\n".to_vec());
-        assert_eq!(files.len(), super::V1_CHECKSUM_SUBJECT_COUNT);
+        assert_eq!(files.len(), index.artifacts.len() * 4 + 7);
         let checksums = files
             .iter()
             .fold(String::new(), |mut output, (name, bytes)| {
@@ -1041,7 +1139,7 @@ mod tests {
                 output
             });
         files.insert(CHECKSUMS_NAME.into(), checksums.into_bytes());
-        assert_eq!(files.len(), super::V1_FINAL_ASSET_COUNT);
+        assert_eq!(files.len(), index.artifacts.len() * 4 + 8);
         for (name, bytes) in files {
             std::fs::write(root.join(name), bytes).unwrap();
         }
