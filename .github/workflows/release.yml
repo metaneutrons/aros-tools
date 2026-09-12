@@ -797,7 +797,7 @@ jobs:
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --allow-new "$allow_new"
       - name: Attest every native release subject
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
       - name: Upload signed native artifact set
@@ -1053,7 +1053,7 @@ jobs:
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --allow-new "$allow_new"
       - name: Attest package-manager metadata
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release/aros-tools.rb
@@ -1084,7 +1084,7 @@ jobs:
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --allow-new "$(cat "$RUNNER_TEMP/allow-new")"
       - name: Attest checksum inventory
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release/SHA256SUMS
