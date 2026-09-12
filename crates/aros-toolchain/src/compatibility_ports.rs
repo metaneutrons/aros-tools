@@ -672,7 +672,13 @@ pub(crate) fn safe_relative_path(value: &str) -> bool {
             .all(|part| portable_filename(part) && part != "." && part != "..")
 }
 
-pub(crate) fn safe_fetch_marker_path(value: &str) -> bool {
+/// Whether `value` is a safe relative path for an upstream fetch marker.
+///
+/// Fetch markers may deliberately reside beside a nested upstream source, for
+/// example `codesets/.6.22-fetched`; callers outside this crate use this
+/// predicate when they verify persisted compatibility evidence.
+#[must_use]
+pub fn safe_fetch_marker_path(value: &str) -> bool {
     let basename = value.rsplit('/').next().unwrap_or_default();
     safe_relative_path(value) && basename.starts_with('.') && basename.ends_with("-fetched")
 }

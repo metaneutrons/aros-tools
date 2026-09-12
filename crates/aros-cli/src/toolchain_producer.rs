@@ -1298,9 +1298,7 @@ fn compatibility_ports_source_closure(sources: &[serde_json::Value]) -> bool {
                 .split('/')
                 .all(portable_compatibility_filename);
         let valid_marker = fetch_marker.is_empty()
-            || (portable_compatibility_filename(fetch_marker)
-                && fetch_marker.starts_with('.')
-                && fetch_marker.ends_with("-fetched"));
+            || aros_toolchain::compatibility_ports::safe_fetch_marker_path(fetch_marker);
         valid_id
             && valid_filename
             && valid_path
@@ -1889,7 +1887,7 @@ mod tests {
                 "id": "mesa",
                 "cache_filename": "mesa-20.0.8.tar.xz",
                 "relative_path": "ports/mesa-20.0.8.tar.xz",
-                "fetch_marker": ".mesa-20.0.8-fetched",
+                "fetch_marker": "ports/.mesa-20.0.8-fetched",
                 "sha256": "b".repeat(64),
                 "size": 2,
             }),
@@ -1903,5 +1901,10 @@ mod tests {
         let mut unsafe_path = sources;
         unsafe_path[1]["relative_path"] = serde_json::json!("../mesa-20.0.8.tar.xz");
         assert!(!compatibility_ports_source_closure(&unsafe_path));
+
+        let mut unsafe_marker = unsafe_path;
+        unsafe_marker[1]["relative_path"] = serde_json::json!("ports/mesa-20.0.8.tar.xz");
+        unsafe_marker[1]["fetch_marker"] = serde_json::json!("ports/../.mesa-20.0.8-fetched");
+        assert!(!compatibility_ports_source_closure(&unsafe_marker));
     }
 }
