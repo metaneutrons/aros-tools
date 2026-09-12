@@ -32,18 +32,26 @@ preserves earlier checkpoints.
 - A fresh macOS AArch64 aros-cli store passed `toolchain list`, online install,
   verification, and offline re-install for all three released profiles.
 
+## TCP-M8 management acceptance
+
+- [PR #134](https://github.com/metaneutrons/aros-tools/pull/134) merged as
+  [`c4a6199782056d10bb5f8c20cb06f1139f989bcc`](https://github.com/metaneutrons/aros-tools/commit/c4a6199782056d10bb5f8c20cb06f1139f989bcc).
+  Its source tree (`da326ef2046aa3da6f2499ab881be11545a72fb6`) is identical to
+  the qualified PR head `d9195bc4c103169a233da206f084f4f09b0939e1`.
+- The [three-host Workspace CI run](https://github.com/metaneutrons/aros-tools/actions/runs/34722909249)
+  passed Linux x86-64 source-coupled tests, Linux AArch64 portable tests,
+  macOS AArch64 portable tests, formatting, architecture and Clippy. CodeQL
+  and the documentation gate passed against the same tree.
+- The accepted [M8 evidence ledger](docs/tcp-m8-lifecycle-evidence.md) records
+  the lifecycle contract, black-box preview/confirmation tests, adversarial
+  filesystem cases and explicit boundaries. Intel macOS remains deferred under
+  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+
 ## Current bounded action
 
-M7 integration is complete. AROS-NX
-[PR #30](https://github.com/metaneutrons/AROS-NX/pull/30) merged as
-`c6bbff066c31171d8ba7320a72060b7e5c5f1318`; it copies only measured RC8
-release-index values into the consumer lock, activates the nine qualified
-entries, suspends Intel macOS pending
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27),
-and preserves the disabled RISC-V entries.
-
-Intel macOS and RISC-V are explicit subsequent qualifications, not reasons to
-change or retarget RC8.
+M7 and M8 are complete. There is no pending release, compilation or real-store
+cleanup action. Intel macOS and RISC-V are explicit subsequent qualifications,
+not reasons to change or retarget RC8.
 
 ## Resume safely
 

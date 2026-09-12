@@ -8,7 +8,8 @@ slice from future release and qualification commands.
 
 Planning extension approved on 2026-09-06: TCP-M8 adds explicit local toolchain
 management. It is a separate acceptance track, not a new prerequisite for M7
-or the initial tools release. The extension is planned, not implemented.
+or the initial tools release. It was accepted through [PR #134](https://github.com/metaneutrons/aros-tools/pull/134)
+with [its own native evidence](tcp-m8-lifecycle-evidence.md).
 
 Execution is tracked in [epic #27](https://github.com/metaneutrons/aros-tools/issues/27).
 The M1 acceptance evidence is recorded below and its formal issue is
@@ -753,32 +754,32 @@ Delivery group: [Toolchain management](https://github.com/metaneutrons/aros-tool
 The [pre-M4 design review](toolchain-management-design.md) records the
 source-based store inventory which informed the
 [M8 management contract](toolchain-management-contract.md). The latter freezes
-the command, state and safety boundary; neither document implements or
-completes M8 alone.
+the command, state and safety boundary; the implementation and its three-host
+evidence are recorded in [the M8 ledger](tcp-m8-lifecycle-evidence.md).
 This extension can proceed after M4's envelope/verification acceptance,
 including its M0–M3 prerequisites. Design and existing-store inventory can
 start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
 
-- [ ] Freeze management commands, human/JSON results, diagnostics, ownership
+- [x] Freeze management commands, human/JSON results, diagnostics, ownership
   receipts, reference/lease policy and on-disk compatibility. Inventory all
   installed versions across project locks, with host/profile, immutable
   identity, provenance/qualification class, integrity state, location and
   known use references. Preserve current commands/defaults. New inventory and
   preview operations are bounded and non-mutating; they do not fetch or run
   untrusted toolchain executables merely to discover entries.
-- [ ] Reuse the existing content-addressed store, resolution, installation,
+- [x] Reuse the existing content-addressed store, resolution, installation,
   transport and verification contracts. A derived index must be rebuildable
   from validated state; a stale/tampered index cannot select, overwrite or
   delete an artifact. Do not duplicate these algorithms in CLI handlers or
   change the separate host-compiler manager implicitly.
-- [ ] Import a verified local candidate through staged, no-clobber copies
+- [x] Import a verified local candidate through staged, no-clobber copies
   into a managed envelope. Preserve its measured identity and qualification;
   imported/built is not synonymous with released/attested. External-prefix
   registration remains non-owning, never copies ownership onto an arbitrary
   directory, and records missing provenance explicitly. Preserve existing
   `--local` use without requiring registration. Managed cleanup never removes
   an external prefix or mutates the original import input.
-- [ ] Add explicit project-scoped selection with a read-only change preview,
+- [x] Add explicit project-scoped selection with a read-only change preview,
   compatibility checks and an atomic, concurrent-change-checked lock update.
   The project lock is the selection SSOT; no ambient global active/latest
   state or automatic activation after building/importing. Specify whole-lock
@@ -786,7 +787,7 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   never silently mix release identities or fabricate released values for a
   local candidate. Any incompatible schema extension needs a versioned,
   tested migration. A failed selection preserves the previous valid lock.
-- [ ] Implement explicit removal and conservative garbage collection with
+- [x] Implement explicit removal and conservative garbage collection with
   an exact-target dry-run, clear scope/size reporting and revalidation under
   store/reference locks before mutation. Protect registered project locks,
   active build leases and explicit retention references. A partial index or
@@ -794,22 +795,24 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   ownership or use prevents automatic cleanup. Do not infer permission to
   delete from a matching path/name, and never recurse over a checkout, volume,
   arbitrary parent, external registration or another tool's shared cache.
-- [ ] Prove safe concurrency and recovery for install/import/select/remove,
+- [x] Prove safe concurrency and recovery for install/import/select/remove,
   interrupted or stale leases, PID reuse, symlink/path substitution, modified
   lockfiles, corrupt manifests/indexes, disk-full/read-only failures and
   post-rename durability uncertainty. Only this operation's verified managed
   targets may change; previous valid selections, live inputs and external
   paths survive failed operations. Specify conservative stale-reference
   handling and on-disk rollback before enabling destructive commands.
-- [ ] Reuse the shared diagnostics/logging/process boundaries; distinguish
+- [x] Reuse the shared diagnostics/logging/process boundaries; distinguish
   a read-only plan, committed change and uncertain durability in machine
-  results. Run CLI/parser, package/store and failure fixtures on all four
-  native hosts using isolated envelopes and existing qualified vectors.
+  results. Run CLI/parser, package/store and failure fixtures on the three
+  active native hosts using isolated envelopes and existing qualified vectors.
+  Intel macOS remains explicitly deferred under
+  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
   Include valid imports/selections/removals and counter-probes for wrong
   provenance, unsupported profiles, mixed releases, active references and
   foreign ownership. No full compiler A/B matrix is added for management-only
   changes; normal feature-release distribution gates still apply.
-- [ ] Document shipped commands, project selection/rollback, local-versus-
+- [x] Document shipped commands, project selection/rollback, local-versus-
   release trust, offline behavior, external-prefix ownership and cleanup
   limits against the actual code. Record exact implementation PRs, format
   identities, host results, durable evidence and explicit omissions before
@@ -820,8 +823,8 @@ Exit evidence: merged implementation and source-verified docs; three-active-host
 positive/adversarial lifecycle results (with Intel macOS explicitly deferred
 under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)); safe project selection and cleanup
 demonstrations; and a reviewed state-format migration/rollback contract.
-Creating the issue or merging this planning extension does not complete M8
-and does not authorize real installation cleanup, compiler builds or releases.
+The accepted implementation still does not authorize real installation
+cleanup, compiler builds or releases outside their respective contracts.
 
 ## 8. Test strategy and runner budget
 
@@ -890,10 +893,11 @@ created on 2026-09-05 after producer implementation was authorized. The TCP-M8
 acceptance issue and fourth delivery group were added on 2026-09-06 after
 Fabian approved the management planning extension. No compiler matrix,
 release tag or publication is authorized by that tracking change. M8
-implementation began later through [PR #127](https://github.com/metaneutrons/aros-tools/pull/127)
-with the read-only inventory boundary. Verified import and non-owning
-registration follow as their own increment; selection, leases, cleanup and
-lifecycle qualification remain separately gated.
+implementation began through [PR #127](https://github.com/metaneutrons/aros-tools/pull/127)
+with the read-only inventory boundary. The later import, registration,
+selection, leases and cleanup increments were accepted together through
+[PR #134](https://github.com/metaneutrons/aros-tools/pull/134) and the
+[M8 evidence ledger](tcp-m8-lifecycle-evidence.md).
 
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |
@@ -905,7 +909,7 @@ lifecycle qualification remain separately gated.
 | TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | [Accepted evidence](tcp-m5-native-evidence.md) |
 | TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | [Accepted evidence](tcp-m6-native-evidence.md) |
 | TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | [RC8 qualification and consumer promotion](https://github.com/metaneutrons/aros-tools/pull/125) |
-| TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | In progress; [read-only inventory PR #127](https://github.com/metaneutrons/aros-tools/pull/127) |
+| TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | [Accepted evidence](tcp-m8-lifecycle-evidence.md) |
 
 ### Issue and pull-request contract
 
@@ -952,10 +956,10 @@ remain valid, every claimed host/profile is qualified, fault paths have stable
 diagnostics, and documentation matches shipped commands. Known exceptions must
 be explicitly scoped/deferred; they cannot be hidden behind "100%".
 
-The approved management extension is complete only when M8 closes with its
-own evidence. The expanded epic remains open until all nine acceptance issues
-are complete; that tracking relationship does not make M8 a release gate for
-M7 or for the first tools suite.
+The approved management extension closed with
+[its own evidence](tcp-m8-lifecycle-evidence.md). The expanded epic remains
+open until all nine acceptance issues are complete; that tracking relationship
+does not make M8 a release gate for M7 or for the first tools suite.
 
 ## 10. Rollout risks and decisions that must remain explicit
 
