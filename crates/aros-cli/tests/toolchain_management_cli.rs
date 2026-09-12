@@ -199,3 +199,79 @@ fn stale_import_preview_cannot_publish_after_the_source_changes() {
     assert!(!stale_apply.status.success());
     assert!(!store.exists());
 }
+
+#[test]
+fn owned_import_removal_is_preview_gated_and_checkout_independent() {
+    let temporary = tempfile::tempdir().unwrap();
+    let working_directory = temporary.path().join("not-an-aros-checkout");
+    let source = temporary.path().join("candidate");
+    let store = temporary.path().join("store");
+    fs::create_dir(&working_directory).unwrap();
+    write_candidate(&source);
+
+    let import_preview = output_json(
+        &command(&working_directory)
+            .args(["toolchain", "import", "--format", "json", "--source"])
+            .arg(&source)
+            .arg("--store")
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    let import_token = import_preview["apply_token"].as_str().unwrap();
+    let imported = output_json(
+        &command(&working_directory)
+            .args(["toolchain", "import", "--format", "json", "--source"])
+            .arg(&source)
+            .arg("--store")
+            .arg(&store)
+            .args(["--apply", import_token])
+            .output()
+            .unwrap(),
+    );
+    let managed_id = imported["id"].as_str().unwrap();
+    let envelope = imported["destination"].as_str().unwrap();
+
+    let preview = output_json(
+        &command(&working_directory)
+            .args([
+                "toolchain",
+                "remove",
+                "--format",
+                "json",
+                "--managed-id",
+                managed_id,
+                "--store",
+            ])
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(preview["schema"], "aros-toolchain-lifecycle-v1");
+    assert_eq!(preview["operation"], "remove");
+    assert_eq!(preview["state"], "preview");
+    assert_eq!(preview["candidates"][0]["status"], "eligible");
+    assert!(Path::new(envelope).is_dir());
+    let token = preview["apply_token"].as_str().unwrap();
+
+    let removed = output_json(
+        &command(&working_directory)
+            .args([
+                "toolchain",
+                "remove",
+                "--format",
+                "json",
+                "--managed-id",
+                managed_id,
+                "--store",
+            ])
+            .arg(&store)
+            .args(["--apply", token])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(removed["state"], "committed");
+    assert_eq!(removed["candidates"][0]["status"], "removed");
+    assert!(!Path::new(envelope).exists());
+    assert!(source.join(AROS_TOOLCHAIN_MANIFEST_FILE).is_file());
+}

@@ -57,6 +57,12 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         Commands::Toolchain {
             command: ToolchainCommands::Register(args),
         } => crate::toolchain_management::register(args),
+        Commands::Toolchain {
+            command: ToolchainCommands::Remove(args),
+        } => crate::toolchain_lifecycle::remove(args),
+        Commands::Toolchain {
+            command: ToolchainCommands::Gc(args),
+        } => crate::toolchain_lifecycle::gc(args),
         Commands::Toolchain { command } => {
             toolchain_command(required_repo(repo_root)?, command).await
         }
@@ -205,6 +211,8 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
         ToolchainCommands::Import(args) => crate::toolchain_management::import(args)?,
         ToolchainCommands::Register(args) => crate::toolchain_management::register(args)?,
         ToolchainCommands::Select(args) => crate::toolchain_selection::select(repo_root, args)?,
+        ToolchainCommands::Remove(args) => crate::toolchain_lifecycle::remove(args)?,
+        ToolchainCommands::Gc(args) => crate::toolchain_lifecycle::gc(args)?,
         ToolchainCommands::Install {
             preset,
             force,

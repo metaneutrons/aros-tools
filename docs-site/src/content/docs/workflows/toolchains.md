@@ -133,8 +133,44 @@ nor proves that a supplied lock was published or attested; use the normal
 release verification workflow for that evidence. Imported and registered local
 prefixes remain unavailable to selection.
 
-Removal and garbage collection remain unavailable until their own M8 safety
-gates are implemented.
+## Remove or reclaim an owned local import
+
+Only an import created by `aros toolchain import` can be removed. Released
+toolchains, archive caches and prefixes supplied through `--local` remain
+outside this command family. Start with a preview for one exact managed ID:
+
+    aros toolchain remove --managed-id SHA256_FROM_INVENTORY \
+      --store /absolute/path/to/store --format json
+
+The preview is read-only. It reports the exact owned envelope, its bounded
+no-follow snapshot, entry count and regular-file byte scope. It also reports
+whether a project reference, external registration or active OS-held build
+lease retains the candidate. Confirm only the token shown by that preview:
+
+    aros toolchain remove --managed-id SHA256_FROM_INVENTORY \
+      --store /absolute/path/to/store --apply TOKEN_FROM_PREVIEW
+
+`aros toolchain gc` follows the same preview/apply protocol for all currently
+eligible owned imports:
+
+    aros toolchain gc --store /absolute/path/to/store --format json
+    aros toolchain gc --store /absolute/path/to/store --apply TOKEN_FROM_PREVIEW
+
+GC is an explicit operator-authorized reclamation, not proof that an old or
+unregistered client is unable to use a path. Read the complete preview before
+confirming it. Any malformed control record, unexpected entry, changed project
+lock, active lease, external registration, symlink or unresolved removal record
+blocks cleanup rather than being ignored. If deletion fails after its durable
+removal journal is published, do not retry blindly: preserve the envelope and
+inspect the reported indeterminate state.
+
+Cleanup is intentionally single-user store management, not a shared-storage
+protocol. It rejects a store path with a group- or world-writable ancestor,
+directory or regular payload file, and rejects multiply linked payload files.
+This creates the required permissions boundary around POSIX's final
+identity-check-to-unlink interval. Cooperating AROS processes are serialized
+by OS-held locks; an arbitrary process running as the same store owner is
+outside that boundary and should not share a managed store.
 
 ## Use an existing AROS-built prefix
 

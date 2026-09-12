@@ -184,6 +184,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         options.input_policy.offline,
     )
     .await?;
+    let lease = crate::toolchain_lifecycle::acquire_for_build(repo_root, &resolved)?;
     let build_tools = build_tools::ensure(repo_root)?;
 
     aros_common::outputln!(
@@ -322,6 +323,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         style("SUCCESS: ").green().bold(),
         start.elapsed()
     );
+    drop(lease);
     Ok(())
 }
 

@@ -62,6 +62,237 @@ fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
 }
 
 #[cfg(unix)]
+#[test]
+fn advisory_lock_probe_is_read_only_and_distinguishes_live_ownership() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("management/store.lock");
+
+    assert_eq!(
+        probe_advisory_file_lock(&lock_path).unwrap().state,
+        AdvisoryLockState::Absent
+    );
+    assert!(!lock_path.exists());
+
+    let guard = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    assert_eq!(
+        probe_advisory_file_lock(&lock_path).unwrap().state,
+        AdvisoryLockState::Held
+    );
+    drop(guard);
+
+    assert_eq!(
+        probe_advisory_file_lock(&lock_path).unwrap().state,
+        AdvisoryLockState::Unheld
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn advisory_lock_revalidation_rejects_a_substituted_lock_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("management/store.lock");
+    let guard = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    let original_identity = guard.identity().unwrap();
+    let displaced = temporary.path().join("management/displaced.lock");
+    std::fs::rename(&lock_path, &displaced).unwrap();
+    std::fs::write(&lock_path, b"unlocked replacement").unwrap();
+
+    let replacement = probe_advisory_file_lock(&lock_path).unwrap();
+    assert_ne!(replacement.identity, Some(original_identity));
+    assert_eq!(replacement.state, AdvisoryLockState::Unheld);
+    assert!(guard.revalidate().is_err());
+}
+
+#[test]
+fn publication_lock_names_have_one_shared_validation_contract() {
+    let journal =
+        publication_journal_path(Path::new("/tmp/managed-envelope"), "prepared-tree").unwrap();
+    let lock = publication_journal_lock_path(&journal).unwrap();
+    assert!(is_publication_journal_lock_name(
+        lock.file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(!is_publication_journal_lock_name(
+        ".aros-lock-not-a-digest-0000000000000000"
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_never_follows_a_link_or_touches_a_sibling() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    let sibling = temporary.path().join("sibling");
+    std::fs::create_dir_all(owned.join("nested")).unwrap();
+    std::fs::write(owned.join("nested/payload"), b"owned").unwrap();
+    std::fs::write(&sibling, b"must-survive").unwrap();
+    symlink(&sibling, owned.join("outside-link")).unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+
+    remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).unwrap();
+
+    assert!(!owned.exists());
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"must-survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_changed_tree_without_deleting_it() {
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir_all(owned.join("nested")).unwrap();
+    let payload = owned.join("nested/payload");
+    std::fs::write(&payload, b"before").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    std::fs::write(&payload, b"after").unwrap();
+
+    assert!(remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).is_err());
+    assert_eq!(std::fs::read(payload).unwrap(), b"after");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_group_writable_payload() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir(&owned).unwrap();
+    let payload = owned.join("payload");
+    std::fs::write(&payload, b"fixture").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+    let error = remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(owned.is_dir());
+    assert_eq!(std::fs::read(payload).unwrap(), b"fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_hard_linked_payload() {
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir(&owned).unwrap();
+    let payload = owned.join("payload");
+    let alias = temporary.path().join("payload-alias");
+    std::fs::write(&payload, b"fixture").unwrap();
+    std::fs::hard_link(&payload, &alias).unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+
+    let error = remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(owned.is_dir());
+    assert_eq!(std::fs::read(&payload).unwrap(), b"fixture");
+    assert_eq!(std::fs::read(alias).unwrap(), b"fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_group_writable_ancestor() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir(&owned).unwrap();
+    std::fs::write(owned.join("payload"), b"fixture").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    let mode = std::fs::metadata(temporary.path()).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(
+        temporary.path(),
+        std::fs::Permissions::from_mode(mode | 0o020),
+    )
+    .unwrap();
+
+    let result = remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits);
+
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(owned.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_permits_a_sticky_writable_ancestor() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir(&owned).unwrap();
+    std::fs::write(owned.join("payload"), b"fixture").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    let mode = std::fs::metadata(temporary.path()).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(
+        temporary.path(),
+        std::fs::Permissions::from_mode(mode | 0o1022),
+    )
+    .unwrap();
+
+    let result = remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits);
+
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+    result.unwrap();
+    assert!(!owned.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_same_name_swap_before_unlink() {
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    let payload = owned.join("payload");
+    std::fs::create_dir(&owned).unwrap();
+    std::fs::write(&payload, b"approved").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    let displaced = owned.join("displaced-approved");
+    let displaced_for_action = displaced.clone();
+
+    let result = at_boundary(
+        "snapshot-removal-before-regular-unlink",
+        |path| path.file_name() == Some(std::ffi::OsStr::new("payload")),
+        move |path| {
+            std::fs::rename(path, &displaced_for_action).unwrap();
+            std::fs::write(path, b"unapproved replacement").unwrap();
+        },
+        || remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&payload).unwrap(), b"unapproved replacement");
+    assert_eq!(std::fs::read(displaced).unwrap(), b"approved");
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_nofollow_directory_listing_refuses_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("directory");
+    let link = temporary.path().join("link");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("entry"), b"fixture").unwrap();
+    symlink(&directory, &link).unwrap();
+
+    assert_eq!(
+        directory_entry_names_nofollow_bounded(&directory, 4).unwrap(),
+        vec![std::ffi::OsString::from("entry")]
+    );
+    assert!(directory_entry_names_nofollow_bounded(&link, 4).is_err());
+}
+
+#[cfg(unix)]
 struct BoundaryAction {
     point: &'static str,
     matches: Box<dyn Fn(&Path) -> bool>,

@@ -38,6 +38,22 @@ impl TreeContentCas {
         self.entries.len()
     }
 
+    /// Total bytes in regular files represented by this snapshot.
+    ///
+    /// Returns `None` only if a platform supplied an invalid negative size or
+    /// the exact sum does not fit in `u64`. Callers can treat that condition as
+    /// a safety blocker rather than guessing a destructive operation's scope.
+    #[must_use]
+    pub fn regular_file_bytes(&self) -> Option<u64> {
+        self.entries
+            .values()
+            .filter(|entry| entry.snapshot.kind == 1)
+            .try_fold(0_u64, |total, entry| {
+                let size = u64::try_from(entry.snapshot.size).ok()?;
+                total.checked_add(size)
+            })
+    }
+
     /// Return a stable digest of names, node kinds, regular-file bytes, and
     /// link targets. Identity and timestamps are deliberately excluded so an
     /// independently staged equivalent tree has the same digest. A top-level

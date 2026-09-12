@@ -9,8 +9,10 @@ use crate::observability;
 use crate::repo;
 use crate::toolchain;
 use crate::toolchain_management::{
-    acquire_store_lock, management_store, normalized_absolute_utf8, publication_error,
-    stable_token, ResultFormat, MANAGEMENT_DIRECTORY,
+    acquire_store_lock, management_store, normalized_absolute_utf8, project_lock_path,
+    project_reference_path, publication_error, publish_project_reference_receipt,
+    read_project_reference, stable_token, MeasuredProjectReference, ProjectReferenceReceipt,
+    ResultFormat,
 };
 use aros_common::{
     measure_regular_file_bounded, parse_credential_free_https_url, publish_atomic_file,
@@ -18,16 +20,12 @@ use aros_common::{
 };
 use clap::Args;
 use miette::{IntoDiagnostic, Result, WrapErr};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const SELECTION_SCHEMA: &str = "aros-toolchain-selection-v1";
-const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
-const PROJECT_REFERENCES_DIRECTORY: &str = "projects/v1";
-const PROJECT_REFERENCE_SCHEMA: &str = "aros-toolchain-project-reference-v1";
 const MAX_RELEASE_LOCK_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_PROJECT_REFERENCE_BYTES: u64 = 1024 * 1024;
 
 /// Arguments for the project-scoped release-lock selection operation.
 #[derive(Args)]
@@ -75,30 +73,6 @@ struct MeasuredReleaseLock {
     bytes: Vec<u8>,
     sha256: String,
     lock: ArosToolchainLock,
-}
-
-/// A derived, non-authoritative index entry for a selected project lock.
-///
-/// The project lock remains the sole selection authority. This receipt only
-/// gives later lifecycle commands a bounded, durable path back to the lock so
-/// an unreadable, moved, or manually changed project blocks cleanup instead of
-/// being mistaken for non-use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProjectReferenceReceipt {
-    schema: String,
-    project: String,
-    project_lock: String,
-    release_id: String,
-    lock_sha256: String,
-}
-
-#[derive(Debug, Clone)]
-struct MeasuredProjectReference {
-    identity: FileIdentity,
-    bytes: Vec<u8>,
-    sha256: String,
-    receipt: ProjectReferenceReceipt,
 }
 
 #[derive(Debug, Clone)]
@@ -218,52 +192,21 @@ fn commit_plan(plan: &SelectionPlan) -> Result<()> {
 
 fn publish_project_reference(plan: &SelectionPlan) -> Result<()> {
     let receipt = ProjectReferenceReceipt {
-        schema: PROJECT_REFERENCE_SCHEMA.to_owned(),
+        schema: "aros-toolchain-project-reference-v1".to_owned(),
         project: plan.project.clone(),
         project_lock: normalized_absolute_utf8(&plan.project_lock, "project lock")?,
         release_id: plan.candidate.lock.release_id.clone(),
         lock_sha256: plan.candidate.sha256.clone(),
     };
-    let bytes = serde_json::to_vec_pretty(&receipt)
-        .into_diagnostic()
-        .wrap_err("cannot serialize project reference receipt")?;
-    let policy = plan
-        .previous_reference
-        .as_ref()
-        .map_or(AtomicFilePolicy::NoClobber, |previous| {
-            AtomicFilePolicy::ReplaceIf {
-                identity: previous.identity,
-                sha256: sha256_bytes(&previous.bytes),
-            }
-        });
-    if let Err(error) = publish_atomic_file(&plan.project_reference, &bytes, policy) {
+    if let Err(error) = publish_project_reference_receipt(
+        &plan.project_reference,
+        &receipt,
+        plan.previous_reference.as_ref(),
+    ) {
         return observability::commit_state(
-            Err(miette::miette!(
-                "project reference publication failed: {error}"
-            )),
+            Err(error),
             CommitState::Committed,
             "project selection was published, but its derived reference could not be proven; cleanup remains unsafe until the project is inspected",
-        );
-    }
-    let published = read_project_reference(
-        &plan.project_reference,
-        &plan.project,
-        &plan.project_lock,
-        "published project reference",
-    )?
-    .ok_or_else(|| {
-        miette::miette!(
-            "project reference disappeared after publication: '{}'",
-            plan.project_reference.display()
-        )
-    })?;
-    if published.bytes != bytes || published.receipt != receipt {
-        return observability::commit_state(
-            Err(miette::miette!(
-                "published project reference does not match the approved selection"
-            )),
-            CommitState::Committed,
-            "project selection was published, but its derived reference readback could not be proven; cleanup remains unsafe until the project is inspected",
         );
     }
     Ok(())
@@ -472,67 +415,6 @@ fn validate_candidate_for_project(repo_root: &Path, lock: &ArosToolchainLock) ->
     Ok(())
 }
 
-fn project_lock_path(store: &Path, project: &str) -> PathBuf {
-    let project_id = stable_token("aros-toolchain-project-lock-v1", &[project]);
-    store
-        .join(MANAGEMENT_DIRECTORY)
-        .join(PROJECT_LOCKS_DIRECTORY)
-        .join(format!("{project_id}.lock"))
-}
-
-fn project_reference_path(store: &Path, project: &str) -> PathBuf {
-    let project_id = stable_token("aros-toolchain-project-reference-v1", &[project]);
-    store
-        .join(MANAGEMENT_DIRECTORY)
-        .join(PROJECT_REFERENCES_DIRECTORY)
-        .join(format!("{project_id}.json"))
-}
-
-fn read_project_reference(
-    path: &Path,
-    expected_project: &str,
-    expected_project_lock: &Path,
-    label: &str,
-) -> Result<Option<MeasuredProjectReference>> {
-    let Some((identity, bytes)) = measure_regular_file_bounded(path, MAX_PROJECT_REFERENCE_BYTES)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("cannot safely read {label} '{}'", path.display()))?
-    else {
-        return Ok(None);
-    };
-    let receipt: ProjectReferenceReceipt = serde_json::from_slice(&bytes)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("{label} '{}' is not valid JSON", path.display()))?;
-    let expected_lock = normalized_absolute_utf8(expected_project_lock, "project lock")?;
-    if receipt.schema != PROJECT_REFERENCE_SCHEMA
-        || receipt.project != expected_project
-        || receipt.project_lock != expected_lock
-    {
-        return Err(miette::miette!(
-            "{label} '{}' does not bind this project and its authoritative lock",
-            path.display()
-        ));
-    }
-    if receipt.release_id.is_empty()
-        || receipt.lock_sha256.len() != 64
-        || !receipt
-            .lock_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(miette::miette!(
-            "{label} '{}' has an invalid release identity or lock digest",
-            path.display()
-        ));
-    }
-    Ok(Some(MeasuredProjectReference {
-        identity,
-        sha256: sha256_bytes(&bytes).to_string(),
-        bytes,
-        receipt,
-    }))
-}
-
 fn apply_token(plan: &SelectionPlan) -> String {
     let previous_sha256 = plan.previous.as_ref().map_or("absent", |lock| &lock.sha256);
     let previous_release = plan
@@ -634,9 +516,9 @@ fn print_selection_result(result: &SelectionResult, format: ResultFormat) {
 mod tests {
     use super::{
         apply_selection, apply_token, commit_plan, inspect_selection, project_lock_path,
-        project_reference_path, read_release_lock, ProjectReferenceReceipt,
-        PROJECT_REFERENCE_SCHEMA,
+        project_reference_path, read_release_lock,
     };
+    use crate::toolchain_management::{ProjectReferenceReceipt, PROJECT_REFERENCE_SCHEMA};
     use aros_common::{sha256_bytes, ArosToolchainArtifact, ArosToolchainLock};
     use std::fs;
     use std::path::Path;
