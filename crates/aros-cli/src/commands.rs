@@ -204,6 +204,7 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
         ToolchainCommands::Inventory(args) => crate::toolchain_management::inventory(args)?,
         ToolchainCommands::Import(args) => crate::toolchain_management::import(args)?,
         ToolchainCommands::Register(args) => crate::toolchain_management::register(args)?,
+        ToolchainCommands::Select(args) => crate::toolchain_selection::select(repo_root, args)?,
         ToolchainCommands::Install {
             preset,
             force,

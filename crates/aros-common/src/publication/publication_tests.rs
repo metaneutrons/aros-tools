@@ -29,6 +29,23 @@ fn nofollow_regular_reader_refuses_a_final_symlink() {
     assert!(open_regular_file_nofollow(&link).is_err());
 }
 
+#[test]
+fn bounded_regular_reader_rejects_an_oversized_control_document() {
+    let temporary = tempfile::tempdir().unwrap();
+    let document = temporary.path().join("candidate.lock");
+    std::fs::write(&document, b"12345").unwrap();
+
+    let error = measure_regular_file_bounded(&document, 4).unwrap_err();
+    assert!(error.to_string().contains("4-byte read limit"));
+    assert_eq!(
+        measure_regular_file_bounded(&document, 5)
+            .unwrap()
+            .unwrap()
+            .1,
+        b"12345"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {

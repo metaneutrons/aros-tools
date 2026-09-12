@@ -101,9 +101,35 @@ To retain non-owning evidence for an existing prefix without copying it:
 
 Registration records the external path and observed identity but never owns,
 updates, selects, or removes it. Both commands require absolute paths and
-refuse changed sources or mismatched tokens. Project-scoped selection, removal
-and garbage collection remain unavailable until their own M8 safety gates are
-implemented.
+refuse changed sources or mismatched tokens. Registration does not make the
+prefix selectable: use an explicit `--local` path for that existing workflow.
+
+## Select a released lock for one project
+
+Selection changes only the `aros-toolchains.lock.toml` in the current AROS
+checkout. Start from an explicit, absolute TOML release lock:
+
+    aros toolchain select --release-lock /absolute/path/to/release.lock.toml \
+      --store /absolute/path/to/store
+
+The preview validates a coherent v1 lock: its HTTPS release base URL must bind
+the declared release ID, every checkout target profile must be covered by the
+same host matrix, and each target triple must match the checkout contract. It
+then reports the old and new lock identities plus an apply token. Commit only
+that exact plan:
+
+    aros toolchain select --release-lock /absolute/path/to/release.lock.toml \
+      --store /absolute/path/to/store --apply TOKEN_FROM_PREVIEW
+
+The command holds store and project locks in a fixed order and publishes the
+project lock as a no-clobber creation or an identity-and-digest CAS replacement.
+It refuses a changed source or project lock. It neither downloads an archive
+nor proves that a supplied lock was published or attested; use the normal
+release verification workflow for that evidence. Imported and registered local
+prefixes remain unavailable to selection.
+
+Removal and garbage collection remain unavailable until their own M8 safety
+gates are implemented.
 
 ## Use an existing AROS-built prefix
 

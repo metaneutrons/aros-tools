@@ -30,6 +30,7 @@ mod toolchain_fetch_bridge;
 mod toolchain_management;
 mod toolchain_plan;
 mod toolchain_producer;
+mod toolchain_selection;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -372,6 +373,8 @@ enum ToolchainCommands {
     Import(toolchain_management::ImportArgs),
     /// Preview or register one verified external toolchain prefix without copying it
     Register(toolchain_management::RegisterArgs),
+    /// Preview or atomically select one complete released lock for this checkout
+    Select(toolchain_selection::SelectArgs),
     /// Verify an installed or explicitly local AROS toolchain
     Verify {
         /// Target profile whose locked contract should be verified
@@ -730,6 +733,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 | ToolchainCommands::Inventory(_)
                 | ToolchainCommands::Import(_)
                 | ToolchainCommands::Register(_)
+                | ToolchainCommands::Select(_)
                 | ToolchainCommands::Producer(_)
                 | ToolchainCommands::MetaMakeFetch(_) => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),

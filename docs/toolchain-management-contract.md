@@ -108,6 +108,7 @@ introduce an ambient second selector.
 $STORE/.aros-management/v1/
   store.lock
   registrations/<registration-id>.json
+  project-locks/v1/<project-id>.lock
   leases/<lease-id>.json
 
 $STORE/imports/v1/<host>/<target-profile>/<managed-id>/
@@ -126,7 +127,9 @@ reuse never make a lease reclaimable; only release of the held lock does.
 
 The in-envelope ownership receipt is staged, reread, and published atomically
 with its managed payload. It deliberately omits the local source pathname.
-The state directory has no selection authority; registrations and future
+The state directory has no selection authority. `project-locks` are only
+OS-held mutual-exclusion guards whose deterministic ID binds the canonical
+checkout root; they do not record a selected release. Registrations and future
 leases are independently atomic records. A corrupt, absent or stale receipt
 blocks mutation; it cannot select, overwrite, or remove anything. Existing
 released envelopes start as `unowned-legacy` and are not automatically adopted
@@ -156,14 +159,23 @@ general-purpose `--force` flag is prohibited.
 
 ### Project selection
 
-M8 v1 selection writes only a complete, validated released lock. It receives
-the exact trusted release-lock document, verifies its coherent one-release
-schema and selector compatibility, previews the old lock digest and new lock
-digest, then uses a project lock plus an atomic compare-and-publish update.
-It never creates a mixed-release lock, invents an asset URL, or activates a
-local/imported candidate. Existing `--local` is the compatible path for local
-candidates until a separately versioned project-lock v2 can represent portable
-local and external references, old-reader refusal, migration, and rollback.
+`toolchain select --release-lock FILE` writes only one complete, validated
+released TOML v1 lock. `FILE` is absolute, read no-follow under a 4 MiB limit,
+and must describe the checkout's complete target-profile matrix with the same
+host set per profile. Every target triple is checked against the checkout and
+all enabled assets must resolve below a credential-free HTTPS release base URL
+ending in that lock's immutable release ID. This is structural coherence, not
+network attestation or proof that an operator-passed file was published.
+
+The preview binds the old lock's absence or exact digest and identity, the new
+lock bytes and release ID, the canonical checkout root and destination to an
+explicit apply token. On apply it takes the store lock and then the deterministic
+project guard; it rereads both lock inputs and publishes either no-clobber (no
+previous lock) or an identity-and-digest CAS replacement. It never creates a
+mixed-release lock, invents an asset URL, or activates a local/imported
+candidate. Existing `--local` is the compatible path for local candidates until
+a separately versioned project-lock v2 can represent portable local and
+external references, old-reader refusal, migration, and rollback.
 
 ### Removal and garbage collection
 
