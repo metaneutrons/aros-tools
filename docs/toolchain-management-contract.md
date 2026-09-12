@@ -108,6 +108,7 @@ introduce an ambient second selector.
 $STORE/.aros-management/v1/
   store.lock
   registrations/<registration-id>.json
+  projects/v1/<project-id>.json
   project-locks/v1/<project-id>.lock
   leases/<lease-id>.json
 
@@ -129,11 +130,18 @@ The in-envelope ownership receipt is staged, reread, and published atomically
 with its managed payload. It deliberately omits the local source pathname.
 The state directory has no selection authority. `project-locks` are only
 OS-held mutual-exclusion guards whose deterministic ID binds the canonical
-checkout root; they do not record a selected release. Registrations and future
-leases are independently atomic records. A corrupt, absent or stale receipt
-blocks mutation; it cannot select, overwrite, or remove anything. Existing
-released envelopes start as `unowned-legacy` and are not automatically adopted
-or deleted.
+checkout root; they do not record a selected release. `projects/v1` contains
+derived project-reference receipts, each binding a canonical checkout, its
+authoritative lock pathname, the selected release ID and the exact lock digest.
+The checkout lock remains the sole selector. The receipt lets a later cleanup
+operation rediscover and revalidate a known project; it cannot activate,
+override or repair its lock. Registrations, project references and future
+leases are independently atomic records. If selection publishes a project lock
+but cannot prove its derived-reference publication, it reports an indeterminate
+committed state and cleanup must remain blocked. A corrupt, absent or stale
+receipt blocks mutation; it cannot select, overwrite, or remove anything.
+Existing released envelopes start as `unowned-legacy` and are not automatically
+adopted or deleted.
 
 ### Import and external registration
 
@@ -176,6 +184,16 @@ mixed-release lock, invents an asset URL, or activates a local/imported
 candidate. Existing `--local` is the compatible path for local candidates until
 a separately versioned project-lock v2 can represent portable local and
 external references, old-reader refusal, migration, and rollback.
+
+After a successful lock publication, selection publishes a separate derived
+`aros-toolchain-project-reference-v1` receipt under `projects/v1`. Its token
+also binds the prior receipt snapshot. Selection rereads the receipt and rejects
+any disagreement with the existing project lock before changing either record.
+The two locations cannot share one filesystem rename transaction: a failure
+after the lock commit is therefore reported as a committed-but-indeterminate
+selection and makes future cleanup conservatively unavailable until the project
+reference can be independently reconciled. The receipt is a use-reference
+index, never an alternate selector.
 
 ### Removal and garbage collection
 

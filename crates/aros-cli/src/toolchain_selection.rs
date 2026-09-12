@@ -18,13 +18,16 @@ use aros_common::{
 };
 use clap::Args;
 use miette::{IntoDiagnostic, Result, WrapErr};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const SELECTION_SCHEMA: &str = "aros-toolchain-selection-v1";
 const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
+const PROJECT_REFERENCES_DIRECTORY: &str = "projects/v1";
+const PROJECT_REFERENCE_SCHEMA: &str = "aros-toolchain-project-reference-v1";
 const MAX_RELEASE_LOCK_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PROJECT_REFERENCE_BYTES: u64 = 1024 * 1024;
 
 /// Arguments for the project-scoped release-lock selection operation.
 #[derive(Args)]
@@ -56,6 +59,7 @@ struct SelectionResult {
     candidate: String,
     store: String,
     project_lock_guard: String,
+    project_reference: String,
     old_lock_sha256: Option<String>,
     old_release_id: Option<String>,
     new_lock_sha256: String,
@@ -73,6 +77,30 @@ struct MeasuredReleaseLock {
     lock: ArosToolchainLock,
 }
 
+/// A derived, non-authoritative index entry for a selected project lock.
+///
+/// The project lock remains the sole selection authority. This receipt only
+/// gives later lifecycle commands a bounded, durable path back to the lock so
+/// an unreadable, moved, or manually changed project blocks cleanup instead of
+/// being mistaken for non-use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectReferenceReceipt {
+    schema: String,
+    project: String,
+    project_lock: String,
+    release_id: String,
+    lock_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct MeasuredProjectReference {
+    identity: FileIdentity,
+    bytes: Vec<u8>,
+    sha256: String,
+    receipt: ProjectReferenceReceipt,
+}
+
 #[derive(Debug, Clone)]
 struct SelectionPlan {
     project: String,
@@ -81,6 +109,8 @@ struct SelectionPlan {
     previous: Option<MeasuredReleaseLock>,
     store: PathBuf,
     project_lock_guard: PathBuf,
+    project_reference: PathBuf,
+    previous_reference: Option<MeasuredProjectReference>,
 }
 
 /// Preview or atomically select one complete released toolchain lock.
@@ -151,7 +181,7 @@ fn apply_selection(
         &plan,
         "committed",
         None,
-        "published one complete release lock atomically; no local or external prefix was selected",
+        "published one complete release lock and a derived project reference; no local or external prefix was selected",
     ))
 }
 
@@ -183,6 +213,59 @@ fn commit_plan(plan: &SelectionPlan) -> Result<()> {
             "project toolchain lock was published, but exact readback could not be proven",
         );
     }
+    publish_project_reference(plan)
+}
+
+fn publish_project_reference(plan: &SelectionPlan) -> Result<()> {
+    let receipt = ProjectReferenceReceipt {
+        schema: PROJECT_REFERENCE_SCHEMA.to_owned(),
+        project: plan.project.clone(),
+        project_lock: normalized_absolute_utf8(&plan.project_lock, "project lock")?,
+        release_id: plan.candidate.lock.release_id.clone(),
+        lock_sha256: plan.candidate.sha256.clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&receipt)
+        .into_diagnostic()
+        .wrap_err("cannot serialize project reference receipt")?;
+    let policy = plan
+        .previous_reference
+        .as_ref()
+        .map_or(AtomicFilePolicy::NoClobber, |previous| {
+            AtomicFilePolicy::ReplaceIf {
+                identity: previous.identity,
+                sha256: sha256_bytes(&previous.bytes),
+            }
+        });
+    if let Err(error) = publish_atomic_file(&plan.project_reference, &bytes, policy) {
+        return observability::commit_state(
+            Err(miette::miette!(
+                "project reference publication failed: {error}"
+            )),
+            CommitState::Committed,
+            "project selection was published, but its derived reference could not be proven; cleanup remains unsafe until the project is inspected",
+        );
+    }
+    let published = read_project_reference(
+        &plan.project_reference,
+        &plan.project,
+        &plan.project_lock,
+        "published project reference",
+    )?
+    .ok_or_else(|| {
+        miette::miette!(
+            "project reference disappeared after publication: '{}'",
+            plan.project_reference.display()
+        )
+    })?;
+    if published.bytes != bytes || published.receipt != receipt {
+        return observability::commit_state(
+            Err(miette::miette!(
+                "published project reference does not match the approved selection"
+            )),
+            CommitState::Committed,
+            "project selection was published, but its derived reference readback could not be proven; cleanup remains unsafe until the project is inspected",
+        );
+    }
     Ok(())
 }
 
@@ -193,6 +276,7 @@ fn inspect_selection(
 ) -> Result<SelectionPlan> {
     let project = normalized_absolute_utf8(repo_root, "project root")?;
     let project_lock = toolchain::lock_file_path(repo_root);
+    let project_reference = project_reference_path(store, &project);
     let candidate = read_release_lock(candidate_path, "candidate release lock")?;
     validate_candidate_for_project(repo_root, &candidate.lock)?;
     let previous = match measure_regular_file_bounded(&project_lock, MAX_RELEASE_LOCK_BYTES)
@@ -223,6 +307,28 @@ fn inspect_selection(
             candidate.lock.release_id
         ));
     }
+    let previous_reference = read_project_reference(
+        &project_reference,
+        &project,
+        &project_lock,
+        "existing project reference",
+    )?;
+    if let Some(reference) = &previous_reference {
+        let Some(previous) = &previous else {
+            return Err(miette::miette!(
+                "existing project reference '{}' has no corresponding project lock",
+                project_reference.display()
+            ));
+        };
+        if reference.receipt.release_id != previous.lock.release_id
+            || reference.receipt.lock_sha256 != previous.sha256
+        {
+            return Err(miette::miette!(
+                "existing project reference '{}' does not match the current project lock; resolve the inconsistent project state before selecting another release",
+                project_reference.display()
+            ));
+        }
+    }
     let project_lock_guard = project_lock_path(store, &project);
     Ok(SelectionPlan {
         project,
@@ -231,6 +337,8 @@ fn inspect_selection(
         previous,
         store: store.to_path_buf(),
         project_lock_guard,
+        project_reference,
+        previous_reference,
     })
 }
 
@@ -372,12 +480,69 @@ fn project_lock_path(store: &Path, project: &str) -> PathBuf {
         .join(format!("{project_id}.lock"))
 }
 
+fn project_reference_path(store: &Path, project: &str) -> PathBuf {
+    let project_id = stable_token("aros-toolchain-project-reference-v1", &[project]);
+    store
+        .join(MANAGEMENT_DIRECTORY)
+        .join(PROJECT_REFERENCES_DIRECTORY)
+        .join(format!("{project_id}.json"))
+}
+
+fn read_project_reference(
+    path: &Path,
+    expected_project: &str,
+    expected_project_lock: &Path,
+    label: &str,
+) -> Result<Option<MeasuredProjectReference>> {
+    let Some((identity, bytes)) = measure_regular_file_bounded(path, MAX_PROJECT_REFERENCE_BYTES)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot safely read {label} '{}'", path.display()))?
+    else {
+        return Ok(None);
+    };
+    let receipt: ProjectReferenceReceipt = serde_json::from_slice(&bytes)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("{label} '{}' is not valid JSON", path.display()))?;
+    let expected_lock = normalized_absolute_utf8(expected_project_lock, "project lock")?;
+    if receipt.schema != PROJECT_REFERENCE_SCHEMA
+        || receipt.project != expected_project
+        || receipt.project_lock != expected_lock
+    {
+        return Err(miette::miette!(
+            "{label} '{}' does not bind this project and its authoritative lock",
+            path.display()
+        ));
+    }
+    if receipt.release_id.is_empty()
+        || receipt.lock_sha256.len() != 64
+        || !receipt
+            .lock_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(miette::miette!(
+            "{label} '{}' has an invalid release identity or lock digest",
+            path.display()
+        ));
+    }
+    Ok(Some(MeasuredProjectReference {
+        identity,
+        sha256: sha256_bytes(&bytes).to_string(),
+        bytes,
+        receipt,
+    }))
+}
+
 fn apply_token(plan: &SelectionPlan) -> String {
     let previous_sha256 = plan.previous.as_ref().map_or("absent", |lock| &lock.sha256);
     let previous_release = plan
         .previous
         .as_ref()
         .map_or("absent", |lock| lock.lock.release_id.as_str());
+    let previous_reference = plan
+        .previous_reference
+        .as_ref()
+        .map_or("absent", |reference| reference.sha256.as_str());
     stable_token(
         "aros-toolchain-selection-apply-v1",
         &[
@@ -388,6 +553,7 @@ fn apply_token(plan: &SelectionPlan) -> String {
             plan.candidate.lock.release_id.as_str(),
             previous_sha256,
             previous_release,
+            previous_reference,
         ],
     )
 }
@@ -419,6 +585,7 @@ fn selection_result(
         candidate: plan.candidate.path_text.clone(),
         store: plan.store.display().to_string(),
         project_lock_guard: plan.project_lock_guard.display().to_string(),
+        project_reference: plan.project_reference.display().to_string(),
         old_lock_sha256: plan.previous.as_ref().map(|lock| lock.sha256.clone()),
         old_release_id: plan
             .previous
@@ -445,6 +612,7 @@ fn print_selection_result(result: &SelectionResult, format: ResultFormat) {
             );
             aros_common::outputln!("  Project:     {}", result.project);
             aros_common::outputln!("  Lock:        {}", result.project_lock);
+            aros_common::outputln!("  Reference:   {}", result.project_reference);
             aros_common::outputln!("  Candidate:   {}", result.candidate);
             aros_common::outputln!("  {}", result.note);
             if let Some(token) = &result.apply_token {
@@ -465,11 +633,37 @@ fn print_selection_result(result: &SelectionResult, format: ResultFormat) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_selection, apply_token, inspect_selection, project_lock_path, read_release_lock,
+        apply_selection, apply_token, commit_plan, inspect_selection, project_lock_path,
+        project_reference_path, read_release_lock, ProjectReferenceReceipt,
+        PROJECT_REFERENCE_SCHEMA,
     };
-    use aros_common::{ArosToolchainArtifact, ArosToolchainLock};
+    use aros_common::{sha256_bytes, ArosToolchainArtifact, ArosToolchainLock};
     use std::fs;
     use std::path::Path;
+
+    #[cfg(unix)]
+    static PUBLICATION_FAULT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    struct PublicationFaultGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for PublicationFaultGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_PATH");
+        }
+    }
+
+    #[cfg(unix)]
+    fn lock_publication_fault() -> PublicationFaultGuard {
+        let lock = PUBLICATION_FAULT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_PATH");
+        PublicationFaultGuard { _lock: lock }
+    }
 
     fn lock(release_id: &str) -> ArosToolchainLock {
         ArosToolchainLock {
@@ -588,6 +782,72 @@ mod tests {
             "new-release"
         );
         assert!(project_lock_path(&store, &result.project).is_file());
+        let reference = project_reference_path(&store, &result.project);
+        let receipt: ProjectReferenceReceipt =
+            serde_json::from_slice(&fs::read(reference).unwrap()).unwrap();
+        assert_eq!(receipt.schema, PROJECT_REFERENCE_SCHEMA);
+        assert_eq!(receipt.project, result.project);
+        assert_eq!(receipt.release_id, "new-release");
+        assert_eq!(
+            receipt.lock_sha256,
+            sha256_bytes(&fs::read(project.join("aros-toolchains.lock.toml")).unwrap()).to_string()
+        );
+    }
+
+    #[test]
+    fn selection_refuses_a_project_reference_that_disagrees_with_its_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let candidate = temporary.path().join("candidate.toml");
+        let store = temporary.path().join("store");
+        checkout(&project);
+        let destination = project.join("aros-toolchains.lock.toml");
+        write_lock(&destination, &lock("old-release"));
+        write_lock(&candidate, &lock("new-release"));
+        let project_text = super::normalized_absolute_utf8(&project, "project root").unwrap();
+        let receipt = ProjectReferenceReceipt {
+            schema: PROJECT_REFERENCE_SCHEMA.into(),
+            project: project_text,
+            project_lock: super::normalized_absolute_utf8(&destination, "project lock").unwrap(),
+            release_id: "old-release".into(),
+            lock_sha256: "0".repeat(64),
+        };
+        let reference = project_reference_path(&store, &receipt.project);
+        fs::create_dir_all(reference.parent().unwrap()).unwrap();
+        fs::write(reference, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        assert!(inspect_selection(&project, &candidate, &store).is_err());
+        assert_eq!(
+            read_release_lock(&destination, "project lock")
+                .unwrap()
+                .lock
+                .release_id,
+            "old-release"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reference_publication_failure_keeps_the_committed_lock_and_blocks_cleanup() {
+        let _fault = lock_publication_fault();
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        let candidate = temporary.path().join("candidate.toml");
+        let store = temporary.path().join("store");
+        checkout(&project);
+        write_lock(&candidate, &lock("new-release"));
+        let plan = inspect_selection(&project, &candidate, &store).unwrap();
+        std::env::set_var("AROS_PUBLICATION_TEST_FAIL_PATH", &plan.project_reference);
+
+        assert!(commit_plan(&plan).is_err());
+        assert_eq!(
+            read_release_lock(&project.join("aros-toolchains.lock.toml"), "published")
+                .unwrap()
+                .lock
+                .release_id,
+            "new-release"
+        );
+        assert!(!plan.project_reference.exists());
     }
 
     #[test]

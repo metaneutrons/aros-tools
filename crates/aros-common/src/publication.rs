@@ -367,6 +367,7 @@ pub fn publish_atomic_file(
     #[cfg(unix)]
     {
         let target = absolute_path(target)?;
+        unix::test_fail_path(&target)?;
         match policy {
             AtomicFilePolicy::NoClobber => unix::publish_file_noclobber(&target, contents),
             AtomicFilePolicy::ReplaceIf { identity, sha256 } => {
@@ -1856,6 +1857,33 @@ mod unix {
 
     #[cfg(not(debug_assertions))]
     fn test_fail_point(_point: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Deterministically reject one exact publication target in debug builds.
+    ///
+    /// This is deliberately path-scoped so a higher-level operation that
+    /// publishes more than one independent record can exercise a failure after
+    /// its first durable boundary. Release builds ignore this test-only input.
+    #[cfg(debug_assertions)]
+    pub(super) fn test_fail_path(path: &Path) -> std::io::Result<()> {
+        if std::env::var_os("AROS_PUBLICATION_TEST_FAIL_PATH")
+            .as_deref()
+            .is_some_and(|configured| {
+                super::absolute_path(Path::new(configured))
+                    .is_ok_and(|configured| configured == path)
+            })
+        {
+            return Err(std::io::Error::other(format!(
+                "injected publication failure for '{}'",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(super) fn test_fail_path(_path: &Path) -> std::io::Result<()> {
         Ok(())
     }
 

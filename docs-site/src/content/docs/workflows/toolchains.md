@@ -123,6 +123,11 @@ that exact plan:
 
 The command holds store and project locks in a fixed order and publishes the
 project lock as a no-clobber creation or an identity-and-digest CAS replacement.
+It then records a derived project-reference receipt for later lifecycle safety.
+That receipt never selects a toolchain; the checkout lock remains authoritative.
+If the receipt cannot be proven after the lock update, the command reports an
+indeterminate committed result and conservative cleanup remains unavailable
+until the project is inspected.
 It refuses a changed source or project lock. It neither downloads an archive
 nor proves that a supplied lock was published or attested; use the normal
 release verification workflow for that evidence. Imported and registered local

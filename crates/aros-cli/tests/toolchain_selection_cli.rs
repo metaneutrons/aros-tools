@@ -79,7 +79,7 @@ fn checkout(root: &Path) {
 }
 
 #[test]
-fn select_preview_then_apply_replaces_only_the_project_lock() {
+fn select_preview_then_apply_publishes_the_project_lock_and_derived_reference() {
     let temporary = tempfile::tempdir().unwrap();
     let project = temporary.path().join("project");
     let candidate = temporary.path().join("candidate.toml");
@@ -118,6 +118,10 @@ fn select_preview_then_apply_replaces_only_the_project_lock() {
     );
     assert_eq!(committed["state"], "committed");
     assert_eq!(committed["new_release_id"], "new-release");
+    let reference = committed["project_reference"].as_str().unwrap();
+    let reference: Value = serde_json::from_slice(&fs::read(reference).unwrap()).unwrap();
+    assert_eq!(reference["schema"], "aros-toolchain-project-reference-v1");
+    assert_eq!(reference["release_id"], "new-release");
     assert_eq!(
         toml::from_str::<ArosToolchainLock>(
             &fs::read_to_string(project.join("aros-toolchains.lock.toml")).unwrap()
@@ -165,6 +169,55 @@ fn stale_select_preview_never_overwrites_a_changed_project_lock() {
             .unwrap()
             .release_id,
         "concurrent-release"
+    );
+}
+
+#[test]
+fn stale_select_preview_never_accepts_a_new_project_reference() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let candidate = temporary.path().join("candidate.toml");
+    let store = temporary.path().join("store");
+    checkout(&project);
+    let destination = project.join("aros-toolchains.lock.toml");
+    write_lock(&destination, &lock("old-release"));
+    write_lock(&candidate, &lock("new-release"));
+
+    let preview = output_json(
+        &command(&project)
+            .args(["toolchain", "select", "--format", "json", "--release-lock"])
+            .arg(&candidate)
+            .arg("--store")
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    let token = preview["apply_token"].as_str().unwrap();
+    let reference = preview["project_reference"].as_str().unwrap();
+    let receipt = serde_json::json!({
+        "schema": "aros-toolchain-project-reference-v1",
+        "project": fs::canonicalize(&project).unwrap().display().to_string(),
+        "project_lock": fs::canonicalize(&destination).unwrap().display().to_string(),
+        "release_id": "old-release",
+        "lock_sha256": aros_common::sha256_bytes(&fs::read(&destination).unwrap()).to_string(),
+    });
+    fs::create_dir_all(Path::new(reference).parent().unwrap()).unwrap();
+    fs::write(reference, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    let stale_apply = command(&project)
+        .args(["toolchain", "select", "--format", "json", "--release-lock"])
+        .arg(&candidate)
+        .arg("--store")
+        .arg(&store)
+        .args(["--apply", token])
+        .output()
+        .unwrap();
+    assert!(!stale_apply.status.success());
+    assert_eq!(
+        toml::from_str::<ArosToolchainLock>(&fs::read_to_string(destination).unwrap())
+            .unwrap()
+            .release_id,
+        "old-release"
     );
 }
 

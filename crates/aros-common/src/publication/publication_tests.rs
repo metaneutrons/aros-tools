@@ -203,6 +203,7 @@ struct FaultEnvironmentGuard {
 impl Drop for FaultEnvironmentGuard {
     fn drop(&mut self) {
         std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_PATH");
         std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
         std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
     }
@@ -214,6 +215,7 @@ fn lock_fault_environment() -> FaultEnvironmentGuard {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+    std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_PATH");
     std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
     std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
     FaultEnvironmentGuard { _lock: lock }
@@ -586,6 +588,21 @@ fn flat_tree_post_rename_failure_preserves_complete_destination() {
     );
     assert_eq!(retry.unwrap_err().kind(), ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(destination.join("one")).unwrap(), b"first");
+}
+
+#[cfg(unix)]
+#[test]
+fn path_scoped_publication_failure_targets_only_the_nominated_file() {
+    let _environment = lock_fault_environment();
+    let root = tempfile::tempdir().unwrap();
+    let blocked = root.path().join("blocked");
+    let permitted = root.path().join("permitted");
+    std::env::set_var("AROS_PUBLICATION_TEST_FAIL_PATH", &blocked);
+
+    assert!(publish_atomic_file(&blocked, b"blocked", AtomicFilePolicy::NoClobber).is_err());
+    assert!(!blocked.exists());
+    publish_atomic_file(&permitted, b"permitted", AtomicFilePolicy::NoClobber).unwrap();
+    assert_eq!(std::fs::read(permitted).unwrap(), b"permitted");
 }
 
 #[cfg(unix)]
