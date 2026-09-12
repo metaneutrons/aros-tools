@@ -891,8 +891,9 @@ acceptance issue and fourth delivery group were added on 2026-09-06 after
 Fabian approved the management planning extension. No compiler matrix,
 release tag or publication is authorized by that tracking change. M8
 implementation began later through [PR #127](https://github.com/metaneutrons/aros-tools/pull/127)
-with the read-only inventory boundary; import, selection and cleanup remain
-separately gated.
+with the read-only inventory boundary. Verified import and non-owning
+registration follow as their own increment; selection, leases, cleanup and
+lifecycle qualification remain separately gated.
 
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |

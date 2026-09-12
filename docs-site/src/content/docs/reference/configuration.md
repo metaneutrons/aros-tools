@@ -196,6 +196,9 @@ no fallback to a neighboring checkout or an arbitrary compiler on `PATH`.
 Use `aros info`, `aros toolchain list`, `aros toolchain inventory` and `aros
 board doctor` to inspect selected values without mutating source or hardware.
 `inventory` works without a checkout and reads only bounded store metadata; it
-does not run a compiler or assert payload integrity. `aros info` prints the
+does not run a compiler or assert payload integrity. The checkout-independent
+`toolchain import` and `toolchain register` commands require explicit
+absolute source paths and a preview token before they publish managed or
+non-owning local state. `aros info` prints the
 effective state root, archive cache, cross-toolchain store, and whether a
 managed host compiler was verified against the current checkout's digest.

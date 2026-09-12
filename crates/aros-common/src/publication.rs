@@ -171,11 +171,18 @@ pub struct FileIdentity {
     inode: u64,
 }
 
+mod limits;
+pub use limits::{AdvisoryFileLock, TreeTraversalLimits};
+
 mod tree_cas;
 pub use tree_cas::TreeContentCas;
 use tree_cas::{TreeContentEntry, TreeNodeSnapshot};
 mod payload_path;
 pub use payload_path::payload_casefold_path_key;
+mod tree_ops;
+pub use tree_ops::{
+    copy_tree_from_snapshot_nofollow, ensure_directory_nofollow, measure_tree_content_cas_bounded,
+};
 
 /// Existing-target policy for one-file publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1260,6 +1267,29 @@ mod unix {
     pub(super) use tree::publish_prepared_tree_noclobber;
 
     pub(super) fn measure_tree_content_cas(path: &Path) -> std::io::Result<TreeContentCas> {
+        measure_tree_content_cas_with_limits(path, None)
+    }
+
+    pub(super) fn measure_tree_content_cas_bounded(
+        path: &Path,
+        limits: TreeTraversalLimits,
+    ) -> std::io::Result<TreeContentCas> {
+        measure_tree_content_cas_with_limits(path, Some(limits))
+    }
+
+    pub(super) fn copy_tree_from_snapshot_nofollow(
+        source: &Path,
+        destination: &Path,
+        expected: &TreeContentCas,
+        limits: TreeTraversalLimits,
+    ) -> std::io::Result<TreeContentCas> {
+        tree::copy_tree_from_snapshot_nofollow(source, destination, expected, limits)
+    }
+
+    fn measure_tree_content_cas_with_limits(
+        path: &Path,
+        limits: Option<TreeTraversalLimits>,
+    ) -> std::io::Result<TreeContentCas> {
         let parent = open_parent(path, false)?;
         let directory = rfs::openat(
             &parent.fd,
@@ -1268,7 +1298,7 @@ mod unix {
             Mode::empty(),
         )?;
         let root = identity_from_stat(&rfs::fstat(&directory)?);
-        let entries = stable_measure_tree_content_at(&directory, path)?;
+        let entries = stable_measure_tree_content_at_bounded(&directory, path, limits)?;
         if identity_from_stat(&rfs::fstat(&directory)?) != root
             || directory_identity_at(&parent.fd, &parent.leaf)? != Some(root)
         {
@@ -1869,6 +1899,10 @@ mod unix {
         remove_operation_aux_exact, remove_operation_aux_unidentified, remove_regular_exact,
         rename_noclobber, sibling_name, write_new_file, write_new_file_mode,
     };
+    mod locks;
+    pub(in crate::publication) use locks::{
+        acquire_advisory_file_lock, ensure_directory_nofollow, revalidate_advisory_file_lock,
+    };
     mod journal;
     use journal::{cleanup_journal_stage, parse_journal, validate_journal, write_journal};
 
@@ -1876,7 +1910,8 @@ mod unix {
     use tree::{
         cleanup_completed_tree_root, cleanup_empty_tree_root, directory_identity_at,
         encode_tree_stage_marker, recover_flat_tree_stage, stable_measure_tree_content_at,
-        sync_prepared_tree, tree_stage_name, verify_flat_tree_members,
+        stable_measure_tree_content_at_bounded, sync_prepared_tree, tree_stage_name,
+        verify_flat_tree_members,
     };
 
     #[cfg(debug_assertions)]

@@ -53,7 +53,7 @@ Use PATH for a source build or the verified archive installation procedure.
 ## Toolchains and helpers
 
 Consumer toolchain/host-compiler commands require an AROS checkout, except
-the read-only store inventory. The experimental native producer instead
+store inventory and explicit import/registration. The experimental native producer instead
 requires three explicit source roots and works from any directory.
 
 | Command | Inputs and effect |
@@ -63,6 +63,8 @@ requires three explicit source roots and works from any directory.
 | `toolchain install` | Requires `--preset NAME`; supports `--force`, `--offline`, `--local DIR` |
 | `toolchain list` | Show lock entries for the current host |
 | `toolchain inventory` | Read-only metadata scan of the installed store; checkout optional; supports absolute `--store DIR`, bounded `--max-entries N`, and `--format human\|json` |
+| `toolchain import` | Checkout optional; preview then token-confirmed bounded, no-follow import of a manifest-verified local prefix into a no-clobber managed envelope; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
+| `toolchain register` | Checkout optional; preview then token-confirmed bounded validation and non-owning receipt for an external local prefix; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
