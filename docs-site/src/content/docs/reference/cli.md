@@ -53,7 +53,7 @@ Use PATH for a source build or the verified archive installation procedure.
 ## Toolchains and helpers
 
 Consumer toolchain/host-compiler commands require an AROS checkout, except
-store inventory and explicit import/registration. The experimental native producer instead
+store inventory and explicit local management (`import`, `register`, `remove`, `gc`). The experimental native producer instead
 requires three explicit source roots and works from any directory.
 
 | Command | Inputs and effect |
@@ -66,6 +66,8 @@ requires three explicit source roots and works from any directory.
 | `toolchain import` | Checkout optional; preview then token-confirmed bounded, no-follow import of a manifest-verified local prefix into a no-clobber managed envelope; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
 | `toolchain register` | Checkout optional; preview then token-confirmed bounded validation and non-owning receipt for an external local prefix; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
 | `toolchain select` | Requires an AROS checkout; preview then token-confirmed atomic selection of one complete TOML v1 release lock plus a derived non-authoritative project-reference receipt; supports absolute `--release-lock FILE`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
+| `toolchain remove` | Checkout optional; preview then token-confirmed removal of one exact, owned managed import only from a private single-user store; requires `--managed-id SHA256`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
+| `toolchain gc` | Checkout optional; preview then token-confirmed reclamation of eligible owned imports only from a private single-user store; supports optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |

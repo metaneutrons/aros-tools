@@ -197,8 +197,14 @@ Use `aros info`, `aros toolchain list`, `aros toolchain inventory` and `aros
 board doctor` to inspect selected values without mutating source or hardware.
 `inventory` works without a checkout and reads only bounded store metadata; it
 does not run a compiler or assert payload integrity. The checkout-independent
-`toolchain import` and `toolchain register` commands require explicit
-absolute source paths and a preview token before they publish managed or
-non-owning local state. `aros info` prints the
+`toolchain import`, `toolchain register`, `toolchain remove` and `toolchain gc`
+commands use explicit absolute state paths and a preview token before they
+publish or remove managed local state. `remove` and `gc` never target an
+external prefix or a released archive envelope. `aros info` prints the
 effective state root, archive cache, cross-toolchain store, and whether a
 managed host compiler was verified against the current checkout's digest.
+
+Managed-import cleanup assumes a private, single-user store. It fails closed
+when an ancestor, managed directory or regular payload file is group- or
+world-writable, or when a payload file has multiple links. Do not place a
+cleanup-managed store on a multi-writer shared path.

@@ -3,7 +3,9 @@
 Status: M8 implementation contract, 2026-09-12. This document turns the
 pre-M4 design review into the compatibility boundary for the M8 command family.
 It does not make an installed payload trusted, selected or removable merely
-because it was found by an inventory scan.
+because it was found by an inventory scan. The M8.1–M8.4 command contracts
+below are implemented; native host evidence remains a separate completion
+gate.
 
 The [TCP-M8 acceptance criteria](toolchain-producer-plan.md#tcp-m8--local-toolchain-management)
 and [issue #41](https://github.com/metaneutrons/aros-tools/issues/41) remain
@@ -110,7 +112,10 @@ $STORE/.aros-management/v1/
   registrations/<registration-id>.json
   projects/v1/<project-id>.json
   project-locks/v1/<project-id>.lock
-  leases/<lease-id>.json
+  leases/v1/<lease-id>.json
+  lease-locks/v1/<lease-id>.lock
+  envelope-locks/v1/<envelope-id>.lock
+  removals/v1/<journal-id>.json
 
 $STORE/imports/v1/<host>/<target-profile>/<managed-id>/
   .complete
@@ -122,9 +127,16 @@ $STORE/imports/v1/<host>/<target-profile>/<managed-id>/
 
 `store.lock` is an OS-held advisory lock, never a PID file. The M8 lock order
 is: store lock, then deterministic lexicographic project-root locks, then an
-exact envelope lock. A process that needs a payload during a build must retain
-an OS-held lease before M8 cleanup can consider that payload. Expiry and PID
-reuse never make a lease reclaimable; only release of the held lock does.
+exact envelope lock, then the per-build lease lock. A build using a released
+project lock keeps its project lock and confirms or publishes the matching
+derived reference before compilation. A build using an owned local import
+keeps its envelope and lease locks for the CMake/Ninja transaction; it does not
+create a project-lock orphan because it has no project-lock selection to
+serialize. It rereads a released project lock after taking the project lock,
+so a concurrent selection cannot silently mix inputs. An external or legacy
+local prefix remains non-owning and receives no cleanup authority. Expiry,
+clock values and PID reuse never make a lease reclaimable; only the actual
+absence of an OS-held lock does.
 
 The in-envelope ownership receipt is staged, reread, and published atomically
 with its managed payload. It deliberately omits the local source pathname.
@@ -197,16 +209,60 @@ index, never an alternate selector.
 
 ### Removal and garbage collection
 
-`remove` and `gc` remain unavailable until imports, registrations, project
-locking, and leases participate in the common protocol. Their preview output
-will bind exact managed IDs, locations, byte counts, ownership receipts,
-reference snapshots, and lease observations. Before a mutation they reacquire
-locks and revalidate every identity and lock digest. An unknown owner, missing
-or unreadable registered project, incomplete reference scan, changed project
-lock, active lease, untrusted symlink, or post-rename uncertainty blocks
-destruction. They never recurse over a checkout, a volume, the archive cache,
-a parent chosen by a caller, an external registration, or an old release
-envelope merely because its name resembles a managed target.
+```text
+aros toolchain remove --managed-id SHA256 [--store DIR] [--apply TOKEN] [--format human|json]
+aros toolchain gc [--store DIR] [--apply TOKEN] [--format human|json]
+```
+
+Both commands produce an `aros-toolchain-lifecycle-v1` preview before any
+mutation. The preview enumerates only fixed-layout `imports/v1` envelopes and
+binds every candidate's managed ID, canonical envelope, full no-follow tree
+snapshot, entry count and regular-file byte count. It also binds all readable
+project-reference receipts and current authoritative lock digests, external
+registrations and build-lease receipts/lock observations. A preview is
+read-only: it creates no store, management record or lock file.
+
+`remove` accepts exactly one managed ID. `gc` is an explicitly confirmed
+reclamation of every currently eligible *owned import*; it is not a claim that
+an unregistered or pre-M8 client cannot use a path. Operators must therefore
+read the preview and confirm its exact token. A candidate is retained when a
+project reference declares the same release ID, a non-owning registration names
+its payload, or a corresponding lease lock is actively held. Any malformed or
+incomplete import, project reference, registration, lease, journal, symlink,
+unexpected namespace entry, unreadable project lock or changed control record
+blocks the destructive operation rather than being skipped.
+
+On apply the command takes store and sorted project locks, rereads the entire
+control plane, then takes the exact envelope lock. It remeasures the envelope
+and requires its complete identity/content snapshot to remain equal to the
+preview. Immediately before deletion it no-clobber publishes an immutable
+`aros-toolchain-removal-v1` journal outside the envelope. The shared
+descriptor-relative deletion primitive then removes only entries in that
+snapshot; it never follows links or accepts an arbitrary caller-selected
+parent.
+
+Destructive cleanup has one explicit Unix trust boundary. Every ancestor from
+the filesystem root to the managed envelope, every directory below it and each
+regular payload file must be neither group- nor world-writable; regular files
+must not have more than one link. A violation fails closed. POSIX provides no
+unlink operation that atomically names an already-open inode, so it cannot
+distinguish an arbitrary same-UID process replacing the entire privately owned
+store from the store owner itself. That process is deliberately within the
+single-user store trust domain. Advisory locks serialize cooperating AROS
+processes; permissions exclude a different group/world principal from the
+short identity-check-to-unlink interval. Multi-writer shared stores are not a
+supported cleanup deployment.
+
+If anything fails after journal publication, the result is indeterminate and
+the still-present envelope blocks subsequent cleanup. A journal whose envelope
+is absent is retained as completion evidence. There is no retry-by-recursion,
+automatic repair, PID-based reclamation or `--force`.
+
+No M8 cleanup command can target a release envelope, archive cache, checkout,
+volume root or external prefix. The exact-format publication lock left beside
+an imported envelope by the shared no-clobber importer is recognized as
+control-plane state even after its envelope was removed; an unknown sibling
+still blocks cleanup.
 
 ## Delivery and evidence sequence
 
@@ -215,7 +271,7 @@ envelope merely because its name resembles a managed target.
    ownership receipts, and adversarial copy tests.
 3. Released-lock selection preview/apply with atomic concurrent-change tests.
 4. Store/project locks, participating build leases, safe remove/GC and crash
-   recovery tests.
+   recovery tests. **Implemented locally; host evidence remains required.**
 5. Positive and adversarial lifecycle evidence on the three active native
    hosts: Linux x86-64, Linux AArch64, and macOS ARM64. Intel macOS is
    explicitly suspended under
