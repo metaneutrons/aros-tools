@@ -751,8 +751,10 @@ or partially published channel counts as complete.
 Acceptance issue: [#41](https://github.com/metaneutrons/aros-tools/issues/41).
 Delivery group: [Toolchain management](https://github.com/metaneutrons/aros-tools/milestone/4).
 The [pre-M4 design review](toolchain-management-design.md) records the
-source-based store inventory, proposed command boundaries and unresolved
-ownership/selection decisions; it does not implement or complete M8.
+source-based store inventory which informed the
+[M8 management contract](toolchain-management-contract.md). The latter freezes
+the command, state and safety boundary; neither document implements or
+completes M8 alone.
 This extension can proceed after M4's envelope/verification acceptance,
 including its M0–M3 prerequisites. Design and existing-store inventory can
 start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
@@ -814,8 +816,9 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   closure. Calibrate an effort range from the store/reference and failure-
   model review; assigning this issue does not invent a deadline.
 
-Exit evidence: merged implementation and source-verified docs; four-host
-positive/adversarial lifecycle results; safe project selection and cleanup
+Exit evidence: merged implementation and source-verified docs; three-active-host
+positive/adversarial lifecycle results (with Intel macOS explicitly deferred
+under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)); safe project selection and cleanup
 demonstrations; and a reviewed state-format migration/rollback contract.
 Creating the issue or merging this planning extension does not complete M8
 and does not authorize real installation cleanup, compiler builds or releases.

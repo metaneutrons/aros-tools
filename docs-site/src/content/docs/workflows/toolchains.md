@@ -41,6 +41,36 @@ usable lock entry stops the operation. It does not skip unsupported entries.
 `--force` refreshes the archive cache; it does not authorize overwriting an
 installed tree.
 
+## Inspect the local store without running a toolchain
+
+```sh
+aros toolchain inventory
+aros toolchain inventory --format json
+```
+
+Unlike `toolchain list`, `inventory` does not need an AROS checkout. It scans
+the normal cross-toolchain store, or an explicitly supplied absolute
+`--store DIR`, and reports every release-shaped envelope it can inspect. The
+scan reads only fixed-layout metadata: path selectors, the completion marker
+and the embedded manifest. It does not download, measure the payload tree, or
+run a compiler or collector.
+
+The result therefore separates **valid metadata** from integrity,
+compatibility, provenance and qualification. `not-checked` and `unknown` are
+honest states, not failures that `inventory` silently turns into success. A
+malformed envelope is reported alongside the other entries. The default scan
+budget is 10,000 fixed-layout entries; a truncated or incomplete coverage state
+is explicitly marked and is not proof that the store is complete. Increase the
+budget deliberately when needed:
+
+```sh
+aros toolchain inventory --max-entries 25000 --format json
+```
+
+The command is read-only. It does not register an external prefix, import a
+local candidate, alter a project's toolchain selection or make anything
+eligible for cleanup. Those lifecycle operations are not available yet.
+
 ## Use an existing AROS-built prefix
 
 ```sh
