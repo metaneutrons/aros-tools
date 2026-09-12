@@ -52,9 +52,9 @@ Use PATH for a source build or the verified archive installation procedure.
 
 ## Toolchains and helpers
 
-Consumer toolchain/host-compiler commands require an AROS checkout. The
-experimental native producer instead requires three explicit source roots and
-works from any directory.
+Consumer toolchain/host-compiler commands require an AROS checkout, except
+the read-only store inventory. The experimental native producer instead
+requires three explicit source roots and works from any directory.
 
 | Command | Inputs and effect |
 | --- | --- |
@@ -62,6 +62,7 @@ works from any directory.
 | `host-compiler install` | Managed host LLVM installation; supports `--force`, `--offline` |
 | `toolchain install` | Requires `--preset NAME`; supports `--force`, `--offline`, `--local DIR` |
 | `toolchain list` | Show lock entries for the current host |
+| `toolchain inventory` | Read-only metadata scan of the installed store; checkout optional; supports absolute `--store DIR`, bounded `--max-entries N`, and `--format human\|json` |
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |

@@ -27,6 +27,7 @@ mod source;
 mod toolchain;
 mod toolchain_build;
 mod toolchain_fetch_bridge;
+mod toolchain_management;
 mod toolchain_plan;
 mod toolchain_producer;
 
@@ -365,6 +366,8 @@ enum ToolchainCommands {
     },
     /// List locked artifacts for the current host
     List,
+    /// Inspect installed cross-toolchain envelopes without downloading or executing them
+    Inventory(toolchain_management::InventoryArgs),
     /// Verify an installed or explicitly local AROS toolchain
     Verify {
         /// Target profile whose locked contract should be verified
@@ -657,7 +660,8 @@ impl Commands {
                     ToolchainCommands::Plan(_)
                     | ToolchainCommands::Build(_)
                     | ToolchainCommands::Producer(_)
-                    | ToolchainCommands::MetaMakeFetch(_),
+                    | ToolchainCommands::MetaMakeFetch(_)
+                    | ToolchainCommands::Inventory(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
@@ -717,6 +721,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     Some(preset.clone())
                 }
                 ToolchainCommands::List
+                | ToolchainCommands::Inventory(_)
                 | ToolchainCommands::Producer(_)
                 | ToolchainCommands::MetaMakeFetch(_) => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
@@ -1084,6 +1089,10 @@ mod tests {
             RepositoryRequirement::Global
         );
         assert_eq!(
+            requirement(&["aros", "toolchain", "inventory"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
             requirement(&["aros", "info"]),
             RepositoryRequirement::Optional
         );
@@ -1144,5 +1153,20 @@ mod tests {
             ErrorKind::ValueValidation
         );
         assert!(Cli::try_parse_from(["aros", "build", "--jobs", "1"]).is_ok());
+    }
+
+    #[test]
+    fn toolchain_inventory_budget_is_bounded_at_the_cli_boundary() {
+        assert_eq!(
+            parse_error(&["aros", "toolchain", "inventory", "--max-entries", "0"]),
+            ErrorKind::ValueValidation
+        );
+        assert_eq!(
+            parse_error(&["aros", "toolchain", "inventory", "--max-entries", "100001"]),
+            ErrorKind::ValueValidation
+        );
+        assert!(
+            Cli::try_parse_from(["aros", "toolchain", "inventory", "--max-entries", "1"]).is_ok()
+        );
     }
 }

@@ -751,8 +751,10 @@ or partially published channel counts as complete.
 Acceptance issue: [#41](https://github.com/metaneutrons/aros-tools/issues/41).
 Delivery group: [Toolchain management](https://github.com/metaneutrons/aros-tools/milestone/4).
 The [pre-M4 design review](toolchain-management-design.md) records the
-source-based store inventory, proposed command boundaries and unresolved
-ownership/selection decisions; it does not implement or complete M8.
+source-based store inventory which informed the
+[M8 management contract](toolchain-management-contract.md). The latter freezes
+the command, state and safety boundary; neither document implements or
+completes M8 alone.
 This extension can proceed after M4's envelope/verification acceptance,
 including its M0–M3 prerequisites. Design and existing-store inventory can
 start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
@@ -814,8 +816,9 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   closure. Calibrate an effort range from the store/reference and failure-
   model review; assigning this issue does not invent a deadline.
 
-Exit evidence: merged implementation and source-verified docs; four-host
-positive/adversarial lifecycle results; safe project selection and cleanup
+Exit evidence: merged implementation and source-verified docs; three-active-host
+positive/adversarial lifecycle results (with Intel macOS explicitly deferred
+under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)); safe project selection and cleanup
 demonstrations; and a reviewed state-format migration/rollback contract.
 Creating the issue or merging this planning extension does not complete M8
 and does not authorize real installation cleanup, compiler builds or releases.
@@ -886,8 +889,10 @@ The original epic, eight acceptance issues and three delivery milestones were
 created on 2026-09-05 after producer implementation was authorized. The TCP-M8
 acceptance issue and fourth delivery group were added on 2026-09-06 after
 Fabian approved the management planning extension. No compiler matrix,
-release tag, publication or management implementation is authorized by that
-tracking change.
+release tag or publication is authorized by that tracking change. M8
+implementation began later through [PR #127](https://github.com/metaneutrons/aros-tools/pull/127)
+with the read-only inventory boundary; import, selection and cleanup remain
+separately gated.
 
 | Acceptance issue | Link | Completion evidence |
 | --- | --- | --- |
@@ -897,9 +902,9 @@ tracking change.
 | TCP-M3 | [#31](https://github.com/metaneutrons/aros-tools/issues/31) | [Accepted evidence](tcp-m3-native-evidence.md) |
 | TCP-M4 | [#32](https://github.com/metaneutrons/aros-tools/issues/32) | [Accepted evidence](tcp-m4-native-evidence.md) |
 | TCP-M5 | [#33](https://github.com/metaneutrons/aros-tools/issues/33) | [Accepted evidence](tcp-m5-native-evidence.md) |
-| TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | Pending |
-| TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | Pending |
-| TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | Pending |
+| TCP-M6 | [#34](https://github.com/metaneutrons/aros-tools/issues/34) | [Accepted evidence](tcp-m6-native-evidence.md) |
+| TCP-M7 | [#35](https://github.com/metaneutrons/aros-tools/issues/35) | [RC8 qualification and consumer promotion](https://github.com/metaneutrons/aros-tools/pull/125) |
+| TCP-M8 | [#41](https://github.com/metaneutrons/aros-tools/issues/41) | In progress; [read-only inventory PR #127](https://github.com/metaneutrons/aros-tools/pull/127) |
 
 ### Issue and pull-request contract
 

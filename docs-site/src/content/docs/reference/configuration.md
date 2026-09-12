@@ -193,7 +193,9 @@ The effective order is explicit CLI option, documented environment variable,
 versioned checkout configuration, then a documented constant default. There is
 no fallback to a neighboring checkout or an arbitrary compiler on `PATH`.
 
-Use `aros info`, `aros toolchain list` and `aros board doctor` to inspect the
-selected values without mutating source or hardware. `aros info` prints the
+Use `aros info`, `aros toolchain list`, `aros toolchain inventory` and `aros
+board doctor` to inspect selected values without mutating source or hardware.
+`inventory` works without a checkout and reads only bounded store metadata; it
+does not run a compiler or assert payload integrity. `aros info` prints the
 effective state root, archive cache, cross-toolchain store, and whether a
 managed host compiler was verified against the current checkout's digest.

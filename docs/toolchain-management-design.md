@@ -1,11 +1,16 @@
 # Toolchain management: pre-M4 design review
 
-Status: design only, 2026-09-06. No management command, state migration or
+Status: historical design review, 2026-09-06. No management command, state migration or
 cleanup is implemented or authorized by this document. The
 [TCP-M8 acceptance criteria](toolchain-producer-plan.md#tcp-m8--local-toolchain-management)
 remain authoritative; [issue #41](https://github.com/metaneutrons/aros-tools/issues/41)
 owns execution status. Implementation depends on accepted M4 envelopes and
 verification. This review can proceed without blocking M1–M7.
+
+The successor [M8 management contract](toolchain-management-contract.md)
+freezes the implementation boundary and supersedes the proposal and unresolved
+decision sections below where they differ. This document remains as the
+source-review record; it is not public CLI documentation.
 
 ## What exists, and what must be reused
 
@@ -111,7 +116,8 @@ Do not add an ambient sidecar that secretly overrides the authoritative lock.
 
 ## Tests and decisions before implementation
 
-Use tiny verified envelopes on all four native hosts; management changes do
+Use tiny verified envelopes on the three active native hosts; Intel macOS is
+explicitly suspended under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27). Management changes do
 not warrant another compiler A/B matrix. Required tests include positive
 inventory/import/registration/selection/removal, plus corrupt markers and
 manifests, stale indexes, active and uncertain references, symlink substitution,
