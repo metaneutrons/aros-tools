@@ -1,66 +1,58 @@
 # Development handoff
 
-Checkpoint verified on 2026-09-08. This is a compact entry point, not a second
-backlog, live CI dashboard or authorization to build, merge or publish.
-Recheck linked issues and runs before acting; replace stale checkpoint text
-instead of appending session history. Git history preserves earlier versions.
+Checkpoint verified on 2026-09-12. This is a compact entry point, not a second
+backlog, live CI dashboard, or authorization to build, merge, or publish.
+Recheck linked issues, runs, and release objects before acting. Git history
+preserves earlier checkpoints.
 
 ## Last verified implementation checkpoint
 
-- Baseline: [`016a15b41cc6de346fb81487328d099b4705ccad`](https://github.com/metaneutrons/aros-tools/commit/016a15b41cc6de346fb81487328d099b4705ccad),
-  the merged [PR #97](https://github.com/metaneutrons/aros-tools/pull/97).
-- TCP-M0 through TCP-M6 are accepted. M3 local-build limits are recorded in
-  [the TCP-M3 evidence ledger](docs/tcp-m3-native-evidence.md); M4 native
-  packaging/read-back results and its strict boundary are recorded in
-  [the TCP-M4 evidence ledger](docs/tcp-m4-native-evidence.md). M5 native
-  compatibility execution, evidence-bound replay/repackage and source-aware
-  checkpoints are recorded in [the TCP-M5 evidence ledger](docs/tcp-m5-native-evidence.md).
-  The CI cutover, legacy retirement and lean real PC candidates are recorded in
-  [the TCP-M6 evidence ledger](docs/tcp-m6-native-evidence.md).
-- The final cross-repository producer declaration is
-  [`03506956b25944f1476acf8c9398bbdf714638fe`](https://github.com/metaneutrons/aros-toolchains/commit/03506956b25944f1476acf8c9398bbdf714638fe).
-  Its [contract run](https://github.com/metaneutrons/aros-toolchains/actions/runs/34260382908)
-  and the final [four-host workspace run](https://github.com/metaneutrons/aros-tools/actions/runs/34259378712)
-  are green.
-- M6 does not qualify a distributable compiler or release. There is no tag,
-  publication or live A/B result. The fresh nine-lane active
-  three-host/three-profile release qualification remains TCP-M7 work. Intel
-  macOS qualification is deliberately deferred to
-  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+- TCP-M0 through TCP-M6 remain accepted. Their durable implementation and
+  evidence boundaries are recorded in the M3, M4, M5, and M6 evidence ledgers.
+- M7's native executor is aros-tools
+  [`253c11a52af6c4eff8d0e3db2ea2d33b740bef79`](https://github.com/metaneutrons/aros-tools/commit/253c11a52af6c4eff8d0e3db2ea2d33b740bef79).
+  It accepts the canonical nested compatibility fetch markers and contains the
+  Linux process-group PID-reuse repair exercised by the final qualification.
+- The immutable
+  [`toolchain-v1-20260912-rc8`](https://github.com/metaneutrons/aros-toolchains/releases/tag/toolchain-v1-20260912-rc8)
+  prerelease was built from producer commit
+  `d018d11dd6f995fc1f37d0b2b431f94a6ec78fd5` and AROS-NX
+  `9369cc8f8ba4f7d320945c78788c6e2a6d0d1eab`. Its tag object is
+  `6b904632d5fda7fea8f9259de27b34e77c1556db`.
+- Producer run
+  [`34699919725`](https://github.com/metaneutrons/aros-toolchains/actions/runs/34699919725)
+  passed 18 independent builds, nine byte-identical A/B comparisons, nine
+  compatibility/relocation lanes, and draft creation for the active 3×3 matrix:
+  Linux x86-64, Linux AArch64, and macOS AArch64 across `pc-x86_64`,
+  `arm-raspi`, and `rpi-aarch64`.
+- Independent draft and published audits each verified the exact 44-asset
+  inventory, all 43 non-self checksums, manifests, SBOMs, qualification
+  receipts, 42 signed pre-provenance subjects, and all final URLs. The release
+  was published unchanged as a prerelease only after the draft audit passed.
+- A fresh macOS AArch64 aros-cli store passed `toolchain list`, online install,
+  verification, and offline re-install for all three released profiles.
 
 ## Current bounded action
 
-TCP-M7 is next. Start only with clean, explicitly selected AROS-NX,
-`aros-toolchains`, and `aros-tools` identities. It alone may select a new
-immutable annotated toolchain tag and run the active three-host,
-three-profile A/B, compatibility, draft-verification and consumer-promotion
-sequence. Do not use M6 local candidates or a retained build root as a release
-input. Intel macOS is an explicit follow-up, not a release blocker.
+M7 integration is complete. AROS-NX
+[PR #30](https://github.com/metaneutrons/AROS-NX/pull/30) merged as
+`c6bbff066c31171d8ba7320a72060b7e5c5f1318`; it copies only measured RC8
+release-index values into the consumer lock, activates the nine qualified
+entries, suspends Intel macOS pending
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27),
+and preserves the disabled RISC-V entries.
+
+Intel macOS and RISC-V are explicit subsequent qualifications, not reasons to
+change or retarget RC8.
 
 ## Resume safely
 
-1. Read applicable repository instructions and inspect the working tree before
-   choosing a branch. Preserve unrelated changes and retained run directories.
-2. Recheck [issue #34](https://github.com/metaneutrons/aros-tools/issues/34),
-   current PR heads and required checks. Never infer current completion from
-   this handoff or reuse stale qualification for changed executable code.
-3. Resolve source/producer identities from the versioned contracts. Do not
-   substitute neighboring checkouts, moving branches or retained build output.
-4. Follow the [test-stage policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints).
-   Use a final-candidate integration checkpoint only when required; do not
-   repeat expensive compiler/GRUB/A-B builds for documentation-only changes.
-
-## Records and ownership
-
-- [Producer plan](docs/toolchain-producer-plan.md#9-repository-tracking-and-handoff):
-  design, dependencies and acceptance criteria; issues own live execution state.
-- [Implementation scope](crates/aros-toolchain/README.md),
-  [producer contract](docs/toolchain-producer-contract.md) and the
-  [TCP-M6 evidence ledger](docs/tcp-m6-native-evidence.md): implemented
-  guarantees, measured evidence and explicit omissions.
-- Keep raw logs, machine-specific paths, private operations notes and credential
-  references outside Git in a stable private state directory, not a disposable
-  build directory. Retained snapshots are evidence, not resumable guards or
-  permission to execute archived scripts.
-- This handoff is developer documentation in Git; it is not a public-site
-  operations manual. Do not add hosting configuration or secrets here.
+1. Inspect the current tag object, release state, producer run, PR #30, and
+   working trees before taking action.
+2. Use the published release index and manifests as the sole source of lock
+   values. Never recover hashes, sizes, or tree digests from retained output.
+3. Follow [the test-stage policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints).
+   Do not repeat expensive compiler or A/B work for documentation-only changes.
+4. Keep raw logs, machine-specific paths, private operational notes, and
+   credentials outside Git. This handoff is developer documentation, not a
+   public-site operations manual.
