@@ -73,8 +73,8 @@ pub struct VerifiedPackage {
 /// The four closed outer members of one toolchain package set.
 ///
 /// This internal representation lets the release-index verifier reuse the
-/// same bounded archive read-back logic after it has established the larger
-/// 56-file release inventory. Public callers should use [`verify`], which
+/// same bounded archive read-back logic after it has established the complete
+/// release inventory. Public callers should use [`verify`], which
 /// additionally requires that its directory contains exactly these members.
 #[derive(Debug, Clone)]
 pub(crate) struct PackageAssetPaths {

@@ -307,7 +307,7 @@ struct ValidateRecoveryArgs {
     /// Closed recovery-request-v1 document with isolated inventory and policy claims
     #[arg(long)]
     recovery_request: PathBuf,
-    /// Complete isolated 56-member source release inventory
+    /// Complete isolated final release inventory selected by its release index
     #[arg(long)]
     release_dir: PathBuf,
     /// Absent durable receipt for the exact revalidated recovery inventory
@@ -393,7 +393,7 @@ struct PrepareRecoveryArgs {
     /// Closed qualification-evidence-v1 document from the qualified source run
     #[arg(long)]
     qualification_evidence: PathBuf,
-    /// Complete isolated 56-member final release inventory from that source run
+    /// Complete isolated final release inventory selected by its release index
     #[arg(long)]
     release_dir: PathBuf,
     /// Re-observed annotated source tag object identity
@@ -1549,7 +1549,7 @@ mod toolchain_producer_active_matrix_tests;
 mod tests {
     use std::fs;
 
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
 
     use super::{
         compare, compatibility_ports_source_closure, environment, CompareArgs, EnvironmentArgs,
@@ -1806,6 +1806,33 @@ mod tests {
             "linux-x86_64",
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn recovery_help_does_not_hard_code_the_historical_inventory_size() {
+        for command in [
+            "validate-recovery",
+            "record-qualification",
+            "prepare-recovery",
+        ] {
+            let Err(error) =
+                Cli::try_parse_from(["aros", "toolchain", "producer", command, "--help"])
+            else {
+                panic!("{command} help unexpectedly parsed as an invocation");
+            };
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{command}");
+            let help = error.to_string();
+            assert!(
+                !help.contains("56-member"),
+                "{command} help must not hard-code the historical release shape"
+            );
+            if command != "record-qualification" {
+                assert!(
+                    help.contains("selected by its release index"),
+                    "{command} help must describe index-selected inventory shapes"
+                );
+            }
+        }
     }
 
     #[test]
