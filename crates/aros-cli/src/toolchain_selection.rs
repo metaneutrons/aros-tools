@@ -9,8 +9,8 @@ use crate::observability;
 use crate::repo;
 use crate::toolchain;
 use crate::toolchain_management::{
-    acquire_store_lock, management_store, normalized_absolute_utf8, publication_error,
-    stable_token, ResultFormat, MANAGEMENT_DIRECTORY,
+    acquire_store_lock, management_store, normalized_absolute_utf8, project_lock_path,
+    publication_error, stable_token, ResultFormat, MANAGEMENT_DIRECTORY,
 };
 use aros_common::{
     measure_regular_file_bounded, parse_credential_free_https_url, publish_atomic_file,
@@ -23,7 +23,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const SELECTION_SCHEMA: &str = "aros-toolchain-selection-v1";
-const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
 const PROJECT_REFERENCES_DIRECTORY: &str = "projects/v1";
 const PROJECT_REFERENCE_SCHEMA: &str = "aros-toolchain-project-reference-v1";
 const MAX_RELEASE_LOCK_BYTES: u64 = 4 * 1024 * 1024;
@@ -470,14 +469,6 @@ fn validate_candidate_for_project(repo_root: &Path, lock: &ArosToolchainLock) ->
         }
     }
     Ok(())
-}
-
-fn project_lock_path(store: &Path, project: &str) -> PathBuf {
-    let project_id = stable_token("aros-toolchain-project-lock-v1", &[project]);
-    store
-        .join(MANAGEMENT_DIRECTORY)
-        .join(PROJECT_LOCKS_DIRECTORY)
-        .join(format!("{project_id}.lock"))
 }
 
 fn project_reference_path(store: &Path, project: &str) -> PathBuf {

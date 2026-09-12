@@ -36,6 +36,7 @@ pub const MANAGEMENT_DIRECTORY: &str = ".aros-management/v1";
 const IMPORTS_DIRECTORY: &str = "imports/v1";
 const OWNERSHIP_RECEIPT: &str = "ownership.json";
 const REGISTRATIONS_DIRECTORY: &str = "registrations";
+const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
 pub const STORE_LOCK: &str = "store.lock";
 const IMPORT_MAX_ENTRIES: usize = 500_000;
 const IMPORT_MAX_REGULAR_FILE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -881,6 +882,19 @@ struct RegistrationReceipt {
     source_snapshot_sha256: String,
 }
 
+/// A managed import envelope whose control-plane receipt still binds the
+/// payload selected by an explicit local build.
+///
+/// This is intentionally narrower than a generic local prefix: external and
+/// legacy paths never acquire lifecycle ownership merely because they happen
+/// to have a compatible layout.
+#[derive(Debug, Clone)]
+pub struct ManagedImportEnvelope {
+    pub envelope: PathBuf,
+    pub managed_id: String,
+    pub release_id_claim: String,
+}
+
 /// Preview or commit a verified local toolchain import.
 pub fn import(args: ImportArgs) -> Result<()> {
     let store = management_store(args.store)?;
@@ -943,6 +957,94 @@ pub fn management_store(configured: Option<PathBuf>) -> Result<PathBuf> {
     })?;
     normalized_absolute_utf8(&store, "--store")?;
     Ok(store)
+}
+
+/// Prove that `payload` is the fixed-layout payload of a valid owned import.
+///
+/// A path outside the managed-import namespace is intentionally not an error:
+/// it remains an explicit local prefix and receives no cleanup authority.
+pub fn managed_import_envelope_for_payload(
+    store: &Path,
+    payload: &Path,
+) -> Result<Option<ManagedImportEnvelope>> {
+    let store_text = normalized_absolute_utf8(store, "toolchain store")?;
+    let payload_text = normalized_absolute_utf8(payload, "resolved toolchain root")?;
+    let imports = PathBuf::from(&store_text).join(IMPORTS_DIRECTORY);
+    let payload = PathBuf::from(payload_text);
+    let Ok(relative) = payload.strip_prefix(&imports) else {
+        return Ok(None);
+    };
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| miette::miette!("managed import path is not valid UTF-8")),
+            _ => Err(miette::miette!(
+                "managed import path has an unsafe component"
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let [host, target_profile, managed_id, payload_directory] = components.as_slice() else {
+        return Err(miette::miette!(
+            "resolved local prefix is below managed imports but does not use the v1 import layout"
+        ));
+    };
+    if !safe_segment(host)
+        || !safe_segment(target_profile)
+        || !is_lower_sha256(managed_id)
+        || payload_directory != PAYLOAD_DIRECTORY
+    {
+        return Err(miette::miette!(
+            "resolved local prefix is below managed imports but has an invalid envelope identity"
+        ));
+    }
+    let envelope = imports.join(host).join(target_profile).join(managed_id);
+    for (label, path) in [
+        ("managed import envelope", &envelope),
+        ("managed import payload", &payload),
+    ] {
+        let metadata = fs::symlink_metadata(path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("cannot inspect {label} '{}'", path.display()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(miette::miette!(
+                "{label} '{}' is not a real directory",
+                path.display()
+            ));
+        }
+    }
+    if !matches!(
+        marker_state(&envelope.join(COMPLETE_MARKER)),
+        MarkerState::Complete
+    ) {
+        return Err(miette::miette!(
+            "managed import envelope '{}' has no valid completion marker",
+            envelope.display()
+        ));
+    }
+    let manifest = ArosToolchainManifest::load(&payload)
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "cannot load managed import manifest below '{}'",
+                payload.display()
+            )
+        })?;
+    if manifest.host != *host || manifest.target_profile != *target_profile {
+        return Err(miette::miette!(
+            "managed import manifest does not match its fixed envelope selectors"
+        ));
+    }
+    verify_import_ownership(&envelope, &manifest, managed_id).map_err(|message| {
+        miette::miette!("managed import ownership cannot be proven: {message}")
+    })?;
+    Ok(Some(ManagedImportEnvelope {
+        envelope,
+        managed_id: managed_id.to_owned(),
+        release_id_claim: manifest.release_id,
+    }))
 }
 
 fn inspect_candidate(source: PathBuf) -> Result<Candidate> {
@@ -1295,6 +1397,17 @@ pub fn acquire_store_lock(store: &Path) -> Result<AdvisoryFileLock> {
         })
 }
 
+/// Return the deterministic OS-lock path for one canonical project root.
+///
+/// This guard is mutual exclusion only. It is not a project selection record.
+pub fn project_lock_path(store: &Path, project: &str) -> PathBuf {
+    let project_id = stable_token("aros-toolchain-project-lock-v1", &[project]);
+    store
+        .join(MANAGEMENT_DIRECTORY)
+        .join(PROJECT_LOCKS_DIRECTORY)
+        .join(format!("{project_id}.lock"))
+}
+
 pub fn publication_error<T>(
     error: std::io::Error,
     context: &'static str,
@@ -1420,9 +1533,10 @@ fn print_management_result(result: &ManagementResult, format: ResultFormat) {
 mod tests {
     use super::{
         apply_import, apply_registration, import_destination, inspect_candidate, inspect_store,
-        normalized_absolute_utf8, registration_destination, validate_candidate_payload,
-        MarkerState, MetadataState,
+        managed_import_envelope_for_payload, normalized_absolute_utf8, registration_destination,
+        validate_candidate_payload, MarkerState, MetadataState, MANAGEMENT_DIRECTORY,
     };
+    use crate::toolchain::{ResolvedToolchain, ToolchainPaths, ToolchainSource};
     use aros_common::{
         toolchain_tree_inventory, ArosToolchainManifest, ArosToolchainManifestEntry,
         AROS_TOOLCHAIN_MANIFEST_FILE,
@@ -1488,6 +1602,81 @@ mod tests {
             serde_json::to_vec(&candidate).unwrap(),
         )
         .unwrap();
+    }
+
+    fn resolved_local(root: &Path) -> ResolvedToolchain {
+        let root = root.to_path_buf();
+        ResolvedToolchain {
+            paths: ToolchainPaths {
+                clang: root.join("bin/clang"),
+                clangxx: root.join("bin/clang++"),
+                lld: root.join("bin/ld.lld"),
+                llvm_ar: root.join("bin/llvm-ar"),
+                aros_collect: root.join("bin/aros-collect"),
+                collect_aros: root.join("bin/collect-aros"),
+                collect_aros32: root.join("bin/collect-aros32"),
+                root,
+            },
+            target_triple: "x86_64-unknown-aros".into(),
+            release_id: None,
+            source: ToolchainSource::LocalManifest,
+        }
+    }
+
+    #[test]
+    fn managed_import_payloads_receive_os_held_build_leases_but_external_prefixes_do_not() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("candidate");
+        let store = temporary.path().join("store");
+        let project = temporary.path().join("project");
+        fs::create_dir(&project).unwrap();
+        write_candidate(&source);
+        let candidate = inspect_candidate(source.clone()).unwrap();
+        let destination = import_destination(&store, &candidate);
+        apply_import(&store, &candidate, &destination).unwrap();
+        let payload = destination.join("toolchain");
+        let imported = managed_import_envelope_for_payload(&store, &payload)
+            .unwrap()
+            .expect("import payload must retain management identity");
+        assert_eq!(imported.envelope, destination);
+
+        let lease = crate::toolchain_lifecycle::acquire_for_build_in_test_store(
+            &project,
+            &resolved_local(&payload),
+            &store,
+        )
+        .unwrap();
+        let leases = store.join(MANAGEMENT_DIRECTORY).join("leases/v1");
+        let records = fs::read_dir(&leases)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .count();
+        assert_eq!(records, 1);
+        drop(lease);
+
+        crate::toolchain_lifecycle::acquire_for_build_in_test_store(
+            &project,
+            &resolved_local(&source),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(&leases)
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json"))
+                .count(),
+            1
+        );
     }
 
     #[test]

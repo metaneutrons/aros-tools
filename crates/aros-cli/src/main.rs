@@ -27,6 +27,7 @@ mod source;
 mod toolchain;
 mod toolchain_build;
 mod toolchain_fetch_bridge;
+mod toolchain_lifecycle;
 mod toolchain_management;
 mod toolchain_plan;
 mod toolchain_producer;
