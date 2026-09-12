@@ -298,13 +298,31 @@ pub fn publication_failure_class(error: &std::io::Error) -> PublicationFailureCl
 /// snapshot cannot be established; mutating-grade measurement is unsupported
 /// on non-Unix hosts.
 pub fn measure_regular_file(path: &Path) -> std::io::Result<Option<(FileIdentity, Vec<u8>)>> {
+    measure_regular_file_bounded(path, u64::MAX)
+}
+
+/// Read a regular file through a no-follow descriptor under an exact byte
+/// ceiling, returning its identity and contents as one stable snapshot.
+///
+/// This is the bounded counterpart of [`measure_regular_file`].  It is for
+/// control-plane documents such as locks and receipts: an untrusted file must
+/// not turn a preview or compare-and-swap precondition into an unbounded read.
+///
+/// # Errors
+///
+/// Returns an error when the file is unsafe, changes while being read, or
+/// exceeds `max_bytes`.
+pub fn measure_regular_file_bounded(
+    path: &Path,
+    max_bytes: u64,
+) -> std::io::Result<Option<(FileIdentity, Vec<u8>)>> {
     #[cfg(unix)]
     {
-        unix::read_regular(&absolute_path(path)?)
+        unix::read_regular_bounded(&absolute_path(path)?, max_bytes)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, max_bytes);
         Err(unsupported_durability())
     }
 }
@@ -349,6 +367,7 @@ pub fn publish_atomic_file(
     #[cfg(unix)]
     {
         let target = absolute_path(target)?;
+        unix::test_fail_path(&target)?;
         match policy {
             AtomicFilePolicy::NoClobber => unix::publish_file_noclobber(&target, contents),
             AtomicFilePolicy::ReplaceIf { identity, sha256 } => {
@@ -734,99 +753,6 @@ mod unix {
         )?;
         rfs::flock(&fd, FlockOperation::LockExclusive)?;
         Ok(std::fs::File::from(fd))
-    }
-
-    pub(super) fn read_regular(path: &Path) -> std::io::Result<Option<(FileIdentity, Vec<u8>)>> {
-        read_regular_with_mode(path)
-            .map(|snapshot| snapshot.map(|(identity, bytes, _mode)| (identity, bytes)))
-    }
-
-    pub(super) fn open_regular_file_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
-        let parent = open_parent(path, false)?;
-        let fd = rfs::openat(
-            &parent.fd,
-            Path::new(&parent.leaf),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        let stat = rfs::fstat(&fd)?;
-        if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "publication target '{}' is not a regular file",
-                    path.display()
-                ),
-            ));
-        }
-        Ok(std::fs::File::from(fd))
-    }
-
-    pub(super) fn read_regular_with_mode(
-        path: &Path,
-    ) -> std::io::Result<Option<(FileIdentity, Vec<u8>, u16)>> {
-        let parent = match open_parent(path, false) {
-            Ok(parent) => parent,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let fd = match rfs::openat(
-            &parent.fd,
-            Path::new(&parent.leaf),
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let stat = rfs::fstat(&fd)?;
-        if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "publication target '{}' is not a regular file",
-                    path.display()
-                ),
-            ));
-        }
-        let identity = identity_from_stat(&stat);
-        let mode = permission_mode_from_stat(&stat);
-        let mut file = std::fs::File::from(fd);
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut bytes)?;
-        test_pause_point("read-before-final-stat");
-        let final_stat = rfs::fstat(&file)?;
-        if !same_regular_snapshot(&stat, &final_stat, bytes.len()) {
-            return Err(std::io::Error::other(format!(
-                "publication target changed or was written concurrently while reading: '{}'",
-                path.display()
-            )));
-        }
-        Ok(Some((identity, bytes, mode)))
-    }
-
-    #[allow(clippy::cast_sign_loss)]
-    fn same_regular_snapshot(before: &rfs::Stat, after: &rfs::Stat, bytes: usize) -> bool {
-        identity_from_stat(before) == identity_from_stat(after)
-            && before.st_size >= 0
-            && usize::try_from(before.st_size).ok() == Some(bytes)
-            && before.st_size == after.st_size
-            && before.st_mtime == after.st_mtime
-            && before.st_mtime_nsec == after.st_mtime_nsec
-            && before.st_ctime == after.st_ctime
-            && before.st_ctime_nsec == after.st_ctime_nsec
-            && before.st_mode == after.st_mode
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::unnecessary_cast,
-        reason = "rustix mode_t width differs between supported Unix targets"
-    )]
-    const fn permission_mode_from_stat(stat: &rfs::Stat) -> u16 {
-        (stat.st_mode as u32 & 0o7777) as u16
     }
 
     pub(super) fn recover_if_needed(journal_path: &Path) -> std::io::Result<RecoveryOutcome> {
@@ -1903,6 +1829,11 @@ mod unix {
     pub(in crate::publication) use locks::{
         acquire_advisory_file_lock, ensure_directory_nofollow, revalidate_advisory_file_lock,
     };
+    mod regular;
+    use regular::same_regular_snapshot;
+    pub(in crate::publication) use regular::{
+        open_regular_file_nofollow, read_regular, read_regular_bounded, read_regular_with_mode,
+    };
     mod journal;
     use journal::{cleanup_journal_stage, parse_journal, validate_journal, write_journal};
 
@@ -1926,6 +1857,33 @@ mod unix {
 
     #[cfg(not(debug_assertions))]
     fn test_fail_point(_point: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Deterministically reject one exact publication target in debug builds.
+    ///
+    /// This is deliberately path-scoped so a higher-level operation that
+    /// publishes more than one independent record can exercise a failure after
+    /// its first durable boundary. Release builds ignore this test-only input.
+    #[cfg(debug_assertions)]
+    pub(super) fn test_fail_path(path: &Path) -> std::io::Result<()> {
+        if std::env::var_os("AROS_PUBLICATION_TEST_FAIL_PATH")
+            .as_deref()
+            .is_some_and(|configured| {
+                super::absolute_path(Path::new(configured))
+                    .is_ok_and(|configured| configured == path)
+            })
+        {
+            return Err(std::io::Error::other(format!(
+                "injected publication failure for '{}'",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(super) fn test_fail_path(_path: &Path) -> std::io::Result<()> {
         Ok(())
     }
 

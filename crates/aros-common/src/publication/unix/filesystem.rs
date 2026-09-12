@@ -45,6 +45,9 @@ pub(super) fn write_new_file_mode(
     let identity = identity_from_stat(&rfs::fstat(&fd)?);
     let mut file = std::fs::File::from(fd);
     let write = (|| {
+        // Exercise the same pre-publication cleanup path as a full device
+        // without making the test suite depend on a privileged tiny volume.
+        test_fail_point("stage-before-write")?;
         file.set_permissions(std::fs::Permissions::from_mode(u32::from(mode)))?;
         file.write_all(contents)?;
         file.flush()?;

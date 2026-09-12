@@ -136,6 +136,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "which",
  "xz2",
 ]

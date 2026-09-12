@@ -32,11 +32,11 @@ const PAYLOAD_DIRECTORY: &str = "toolchain";
 const MANAGEMENT_SCHEMA: &str = "aros-toolchain-management-v1";
 const OWNERSHIP_RECEIPT_SCHEMA: &str = "aros-toolchain-ownership-v1";
 const REGISTRATION_RECEIPT_SCHEMA: &str = "aros-toolchain-registration-v1";
-const MANAGEMENT_DIRECTORY: &str = ".aros-management/v1";
+pub const MANAGEMENT_DIRECTORY: &str = ".aros-management/v1";
 const IMPORTS_DIRECTORY: &str = "imports/v1";
 const OWNERSHIP_RECEIPT: &str = "ownership.json";
 const REGISTRATIONS_DIRECTORY: &str = "registrations";
-const STORE_LOCK: &str = "store.lock";
+pub const STORE_LOCK: &str = "store.lock";
 const IMPORT_MAX_ENTRIES: usize = 500_000;
 const IMPORT_MAX_REGULAR_FILE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
@@ -937,7 +937,7 @@ pub fn register(args: RegisterArgs) -> Result<()> {
     Ok(())
 }
 
-fn management_store(configured: Option<PathBuf>) -> Result<PathBuf> {
+pub fn management_store(configured: Option<PathBuf>) -> Result<PathBuf> {
     let store = configured.map_or_else(default_store_root, |path| {
         require_absolute_state_path("--store", path)
     })?;
@@ -1035,7 +1035,7 @@ fn import_limits() -> TreeTraversalLimits {
         .expect("compile-time import limits must be non-zero")
 }
 
-fn normalized_absolute_utf8(path: &Path, label: &str) -> Result<String> {
+pub fn normalized_absolute_utf8(path: &Path, label: &str) -> Result<String> {
     if !path.is_absolute() {
         return Err(miette::miette!("{label} must be an absolute path"));
     }
@@ -1108,7 +1108,7 @@ fn apply_token(operation: &str, candidate: &Candidate, destination: &Path) -> St
     )
 }
 
-fn stable_token(namespace: &str, fields: &[&str]) -> String {
+pub fn stable_token(namespace: &str, fields: &[&str]) -> String {
     let mut bytes = Vec::new();
     for field in std::iter::once(&namespace).chain(fields.iter()) {
         let field = field.as_bytes();
@@ -1284,7 +1284,7 @@ fn apply_registration(
     ))
 }
 
-fn acquire_store_lock(store: &Path) -> Result<AdvisoryFileLock> {
+pub fn acquire_store_lock(store: &Path) -> Result<AdvisoryFileLock> {
     AdvisoryFileLock::acquire(&store.join(MANAGEMENT_DIRECTORY).join(STORE_LOCK))
         .into_diagnostic()
         .wrap_err_with(|| {
@@ -1295,7 +1295,7 @@ fn acquire_store_lock(store: &Path) -> Result<AdvisoryFileLock> {
         })
 }
 
-fn publication_error<T>(
+pub fn publication_error<T>(
     error: std::io::Error,
     context: &'static str,
     indeterminate: &'static str,
