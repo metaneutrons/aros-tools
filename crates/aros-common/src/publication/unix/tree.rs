@@ -187,6 +187,253 @@ pub(in crate::publication) fn copy_tree_from_snapshot_nofollow(
     Ok(copied)
 }
 
+/// Remove a complete tree only when it still equals the measured snapshot.
+///
+/// This is deliberately descriptor-relative and bounded. It is suitable for a
+/// higher-level lifecycle operation that has already recorded a durable
+/// recovery receipt; it may leave a partially removed tree when the operating
+/// system reports a later error, rather than guessing that a changed target is
+/// still safe to remove.
+pub(in crate::publication) fn remove_tree_from_snapshot_nofollow(
+    target: &Path,
+    expected: &TreeContentCas,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<()> {
+    let parent = open_parent(target, false)?;
+    let directory = rfs::openat(
+        &parent.fd,
+        &parent.leaf,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let root = identity_from_stat(&rfs::fstat(&directory)?);
+    if root != expected.root {
+        return Err(std::io::Error::other(format!(
+            "refusing to remove identity-mismatched tree '{}'",
+            target.display()
+        )));
+    }
+    let current = TreeContentCas {
+        root,
+        entries: stable_measure_tree_content_at_bounded(&directory, target, Some(limits))?,
+    };
+    if &current != expected {
+        return Err(std::io::Error::other(format!(
+            "refusing to remove changed tree '{}'",
+            target.display()
+        )));
+    }
+
+    let mut budget = TreeMeasurementBudget::bounded(limits);
+    remove_tree_contents_from_snapshot(&directory, target, &expected.entries, &[], &mut budget)?;
+    if !directory_entry_names_capped(&directory, Some(limits.max_entries))?.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "refusing to remove tree '{}' because entries appeared during cleanup",
+            target.display()
+        )));
+    }
+    drop(directory);
+    if directory_identity_at(&parent.fd, &parent.leaf)? != Some(root) {
+        return Err(std::io::Error::other(format!(
+            "tree '{}' changed before final removal",
+            target.display()
+        )));
+    }
+    rfs::unlinkat(&parent.fd, Path::new(&parent.leaf), AtFlags::REMOVEDIR)?;
+    rfs::fsync(&parent.fd)?;
+    Ok(())
+}
+
+/// Return a stable immediate-name snapshot of one real directory without
+/// following any component. The second read detects ordinary concurrent
+/// additions/removals; callers must still bind each resulting entry before a
+/// mutation.
+pub(in crate::publication) fn directory_entry_names_nofollow_bounded(
+    path: &Path,
+    max_entries: usize,
+) -> std::io::Result<Vec<OsString>> {
+    let parent = open_parent(path, false)?;
+    let directory = rfs::openat(
+        &parent.fd,
+        &parent.leaf,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let identity = identity_from_stat(&rfs::fstat(&directory)?);
+    let first = directory_entry_names_capped(&directory, Some(max_entries))?;
+    let second = directory_entry_names_capped(&directory, Some(max_entries))?;
+    if first != second
+        || identity_from_stat(&rfs::fstat(&directory)?) != identity
+        || directory_identity_at(&parent.fd, &parent.leaf)? != Some(identity)
+    {
+        return Err(std::io::Error::other(format!(
+            "directory '{}' changed while its entries were listed",
+            path.display()
+        )));
+    }
+    Ok(second.into_iter().collect())
+}
+
+fn remove_tree_contents_from_snapshot(
+    directory: &OwnedFd,
+    display_path: &Path,
+    entries: &BTreeMap<Vec<u8>, TreeContentEntry>,
+    prefix: &[u8],
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<()> {
+    let expected_names = directory_entry_names_from_keys(entries, prefix);
+    let actual_names = directory_entry_names_with_budget(directory, budget)?;
+    if actual_names != expected_names {
+        return Err(std::io::Error::other(format!(
+            "tree directory '{}' changed before owned cleanup",
+            display_path.display()
+        )));
+    }
+
+    for name in actual_names {
+        let relative = child_relative_path(prefix, &name);
+        let expected_entry = entries.get(&relative).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "tree directory '{}' has an unrecorded cleanup entry '{}'",
+                display_path.display(),
+                name.to_string_lossy()
+            ))
+        })?;
+        let child_display = display_path.join(&name);
+        let stat = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
+        if tree_node_snapshot(&stat)? != expected_entry.snapshot {
+            return Err(std::io::Error::other(format!(
+                "tree entry '{}' changed before owned cleanup",
+                child_display.display()
+            )));
+        }
+
+        match expected_entry.snapshot.kind {
+            1 => remove_snapshot_regular(directory, &name, &child_display, expected_entry, budget)?,
+            2 => remove_snapshot_directory(
+                directory,
+                &name,
+                &child_display,
+                entries,
+                &relative,
+                expected_entry,
+                budget,
+            )?,
+            3 => remove_snapshot_symlink(directory, &name, &child_display, expected_entry)?,
+            kind => {
+                return Err(std::io::Error::other(format!(
+                    "tree entry '{}' has unsupported snapshot kind {kind}",
+                    child_display.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn child_relative_path(prefix: &[u8], name: &OsStr) -> Vec<u8> {
+    let mut relative = prefix.to_owned();
+    if !relative.is_empty() {
+        relative.push(b'/');
+    }
+    relative.extend_from_slice(name.as_bytes());
+    relative
+}
+
+fn remove_snapshot_regular(
+    parent: &OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+    expected: &TreeContentEntry,
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<()> {
+    budget.reserve_regular_file_bytes(expected.snapshot.size, display_path)?;
+    let fd = rfs::openat(
+        parent,
+        Path::new(name),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if tree_node_snapshot(&rfs::fstat(&fd)?)? != expected.snapshot {
+        return Err(std::io::Error::other(format!(
+            "tree file '{}' changed before owned cleanup",
+            display_path.display()
+        )));
+    }
+    let mut file = std::fs::File::from(fd);
+    let digest = sha256_reader(&mut file)?.digest;
+    if tree_node_snapshot(&rfs::fstat(&file)?)? != expected.snapshot
+        || expected.content.as_ref() != Some(&digest)
+    {
+        return Err(std::io::Error::other(format!(
+            "tree file '{}' changed while verifying owned cleanup",
+            display_path.display()
+        )));
+    }
+    drop(file);
+    rfs::unlinkat(parent, Path::new(name), AtFlags::empty())?;
+    rfs::fsync(parent)?;
+    Ok(())
+}
+
+fn remove_snapshot_symlink(
+    parent: &OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+    expected: &TreeContentEntry,
+) -> std::io::Result<()> {
+    let target = rfs::readlinkat(parent, Path::new(name), Vec::new())?;
+    if tree_node_snapshot(&rfs::statat(
+        parent,
+        Path::new(name),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)? != expected.snapshot
+        || expected.content.as_ref() != Some(&sha256_bytes(target.as_bytes()))
+    {
+        return Err(std::io::Error::other(format!(
+            "tree link '{}' changed while verifying owned cleanup",
+            display_path.display()
+        )));
+    }
+    rfs::unlinkat(parent, Path::new(name), AtFlags::empty())?;
+    rfs::fsync(parent)?;
+    Ok(())
+}
+
+fn remove_snapshot_directory(
+    parent: &OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+    entries: &BTreeMap<Vec<u8>, TreeContentEntry>,
+    relative: &[u8],
+    expected: &TreeContentEntry,
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<()> {
+    let directory = rfs::openat(
+        parent,
+        Path::new(name),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if tree_node_snapshot(&rfs::fstat(&directory)?)? != expected.snapshot {
+        return Err(std::io::Error::other(format!(
+            "tree directory '{}' changed before owned cleanup",
+            display_path.display()
+        )));
+    }
+    remove_tree_contents_from_snapshot(&directory, display_path, entries, relative, budget)?;
+    if !directory_entry_names_capped(&directory, budget.limits.map(|limits| limits.max_entries))?
+        .is_empty()
+    {
+        return Err(std::io::Error::other(format!(
+            "tree directory '{}' received entries during owned cleanup",
+            display_path.display()
+        )));
+    }
+    drop(directory);
+    remove_empty_directory_at_exact(parent, name, expected.snapshot.identity)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn copy_tree_contents(
     source: &OwnedFd,
@@ -1118,6 +1365,29 @@ fn prepared_snapshot(stat: &rfs::Stat) -> std::io::Result<PreparedNodeSnapshot> 
     })
 }
 
+fn tree_node_snapshot(stat: &rfs::Stat) -> std::io::Result<TreeNodeSnapshot> {
+    let prepared = prepared_snapshot(stat)?;
+    #[allow(
+        clippy::useless_conversion,
+        reason = "rustix mode_t width differs between supported Unix targets"
+    )]
+    let mode = u32::from(stat.st_mode);
+    Ok(TreeNodeSnapshot {
+        identity: prepared.identity,
+        kind: match prepared.kind {
+            PreparedNodeKind::File => 1,
+            PreparedNodeKind::Directory => 2,
+            PreparedNodeKind::Symlink => 3,
+        },
+        mode,
+        size: prepared.size,
+        mtime: prepared.mtime,
+        mtime_nsec: prepared.mtime_nsec,
+        ctime: prepared.ctime,
+        ctime_nsec: prepared.ctime_nsec,
+    })
+}
+
 fn measure_tree_content_at(
     directory: &OwnedFd,
     display_path: &Path,
@@ -1144,25 +1414,7 @@ fn measure_tree_content_at(
         let child_display = display_path.join(&name);
         let stat_before = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
         let prepared = prepared_snapshot(&stat_before)?;
-        #[allow(
-            clippy::useless_conversion,
-            reason = "rustix mode_t width differs between supported Unix targets"
-        )]
-        let mode = u32::from(stat_before.st_mode);
-        let snapshot = TreeNodeSnapshot {
-            identity: prepared.identity,
-            kind: match prepared.kind {
-                PreparedNodeKind::File => 1,
-                PreparedNodeKind::Directory => 2,
-                PreparedNodeKind::Symlink => 3,
-            },
-            mode,
-            size: prepared.size,
-            mtime: prepared.mtime,
-            mtime_nsec: prepared.mtime_nsec,
-            ctime: prepared.ctime,
-            ctime_nsec: prepared.ctime_nsec,
-        };
+        let snapshot = tree_node_snapshot(&stat_before)?;
         let content = match prepared.kind {
             PreparedNodeKind::File => {
                 budget.reserve_regular_file_bytes(prepared.size, &child_display)?;

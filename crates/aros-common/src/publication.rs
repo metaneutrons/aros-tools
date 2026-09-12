@@ -181,7 +181,9 @@ mod payload_path;
 pub use payload_path::payload_casefold_path_key;
 mod tree_ops;
 pub use tree_ops::{
-    copy_tree_from_snapshot_nofollow, ensure_directory_nofollow, measure_tree_content_cas_bounded,
+    copy_tree_from_snapshot_nofollow, directory_entry_names_nofollow_bounded,
+    ensure_directory_nofollow, measure_tree_content_cas_bounded,
+    remove_tree_from_snapshot_nofollow,
 };
 
 /// Existing-target policy for one-file publication.
@@ -1844,6 +1846,21 @@ mod unix {
         stable_measure_tree_content_at_bounded, sync_prepared_tree, tree_stage_name,
         verify_flat_tree_members,
     };
+
+    pub(in crate::publication) fn remove_tree_from_snapshot_impl(
+        target: &Path,
+        expected: &TreeContentCas,
+        limits: TreeTraversalLimits,
+    ) -> std::io::Result<()> {
+        tree::remove_tree_from_snapshot_nofollow(target, expected, limits)
+    }
+
+    pub(in crate::publication) fn directory_entry_names_nofollow_bounded_impl(
+        path: &Path,
+        max_entries: usize,
+    ) -> std::io::Result<Vec<OsString>> {
+        tree::directory_entry_names_nofollow_bounded(path, max_entries)
+    }
 
     #[cfg(debug_assertions)]
     fn test_fail_point(point: &str) -> std::io::Result<()> {

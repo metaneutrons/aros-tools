@@ -62,6 +62,62 @@ fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
 }
 
 #[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_never_follows_a_link_or_touches_a_sibling() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    let sibling = temporary.path().join("sibling");
+    std::fs::create_dir_all(owned.join("nested")).unwrap();
+    std::fs::write(owned.join("nested/payload"), b"owned").unwrap();
+    std::fs::write(&sibling, b"must-survive").unwrap();
+    symlink(&sibling, owned.join("outside-link")).unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+
+    remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).unwrap();
+
+    assert!(!owned.exists());
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"must-survive");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_tree_removal_refuses_a_changed_tree_without_deleting_it() {
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir_all(owned.join("nested")).unwrap();
+    let payload = owned.join("nested/payload");
+    std::fs::write(&payload, b"before").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    std::fs::write(&payload, b"after").unwrap();
+
+    assert!(remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits).is_err());
+    assert_eq!(std::fs::read(payload).unwrap(), b"after");
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_nofollow_directory_listing_refuses_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("directory");
+    let link = temporary.path().join("link");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("entry"), b"fixture").unwrap();
+    symlink(&directory, &link).unwrap();
+
+    assert_eq!(
+        directory_entry_names_nofollow_bounded(&directory, 4).unwrap(),
+        vec![std::ffi::OsString::from("entry")]
+    );
+    assert!(directory_entry_names_nofollow_bounded(&link, 4).is_err());
+}
+
+#[cfg(unix)]
 struct BoundaryAction {
     point: &'static str,
     matches: Box<dyn Fn(&Path) -> bool>,

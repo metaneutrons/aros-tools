@@ -3,7 +3,41 @@
 #[cfg(not(unix))]
 use super::unsupported_durability;
 use super::{absolute_path, unix, validate_target_leaf, TreeContentCas, TreeTraversalLimits};
+use std::ffi::OsString;
 use std::path::Path;
+
+/// List one directory through no-follow descriptor traversal with a stable,
+/// bounded snapshot of its immediate entry names.
+///
+/// The directory is read twice through the same descriptor and must retain its
+/// path binding and identity. Callers still need to validate every listed
+/// entry before treating it as authority for a state-changing operation.
+///
+/// # Errors
+///
+/// Returns an I/O, unsafe-directory, concurrent-mutation, unsupported-host,
+/// or resource-limit error.
+pub fn directory_entry_names_nofollow_bounded(
+    path: &Path,
+    max_entries: usize,
+) -> std::io::Result<Vec<OsString>> {
+    if max_entries == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "directory entry limit must be greater than zero",
+        ));
+    }
+    validate_target_leaf(path)?;
+    #[cfg(unix)]
+    {
+        unix::directory_entry_names_nofollow_bounded_impl(&absolute_path(path)?, max_entries)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_entries);
+        Err(unsupported_durability())
+    }
+}
 
 /// Create a directory path through no-follow descriptor traversal, or verify
 /// that the existing path is a real directory.
@@ -82,6 +116,37 @@ pub fn copy_tree_from_snapshot_nofollow(
     #[cfg(not(unix))]
     {
         let _ = (source, destination, expected, limits);
+        Err(unsupported_durability())
+    }
+}
+
+/// Remove exactly one previously measured tree through no-follow descriptor
+/// traversal.
+///
+/// The target must still match `expected` before mutation begins. Every child
+/// is rechecked against that snapshot immediately before removal, and a new,
+/// missing, replaced, symlinked, or changed entry aborts the operation. The
+/// traversal remains bounded by `limits`; this function never follows a link
+/// or recursively removes an arbitrary caller-selected parent.
+///
+/// # Errors
+///
+/// Returns an I/O, unsafe-tree, identity-race, content-mismatch, durability,
+/// unsupported-host, or resource-limit error. A caller that needs recovery
+/// after a partial deletion must retain its own durable operation record.
+pub fn remove_tree_from_snapshot_nofollow(
+    target: &Path,
+    expected: &TreeContentCas,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<()> {
+    validate_target_leaf(target)?;
+    #[cfg(unix)]
+    {
+        unix::remove_tree_from_snapshot_impl(&absolute_path(target)?, expected, limits)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, expected, limits);
         Err(unsupported_durability())
     }
 }
