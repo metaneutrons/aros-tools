@@ -1,11 +1,11 @@
 # Toolchain management contract
 
-Status: M8 implementation contract, 2026-09-12. This document turns the
+Status: M8 implementation contract and accepted evidence boundary, 2026-09-12. This document turns the
 pre-M4 design review into the compatibility boundary for the M8 command family.
 It does not make an installed payload trusted, selected or removable merely
 because it was found by an inventory scan. The M8.1–M8.4 command contracts
-below are implemented; native host evidence remains a separate completion
-gate.
+below are implemented; the completed three-host evidence is recorded in the
+[M8 lifecycle ledger](tcp-m8-lifecycle-evidence.md).
 
 The [TCP-M8 acceptance criteria](toolchain-producer-plan.md#tcp-m8--local-toolchain-management)
 and [issue #41](https://github.com/metaneutrons/aros-tools/issues/41) remain
@@ -273,7 +273,7 @@ still blocks cleanup.
    ownership receipts, and adversarial copy tests.
 3. Released-lock selection preview/apply with atomic concurrent-change tests.
 4. Store/project locks, participating build leases, safe remove/GC and crash
-   recovery tests. **Implemented locally; host evidence remains required.**
+   recovery tests. **Implemented and accepted with three-host evidence.**
 5. Positive and adversarial lifecycle evidence on the three active native
    hosts: Linux x86-64, Linux AArch64, and macOS ARM64. Intel macOS is
    explicitly suspended under
@@ -281,6 +281,7 @@ still blocks cleanup.
    not silently dropped.
 
 M8 management changes do not warrant a compiler A/B release matrix. They do
-require the normal relevant CLI, package and fixture gates. The final evidence
-must link exact PRs, schema identities, test runs, failure fixtures and a
-manual safe-selection/cleanup demonstration before #41 can close.
+require the normal relevant CLI, package and fixture gates. The
+[accepted evidence](tcp-m8-lifecycle-evidence.md) links the exact PR, schema
+identities, test runs, failure fixtures and a black-box safe-selection/cleanup
+demonstration for #41.
