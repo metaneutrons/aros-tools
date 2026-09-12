@@ -376,6 +376,10 @@ enum ToolchainCommands {
     Register(toolchain_management::RegisterArgs),
     /// Preview or atomically select one complete released lock for this checkout
     Select(toolchain_selection::SelectArgs),
+    /// Preview or remove one exact owned local-toolchain import
+    Remove(toolchain_lifecycle::RemoveArgs),
+    /// Preview or reclaim unprotected owned local-toolchain imports
+    Gc(toolchain_lifecycle::GcArgs),
     /// Verify an installed or explicitly local AROS toolchain
     Verify {
         /// Target profile whose locked contract should be verified
@@ -671,7 +675,9 @@ impl Commands {
                     | ToolchainCommands::MetaMakeFetch(_)
                     | ToolchainCommands::Inventory(_)
                     | ToolchainCommands::Import(_)
-                    | ToolchainCommands::Register(_),
+                    | ToolchainCommands::Register(_)
+                    | ToolchainCommands::Remove(_)
+                    | ToolchainCommands::Gc(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
@@ -734,6 +740,8 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 | ToolchainCommands::Inventory(_)
                 | ToolchainCommands::Import(_)
                 | ToolchainCommands::Register(_)
+                | ToolchainCommands::Remove(_)
+                | ToolchainCommands::Gc(_)
                 | ToolchainCommands::Select(_)
                 | ToolchainCommands::Producer(_)
                 | ToolchainCommands::MetaMakeFetch(_) => None,

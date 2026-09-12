@@ -8,7 +8,7 @@
 
 use crate::artifact::require_absolute_state_path;
 use crate::observability;
-use crate::toolchain::default_store_root;
+use crate::toolchain::{self, default_store_root};
 use aros_common::{
     copy_tree_from_snapshot_nofollow, ensure_directory_nofollow, measure_regular_file,
     measure_regular_file_bounded, measure_tree_content_cas_bounded, open_regular_file_nofollow,
@@ -28,15 +28,15 @@ const INVENTORY_SCHEMA: &str = "aros-toolchain-inventory-v1";
 const DEFAULT_MAX_ENTRIES: usize = 10_000;
 const MAX_MAX_ENTRIES: usize = 100_000;
 const COMPLETE_MARKER: &str = ".complete";
-const PAYLOAD_DIRECTORY: &str = "toolchain";
+pub const MANAGED_PAYLOAD_DIRECTORY: &str = "toolchain";
 const MANAGEMENT_SCHEMA: &str = "aros-toolchain-management-v1";
 const OWNERSHIP_RECEIPT_SCHEMA: &str = "aros-toolchain-ownership-v1";
-const REGISTRATION_RECEIPT_SCHEMA: &str = "aros-toolchain-registration-v1";
+pub const REGISTRATION_RECEIPT_SCHEMA: &str = "aros-toolchain-registration-v1";
 pub const MANAGEMENT_DIRECTORY: &str = ".aros-management/v1";
-const IMPORTS_DIRECTORY: &str = "imports/v1";
+pub const MANAGED_IMPORTS_DIRECTORY: &str = "imports/v1";
 const OWNERSHIP_RECEIPT: &str = "ownership.json";
-const REGISTRATIONS_DIRECTORY: &str = "registrations";
-const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
+pub const REGISTRATIONS_DIRECTORY: &str = "registrations";
+pub const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
 pub const PROJECT_REFERENCES_DIRECTORY: &str = "projects/v1";
 pub const PROJECT_REFERENCE_SCHEMA: &str = "aros-toolchain-project-reference-v1";
 const MAX_PROJECT_REFERENCE_BYTES: u64 = 1024 * 1024;
@@ -526,7 +526,7 @@ fn inspect_envelope(envelope: &Path, components: &[String], result: &mut Invento
         });
         return;
     };
-    let payload = envelope.join(PAYLOAD_DIRECTORY);
+    let payload = envelope.join(MANAGED_PAYLOAD_DIRECTORY);
     let marker = marker_state(&envelope.join(COMPLETE_MARKER));
     let mut error = None;
     let manifest = match fs::symlink_metadata(&payload) {
@@ -608,7 +608,7 @@ fn inspect_import_envelope(envelope: &Path, components: &[String], result: &mut 
     };
     debug_assert_eq!(version, "v1");
 
-    let payload = envelope.join(PAYLOAD_DIRECTORY);
+    let payload = envelope.join(MANAGED_PAYLOAD_DIRECTORY);
     let marker = marker_state(&envelope.join(COMPLETE_MARKER));
     let mut error = None;
     let manifest = match fs::symlink_metadata(&payload) {
@@ -700,7 +700,7 @@ fn verify_import_ownership(
     let receipt: OwnershipReceipt = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| format!("ownership receipt is not valid JSON: {error}"))?;
     let manifest_path = envelope
-        .join(PAYLOAD_DIRECTORY)
+        .join(MANAGED_PAYLOAD_DIRECTORY)
         .join(AROS_TOOLCHAIN_MANIFEST_FILE);
     let Some((_, manifest_bytes)) = measure_regular_file(&manifest_path)
         .map_err(|error| format!("cannot safely read embedded manifest: {error}"))?
@@ -755,11 +755,11 @@ fn marker_state(path: &Path) -> MarkerState {
     }
 }
 
-fn safe_segment(value: &str) -> bool {
+pub fn safe_segment(value: &str) -> bool {
     !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\'])
 }
 
-fn is_lower_sha256(value: &str) -> bool {
+pub fn is_lower_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -871,18 +871,26 @@ struct OwnershipReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct RegistrationReceipt {
-    schema: String,
-    management: String,
-    registration_id: String,
-    source: String,
-    host: String,
-    target_profile: String,
-    target_triple: String,
-    release_id_claim: String,
-    manifest_sha256: String,
-    tree_sha256: String,
-    source_snapshot_sha256: String,
+pub struct RegistrationReceipt {
+    pub schema: String,
+    pub management: String,
+    pub registration_id: String,
+    pub source: String,
+    pub host: String,
+    pub target_profile: String,
+    pub target_triple: String,
+    pub release_id_claim: String,
+    pub manifest_sha256: String,
+    pub tree_sha256: String,
+    pub source_snapshot_sha256: String,
+}
+
+/// A measured non-owning external registration receipt.
+#[derive(Debug, Clone)]
+pub struct MeasuredRegistration {
+    pub identity: FileIdentity,
+    pub sha256: String,
+    pub receipt: RegistrationReceipt,
 }
 
 /// A managed import envelope whose control-plane receipt still binds the
@@ -996,10 +1004,27 @@ pub fn managed_import_envelope_for_payload(
     payload: &Path,
 ) -> Result<Option<ManagedImportEnvelope>> {
     let store_text = normalized_absolute_utf8(store, "toolchain store")?;
-    let payload_text = normalized_absolute_utf8(payload, "resolved toolchain root")?;
-    let imports = PathBuf::from(&store_text).join(IMPORTS_DIRECTORY);
-    let payload = PathBuf::from(payload_text);
-    let Ok(relative) = payload.strip_prefix(&imports) else {
+    normalized_absolute_utf8(payload, "resolved toolchain root")?;
+    let canonical_store = match store.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).into_diagnostic().wrap_err_with(|| {
+                format!(
+                    "cannot canonicalize toolchain store '{}' while validating managed ownership",
+                    store.display()
+                )
+            });
+        }
+    };
+    let canonical_payload = payload.canonicalize().into_diagnostic().wrap_err_with(|| {
+        format!(
+            "cannot canonicalize resolved toolchain root '{}' while validating managed ownership",
+            payload.display()
+        )
+    })?;
+    let imports = canonical_store.join(MANAGED_IMPORTS_DIRECTORY);
+    let Ok(relative) = canonical_payload.strip_prefix(&imports) else {
         return Ok(None);
     };
     let components = relative
@@ -1022,7 +1047,7 @@ pub fn managed_import_envelope_for_payload(
     if !safe_segment(host)
         || !safe_segment(target_profile)
         || !is_lower_sha256(managed_id)
-        || payload_directory != PAYLOAD_DIRECTORY
+        || payload_directory != MANAGED_PAYLOAD_DIRECTORY
     {
         return Err(miette::miette!(
             "resolved local prefix is below managed imports but has an invalid envelope identity"
@@ -1031,7 +1056,7 @@ pub fn managed_import_envelope_for_payload(
     let envelope = imports.join(host).join(target_profile).join(managed_id);
     for (label, path) in [
         ("managed import envelope", &envelope),
-        ("managed import payload", &payload),
+        ("managed import payload", &canonical_payload),
     ] {
         let metadata = fs::symlink_metadata(path)
             .into_diagnostic()
@@ -1052,12 +1077,12 @@ pub fn managed_import_envelope_for_payload(
             envelope.display()
         ));
     }
-    let manifest = ArosToolchainManifest::load(&payload)
+    let manifest = ArosToolchainManifest::load(&canonical_payload)
         .into_diagnostic()
         .wrap_err_with(|| {
             format!(
                 "cannot load managed import manifest below '{}'",
-                payload.display()
+                canonical_payload.display()
             )
         })?;
     if manifest.host != *host || manifest.target_profile != *target_profile {
@@ -1069,7 +1094,15 @@ pub fn managed_import_envelope_for_payload(
         miette::miette!("managed import ownership cannot be proven: {message}")
     })?;
     Ok(Some(ManagedImportEnvelope {
-        envelope,
+        // Preserve the caller's configured lexical store spelling for all
+        // management lock paths, while classifying ownership through the
+        // canonical filesystem identities above. This prevents `/tmp` versus
+        // `/private/tmp` (or a user store symlink) from bypassing build leases.
+        envelope: PathBuf::from(store_text)
+            .join(MANAGED_IMPORTS_DIRECTORY)
+            .join(host)
+            .join(target_profile)
+            .join(managed_id),
         managed_id: managed_id.to_owned(),
         release_id_claim: manifest.release_id,
     }))
@@ -1087,7 +1120,7 @@ fn inspect_candidate(source: PathBuf) -> Result<Candidate> {
             source.display()
         ));
     }
-    let limits = import_limits();
+    let limits = managed_import_limits();
     let snapshot = measure_tree_content_cas_bounded(&source, limits)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot safely measure import source '{}'", source.display()))?;
@@ -1160,7 +1193,8 @@ fn validate_candidate_payload(root: &Path) -> Result<(ArosToolchainManifest, Str
     ))
 }
 
-fn import_limits() -> TreeTraversalLimits {
+/// Traversal limits shared by import validation and managed-envelope cleanup.
+pub fn managed_import_limits() -> TreeTraversalLimits {
     TreeTraversalLimits::new(IMPORT_MAX_ENTRIES, IMPORT_MAX_REGULAR_FILE_BYTES)
         .expect("compile-time import limits must be non-zero")
 }
@@ -1208,7 +1242,7 @@ pub fn normalized_absolute_utf8(path: &Path, label: &str) -> Result<String> {
 
 fn import_destination(store: &Path, candidate: &Candidate) -> PathBuf {
     store
-        .join(IMPORTS_DIRECTORY)
+        .join(MANAGED_IMPORTS_DIRECTORY)
         .join(&candidate.manifest.host)
         .join(&candidate.manifest.target_profile)
         .join(&candidate.managed_id)
@@ -1268,7 +1302,7 @@ fn apply_import(
         .tempdir_in(parent)
         .into_diagnostic()
         .wrap_err("cannot create managed import staging directory")?;
-    let payload = staging.path().join(PAYLOAD_DIRECTORY);
+    let payload = staging.path().join(MANAGED_PAYLOAD_DIRECTORY);
     fs::create_dir(&payload)
         .into_diagnostic()
         .wrap_err("cannot create managed import payload staging directory")?;
@@ -1276,7 +1310,7 @@ fn apply_import(
         &candidate.source,
         &payload,
         &candidate.snapshot,
-        import_limits(),
+        managed_import_limits(),
     )
     .into_diagnostic()
     .wrap_err("import source changed or could not be copied safely")?;
@@ -1334,7 +1368,7 @@ fn apply_import(
             "managed import was published, but receipt readback could not be proven",
         )
     })?;
-    validate_candidate_payload(&destination.join(PAYLOAD_DIRECTORY)).or_else(|error| {
+    validate_candidate_payload(&destination.join(MANAGED_PAYLOAD_DIRECTORY)).or_else(|error| {
         observability::commit_state(
             Err(error),
             CommitState::Committed,
@@ -1456,6 +1490,122 @@ pub fn read_project_reference(
     expected_project_lock: &Path,
     label: &str,
 ) -> Result<Option<MeasuredProjectReference>> {
+    let reference = read_project_reference_unbound(path, label)?;
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let expected_lock = normalized_absolute_utf8(expected_project_lock, "project lock")?;
+    if reference.receipt.project != expected_project
+        || reference.receipt.project_lock != expected_lock
+    {
+        return Err(miette::miette!(
+            "{label} '{}' does not bind this project and its authoritative lock",
+            path.display()
+        ));
+    }
+    Ok(Some(reference))
+}
+
+/// Ensure that a project's already-published release lock has a matching
+/// derived lifecycle reference.
+///
+/// The caller must hold both the store lock and the project's advisory lock.
+/// This helper never replaces a reference: a mismatched existing receipt is
+/// evidence of an incomplete or externally modified selection and must be
+/// repaired through the explicit selection workflow before a build can rely
+/// on it.
+pub fn ensure_project_reference_for_locked_build(
+    store: &Path,
+    project: &str,
+    project_lock: &Path,
+    release_id: &str,
+    lock_sha256: &str,
+) -> Result<()> {
+    let reference_path = project_reference_path(store, project);
+    if let Some(existing) = read_project_reference(
+        &reference_path,
+        project,
+        project_lock,
+        "existing project reference",
+    )? {
+        if existing.receipt.release_id == release_id && existing.receipt.lock_sha256 == lock_sha256
+        {
+            return Ok(());
+        }
+        return Err(miette::miette!(
+            "existing project reference '{}' does not match the locked release; run 'aros toolchain select' to repair the project lifecycle state",
+            reference_path.display()
+        ));
+    }
+
+    let receipt = ProjectReferenceReceipt {
+        schema: PROJECT_REFERENCE_SCHEMA.to_owned(),
+        project: project.to_owned(),
+        project_lock: normalized_absolute_utf8(project_lock, "project lock")?,
+        release_id: release_id.to_owned(),
+        lock_sha256: lock_sha256.to_owned(),
+    };
+    publish_project_reference_receipt(&reference_path, &receipt, None).wrap_err_with(|| {
+        format!(
+            "cannot publish build-derived project reference '{}'; rerun 'aros toolchain select' if another selection completed concurrently",
+            reference_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Atomically publish one project-reference receipt and prove its readback.
+///
+/// `previous` is the exact receipt snapshot permitted to be replaced. Omit it
+/// to require no prior receipt. The caller owns any broader transaction or
+/// commit-state classification; this primitive only establishes the durable
+/// reference boundary.
+pub fn publish_project_reference_receipt(
+    path: &Path,
+    receipt: &ProjectReferenceReceipt,
+    previous: Option<&MeasuredProjectReference>,
+) -> Result<MeasuredProjectReference> {
+    let bytes = serde_json::to_vec_pretty(receipt)
+        .into_diagnostic()
+        .wrap_err("cannot serialize project reference receipt")?;
+    let policy = previous.map_or(AtomicFilePolicy::NoClobber, |previous| {
+        AtomicFilePolicy::ReplaceIf {
+            identity: previous.identity,
+            sha256: sha256_bytes(&previous.bytes),
+        }
+    });
+    publish_atomic_file(path, &bytes, policy)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot publish project reference '{}'", path.display()))?;
+    let published = read_project_reference(
+        path,
+        &receipt.project,
+        Path::new(&receipt.project_lock),
+        "published project reference",
+    )?
+    .ok_or_else(|| {
+        miette::miette!(
+            "project reference disappeared after publication: '{}'",
+            path.display()
+        )
+    })?;
+    if published.bytes != bytes || published.receipt != *receipt {
+        return Err(miette::miette!(
+            "published project reference does not match its approved receipt"
+        ));
+    }
+    Ok(published)
+}
+
+/// Read one project reference without a caller-supplied project binding.
+///
+/// This is for store-wide lifecycle scans. It validates the receipt's own
+/// canonical project and lock paths, but the current lock bytes still need to
+/// be measured separately before a destructive operation is allowed.
+pub fn read_project_reference_unbound(
+    path: &Path,
+    label: &str,
+) -> Result<Option<MeasuredProjectReference>> {
     let Some((identity, bytes)) = measure_regular_file_bounded(path, MAX_PROJECT_REFERENCE_BYTES)
         .into_diagnostic()
         .wrap_err_with(|| format!("cannot safely read {label} '{}'", path.display()))?
@@ -1465,13 +1615,18 @@ pub fn read_project_reference(
     let receipt: ProjectReferenceReceipt = serde_json::from_slice(&bytes)
         .into_diagnostic()
         .wrap_err_with(|| format!("{label} '{}' is not valid JSON", path.display()))?;
-    let expected_lock = normalized_absolute_utf8(expected_project_lock, "project lock")?;
+    let project = Path::new(&receipt.project);
+    let normalized_project = normalized_absolute_utf8(project, "project reference project")?;
+    let expected_lock = normalized_absolute_utf8(
+        &toolchain::lock_file_path(project),
+        "project reference lock",
+    )?;
     if receipt.schema != PROJECT_REFERENCE_SCHEMA
-        || receipt.project != expected_project
+        || receipt.project != normalized_project
         || receipt.project_lock != expected_lock
     {
         return Err(miette::miette!(
-            "{label} '{}' does not bind this project and its authoritative lock",
+            "{label} '{}' does not bind a canonical project and its authoritative lock",
             path.display()
         ));
     }
@@ -1491,6 +1646,47 @@ pub fn read_project_reference(
         identity,
         sha256: sha256_bytes(&bytes).to_string(),
         bytes,
+        receipt,
+    }))
+}
+
+/// Read and validate one non-owning external registration receipt.
+///
+/// A registration is never deletion authority. Lifecycle code uses this to
+/// retain an owned import when an explicit registration still names it, and
+/// to fail closed if a control-plane receipt is malformed.
+pub fn read_registration(path: &Path, label: &str) -> Result<Option<MeasuredRegistration>> {
+    let Some((identity, bytes)) = measure_regular_file_bounded(path, MAX_PROJECT_REFERENCE_BYTES)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot safely read {label} '{}'", path.display()))?
+    else {
+        return Ok(None);
+    };
+    let receipt: RegistrationReceipt = serde_json::from_slice(&bytes)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("{label} '{}' is not valid JSON", path.display()))?;
+    let normalized_source =
+        normalized_absolute_utf8(Path::new(&receipt.source), "registration source")?;
+    if receipt.schema != REGISTRATION_RECEIPT_SCHEMA
+        || receipt.management != "non-owning-external"
+        || !is_lower_sha256(&receipt.registration_id)
+        || receipt.source != normalized_source
+        || receipt.host.is_empty()
+        || receipt.target_profile.is_empty()
+        || receipt.target_triple.is_empty()
+        || receipt.release_id_claim.is_empty()
+        || !is_lower_sha256(&receipt.manifest_sha256)
+        || !is_lower_sha256(&receipt.tree_sha256)
+        || !is_lower_sha256(&receipt.source_snapshot_sha256)
+    {
+        return Err(miette::miette!(
+            "{label} '{}' does not satisfy the v1 external-registration contract",
+            path.display()
+        ));
+    }
+    Ok(Some(MeasuredRegistration {
+        identity,
+        sha256: sha256_bytes(&bytes).to_string(),
         receipt,
     }))
 }
@@ -1621,7 +1817,8 @@ mod tests {
     use super::{
         apply_import, apply_registration, import_destination, inspect_candidate, inspect_store,
         managed_import_envelope_for_payload, normalized_absolute_utf8, registration_destination,
-        validate_candidate_payload, MarkerState, MetadataState, MANAGEMENT_DIRECTORY,
+        validate_candidate_payload, MarkerState, MetadataState, MANAGED_IMPORTS_DIRECTORY,
+        MANAGED_PAYLOAD_DIRECTORY, MANAGEMENT_DIRECTORY,
     };
     use crate::toolchain::{ResolvedToolchain, ToolchainPaths, ToolchainSource};
     use aros_common::{
@@ -1763,6 +1960,37 @@ mod tests {
                     .is_some_and(|extension| extension == "json"))
                 .count(),
             1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_import_ownership_survives_a_canonical_store_alias() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("candidate");
+        let store = temporary.path().join("store");
+        let store_alias = temporary.path().join("store-alias");
+        write_candidate(&source);
+        let candidate = inspect_candidate(source).unwrap();
+        let destination = import_destination(&store, &candidate);
+        apply_import(&store, &candidate, &destination).unwrap();
+        symlink(&store, &store_alias).unwrap();
+
+        let imported = managed_import_envelope_for_payload(
+            &store_alias,
+            &destination.join(MANAGED_PAYLOAD_DIRECTORY),
+        )
+        .unwrap()
+        .expect("canonical store aliases must retain managed ownership");
+        assert_eq!(
+            imported.envelope,
+            store_alias
+                .join(MANAGED_IMPORTS_DIRECTORY)
+                .join("linux-x86_64")
+                .join("pc-x86_64")
+                .join(candidate.managed_id)
         );
     }
 

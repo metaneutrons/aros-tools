@@ -10,8 +10,9 @@ use crate::repo;
 use crate::toolchain;
 use crate::toolchain_management::{
     acquire_store_lock, management_store, normalized_absolute_utf8, project_lock_path,
-    project_reference_path, publication_error, read_project_reference, stable_token,
-    MeasuredProjectReference, ProjectReferenceReceipt, ResultFormat,
+    project_reference_path, publication_error, publish_project_reference_receipt,
+    read_project_reference, stable_token, MeasuredProjectReference, ProjectReferenceReceipt,
+    ResultFormat,
 };
 use aros_common::{
     measure_regular_file_bounded, parse_credential_free_https_url, publish_atomic_file,
@@ -197,46 +198,15 @@ fn publish_project_reference(plan: &SelectionPlan) -> Result<()> {
         release_id: plan.candidate.lock.release_id.clone(),
         lock_sha256: plan.candidate.sha256.clone(),
     };
-    let bytes = serde_json::to_vec_pretty(&receipt)
-        .into_diagnostic()
-        .wrap_err("cannot serialize project reference receipt")?;
-    let policy = plan
-        .previous_reference
-        .as_ref()
-        .map_or(AtomicFilePolicy::NoClobber, |previous| {
-            AtomicFilePolicy::ReplaceIf {
-                identity: previous.identity,
-                sha256: sha256_bytes(&previous.bytes),
-            }
-        });
-    if let Err(error) = publish_atomic_file(&plan.project_reference, &bytes, policy) {
+    if let Err(error) = publish_project_reference_receipt(
+        &plan.project_reference,
+        &receipt,
+        plan.previous_reference.as_ref(),
+    ) {
         return observability::commit_state(
-            Err(miette::miette!(
-                "project reference publication failed: {error}"
-            )),
+            Err(error),
             CommitState::Committed,
             "project selection was published, but its derived reference could not be proven; cleanup remains unsafe until the project is inspected",
-        );
-    }
-    let published = read_project_reference(
-        &plan.project_reference,
-        &plan.project,
-        &plan.project_lock,
-        "published project reference",
-    )?
-    .ok_or_else(|| {
-        miette::miette!(
-            "project reference disappeared after publication: '{}'",
-            plan.project_reference.display()
-        )
-    })?;
-    if published.bytes != bytes || published.receipt != receipt {
-        return observability::commit_state(
-            Err(miette::miette!(
-                "published project reference does not match the approved selection"
-            )),
-            CommitState::Committed,
-            "project selection was published, but its derived reference readback could not be proven; cleanup remains unsafe until the project is inspected",
         );
     }
     Ok(())
