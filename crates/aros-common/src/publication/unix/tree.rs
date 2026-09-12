@@ -213,6 +213,15 @@ pub(in crate::publication) fn remove_tree_from_snapshot_nofollow(
             target.display()
         )));
     }
+    // POSIX has no `unlinkat` variant that binds deletion to an already-open
+    // descriptor or an expected inode.  The identity checks below therefore
+    // need a namespace in which an uncooperative principal cannot replace a
+    // path between check and mutation.  Reject group/world-writable ancestors,
+    // directories, and regular files before treating the caller's advisory
+    // locks as that cooperative-writer boundary.  A same-UID process is part
+    // of the store owner's trust domain; it has the authority to replace the
+    // entire store and cannot be distinguished portably from its owner.
+    validate_private_removal_boundary(target, &directory, limits)?;
     let current = TreeContentCas {
         root,
         entries: stable_measure_tree_content_at_bounded(&directory, target, Some(limits))?,
@@ -232,8 +241,13 @@ pub(in crate::publication) fn remove_tree_from_snapshot_nofollow(
             target.display()
         )));
     }
-    drop(directory);
-    if directory_identity_at(&parent.fd, &parent.leaf)? != Some(root) {
+    // Keep the verified root descriptor open through the final pathname
+    // operation. Revalidate both the descriptor and no-follow parent entry
+    // immediately before `unlinkat`; a substituted root must fail closed
+    // rather than being treated as the approved snapshot.
+    if identity_from_stat(&rfs::fstat(&directory)?) != root
+        || directory_identity_at(&parent.fd, &parent.leaf)? != Some(root)
+    {
         return Err(std::io::Error::other(format!(
             "tree '{}' changed before final removal",
             target.display()
@@ -241,6 +255,163 @@ pub(in crate::publication) fn remove_tree_from_snapshot_nofollow(
     }
     rfs::unlinkat(&parent.fd, Path::new(&parent.leaf), AtFlags::REMOVEDIR)?;
     rfs::fsync(&parent.fd)?;
+    Ok(())
+}
+
+/// Prove that destructive cleanup is confined to a non-shared Unix namespace.
+///
+/// Descriptor-relative traversal prevents symlink escapes, while this check
+/// prevents a group or world principal from modifying an otherwise verified
+/// path through a writable ancestor or payload object.  POSIX cannot express
+/// an identity-bound unlink; callers therefore use this as the explicit trust
+/// boundary for the short revalidation-to-unlink interval.
+fn validate_private_removal_boundary(
+    target: &Path,
+    directory: &OwnedFd,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<()> {
+    validate_private_ancestor_chain(target)?;
+    let mut budget = TreeMeasurementBudget::bounded(limits);
+    validate_private_tree(directory, target, &mut budget)
+}
+
+fn validate_private_ancestor_chain(target: &Path) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("tree removal target '{}' has no parent", target.display()),
+        )
+    })?;
+    let mut directory = rfs::open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    validate_private_directory(&rfs::fstat(&directory)?, Path::new("/"))?;
+    let mut display = PathBuf::from("/");
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                let next = rfs::openat(
+                    &directory,
+                    Path::new(name),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?;
+                display.push(name);
+                validate_private_directory(&rfs::fstat(&next)?, &display)?;
+                directory = next;
+            }
+            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "tree removal target '{}' is not absolute and normalized",
+                        target.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_private_tree(
+    directory: &OwnedFd,
+    display_path: &Path,
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<()> {
+    let root = rfs::fstat(directory)?;
+    validate_private_directory(&root, display_path)?;
+    let root_identity = identity_from_stat(&root);
+    let names = directory_entry_names_with_budget(directory, budget)?;
+    for name in names {
+        let path = display_path.join(&name);
+        let stat = rfs::statat(directory, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
+        let file_type = rfs::FileType::from_raw_mode(stat.st_mode);
+        if file_type.is_file() {
+            validate_private_regular_file(&stat, &path)?;
+            continue;
+        }
+        if file_type.is_symlink() {
+            continue;
+        }
+        if !file_type.is_dir() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "refusing to remove unsupported filesystem object '{}'",
+                    path.display()
+                ),
+            ));
+        }
+        let child = rfs::openat(
+            directory,
+            Path::new(&name),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        if identity_from_stat(&rfs::fstat(&child)?) != identity_from_stat(&stat) {
+            return Err(std::io::Error::other(format!(
+                "directory '{}' changed while checking its removal trust boundary",
+                path.display()
+            )));
+        }
+        validate_private_tree(&child, &path, budget)?;
+    }
+    if identity_from_stat(&rfs::fstat(directory)?) != root_identity {
+        return Err(std::io::Error::other(format!(
+            "directory '{}' changed while checking its removal trust boundary",
+            display_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_private_directory(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
+    if !rfs::FileType::from_raw_mode(stat.st_mode).is_dir() {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("removal boundary '{}' is not a directory", path.display()),
+        ));
+    }
+    validate_not_group_or_world_writable(stat, path, "directory")
+}
+
+fn validate_private_regular_file(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
+    validate_not_group_or_world_writable(stat, path, "regular file")?;
+    if stat.st_nlink != 1 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "refusing to remove multiply linked regular file '{}'; its content may be reachable outside the managed tree",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_not_group_or_world_writable(
+    stat: &rfs::Stat,
+    path: &Path,
+    kind: &str,
+) -> std::io::Result<()> {
+    #[allow(
+        clippy::useless_conversion,
+        reason = "rustix mode_t width differs between supported Unix targets"
+    )]
+    let mode = u32::from(stat.st_mode);
+    if mode & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "refusing to remove {kind} '{}' because it is group- or world-writable",
+                path.display()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -370,7 +541,26 @@ fn remove_snapshot_regular(
             display_path.display()
         )));
     }
-    drop(file);
+    // Retain the verified descriptor and recheck the parent entry immediately
+    // before unlink. POSIX cannot make that final name-based unlink
+    // identity-atomic, so the enclosing private-namespace check is also a
+    // required part of this mutation contract.
+    #[cfg(test)]
+    crate::publication::publication_tests::run_boundary(
+        "snapshot-removal-before-regular-unlink",
+        display_path,
+    );
+    if tree_node_snapshot(&rfs::statat(
+        parent,
+        Path::new(name),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)? != expected.snapshot
+    {
+        return Err(std::io::Error::other(format!(
+            "tree file '{}' changed immediately before owned cleanup",
+            display_path.display()
+        )));
+    }
     rfs::unlinkat(parent, Path::new(name), AtFlags::empty())?;
     rfs::fsync(parent)?;
     Ok(())
@@ -392,6 +582,17 @@ fn remove_snapshot_symlink(
     {
         return Err(std::io::Error::other(format!(
             "tree link '{}' changed while verifying owned cleanup",
+            display_path.display()
+        )));
+    }
+    if tree_node_snapshot(&rfs::statat(
+        parent,
+        Path::new(name),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)? != expected.snapshot
+    {
+        return Err(std::io::Error::other(format!(
+            "tree link '{}' changed immediately before owned cleanup",
             display_path.display()
         )));
     }
@@ -430,8 +631,9 @@ fn remove_snapshot_directory(
             display_path.display()
         )));
     }
-    drop(directory);
-    remove_empty_directory_at_exact(parent, name, expected.snapshot.identity)
+    // Do not drop the verified child descriptor before the directory-entry
+    // comparison and removal below.
+    remove_open_empty_directory_at_exact(parent, name, &directory, expected.snapshot.identity)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1116,16 +1318,26 @@ fn remove_empty_directory_at_exact(
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    if !directory_entry_names(&directory)?.is_empty() {
+    remove_open_empty_directory_at_exact(parent, name, &directory, expected_identity)
+}
+
+fn remove_open_empty_directory_at_exact(
+    parent: &OwnedFd,
+    name: &OsStr,
+    directory: &OwnedFd,
+    expected_identity: FileIdentity,
+) -> std::io::Result<()> {
+    if identity_from_stat(&rfs::fstat(directory)?) != expected_identity
+        || !directory_entry_names(directory)?.is_empty()
+    {
         return Err(std::io::Error::other(format!(
-            "refusing to remove non-empty directory '{}'",
+            "refusing to remove changed or non-empty directory '{}'",
             name.to_string_lossy()
         )));
     }
-    drop(directory);
     if directory_identity_at(parent, name)? != Some(expected_identity) {
         return Err(std::io::Error::other(format!(
-            "directory '{}' changed before removal",
+            "directory '{}' changed immediately before removal",
             name.to_string_lossy()
         )));
     }

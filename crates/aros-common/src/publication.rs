@@ -171,8 +171,25 @@ pub struct FileIdentity {
     inode: u64,
 }
 
+impl FileIdentity {
+    /// Filesystem device number measured through a no-follow descriptor.
+    #[must_use]
+    pub const fn device(self) -> u64 {
+        self.device
+    }
+
+    /// Filesystem inode number measured through a no-follow descriptor.
+    #[must_use]
+    pub const fn inode(self) -> u64 {
+        self.inode
+    }
+}
+
 mod limits;
-pub use limits::{AdvisoryFileLock, TreeTraversalLimits};
+pub use limits::{
+    probe_advisory_file_lock, AdvisoryFileLock, AdvisoryLockObservation, AdvisoryLockState,
+    TreeTraversalLimits,
+};
 
 mod tree_cas;
 pub use tree_cas::TreeContentCas;
@@ -671,6 +688,52 @@ pub fn publication_journal_path(target: &Path, purpose: &str) -> std::io::Result
     )))
 }
 
+/// Return the persistent advisory-lock path for one publication journal.
+///
+/// The lock is intentionally a sibling of the journal so independent
+/// publishers recover and serialize the same durable namespace. The returned
+/// path is a naming convention only; acquire it through
+/// [`AdvisoryFileLock::acquire`] when mutual exclusion is required.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` if the journal path has no UTF-8 leaf or parent.
+pub fn publication_journal_lock_path(journal: &Path) -> std::io::Result<PathBuf> {
+    let parent = journal.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "publication journal has no parent")
+    })?;
+    let leaf = journal.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "publication journal has no UTF-8 leaf for its advisory lock",
+        )
+    })?;
+    let digest = sha256_bytes(leaf.as_bytes()).to_string();
+    Ok(parent.join(format!(".aros-lock-{}-0000000000000000", &digest[..16])))
+}
+
+/// Return whether `name` has the exact portable form of a persistent
+/// publication-journal advisory lock.
+///
+/// This recognizes the control-plane lock itself, not an arbitrary object as
+/// safe for deletion. Callers must still verify its regular-file type through
+/// a no-follow lookup.
+#[must_use]
+pub fn is_publication_journal_lock_name(name: &str) -> bool {
+    const PREFIX: &str = ".aros-lock-";
+    const SUFFIX: &str = "-0000000000000000";
+    let Some(digest) = name
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.strip_suffix(SUFFIX))
+    else {
+        return false;
+    };
+    digest.len() == 16
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[cfg(not(unix))]
 fn unsupported_durability() -> std::io::Error {
     std::io::Error::new(
@@ -745,11 +808,11 @@ mod unix {
     }
 
     pub(super) fn lock_for_journal(journal: &Path) -> std::io::Result<std::fs::File> {
-        let parent = open_parent(journal, true)?;
-        let lock_name = sibling_name(&parent.leaf, "lock", 0);
+        let lock_path = publication_journal_lock_path(journal)?;
+        let parent = open_parent(&lock_path, true)?;
         let fd = rfs::openat(
             &parent.fd,
-            Path::new(&lock_name),
+            Path::new(&parent.leaf),
             OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )?;
@@ -1829,7 +1892,8 @@ mod unix {
     };
     mod locks;
     pub(in crate::publication) use locks::{
-        acquire_advisory_file_lock, ensure_directory_nofollow, revalidate_advisory_file_lock,
+        acquire_advisory_file_lock, advisory_file_lock_identity, ensure_directory_nofollow,
+        probe_advisory_file_lock, revalidate_advisory_file_lock,
     };
     mod regular;
     use regular::same_regular_snapshot;

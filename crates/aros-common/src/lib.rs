@@ -59,14 +59,16 @@ pub use process::{
 pub use publication::{
     canonical_source_file, casefold_path_key, copy_tree_from_snapshot_nofollow,
     directory_entry_names_nofollow_bounded, ensure_directory_nofollow, exchange_prepared_tree,
-    exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_regular_file,
-    measure_regular_file_bounded, measure_tree_content_cas, measure_tree_content_cas_bounded,
-    open_regular_file_nofollow, payload_casefold_path_key, publication_failure_class,
+    exchange_prepared_tree_if_unchanged, is_publication_journal_lock_name, is_rollback_incomplete,
+    measure_regular_file, measure_regular_file_bounded, measure_tree_content_cas,
+    measure_tree_content_cas_bounded, open_regular_file_nofollow, payload_casefold_path_key,
+    probe_advisory_file_lock, publication_failure_class, publication_journal_lock_path,
     publication_journal_path, publish_atomic_file, publish_flat_tree_noclobber,
     publish_prepared_source_tree_noclobber, publish_prepared_tree_noclobber,
-    remove_tree_from_snapshot_nofollow, AdvisoryFileLock, AtomicFilePolicy, DurableFileSet,
-    FileIdentity, PortableOutputName, PublicationError, PublicationFailureClass,
-    PublicationReceipt, RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
+    remove_tree_from_snapshot_nofollow, AdvisoryFileLock, AdvisoryLockObservation,
+    AdvisoryLockState, AtomicFilePolicy, DurableFileSet, FileIdentity, PortableOutputName,
+    PublicationError, PublicationFailureClass, PublicationReceipt, RecoveryOutcome, TreeContentCas,
+    TreeTraversalLimits,
 };
 pub use target::{TargetProfile, TranspilerProfile};
 pub use text::read_source;

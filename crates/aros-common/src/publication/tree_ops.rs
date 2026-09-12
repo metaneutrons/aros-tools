@@ -129,6 +129,12 @@ pub fn copy_tree_from_snapshot_nofollow(
 /// traversal remains bounded by `limits`; this function never follows a link
 /// or recursively removes an arbitrary caller-selected parent.
 ///
+/// On Unix the target must also be contained in a private, non-shared
+/// namespace: no ancestor, directory, or regular payload file may be group-
+/// or world-writable, and regular payload files may not have multiple links.
+/// POSIX has no inode-bound unlink primitive, so arbitrary processes running
+/// as the store owner remain within that owner's trust boundary.
+///
 /// # Errors
 ///
 /// Returns an I/O, unsafe-tree, identity-race, content-mismatch, durability,

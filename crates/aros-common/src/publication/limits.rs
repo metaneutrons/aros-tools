@@ -2,9 +2,9 @@
 
 #[cfg(not(unix))]
 use super::unsupported_durability;
-use super::{absolute_path, unix, validate_target_leaf};
+use super::{absolute_path, unix, validate_target_leaf, FileIdentity};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resource ceiling for a descriptor-validated tree snapshot or copy.
 ///
@@ -48,6 +48,34 @@ impl TreeTraversalLimits {
 pub struct AdvisoryFileLock {
     #[cfg(unix)]
     file: std::fs::File,
+    #[cfg(unix)]
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: FileIdentity,
+}
+
+/// Observed state of one advisory lock without creating its path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdvisoryLockState {
+    /// No regular lock file exists at the requested path.
+    Absent,
+    /// A regular lock file exists, but no process currently holds it.
+    Unheld,
+    /// Another process currently holds the exclusive lock.
+    Held,
+}
+
+/// Descriptor-measured observation of an advisory-lock pathname.
+///
+/// A pathname may not be substituted between a durable receipt and a later
+/// lifecycle scan. Consumers therefore bind both this identity and state; a
+/// state alone is not authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdvisoryLockObservation {
+    /// Identity of the regular lock file when it exists.
+    pub identity: Option<FileIdentity>,
+    /// Whether another process currently holds that exact file lock.
+    pub state: AdvisoryLockState,
 }
 
 impl AdvisoryFileLock {
@@ -62,8 +90,13 @@ impl AdvisoryFileLock {
         validate_target_leaf(path)?;
         #[cfg(unix)]
         {
+            let path = absolute_path(path)?;
+            let file = unix::acquire_advisory_file_lock(&path)?;
+            let identity = unix::advisory_file_lock_identity(&file)?;
             Ok(Self {
-                file: unix::acquire_advisory_file_lock(&absolute_path(path)?)?,
+                file,
+                path,
+                identity,
             })
         }
         #[cfg(not(unix))]
@@ -81,11 +114,56 @@ impl AdvisoryFileLock {
     pub fn revalidate(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            unix::revalidate_advisory_file_lock(&self.file)
+            unix::revalidate_advisory_file_lock(&self.file, &self.path, self.identity)
         }
         #[cfg(not(unix))]
         {
             Err(unsupported_durability())
         }
+    }
+
+    /// Return the descriptor-measured identity of this lock file.
+    ///
+    /// Lifecycle receipts use this value to reject a substituted lock
+    /// pathname rather than treating a different unheld inode as stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor no longer owns its lock or the
+    /// lock pathname was replaced.
+    pub fn identity(&self) -> std::io::Result<FileIdentity> {
+        #[cfg(unix)]
+        {
+            self.revalidate()?;
+            Ok(self.identity)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(unsupported_durability())
+        }
+    }
+}
+
+/// Probe one advisory lock without creating a file or changing lock state.
+///
+/// This is suitable for a read-only lifecycle preview. A persisted receipt is
+/// not authority by itself: consumers must bind the returned identity and
+/// [`AdvisoryLockState::Held`] before treating a process as protecting the
+/// associated resource.
+///
+/// # Errors
+///
+/// Returns an error when the path is unsafe, points to a non-regular file, or
+/// cannot be inspected through the no-follow descriptor path.
+pub fn probe_advisory_file_lock(path: &Path) -> std::io::Result<AdvisoryLockObservation> {
+    validate_target_leaf(path)?;
+    #[cfg(unix)]
+    {
+        unix::probe_advisory_file_lock(&absolute_path(path)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(unsupported_durability())
     }
 }
