@@ -1,86 +1,44 @@
-# Documentation source audit — 2026-09-05
+# Documentation source-parity audit — 2026-09-13
 
-Scope: the public AROS tools documentation, README and contributor entry points.
-Implementation reference: `9be605ca980cc673d698001e5ab12b2beaf034f4`.
-This overhaul changes documentation and its presentation, not Rust behavior,
-release inputs or qualification policy.
+Scope: the public AROS tools documentation, README and contributor entry
+points. This record is a maintenance evidence ledger, not release or hardware
+qualification evidence.
 
-## Maintenance addendum — 2026-09-06
+## Current source boundaries
 
-The M1 inspection change adds the 30th leaf command, `toolchain plan`, with
-its actual help/arguments and source boundary in the command reference.
-The inspector remains blocked and never builds. Added AX diagnostics and
-their distinct 1 MiB/10-second Git bounds are documented; the historical
-29-command and visual audit below is unchanged, not claimed as a fresh
-browser sweep. The updated documentation build checks 1,654 generated links.
-
-## Native-producer addendum — 2026-09-08
-
-The historical command-count measurement below is not reused as proof for the
-native producer. `toolchain build` and the visible `toolchain producer`
-namespace are covered by the command reference and the dedicated local producer
-guide. The hidden `__metamake-fetch` bridge remains deliberately undocumented
-as a public command: it is an internal lifecycle child and accepts only
-controlled environment inputs. The guide distinguishes cache bootstrap from the
-mandatory offline execution stage, records that a local candidate has no release
-provenance, and links stable AX diagnostic handling. The fresh M6 build evidence
-is maintained in `../docs/tcp-m6-native-evidence.md`.
-
-## Coverage and source boundaries
-
-| Area | Evidence inspected | Result documented |
+| Area | Source checked | Current public claim |
 | --- | --- | --- |
-| Frontend | `crates/aros-cli/src/main.rs`, `commands.rs`, freshly built `aros --help` recursively | All 29 leaf commands, their options, checkout requirements and mutation boundaries |
-| Source lifecycle | `crates/aros-cli/src/source.rs` | Init refs are explicit and detached; sync expects a branch name without a namespace; ignored files and submodules are part of clean-tree checks |
-| Compiler selection | CLI `toolchain.rs`, `host_compiler.rs`, `aros-common` target defaults | Cross-toolchain locks differ from host LLVM metadata; built-in host assets lack required digests; explicit local prefixes do not acquire release provenance |
-| Product build and boot | CLI `build.rs`, `boot.rs`, `build_tools.rs`, `aros-cmake-engine` | Embedded engine ownership; six CMake helpers versus eight installed programs; PC x86 QEMU boot implementation, not automatic architecture selection |
-| Boards | `aros-board` schema, templates, media and console implementation | Four models with explicit transport restrictions; init always uses the Pi-4 USB-ECM template; no automated JTAG/SWD or power control |
-| Companion tools | Parsers, implementations and crate contracts for all seven public companions | GenMF architecture verification only; collector direct/driver distinction; optional fetch checksums; PKG-only ROM tool; restricted AHI modes; generator publication |
-| Configuration and diagnostics | `aros-common` schema/codes, public environment contract and component logging setup | Versioned diagnostic array, source publication states, complete environment list, component-specific file-only logging defaults |
-| Application development | `engine/toolchains/AROS.cmake` and frontend model | Compiler selection is reusable, but does not constitute a complete exported SDK or application-packaging frontend |
-| Versions and installation | Release policy, installer contract and release inventory | Separate tools/compiler identities, eight-program suite, no-clobber installer, conditional A/B policy and verified future package procedures |
+| Frontend command tree | `crates/aros-cli/src/main.rs`, `commands.rs`, and recursive built `--help` | 53 visible leaf commands; the hidden MetaMake bridge is intentionally excluded |
+| Native producer control plane | `crates/aros-cli/src/toolchain_producer.rs` | All 16 public producer stages are named with their authority boundary in the CLI reference |
+| Toolchain lifecycle | `toolchain_management.rs`, `toolchain_lifecycle/` and `toolchain_selection.rs` | Inventory, import, register, selection, removal and garbage collection distinguish preview from token-confirmed mutation |
+| CI matrix | `scripts/plan_ci_platform_matrix.py` and `.github/workflows/ci.yml` | Linux x86-64, Linux AArch64 and macOS AArch64 are active; Intel macOS is temporarily suspended |
+| Release targets and channels | Release policy plus native archive/package contracts | Archive targets are distinct from active CI coverage and from published availability |
+| Public-service boundary | Documentation workflow and site content | Endpoint and verification instructions are public; credentials, account setup and service-operation procedures are not |
 
-Each guide/reference links to its owning implementation or canonical contract.
-All linked `aros-tools/blob/main` file paths were checked against the workspace.
-The configuration reference retains every declared environment name; the
-existing environment gate and its regression test pass.
+## Durable regression coverage
 
-## Measured checks
+- `crates/aros-cli/tests/public_command_documentation.rs` recursively invokes
+  the built public CLI help tree, asserts the 53-leaf inventory and requires
+  each command to appear in `reference/cli.md`.
+- `scripts/ci_platform_matrix_test.py` proves the documentation-only allowlist,
+  the three active native hosts and the fail-closed fallback for unknown paths.
+- `scripts/check-doc-links.py` validates generated paths and anchors after the
+  Astro build; the documentation gate also checks locked npm dependencies,
+  static output and Worker asset constraints.
 
-- `cargo build --locked -p aros-cli`: passed. The resulting binary enumerated
-  29 leaf command paths; every path occurs in the command reference.
-- Invalid `build --jobs 0` with JSON diagnostics: exit 1, `AR0001`, the
-  `aros-tool-diagnostics-v1` envelope with a `diagnostics` array.
-- `scripts/check-workspace.sh docs`: passed; zero npm vulnerabilities,
-  Astro check with zero errors/warnings/hints, 25 generated pages and
-  1,648 checked links. The Astro build emits no route warnings.
-- `python3 scripts/check-environment-contract.py` and
-  `python3 scripts/environment_contract_test.py`: passed.
-- `scripts/release/test-release-policy.sh`: passed. Its maintainer-tooling
-  documentation assertion follows the moved installation instructions into the
-  contributor guide without relaxing the expected tooling contract.
-- Chrome production-preview sweep: all 24 content pages at 390, 768, 1280,
-  1440 and 1920 pixels, dark and light themes — 240 page checks, no page-level
-  horizontal overflow, missing selected navigation or JavaScript/console errors.
-- Interaction checks: persistent theme selection, code copy, expandable
-  installation procedures, desktop/mobile search, correct search URL prefix,
-  keyboard skip link, mobile menu focus isolation and navigation — passed.
-- Additional 320-pixel spot checks of overview, CLI, configuration and boards,
-  plus the custom 404 page and its search-index exclusion — passed.
-- Screenshots reviewed for overview, long reference, mobile tables and search.
-  Command tokens remain intact; long tables/code blocks scroll within content.
-- Public-content review excludes service-operating details. Package endpoints
-  and consumer verification instructions remain public.
-- `git diff --check`: passed.
+## Verification for this audit
 
-## Limits
+- `cargo test -p aros-cli --test public_command_documentation --locked`: passed
+  (1 test).
+- `scripts/check-workspace.sh docs`: passed with 27 generated pages, 1,874
+  checked internal links, zero Astro diagnostics and 81 validated publication
+  assets.
+- Public delivery is verified separately by the deployment workflow. A green
+  local documentation build is not a claim that a new documentation revision
+  has already been deployed.
 
-These checks validate documentation coverage, source consistency and the local
-production rendering. They are not a new complete AROS product build, four-host
-binary release qualification, accessibility certification or physical UART boot
-test. No public tools releases were listed at audit time; guides explicitly
-mark native packages as pending and recommend source installation today.
+## Deliberate limits
 
-At completion of this local audit, the changed site had not yet been published.
-Temporary browser automation and screenshots are local QA evidence, not shipped
-dependencies. Publication is a separate step after the pull request checks.
+This audit does not assert a tools release, toolchain release, full product
+build, four-host artifact matrix, A/B determinism, external attestation or
+physical hardware boot. Those claims require their own immutable evidence.

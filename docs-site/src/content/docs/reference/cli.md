@@ -1,6 +1,6 @@
 ---
 title: Command reference
-description: All 30 frontend command paths, their inputs, defaults, and effects.
+description: All 53 visible frontend leaf commands, their boundaries, and the canonical option reference.
 ---
 
 The executable is `aros`. The tables below cover the current
@@ -25,6 +25,93 @@ effective level of `off` enables `info`.
 [Environment variables](/aros-tools/reference/configuration/#environment-variables)
 and [component logging differences](/aros-tools/reference/diagnostics/) are
 documented separately.
+
+## Complete public CLI inventory
+
+**All 53 visible frontend leaf commands** are listed below. The inventory is
+checked against the built CLI in the portable test suite, so adding a visible
+command requires an intentional documentation update. The hidden
+`__metamake-fetch` lifecycle bridge is not a public command and is deliberately
+excluded.
+
+### Setup, source and product workflow
+
+| Command | Effect and boundary |
+| --- | --- |
+| `aros setup` | Install the declared host compiler, or a selected/all cross-toolchains when a preset is supplied |
+| `aros host-compiler install` | Install the managed host LLVM compiler |
+| `aros build-tools build` | Build the CMake helper suite from the explicitly selected tools workspace |
+| `aros build-tools check` | Verify the required CMake helper suite and version agreement |
+| `aros source init` | Clone and configure a new AROS checkout atomically |
+| `aros source sync` | Validate and fast-forward a clean attached checkout from its reviewed upstream |
+| `aros install` | Publish one verified, extracted eight-program native suite atomically |
+| `aros build` | Configure the embedded CMake engine and build one target preset |
+| `aros clean` | Remove one selected build preset or the checkout's complete `build/` directory |
+| `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
+| `aros ccache` | Inspect or explicitly clear the selected compiler cache |
+| `aros golden capture` | Capture a reviewed transpiler-output baseline |
+| `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
+| `aros info` | Report the discovered checkout, host and toolchain state |
+
+### Released-toolchain consumer and local-store controls
+
+| Command | Effect and boundary |
+| --- | --- |
+| `aros toolchain plan` | Read-only inspection of explicit native-producer inputs; experimental |
+| `aros toolchain build` | Build one controlled local native candidate; experimental and local-only |
+| `aros toolchain install` | Install the lock-selected host/profile artifact or verify an explicit local prefix |
+| `aros toolchain list` | List the lock entries applicable to the current host |
+| `aros toolchain inventory` | Read-only bounded scan of store metadata without downloading or executing a toolchain |
+| `aros toolchain import` | Preview then import one verified local prefix into the owned managed store |
+| `aros toolchain register` | Preview then record a non-owning receipt for one verified external prefix |
+| `aros toolchain select` | Preview then atomically select one complete released lock for this checkout |
+| `aros toolchain remove` | Preview then remove one exact, unreferenced owned import only |
+| `aros toolchain gc` | Preview then reclaim eligible unreferenced owned imports only |
+| `aros toolchain verify` | Verify an installed or explicit local cross-toolchain for one preset |
+| `aros toolchain path` | Print the verified cross-toolchain prefix for one preset |
+
+### Native producer control plane
+
+These 16 commands are maintainer-only, explicit local stages. They have no
+forge authority: none creates a tag, GitHub release, attestation or package
+manager publication. Their exact required options come from the installed
+`aros toolchain producer <command> --help`; the local candidate workflow uses
+the safe entry stages and explains the required checkout/cache separation.
+
+| Command | Effect and boundary |
+| --- | --- |
+| `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
+| `aros toolchain producer cache` | Acquire or verify the lock-selected source-cache closure |
+| `aros toolchain producer compatibility-ports` | Acquire or verify the lock-selected upstream ports-source closure |
+| `aros toolchain producer environment` | Write a deterministic build-environment receipt |
+| `aros toolchain producer profile` | Read one recipe-bound profile without duplicating selectors |
+| `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
+| `aros toolchain producer package` | Create one deterministic local package set from a completed candidate |
+| `aros toolchain producer verify-package` | Read back and verify one complete local package set |
+| `aros toolchain producer compare` | Compare two complete package sets byte-for-byte and write a receipt |
+| `aros toolchain producer repackage` | Repackage a retained, evidence-bound package twice under a closed recovery request |
+| `aros toolchain producer validate-recovery` | Re-evaluate recovery eligibility against one isolated release inventory |
+| `aros toolchain producer record-qualification` | Record complete measured native qualification evidence from an isolated inventory |
+| `aros toolchain producer prepare-recovery` | Create a closed recovery request from externally verified qualification facts |
+| `aros toolchain producer index` | Advance a complete local release inventory through an explicit index stage |
+| `aros toolchain producer compatibility-host-tools` | Print the measured command roles required for native compatibility |
+| `aros toolchain producer compatibility` | Execute all six local package-compatibility phases |
+
+### Physical-board workflow
+
+| Command | Effect and boundary |
+| --- | --- |
+| `aros board init` | Print or explicitly create a Pi-4 USB-ECM profile template |
+| `aros board scan` | Find USB CDC-ECM adapters eligible for local profile pairing |
+| `aros board doctor` | Inspect a profile, host prerequisites and built artifacts without mutating hardware |
+| `aros board build` | Build the selected board profile's CMake target with its locked toolchain |
+| `aros board deploy` | Preview or explicitly stage one verified boot bundle into a local TFTP root |
+| `aros board serve` | Run restricted DHCP and read-only TFTP, or inspect the plan without sockets |
+| `aros board sd image` | Validate a pinned boot bundle and explicitly create a raw removable-media image |
+| `aros board sd scan` | List safe removable disks and optionally generate artifact-bound write tokens |
+| `aros board sd unmount` | Preview or explicitly unmount one opaque scanned disk identity |
+| `aros board sd write` | Preview or explicitly write a verified image with an exact opaque token |
+| `aros board console` | Launch or preview an external serial terminal; no UART driver is embedded |
 
 ## Source and repository
 

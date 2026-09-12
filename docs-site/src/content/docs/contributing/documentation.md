@@ -39,6 +39,12 @@ Useful source anchors:
 - [Board model/transport validation](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-board/src/config.rs).
 - The owning standalone tool's parser, implementation and tests.
 
+The visible `aros` leaf-command inventory is protected by
+`public_command_documentation.rs`: it walks the built `--help` tree and
+requires every visible command to be named in the command reference. Update
+the reference and its declared count deliberately when adding or exposing a
+command; internal hidden lifecycle bridges remain undocumented by design.
+
 Separate **implemented**, **tested against an exact source**, **released** and
 **booted on hardware**. Never turn a profile name, zero exit code in report-only
 mode, or workflow definition into broader evidence.

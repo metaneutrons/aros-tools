@@ -13,6 +13,7 @@ Only these paths are documentation-only:
 
 - `README.md`
 - `CONTRIBUTING.md`
+- `HANDOFF.md`
 - `docs/**`
 - `docs-site/**`
 
@@ -28,12 +29,16 @@ Any change outside the documentation-only set runs the complete native matrix:
 | --- | --- |
 | Linux x86-64 | `ubuntu-24.04` |
 | Linux AArch64 | `ubuntu-24.04-arm` |
-| macOS x86-64 | `macos-15-intel` |
 | macOS AArch64 | `macos-15` |
 
 That includes Rust crates, Cargo inputs, scripts, workflow definitions,
 contracts, package metadata and unknown paths. Linux x86-64 uses the exact
 qualified AROS-NX source; the other hosts run the closed portable suite.
+
+Intel macOS is intentionally absent from the **active** matrix while its
+qualification lane is suspended. It remains a distinct archive compatibility
+target, not evidence supplied by a three-host run. Its restoration is tracked
+in [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
 
 After integration into `main`, the Linux lane also runs the compatible CMake
 fixtures. This is the integrated product checkpoint, not a substitute for the
@@ -41,9 +46,9 @@ native matrix. The GRUB fixture is available only on Darwin/AArch64.
 
 ## Explicit and release qualification
 
-**Workspace CI → Run workflow** defaults to the full matrix. Its `fast` option
-is an explicit maintainer choice for a Linux source-coupled checkpoint. A
-weekly full matrix detects runner and toolchain drift.
+**Workspace CI → Run workflow** defaults to the active three-host matrix. Its
+`fast` option is an explicit maintainer choice for a Linux source-coupled
+checkpoint. A weekly three-host sweep detects runner and toolchain drift.
 
 Release qualification does not run on ordinary pull requests. It runs for an
 immutable version tag or an explicit **Release qualification → Run workflow**
