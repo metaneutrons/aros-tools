@@ -171,95 +171,18 @@ pub struct FileIdentity {
     inode: u64,
 }
 
-/// Resource ceiling for a descriptor-validated tree snapshot or copy.
-///
-/// The limit is deliberately explicit at mutation boundaries.  It prevents a
-/// caller from turning an inspection or import preview into an unbounded walk
-/// of an attacker-controlled tree.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TreeTraversalLimits {
-    /// Maximum number of non-root filesystem entries examined.
-    pub max_entries: usize,
-    /// Maximum total regular-file bytes examined.
-    pub max_regular_file_bytes: u64,
-}
-
-/// An OS-held exclusive advisory lock for one no-follow regular file.
-///
-/// The guard owns the open descriptor.  It is intentionally neither cloneable
-/// nor serializable: a pathname or PID alone is never evidence that a lock is
-/// still held.
-#[derive(Debug)]
-pub struct AdvisoryFileLock {
-    #[cfg(unix)]
-    file: std::fs::File,
-}
-
-impl AdvisoryFileLock {
-    /// Acquire an exclusive no-follow advisory lock, creating its parent
-    /// namespace and lock file safely when needed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the path is unsafe, another process owns the
-    /// lock, or durable Unix locking is unavailable.
-    pub fn acquire(path: &Path) -> std::io::Result<Self> {
-        validate_target_leaf(path)?;
-        #[cfg(unix)]
-        {
-            Ok(Self {
-                file: unix::acquire_advisory_file_lock(&absolute_path(path)?)?,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            Err(unsupported_durability())
-        }
-    }
-
-    /// Reassert that this process still holds the exclusive lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the underlying lock can no longer be proven.
-    pub fn revalidate(&self) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            unix::revalidate_advisory_file_lock(&self.file)
-        }
-        #[cfg(not(unix))]
-        {
-            Err(unsupported_durability())
-        }
-    }
-}
-
-impl TreeTraversalLimits {
-    /// Construct a non-zero bounded traversal policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-input error when either ceiling is zero.
-    pub fn new(max_entries: usize, max_regular_file_bytes: u64) -> std::io::Result<Self> {
-        if max_entries == 0 || max_regular_file_bytes == 0 {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "tree traversal limits must be greater than zero",
-            ));
-        }
-        Ok(Self {
-            max_entries,
-            max_regular_file_bytes,
-        })
-    }
-}
+mod limits;
+pub use limits::{AdvisoryFileLock, TreeTraversalLimits};
 
 mod tree_cas;
 pub use tree_cas::TreeContentCas;
 use tree_cas::{TreeContentEntry, TreeNodeSnapshot};
 mod payload_path;
 pub use payload_path::payload_casefold_path_key;
+mod tree_ops;
+pub use tree_ops::{
+    copy_tree_from_snapshot_nofollow, ensure_directory_nofollow, measure_tree_content_cas_bounded,
+};
 
 /// Existing-target policy for one-file publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -404,24 +327,6 @@ pub fn open_regular_file_nofollow(path: &Path) -> std::io::Result<std::fs::File>
     #[cfg(unix)]
     {
         unix::open_regular_file_nofollow(&absolute_path(path)?)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(unsupported_durability())
-    }
-}
-
-/// Create a directory path through no-follow descriptor traversal, or verify
-/// that the existing path is a real directory.
-///
-/// # Errors
-///
-/// Returns an error when a component is unsafe, a symlink, or not a directory.
-pub fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        unix::ensure_directory_nofollow(&absolute_path(path)?)
     }
     #[cfg(not(unix))]
     {
@@ -638,69 +543,6 @@ pub fn measure_tree_content_cas(path: &Path) -> std::io::Result<TreeContentCas> 
     }
 }
 
-/// Measure a complete tree through no-follow descriptors under explicit
-/// resource limits.
-///
-/// This has the same identity and double-snapshot contract as
-/// [`measure_tree_content_cas`], while rejecting a tree whose entry count or
-/// regular-file content exceeds `limits`.
-///
-/// # Errors
-///
-/// Returns an I/O, unsafe-tree, mutation, or resource-limit error.
-pub fn measure_tree_content_cas_bounded(
-    path: &Path,
-    limits: TreeTraversalLimits,
-) -> std::io::Result<TreeContentCas> {
-    validate_target_leaf(path)?;
-    #[cfg(unix)]
-    {
-        unix::measure_tree_content_cas_bounded(&absolute_path(path)?, limits)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, limits);
-        Err(unsupported_durability())
-    }
-}
-
-/// Copy one previously measured tree into an empty, caller-owned staging
-/// directory without following source or destination symlinks.
-///
-/// The source must still equal `expected` when the copy begins and ends.  The
-/// copied staging tree is measured again and must have the same content
-/// digest.  Callers remain responsible for publishing the staging directory
-/// atomically through [`publish_prepared_source_tree_noclobber`] or a stricter
-/// envelope operation.
-///
-/// # Errors
-///
-/// Returns an I/O, unsafe-tree, mutation, content-mismatch, or resource-limit
-/// error.  It never replaces or removes either input tree.
-pub fn copy_tree_from_snapshot_nofollow(
-    source: &Path,
-    destination: &Path,
-    expected: &TreeContentCas,
-    limits: TreeTraversalLimits,
-) -> std::io::Result<TreeContentCas> {
-    validate_target_leaf(source)?;
-    validate_target_leaf(destination)?;
-    #[cfg(unix)]
-    {
-        unix::copy_tree_from_snapshot_nofollow(
-            &absolute_path(source)?,
-            &absolute_path(destination)?,
-            expected,
-            limits,
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (source, destination, expected, limits);
-        Err(unsupported_durability())
-    }
-}
-
 /// Exchange a prepared tree only if the complete destination still matches
 /// the supplied snapshot immediately before the atomic exchange.
 ///
@@ -894,28 +736,6 @@ mod unix {
         Ok(std::fs::File::from(fd))
     }
 
-    pub(super) fn acquire_advisory_file_lock(path: &Path) -> std::io::Result<std::fs::File> {
-        let parent = open_parent(path, true)?;
-        let fd = rfs::openat(
-            &parent.fd,
-            Path::new(&parent.leaf),
-            OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )?;
-        if !rfs::FileType::from_raw_mode(rfs::fstat(&fd)?.st_mode).is_file() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("advisory lock '{}' is not a regular file", path.display()),
-            ));
-        }
-        rfs::flock(&fd, FlockOperation::NonBlockingLockExclusive)?;
-        Ok(std::fs::File::from(fd))
-    }
-
-    pub(super) fn revalidate_advisory_file_lock(file: &std::fs::File) -> std::io::Result<()> {
-        rfs::flock(file, FlockOperation::NonBlockingLockExclusive).map_err(Into::into)
-    }
-
     pub(super) fn read_regular(path: &Path) -> std::io::Result<Option<(FileIdentity, Vec<u8>)>> {
         read_regular_with_mode(path)
             .map(|snapshot| snapshot.map(|(identity, bytes, _mode)| (identity, bytes)))
@@ -940,55 +760,6 @@ mod unix {
             ));
         }
         Ok(std::fs::File::from(fd))
-    }
-
-    pub(super) fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
-        let absolute = path.to_path_buf();
-        let mut directory = rfs::open(
-            "/",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        for component in absolute.components() {
-            match component {
-                Component::RootDir => {}
-                Component::Normal(name) => {
-                    let child = match rfs::openat(
-                        &directory,
-                        Path::new(name),
-                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                        Mode::empty(),
-                    ) {
-                        Ok(child) => child,
-                        Err(rustix::io::Errno::NOENT) => {
-                            rfs::mkdirat(&directory, Path::new(name), Mode::from_raw_mode(0o755))?;
-                            rfs::fsync(&directory)?;
-                            rfs::openat(
-                                &directory,
-                                Path::new(name),
-                                OFlags::RDONLY
-                                    | OFlags::DIRECTORY
-                                    | OFlags::NOFOLLOW
-                                    | OFlags::CLOEXEC,
-                                Mode::empty(),
-                            )?
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
-                    directory = child;
-                }
-                Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "directory path '{}' is not absolute and normalized",
-                            absolute.display()
-                        ),
-                    ));
-                }
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn read_regular_with_mode(
@@ -2127,6 +1898,10 @@ mod unix {
         identity_at, identity_at_fd, identity_from_stat, open_parent, remove_at_exact_mode,
         remove_operation_aux_exact, remove_operation_aux_unidentified, remove_regular_exact,
         rename_noclobber, sibling_name, write_new_file, write_new_file_mode,
+    };
+    mod locks;
+    pub(in crate::publication) use locks::{
+        acquire_advisory_file_lock, ensure_directory_nofollow, revalidate_advisory_file_lock,
     };
     mod journal;
     use journal::{cleanup_journal_stage, parse_journal, validate_journal, write_journal};
