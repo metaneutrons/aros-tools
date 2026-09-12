@@ -606,11 +606,6 @@ fn parse_profiles(directory: &Path, recipe: &Recipe) -> Result<Profiles, Contrac
     let bytes = read_metadata(&path, "published profiles")?;
     let profiles = Profiles::parse(&bytes)
         .map_err(|_| ContractError::index("published profiles are invalid"))?;
-    if profiles.upstream_commit().as_str() != recipe.source().0.as_str() {
-        return Err(ContractError::index(
-            "published profiles upstream revision does not match the release source",
-        ));
-    }
     Ok(profiles)
 }
 
@@ -1288,7 +1283,7 @@ mod tests {
     fn fixture_recipe(source_lock: &[u8], profiles: &[u8]) -> Vec<u8> {
         let mut value = json!({
             "schema": "aros-toolchain-recipe-v2",
-            "source_commit": "1".repeat(40), "source_tree": "2".repeat(40),
+            "source_commit": "7".repeat(40), "source_tree": "2".repeat(40),
             "producer_commit": "3".repeat(40), "producer_tree": "4".repeat(40),
             "tools_commit": "5".repeat(40), "tools_tree": "6".repeat(40),
             "source_date_epoch": 946_684_800_u64,
@@ -1477,6 +1472,17 @@ mod tests {
             .unwrap()
             .iter()
             .all(|artifact| artifact["required_paths"].as_array().unwrap().len() >= 26));
+    }
+
+    #[test]
+    fn complete_matrix_binds_a_distinct_upstream_compatibility_reference() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = write_complete_pre_attestation_fixture(temporary.path());
+        let recipe = parse_recipe(temporary.path()).unwrap();
+        let profiles = parse_profiles(temporary.path(), &recipe).unwrap();
+
+        assert_ne!(profiles.upstream_commit(), recipe.source().0);
+        assert!(index_complete_v1(&request).is_ok());
     }
 
     #[test]
