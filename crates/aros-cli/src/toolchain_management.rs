@@ -11,11 +11,11 @@ use crate::observability;
 use crate::toolchain::default_store_root;
 use aros_common::{
     copy_tree_from_snapshot_nofollow, ensure_directory_nofollow, measure_regular_file,
-    measure_tree_content_cas_bounded, open_regular_file_nofollow, publication_failure_class,
-    publish_atomic_file, publish_prepared_source_tree_noclobber, sha256_bytes,
-    toolchain_tree_inventory, AdvisoryFileLock, ArosToolchainManifest, AtomicFilePolicy,
-    CommitState, PublicationFailureClass, TreeContentCas, TreeTraversalLimits,
-    AROS_TOOLCHAIN_MANIFEST_FILE,
+    measure_regular_file_bounded, measure_tree_content_cas_bounded, open_regular_file_nofollow,
+    publication_failure_class, publish_atomic_file, publish_prepared_source_tree_noclobber,
+    sha256_bytes, toolchain_tree_inventory, AdvisoryFileLock, ArosToolchainManifest,
+    AtomicFilePolicy, CommitState, FileIdentity, PublicationFailureClass, TreeContentCas,
+    TreeTraversalLimits, AROS_TOOLCHAIN_MANIFEST_FILE,
 };
 use clap::{Args, ValueEnum};
 use miette::{IntoDiagnostic, Result, WrapErr};
@@ -37,6 +37,9 @@ const IMPORTS_DIRECTORY: &str = "imports/v1";
 const OWNERSHIP_RECEIPT: &str = "ownership.json";
 const REGISTRATIONS_DIRECTORY: &str = "registrations";
 const PROJECT_LOCKS_DIRECTORY: &str = "project-locks/v1";
+pub const PROJECT_REFERENCES_DIRECTORY: &str = "projects/v1";
+pub const PROJECT_REFERENCE_SCHEMA: &str = "aros-toolchain-project-reference-v1";
+const MAX_PROJECT_REFERENCE_BYTES: u64 = 1024 * 1024;
 pub const STORE_LOCK: &str = "store.lock";
 const IMPORT_MAX_ENTRIES: usize = 500_000;
 const IMPORT_MAX_REGULAR_FILE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
@@ -895,6 +898,31 @@ pub struct ManagedImportEnvelope {
     pub release_id_claim: String,
 }
 
+/// A derived, non-authoritative index entry for a selected project lock.
+///
+/// The project lock remains the sole selection authority. This receipt only
+/// gives lifecycle commands a bounded, durable path back to that lock so an
+/// unreadable, moved, or manually changed project blocks cleanup rather than
+/// being mistaken for non-use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectReferenceReceipt {
+    pub schema: String,
+    pub project: String,
+    pub project_lock: String,
+    pub release_id: String,
+    pub lock_sha256: String,
+}
+
+/// A measured project-reference receipt bound to its exact file bytes.
+#[derive(Debug, Clone)]
+pub struct MeasuredProjectReference {
+    pub identity: FileIdentity,
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+    pub receipt: ProjectReferenceReceipt,
+}
+
 /// Preview or commit a verified local toolchain import.
 pub fn import(args: ImportArgs) -> Result<()> {
     let store = management_store(args.store)?;
@@ -1406,6 +1434,65 @@ pub fn project_lock_path(store: &Path, project: &str) -> PathBuf {
         .join(MANAGEMENT_DIRECTORY)
         .join(PROJECT_LOCKS_DIRECTORY)
         .join(format!("{project_id}.lock"))
+}
+
+/// Return the deterministic receipt path for a project's derived reference.
+pub fn project_reference_path(store: &Path, project: &str) -> PathBuf {
+    let project_id = stable_token("aros-toolchain-project-reference-v1", &[project]);
+    store
+        .join(MANAGEMENT_DIRECTORY)
+        .join(PROJECT_REFERENCES_DIRECTORY)
+        .join(format!("{project_id}.json"))
+}
+
+/// Read and bind one derived project reference to its authoritative lock.
+///
+/// `None` means that no receipt exists. Invalid, unreadable, swapped, or
+/// mismatched receipts are errors; callers must treat them as lifecycle
+/// blockers rather than as evidence that the referenced project is unused.
+pub fn read_project_reference(
+    path: &Path,
+    expected_project: &str,
+    expected_project_lock: &Path,
+    label: &str,
+) -> Result<Option<MeasuredProjectReference>> {
+    let Some((identity, bytes)) = measure_regular_file_bounded(path, MAX_PROJECT_REFERENCE_BYTES)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("cannot safely read {label} '{}'", path.display()))?
+    else {
+        return Ok(None);
+    };
+    let receipt: ProjectReferenceReceipt = serde_json::from_slice(&bytes)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("{label} '{}' is not valid JSON", path.display()))?;
+    let expected_lock = normalized_absolute_utf8(expected_project_lock, "project lock")?;
+    if receipt.schema != PROJECT_REFERENCE_SCHEMA
+        || receipt.project != expected_project
+        || receipt.project_lock != expected_lock
+    {
+        return Err(miette::miette!(
+            "{label} '{}' does not bind this project and its authoritative lock",
+            path.display()
+        ));
+    }
+    if receipt.release_id.is_empty()
+        || receipt.lock_sha256.len() != 64
+        || !receipt
+            .lock_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(miette::miette!(
+            "{label} '{}' has an invalid release identity or lock digest",
+            path.display()
+        ));
+    }
+    Ok(Some(MeasuredProjectReference {
+        identity,
+        sha256: sha256_bytes(&bytes).to_string(),
+        bytes,
+        receipt,
+    }))
 }
 
 pub fn publication_error<T>(
