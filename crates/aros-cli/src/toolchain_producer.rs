@@ -20,9 +20,7 @@ use aros_toolchain::recovery::{
     self, FailedStage, ObservedTag, RecoveryHandoff, RecoveryOperation, RecoveryRequest,
     ReleaseHandoffState,
 };
-use aros_toolchain::release_index::{
-    self, IndexRequest, IndexStage, NativeReleaseIndex, V1_HOSTS, V1_PROFILES,
-};
+use aros_toolchain::release_index::{self, IndexRequest, IndexStage, NativeReleaseIndex};
 use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
 use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
@@ -324,11 +322,11 @@ struct ValidateRecoveryArgs {
 ///
 /// The three report roots use the default names produced by the pinned GitHub
 /// artifact action.  Keeping this layout explicit means the native command,
-/// rather than workflow string processing, owns the four-host/three-profile
-/// evidence closure.
+/// rather than workflow string processing, owns the release index's active or
+/// historical host/profile evidence closure.
 #[derive(Args)]
 struct RecordQualificationArgs {
-    /// Complete isolated 56-member final release inventory
+    /// Complete isolated final release inventory
     #[arg(long)]
     release_dir: PathBuf,
     /// Basename of the source-lock document in the final release inventory
@@ -992,7 +990,8 @@ fn record_qualification(args: &RecordQualificationArgs) -> miette::Result<()> {
     )?;
     match args.format {
         ResultFormat::Human => aros_common::outputln!(
-            "Native qualification evidence: 12 lanes\nReceipt: {}\nRelease: {}",
+            "Native qualification evidence: {} lanes\nReceipt: {}\nRelease: {}",
+            evidence.lanes.len(),
             output.display(),
             evidence.release.release_id,
         ),
@@ -1126,44 +1125,38 @@ fn qualification_lanes(
     args: &RecordQualificationArgs,
     index: &NativeReleaseIndex,
 ) -> miette::Result<Vec<QualificationLane>> {
-    let mut lanes = Vec::with_capacity(V1_HOSTS.len() * V1_PROFILES.len());
-    for host in V1_HOSTS {
-        for profile in V1_PROFILES {
-            let artifact = index
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.host == *host && artifact.target_profile == *profile)
-                .ok_or_else(|| {
-                    miette::miette!(
-                        "native qualification evidence release index is missing {host}/{profile}"
-                    )
-                })?;
-            let lifecycle_a = args
-                .lifecycle_reports_dir
-                .join(format!("native-lifecycle-{host}-{profile}-a"))
-                .join("publish.json");
-            let lifecycle_b = args
-                .lifecycle_reports_dir
-                .join(format!("native-lifecycle-{host}-{profile}-b"))
-                .join("publish.json");
-            let comparison = args
-                .comparison_reports_dir
-                .join(format!("comparison-{host}-{profile}"))
-                .join(format!("comparison-{host}-{profile}.json"));
-            let compatibility = args
-                .compatibility_reports_dir
-                .join(format!("compatibility-{host}-{profile}"))
-                .join("native-compatibility.receipt.json");
-            lanes.push(QualificationLane {
-                host: (*host).into(),
-                target_profile: (*profile).into(),
-                target_triple: artifact.target_triple.clone(),
-                build_a_report_sha256: lifecycle_report_digest(&lifecycle_a)?,
-                build_b_report_sha256: lifecycle_report_digest(&lifecycle_b)?,
-                comparison_report_sha256: comparison_report_digest(&comparison)?,
-                compatibility_report_sha256: compatibility_report_digest(&compatibility)?,
-            });
-        }
+    // `NativeReleaseIndex::parse` already accepts only the complete active or
+    // historical v1 matrix.  The evidence must follow that selected immutable
+    // inventory, rather than re-expanding it to every host the parser can read.
+    let mut lanes = Vec::with_capacity(index.artifacts.len());
+    for artifact in &index.artifacts {
+        let host = &artifact.host;
+        let profile = &artifact.target_profile;
+        let lifecycle_a = args
+            .lifecycle_reports_dir
+            .join(format!("native-lifecycle-{host}-{profile}-a"))
+            .join("publish.json");
+        let lifecycle_b = args
+            .lifecycle_reports_dir
+            .join(format!("native-lifecycle-{host}-{profile}-b"))
+            .join("publish.json");
+        let comparison = args
+            .comparison_reports_dir
+            .join(format!("comparison-{host}-{profile}"))
+            .join(format!("comparison-{host}-{profile}.json"));
+        let compatibility = args
+            .compatibility_reports_dir
+            .join(format!("compatibility-{host}-{profile}"))
+            .join("native-compatibility.receipt.json");
+        lanes.push(QualificationLane {
+            host: host.clone(),
+            target_profile: profile.clone(),
+            target_triple: artifact.target_triple.clone(),
+            build_a_report_sha256: lifecycle_report_digest(&lifecycle_a)?,
+            build_b_report_sha256: lifecycle_report_digest(&lifecycle_b)?,
+            comparison_report_sha256: comparison_report_digest(&comparison)?,
+            compatibility_report_sha256: compatibility_report_digest(&compatibility)?,
+        });
     }
     Ok(lanes)
 }
@@ -1550,6 +1543,10 @@ fn print_json(document: &serde_json::Value) -> miette::Result<()> {
     aros_common::outputln!("{encoded}");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "toolchain_producer_active_matrix_tests.rs"]
+mod toolchain_producer_active_matrix_tests;
 
 #[cfg(test)]
 mod tests {
