@@ -294,3 +294,105 @@ fn select_reports_post_rename_uncertainty_and_retains_the_complete_lock() {
         "new-release"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn select_preserves_the_previous_lock_on_a_prepublication_storage_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let candidate = temporary.path().join("candidate.toml");
+    let store = temporary.path().join("store");
+    checkout(&project);
+    let destination = project.join("aros-toolchains.lock.toml");
+    write_lock(&destination, &lock("old-release"));
+    write_lock(&candidate, &lock("new-release"));
+
+    let preview = output_json(
+        &command(&project)
+            .args(["toolchain", "select", "--format", "json", "--release-lock"])
+            .arg(&candidate)
+            .arg("--store")
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    let token = preview["apply_token"].as_str().unwrap();
+    let output = command(&project)
+        .env("AROS_PUBLICATION_TEST_FAIL_AT", "stage-before-write")
+        .args([
+            "--diagnostic-format=json",
+            "toolchain",
+            "select",
+            "--format",
+            "json",
+            "--release-lock",
+        ])
+        .arg(&candidate)
+        .arg("--store")
+        .arg(&store)
+        .args(["--apply", token])
+        .output()
+        .unwrap();
+    let diagnostic = diagnostic_json(&output);
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "rolled_back"
+    );
+    assert_eq!(
+        toml::from_str::<ArosToolchainLock>(&fs::read_to_string(destination).unwrap())
+            .unwrap()
+            .release_id,
+        "old-release"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn select_refuses_a_read_only_project_before_publishing_any_lock() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let candidate = temporary.path().join("candidate.toml");
+    let store = temporary.path().join("store");
+    checkout(&project);
+    write_lock(&candidate, &lock("new-release"));
+
+    let preview = output_json(
+        &command(&project)
+            .args(["toolchain", "select", "--format", "json", "--release-lock"])
+            .arg(&candidate)
+            .arg("--store")
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    let token = preview["apply_token"].as_str().unwrap();
+    let original_permissions = fs::metadata(&project).unwrap().permissions();
+    let mut read_only = original_permissions.clone();
+    read_only.set_mode(0o500);
+    fs::set_permissions(&project, read_only).unwrap();
+    let output = command(&project)
+        .args([
+            "--diagnostic-format=json",
+            "toolchain",
+            "select",
+            "--format",
+            "json",
+            "--release-lock",
+        ])
+        .arg(&candidate)
+        .arg("--store")
+        .arg(&store)
+        .args(["--apply", token])
+        .output()
+        .unwrap();
+    fs::set_permissions(&project, original_permissions).unwrap();
+
+    let diagnostic = diagnostic_json(&output);
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "rolled_back"
+    );
+    assert!(!project.join("aros-toolchains.lock.toml").exists());
+}
