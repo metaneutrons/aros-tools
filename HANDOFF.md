@@ -34,13 +34,13 @@ preserves earlier checkpoints.
 
 ## Current bounded action
 
-The remaining integration step is AROS-NX
-[PR #30](https://github.com/metaneutrons/AROS-NX/pull/30), commit
-`f5f968973d`. It copies only measured RC8 release-index values into the
-consumer lock, activates the nine qualified entries, suspends Intel macOS
-pending [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27),
-and preserves the disabled RISC-V entries. Merge it normally without changing
-the immutable release or deriving values from local build output.
+M7 integration is complete. AROS-NX
+[PR #30](https://github.com/metaneutrons/AROS-NX/pull/30) merged as
+`c6bbff066c31171d8ba7320a72060b7e5c5f1318`; it copies only measured RC8
+release-index values into the consumer lock, activates the nine qualified
+entries, suspends Intel macOS pending
+[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27),
+and preserves the disabled RISC-V entries.
 
 Intel macOS and RISC-V are explicit subsequent qualifications, not reasons to
 change or retarget RC8.
