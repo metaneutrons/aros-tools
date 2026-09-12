@@ -61,18 +61,19 @@ reported as `unknown`, never inferred as `passed`.
 
 ## `toolchain inventory` v1
 
-The first shipped M8 command is read-only:
+The shipped inventory command remains read-only:
 
 ```text
 aros toolchain inventory [--store DIR] [--max-entries N] [--format human|json]
 ```
 
 Without `--store`, it resolves the normal cross-toolchain store. `--store`
-must be absolute. It examines only the four fixed envelope path components,
-the `.complete` marker, and the embedded manifest. It neither reads a payload
-tree nor invokes an executable. The default ceiling is 10,000 fixed-layout
-entries and the hard ceiling is 100,000; a truncated scan is explicit and is
-not coverage evidence.
+must be absolute. It examines legacy release envelopes and managed imports
+through fixed path components, the `.complete` marker, embedded manifest and,
+for a managed import, the ownership receipt. It neither reads a payload tree
+nor invokes an executable. The default ceiling is 10,000 fixed-layout entries
+and the hard ceiling is 100,000; a truncated scan is explicit and is not
+coverage evidence.
 
 Its JSON schema is `aros-toolchain-inventory-v1`. It contains the operation,
 resolved store, store state, declared and used entry budget, `truncated`, a
@@ -80,10 +81,14 @@ coverage state (`complete`, `truncated` or `incomplete`), candidate `entries`,
 and malformed-layout `findings`. Every candidate reports
 the envelope location and selectors, marker and metadata state, and the
 constant observations `integrity: "not-checked"` and
-`compatibility: "not-checked"`. The initial release reports
+`compatibility: "not-checked"`. A legacy envelope reports
 `provenance: "embedded-manifest-claim"`, `qualification: "unknown"`, and
-`management: "unowned-legacy"`; it does not manufacture release or ownership
-evidence from a pathname.
+`management: "unowned-legacy"`; a managed import with a receipt binding its
+manifest identity reports `provenance: "imported-local-receipt"` and
+`management: "owned-import"`. A malformed import is retained as an explicit
+`unverified-local-import` / `invalid-import-envelope` observation. None of
+these labels manufactures published-release, attestation or selection evidence
+from a pathname.
 
 All inspected directories and the manifest are no-follow objects. A symlink,
 special object, unreadable name, malformed manifest, bad marker, unsafe path
@@ -93,18 +98,24 @@ manifest reader itself now uses a descriptor-relative no-follow read and a
 4 MiB document limit, so the same safety property also applies to the existing
 installer/verifier path.
 
-## State formats reserved for later M8 increments
+## M8 state formats
 
-The following records are not yet written by the inventory command. Their
-names, locations and authority are frozen now so import, selection and cleanup
-cannot introduce an ambient second selector later.
+The first mutation increment writes only the following records. Their names,
+locations and authority are frozen so later selection and cleanup cannot
+introduce an ambient second selector.
 
 ```text
 $STORE/.aros-management/v1/
   store.lock
-  ownership/<managed-id>.json
   registrations/<registration-id>.json
   leases/<lease-id>.json
+
+$STORE/imports/v1/<host>/<target-profile>/<managed-id>/
+  .complete
+  ownership.json
+  toolchain/
+    toolchain-manifest.json
+    ... payload
 ```
 
 `store.lock` is an OS-held advisory lock, never a PID file. The M8 lock order
@@ -113,28 +124,35 @@ exact envelope lock. A process that needs a payload during a build must retain
 an OS-held lease before M8 cleanup can consider that payload. Expiry and PID
 reuse never make a lease reclaimable; only release of the held lock does.
 
-The state directory has no selection authority and may be rebuilt from
-validated receipts. A corrupt, absent or stale index/receipt blocks mutation;
-it cannot select, overwrite, or remove anything. Existing released envelopes
-start as `unowned-legacy` and are not automatically adopted or deleted.
+The in-envelope ownership receipt is staged, reread, and published atomically
+with its managed payload. It deliberately omits the local source pathname.
+The state directory has no selection authority; registrations and future
+leases are independently atomic records. A corrupt, absent or stale receipt
+blocks mutation; it cannot select, overwrite, or remove anything. Existing
+released envelopes start as `unowned-legacy` and are not automatically adopted
+or deleted.
 
 ### Import and external registration
 
-`toolchain import` will accept only a self-describing candidate whose payload
-manifest and canonical tree digest have been remeasured in a staging directory.
-It will copy into a no-clobber managed candidate envelope and publish a
-versioned ownership receipt only after the copy and receipt have been reread.
-The original source remains untouched. Imported is not released or attested.
+The import command accepts only an absolute, self-describing candidate. Its
+bounded source snapshot is copied through no-follow descriptors into private
+staging; the embedded manifest, canonical payload inventory, and tree digest
+are remeasured there. The resulting no-clobber managed envelope contains a
+versioned ownership receipt which is reread before atomic publication.
+Without the explicit apply token it emits a preview binding source snapshot,
+candidate identity, and destination; no managed path or receipt is published.
+The original source remains untouched. Imported is not released, attested,
+selected, or executable merely because import succeeds.
 
-`toolchain register` will store a canonical external prefix identity and its
-observed evidence without copying it. Registrations are permanently
-non-owning. An external prefix may be used with the existing `--local` path
-without registering it, and no removal or GC command will target an external
-prefix.
+The register command runs the same bounded source validation but publishes
+only a versioned registration receipt. The normalized absolute external prefix
+remains permanently non-owning. An external prefix may be used with the
+existing `--local` path without registering it, and no removal or GC command
+will target an external prefix.
 
-Both mutations will require a read-only preview followed by an explicit apply
-token that binds the exact source/destination identity and precondition
-digest. A general-purpose `--force` flag is prohibited.
+Both mutations require a preview followed by an explicit apply token that
+binds the exact source/destination identity and precondition digest. A
+general-purpose `--force` flag is prohibited.
 
 ### Project selection
 

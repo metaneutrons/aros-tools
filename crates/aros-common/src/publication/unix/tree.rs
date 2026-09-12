@@ -93,6 +93,276 @@ pub(in crate::publication) fn publish_prepared_tree_noclobber(
     drop(lock);
     Ok(PublicationReceipt::default())
 }
+
+/// Copy a previously measured source tree into an empty staging tree using
+/// descriptor-relative no-follow operations only.
+pub(in crate::publication) fn copy_tree_from_snapshot_nofollow(
+    source: &Path,
+    destination: &Path,
+    expected: &TreeContentCas,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<TreeContentCas> {
+    let source_parent = open_parent(source, false)?;
+    let source_directory = rfs::openat(
+        &source_parent.fd,
+        &source_parent.leaf,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let source_identity = identity_from_stat(&rfs::fstat(&source_directory)?);
+    let destination_parent = open_parent(destination, false)?;
+    let destination_directory = rfs::openat(
+        &destination_parent.fd,
+        &destination_parent.leaf,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let destination_identity = identity_from_stat(&rfs::fstat(&destination_directory)?);
+    if !directory_entry_names_capped(&destination_directory, Some(limits.max_entries))?.is_empty() {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "destination staging tree '{}' is not empty",
+                destination.display()
+            ),
+        ));
+    }
+
+    let current = TreeContentCas {
+        root: source_identity,
+        entries: stable_measure_tree_content_at_bounded(&source_directory, source, Some(limits))?,
+    };
+    if &current != expected {
+        return Err(std::io::Error::other(format!(
+            "source tree '{}' changed after its import preview",
+            source.display()
+        )));
+    }
+
+    let mut copy_budget = TreeMeasurementBudget::bounded(limits);
+    let mut portable_paths = BTreeSet::new();
+    copy_tree_contents(
+        &source_directory,
+        &destination_directory,
+        source,
+        destination,
+        Path::new(""),
+        &mut copy_budget,
+        &mut portable_paths,
+    )?;
+    rfs::fsync(&destination_directory)?;
+
+    let source_after = TreeContentCas {
+        root: source_identity,
+        entries: stable_measure_tree_content_at_bounded(&source_directory, source, Some(limits))?,
+    };
+    if &source_after != expected
+        || identity_from_stat(&rfs::fstat(&source_directory)?) != source_identity
+        || directory_identity_at(&source_parent.fd, &source_parent.leaf)? != Some(source_identity)
+    {
+        return Err(std::io::Error::other(format!(
+            "source tree '{}' changed while it was imported",
+            source.display()
+        )));
+    }
+
+    let copied = TreeContentCas {
+        root: destination_identity,
+        entries: stable_measure_tree_content_at_bounded(
+            &destination_directory,
+            destination,
+            Some(limits),
+        )?,
+    };
+    if copied.payload_digest_excluding(None) != expected.payload_digest_excluding(None)
+        || identity_from_stat(&rfs::fstat(&destination_directory)?) != destination_identity
+        || directory_identity_at(&destination_parent.fd, &destination_parent.leaf)?
+            != Some(destination_identity)
+    {
+        return Err(std::io::Error::other(format!(
+            "staged copy '{}' does not exactly match its source snapshot",
+            destination.display()
+        )));
+    }
+    Ok(copied)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_tree_contents(
+    source: &OwnedFd,
+    destination: &OwnedFd,
+    source_display: &Path,
+    destination_display: &Path,
+    relative: &Path,
+    budget: &mut TreeMeasurementBudget,
+    portable_paths: &mut BTreeSet<String>,
+) -> std::io::Result<()> {
+    let source_identity = identity_from_stat(&rfs::fstat(source)?);
+    let destination_identity = identity_from_stat(&rfs::fstat(destination)?);
+    let names = directory_entry_names_with_budget(source, budget)?;
+    for name in names {
+        let child_relative = relative.join(&name);
+        let collision_key = payload_casefold_path_key(&child_relative)?;
+        if !portable_paths.insert(collision_key) {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "source tree '{}' has a case-folded path collision at '{}'",
+                    source_display.display(),
+                    child_relative.display()
+                ),
+            ));
+        }
+        let source_path = source_display.join(&name);
+        let destination_path = destination_display.join(&name);
+        let before = rfs::statat(source, Path::new(&name), AtFlags::SYMLINK_NOFOLLOW)?;
+        let snapshot = prepared_snapshot(&before)?;
+        match snapshot.kind {
+            PreparedNodeKind::File => copy_regular_entry(
+                source,
+                destination,
+                &name,
+                &source_path,
+                &before,
+                snapshot,
+                budget,
+            )?,
+            PreparedNodeKind::Directory => {
+                rfs::mkdirat(destination, Path::new(&name), Mode::from_raw_mode(0o700))?;
+                let source_child = rfs::openat(
+                    source,
+                    Path::new(&name),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?;
+                if prepared_snapshot(&rfs::fstat(&source_child)?)? != snapshot {
+                    return Err(std::io::Error::other(format!(
+                        "source directory '{}' changed before it was copied",
+                        source_path.display()
+                    )));
+                }
+                let destination_child = rfs::openat(
+                    destination,
+                    Path::new(&name),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?;
+                copy_tree_contents(
+                    &source_child,
+                    &destination_child,
+                    &source_path,
+                    &destination_path,
+                    &child_relative,
+                    budget,
+                    portable_paths,
+                )?;
+                set_mode(&destination_child, before.st_mode)?;
+                rfs::fsync(&destination_child)?;
+                if prepared_snapshot(&rfs::fstat(&source_child)?)? != snapshot {
+                    return Err(std::io::Error::other(format!(
+                        "source directory '{}' changed while it was copied",
+                        source_path.display()
+                    )));
+                }
+            }
+            PreparedNodeKind::Symlink => {
+                let target = rfs::readlinkat(source, Path::new(&name), Vec::new())?;
+                if prepared_snapshot(&rfs::statat(
+                    source,
+                    Path::new(&name),
+                    AtFlags::SYMLINK_NOFOLLOW,
+                )?)? != snapshot
+                {
+                    return Err(std::io::Error::other(format!(
+                        "source symlink '{}' changed before it was copied",
+                        source_path.display()
+                    )));
+                }
+                rfs::symlinkat(
+                    OsStr::from_bytes(target.as_bytes()),
+                    destination,
+                    Path::new(&name),
+                )?;
+            }
+        }
+    }
+    rfs::fsync(destination)?;
+    if identity_from_stat(&rfs::fstat(source)?) != source_identity
+        || identity_from_stat(&rfs::fstat(destination)?) != destination_identity
+    {
+        return Err(std::io::Error::other(format!(
+            "source directory '{}' changed while it was copied",
+            source_display.display()
+        )));
+    }
+    Ok(())
+}
+
+fn copy_regular_entry(
+    source: &OwnedFd,
+    destination: &OwnedFd,
+    name: &OsStr,
+    source_display: &Path,
+    before: &rfs::Stat,
+    snapshot: PreparedNodeSnapshot,
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<()> {
+    budget.reserve_regular_file_bytes(snapshot.size, source_display)?;
+    let size = u64::try_from(snapshot.size).map_err(|_| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "source file '{}' has a negative size",
+                source_display.display()
+            ),
+        )
+    })?;
+    let source_fd = rfs::openat(
+        source,
+        Path::new(name),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if prepared_snapshot(&rfs::fstat(&source_fd)?)? != snapshot {
+        return Err(std::io::Error::other(format!(
+            "source file '{}' changed before it was copied",
+            source_display.display()
+        )));
+    }
+    let destination_fd = rfs::openat(
+        destination,
+        Path::new(name),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?;
+    let mut input = std::fs::File::from(source_fd);
+    let mut output = std::fs::File::from(destination_fd);
+    let copied = std::io::copy(
+        &mut std::io::Read::take(&mut input, size.saturating_add(1)),
+        &mut output,
+    )?;
+    if copied != size {
+        return Err(std::io::Error::other(format!(
+            "source file '{}' changed while it was copied",
+            source_display.display()
+        )));
+    }
+    set_mode(&output, before.st_mode)?;
+    output.flush()?;
+    output.sync_all()?;
+    if prepared_snapshot(&rfs::fstat(&input)?)? != snapshot {
+        return Err(std::io::Error::other(format!(
+            "source file '{}' changed while it was copied",
+            source_display.display()
+        )));
+    }
+    Ok(())
+}
+
+fn set_mode(file: &impl std::os::fd::AsFd, mode: rustix::fs::RawMode) -> std::io::Result<()> {
+    rfs::fchmod(file, Mode::from_raw_mode(mode & 0o7777)).map_err(Into::into)
+}
+
 pub(super) fn tree_stage_name(leaf: &OsStr) -> OsString {
     let folded = leaf.to_string_lossy().to_ascii_lowercase();
     let digest = sha256_bytes(folded.as_bytes()).to_string();
@@ -408,12 +678,113 @@ pub(super) fn verify_flat_tree_members(
 }
 
 fn directory_entry_names(directory: &OwnedFd) -> std::io::Result<BTreeSet<OsString>> {
+    directory_entry_names_capped(directory, None)
+}
+
+fn directory_entry_names_capped(
+    directory: &OwnedFd,
+    limit: Option<usize>,
+) -> std::io::Result<BTreeSet<OsString>> {
     let mut names = BTreeSet::new();
     for entry in rfs::Dir::read_from(directory)? {
         let entry = entry?;
         if matches!(entry.file_name().to_bytes(), b"." | b"..") {
             continue;
         }
+        if let Some(limit) = limit {
+            if names.len() == limit {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("tree directory exceeds the {limit}-entry traversal limit"),
+                ));
+            }
+        }
+        names.insert(OsStr::from_bytes(entry.file_name().to_bytes()).to_os_string());
+    }
+    Ok(names)
+}
+
+#[derive(Clone, Copy)]
+struct TreeMeasurementBudget {
+    limits: Option<TreeTraversalLimits>,
+    entries: usize,
+    regular_file_bytes: u64,
+}
+
+impl TreeMeasurementBudget {
+    const fn unrestricted() -> Self {
+        Self {
+            limits: None,
+            entries: 0,
+            regular_file_bytes: 0,
+        }
+    }
+
+    const fn bounded(limits: TreeTraversalLimits) -> Self {
+        Self {
+            limits: Some(limits),
+            entries: 0,
+            regular_file_bytes: 0,
+        }
+    }
+
+    fn consume_entry(&mut self) -> std::io::Result<()> {
+        if let Some(limits) = self.limits {
+            if self.entries == limits.max_entries {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "tree exceeds the {}-entry traversal limit",
+                        limits.max_entries
+                    ),
+                ));
+            }
+        }
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("tree entry count overflowed"))?;
+        Ok(())
+    }
+
+    fn reserve_regular_file_bytes(&mut self, size: i64, path: &Path) -> std::io::Result<()> {
+        let size = u64::try_from(size).map_err(|_| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("tree file '{}' has a negative size", path.display()),
+            )
+        })?;
+        let next = self
+            .regular_file_bytes
+            .checked_add(size)
+            .ok_or_else(|| std::io::Error::other("tree regular-file byte count overflowed"))?;
+        if let Some(limits) = self.limits {
+            if next > limits.max_regular_file_bytes {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "tree exceeds the {}-byte regular-file traversal limit",
+                        limits.max_regular_file_bytes
+                    ),
+                ));
+            }
+        }
+        self.regular_file_bytes = next;
+        Ok(())
+    }
+}
+
+fn directory_entry_names_with_budget(
+    directory: &OwnedFd,
+    budget: &mut TreeMeasurementBudget,
+) -> std::io::Result<BTreeSet<OsString>> {
+    let mut names = BTreeSet::new();
+    for entry in rfs::Dir::read_from(directory)? {
+        let entry = entry?;
+        if matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            continue;
+        }
+        budget.consume_entry()?;
         names.insert(OsStr::from_bytes(entry.file_name().to_bytes()).to_os_string());
     }
     Ok(names)
@@ -747,14 +1118,15 @@ fn prepared_snapshot(stat: &rfs::Stat) -> std::io::Result<PreparedNodeSnapshot> 
     })
 }
 
-pub(super) fn measure_tree_content_at(
+fn measure_tree_content_at(
     directory: &OwnedFd,
     display_path: &Path,
     prefix: &[u8],
+    budget: &mut TreeMeasurementBudget,
 ) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
     let directory_before = rfs::fstat(directory)?;
     let directory_identity = identity_from_stat(&directory_before);
-    let names = directory_entry_names(directory)?;
+    let names = directory_entry_names_with_budget(directory, budget)?;
     let mut entries = BTreeMap::new();
     for name in names {
         let name_bytes = name.as_bytes();
@@ -793,6 +1165,7 @@ pub(super) fn measure_tree_content_at(
         };
         let content = match prepared.kind {
             PreparedNodeKind::File => {
+                budget.reserve_regular_file_bytes(prepared.size, &child_display)?;
                 let fd = rfs::openat(
                     directory,
                     Path::new(&name),
@@ -843,7 +1216,7 @@ pub(super) fn measure_tree_content_at(
                         child_display.display()
                     )));
                 }
-                let children = measure_tree_content_at(&fd, &child_display, &relative)?;
+                let children = measure_tree_content_at(&fd, &child_display, &relative, budget)?;
                 if prepared_snapshot(&rfs::fstat(&fd)?)? != prepared {
                     return Err(std::io::Error::other(format!(
                         "tree directory '{}' changed while traversing",
@@ -866,7 +1239,8 @@ pub(super) fn measure_tree_content_at(
         }
     }
     if identity_from_stat(&rfs::fstat(directory)?) != directory_identity
-        || directory_entry_names(directory)? != directory_entry_names_from_keys(&entries, prefix)
+        || directory_entry_names_capped(directory, budget.limits.map(|limits| limits.max_entries))?
+            != directory_entry_names_from_keys(&entries, prefix)
     {
         return Err(std::io::Error::other(format!(
             "tree directory '{}' changed while measuring content",
@@ -880,9 +1254,25 @@ pub(super) fn stable_measure_tree_content_at(
     directory: &OwnedFd,
     display_path: &Path,
 ) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
-    let first = measure_tree_content_at(directory, display_path, &[])?;
+    stable_measure_tree_content_at_bounded(directory, display_path, None)
+}
+
+pub(super) fn stable_measure_tree_content_at_bounded(
+    directory: &OwnedFd,
+    display_path: &Path,
+    limits: Option<TreeTraversalLimits>,
+) -> std::io::Result<BTreeMap<Vec<u8>, TreeContentEntry>> {
+    let mut first_budget = limits.map_or_else(
+        TreeMeasurementBudget::unrestricted,
+        TreeMeasurementBudget::bounded,
+    );
+    let first = measure_tree_content_at(directory, display_path, &[], &mut first_budget)?;
     test_pause_point("tree-content-cas-between-passes");
-    let second = measure_tree_content_at(directory, display_path, &[])?;
+    let mut second_budget = limits.map_or_else(
+        TreeMeasurementBudget::unrestricted,
+        TreeMeasurementBudget::bounded,
+    );
+    let second = measure_tree_content_at(directory, display_path, &[], &mut second_budget)?;
     if first != second {
         return Err(std::io::Error::other(format!(
             "tree '{}' changed between complete content measurement passes",

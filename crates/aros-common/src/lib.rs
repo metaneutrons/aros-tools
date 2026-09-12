@@ -57,14 +57,15 @@ pub use process::{
     TimedProcessStatus, DEFAULT_CAPTURE_LIMIT,
 };
 pub use publication::{
-    canonical_source_file, casefold_path_key, exchange_prepared_tree,
-    exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_regular_file,
-    measure_tree_content_cas, open_regular_file_nofollow, payload_casefold_path_key,
+    canonical_source_file, casefold_path_key, copy_tree_from_snapshot_nofollow,
+    ensure_directory_nofollow, exchange_prepared_tree, exchange_prepared_tree_if_unchanged,
+    is_rollback_incomplete, measure_regular_file, measure_tree_content_cas,
+    measure_tree_content_cas_bounded, open_regular_file_nofollow, payload_casefold_path_key,
     publication_failure_class, publication_journal_path, publish_atomic_file,
     publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
-    publish_prepared_tree_noclobber, AtomicFilePolicy, DurableFileSet, FileIdentity,
-    PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
-    RecoveryOutcome, TreeContentCas,
+    publish_prepared_tree_noclobber, AdvisoryFileLock, AtomicFilePolicy, DurableFileSet,
+    FileIdentity, PortableOutputName, PublicationError, PublicationFailureClass,
+    PublicationReceipt, RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
 };
 pub use target::{TargetProfile, TranspilerProfile};
 pub use text::read_source;

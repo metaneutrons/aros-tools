@@ -30,6 +30,21 @@ fn nofollow_regular_reader_refuses_a_final_symlink() {
 }
 
 #[cfg(unix)]
+#[test]
+fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("management/store.lock");
+
+    let first = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    first.revalidate().unwrap();
+    assert!(AdvisoryFileLock::acquire(&lock_path).is_err());
+    drop(first);
+
+    let second = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    second.revalidate().unwrap();
+}
+
+#[cfg(unix)]
 struct BoundaryAction {
     point: &'static str,
     matches: Box<dyn Fn(&Path) -> bool>,
@@ -1382,4 +1397,56 @@ fn tree_content_cas_double_pass_rejects_early_entry_race() {
     std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_AT");
     std::env::remove_var("AROS_PUBLICATION_TEST_PAUSE_MS");
     assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_snapshot_copy_preserves_a_stable_tree_without_following_links() {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let destination = temporary.path().join("destination");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(source.join("bin")).unwrap();
+    std::fs::write(source.join("bin/aros-collect"), b"fixture collector").unwrap();
+    let mut permissions = std::fs::metadata(source.join("bin/aros-collect"))
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(source.join("bin/aros-collect"), permissions).unwrap();
+    symlink("aros-collect", source.join("bin/collect-aros")).unwrap();
+    std::fs::create_dir(&destination).unwrap();
+
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let expected = measure_tree_content_cas_bounded(&source, limits).unwrap();
+    let copied =
+        copy_tree_from_snapshot_nofollow(&source, &destination, &expected, limits).unwrap();
+
+    assert_eq!(
+        expected.payload_digest_excluding(None),
+        copied.payload_digest_excluding(None)
+    );
+    assert_eq!(
+        std::fs::read(destination.join("bin/aros-collect")).unwrap(),
+        b"fixture collector"
+    );
+    assert_eq!(
+        std::fs::read_link(destination.join("bin/collect-aros")).unwrap(),
+        Path::new("aros-collect")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_snapshot_refuses_a_tree_that_exceeds_its_entry_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let tree = temporary.path().join("tree");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("one"), b"one").unwrap();
+    std::fs::write(tree.join("two"), b"two").unwrap();
+
+    let error = measure_tree_content_cas_bounded(&tree, TreeTraversalLimits::new(1, 1024).unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("entry traversal limit"));
 }

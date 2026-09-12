@@ -368,6 +368,10 @@ enum ToolchainCommands {
     List,
     /// Inspect installed cross-toolchain envelopes without downloading or executing them
     Inventory(toolchain_management::InventoryArgs),
+    /// Preview or import one verified local toolchain into the managed store
+    Import(toolchain_management::ImportArgs),
+    /// Preview or register one verified external toolchain prefix without copying it
+    Register(toolchain_management::RegisterArgs),
     /// Verify an installed or explicitly local AROS toolchain
     Verify {
         /// Target profile whose locked contract should be verified
@@ -661,7 +665,9 @@ impl Commands {
                     | ToolchainCommands::Build(_)
                     | ToolchainCommands::Producer(_)
                     | ToolchainCommands::MetaMakeFetch(_)
-                    | ToolchainCommands::Inventory(_),
+                    | ToolchainCommands::Inventory(_)
+                    | ToolchainCommands::Import(_)
+                    | ToolchainCommands::Register(_),
             } => RepositoryRequirement::Global,
             Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
@@ -722,6 +728,8 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 }
                 ToolchainCommands::List
                 | ToolchainCommands::Inventory(_)
+                | ToolchainCommands::Import(_)
+                | ToolchainCommands::Register(_)
                 | ToolchainCommands::Producer(_)
                 | ToolchainCommands::MetaMakeFetch(_) => None,
                 ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),

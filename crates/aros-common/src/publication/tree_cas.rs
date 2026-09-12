@@ -65,4 +65,36 @@ impl TreeContentCas {
         }
         sha256_bytes(&bytes)
     }
+
+    /// Return a digest binding this exact measured filesystem snapshot.
+    ///
+    /// Unlike [`Self::payload_digest_excluding`], this includes root and child
+    /// device/inode identities and timestamps.  It is suitable for a
+    /// short-lived compare-and-apply token, not for portable content identity.
+    #[must_use]
+    pub fn snapshot_digest(&self) -> Sha256Digest {
+        let mut bytes = Vec::new();
+        append_identity(&mut bytes, self.root);
+        for (path, entry) in &self.entries {
+            bytes.extend_from_slice(&(path.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(path);
+            append_identity(&mut bytes, entry.snapshot.identity);
+            bytes.push(entry.snapshot.kind);
+            bytes.extend_from_slice(&entry.snapshot.mode.to_be_bytes());
+            bytes.extend_from_slice(&entry.snapshot.size.to_be_bytes());
+            bytes.extend_from_slice(&entry.snapshot.mtime.to_be_bytes());
+            bytes.extend_from_slice(&entry.snapshot.mtime_nsec.to_be_bytes());
+            bytes.extend_from_slice(&entry.snapshot.ctime.to_be_bytes());
+            bytes.extend_from_slice(&entry.snapshot.ctime_nsec.to_be_bytes());
+            if let Some(content) = &entry.content {
+                bytes.extend_from_slice(content.to_string().as_bytes());
+            }
+        }
+        sha256_bytes(&bytes)
+    }
+}
+
+fn append_identity(bytes: &mut Vec<u8>, identity: FileIdentity) {
+    bytes.extend_from_slice(&identity.device.to_be_bytes());
+    bytes.extend_from_slice(&identity.inode.to_be_bytes());
 }

@@ -50,10 +50,11 @@ aros toolchain inventory --format json
 
 Unlike `toolchain list`, `inventory` does not need an AROS checkout. It scans
 the normal cross-toolchain store, or an explicitly supplied absolute
-`--store DIR`, and reports every release-shaped envelope it can inspect. The
-scan reads only fixed-layout metadata: path selectors, the completion marker
-and the embedded manifest. It does not download, measure the payload tree, or
-run a compiler or collector.
+`--store DIR`, and reports every legacy release envelope and managed local
+import it can inspect. The scan reads only bounded fixed-layout metadata: path
+selectors, the completion marker, embedded manifest and, for an import, its
+ownership receipt. It does not download, measure the payload tree, or run a
+compiler or collector.
 
 The result therefore separates **valid metadata** from integrity,
 compatibility, provenance and qualification. `not-checked` and `unknown` are
@@ -67,9 +68,42 @@ budget deliberately when needed:
 aros toolchain inventory --max-entries 25000 --format json
 ```
 
-The command is read-only. It does not register an external prefix, import a
-local candidate, alter a project's toolchain selection or make anything
-eligible for cleanup. Those lifecycle operations are not available yet.
+The command is read-only. It does not alter a project's toolchain selection or
+make anything eligible for cleanup.
+
+## Import or register a local candidate
+
+If you have a self-describing toolchain prefix produced by compatible AROS
+tooling, inspect the import first:
+
+    aros toolchain import --source /absolute/path/to/crosstools --store /absolute/path/to/store
+
+The preview copies the candidate only into private temporary staging. It
+measures the source through no-follow descriptors, checks the embedded manifest
+against a fresh canonical inventory, and prints an apply token. It does not
+execute a compiler, select the candidate for a project, or publish anything.
+Commit only that exact preview:
+
+    aros toolchain import --source /absolute/path/to/crosstools \
+      --store /absolute/path/to/store --apply TOKEN_FROM_PREVIEW
+
+The managed envelope has a deterministic identity derived from its verified
+manifest and payload-tree digests, is no-clobber, and contains an ownership
+receipt published atomically with the copied payload. An imported candidate is
+local evidence only; it is not a release, an attestation, or a replacement for
+the checkout's release lock.
+
+To retain non-owning evidence for an existing prefix without copying it:
+
+    aros toolchain register --source /absolute/path/to/crosstools --store /absolute/path/to/store
+    aros toolchain register --source /absolute/path/to/crosstools \
+      --store /absolute/path/to/store --apply TOKEN_FROM_PREVIEW
+
+Registration records the external path and observed identity but never owns,
+updates, selects, or removes it. Both commands require absolute paths and
+refuse changed sources or mismatched tokens. Project-scoped selection, removal
+and garbage collection remain unavailable until their own M8 safety gates are
+implemented.
 
 ## Use an existing AROS-built prefix
 
