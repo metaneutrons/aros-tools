@@ -2,12 +2,14 @@ use crate::error::{ArosError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path};
 use url::Url;
 
 pub const AROS_TOOLCHAIN_LOCK_SCHEMA: u32 = 1;
 pub const AROS_TOOLCHAIN_MANIFEST_SCHEMA: u32 = 1;
 pub const AROS_TOOLCHAIN_MANIFEST_FILE: &str = "toolchain-manifest.json";
+const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Immutable release selection checked into the selected AROS source tree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,7 +293,16 @@ impl ArosToolchainManifest {
     /// an unsupported schema version.
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
-        let content = fs::read_to_string(&path)?;
+        let file = crate::publication::open_regular_file_nofollow(&path)?;
+        let mut content = String::new();
+        file.take(MAX_MANIFEST_BYTES + 1)
+            .read_to_string(&mut content)?;
+        if content.len() > usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX) {
+            return Err(ArosError::ToolchainManifest {
+                file: path.display().to_string(),
+                message: format!("manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit"),
+            });
+        }
         let manifest: Self =
             serde_json::from_str(&content).map_err(|error| ArosError::ToolchainManifest {
                 file: path.display().to_string(),
@@ -648,6 +659,42 @@ mod tests {
             b"{not-json",
         )
         .unwrap();
+        assert!(matches!(
+            ArosToolchainManifest::load(directory.path()).unwrap_err(),
+            ArosError::ToolchainManifest { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_manifest_loader_rejects_a_symbolic_link() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        fs::write(target.path(), b"{not-json").unwrap();
+        symlink(
+            target.path(),
+            directory.path().join(AROS_TOOLCHAIN_MANIFEST_FILE),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ArosToolchainManifest::load(directory.path()).unwrap_err(),
+            ArosError::Io { .. }
+        ));
+    }
+
+    #[test]
+    fn installed_manifest_loader_bounds_a_regular_file_before_decoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let oversized = vec![b' '; usize::try_from(MAX_MANIFEST_BYTES + 1).unwrap()];
+        fs::write(
+            directory.path().join(AROS_TOOLCHAIN_MANIFEST_FILE),
+            oversized,
+        )
+        .unwrap();
+
         assert!(matches!(
             ArosToolchainManifest::load(directory.path()).unwrap_err(),
             ArosError::ToolchainManifest { .. }
