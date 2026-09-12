@@ -222,6 +222,31 @@ fn snapshot_bound_tree_removal_refuses_a_group_writable_ancestor() {
 
 #[cfg(unix)]
 #[test]
+fn snapshot_bound_tree_removal_permits_a_sticky_writable_ancestor() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let owned = temporary.path().join("owned");
+    std::fs::create_dir(&owned).unwrap();
+    std::fs::write(owned.join("payload"), b"fixture").unwrap();
+    let limits = TreeTraversalLimits::new(16, 1024).unwrap();
+    let snapshot = measure_tree_content_cas_bounded(&owned, limits).unwrap();
+    let mode = std::fs::metadata(temporary.path()).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(
+        temporary.path(),
+        std::fs::Permissions::from_mode(mode | 0o1022),
+    )
+    .unwrap();
+
+    let result = remove_tree_from_snapshot_nofollow(&owned, &snapshot, limits);
+
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+    result.unwrap();
+    assert!(!owned.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn snapshot_bound_tree_removal_refuses_a_same_name_swap_before_unlink() {
     let temporary = tempfile::tempdir().unwrap();
     let owned = temporary.path().join("owned");

@@ -130,8 +130,10 @@ pub fn copy_tree_from_snapshot_nofollow(
 /// or recursively removes an arbitrary caller-selected parent.
 ///
 /// On Unix the target must also be contained in a private, non-shared
-/// namespace: no ancestor, directory, or regular payload file may be group-
-/// or world-writable, and regular payload files may not have multiple links.
+/// namespace: no directory in the target tree or regular payload file may be
+/// group- or world-writable, and regular payload files may not have multiple
+/// links. A group/world-writable ancestor is allowed only when its sticky bit
+/// protects the store owner's entry (for example, `/tmp`).
 /// POSIX has no inode-bound unlink primitive, so arbitrary processes running
 /// as the store owner remain within that owner's trust boundary.
 ///

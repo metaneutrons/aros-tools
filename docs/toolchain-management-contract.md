@@ -241,17 +241,19 @@ descriptor-relative deletion primitive then removes only entries in that
 snapshot; it never follows links or accepts an arbitrary caller-selected
 parent.
 
-Destructive cleanup has one explicit Unix trust boundary. Every ancestor from
-the filesystem root to the managed envelope, every directory below it and each
-regular payload file must be neither group- nor world-writable; regular files
-must not have more than one link. A violation fails closed. POSIX provides no
-unlink operation that atomically names an already-open inode, so it cannot
-distinguish an arbitrary same-UID process replacing the entire privately owned
-store from the store owner itself. That process is deliberately within the
-single-user store trust domain. Advisory locks serialize cooperating AROS
-processes; permissions exclude a different group/world principal from the
-short identity-check-to-unlink interval. Multi-writer shared stores are not a
-supported cleanup deployment.
+Destructive cleanup has one explicit Unix trust boundary. Every directory in
+the managed envelope and every regular payload file must be neither group- nor
+world-writable; regular files must not have more than one link. Ancestors may
+be group/world-writable only when they have the sticky bit, which protects the
+store owner's path entry (for example, the standard `/tmp` directory). A
+violation fails closed. POSIX provides no unlink operation that atomically
+names an already-open inode, so it cannot distinguish an arbitrary same-UID
+process replacing the entire privately owned store from the store owner
+itself. That process is deliberately within the single-user store trust
+domain. Advisory locks serialize cooperating AROS processes; permissions
+exclude a different group/world principal from the short identity-check-to-
+unlink interval. Multi-writer shared stores are not a supported cleanup
+deployment.
 
 If anything fails after journal publication, the result is indeterminate and
 the still-present envelope blocks subsequent cleanup. A journal whose envelope
