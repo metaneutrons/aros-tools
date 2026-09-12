@@ -22,7 +22,11 @@ use super::{checked_directory, checked_executable, measure_executable};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
-const MAX_HOST_TOOLS: usize = 72;
+// This is a hard resource bound for an owned, revalidated closure, not a
+// guessed ambient-tool allowance. It equals the largest reviewed v1 role set
+// (macOS, including its SDK aliases); enlarging it requires an explicit
+// source-graph review and keeps the bounded invariant auditable.
+const MAX_HOST_TOOLS: usize = 78;
 
 /// Exact command roles admitted to the sealed native-compatibility closure.
 ///
@@ -48,9 +52,19 @@ const MAX_HOST_TOOLS: usize = 72;
 /// they must resolve inside the same closure rather than through an ambient
 /// runner path. Its generated MetaMake rules invoke `env` to bind their
 /// explicit configuration variables before they build `archtool`.
-/// The bzip2 port is unpacked by the selected upstream `fetch.sh`, so `tar`
-/// is also a literal requirement of the same sealed child. On Darwin,
+/// The selected upstream `fetch.sh` falls back to `curl` for declared source
+/// origins, even when the verified local cache normally makes that transport
+/// path unnecessary. Its gzip-, bzip2-, and XZ-compressed source archives go
+/// through `tar`, which delegates to `gzip`, `bzip2`, and `xz` on GNU tar.
+/// These five programs are therefore literal requirements of the same sealed
+/// child. The ARM SoftFloat dependency is distributed as a ZIP archive, so
+/// upstream `fetch.sh` also invokes literal `unzip` while it materializes the
+/// reviewed source closure. On Darwin,
 /// upstream configure explicitly selects GNU sed as `gsed`.
+/// The generated MetaMake rules from upstream `config/make.tmpl` invoke
+/// literal `tee` to retain compiler and linker diagnostics, including during
+/// otherwise successful commands that emit warnings. It is therefore also a
+/// required command inside this closure, not an ambient reporting helper.
 /// macOS has two SDK-discovery commands and two measured compatibility aliases;
 /// see
 /// [`native_compatibility_host_tools`].
@@ -65,12 +79,14 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "basename",
     "bash",
     "bison",
+    "bzip2",
     "c++",
     "cat",
     "cc",
     "chmod",
     "cmp",
     "cp",
+    "curl",
     "cut",
     "date",
     "diff",
@@ -87,6 +103,7 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "gawk",
     "gcc",
     "grep",
+    "gzip",
     "head",
     "id",
     "install",
@@ -114,14 +131,17 @@ pub const REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS: &[&str] = &[
     "strip",
     "tail",
     "tar",
+    "tee",
     "test",
     "touch",
     "tr",
     "true",
     "uname",
     "uniq",
+    "unzip",
     "wc",
     "xargs",
+    "xz",
 ];
 
 // The pinned upstream configure script appends the host compiler suffix `cc`
@@ -237,9 +257,9 @@ pub fn prepare_host_tool_closure(
     request: &HostToolClosureRequest,
 ) -> Result<HostToolClosure, ContractError> {
     if request.tools.is_empty() || request.tools.len() > MAX_HOST_TOOLS {
-        return Err(ContractError::compatibility(
-            "compatibility host-tool closure exceeds its explicit 72-tool capacity",
-        ));
+        return Err(ContractError::compatibility(format!(
+            "compatibility host-tool closure exceeds its explicit {MAX_HOST_TOOLS}-tool capacity"
+        )));
     }
     let output_root = checked_absent_root(&request.output_root)?;
     let mut names = BTreeSet::new();
@@ -732,10 +752,21 @@ mod tests {
     }
 
     #[test]
+    fn closure_capacity_tracks_the_largest_reviewed_v1_role_set() {
+        assert_eq!(
+            native_compatibility_host_tools("macos-aarch64")
+                .unwrap()
+                .len(),
+            MAX_HOST_TOOLS
+        );
+    }
+
+    #[test]
     fn required_roles_include_unconditional_upstream_make_tools() {
         for role in [
             "bash",
             "env",
+            "curl",
             "gcc",
             "strip",
             "uniq",
@@ -743,6 +774,11 @@ mod tests {
             "pngtopnm",
             "ppmtoilbm",
             "tar",
+            "tee",
+            "gzip",
+            "bzip2",
+            "xz",
+            "unzip",
         ] {
             assert!(REQUIRED_NATIVE_COMPATIBILITY_HOST_TOOLS.contains(&role));
         }

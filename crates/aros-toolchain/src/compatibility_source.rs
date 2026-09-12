@@ -1,9 +1,10 @@
 //! Materialization of the engine-free source input for native compatibility.
 //!
-//! The native compatibility runner deliberately refuses a source tree with a
-//! top-level `cmake/` directory: it always uses the engine embedded in the
-//! selected `aros-tools` executable.  This module creates that probe input
-//! from the raw, recursively audited Git material of a clean AROS checkout.
+//! The native compatibility runner deliberately refuses a *materialized*
+//! source tree with a top-level `cmake/` directory: it always uses the engine
+//! embedded in the selected `aros-tools` executable. This module creates that
+//! probe input from the raw, recursively audited Git material of a clean AROS
+//! checkout.
 //! It never copies an untracked build tree, runs a source-owned program, or
 //! follows source-tree symbolic links.
 
@@ -55,17 +56,18 @@ pub struct EngineFreeSourceOutput {
 ///
 /// The input checkout is recursively audited against raw Git blobs, including
 /// every initialized submodule.  Only those audited bytes are copied; the
-/// caller's worktree files are never read.  The top-level `cmake/` directory
-/// must be a committed directory and is omitted completely, leaving the
-/// embedded `aros-tools` engine as the only CMake engine available to the
-/// later compatibility runner.  The fresh destination is private and is never
-/// overwritten or adopted; a failed materialization is retained for diagnosis.
+/// caller's worktree files are never read. A committed top-level `cmake/`
+/// directory, if present, is omitted completely; an already engine-free source
+/// checkout is accepted unchanged. Both forms leave the embedded `aros-tools`
+/// engine as the only CMake engine available to the later compatibility runner.
+/// The fresh destination is private and is never overwritten or adopted; a
+/// failed materialization is retained for diagnosis.
 ///
 /// # Errors
 ///
 /// Returns a typed contract error for a dirty or unsafe checkout, a source
-/// tree without a top-level CMake directory, an existing/unsafe destination,
-/// or an I/O failure.  It has no network, cache, compiler, package, tag or
+/// tree with an invalid top-level CMake entry, an existing/unsafe destination,
+/// or an I/O failure. It has no network, cache, compiler, package, tag or
 /// publication authority.
 pub fn materialize_engine_free_source(
     request: &EngineFreeSourceRequest,
@@ -89,11 +91,6 @@ pub fn materialize_engine_free_source(
     source_audit::visit(&checkout, &mut budget, 0, "", &mut |path, entry, bytes| {
         copied.copy(path, entry.mode, bytes)
     })?;
-    if !copied.saw_engine_directory {
-        return Err(ContractError::compatibility(
-            "selected compatibility source checkout has no committed top-level cmake directory",
-        ));
-    }
     if fs::symlink_metadata(output.staging.join("cmake")).is_ok() {
         return Err(ContractError::compatibility(
             "engine-free compatibility source materialization retained a top-level cmake entry",
@@ -250,7 +247,6 @@ fn prepare_output(source_root: &Path, path: &Path) -> Result<PreparedOutput, Con
 
 struct SourceCopy<'a> {
     root: &'a Path,
-    saw_engine_directory: bool,
     links: Vec<PathBuf>,
 }
 
@@ -258,7 +254,6 @@ impl<'a> SourceCopy<'a> {
     const fn new(root: &'a Path) -> Self {
         Self {
             root,
-            saw_engine_directory: false,
             links: Vec::new(),
         }
     }
@@ -270,7 +265,6 @@ impl<'a> SourceCopy<'a> {
                     "selected compatibility source top-level cmake entry is not a directory",
                 ));
             }
-            self.saw_engine_directory = true;
             return Ok(());
         }
         if path.starts_with("cmake/") {
@@ -510,5 +504,36 @@ mod tests {
             output_root: output,
         })
         .is_err());
+    }
+
+    #[test]
+    fn materializes_an_already_engine_free_committed_source() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        fs::create_dir(source.join("arch")).unwrap();
+        fs::write(
+            source.join("arch/source.c"),
+            "int main(void) { return 0; }\n",
+        )
+        .unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-qm", "test: engine-free source"]);
+        let recipe = recipe_for(&source);
+
+        let output = temporary.path().join("engine-free");
+        let result = materialize_engine_free_source(&EngineFreeSourceRequest {
+            source_root: source,
+            recipe,
+            output_root: output,
+        })
+        .unwrap();
+
+        assert!(!result.root.join("cmake").exists());
+        assert_eq!(
+            fs::read(result.root.join("arch/source.c")).unwrap(),
+            b"int main(void) { return 0; }\n"
+        );
     }
 }

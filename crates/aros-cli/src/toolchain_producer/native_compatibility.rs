@@ -169,6 +169,7 @@ pub(super) async fn compatibility_ports(args: CompatibilityPortsArgs) -> miette:
                     "cache_filename": payload.cache_filename,
                     "relative_path": payload.relative_path,
                     "fetch_marker": payload.fetch_marker,
+                    "normalization": payload.normalization,
                     "sha256": payload.sha256,
                     "size": payload.size,
                 })).collect::<Vec<_>>(),
