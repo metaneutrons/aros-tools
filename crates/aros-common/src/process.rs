@@ -358,6 +358,7 @@ fn run_output_inner(
             return Err(combine_process_errors(primary, &cleanup));
         }
     };
+    #[cfg(not(target_os = "linux"))]
     if completion == Completion::Exited {
         if let Err(primary) = kill_remaining_process_group(&mut child) {
             finished.store(true, Ordering::Release);
@@ -418,14 +419,12 @@ pub fn run_status_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> io::Result<TimedProcessStatus> {
-    const POLL_INTERVAL: Duration = Duration::from_millis(20);
-
     let tool = command.get_program().to_string_lossy().into_owned();
     configure_process_group(command);
     let started = Instant::now();
     let deadline = process_deadline(started, timeout)?;
     let mut child = command.spawn()?;
-    let (status, completion) = match wait_until(&mut child, deadline, POLL_INTERVAL, None) {
+    let (status, completion) = match wait_for_child(&mut child, Some(deadline), None) {
         Ok(result) => result,
         Err(primary) => {
             let cleanup = terminate_and_reap(&mut child);
@@ -433,6 +432,7 @@ pub fn run_status_with_timeout(
         }
     };
     let timed_out = completion == Completion::TimedOut;
+    #[cfg(not(target_os = "linux"))]
     if !timed_out {
         kill_remaining_process_group(&mut child)?;
     }
@@ -470,12 +470,21 @@ fn wait_for_child(
     deadline: Option<Instant>,
     cancellation: Option<&CancellationToken>,
 ) -> io::Result<(ExitStatus, Completion)> {
-    let Some(deadline) = deadline else {
-        return child.wait().map(|status| (status, Completion::Exited));
-    };
-    wait_until(child, deadline, Duration::from_millis(20), cancellation)
+    #[cfg(target_os = "linux")]
+    {
+        wait_until_linux(child, deadline, cancellation)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Some(deadline) = deadline else {
+            return child.wait().map(|status| (status, Completion::Exited));
+        };
+        wait_until(child, deadline, Duration::from_millis(20), cancellation)
+    }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn wait_until(
     child: &mut Child,
     deadline: Instant,
@@ -538,6 +547,122 @@ fn wait_until(
     }
 }
 
+/// An exit state observed without allowing the kernel to recycle the child PID.
+///
+/// A separate process group is identified by the child's PID. If that PID is
+/// reaped before the process group is terminated, a busy host can reuse it for
+/// an unrelated group. Linux cleanup must therefore signal the original group
+/// while its leader is still waitable.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+enum LinuxExitObservation {
+    Running,
+    ExitedUnreaped,
+    ExitedReaped(ExitStatus),
+}
+
+#[cfg(target_os = "linux")]
+fn observe_linux_exit(child: &mut Child, nonblocking: bool) -> io::Result<LinuxExitObservation> {
+    use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
+
+    let mut options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+    if nonblocking {
+        options |= WaitIdOptions::NOHANG;
+    }
+    match waitid(WaitId::Pid(Pid::from_child(child)), options) {
+        Ok(Some(_)) => Ok(LinuxExitObservation::ExitedUnreaped),
+        Ok(None) => Ok(LinuxExitObservation::Running),
+        Err(rustix::io::Errno::CHILD) => child
+            .try_wait()?
+            .map(LinuxExitObservation::ExitedReaped)
+            .ok_or_else(|| io::Error::other("child exit state is unavailable after waitid")),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn finish_linux_exit(
+    child: &mut Child,
+    observation: &LinuxExitObservation,
+) -> io::Result<ExitStatus> {
+    match observation {
+        LinuxExitObservation::Running => Err(io::Error::other(
+            "cannot finalize a Linux process group before its child exits",
+        )),
+        LinuxExitObservation::ExitedUnreaped => {
+            // The unreaped leader keeps its PID and process-group identity
+            // reserved until all original descendants are terminated.
+            kill_process_group(child)?;
+            child.wait()
+        }
+        LinuxExitObservation::ExitedReaped(status) => Ok(*status),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_until_linux(
+    child: &mut Child,
+    deadline: Option<Instant>,
+    cancellation: Option<&CancellationToken>,
+) -> io::Result<(ExitStatus, Completion)> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+    // A controlled call always has a deadline. Calls without one have no
+    // cancellation source, so a blocking waitid is both safe and efficient.
+    let nonblocking = deadline.is_some() || cancellation.is_some();
+    loop {
+        let observation = observe_linux_exit(child, nonblocking)?;
+        if !matches!(observation, LinuxExitObservation::Running) {
+            return finish_linux_exit(child, &observation)
+                .map(|status| (status, Completion::Exited));
+        }
+
+        let now = Instant::now();
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let cleanup = terminate_and_reap(child);
+            if !cleanup.is_empty() {
+                return Err(combine_process_errors(
+                    io::Error::new(io::ErrorKind::Interrupted, "cancelled child cleanup failed"),
+                    &cleanup,
+                ));
+            }
+            return child.wait().map(|status| (status, Completion::Cancelled));
+        }
+        if let Some(deadline) = deadline {
+            if now >= deadline {
+                let observed = observe_linux_exit(child, true)?;
+                if !matches!(observed, LinuxExitObservation::Running) {
+                    return finish_linux_exit(child, &observed)
+                        .map(|status| (status, Completion::Exited));
+                }
+                if let Err(kill_error) = kill_process_group(child) {
+                    let observed = observe_linux_exit(child, true)?;
+                    if !matches!(observed, LinuxExitObservation::Running) {
+                        return finish_linux_exit(child, &observed)
+                            .map(|status| (status, Completion::Exited));
+                    }
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("could not terminate timed-out process group: {kill_error}"),
+                    ));
+                }
+                return child
+                    .wait()
+                    .map(|status| (status, Completion::TimedOut))
+                    .map_err(|error| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "timed-out process group was terminated but could not be reaped: {error}"
+                            ),
+                        )
+                    });
+            }
+            thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+        }
+    }
+}
+
 #[cfg(unix)]
 fn configure_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt as _;
@@ -580,6 +705,7 @@ fn kill_process_group(child: &mut Child) -> io::Result<()> {
         reason = "the cross-platform contract needs mutable Child for Child::kill on non-Unix"
     )
 )]
+#[cfg(not(target_os = "linux"))]
 fn kill_remaining_process_group(child: &mut Child) -> io::Result<()> {
     kill_process_group(child).map_err(|error| {
         io::Error::new(
@@ -985,13 +1111,8 @@ mod tests {
         child.wait().unwrap();
         let token = CancellationToken::default();
         token.cancel();
-        let (status, completion) = wait_until(
-            &mut child,
-            Instant::now(),
-            Duration::from_millis(1),
-            Some(&token),
-        )
-        .unwrap();
+        let (status, completion) =
+            wait_for_child(&mut child, Some(Instant::now()), Some(&token)).unwrap();
         assert_eq!(status.code(), Some(7));
         assert!(completion == Completion::Exited);
     }
