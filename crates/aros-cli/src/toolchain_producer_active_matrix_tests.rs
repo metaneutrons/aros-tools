@@ -152,9 +152,11 @@ fn write_qualification_reports(
 }
 
 fn native_publish_receipt() -> serde_json::Value {
+    // Native lifecycle receipts deliberately have no backend selector. Their
+    // schema and publish phase are the stable contract emitted by the native
+    // executor, so qualification must accept that real receipt shape.
     let mut receipt = serde_json::json!({
         "schema": "aros-toolchain-receipt-v1",
-        "backend": "native",
         "phase": "publish",
     });
     let digest = sha256_bytes(&canonical::bytes(&receipt).unwrap());
