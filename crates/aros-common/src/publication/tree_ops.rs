@@ -27,7 +27,7 @@ pub fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
 /// resource limits.
 ///
 /// This has the same identity and double-snapshot contract as
-/// [`measure_tree_content_cas`], while rejecting a tree whose entry count or
+/// [`crate::publication::measure_tree_content_cas`], while rejecting a tree whose entry count or
 /// regular-file content exceeds `limits`.
 ///
 /// # Errors
@@ -55,7 +55,7 @@ pub fn measure_tree_content_cas_bounded(
 /// The source must still equal `expected` when the copy begins and ends. The
 /// copied staging tree is measured again and must have the same content
 /// digest. Callers remain responsible for publishing the staging directory
-/// atomically through [`publish_prepared_source_tree_noclobber`] or a stricter
+/// atomically through [`crate::publication::publish_prepared_source_tree_noclobber`] or a stricter
 /// envelope operation.
 ///
 /// # Errors
