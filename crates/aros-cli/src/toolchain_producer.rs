@@ -1164,7 +1164,6 @@ fn qualification_lanes(
 fn lifecycle_report_digest(path: &std::path::Path) -> miette::Result<Sha256Digest> {
     let (value, digest) = evidence_report(path, "native lifecycle publish receipt")?;
     if value.get("schema").and_then(serde_json::Value::as_str) != Some("aros-toolchain-receipt-v1")
-        || value.get("backend").and_then(serde_json::Value::as_str) != Some("native")
         || value.get("phase").and_then(serde_json::Value::as_str) != Some("publish")
     {
         return Err(miette::miette!(
