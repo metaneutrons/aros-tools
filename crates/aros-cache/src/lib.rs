@@ -16,9 +16,9 @@ pub use compiler::{
     CompilerCacheSelection, CompilerConfigurationScope,
 };
 pub use lifecycle::{
-    apply_removal, keep, preview_removal, release, CacheLifecycleError, CacheObjectKind,
+    apply_removal, keep, keep_many, preview_removal, release, CacheLifecycleError, CacheObjectKind,
     CacheObjectProof, CacheObjectRequest, CacheRemovalBlocker, CacheRemovalPreview,
-    CacheRemovalResult, CacheRetentionRecord, CacheRetentionRelease,
+    CacheRemovalResult, CacheRetainedObject, CacheRetentionRecord, CacheRetentionRelease,
 };
 pub use roots::{
     archive_cache_root, aros_home, observe_root, resolve_archive_cache_root, resolve_aros_home,

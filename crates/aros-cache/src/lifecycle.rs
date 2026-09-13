@@ -33,6 +33,7 @@ const RETENTION_DIRECTORY: &str = "retention";
 const LOCK_DIRECTORY: &str = "locks";
 const RETENTION_SUFFIX: &str = ".json";
 const MAX_RETENTION_RECEIPTS: usize = 1024;
+const MAX_RETENTION_OBJECTS: usize = 256;
 const MAX_RETENTION_RECEIPT_BYTES: u64 = 64 * 1024;
 const PREVIEW_LIFETIME_SECONDS: u64 = 5 * 60;
 
@@ -138,7 +139,7 @@ pub enum CacheObjectProof {
     },
 }
 
-/// A named retention receipt created for a cache object.
+/// A named retention receipt created for one exact cache selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CacheRetentionRecord {
     /// Versioned receipt schema.
@@ -149,14 +150,22 @@ pub struct CacheRetentionRecord {
     pub family: CacheFamily,
     /// Absolute root path bound into the receipt.
     pub cache_root: PathBuf,
-    /// Portable selected object path relative to `cache_root`.
+    /// Every exact selected object retained by this named reference, sorted by
+    /// portable relative path.
+    pub objects: Vec<CacheRetainedObject>,
+    /// Unix timestamp when the receipt was written.
+    pub created_unix_seconds: u64,
+}
+
+/// One object bound into a named retention reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheRetainedObject {
+    /// Portable object path relative to the receipt's cache root.
     pub relative_path: String,
     /// Object representation.
     pub object_kind: &'static str,
-    /// Exact content proof retained by this record.
+    /// Exact content proof retained by the reference.
     pub object: CacheObjectProof,
-    /// Unix timestamp when the receipt was written.
-    pub created_unix_seconds: u64,
 }
 
 /// A retention record that blocks a removal preview.
@@ -281,16 +290,37 @@ pub fn keep(
     request: &CacheObjectRequest,
     name: &str,
 ) -> Result<CacheRetentionRecord, CacheLifecycleError> {
+    keep_many(std::slice::from_ref(request), name)
+}
+
+/// Create one named retention reference for an exact closed selection.
+///
+/// All requests must select the same root and family. Every selected object is
+/// measured under its deterministically ordered lifecycle lock before one
+/// no-clobber receipt records the complete selection. A failed measurement or
+/// publication therefore never creates a partial retention reference.
+///
+/// # Errors
+///
+/// Returns an error for an empty, mixed-root, mixed-family or duplicate
+/// selection, unsafe objects or roots, lock contention, or failed receipt
+/// publication.
+pub fn keep_many(
+    requests: &[CacheObjectRequest],
+    name: &str,
+) -> Result<CacheRetentionRecord, CacheLifecycleError> {
     let name = retention_name(name)?;
-    let root = selected_root(&request.cache_root)?;
-    let relative_path = relative_path(&request.relative_path)?;
+    let (family, root, relative_paths) = common_selection(requests)?;
     validate_private_directory_nofollow(&root)
         .map_err(|error| CacheLifecycleError::io("validate private root", &root, error))?;
-    let (lock_path, lock) = acquire_object_lock(&root, request.family, &relative_path)?;
-    let selected = SelectedObject::measure(request)?;
-    lock.revalidate()
-        .map_err(|error| CacheLifecycleError::io("revalidate lifecycle lock", &lock_path, error))?;
-    let directory = retention_directory(&selected.root, request.family);
+    let locks = acquire_object_locks(&root, family, &relative_paths)?;
+    let mut selected = requests
+        .iter()
+        .map(SelectedObject::measure)
+        .collect::<Result<Vec<_>, _>>()?;
+    selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    revalidate_object_locks(&locks)?;
+    let directory = retention_directory(&root, family);
     ensure_directory_nofollow(&directory).map_err(|error| {
         CacheLifecycleError::io("create retention directory", &directory, error)
     })?;
@@ -301,11 +331,16 @@ pub fn keep(
     let record = CacheRetentionRecord {
         schema: RETENTION_SCHEMA,
         name: name.clone(),
-        family: request.family,
-        cache_root: selected.root.clone(),
-        relative_path: selected.relative_path.clone(),
-        object_kind: request.kind.label(),
-        object: selected.proof,
+        family,
+        cache_root: root,
+        objects: selected
+            .into_iter()
+            .map(|object| CacheRetainedObject {
+                relative_path: object.relative_path,
+                object_kind: selected_kind(&object.snapshot),
+                object: object.proof,
+            })
+            .collect(),
         created_unix_seconds: current_unix_seconds()?,
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| {
@@ -314,8 +349,7 @@ pub fn keep(
     let path = retention_receipt_path(&directory, &name);
     publish_atomic_file(&path, &bytes, AtomicFilePolicy::NoClobber)
         .map_err(|error| CacheLifecycleError::io("publish retention receipt", &path, error))?;
-    lock.revalidate()
-        .map_err(|error| CacheLifecycleError::io("revalidate lifecycle lock", &lock_path, error))?;
+    revalidate_object_locks(&locks)?;
     Ok(record)
 }
 
@@ -481,10 +515,16 @@ struct StoredRetentionRecord {
     name: String,
     family: CacheFamily,
     cache_root: PathBuf,
+    objects: Vec<StoredRetainedObject>,
+    created_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRetainedObject {
     relative_path: String,
     object_kind: String,
     object: CacheObjectProof,
-    created_unix_seconds: u64,
 }
 
 #[derive(Debug)]
@@ -625,11 +665,14 @@ fn read_retention_blockers(
     let records = read_retention_records(&directory, family, &selected.root)?;
     let mut blockers = records
         .into_iter()
-        .filter(|record| record.relative_path == selected.relative_path)
-        .map(|record| {
-            let matches_current_object = record.object_kind == selected_kind(&selected.snapshot)
-                && record.object == selected.proof;
-            CacheRemovalBlocker {
+        .filter_map(|record| {
+            let object = record
+                .objects
+                .iter()
+                .find(|object| object.relative_path == selected.relative_path)?;
+            let matches_current_object = object.object_kind == selected_kind(&selected.snapshot)
+                && object.object == selected.proof;
+            Some(CacheRemovalBlocker {
                 name: record.name,
                 matches_current_object,
                 reason: if matches_current_object {
@@ -637,7 +680,7 @@ fn read_retention_blockers(
                 } else {
                     "named_retention_reference_has_stale_object_proof"
                 },
-            }
+            })
         })
         .collect::<Vec<_>>();
     blockers.sort_by(|left, right| left.name.cmp(&right.name));
@@ -714,6 +757,68 @@ fn object_lock_path(root: &Path, family: CacheFamily, relative_path: &str) -> Pa
         .join(LOCK_DIRECTORY)
         .join(family.as_str())
         .join(format!("{}.lock", &digest.as_str()[..32]))
+}
+
+fn common_selection(
+    requests: &[CacheObjectRequest],
+) -> Result<(CacheFamily, PathBuf, Vec<String>), CacheLifecycleError> {
+    let first = requests.first().ok_or_else(|| {
+        CacheLifecycleError::invalid("a retention reference must select at least one cache object")
+    })?;
+    if requests.len() > MAX_RETENTION_OBJECTS {
+        return Err(CacheLifecycleError::invalid(format!(
+            "a retention reference cannot select more than {MAX_RETENTION_OBJECTS} cache objects"
+        )));
+    }
+    let family = first.family;
+    let root = selected_root(&first.cache_root)?;
+    let mut relative_paths = requests
+        .iter()
+        .map(|request| {
+            if request.family != family || selected_root(&request.cache_root)? != root {
+                return Err(CacheLifecycleError::invalid(
+                    "a retention reference must use one exact cache root and family",
+                ));
+            }
+            relative_path(&request.relative_path)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    relative_paths.sort();
+    if relative_paths.windows(2).any(|paths| paths[0] == paths[1]) {
+        return Err(CacheLifecycleError::invalid(
+            "a retention reference cannot select the same cache object more than once",
+        ));
+    }
+    Ok((family, root, relative_paths))
+}
+
+#[derive(Debug)]
+struct HeldObjectLock {
+    path: PathBuf,
+    lock: AdvisoryFileLock,
+}
+
+fn acquire_object_locks(
+    root: &Path,
+    family: CacheFamily,
+    relative_paths: &[String],
+) -> Result<Vec<HeldObjectLock>, CacheLifecycleError> {
+    relative_paths
+        .iter()
+        .map(|relative_path| {
+            let (path, lock) = acquire_object_lock(root, family, relative_path)?;
+            Ok(HeldObjectLock { path, lock })
+        })
+        .collect()
+}
+
+fn revalidate_object_locks(locks: &[HeldObjectLock]) -> Result<(), CacheLifecycleError> {
+    for lock in locks {
+        lock.lock.revalidate().map_err(|error| {
+            CacheLifecycleError::io("revalidate lifecycle lock", &lock.path, error)
+        })?;
+    }
+    Ok(())
 }
 
 fn acquire_object_lock(
@@ -819,25 +924,39 @@ fn validate_retention_binding(
     root: &Path,
     name: &str,
 ) -> Result<(), CacheLifecycleError> {
-    if record.family != family
-        || record.cache_root != root
-        || record.name != name
-        || record.relative_path != relative_path(Path::new(&record.relative_path))?
-        || !matches!(record.object_kind.as_str(), "regular_file" | "tree")
-    {
+    if record.family != family || record.cache_root != root || record.name != name {
         return Err(CacheLifecycleError::Control(format!(
             "retention receipt '{name}' is not bound to its selected root, family and portable object"
         )));
     }
-    let proof_kind = match record.object {
-        CacheObjectProof::RegularFile { .. } => "regular_file",
-        CacheObjectProof::Tree { .. } => "tree",
-    };
-    if record.object_kind != proof_kind {
+    if record.objects.is_empty() {
         return Err(CacheLifecycleError::Control(format!(
-            "retention receipt '{name}' declares object kind '{}' but contains '{proof_kind}' proof",
-            record.object_kind
+            "retention receipt '{name}' does not retain any object"
         )));
+    }
+    let mut prior = None;
+    for object in &record.objects {
+        let normalized = relative_path(Path::new(&object.relative_path))?;
+        if object.relative_path != normalized
+            || prior
+                .as_deref()
+                .is_some_and(|prior| prior >= normalized.as_str())
+        {
+            return Err(CacheLifecycleError::Control(format!(
+                "retention receipt '{name}' does not contain strictly sorted unique portable object paths"
+            )));
+        }
+        let proof_kind = match object.object {
+            CacheObjectProof::RegularFile { .. } => "regular_file",
+            CacheObjectProof::Tree { .. } => "tree",
+        };
+        if object.object_kind != proof_kind {
+            return Err(CacheLifecycleError::Control(format!(
+                "retention receipt '{name}' declares object kind '{}' but contains '{proof_kind}' proof",
+                object.object_kind
+            )));
+        }
+        prior = Some(normalized);
     }
     Ok(())
 }
@@ -903,7 +1022,7 @@ fn current_unix_seconds() -> Result<u64, CacheLifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        keep, preview_removal_until, release, CacheLifecycleError, CacheObjectKind,
+        keep, keep_many, preview_removal_until, release, CacheLifecycleError, CacheObjectKind,
         CacheObjectRequest, CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
     };
     use crate::CacheFamily;
@@ -998,6 +1117,85 @@ mod tests {
         let preview = preview_removal_until(&request, 4_000).unwrap();
         apply_removal_with_now(&request, &preview.apply_token, 3_900).unwrap();
         assert!(!entry.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keep_many_creates_one_sorted_atomic_reference_for_the_complete_selection() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("alpha"), b"alpha").unwrap();
+        std::fs::write(root.join("beta"), b"beta").unwrap();
+        let alpha = file_request(&root, "alpha");
+        let beta = file_request(&root, "beta");
+
+        let record = keep_many(&[beta.clone(), alpha.clone()], "release-candidate").unwrap();
+
+        assert_eq!(
+            record
+                .objects
+                .iter()
+                .map(|object| object.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        let receipt_directory = root.join(".aros-cache-lifecycle/v1/retention/archives");
+        assert_eq!(
+            std::fs::read_dir(&receipt_directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+                .count(),
+            1
+        );
+        for request in [&alpha, &beta] {
+            let preview = preview_removal_until(request, 4_000).unwrap();
+            assert!(!preview.eligible);
+            assert_eq!(preview.blockers[0].name, "release-candidate");
+        }
+
+        release(&CacheRetentionRelease {
+            family: CacheFamily::Archives,
+            cache_root: root,
+            name: "release-candidate".to_owned(),
+        })
+        .unwrap();
+        assert!(preview_removal_until(&alpha, 4_000).unwrap().eligible);
+        assert!(preview_removal_until(&beta, 4_000).unwrap().eligible);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keep_many_rejects_ambiguous_or_mixed_selections_before_creating_a_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        let other_root = temporary.path().join("other-cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&other_root).unwrap();
+        std::fs::write(root.join("archive"), b"approved").unwrap();
+        std::fs::write(other_root.join("archive"), b"approved").unwrap();
+        let archive = file_request(&root, "archive");
+        let same_archive = file_request(&root, "archive");
+        let other_archive = file_request(&other_root, "archive");
+        let cargo = CacheObjectRequest {
+            family: CacheFamily::Cargo,
+            ..archive.clone()
+        };
+
+        for selection in [
+            vec![archive.clone(), same_archive],
+            vec![archive.clone(), other_archive],
+            vec![archive, cargo],
+        ] {
+            assert!(matches!(
+                keep_many(&selection, "must-not-exist"),
+                Err(CacheLifecycleError::Invalid(_))
+            ));
+        }
+        assert!(!root
+            .join(".aros-cache-lifecycle/v1/retention/archives/must-not-exist.json")
+            .exists());
     }
 
     #[test]
