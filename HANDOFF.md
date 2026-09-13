@@ -1,6 +1,6 @@
 # Development handoff
 
-Checkpoint verified on 2026-09-12. This is a compact entry point, not a second
+Checkpoint verified on 2026-09-14. This is a compact entry point, not a second
 backlog, live CI dashboard, or authorization to build, merge, or publish.
 Recheck linked issues, runs, and release objects before acting. Git history
 preserves earlier checkpoints.
@@ -9,10 +9,13 @@ preserves earlier checkpoints.
 
 - TCP-M0 through TCP-M6 remain accepted. Their durable implementation and
   evidence boundaries are recorded in the M3, M4, M5, and M6 evidence ledgers.
-- M7's native executor is aros-tools
-  [`253c11a52af6c4eff8d0e3db2ea2d33b740bef79`](https://github.com/metaneutrons/aros-tools/commit/253c11a52af6c4eff8d0e3db2ea2d33b740bef79).
-  It accepts the canonical nested compatibility fetch markers and contains the
-  Linux process-group PID-reuse repair exercised by the final qualification.
+- The active `aros-toolchains` executor contract pins aros-tools
+  [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4), the integrated CACHE-M7 command migration. [aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains/pull/53), merged as
+  [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2), passed both its PR and main producer-contract gates. The migration neither creates nor changes a release artifact.
+- CACHE-M1 through CACHE-M7 and CLI-M1 through CLI-M6 have complete evidence in
+  their linked issues and evidence ledgers. The cache evidence records the
+  supported owned compiler namespace and excludes ambient, remote and
+  external cache storage from cleanup authority.
 - The immutable
   [`toolchain-v1-20260912-rc8`](https://github.com/metaneutrons/aros-toolchains/releases/tag/toolchain-v1-20260912-rc8)
   prerelease was built from producer commit
@@ -49,9 +52,9 @@ preserves earlier checkpoints.
 
 ## Current bounded action
 
-M7 and M8 are complete. There is no pending release, compilation or real-store
-cleanup action. Intel macOS and RISC-V are explicit subsequent qualifications,
-not reasons to change or retarget RC8.
+TCP-M7 and TCP-M8 are complete. There is no pending cache-driven release,
+compilation or real-store cleanup action. Intel macOS and RISC-V are explicit
+subsequent qualifications, not reasons to change or retarget RC8.
 
 ## Resume safely
 

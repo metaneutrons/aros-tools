@@ -1,8 +1,7 @@
 # Cache management: architecture and delivery plan
 
-Decision state: active delivery; the shipped CACHE-M1 and CACHE-M6 interfaces
-remain subject to their milestone acceptance evidence. Planning baseline:
-2026-09-13, aros-tools
+Decision state: acceptance evidence complete as of 2026-09-14; package and tag
+publication remain separate maintainer actions. Planning baseline: 2026-09-13, aros-tools
 `1aed0c970f9a4df2fb047a1b5603ecea1d1a6bed`.
 Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 `TCP` producer milestones.

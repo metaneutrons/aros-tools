@@ -1,11 +1,12 @@
 # Public CLI contracts and continuously aligned documentation
 
 Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
-Decision state: CLI-M1, CLI-M2, CLI-M4 and CLI-M5 are accepted. CLI-M3's
-caller migration and CLI-M6's integrated acceptance remain open until the
-native producer consumes an exact reviewed tools revision. A package or tag
-release is a separate maintainer action. The earlier integrated evidence is
-recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
+Decision state: CLI-M1 through CLI-M6 have complete acceptance evidence. The
+native producer consumes exact reviewed tools revision
+`2474bc3c89c21c80d23197c28ef63cd3c18603a4` through
+[aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains/pull/53).
+A package or tag release remains a separate maintainer action. The integrated
+evidence is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
 
 ## Outcome and boundaries
 
