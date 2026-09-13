@@ -8,11 +8,12 @@ use aros_common::{
 };
 use std::io::Write;
 use std::process::{Command, ExitStatus};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static DIAGNOSTIC_FORMAT: OnceLock<DiagnosticFormat> = OnceLock::new();
+static MACHINE_SUBPROCESS_WARNINGS: OnceLock<Mutex<Vec<Diagnostic>>> = OnceLock::new();
 
 /// Whether human-only progress rendering may write to the diagnostic stream.
 ///
@@ -499,6 +500,7 @@ fn run_captured_command(
         ));
     }
     if status.success() {
+        record_machine_subprocess_warning(description, &tool, &observed.stderr);
         if replay_success {
             replay(
                 &observed.stdout,
@@ -507,18 +509,52 @@ fn run_captured_command(
                 &tool,
                 true,
             )?;
-            replay(
-                &observed.stderr,
-                &mut std::io::stderr(),
-                description,
-                &tool,
-                false,
-            )?;
         }
         return Ok(());
     }
     let detail = bounded_output_detail(&observed.stdout, &observed.stderr);
     Err(ProcessFailure::exit(description, tool, status, &detail))
+}
+
+fn record_machine_subprocess_warning(description: &str, tool: &str, stderr: &CapturedStream) {
+    if stderr.total_bytes() == 0 {
+        return;
+    }
+    let warning = Diagnostic::warning(
+        DiagnosticCode::CliObservability,
+        DiagnosticStage::Observability,
+        format!(
+            "{description} succeeded but emitted bounded standard-error output:\n{}",
+            stderr.rendered_lossy().trim_end()
+        ),
+    )
+    .with_context(DiagnosticContext {
+        tool: Some(tool.to_owned()),
+        ..DiagnosticContext::default()
+    });
+    let warnings = MACHINE_SUBPROCESS_WARNINGS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut warnings = match warnings.lock() {
+        Ok(warnings) => warnings,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    warnings.push(warning);
+}
+
+/// Take warnings captured from successful subprocesses in JSON-diagnostic
+/// mode.
+///
+/// The frontend emits them in the final diagnostic envelope if a later command
+/// fails, or writes them to the opted-in local log when the invocation
+/// succeeds. They are never replayed as raw stderr, because that would corrupt
+/// the one-document JSON diagnostic contract.
+#[must_use]
+pub fn take_machine_subprocess_warnings() -> Vec<Diagnostic> {
+    let warnings = MACHINE_SUBPROCESS_WARNINGS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut warnings = match warnings.lock() {
+        Ok(warnings) => warnings,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    std::mem::take(&mut *warnings)
 }
 
 fn replay(

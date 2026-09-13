@@ -20,6 +20,15 @@ and any optional source/context fields. Do not parse human wording.
 A failed invocation exits nonzero. A diagnostic document can contain multiple
 findings, including warnings; the envelope is not a single error object.
 
+When JSON diagnostics are selected, `aros` reserves stderr for that one
+document. A successful child process that writes to stderr is captured with the
+same 64 KiB bound as a failed child; it is never replayed as raw stderr. If a
+later step fails, the captured observation appears as a warning in the final
+diagnostic envelope alongside the error. If the invocation succeeds, it is
+available through an opted-in local log that accepts `warn` records. Normal
+child stdout remains command output, and the deliberately interactive `aros
+board console` retains its terminal streams.
+
 ## Collect a local log
 
 ```sh
@@ -32,9 +41,11 @@ Supported levels are `off`, `error`, `warn`, `info`, `debug`,
 Logging is off by default and requires an explicit local file.
 
 Use both `--log-level` and `--log-file` in portable examples.
-The frontend promotes an effective `off` level to `info` when a file is
-supplied. The collector promotes file-only logging when no level was explicitly
-selected. Other companions keep an explicit/default `off` unchanged.
+For `aros`, a file without an explicitly selected level uses `info`. An
+explicit `--log-level off` or `AROS_LOG_LEVEL=off` always disables logging and
+does not create the selected file. A command-line level overrides the
+environment; a non-`off` level without a file fails with an actionable
+diagnostic.
 
 Logs are local observations and are not uploaded automatically. Standard
 records omit ambient timestamps and host identity, but explicit paths,

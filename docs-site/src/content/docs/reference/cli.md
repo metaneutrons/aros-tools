@@ -20,8 +20,9 @@ Discovery searches upward; it does not select a neighboring repository.
 | `--log-format` | `human` (default) or `jsonl` |
 | `--log-file PATH` | Explicit local log destination |
 
-A log level requires a file. In the frontend, supplying a file with an
-effective level of `off` enables `info`.
+A non-`off` log level requires a file. In the frontend, supplying only a file
+enables `info`; an explicit `--log-level off` or `AROS_LOG_LEVEL=off` disables
+logging and creates no file. A command-line level overrides the environment.
 [Environment variables](/aros-tools/reference/configuration/#environment-variables)
 and [component logging differences](/aros-tools/reference/diagnostics/) are
 documented separately.

@@ -183,6 +183,71 @@ fn enabled_logging_without_a_file_is_an_observability_error() {
 }
 
 #[test]
+fn explicit_log_level_off_disables_a_selected_log_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("disabled.jsonl");
+    let output = command()
+        .args(["--log-level=off", "--log-file"])
+        .arg(&log)
+        .arg("info")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(
+        !log.exists(),
+        "an explicit off level must not create the selected log file"
+    );
+}
+
+#[test]
+fn explicit_environment_log_level_off_disables_a_selected_log_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("disabled-from-environment.jsonl");
+    let output = command()
+        .env("AROS_LOG_LEVEL", "off")
+        .args(["--log-file"])
+        .arg(&log)
+        .arg("info")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(
+        !log.exists(),
+        "an explicit environment off level must not create the selected log file"
+    );
+}
+
+#[test]
+fn file_only_logging_uses_the_documented_info_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("file-only.jsonl");
+    let output = command()
+        .args([
+            "--log-file",
+            "file-only.jsonl",
+            "--log-format=jsonl",
+            "info",
+        ])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let records: Vec<serde_json::Value> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records[0]["event"], "invocation.start");
+    assert_eq!(records[1]["event"], "invocation.complete");
+}
+
+#[test]
 fn repository_discovery_has_its_own_stable_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let output = command()
@@ -465,6 +530,52 @@ fn child_exit_status_is_preserved_as_structured_context() {
         .as_str()
         .unwrap()
         .contains("stderr:\nraw-child-error"));
+}
+
+#[cfg(unix)]
+#[test]
+fn json_diagnostics_preserve_one_envelope_after_a_noisy_successful_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let tool = directory.path().join("sccache");
+    fs::write(
+        &tool,
+        "#!/bin/sh\ncase \"$1\" in\n  -z) printf '%s\\n' successful-child-warning >&2; exit 0;;\n  -s) printf '%s\\n' failing-child-error >&2; exit 23;;\nesac\nexit 64\n",
+    )
+    .unwrap();
+    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = command()
+        .env("PATH", directory.path())
+        .args(["--diagnostic-format=json", "ccache", "--clear"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(
+        output.stderr.starts_with(b"{"),
+        "machine diagnostics must not prefix raw child stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(value["schema"], "aros-tool-diagnostics-v1");
+    let diagnostics = value["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["severity"] == "warning"
+            && diagnostic["context"]["tool"] == "sccache"
+            && diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("successful-child-warning"))
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["severity"] == "error"
+            && diagnostic["context"]["tool"] == "sccache"
+            && diagnostic["context"]["exit_code"] == 23
+            && diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("failing-child-error"))
+    }));
 }
 
 #[cfg(unix)]

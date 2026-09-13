@@ -4,10 +4,14 @@
 
 use aros_board::config::{BoardModel, Transport};
 use aros_common::{
-    render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
+    effective_log_level, render_diagnostics, requested_diagnostic_format, Diagnostic,
+    DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat,
+    LogLevel, Logger,
 };
-use clap::{error::ErrorKind, Args, Parser, Subcommand, ValueEnum};
+use clap::{
+    error::ErrorKind, parser::ValueSource, Args, CommandFactory, FromArgMatches, Parser,
+    Subcommand, ValueEnum,
+};
 use console::{style, Emoji};
 use miette::Result;
 use std::ffi::OsString;
@@ -71,16 +75,6 @@ struct ObservabilityArgs {
     /// Explicit local log destination
     #[arg(long, global = true, value_name = "PATH", env = "AROS_LOG_FILE")]
     log_file: Option<PathBuf>,
-}
-
-impl ObservabilityArgs {
-    fn effective_log_level(&self) -> LogLevel {
-        if self.log_file.is_some() && self.log_level == LogLevel::Off {
-            LogLevel::Info
-        } else {
-            self.log_level
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -959,8 +953,8 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
 async fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments, "AROS_DIAGNOSTIC_FORMAT");
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments.clone()) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -995,6 +989,20 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(observability::clap_diagnostic(&error)),
+                requested_format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let format = cli.observability.diagnostic_format;
     let invocation_directory = match std::env::current_dir() {
         Ok(directory) => directory,
@@ -1015,7 +1023,11 @@ async fn main() -> ExitCode {
         }
     };
     let logger = match Logger::open(
-        cli.observability.effective_log_level(),
+        effective_log_level(
+            cli.observability.log_level,
+            log_level_was_explicit,
+            cli.observability.log_file.is_some(),
+        ),
         cli.observability.log_format,
         cli.observability.log_file.clone(),
         "aros",
@@ -1075,9 +1087,12 @@ async fn main() -> ExitCode {
                     observability::ErrorBoundary::REPOSITORY,
                     context,
                 );
-                let mut diagnostics = vec![diagnostic.clone()];
-                if let Err(log_error) = logger.diagnostic(&diagnostic) {
-                    diagnostics.push(log_error.into_diagnostic());
+                let mut diagnostics = observability::take_machine_subprocess_warnings();
+                diagnostics.push(diagnostic);
+                for diagnostic in diagnostics.clone() {
+                    if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                        diagnostics.push(log_error.into_diagnostic());
+                    }
                 }
                 render_diagnostics(
                     &observability::set(diagnostics),
@@ -1107,6 +1122,25 @@ async fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            for warning in observability::take_machine_subprocess_warnings() {
+                if let Err(error) = logger.diagnostic(&warning) {
+                    let mut diagnostic = error.into_diagnostic();
+                    if commits_on_success {
+                        let mut committed = context.clone();
+                        committed.commit_state = Some(aros_common::CommitState::Committed);
+                        if let Some(error_context) = diagnostic.context.take() {
+                            committed.log_path = error_context.log_path;
+                        }
+                        diagnostic.context = Some(committed);
+                    }
+                    render_diagnostics(
+                        &DiagnosticSet::single(diagnostic),
+                        format,
+                        observability::POLICY,
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
             match logger.event(
                 LogLevel::Info,
                 "invocation.complete",
@@ -1135,9 +1169,12 @@ async fn main() -> ExitCode {
         }
         Err(error) => {
             let diagnostic = observability::report_diagnostic(&error, boundary, context);
-            let mut diagnostics = vec![diagnostic.clone()];
-            if let Err(log_error) = logger.diagnostic(&diagnostic) {
-                diagnostics.push(log_error.into_diagnostic());
+            let mut diagnostics = observability::take_machine_subprocess_warnings();
+            diagnostics.push(diagnostic);
+            for diagnostic in diagnostics.clone() {
+                if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
             }
             render_diagnostics(
                 &observability::set(diagnostics),

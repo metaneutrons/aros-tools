@@ -46,9 +46,9 @@ pub use digest::{
 };
 pub use error::{ArosError, Result};
 pub use observability::{
-    emit_stdout, render_diagnostics, requested_diagnostic_format, take_stdout_failure_diagnostic,
-    write_stdout, DiagnosticFailure, DiagnosticFormat, LogFormat, LogLevel, Logger,
-    ObservabilityPolicy,
+    effective_log_level, emit_stdout, render_diagnostics, requested_diagnostic_format,
+    take_stdout_failure_diagnostic, write_stdout, DiagnosticFailure, DiagnosticFormat, LogFormat,
+    LogLevel, Logger, ObservabilityPolicy,
 };
 pub use process::{
     bounded_output_detail, exit_signal, run_output, run_output_with_control, run_output_with_input,
