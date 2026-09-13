@@ -113,6 +113,43 @@ pub struct CacheRetentionRelease {
     pub name: String,
 }
 
+/// An OS-held lifecycle lease for one selected cache object.
+///
+/// The lease is intentionally non-cloneable. Retain it for the complete read
+/// or write operation; dropping it releases the advisory lock.
+#[derive(Debug)]
+pub struct CacheObjectLease {
+    cache_root: PathBuf,
+    relative_path: String,
+    lock_path: PathBuf,
+    lock: AdvisoryFileLock,
+}
+
+impl CacheObjectLease {
+    /// Absolute cache root bound to this lease.
+    #[must_use]
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    /// Portable cache-object path bound to this lease.
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    /// Reassert that the lock file has not been substituted while held.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the held no-follow lock can no longer be proven.
+    pub fn revalidate(&self) -> Result<(), CacheLifecycleError> {
+        self.lock.revalidate().map_err(|error| {
+            CacheLifecycleError::io("revalidate lifecycle lease", &self.lock_path, error)
+        })
+    }
+}
+
 /// Content proof for the object selected during retention or preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -291,6 +328,35 @@ pub fn keep(
     name: &str,
 ) -> Result<CacheRetentionRecord, CacheLifecycleError> {
     keep_many(std::slice::from_ref(request), name)
+}
+
+/// Acquire a shared no-follow lease for one exact active cache read.
+///
+/// A shared lease coexists with other readers but rejects any concurrent
+/// lifecycle removal or writer lease for the same cache object.
+///
+/// # Errors
+///
+/// Returns an error for unsafe roots or paths, or when a writer/removal lease
+/// is already active.
+pub fn acquire_read_lease(
+    request: &CacheObjectRequest,
+) -> Result<CacheObjectLease, CacheLifecycleError> {
+    acquire_lease(request, LeaseMode::Read)
+}
+
+/// Acquire an exclusive no-follow lease for one cache-object writer.
+///
+/// An exclusive lease excludes active readers and lifecycle removals for the
+/// same cache object. It does not measure or mutate the selected payload.
+///
+/// # Errors
+///
+/// Returns an error for unsafe roots or paths, or when any lease is active.
+pub fn acquire_write_lease(
+    request: &CacheObjectRequest,
+) -> Result<CacheObjectLease, CacheLifecycleError> {
+    acquire_lease(request, LeaseMode::Write)
 }
 
 /// Create one named retention reference for an exact closed selection.
@@ -798,6 +864,12 @@ struct HeldObjectLock {
     lock: AdvisoryFileLock,
 }
 
+#[derive(Clone, Copy)]
+enum LeaseMode {
+    Read,
+    Write,
+}
+
 fn acquire_object_locks(
     root: &Path,
     family: CacheFamily,
@@ -810,6 +882,37 @@ fn acquire_object_locks(
             Ok(HeldObjectLock { path, lock })
         })
         .collect()
+}
+
+fn acquire_lease(
+    request: &CacheObjectRequest,
+    mode: LeaseMode,
+) -> Result<CacheObjectLease, CacheLifecycleError> {
+    let root = selected_root(&request.cache_root)?;
+    validate_private_directory_nofollow(&root)
+        .map_err(|error| CacheLifecycleError::io("validate private root", &root, error))?;
+    let relative_path = relative_path(&request.relative_path)?;
+    let lock_path = object_lock_path(&root, request.family, &relative_path);
+    let lock_parent = lock_path.parent().ok_or_else(|| {
+        CacheLifecycleError::invalid("object lock path does not have a parent directory")
+    })?;
+    ensure_directory_nofollow(lock_parent).map_err(|error| {
+        CacheLifecycleError::io("create lifecycle lock directory", lock_parent, error)
+    })?;
+    validate_private_directory_nofollow(lock_parent).map_err(|error| {
+        CacheLifecycleError::io("validate lifecycle lock directory", lock_parent, error)
+    })?;
+    let lock = match mode {
+        LeaseMode::Read => AdvisoryFileLock::acquire_shared(&lock_path),
+        LeaseMode::Write => AdvisoryFileLock::acquire(&lock_path),
+    }
+    .map_err(|error| CacheLifecycleError::io("acquire lifecycle lease", &lock_path, error))?;
+    Ok(CacheObjectLease {
+        cache_root: root,
+        relative_path,
+        lock_path,
+        lock,
+    })
 }
 
 fn revalidate_object_locks(locks: &[HeldObjectLock]) -> Result<(), CacheLifecycleError> {
@@ -1022,8 +1125,9 @@ fn current_unix_seconds() -> Result<u64, CacheLifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        keep, keep_many, preview_removal_until, release, CacheLifecycleError, CacheObjectKind,
-        CacheObjectRequest, CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
+        acquire_read_lease, acquire_write_lease, keep, keep_many, preview_removal_until, release,
+        CacheLifecycleError, CacheObjectKind, CacheObjectRequest, CacheRetentionRelease,
+        PREVIEW_LIFETIME_SECONDS,
     };
     use crate::CacheFamily;
     use std::path::PathBuf;
@@ -1286,6 +1390,34 @@ mod tests {
         drop(lock);
         assert!(keep(&request, "blocked-while-removing").is_ok());
         assert!(lock_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn active_reader_leases_exclude_lifecycle_writers_until_every_reader_releases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("archive"), b"approved").unwrap();
+        let request = file_request(&root, "archive");
+
+        let first = acquire_read_lease(&request).unwrap();
+        let second = acquire_read_lease(&request).unwrap();
+        first.revalidate().unwrap();
+        second.revalidate().unwrap();
+        assert!(matches!(
+            acquire_write_lease(&request),
+            Err(CacheLifecycleError::Io {
+                action: "acquire lifecycle lease",
+                ..
+            })
+        ));
+        drop(first);
+        assert!(acquire_write_lease(&request).is_err());
+        drop(second);
+
+        let writer = acquire_write_lease(&request).unwrap();
+        writer.revalidate().unwrap();
     }
 
     #[test]

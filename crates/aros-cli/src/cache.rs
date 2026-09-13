@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::artifact::{archive_cache_path, obtain_archive, require_sha256, verify_archive};
+use crate::artifact::{archive_cache_path, obtain_archive, open_verified_archive, require_sha256};
 use crate::host_compiler;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
@@ -525,11 +525,12 @@ pub async fn archive_fetch(
 /// object. Verification does not extract or install an archive.
 pub fn archive_verify(selector: CacheArchiveSelector, format: ResultFormat) -> Result<()> {
     let selection = archive_selection(selector)?;
-    verify_archive(
-        &selection.cache_path,
-        &selection.sha256,
-        selection.expected_size,
-    )?;
+    let archive = open_verified_archive(&selection.sha256, selection.expected_size)?;
+    if archive.path() != selection.cache_path {
+        return Err(miette::miette!(
+            "selected archive cache path changed while opening its lifecycle lease"
+        ));
+    }
     let report = ArchiveCacheVerification {
         schema: ARCHIVE_VERIFY_SCHEMA,
         operation: "archives.verify",
