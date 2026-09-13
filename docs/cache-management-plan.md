@@ -183,6 +183,72 @@ an unavailable backend is a successful status observation. Both human and JSON
 rendering preserve these distinctions. The canonical Astro reference and
 parser-backed example gate are part of this contract.
 
+### M2 source-cache contract
+
+CACHE-M2 adds only these source-cache commands. They operate on an explicit,
+existing absolute `--dir`; the command never infers a producer cache from an
+archive-cache setting and it never creates an extracted source tree, a build
+directory, a worktree, a package or a release artifact.
+
+```text
+aros cache sources status --dir DIR [--format human|json]
+aros cache sources list --dir DIR SELECTOR [--format human|json]
+aros cache sources fetch --dir DIR SELECTOR [--offline] [--format human|json]
+aros cache sources verify --dir DIR SELECTOR [--format human|json]
+```
+
+`SELECTOR` is exactly one of `--source-lock FILE`,
+`--compatibility-ports-lock FILE`, or `--source-fetch-plan FILE`. The first
+selects `aros-toolchain-source-lock-v2`; the second selects
+`aros-toolchain-compatibility-ports-v2`; the third selects a new,
+schema-discriminated `aros-cache-source-fetch-plan-v1`. A selector is a
+regular, bounded input read without following a final symlink. Its raw-byte
+SHA-256 is the `request_sha256` recorded by every list, fetch and verify
+result. Selection is never based on a filename, inferred project state or a
+source-tree scan.
+
+The source-fetch plan represents the exact data formerly implicit in one
+product source-fetch declaration: a stable role, ordered credential-free HTTPS
+candidates, the declared archive/patch representation, normalization policy,
+and either a size/SHA-256 identity or an explicit `unverified` integrity
+classification. The parser rejects duplicate role/candidate identities,
+unsafe names, relative paths, credentials, non-HTTPS origins, unbounded input
+sets and unsupported normalization. An unverified declaration is not upgraded
+to a pin: a successful fetch records its measured identity as
+`measured_unpinned`, and verify can report presence but cannot report upstream
+integrity. Product-plan acquisition is permitted only with an explicit
+`--allow-unverified`; producer and compatibility locks remain strict.
+
+`status` is passive: it observes only the selected root metadata and emits
+`aros-cache-sources-status-v1`. `list` is a bounded metadata projection of the
+selector's declared entries. It emits `aros-cache-sources-list-v1`, an entry
+role, normalization, declared identity, object location class and one of
+`missing`, `present_unverified`, `unsafe` or `inaccessible`; it does not hash
+payload bytes and never calls a present entry verified. `verify` emits
+`aros-cache-sources-verify-v1`, snapshots and hashes every selected object and
+reports exact consumed object identities. `fetch` emits
+`aros-cache-sources-fetch-v1`; it first verifies every existing selected object
+and only then downloads missing declared objects. `--offline` forbids every
+transfer and turns each selected miss into a typed diagnostic. `fetch` never
+refreshes, replaces, deletes or silently repairs an object; those lifecycle
+operations remain reserved for CACHE-M6.
+
+All three selector adapters yield one shared `SourceCacheRequest` with the
+request digest, role, candidate/normalization policy and declared identity.
+Its writer takes the same per-object no-clobber guard as its reader's
+no-follow snapshot. Staging is private and an interrupted or competing writer
+cannot expose a partial object. Every producer/compatibility consumer is
+migrated to that shared request path before its old public cache/verify-only
+frontend is removed. The shared path records the request digest and every
+consumed object identity in its observation, so a resumed operation cannot
+silently substitute a changed closure.
+
+The M2 root is deliberately an explicitly selected cache *view*, not a global
+garbage-collection authority. Matching immutable entries may be reused, but a
+same-name/different-identity declaration fails closed. Source-archive
+deduplication, retention references, removal and pruning are separate later
+contracts; CACHE-M2 does not infer ownership from an arbitrary directory.
+
 ### Everyday examples
 
 The examples describe the target interface; exact parser/schema fixtures are
@@ -193,15 +259,17 @@ aros cache status
 aros cache compiler status
 aros cache compiler stats --backend sccache --format json
 
-aros cache sources fetch --lock sources.lock.json --dir /work/source-cache
-aros cache sources verify --lock sources.lock.json --dir /work/source-cache
+aros cache sources status --dir /work/source-cache
+aros cache sources fetch --source-lock sources.lock.json --dir /work/source-cache
+aros cache sources verify --compatibility-ports-lock ports.lock.json --dir /work/source-cache
+aros cache sources list --source-fetch-plan grub.fetch-plan.json --dir /work/source-cache
 aros cache archives fetch --toolchain --preset pc-x86_64 --project /work/AROS
 aros cache archives fetch --host-compiler --project /work/AROS
 aros cache cargo fetch --tools-source /work/aros-tools --dir /work/source-cache
 aros cache cargo verify --tools-source /work/aros-tools --dir /work/source-cache
 aros cache genmf verify --source /work/AROS --dir /work/verify/genmf
 
-aros cache sources keep --name pc-offline --lock sources.lock.json --dir /work/source-cache
+aros cache sources keep --name pc-offline --source-lock sources.lock.json --dir /work/source-cache
 aros cache sources prune --dir /work/source-cache --older-than 30d
 # Inspect the preview, then rerun the exact request with its returned token:
 aros cache sources prune --dir /work/source-cache --older-than 30d --apply TOKEN
