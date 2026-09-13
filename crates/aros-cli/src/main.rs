@@ -1358,22 +1358,22 @@ mod tests {
     }
 
     fn rendered_cli_contract_index(command: &Command) -> String {
-        let sections = public_contract_commands(command)
-            .into_iter()
-            .map(|child| {
-                format!(
-                    "- [`aros {}`](/aros-tools/reference/cli-contract/{}/)\n",
-                    child.get_name(),
-                    child.get_name(),
-                )
-            })
-            .collect::<String>();
+        let mut sections = String::new();
+        for child in public_contract_commands(command) {
+            writeln!(
+                sections,
+                "- [`aros {}`](/aros-tools/reference/cli-contract/{}/)",
+                child.get_name(),
+                child.get_name(),
+            )
+            .expect("writing to a string cannot fail");
+        }
         let mut document = String::from("---\ntitle: Generated CLI contract\ndescription: Source-derived structural facts for the current public aros command model.\n---\n\nThis reference is generated from the `aros` Clap command model and committed for review. It records visible commands and structural argument facts; task semantics, side effects, and recovery remain in the [command reference](/aros-tools/reference/cli/). Hidden lifecycle bridges are deliberately excluded.\n\nThe `position` column is one-based for positional arguments and `—` for options. Empty `default`, `values`, `environment`, and `conflicts` cells mean that Clap declares none.\n\n## Global arguments\n\n| ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
-        for argument in visible_arguments(&command)
+        for argument in visible_arguments(command)
             .into_iter()
             .filter(|argument| argument.is_global_set())
         {
-            writeln!(document, "| {} |", argument_contract(&command, argument))
+            writeln!(document, "| {} |", argument_contract(command, argument))
                 .expect("writing to a string cannot fail");
         }
         document.push_str("\n## Command sections\n\n");
@@ -1446,8 +1446,10 @@ mod tests {
                     .expect("requested public contract section must exist");
                 print!("{}", rendered_cli_contract_section(section));
             }
-            Err(_) => {
-                panic!("set AROS_CLI_CONTRACT_SECTION to index or a visible top-level command")
+            Err(error) => {
+                panic!(
+                    "set AROS_CLI_CONTRACT_SECTION to index or a visible top-level command: {error}"
+                )
             }
         }
     }
