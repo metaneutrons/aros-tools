@@ -1028,6 +1028,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     None,
                     "restore the exact reviewed selector and cache objects; verify hashes payloads but never changes them",
                 ),
+                lifecycle @ (CacheSourcesCommand::Keep { .. }
+                | CacheSourcesCommand::Release { .. }
+                | CacheSourcesCommand::Remove { .. }) => source_lifecycle_boundary(lifecycle),
             },
             CacheCommand::Archives { command } => match command {
                 CacheArchivesCommand::Status { .. } => (
@@ -1222,6 +1225,46 @@ fn archive_lifecycle_boundary(
         | CacheArchivesCommand::Fetch { .. }
         | CacheArchivesCommand::Verify { .. } => {
             unreachable!("only archive lifecycle commands call archive_lifecycle_boundary")
+        }
+    }
+}
+
+fn source_lifecycle_boundary(
+    command: &CacheSourcesCommand,
+) -> (
+    DiagnosticCode,
+    DiagnosticStage,
+    &'static str,
+    Option<String>,
+    &'static str,
+) {
+    match command {
+        CacheSourcesCommand::Keep { .. } => (
+            DiagnosticCode::CliSourceLock,
+            DiagnosticStage::Configuration,
+            "cache.sources.keep",
+            None,
+            "select one verified reviewed source closure, an existing private cache root, and a fresh portable --name; keep never downloads, replaces, or deletes source bytes",
+        ),
+        CacheSourcesCommand::Release { .. } => (
+            DiagnosticCode::CliConfiguration,
+            DiagnosticStage::Configuration,
+            "cache.sources.release",
+            None,
+            "pass the exact source-cache root and existing retention --name; release deletes only that named reference, never cache payload bytes",
+        ),
+        CacheSourcesCommand::Remove { .. } => (
+            DiagnosticCode::CliSourceLock,
+            DiagnosticStage::Configuration,
+            "cache.sources.remove",
+            None,
+            "select the same reviewed closure and one exact semantic --role; inspect the preview first, then pass its short-lived --apply token only when retention is released and no active consumer holds the object",
+        ),
+        CacheSourcesCommand::Status { .. }
+        | CacheSourcesCommand::List { .. }
+        | CacheSourcesCommand::Fetch { .. }
+        | CacheSourcesCommand::Verify { .. } => {
+            unreachable!("only source lifecycle commands call source_lifecycle_boundary")
         }
     }
 }

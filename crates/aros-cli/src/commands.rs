@@ -193,6 +193,28 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::source_verify(selector, &dir, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Keep {
+                    selector,
+                    dir,
+                    name,
+                    format,
+                },
+        } => cache::source_keep(selector, &dir, &name, format),
+        CacheCommand::Sources {
+            command: CacheSourcesCommand::Release { dir, name, format },
+        } => cache::source_release(&dir, &name, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Remove {
+                    selector,
+                    dir,
+                    role,
+                    apply,
+                    format,
+                },
+        } => cache::source_remove(selector, &dir, &role, apply.as_deref(), format),
         CacheCommand::Archives {
             command: CacheArchivesCommand::Status { format },
         } => cache::archive_status(format),

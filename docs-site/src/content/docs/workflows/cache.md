@@ -51,6 +51,12 @@ aros cache sources fetch --source-lock toolchains/llvm.sources.json \
   --dir /work/aros-source-cache
 aros cache sources verify --compatibility-ports-lock toolchains/ports.json \
   --dir /work/aros-source-cache --format json
+aros cache sources keep --source-lock toolchains/llvm.sources.json \
+  --dir /work/aros-source-cache --name release-candidate
+aros cache sources remove --source-lock toolchains/llvm.sources.json \
+  --dir /work/aros-source-cache --role producer:toolchain_component:llvm-project@20.1.7 \
+  --format json
+aros cache sources release --dir /work/aros-source-cache --name release-candidate
 ```
 
 Use the JSON documents for scripts. `--format json` changes normal stdout only;
@@ -65,7 +71,7 @@ contents:
 | --- | --- |
 | `compiler` | Discovers `sccache` and `ccache` on `PATH`, then records recognized configuration-variable names without reading their values or starting either backend. |
 | `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
-| `sources` | `status` never guesses a root. `list`, `fetch`, and `verify` require an explicit reviewed selector and root. |
+| `sources` | `status` never guesses a root. `list`, `fetch`, `verify`, `keep`, and role-selected preview/apply `remove` require an explicit reviewed selector and root. |
 | `cargo` | `status` observes an explicit parent root. `list`, `fetch`, and `verify` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
 | `genmf` | `status` observes an explicit parent root. `list`, `verify`, and `refresh` require explicit source, interpreter, and cache inputs. Verification reports and build trees are excluded. |
 
@@ -413,16 +419,20 @@ aros cache sources fetch --compatibility-ports-lock toolchains/ports.json \
 ```
 
 The native producer and compatibility executor independently reverify the
-same typed request before consuming its cache objects. A pinned workflow must
-replace every removed producer-cache invocation before upgrading aros-tools.
+same typed request before consuming its cache objects. The native producer
+holds a shared lifecycle lease across its source-lock closure while upstream
+Configure and MetaMake may read it. `keep` retains a whole closure under one
+named reference; `remove` is deliberately role-selected, preview-first, and
+blocked until every reference is released. A pinned workflow must replace every
+removed producer-cache invocation before upgrading aros-tools.
 
 ## Current limits
 
-The following operations are not yet public cache commands: retention, removal, prune,
-compiler statistics reset, and compiler cache clearing. Do not replace them
-with ad-hoc directory deletion. Their interfaces require verified ownership,
-cooperating reader/writer leases, preview/apply protection, and explicit scope
-proof; they are delivered in the tracked cache milestones.
+Root-wide pruning, compiler statistics reset, and compiler-cache clearing are
+not public cache commands yet. Do not replace them with ad-hoc directory
+deletion. Their interfaces still require verified ownership, cooperating
+reader/writer leases, preview/apply protection, an explicit backend boundary,
+and scope proof; they are delivered in the tracked cache milestones.
 
 `aros ccache` remains the legacy statistics frontend during the transition. It
 may start sccache because it queries backend statistics. Its former `--clear`

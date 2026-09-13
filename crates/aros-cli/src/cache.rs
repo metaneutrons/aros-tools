@@ -26,8 +26,9 @@ use aros_toolchain::{
         CARGO_VENDOR_VERIFY_SCHEMA,
     },
     source_cache::{
-        fetch_request, list as list_source_cache, status as source_cache_status, verify_request,
-        SourceCacheFetch, SourceCacheList, SourceCacheStatus, SourceCacheVerification,
+        fetch_request, list as list_source_cache, retain_request, select_lifecycle_object,
+        status as source_cache_status, verify_request, SourceCacheFetch, SourceCacheList,
+        SourceCacheStatus, SourceCacheVerification, SOURCE_CACHE_KEEP_SCHEMA,
     },
     source_cache_request::{read_selector, SourceCacheRequest},
     ContractError,
@@ -50,10 +51,14 @@ const ARCHIVE_REMOVE_SCHEMA: &str = "aros-cache-archives-remove-v1";
 const CARGO_KEEP_SCHEMA: &str = "aros-cache-cargo-keep-v1";
 const CARGO_RELEASE_SCHEMA: &str = "aros-cache-cargo-release-v1";
 const CARGO_REMOVE_SCHEMA: &str = "aros-cache-cargo-remove-v1";
+const SOURCE_RELEASE_SCHEMA: &str = "aros-cache-sources-release-v1";
+const SOURCE_REMOVE_SCHEMA: &str = "aros-cache-sources-remove-v1";
 const ARCHIVE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache archives fetch for the same declared host or toolchain identity; the command never redownloads or reconstructs archive bytes";
 const ARCHIVE_REMOVAL_OFFLINE_IMPACT: &str = "offline archive fetch and any consumer requiring these exact bytes will fail until the declared archive is restored and verified";
 const CARGO_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit online cache cargo fetch with the same producer, tools, Cargo and cache selection; the command never uses global Cargo state";
 const CARGO_REMOVAL_OFFLINE_IMPACT: &str = "offline cache cargo fetch and native producer execution requiring this generation will fail until an exact verified generation is restored";
+const SOURCE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache sources fetch with the same reviewed selector; the command never guesses an origin, redownloads automatically, or reconstructs source bytes";
+const SOURCE_REMOVAL_OFFLINE_IMPACT: &str = "offline source fetch and any producer or compatibility consumer requiring this exact role will fail until the reviewed closure is restored and verified";
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -251,6 +256,51 @@ struct CargoVendorRemovalApplied {
     boundary: &'static str,
 }
 
+#[derive(Serialize)]
+struct SourceCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRelease {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    release: CacheRemovalResult,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    role: String,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    role: String,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
 /// Render the top-level passive cache overview.
 ///
 /// # Errors
@@ -371,6 +421,120 @@ pub fn source_verify(
     match format {
         ResultFormat::Human => print_source_verify_human(&report),
         ResultFormat::Json => print_json(&report, "source cache verify")?,
+    }
+    Ok(())
+}
+
+/// Retain a fully verified reviewed source closure under one named reference.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when a selected object is
+/// missing, unsafe, changed, actively consumed, or cannot be retained under
+/// the supplied portable name. The command never downloads, replaces or
+/// deletes source bytes.
+pub fn source_keep(
+    selector: CacheSourceSelector,
+    dir: &Path,
+    name: &str,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = source_request(selector)?;
+    let retention = retain_request(dir, &request, name).map_err(|error| contract_error(&error))?;
+    let report = SourceCacheRetention {
+        schema: SOURCE_CACHE_KEEP_SCHEMA,
+        operation: "sources.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection: request,
+        retention,
+        boundary: "keep verifies and retains every exact role in one reviewed source closure under a no-clobber named reference; it neither downloads, replaces, nor deletes source bytes",
+    };
+    match format {
+        ResultFormat::Human => print_source_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "source cache keep")?,
+    }
+    Ok(())
+}
+
+/// Release one named source-cache retention reference without deleting bytes.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when the root or receipt is
+/// missing, unsafe, substituted or malformed.
+pub fn source_release(dir: &Path, name: &str, format: ResultFormat) -> Result<()> {
+    let release = release(&CacheRetentionRelease {
+        family: CacheFamily::Sources,
+        cache_root: dir.to_path_buf(),
+        name: name.to_owned(),
+    })
+    .map_err(|error| miette::miette!(error))?;
+    let report = SourceCacheRelease {
+        schema: SOURCE_RELEASE_SCHEMA,
+        operation: "sources.release",
+        side_effects: lifecycle_release_side_effects(),
+        release,
+        boundary: "release removes one named source retention receipt only; it never enumerates or deletes source-cache bytes",
+    };
+    match format {
+        ResultFormat::Human => print_source_release_human(&report),
+        ResultFormat::Json => print_json(&report, "source cache release")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm removal of one role-selected source object.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when the role is not selected by
+/// the reviewed closure, the object is unsafe/changed, retention blocks it, or
+/// an active reader or writer lease prevents removal.
+pub fn source_remove(
+    selector: CacheSourceSelector,
+    dir: &Path,
+    role: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = source_request(selector)?;
+    let object =
+        select_lifecycle_object(dir, &request, role).map_err(|error| contract_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = SourceCacheRemovalApplied {
+            schema: SOURCE_REMOVE_SCHEMA,
+            operation: "sources.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection: request,
+            role: role.to_owned(),
+            removal,
+            recoverability: SOURCE_REMOVAL_RECOVERABILITY,
+            offline_impact: SOURCE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the direct object selected by one reviewed semantic role after token, retention, reader/writer lease, identity and content bindings still match; no source-cache root scan occurs",
+        };
+        match format {
+            ResultFormat::Human => print_source_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "source cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = SourceCacheRemovalPreview {
+            schema: SOURCE_REMOVE_SCHEMA,
+            operation: "sources.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection: request,
+            role: role.to_owned(),
+            preview,
+            recoverability: SOURCE_REMOVAL_RECOVERABILITY,
+            offline_impact: SOURCE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures only the direct object selected by one reviewed semantic role and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_source_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "source cache remove preview")?,
+        }
     }
     Ok(())
 }
@@ -1277,6 +1441,7 @@ fn print_source_status_human(report: &SourceCacheStatus) {
         report.root.root.origin.as_str(),
         report.root.state.as_str()
     );
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
 }
 
 fn print_source_list_human(report: &SourceCacheList) {
@@ -1332,6 +1497,65 @@ fn print_source_verify_human(report: &SourceCacheVerification) {
             entry.sha256,
             entry.filename
         );
+    }
+}
+
+fn print_source_retention_human(report: &SourceCacheRetention) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_release_human(report: &SourceCacheRelease) {
+    aros_common::outputln!("Source cache retention reference released:");
+    aros_common::outputln!("  root: {}", report.release.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.release.relative_path);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_removal_preview_human(report: &SourceCacheRemovalPreview) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  removal role: {}", report.role);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_removal_applied_human(report: &SourceCacheRemovalApplied) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  removal role: {}", report.role);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_selection_human(request: &SourceCacheRequest) {
+    aros_common::outputln!(
+        "Source cache selection: {} (request {})",
+        request.kind.as_str(),
+        request.request_sha256
+    );
+    for entry in &request.entries {
+        aros_common::outputln!("  {}: {}", entry.role, entry.filename);
     }
 }
 

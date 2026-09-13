@@ -133,6 +133,60 @@ pub enum CacheSourcesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Retain one fully verified reviewed source closure under a named no-clobber reference.
+    Keep {
+        /// One exact reviewed source-cache selector.
+        #[command(flatten)]
+        selector: CacheSourceSelector,
+
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Release one named source-cache retention reference without deleting bytes.
+    Release {
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one role-selected source object.
+    Remove {
+        /// One exact reviewed source-cache selector.
+        #[command(flatten)]
+        selector: CacheSourceSelector,
+
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Exact semantic role from the reviewed selector to remove.
+        #[arg(long, value_name = "ROLE")]
+        role: String,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// Compiler-archive resource operations.

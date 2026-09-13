@@ -303,7 +303,24 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     "shared host and cross-compiler download cache; installed toolchains are outside this family",
                 ),
             },
-            unregistered(CacheFamily::Sources, "source and patch caches require an explicit reviewed lock and root; this command does not guess a producer or product cache"),
+            CacheFamilyStatus {
+                family: CacheFamily::Sources,
+                status: CacheFamilyStatusKind::RequiresExplicitSelection,
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::List,
+                    CacheCapability::Fetch,
+                    CacheCapability::Verify,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
+                ],
+                root: None,
+                backends: Vec::new(),
+                detail: Some(
+                    "source and patch caches require an explicit reviewed lock and root; keep retains one closed selection and remove is role-selected, preview-first and never root-wide",
+                ),
+            },
             CacheFamilyStatus {
                 family: CacheFamily::Cargo,
                 status: CacheFamilyStatusKind::RequiresExplicitSelection,
@@ -336,17 +353,6 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
             },
         ],
     })
-}
-
-fn unregistered(family: CacheFamily, detail: &'static str) -> CacheFamilyStatus {
-    CacheFamilyStatus {
-        family,
-        status: CacheFamilyStatusKind::RequiresExplicitSelection,
-        capabilities: vec![CacheCapability::Status],
-        root: None,
-        backends: Vec::new(),
-        detail: Some(detail),
-    }
 }
 
 #[cfg(test)]

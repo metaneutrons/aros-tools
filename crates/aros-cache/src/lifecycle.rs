@@ -125,6 +125,44 @@ pub struct CacheObjectLease {
     lock: AdvisoryFileLock,
 }
 
+/// An OS-held, all-or-nothing lifecycle lease set for one closed cache
+/// selection.
+///
+/// Every contained lease belongs to the same cache root and family. The
+/// requests are canonicalized into portable-path order before acquisition, so
+/// independently constructed closures cannot deadlock by taking locks in a
+/// different order. Dropping the set releases every lease.
+#[derive(Debug)]
+pub struct CacheObjectLeases {
+    leases: Vec<CacheObjectLease>,
+}
+
+impl CacheObjectLeases {
+    /// Number of exact objects protected by this set.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.leases.len()
+    }
+
+    /// Whether the set protects no objects.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.leases.is_empty()
+    }
+
+    /// Reassert every no-follow lock in deterministic object order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any held lock can no longer be proven.
+    pub fn revalidate(&self) -> Result<(), CacheLifecycleError> {
+        for lease in &self.leases {
+            lease.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
 impl CacheObjectLease {
     /// Absolute cache root bound to this lease.
     #[must_use]
@@ -394,6 +432,39 @@ pub fn acquire_write_lease(
     acquire_lease(request, LeaseMode::Write)
 }
 
+/// Acquire shared no-follow leases for one exact, closed cache selection.
+///
+/// The complete selection must use one exact root and family and may not
+/// repeat an object. Requests are acquired in portable-path order. If any lock
+/// is unavailable, all previously acquired leases are dropped before this
+/// function returns an error.
+///
+/// # Errors
+///
+/// Returns an error for an empty, mixed or duplicate selection, unsafe root or
+/// path, or an active writer/removal lease for any selected object.
+pub fn acquire_read_leases(
+    requests: &[CacheObjectRequest],
+) -> Result<CacheObjectLeases, CacheLifecycleError> {
+    acquire_leases(requests, LeaseMode::Read)
+}
+
+/// Acquire exclusive no-follow leases for one exact, closed cache selection.
+///
+/// The selection and failure semantics are identical to
+/// [`acquire_read_leases`], but every selected object excludes readers,
+/// lifecycle removal and other writers until this returned set is dropped.
+///
+/// # Errors
+///
+/// Returns an error for an empty, mixed or duplicate selection, unsafe root or
+/// path, or an active lease for any selected object.
+pub fn acquire_write_leases(
+    requests: &[CacheObjectRequest],
+) -> Result<CacheObjectLeases, CacheLifecycleError> {
+    acquire_leases(requests, LeaseMode::Write)
+}
+
 /// Create one named retention reference for an exact closed selection.
 ///
 /// All requests must select the same root and family. Every selected object is
@@ -413,7 +484,20 @@ pub fn keep_many(
     keep_many_validated(requests, name, || Ok(()))
 }
 
-fn keep_many_validated<F>(
+/// Create one named retention reference for a closed selection after a
+/// family-specific verifier has accepted it while every selected object lock
+/// is held.
+///
+/// This is the multi-object counterpart to [`keep_validated`]. The verifier
+/// runs after all deterministically ordered exclusive locks are acquired and
+/// before any object is measured or the no-clobber receipt is published.
+///
+/// # Errors
+///
+/// Returns the same errors as [`keep_many`], or
+/// [`CacheLifecycleError::Validation`] when the family verifier rejects the
+/// selection. A rejected selection never produces a partial receipt.
+pub fn keep_many_validated<F>(
     requests: &[CacheObjectRequest],
     name: &str,
     validate: F,
@@ -963,6 +1047,61 @@ fn acquire_lease(
     })
 }
 
+fn acquire_leases(
+    requests: &[CacheObjectRequest],
+    mode: LeaseMode,
+) -> Result<CacheObjectLeases, CacheLifecycleError> {
+    let requests = normalized_lease_requests(requests)?;
+    let mut leases = Vec::with_capacity(requests.len());
+    for request in &requests {
+        // `leases` is local: any failure drops every earlier lock before the
+        // error crosses this boundary, so callers never observe a partial set.
+        leases.push(acquire_lease(request, mode)?);
+    }
+    Ok(CacheObjectLeases { leases })
+}
+
+fn normalized_lease_requests(
+    requests: &[CacheObjectRequest],
+) -> Result<Vec<CacheObjectRequest>, CacheLifecycleError> {
+    let first = requests.first().ok_or_else(|| {
+        CacheLifecycleError::invalid("a lifecycle lease set must select at least one cache object")
+    })?;
+    if requests.len() > MAX_RETENTION_OBJECTS {
+        return Err(CacheLifecycleError::invalid(format!(
+            "a lifecycle lease set cannot select more than {MAX_RETENTION_OBJECTS} cache objects"
+        )));
+    }
+    let family = first.family;
+    let root = selected_root(&first.cache_root)?;
+    let mut normalized = requests
+        .iter()
+        .map(|request| {
+            if request.family != family || selected_root(&request.cache_root)? != root {
+                return Err(CacheLifecycleError::invalid(
+                    "a lifecycle lease set must use one exact cache root and family",
+                ));
+            }
+            Ok(CacheObjectRequest {
+                family,
+                cache_root: root.clone(),
+                relative_path: PathBuf::from(relative_path(&request.relative_path)?),
+                kind: request.kind,
+            })
+        })
+        .collect::<Result<Vec<_>, CacheLifecycleError>>()?;
+    normalized.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if normalized
+        .windows(2)
+        .any(|objects| objects[0].relative_path == objects[1].relative_path)
+    {
+        return Err(CacheLifecycleError::invalid(
+            "a lifecycle lease set cannot select the same cache object more than once",
+        ));
+    }
+    Ok(normalized)
+}
+
 fn revalidate_object_locks(locks: &[HeldObjectLock]) -> Result<(), CacheLifecycleError> {
     for lock in locks {
         lock.lock.revalidate().map_err(|error| {
@@ -1173,9 +1312,9 @@ fn current_unix_seconds() -> Result<u64, CacheLifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_read_lease, acquire_write_lease, keep, keep_many, keep_validated,
-        preview_removal_until, release, CacheLifecycleError, CacheObjectKind, CacheObjectRequest,
-        CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
+        acquire_read_lease, acquire_read_leases, acquire_write_lease, acquire_write_leases, keep,
+        keep_many, keep_validated, preview_removal_until, release, CacheLifecycleError,
+        CacheObjectKind, CacheObjectRequest, CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
     };
     use crate::CacheFamily;
     use std::path::PathBuf;
@@ -1500,6 +1639,33 @@ mod tests {
 
         let writer = acquire_write_lease(&request).unwrap();
         writer.revalidate().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closure_leases_are_ordered_all_or_nothing_and_protect_every_selected_object() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("alpha"), b"approved").unwrap();
+        std::fs::write(root.join("beta"), b"approved").unwrap();
+        let alpha = file_request(&root, "alpha");
+        let beta = file_request(&root, "beta");
+
+        let blocked = acquire_write_lease(&beta).unwrap();
+        assert!(acquire_read_leases(&[beta.clone(), alpha.clone()]).is_err());
+        // A failed multi-object acquisition must not strand the first,
+        // alphabetically acquired lease.
+        assert!(acquire_write_lease(&alpha).is_ok());
+        drop(blocked);
+
+        let readers = acquire_read_leases(&[beta.clone(), alpha.clone()]).unwrap();
+        assert_eq!(readers.len(), 2);
+        assert!(!readers.is_empty());
+        readers.revalidate().unwrap();
+        assert!(acquire_write_leases(&[alpha.clone(), beta.clone()]).is_err());
+        drop(readers);
+        assert!(acquire_write_leases(&[alpha, beta]).is_ok());
     }
 
     #[test]

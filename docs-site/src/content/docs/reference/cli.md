@@ -74,6 +74,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
 | `aros cache sources verify` | Measure selected source objects and verify every declared lock identity |
+| `aros cache sources keep` | Retain one fully verified reviewed source closure under a named reference |
+| `aros cache sources release` | Release one named source retention reference without deleting bytes |
+| `aros cache sources remove` | Preview or token-confirm removal of one role-selected source object |
 | `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
@@ -365,6 +368,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
 | `cache sources verify` | No | Measure every selected cached object; strict declarations must match their lock |
+| `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
+| `cache sources release` | No | Remove one named source retention receipt only; no source bytes are deleted |
+| `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
@@ -443,6 +449,15 @@ snapshots and measures every selected object. `fetch` is the only source-cache
 network boundary: it verifies every existing object in the selected closure
 before considering transport, downloads only a missing object, and never
 refreshes, replaces or repairs a cache entry.
+
+`keep` verifies the whole selected closure while holding deterministic
+exclusive lifecycle leases, then records every object beneath one immutable
+named reference. `release` deletes that reference only. `remove` requires the
+same selector plus one semantic `--role`; it shows an exact short-lived preview
+first and accepts `--apply TOKEN` only if retention, content identity, and
+active reader/writer leases still permit removal. A native producer holds a
+shared lease over its complete source-lock closure through its upstream
+Configure and MetaMake consumption window.
 
 A product source-fetch plan uses the schema
 `aros-cache-source-fetch-plan-v1`. Each entry has a stable role, one direct

@@ -575,6 +575,138 @@ fn source_cache_product_plan_keeps_unpinned_measurements_explicit() {
 }
 
 #[test]
+fn source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role() {
+    let temporary = source_cache_tempdir();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).expect("create source cache root");
+    let payload = b"reviewed product input without an upstream pin\n";
+    fs::write(cache.join("grub-2.12.tar.xz"), payload).expect("write cached product input");
+    let plan = temporary.path().join("grub.fetch-plan.json");
+    fs::write(
+        &plan,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "aros-cache-source-fetch-plan-v1",
+            "entries": [{
+                "role": "product:grub@2.12",
+                "filename": "grub-2.12.tar.xz",
+                "candidates": [{"url": "https://example.invalid/grub-2.12.tar.xz"}],
+                "representation": "archive",
+                "normalization": "exact-bytes-v1",
+                "integrity": {"kind": "unverified", "max_size": 1_048_576}
+            }]
+        }))
+        .expect("serialize product source plan"),
+    )
+    .expect("write product source plan");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+    let plan = plan.to_str().expect("plan path is UTF-8");
+    let role = "product:grub@2.12";
+
+    let kept = run(&[
+        "cache",
+        "sources",
+        "keep",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&kept, "source cache keep");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-sources-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let blocked = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--format",
+        "json",
+    ]);
+    assert_success(&blocked, "retained source cache removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-sources-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+    assert!(blocked["recoverability"]
+        .as_str()
+        .unwrap()
+        .contains("same reviewed selector"));
+
+    let released = run(&[
+        "cache",
+        "sources",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "source cache release");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-sources-release-v1");
+
+    let preview = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--format",
+        "json",
+    ]);
+    assert_success(&preview, "unretained source cache removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("preview returns a token")
+        .to_owned();
+
+    let removed = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--apply",
+        &token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&removed, "source cache removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
+    assert!(
+        !Path::new(cache).join("grub-2.12.tar.xz").exists(),
+        "source lifecycle removal must delete only the previewed direct object"
+    );
+}
+
+#[test]
 fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
     let temporary = tempfile::tempdir().expect("temporary archive-cache semantic root");
     let project = temporary.path().join("AROS");

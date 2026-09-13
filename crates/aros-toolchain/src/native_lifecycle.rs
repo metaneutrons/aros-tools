@@ -145,7 +145,13 @@ fn run_owned(
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
     let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
-    let cache = verify_prepared_cache(&request.cache_dir, &cache_request)?;
+    // Keep the exact source-lock closure leased for the full upstream
+    // configure/MetaMake consumption window. The fetch bridge revalidates its
+    // individual input too, but this outer closure lease prevents a
+    // cooperating lifecycle writer or removal from changing another selected
+    // source between preflight and the actual `%fetch` invocation.
+    let source_cache = open_prepared_cache(&request.cache_dir, &cache_request)?;
+    let cache = source_cache.verification();
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -162,7 +168,7 @@ fn run_owned(
         recipe,
         declaration: &declaration,
         host: Some(&host),
-        cache: Some(&cache),
+        cache: Some(cache),
         jobs: request.jobs,
         snapshots: &snapshots,
         environment: None,
@@ -712,13 +718,28 @@ fn plan_request(request: &BuildRequest) -> PlanRequest {
     }
 }
 
+fn open_prepared_cache(
+    cache_dir: &Path,
+    request: &SourceCacheRequest,
+) -> Result<source_cache::VerifiedSourceCacheLease, ContractError> {
+    source_cache::open_verified_request(cache_dir, request).map_err(|error| {
+        ContractError::sources(format!(
+            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros cache sources fetch --source-lock SOURCE_LOCK --dir CACHE`, then prove it with `aros cache sources verify --source-lock SOURCE_LOCK --dir CACHE` before retrying: {error}"
+        ))
+    })
+}
+
+// A collector-only resume no longer reads upstream source-cache objects. It
+// nevertheless remeasures the closure recorded in its predecessor receipt so
+// stale input evidence cannot silently resume a different candidate. This
+// short verification deliberately does not retain a consumer lease.
 fn verify_prepared_cache(
     cache_dir: &Path,
     request: &SourceCacheRequest,
 ) -> Result<source_cache::SourceCacheVerification, ContractError> {
     source_cache::verify_request(cache_dir, request).map_err(|error| {
         ContractError::sources(format!(
-            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros cache sources fetch --source-lock SOURCE_LOCK --dir CACHE`, then prove it with `aros cache sources verify --source-lock SOURCE_LOCK --dir CACHE` before retrying: {error}"
+            "native collector resume requires the same verified source-lock closure as its predecessor: {error}"
         ))
     })
 }

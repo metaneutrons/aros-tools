@@ -5,7 +5,7 @@
 //! this module reports it as usable.  Extra cache files are intentionally not a
 //! failure: only actual source use can establish an undeclared-input violation.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::{fs, io::ErrorKind};
@@ -14,7 +14,11 @@ use aros_common::{DiagnosticCode, Sha256Digest};
 use aros_fetch::engine::cache::{snapshot_measured_cache_payload, snapshot_verified_cache_payload};
 
 #[cfg(unix)]
-use aros_cache::{observe_root, resolve_explicit_root, CacheSideEffects, RootObservation};
+use aros_cache::{
+    acquire_read_leases, acquire_write_leases, keep_many_validated, observe_root,
+    resolve_explicit_root, CacheCapability, CacheFamily, CacheLifecycleError, CacheObjectKind,
+    CacheObjectLeases, CacheObjectRequest, CacheRetentionRecord, CacheSideEffects, RootObservation,
+};
 #[cfg(unix)]
 use serde::Serialize;
 
@@ -44,6 +48,44 @@ pub const SOURCE_CACHE_VERIFY_SCHEMA: &str = "aros-cache-sources-verify-v1";
 #[cfg(unix)]
 pub const SOURCE_CACHE_FETCH_SCHEMA: &str = "aros-cache-sources-fetch-v1";
 
+/// Stable schema for a named source-cache retention result.
+#[cfg(unix)]
+pub const SOURCE_CACHE_KEEP_SCHEMA: &str = "aros-cache-sources-keep-v1";
+
+/// Shared lifecycle lease and verified closure for an active source consumer.
+///
+/// The non-cloneable lease set remains private and is retained with this value
+/// for the entire consumer operation. It prevents a cooperating fetch, keep,
+/// or removal operation from changing any selected source object after the
+/// closure has been measured.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct VerifiedSourceCacheLease {
+    verification: SourceCacheVerification,
+    leases: CacheObjectLeases,
+}
+
+#[cfg(unix)]
+impl VerifiedSourceCacheLease {
+    /// Exact source-cache verification bound to the held read leases.
+    #[must_use]
+    pub const fn verification(&self) -> &SourceCacheVerification {
+        &self.verification
+    }
+
+    /// Reassert every selected lifecycle lock before a consumer crosses a
+    /// phase boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0301 when a held lifecycle lock can no longer be proven.
+    pub fn revalidate(&self) -> Result<(), ContractError> {
+        self.leases
+            .revalidate()
+            .map_err(|error| source_lifecycle_error(&error))
+    }
+}
+
 /// Passive observation of an explicit source-cache root.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,6 +98,9 @@ pub struct SourceCacheStatus {
     pub observation: &'static str,
     /// Hard side-effect boundary of this status operation.
     pub side_effects: CacheSideEffects,
+    /// Public source-cache operations. Every operation except `status` needs
+    /// an explicit reviewed selector in addition to this root.
+    pub capabilities: [CacheCapability; 7],
     /// One non-recursive no-follow root observation.
     pub root: RootObservation,
 }
@@ -248,6 +293,15 @@ pub fn status(cache_root: &Path) -> Result<SourceCacheStatus, ContractError> {
         operation: "sources.status",
         observation: "passive",
         side_effects: PASSIVE_SIDE_EFFECTS,
+        capabilities: [
+            CacheCapability::Status,
+            CacheCapability::List,
+            CacheCapability::Fetch,
+            CacheCapability::Verify,
+            CacheCapability::Keep,
+            CacheCapability::Release,
+            CacheCapability::Remove,
+        ],
         root: observe_root(root),
     })
 }
@@ -334,6 +388,90 @@ pub fn verify_request(
     })
 }
 
+/// Open and verify the exact source closure for an active consumer.
+///
+/// The returned guard must remain alive for every read of the selected cache
+/// entries. It holds one shared, no-follow lifecycle lease per object, then
+/// verifies the closed request under those leases and revalidates the locks
+/// before returning. It neither downloads nor creates source payloads.
+///
+/// # Errors
+///
+/// Returns AX0301 when the root/request/object is unsafe, a source object is
+/// missing or changed, or a writer/removal lease is active.
+#[cfg(unix)]
+pub fn open_verified_request(
+    cache_root: &Path,
+    request: &SourceCacheRequest,
+) -> Result<VerifiedSourceCacheLease, ContractError> {
+    let objects = lifecycle_objects(cache_root, request)?;
+    let leases = acquire_read_leases(&objects).map_err(|error| source_lifecycle_error(&error))?;
+    let verification = verify_request(cache_root, request)?;
+    leases
+        .revalidate()
+        .map_err(|error| source_lifecycle_error(&error))?;
+    Ok(VerifiedSourceCacheLease {
+        verification,
+        leases,
+    })
+}
+
+/// Retain a fully verified source-cache closure under one named reference.
+///
+/// Verification runs while every selected object has the same exclusive
+/// lifecycle lease used to create the retention receipt. A producer lock,
+/// compatibility lock, product archive and product patch therefore survive
+/// until the final named reference is released.
+///
+/// # Errors
+///
+/// Returns AX0301 when selection, root or object verification fails, when a
+/// reader/writer is active, or when the name is occupied. No failed operation
+/// creates a partial retention receipt.
+#[cfg(unix)]
+pub fn retain_request(
+    cache_root: &Path,
+    request: &SourceCacheRequest,
+    name: &str,
+) -> Result<CacheRetentionRecord, ContractError> {
+    let objects = lifecycle_objects(cache_root, request)?;
+    keep_many_validated(&objects, name, || {
+        verify_request(cache_root, request)
+            .map(|_| ())
+            .map_err(|error| CacheLifecycleError::validation(error.to_string()))
+    })
+    .map_err(|error| source_lifecycle_error(&error))
+}
+
+/// Select the one exact source-cache object named by a reviewed semantic role.
+///
+/// This intentionally does not infer selection from a filename. It validates
+/// the full reviewed closure first, then returns the direct object associated
+/// with the caller-provided role for preview/apply removal.
+///
+/// # Errors
+///
+/// Returns AX0301 when the request/root is unsafe or `role` is not part of the
+/// reviewed closure.
+#[cfg(unix)]
+pub fn select_lifecycle_object(
+    cache_root: &Path,
+    request: &SourceCacheRequest,
+    role: &str,
+) -> Result<CacheObjectRequest, ContractError> {
+    let objects = lifecycle_objects(cache_root, request)?;
+    request
+        .entries
+        .iter()
+        .position(|entry| entry.role == role)
+        .and_then(|index| objects.get(index).cloned())
+        .ok_or_else(|| {
+            ContractError::sources(
+                "the requested source-cache removal role is not part of the reviewed closure",
+            )
+        })
+}
+
 /// Acquire missing source-cache objects, then measure the complete closure.
 ///
 /// Existing entries are snapshotted and verified before transport. They are
@@ -356,11 +494,17 @@ pub async fn fetch_request(
 ) -> Result<SourceCacheFetch, ContractError> {
     checked_real_cache_root(cache_root)?;
     request.validate()?;
+    validate_fetch_policy(request, allow_unverified)?;
+    let objects = lifecycle_objects(cache_root, request)?;
+    let leases = acquire_write_leases(&objects).map_err(|error| source_lifecycle_error(&error))?;
     preflight_existing_entries(cache_root, &request.entries)?;
     for entry in &request.entries {
         fetch_entry(cache_root, entry, offline, allow_unverified).await?;
     }
     let verified = verify_request(cache_root, request)?;
+    leases
+        .revalidate()
+        .map_err(|error| source_lifecycle_error(&error))?;
     Ok(SourceCacheFetch {
         schema: SOURCE_CACHE_FETCH_SCHEMA,
         operation: "sources.fetch",
@@ -373,6 +517,57 @@ pub async fn fetch_request(
         },
         entries: verified.entries,
     })
+}
+
+#[cfg(unix)]
+fn lifecycle_objects(
+    cache_root: &Path,
+    request: &SourceCacheRequest,
+) -> Result<Vec<CacheObjectRequest>, ContractError> {
+    checked_real_cache_root(cache_root)?;
+    request.validate()?;
+    request
+        .entries
+        .iter()
+        .map(|entry| {
+            let filename = cache_filename(entry)?;
+            let max_bytes = match entry.integrity {
+                SourceCacheIntegrity::Locked { size, .. } => size,
+                SourceCacheIntegrity::Unverified { max_size } => max_size,
+            };
+            Ok(CacheObjectRequest {
+                family: CacheFamily::Sources,
+                cache_root: cache_root.to_path_buf(),
+                relative_path: PathBuf::from(filename),
+                kind: CacheObjectKind::RegularFile { max_bytes },
+            })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn validate_fetch_policy(
+    request: &SourceCacheRequest,
+    allow_unverified: bool,
+) -> Result<(), ContractError> {
+    if !allow_unverified
+        && request
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.integrity, SourceCacheIntegrity::Unverified { .. }))
+    {
+        return Err(ContractError::sources(
+            "an explicitly unverified product source requires --allow-unverified; no cache object was changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn source_lifecycle_error(error: &CacheLifecycleError) -> ContractError {
+    ContractError::sources(format!(
+        "source-cache lifecycle operation was rejected safely: {error}"
+    ))
 }
 
 #[cfg(unix)]
@@ -564,11 +759,11 @@ mod m2_tests {
     use aros_fetch::engine::cache::CachePayloadNormalization;
 
     use super::{
-        fetch_request, list, status, verify_request, SourceCacheEntryState, SourceCacheFetch,
-        SourceCacheIntegrity, SourceCacheList, SourceCacheObjectIntegrity, SourceCacheRequest,
-        SourceCacheRequestKind, SourceCacheStatus, SourceCacheVerification,
-        SOURCE_CACHE_FETCH_SCHEMA, SOURCE_CACHE_LIST_SCHEMA, SOURCE_CACHE_STATUS_SCHEMA,
-        SOURCE_CACHE_VERIFY_SCHEMA,
+        fetch_request, list, open_verified_request, retain_request, select_lifecycle_object,
+        status, verify_request, SourceCacheEntryState, SourceCacheFetch, SourceCacheIntegrity,
+        SourceCacheList, SourceCacheObjectIntegrity, SourceCacheRequest, SourceCacheRequestKind,
+        SourceCacheStatus, SourceCacheVerification, SOURCE_CACHE_FETCH_SCHEMA,
+        SOURCE_CACHE_LIST_SCHEMA, SOURCE_CACHE_STATUS_SCHEMA, SOURCE_CACHE_VERIFY_SCHEMA,
     };
     use crate::source_cache_request::{
         SourceCacheCandidate, SourceCacheEntry, SourceCacheRepresentation,
@@ -671,6 +866,32 @@ mod m2_tests {
         assert_eq!(verified.entries[0].size, payload.len() as u64);
         assert!(verified.side_effects.hashes_payloads);
         assert!(!verified.side_effects.mutates_state);
+    }
+
+    #[test]
+    fn verified_source_consumption_excludes_lifecycle_writers_and_retention() {
+        let temporary = real_tempdir();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let payload = b"exact locked payload";
+        let request = strict_request("llvm.tar.xz", payload);
+        fs::write(cache.join("llvm.tar.xz"), payload).unwrap();
+
+        let active = open_verified_request(&cache, &request).unwrap();
+        let object = select_lifecycle_object(
+            &cache,
+            &request,
+            "producer:toolchain_component:llvm-project@20.1.7",
+        )
+        .unwrap();
+        assert!(aros_cache::acquire_write_lease(&object).is_err());
+        assert!(retain_request(&cache, &request, "native-build").is_err());
+        active.revalidate().unwrap();
+        drop(active);
+
+        let retention = retain_request(&cache, &request, "native-build").unwrap();
+        assert_eq!(retention.objects.len(), 1);
+        assert_eq!(retention.objects[0].relative_path, "llvm.tar.xz");
     }
 
     #[tokio::test]
