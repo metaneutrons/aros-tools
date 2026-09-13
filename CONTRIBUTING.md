@@ -153,6 +153,10 @@ boundaries, milestones and evidence-based acceptance criteria. Keep design
 decisions in the repository and execution status in linked issues/PRs; planned
 capabilities must not be documented as already shipped.
 
+- [Public CLI contract plan](docs/public-cli-contract-plan.md): command semantics,
+  diagnostics, discoverability and continuous source-aligned Astro documentation;
+  its [audit baseline](docs/public-cli-audit.md) distinguishes measured findings
+  from proposed capabilities.
 - [Toolchain producer integration plan](docs/toolchain-producer-plan.md):
   native producer design, staged migration and TCP-M0 through TCP-M7 gates.
   Its [M0 contract](docs/toolchain-producer-contract.md) and
