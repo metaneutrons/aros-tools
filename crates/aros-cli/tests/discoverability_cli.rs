@@ -110,6 +110,20 @@ fn completions_are_deterministic_public_and_side_effect_free() {
         );
         assert!(generated.contains("toolchain"));
         assert!(
+            generated.contains("--diagnostic-format"),
+            "{shell} completion omitted a visible global option"
+        );
+        assert!(
+            generated.contains("--format"),
+            "{shell} completion omitted a visible leaf option"
+        );
+        for visible_shell in ["bash", "zsh", "fish"] {
+            assert!(
+                generated.contains(visible_shell),
+                "{shell} completion omitted the completions positional value {visible_shell}"
+            );
+        }
+        assert!(
             !generated.contains("__metamake-fetch"),
             "{shell} completion exposed a hidden internal command"
         );

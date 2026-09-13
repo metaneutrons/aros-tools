@@ -22,6 +22,21 @@ aros toolchain list
 `toolchain list` reads `aros-toolchains.lock.toml` for the current host.
 A missing lock is an error; embedded target defaults do not create one.
 
+For scripts and CI, use the versioned machine representations:
+
+```sh
+aros info --format json
+aros toolchain list --format json
+```
+
+`aros-info-v1` distinguishes an available checkout from an unavailable one and
+reports only observed host/compiler/cache state. `aros-toolchain-list-v1`
+reports only the current host's lock entries. Its `status` describes whether an
+artifact is disabled, available from the lock, or installed locally; its
+separate `verification` field says whether that local state is unavailable,
+metadata-only, or fully verified. Both commands are inspection only: they do
+not fetch, install, or execute a compiler.
+
 ## Install a released cross-toolchain
 
 ```sh
