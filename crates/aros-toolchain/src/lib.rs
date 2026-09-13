@@ -44,6 +44,8 @@ pub mod snapshot;
 #[cfg(unix)]
 mod source_audit;
 pub mod source_cache;
+#[cfg(unix)]
+pub mod source_cache_request;
 pub mod source_lock;
 pub mod source_usage;
 pub mod workspace;
