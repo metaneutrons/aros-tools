@@ -25,7 +25,12 @@ mod build_cache;
 mod build_cache_tests;
 mod build_tools;
 mod cache;
+/// Parser model for resource-oriented cache commands.
+pub mod cache_command;
 mod cli_contract;
+/// Source-derived renderer for reviewed CLI-contract snapshots.
+#[cfg(test)]
+pub mod cli_contract_render;
 #[cfg(test)]
 mod cli_contract_sections;
 mod commands;
@@ -45,6 +50,10 @@ mod toolchain_producer;
 mod toolchain_selection;
 
 use build_cache::BuildCompilerCache;
+use cache_command::{
+    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourceSelector,
+    CacheSourcesCommand,
+};
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
     GoldenAction,
@@ -280,49 +289,6 @@ enum Commands {
         #[arg(long, value_enum, default_value = "human")]
         format: toolchain_management::ResultFormat,
     },
-}
-
-#[derive(Subcommand)]
-enum CacheCommand {
-    /// Show the bounded passive status of every cache family
-    Status {
-        /// Result representation on stdout, independent of diagnostic format
-        #[arg(long, value_enum, default_value = "human")]
-        format: toolchain_management::ResultFormat,
-    },
-    /// Inspect compiler-cache backend selection without querying a backend
-    Compiler {
-        #[command(subcommand)]
-        command: CacheCompilerCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum CacheCompilerCommand {
-    /// Show passive compiler-cache backend availability and configuration provenance
-    Status {
-        /// Backend projection; auto reports the stable sccache-first choice
-        #[arg(long, value_enum, default_value = "auto")]
-        backend: CacheCompilerBackend,
-
-        /// Explicit absolute compiler-cache root to inspect without configuring a backend
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-
-        /// Result representation on stdout, independent of diagnostic format
-        #[arg(long, value_enum, default_value = "human")]
-        format: toolchain_management::ResultFormat,
-    },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum CacheCompilerBackend {
-    /// Select the first available backend in AROS's stable preference order
-    Auto,
-    /// Project the sccache backend only
-    Sccache,
-    /// Project the ccache backend only
-    Ccache,
 }
 
 #[derive(Subcommand)]
@@ -1028,6 +994,40 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     )
                 }
             }
+            CacheCommand::Sources { command } => match command {
+                CacheSourcesCommand::Status { .. } => (
+                    DiagnosticCode::CliConfiguration,
+                    DiagnosticStage::Configuration,
+                    "cache.sources.status",
+                    None,
+                    "pass an absolute source-cache --dir; status observes root metadata only and never creates cache state",
+                ),
+                CacheSourcesCommand::List { .. } => (
+                    DiagnosticCode::CliSourceInput,
+                    DiagnosticStage::Configuration,
+                    "cache.sources.list",
+                    None,
+                    "select one readable reviewed source lock or product plan and an existing real source-cache root; list never hashes or acquires payloads",
+                ),
+                CacheSourcesCommand::Fetch { offline, .. } => (
+                    if *offline {
+                        DiagnosticCode::CliSourceLock
+                    } else {
+                        DiagnosticCode::CliNetwork
+                    },
+                    DiagnosticStage::Configuration,
+                    "cache.sources.fetch",
+                    None,
+                    "restore the selected reviewed closure and cache entries; offline fetch never accesses the network and online fetch never replaces an existing object",
+                ),
+                CacheSourcesCommand::Verify { .. } => (
+                    DiagnosticCode::CliSourceLock,
+                    DiagnosticStage::Configuration,
+                    "cache.sources.verify",
+                    None,
+                    "restore the exact reviewed selector and cache objects; verify hashes payloads but never changes them",
+                ),
+            },
         },
         Commands::Ccache => (
             DiagnosticCode::CliToolResolution,
@@ -1325,169 +1325,24 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_contract::RepositoryRequirement, cli_contract_sections::CLI_CONTRACT_SECTIONS,
+        cli_contract::RepositoryRequirement,
+        cli_contract_render::{
+            public_contract_commands, rendered_cli_contract_index, rendered_cli_contract_section,
+            table_cell,
+        },
+        cli_contract_sections::CLI_CONTRACT_SECTIONS,
         command_boundary, BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli,
         Commands, Parser,
     };
-    use clap::{error::ErrorKind, Arg, Command, CommandFactory};
-    use std::fmt::Write;
+    use clap::{error::ErrorKind, CommandFactory};
 
     const CLI_CONTRACT_INDEX: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs-site/src/content/docs/reference/cli-contract.md"
     ));
-    fn is_public_contract_argument(argument: &Arg) -> bool {
-        !argument.is_hide_set() && !matches!(argument.get_id().as_str(), "help" | "version")
-    }
-
-    fn is_public_contract_command(command: &Command) -> bool {
-        !command.is_hide_set() && command.get_name() != "help"
-    }
-
-    fn visible_arguments(command: &Command) -> Vec<&Arg> {
-        command
-            .get_arguments()
-            .filter(|argument| is_public_contract_argument(argument))
-            .collect()
-    }
-
-    fn table_cell(value: impl AsRef<str>) -> String {
-        value.as_ref().replace('|', "\\|")
-    }
-
     #[test]
     fn cli_contract_escapes_markdown_table_separators_once() {
         assert_eq!(table_cell("one|two"), "one\\|two");
-    }
-
-    fn argument_contract(command: &Command, argument: &Arg) -> String {
-        let spelling = match (argument.get_short(), argument.get_long()) {
-            (Some(short), Some(long)) => format!("-{short}, --{long}"),
-            (Some(short), None) => format!("-{short}"),
-            (None, Some(long)) => format!("--{long}"),
-            (None, None) => argument.get_id().to_string(),
-        };
-        let conflicts = command
-            .get_arg_conflicts_with(argument)
-            .into_iter()
-            .filter(|candidate| is_public_contract_argument(candidate))
-            .map(|candidate| candidate.get_id().to_string())
-            .collect::<Vec<_>>();
-        let values = argument
-            .get_possible_values()
-            .into_iter()
-            .filter(|value| !value.is_hide_set())
-            .map(|value| value.get_name().to_owned())
-            .collect::<Vec<_>>();
-
-        [
-            argument.get_id().to_string(),
-            spelling,
-            argument
-                .get_index()
-                .map_or_else(|| "—".to_owned(), |index| index.to_string()),
-            if argument.is_required_set() {
-                "yes"
-            } else {
-                "no"
-            }
-            .to_owned(),
-            argument
-                .get_num_args()
-                .map_or_else(|| "—".to_owned(), |range| range.to_string()),
-            argument
-                .get_default_values()
-                .iter()
-                .map(|value| value.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(", "),
-            values.join(", "),
-            argument.get_env().map_or_else(
-                || "—".to_owned(),
-                |value| value.to_string_lossy().into_owned(),
-            ),
-            conflicts.join(", "),
-        ]
-        .into_iter()
-        .map(table_cell)
-        .collect::<Vec<_>>()
-        .join(" | ")
-    }
-
-    fn collect_command_contract(command: &Command, path: &[String], document: &mut String) {
-        if !is_public_contract_command(command) {
-            return;
-        }
-
-        let mut children = command
-            .get_subcommands()
-            .filter(|child| is_public_contract_command(child))
-            .collect::<Vec<_>>();
-        children.sort_by_key(|child| child.get_name());
-
-        if children.is_empty() {
-            for argument in visible_arguments(command)
-                .into_iter()
-                .filter(|argument| !argument.is_global_set())
-            {
-                writeln!(
-                    document,
-                    "| `{}` | {} |",
-                    path.join(" "),
-                    argument_contract(command, argument),
-                )
-                .expect("writing to a string cannot fail");
-            }
-        }
-
-        for child in children {
-            let mut child_path = path.to_vec();
-            child_path.push(child.get_name().to_owned());
-            collect_command_contract(child, &child_path, document);
-        }
-    }
-
-    fn rendered_cli_contract_index(command: &Command) -> String {
-        let mut sections = String::new();
-        for child in public_contract_commands(command) {
-            writeln!(
-                sections,
-                "- [`aros {}`](/aros-tools/reference/cli-contract/{}/)",
-                child.get_name(),
-                child.get_name(),
-            )
-            .expect("writing to a string cannot fail");
-        }
-        let mut document = String::from("---\ntitle: Generated CLI contract\ndescription: Source-derived structural facts for the current public aros command model.\n---\n\nThis reference is generated from the `aros` Clap command model and committed for review. It records visible commands and structural argument facts; task semantics, side effects, and recovery remain in the [command reference](/aros-tools/reference/cli/). Hidden lifecycle bridges are deliberately excluded.\n\nThe `position` column is one-based for positional arguments and `—` for options. Empty `default`, `values`, `environment`, and `conflicts` cells mean that Clap declares none.\n\n## Global arguments\n\n| ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
-        for argument in visible_arguments(command)
-            .into_iter()
-            .filter(|argument| argument.is_global_set())
-        {
-            writeln!(document, "| {} |", argument_contract(command, argument))
-                .expect("writing to a string cannot fail");
-        }
-        document.push_str("\n## Command sections\n\n");
-        document.push_str(&sections);
-        document
-    }
-
-    fn rendered_cli_contract_section(command: &Command) -> String {
-        let mut document = format!("---\ntitle: \"Generated CLI contract: {}\"\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the `aros` Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/).\n\n| Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", command.get_name(), command.get_name());
-        collect_command_contract(
-            command,
-            &["aros".to_owned(), command.get_name().to_owned()],
-            &mut document,
-        );
-        document
-    }
-
-    fn public_contract_commands(command: &Command) -> Vec<&Command> {
-        let mut commands = command
-            .get_subcommands()
-            .filter(|child| is_public_contract_command(child))
-            .collect::<Vec<_>>();
-        commands.sort_by_key(|child| child.get_name());
-        commands
     }
 
     #[test]

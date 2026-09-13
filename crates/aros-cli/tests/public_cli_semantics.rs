@@ -51,6 +51,17 @@ fn assert_failure(output: &Output, case: &str) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn source_cache_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("aros-cli-source-cache-")
+        // macOS commonly exposes its system temporary directory through the
+        // /var -> /private/var symlink. CACHE-M2 correctly refuses a source
+        // cache root with symlink components, so fixtures deliberately live
+        // below this real workspace path instead.
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .expect("create real source-cache fixture root")
+}
+
 #[test]
 fn public_board_init_semantic_cases_cover_models_defaults_and_environment() {
     let temporary = tempfile::tempdir().expect("temporary semantic-case root");
@@ -139,6 +150,120 @@ fn relative_board_configuration_stays_at_the_invocation_directory() {
     assert!(
         !temporary.path().join("boards.toml").exists(),
         "repository discovery must not reinterpret board configuration relative to an ancestor"
+    );
+}
+
+#[test]
+fn source_cache_product_plan_keeps_unpinned_measurements_explicit() {
+    let temporary = source_cache_tempdir();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).expect("create source cache root");
+    let payload = b"reviewed product input without an upstream pin\n";
+    fs::write(cache.join("grub-2.12.tar.xz"), payload).expect("write cached product input");
+    let plan = temporary.path().join("grub.fetch-plan.json");
+    fs::write(
+        &plan,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "aros-cache-source-fetch-plan-v1",
+            "entries": [{
+                "role": "product:grub@2.12",
+                "filename": "grub-2.12.tar.xz",
+                "candidates": [{
+                    "url": "https://example.invalid/grub-2.12.tar.xz",
+                }],
+                "representation": "archive",
+                "normalization": "exact-bytes-v1",
+                "integrity": {
+                    "kind": "unverified",
+                    "max_size": 1_048_576,
+                }
+            }]
+        }))
+        .expect("serialize product source plan"),
+    )
+    .expect("write product source plan");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+    let plan = plan.to_str().expect("plan path is UTF-8");
+
+    let status = run(&[
+        "cache", "sources", "status", "--dir", cache, "--format", "json",
+    ]);
+    assert_success(&status, "source cache passive status");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema"], "aros-cache-sources-status-v1");
+    assert_eq!(status["side_effects"]["hashes_payloads"], false);
+
+    let list = run(&[
+        "cache",
+        "sources",
+        "list",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--format",
+        "json",
+    ]);
+    assert_success(&list, "source cache metadata list");
+    let list: Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(list["schema"], "aros-cache-sources-list-v1");
+    assert_eq!(list["entries"][0]["state"], "present_unverified");
+    assert_eq!(list["entries"][0]["integrity"]["kind"], "unverified");
+    assert_eq!(list["side_effects"]["hashes_payloads"], false);
+
+    let rejected = run(&[
+        "cache",
+        "sources",
+        "fetch",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--offline",
+    ]);
+    let diagnostic = assert_failure(&rejected, "unverified source fetch without opt-in");
+    assert!(diagnostic.contains("--allow-unverified"), "{diagnostic}");
+    assert_eq!(
+        fs::read(Path::new(cache).join("grub-2.12.tar.xz")).unwrap(),
+        payload
+    );
+
+    let fetched = run(&[
+        "cache",
+        "sources",
+        "fetch",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--offline",
+        "--allow-unverified",
+        "--format",
+        "json",
+    ]);
+    assert_success(&fetched, "offline unverified source-cache measurement");
+    let fetched: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    assert_eq!(fetched["schema"], "aros-cache-sources-fetch-v1");
+    assert_eq!(fetched["entries"][0]["integrity"], "measured_unpinned");
+    assert_eq!(fetched["side_effects"]["network"], false);
+
+    let parser_rejection = run(&[
+        "cache",
+        "sources",
+        "fetch",
+        "--source-lock",
+        plan,
+        "--dir",
+        cache,
+        "--allow-unverified",
+    ]);
+    let parser_diagnostic = assert_failure(
+        &parser_rejection,
+        "allow-unverified without product source-fetch plan",
+    );
+    assert!(
+        parser_diagnostic.contains("--source-fetch-plan"),
+        "{parser_diagnostic}"
     );
 }
 

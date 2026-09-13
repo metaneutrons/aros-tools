@@ -6,8 +6,8 @@
 use super::{
     artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
-    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, Commands, GoldenAction,
-    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
+    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourcesCommand, Commands,
+    GoldenAction, HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -135,7 +135,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             evidence,
             memory,
         ),
-        Commands::Cache { command } => cache_command(command),
+        Commands::Cache { command } => cache_command(command).await,
         Commands::Ccache => compiler_cache(),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Completions { shell } => crate::completion_model::write(shell),
@@ -152,7 +152,7 @@ const fn build_compiler_cache(backend: BuildCompilerCache) -> aros_cache::Compil
     }
 }
 
-fn cache_command(command: CacheCommand) -> Result<()> {
+async fn cache_command(command: CacheCommand) -> Result<()> {
     match command {
         CacheCommand::Status { format } => cache::status(format),
         CacheCommand::Compiler {
@@ -163,6 +163,35 @@ fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::compiler_status(cache_backend(backend), dir, format),
+        CacheCommand::Sources {
+            command: CacheSourcesCommand::Status { dir, format },
+        } => cache::source_status(&dir, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::List {
+                    selector,
+                    dir,
+                    format,
+                },
+        } => cache::source_list(selector, &dir, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Fetch {
+                    selector,
+                    dir,
+                    offline,
+                    allow_unverified,
+                    format,
+                },
+        } => cache::source_fetch(selector, &dir, offline, allow_unverified, format).await,
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Verify {
+                    selector,
+                    dir,
+                    format,
+                },
+        } => cache::source_verify(selector, &dir, format),
     }
 }
 

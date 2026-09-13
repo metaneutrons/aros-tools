@@ -52,6 +52,10 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
 | `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
 | `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros cache sources status` | Passively observe one explicitly selected source-cache root |
+| `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
+| `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
+| `aros cache sources verify` | Measure selected source objects and verify every declared lock identity |
 | `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
@@ -77,7 +81,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 
 ### Native producer control plane
 
-These 16 commands are maintainer-only, explicit local stages. They have no
+These 14 commands are maintainer-only, explicit local stages. They have no
 forge authority: none creates a tag, GitHub release, attestation or package
 manager publication. Their exact required options come from the installed
 `aros toolchain producer <command> --help`; the local candidate workflow uses
@@ -86,8 +90,6 @@ the safe entry stages and explains the required checkout/cache separation.
 | Command | Effect and boundary |
 | --- | --- |
 | `aros toolchain producer recipe` | Construct one non-overwriting recipe from committed source, producer and tools inputs |
-| `aros toolchain producer cache` | Acquire or verify the lock-selected source-cache closure |
-| `aros toolchain producer compatibility-ports` | Acquire or verify the lock-selected upstream ports-source closure |
 | `aros toolchain producer environment` | Write a deterministic build-environment receipt |
 | `aros toolchain producer profile` | Read one recipe-bound profile without duplicating selectors |
 | `aros toolchain producer materialize-engine-free-source` | Materialize an audited compatibility snapshot without the source-tree engine |
@@ -323,6 +325,10 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
 | `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
 | `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
+| `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
+| `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
+| `cache sources verify` | No | Measure every selected cached object; strict declarations must match their lock |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
@@ -360,6 +366,28 @@ from an unqueried backend configuration. `--dir DIR` passively observes one
 explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
+
+`aros cache sources` never guesses a cache root or a source closure. Every
+operation needs an explicit absolute `--dir` and exactly one reviewed selector:
+`--source-lock FILE`, `--compatibility-ports-lock FILE`, or
+`--source-fetch-plan FILE`. `status` only observes the root. `list` performs a
+metadata-only direct-child projection. `verify` takes private no-follow
+snapshots and measures every selected object. `fetch` is the only source-cache
+network boundary: it verifies every existing object in the selected closure
+before considering transport, downloads only a missing object, and never
+refreshes, replaces or repairs a cache entry.
+
+A product source-fetch plan uses the schema
+`aros-cache-source-fetch-plan-v1`. Each entry has a stable role, one direct
+cache filename, ordered credential-free HTTPS mirror candidates, an explicit
+`archive` or `patch` representation, a reviewed normalization policy, and
+either an exact `sha256`/`size` identity or an explicit `unverified`
+declaration with a finite `max_size`. A `patch` additionally has a required
+`patch` object that binds its optional relative `subdirectory` and ordered,
+restricted patch options. An unverified entry requires `fetch --allow-unverified`;
+successful fetch or verify output labels its locally
+measured digest as `measured_unpinned`, never as an upstream lock. Producer
+source locks and compatibility-port locks are always strict.
 
 Product and board builds accept the same explicit launcher policy:
 

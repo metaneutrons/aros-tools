@@ -5,7 +5,6 @@
 //! six-phase native compatibility probe. Keeping it separate prevents the
 //! general producer command router from becoming the owner of consumer policy.
 
-use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -17,32 +16,14 @@ use aros_toolchain::compatibility::{
 use aros_toolchain::compatibility_ports::{self, CompatibilityPortsLock};
 use aros_toolchain::package_verify;
 use aros_toolchain::python_environment::PythonEnvironment;
+use aros_toolchain::source_cache;
+use aros_toolchain::source_cache_request::SourceCacheRequest;
 use clap::Args;
 
 use super::{
     native_error, package_context, print_json, read_regular_input, PackageContext,
     PackageContextArgs, ResultFormat,
 };
-
-/// Inputs for the exact source-input closure consumed by upstream Make phases.
-#[derive(Args)]
-pub(super) struct CompatibilityPortsArgs {
-    /// Compatibility-ports-v2 document selecting exact immutable upstream inputs
-    #[arg(long)]
-    ports_lock: PathBuf,
-    /// Existing local cache root; only ports-lock-selected direct children are used
-    #[arg(long)]
-    cache_dir: PathBuf,
-    /// Refuse transport and report a typed error for every cache miss
-    #[arg(long, env = "AROS_OFFLINE")]
-    offline: bool,
-    /// Verify the selected closure without inserting a missing cache object
-    #[arg(long)]
-    verify_only: bool,
-    /// Result representation on stdout
-    #[arg(long, value_enum, default_value = "human")]
-    format: ResultFormat,
-}
 
 /// Inputs for one complete native six-phase package compatibility execution.
 #[derive(Args)]
@@ -127,69 +108,18 @@ pub(super) struct CompatibilityArgs {
     format: ResultFormat,
 }
 
-/// Acquire or verify the complete versioned upstream source closure.
-pub(super) async fn compatibility_ports(args: CompatibilityPortsArgs) -> miette::Result<()> {
-    let lock = CompatibilityPortsLock::parse(&read_regular_input(
-        &args.ports_lock,
-        "compatibility ports lock",
-    )?)
-    .map_err(|error| native_error(&error))?;
-    let observation = if args.verify_only {
-        compatibility_ports::verify_cache(&args.cache_dir, &lock)
-    } else {
-        compatibility_ports::acquire_cache(&args.cache_dir, &lock, args.offline).await
-    }
-    .map_err(|error| native_error(&error))?;
-    match args.format {
-        ResultFormat::Human => {
-            let operation = if args.verify_only {
-                "verified"
-            } else {
-                "acquired"
-            };
-            let mut text = format!(
-                "Compatibility ports cache {operation}: {} payload(s)",
-                observation.payloads.len()
-            );
-            for payload in observation.payloads {
-                let _ = write!(
-                    text,
-                    "\n  {} {} ({} -> {})",
-                    payload.sha256, payload.size, payload.cache_filename, payload.relative_path
-                );
-            }
-            aros_common::outputln!("{text}");
-        }
-        ResultFormat::Json => {
-            let document = serde_json::json!({
-                "schema": "aros-toolchain-producer-stage-v1",
-                "operation": if args.verify_only { "compatibility-ports-verify" } else { "compatibility-ports-acquire" },
-                "payloads": observation.payloads.into_iter().map(|payload| serde_json::json!({
-                    "id": payload.id,
-                    "cache_filename": payload.cache_filename,
-                    "relative_path": payload.relative_path,
-                    "fetch_marker": payload.fetch_marker,
-                    "normalization": payload.normalization,
-                    "sha256": payload.sha256,
-                    "size": payload.size,
-                })).collect::<Vec<_>>(),
-            });
-            print_json(&document)?;
-        }
-    }
-    Ok(())
-}
-
 /// Execute the complete native compatibility contract for one package lane.
 pub(super) async fn compatibility(args: CompatibilityArgs) -> miette::Result<()> {
     let format = args.format;
     let context = package_context(args.context.clone())?;
     let host_tools = parse_host_tools(&args.host_tools)?;
-    let ports_lock = CompatibilityPortsLock::parse(&read_regular_input(
-        &args.ports_lock,
-        "compatibility ports lock",
-    )?)
-    .map_err(|error| native_error(&error))?;
+    let ports_lock_bytes = read_regular_input(&args.ports_lock, "compatibility ports lock")?;
+    let ports_lock =
+        CompatibilityPortsLock::parse(&ports_lock_bytes).map_err(|error| native_error(&error))?;
+    let cache_request = SourceCacheRequest::from_compatibility_ports_lock(&ports_lock_bytes)
+        .map_err(|error| native_error(&error))?;
+    source_cache::verify_request(&args.ports_cache_dir, &cache_request)
+        .map_err(|error| native_error(&error))?;
     let cancellation = CancellationToken::default();
     let worker_token = cancellation.clone();
     let mut worker = tokio::task::spawn_blocking(move || {

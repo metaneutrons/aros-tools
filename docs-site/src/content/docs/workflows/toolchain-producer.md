@@ -62,15 +62,15 @@ is allowed. The command verifies existing objects and refuses a mismatched
 payload.
 
 ```sh
-"$AROS" toolchain producer cache \
+"$AROS" cache sources fetch \
   --source-lock "$PRODUCER/toolchains/llvm-11.0.0.sources.json" \
-  --cache-dir "$CACHE" --format json
+  --dir "$CACHE" --format json
 ```
 
 The native build also compiles Rust helpers from the exact tools `Cargo.lock`.
 Prepare its vendor closure once while transport is allowed, before verifying
-that cache through the explicit `producer cache --verify-only --offline`
-operation below. This is Cargo cache preparation, not a producer stage and not
+that cache through the explicit `cache sources verify` operation below. This is
+Cargo cache preparation, not a producer stage and not
 a claim that the subsequent native build used the network:
 
 ```sh
@@ -91,9 +91,9 @@ if content.count(vendor) != 1:
 config.write_text(content.replace(vendor, "__CARGO_VENDOR_DIRECTORY__"), encoding="utf-8")
 PY
 
-"$AROS" toolchain producer cache \
+"$AROS" cache sources verify \
   --source-lock "$PRODUCER/toolchains/llvm-11.0.0.sources.json" \
-  --cache-dir "$CACHE" --verify-only --offline --format json
+  --dir "$CACHE" --format json
 ```
 
 The resulting `cargo-vendor` tree and its template are checked against the

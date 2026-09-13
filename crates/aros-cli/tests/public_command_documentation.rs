@@ -49,7 +49,7 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
     ),
     (
         "workflows/cache.md",
-        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend",
+        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit",
     ),
     (
         "workflows/cross-development.md",
@@ -61,7 +61,7 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
     ),
     (
         "workflows/toolchain-producer.md",
-        "toolchain_plan_cli.rs::native_plan_binds_its_declared_contract_without_mutation",
+        "toolchain_plan_cli.rs::native_plan_binds_its_declared_contract_without_mutation; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit",
     ),
     (
         "workflows/toolchains.md",

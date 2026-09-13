@@ -264,6 +264,7 @@ dependencies = [
 name = "aros-toolchain"
 version = "0.1.0"
 dependencies = [
+ "aros-cache",
  "aros-cmake-engine",
  "aros-common",
  "aros-fetch",
