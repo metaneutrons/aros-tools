@@ -57,6 +57,15 @@ pub fn cache_boundary(command: &CacheCommand) -> CacheLifecycleBoundary {
                 )
             }
         }
+        CacheCommand::Compiler {
+            command: CacheCompilerCommand::Prepare { .. },
+        } => (
+            DiagnosticCode::CliConfiguration,
+            DiagnosticStage::Configuration,
+            "cache.compiler.prepare",
+            None,
+            "pass an absolute empty private --dir; preparation refuses foreign state and creates only a local AROS-managed compiler-cache namespace",
+        ),
         CacheCommand::Sources { command } => match command {
             CacheSourcesCommand::Status { .. } => (
                 DiagnosticCode::CliConfiguration,

@@ -64,6 +64,20 @@ pub enum CacheCompilerCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Claim one empty private root as a local-only compiler-cache namespace.
+    Prepare {
+        /// Backend that will exclusively own this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Empty existing or new absolute root to claim; foreign state is refused.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// Source-cache resource operations.
@@ -579,5 +593,14 @@ pub enum CacheCompilerBackend {
     /// Project the sccache backend only.
     Sccache,
     /// Project the ccache backend only.
+    Ccache,
+}
+
+/// One concrete backend permitted to own a managed local cache namespace.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ManagedCompilerBackend {
+    /// Mozilla sccache with a private local disk store and private UDS socket.
+    Sccache,
+    /// ccache with a private local store and generated local-only configuration.
     Ccache,
 }

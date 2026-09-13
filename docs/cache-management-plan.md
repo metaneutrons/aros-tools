@@ -353,12 +353,11 @@ fetching, not as an OS-level network sandbox.
   `AROS_HOME/cache/compiler/v1/<backend>` namespace, but no build assigns it
   until its backend/server lifecycle is proven. Existing backend configuration
   is observed as external/uninspected, never silently adopted or rewritten.
-  A build-level `--compiler-cache-dir PATH` is deliberately deferred to
-  CACHE-M6: it requires a fresh/recognized owned root, rejection of conflicting
-  external configuration and a dedicated sccache server identity derived from
-  that root. Exposing the flag earlier would make `DIR` look isolated while it
-  could still connect to an unrelated daemon. `AROS_CACHE_DIR` remains
-  archive-only.
+  CACHE-M6 begins that lifecycle with `cache compiler prepare`: it claims only
+  an empty private root, generates a local-only configuration and a dedicated
+  sccache Unix-domain socket path, and holds a shared build lease. The
+  build-level `--compiler-cache-dir PATH` accepts only that prepared root with
+  an explicit backend. `AROS_CACHE_DIR` remains archive-only.
 - `stats` is an explicit backend query and documents potential daemon startup.
   `reset-stats` resets counters only. `clear` removes entries only when that
   operation's exact storage scope is proven and supported.
@@ -747,6 +746,15 @@ snapshot-bound preview/apply token. Materialization holds a shared lease from
 verification through template-shape consumption. This does not make a generic
 GenMF `prune` safe or public, and it does not satisfy the still-open
 owned-local compiler lifecycle criteria.
+
+2026-09-13: CACHE-M6 now has its first compiler-cache implementation slice:
+`aros cache compiler prepare` claims only an empty private namespace, writes a
+no-clobber ownership marker and generated local-only configuration, and
+revalidates both before a build selects it. Build and board-build use a shared
+lease plus a sanitized backend environment; `auto` considers only prepared
+AROS-owned roots. This establishes the ownership and server-isolation
+foundation, but does not yet expose `stats`, `reset-stats` or `clear`, and does
+not satisfy CACHE-M6 acceptance without their preview/apply and native evidence.
 
 2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
 status schemas, absolute archive-root precedence, no-follow single-root

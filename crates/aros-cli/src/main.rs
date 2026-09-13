@@ -54,7 +54,7 @@ use build_cache::BuildCompilerCache;
 use cache_command::{
     CacheArchiveSelector, CacheArchivesCommand, CacheCargoCommand, CacheCargoSelector,
     CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheGenmfCommand,
-    CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand,
+    CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand, ManagedCompilerBackend,
 };
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
@@ -188,9 +188,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        /// Compiler-cache policy; auto uses only a prepared AROS-owned local namespace
         #[arg(long, value_enum, default_value = "auto")]
         compiler_cache: BuildCompilerCache,
+
+        /// Prepared AROS-owned compiler-cache namespace for an explicit backend
+        #[arg(long, value_name = "DIR")]
+        compiler_cache_dir: Option<PathBuf>,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
@@ -525,9 +529,13 @@ enum BoardCommand {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        /// Compiler-cache policy; auto uses only a prepared AROS-owned local namespace
         #[arg(long, value_enum, default_value = "auto")]
         compiler_cache: BuildCompilerCache,
+
+        /// Prepared AROS-owned compiler-cache namespace for an explicit backend
+        #[arg(long, value_name = "DIR")]
+        compiler_cache_dir: Option<PathBuf>,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]

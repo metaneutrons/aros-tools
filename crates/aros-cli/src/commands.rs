@@ -8,7 +8,7 @@ use super::{
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
     CacheArchivesCommand, CacheCargoCommand, CacheCommand, CacheCompilerBackend,
     CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand, Commands, GoldenAction,
-    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
+    HostCompilerCommands, ManagedCompilerBackend, SdCommand, SourceCommand, ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -83,6 +83,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             clean,
             verbose,
             compiler_cache,
+            compiler_cache_dir,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -99,6 +100,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
                     clean,
                     verbose,
                     compiler_cache: build_compiler_cache(compiler_cache),
+                    compiler_cache_dir,
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,
@@ -164,6 +166,14 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::compiler_status(cache_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Prepare {
+                    backend,
+                    dir,
+                    format,
+                },
+        } => cache::compiler_prepare(managed_compiler_backend(backend), dir, format),
         CacheCommand::Sources {
             command: CacheSourcesCommand::Status { dir, format },
         } => cache::source_status(&dir, format),
@@ -354,6 +364,13 @@ const fn cache_backend(backend: CacheCompilerBackend) -> aros_cache::CompilerBac
     }
 }
 
+const fn managed_compiler_backend(backend: ManagedCompilerBackend) -> aros_cache::CompilerBackend {
+    match backend {
+        ManagedCompilerBackend::Sccache => aros_cache::CompilerBackend::Sccache,
+        ManagedCompilerBackend::Ccache => aros_cache::CompilerBackend::Ccache,
+    }
+}
+
 fn install_suite(source_bin: PathBuf, prefix: PathBuf) -> Result<()> {
     let args = aros_release::contract::InstallArgs { source_bin, prefix };
     match aros_release::install::install(&args) {
@@ -509,6 +526,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
             clean,
             verbose,
             compiler_cache,
+            compiler_cache_dir,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -529,6 +547,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
                     clean,
                     verbose,
                     compiler_cache: build_compiler_cache(compiler_cache),
+                    compiler_cache_dir,
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,

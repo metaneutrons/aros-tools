@@ -15,8 +15,8 @@ use aros_cache::{
     apply_removal, apply_retention_release, cache_status, compiler_cache_status, keep_validated,
     preview_removal, preview_retention_release, CacheCapability, CacheFamily, CacheFamilyStatus,
     CacheRemovalPreview, CacheRemovalResult, CacheRetentionRecord, CacheRetentionRelease,
-    CacheRetentionReleasePreview, CacheSideEffects, CacheStatus, CompilerBackendChoice,
-    CompilerCacheStatus, RootObservation,
+    CacheRetentionReleasePreview, CacheSideEffects, CacheStatus, CompilerBackend,
+    CompilerBackendChoice, CompilerCachePreparation, CompilerCacheStatus, RootObservation,
 };
 use aros_toolchain::{
     cargo_vendor::{
@@ -379,6 +379,26 @@ pub fn compiler_status(
     match format {
         ResultFormat::Human => print_compiler_status_human(&report),
         ResultFormat::Json => print_json(&report, "compiler cache status")?,
+    }
+    Ok(())
+}
+
+/// Prepare and render one owned local compiler-cache namespace.
+///
+/// # Errors
+///
+/// Returns a structured error if the root is unsafe, non-private, non-empty,
+/// already owned by another backend, or cannot be atomically initialized.
+pub fn compiler_prepare(
+    backend: CompilerBackend,
+    dir: PathBuf,
+    format: ResultFormat,
+) -> Result<()> {
+    let report = aros_cache::prepare_managed_compiler_cache(backend, dir)
+        .map_err(|error| miette::miette!(error))?;
+    match format {
+        ResultFormat::Human => print_compiler_prepare_human(&report),
+        ResultFormat::Json => print_json(&report, "compiler cache preparation")?,
     }
     Ok(())
 }
@@ -1640,7 +1660,10 @@ fn print_compiler_status_human(report: &CompilerCacheStatus) {
     let family = CacheFamilyStatus {
         family: aros_cache::CacheFamily::Compiler,
         status: aros_cache::CacheFamilyStatusKind::Configured,
-        capabilities: vec![aros_cache::CacheCapability::Status],
+        capabilities: vec![
+            aros_cache::CacheCapability::Status,
+            aros_cache::CacheCapability::Prepare,
+        ],
         root: None,
         backends: report.backends.clone(),
         detail: Some(
@@ -1649,6 +1672,21 @@ fn print_compiler_status_human(report: &CompilerCacheStatus) {
     };
     print_backend_details(&family);
     aros_common::outputln!("  boundary: {}", family.detail.unwrap());
+}
+
+fn print_compiler_prepare_human(report: &CompilerCachePreparation) {
+    aros_common::outputln!(
+        "Prepared local {} cache at {} ({})",
+        report.backend.program(),
+        report.cache_root.display(),
+        report.ownership
+    );
+    aros_common::outputln!("  data root: {}", report.data_root.display());
+    aros_common::outputln!(
+        "  next: pass --compiler-cache {} --compiler-cache-dir {} to aros build or aros board build",
+        report.backend.program(),
+        report.cache_root.display()
+    );
 }
 
 fn print_source_status_human(report: &SourceCacheStatus) {

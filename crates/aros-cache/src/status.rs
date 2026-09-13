@@ -25,6 +25,8 @@ pub const COMPILER_CACHE_STATUS_SCHEMA: &str = "aros-cache-compiler-status-v1";
 pub enum CacheCapability {
     /// Bounded passive observation.
     Status,
+    /// Claim an empty private root under an explicit ownership contract.
+    Prepare,
     /// Bounded metadata projection of selected cache objects.
     List,
     /// Explicit verified cache-object acquisition.
@@ -256,7 +258,7 @@ pub fn compiler_cache_status(
         operation: "compiler.status",
         observation: "passive",
         side_effects: PASSIVE_SIDE_EFFECTS,
-        capabilities: vec![CacheCapability::Status],
+        capabilities: vec![CacheCapability::Status, CacheCapability::Prepare],
         requested_backend,
         selected_backend,
         selection_basis: "executable_availability_only",
@@ -278,7 +280,7 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
             CacheFamilyStatus {
                 family: CacheFamily::Compiler,
                 status: CacheFamilyStatusKind::Configured,
-                capabilities: vec![CacheCapability::Status],
+                capabilities: vec![CacheCapability::Status, CacheCapability::Prepare],
                 root: None,
                 backends: observe_compiler_backends(),
                 detail: Some(

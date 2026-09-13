@@ -4,11 +4,11 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// One supported compiler-cache backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompilerBackend {
     /// Mozilla sccache.
@@ -31,6 +31,12 @@ impl CompilerBackend {
     #[must_use]
     pub const fn stats_argument() -> &'static str {
         "-s"
+    }
+
+    /// Stable private data-directory name inside an AROS-managed namespace.
+    #[must_use]
+    pub const fn data_directory() -> &'static str {
+        "data"
     }
 }
 
@@ -181,6 +187,7 @@ impl CompilerEnvironment {
                     "SCCACHE_AZURE_BLOB_CONTAINER",
                     env::var_os("SCCACHE_AZURE_BLOB_CONTAINER"),
                 ),
+                ("SCCACHE_SERVER_UDS", env::var_os("SCCACHE_SERVER_UDS")),
                 ("CCACHE_DIR", env::var_os("CCACHE_DIR")),
                 ("CCACHE_CONFIGPATH", env::var_os("CCACHE_CONFIGPATH")),
                 (

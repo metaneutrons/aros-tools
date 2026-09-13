@@ -52,6 +52,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
 | `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
 | `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros cache compiler prepare` | Claim an empty private root for one local-only compiler-cache backend |
 | `aros cache archives status` | Passively observe the shared compiler-archive cache root |
 | `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
@@ -377,6 +378,7 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
 | `cache sources release` | No | Preview one named source retention receipt; `--apply TOKEN` releases it without deleting source bytes |
 | `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
+| `cache compiler prepare` | No | Claim an empty private root for exactly one backend; it refuses foreign state and writes only generated local configuration and an ownership marker |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
@@ -392,8 +394,8 @@ operation. Use bare `aros ccache` to query statistics.
 
 `aros ccache --clear` is also removed. The command had no safe shared
 ownership or preview/apply contract and could not provide an equivalent
-sccache operation. Use `aros cache compiler status` to inspect scope while the
-managed cache lifecycle is introduced; no public clear command exists yet.
+sccache operation. Use `aros cache compiler prepare` to establish an owned
+local namespace; no public clear command exists yet.
 :::
 
 ## Cache inspection
@@ -414,6 +416,12 @@ from an unqueried backend configuration. `--dir DIR` passively observes one
 explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
+
+`aros cache compiler prepare --backend sccache|ccache --dir DIR` is the only
+command that establishes compiler-cache ownership. `DIR` must be absolute,
+private, and empty (or absent); existing cache bytes are never adopted. It
+generates a local-only configuration, data directory and ownership marker. The
+same invocation later revalidates that marker instead of overwriting it.
 
 `aros cache archives` manages only downloaded host/compiler archive bytes,
 never their installed payloads. `status` remains passive. `list`, `fetch`,
@@ -486,21 +494,20 @@ Product and board builds accept the same explicit launcher policy:
 ```sh
 aros build --compiler-cache auto
 aros build --compiler-cache off
-aros board build --profile rpi4-usb --compiler-cache ccache
+aros cache compiler prepare --backend ccache --dir /work/cache/aros-ccache
+aros board build --profile rpi4-usb --compiler-cache ccache \
+  --compiler-cache-dir /work/cache/aros-ccache --offline
 ```
 
-`auto` selects `sccache` first, then `ccache`, when the build is not offline;
-an explicitly requested missing backend fails instead of falling back. Offline
-`auto` deliberately configures no launcher because passive discovery cannot
-prove an external backend's effective storage local-only. Offline explicit
-`sccache` or `ccache` fails with `--compiler-cache off` as the safe remedy. The
-frontend passes the exact absolute selected executable to CMake for C and C++;
-CMake never performs a second `PATH` search. CMake has no supported
-language-specific compiler-launcher interface for ASM, so assembly remains a
-direct deterministic invocation rather than a falsely claimed cache hit. A
-later cache-lifecycle milestone will add owned compiler namespaces and
-controlled clearing. No build option currently assigns `CCACHE_DIR` or
-`SCCACHE_DIR`.
+`auto` selects the first available prepared AROS-owned namespace: `sccache`,
+then `ccache`. If neither namespace is prepared, it selects `off` without
+starting a backend. An explicit backend requires a prepared default namespace;
+`--compiler-cache-dir DIR` selects another prepared namespace and is valid only
+with `sccache` or `ccache`. The frontend removes every ambient `SCCACHE_*` and
+`CCACHE_*` setting, then passes the exact absolute launcher and generated local
+environment to CMake for C and C++. CMake never performs a second `PATH`
+search. CMake has no supported language-specific compiler-launcher interface
+for ASM, so assembly remains a direct deterministic invocation.
 
 `build` options:
 
@@ -511,7 +518,8 @@ controlled clearing. No build option currently assigns `CCACHE_DIR` or
 | `--jobs N`, `-j` | Positive parallel job count |
 | `--clean` | Delete this preset's build directory before configuring |
 | `--verbose`, `-v` | Verbose CMake configure messages |
-| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; offline `auto` disables the launcher and explicit backends fail until local storage can be verified |
+| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; only prepared AROS-owned local namespaces are eligible |
+| `--compiler-cache-dir DIR` | Prepared local namespace for an explicit `sccache` or `ccache` selection |
 | `--debug` | Unoptimized build with debug information; default is Release |
 | `--offline` | Require local toolchain/source inputs |
 | `--require-fetch-checksums` | Require source-authored SHA-256 coverage for fetched inputs |

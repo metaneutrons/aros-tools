@@ -30,6 +30,8 @@ pub struct BuildOptions {
     pub verbose: bool,
     /// Explicit compiler-cache policy shared with the CMake engine.
     pub compiler_cache: aros_cache::CompilerBackendChoice,
+    /// Optional prepared AROS-owned local compiler-cache namespace.
+    pub compiler_cache_dir: Option<PathBuf>,
     /// Network and integrity policy applied to every build input.
     pub input_policy: BuildInputPolicy,
     /// Explicit local cross-toolchain override.
@@ -178,11 +180,12 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         miette::bail!("parallel job count must be greater than zero");
     }
     let build_dir = build_dir(repo_root, &options.preset)?;
-    let compiler_cache = aros_cache::resolve_compiler_cache_for_build(
+    let compiler_cache = aros_cache::resolve_managed_compiler_cache_for_build(
         options.compiler_cache,
-        options.input_policy.offline,
+        options.compiler_cache_dir.as_deref(),
     )
     .map_err(|error| miette::miette!(error))?;
+    let compiler_cache_selection = compiler_cache.selection();
     let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
     let resolved = toolchain::resolve_for_build(
         repo_root,
@@ -222,7 +225,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         }
     }
 
-    print_compiler_cache_selection(&compiler_cache, options.input_policy.offline);
+    print_compiler_cache_selection(&compiler_cache_selection, options.input_policy.offline);
 
     aros_common::outputln!("{HAMMER} Configuring CMake build tree...");
     let engine = place_engine(&build_dir, options.engine_dir.as_deref())?;
@@ -245,6 +248,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         .arg("-B")
         .arg(&build_dir)
         .args(["-G", "Ninja"]);
+    compiler_cache.apply_to(&mut configure);
     configure.arg(format!("-DAROS_SOURCE_DIR={}", repo_root.display()));
     for (key, value) in profile_cache_variables(&profile, options) {
         configure.arg(format!("-D{key}={value}"));
@@ -288,7 +292,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         validate_cmake_definition(definition)?;
         configure.arg(format!("-D{}={}", definition.key, definition.value));
     }
-    for definition in compiler_cache_cmake_definitions(&compiler_cache)? {
+    for definition in compiler_cache_cmake_definitions(&compiler_cache_selection)? {
         configure.arg(format!("-D{}={}", definition.key, definition.value));
     }
     if options.verbose {
@@ -307,6 +311,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     aros_common::outputln!("{HAMMER} Compiling AROS modules with Ninja...");
     let mut build = Command::new("cmake");
     build.current_dir(repo_root).args(["--build"]);
+    compiler_cache.apply_to(&mut build);
     build.arg(&build_dir);
     if let Some(target) = &options.target {
         build.args(["--target", target]);
@@ -392,13 +397,19 @@ pub fn validate_cmake_definition(definition: &CmakeDefinition) -> Result<()> {
 fn print_compiler_cache_selection(selection: &aros_cache::CompilerCacheSelection, offline: bool) {
     match selection {
         aros_cache::CompilerCacheSelection::Off if offline => aros_common::outputln!(
-            "⚡ Compiler cache launcher: {} (offline policy cannot prove an external backend local-only)",
+            "⚡ Compiler cache launcher: {} (no prepared AROS-owned local backend is available)",
             style("none").green().bold()
         ),
         aros_cache::CompilerCacheSelection::Off => {
-            aros_common::outputln!("⚡ Compiler cache launcher: {}", style("none").green().bold());
+            aros_common::outputln!(
+                "⚡ Compiler cache launcher: {}",
+                style("none").green().bold()
+            );
         }
-        aros_cache::CompilerCacheSelection::Backend { backend, executable } => aros_common::outputln!(
+        aros_cache::CompilerCacheSelection::Backend {
+            backend,
+            executable,
+        } => aros_common::outputln!(
             "⚡ Compiler cache launcher: {} ({})",
             style(backend.program()).green().bold(),
             executable.display()
@@ -539,6 +550,7 @@ mod tests {
             clean: false,
             verbose: false,
             compiler_cache: aros_cache::CompilerBackendChoice::Auto,
+            compiler_cache_dir: None,
             input_policy: BuildInputPolicy {
                 offline: true,
                 require_fetch_checksums: true,

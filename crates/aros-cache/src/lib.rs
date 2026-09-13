@@ -5,6 +5,7 @@
 //! selection vocabulary that cache-owning crates and the CLI share.
 
 mod compiler;
+mod compiler_lifecycle;
 mod lifecycle;
 mod roots;
 mod status;
@@ -14,6 +15,12 @@ pub use compiler::{
     resolve_compiler_cache_for_build, CompilerBackend, CompilerBackendChoice,
     CompilerBackendObservation, CompilerBackendState, CompilerCacheResolutionError,
     CompilerCacheSelection, CompilerConfigurationScope,
+};
+pub use compiler_lifecycle::{
+    acquire_compiler_cache_build, compiler_cache_environment, load_managed_compiler_cache,
+    prepare_managed_compiler_cache, resolve_managed_compiler_cache_for_build, CompilerCacheBuild,
+    CompilerCacheBuildLease, CompilerCacheBuildSelection, CompilerCacheEnvironment,
+    CompilerCacheLifecycleError, CompilerCacheManagedRoot, CompilerCachePreparation,
 };
 pub use lifecycle::{
     acquire_read_lease, acquire_read_leases, acquire_write_lease, acquire_write_leases,

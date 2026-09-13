@@ -18,6 +18,7 @@ aros cache status --format json
 aros cache compiler status
 aros cache compiler status --backend ccache --format json
 aros cache compiler status --backend sccache --dir /work/aros-compiler-cache
+aros cache compiler prepare --backend sccache --dir /work/aros-compiler-cache
 
 aros cache archives status
 aros cache archives list --project /work/AROS --toolchain --preset pc-x86_64 \
@@ -77,7 +78,7 @@ contents:
 
 | Family | Current status boundary |
 | --- | --- |
-| `compiler` | Discovers `sccache` and `ccache` on `PATH`, then records recognized configuration-variable names without reading their values or starting either backend. |
+| `compiler` | Passively discovers `sccache` and `ccache`; `prepare` can claim one empty private directory as an AROS-owned, local-only namespace. It never adopts an existing cache. |
 | `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
 | `sources` | `status` never guesses a root. `list`, `fetch`, `verify`, `keep`, and role-selected preview/apply `remove` require an explicit reviewed selector and root. |
 | `cargo` | `status` observes an explicit parent root. `list`, `fetch`, `verify`, `keep`, and preview/apply `remove` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
@@ -113,6 +114,29 @@ the same boundary through `root_binding: "status_only_not_applied"`, an
 explicit `selected_backend` value (or `null`), `selection_basis`,
 `effective_build_selection`, and a complete `side_effects` object. This makes
 the limits safe for automation to check rather than infer from prose.
+
+### Managed local namespaces
+
+`prepare` is the explicit ownership boundary. It accepts exactly one concrete
+backend and an absolute path. The path must be an empty private directory (or
+not exist yet); a non-empty directory, symbolic link, malformed marker, or a
+marker for the other backend is rejected. AROS writes a generated local-only
+configuration, a private `data/` directory, and a no-clobber ownership marker.
+Running the command again only revalidates that exact state.
+
+```sh
+aros cache compiler prepare --backend sccache --dir /work/cache/aros-sccache
+aros build --compiler-cache sccache \
+  --compiler-cache-dir /work/cache/aros-sccache --offline
+```
+
+The generated environment removes every ambient `SCCACHE_*` and `CCACHE_*`
+variable before setting the selected backend's paths. `sccache` receives a
+private disk store, configuration and Unix-domain server socket; `ccache`
+receives a private store and generated configuration. A build retains a shared
+lifecycle lease from CMake configure through the final compile command. This is
+why a prepared cache can be used offline without trusting ambient compiler-cache
+configuration.
 
 ## Compiler archive operations
 
@@ -474,9 +498,10 @@ removed producer-cache invocation before upgrading aros-tools.
 
 Root-wide pruning, compiler statistics reset, and compiler-cache clearing are
 not public cache commands yet. Do not replace them with ad-hoc directory
-deletion. Their interfaces still require verified ownership, cooperating
-reader/writer leases, preview/apply protection, an explicit backend boundary,
-and scope proof; they are delivered in the tracked cache milestones.
+deletion. `prepare` now establishes the required ownership, generated local
+configuration, and build-reader lease; reset and clear still require their own
+preview/apply tokens, backend-specific process proof, and destructive-operation
+tests before they become public.
 
 `aros ccache` remains the legacy statistics frontend during the transition. It
 may start sccache because it queries backend statistics. Its former `--clear`
@@ -495,17 +520,13 @@ language-specific compiler launcher for ASM, so assembly stays a direct
 deterministic invocation. `off` also removes stale launcher settings from an
 existing CMake build tree on the next configure.
 
-In an offline build, `auto` selects `off` without probing a backend. Explicit
-`sccache` and `ccache` fail because a passive command cannot prove that their
-effective configuration is local-only: configuration files may select remote,
-multi-level or shared storage. This is deliberate, not a fallback defect. Use
-`--compiler-cache off` for an offline build until the managed local namespace
-and server-isolation lifecycle is available.
-
-The current build option selects a launcher only. It does not set `CCACHE_DIR`,
-`SCCACHE_DIR`, a daemon endpoint or a compiler-cache directory. A `--dir` value
-on `cache compiler status` remains a status-only observation; a build-level
-directory option will be introduced only with owned-root and lifecycle proof.
+`auto` selects the first available prepared AROS-owned namespace in stable
+order: sccache, then ccache. If neither has been prepared, it selects `off`
+without starting a backend. An explicit backend requires its default managed
+root to be prepared; use `--compiler-cache-dir DIR` only with an explicit
+backend to select another prepared root. Both explicit and automatic managed
+selection work offline because ambient compiler-cache configuration is removed
+and the generated namespace is local-only.
 
 For every other state path and precedence rule, see
 [configuration](/aros-tools/reference/configuration/). For a toolchain install
