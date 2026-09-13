@@ -30,7 +30,7 @@ use observability::{
     version,
     about = "Link an AROS relocatable object and collect its symbol sets",
     propagate_version = true,
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_COLLECT_DIAGNOSTIC_FORMAT,\nAROS_COLLECT_LOG_LEVEL, AROS_COLLECT_LOG_FORMAT, and AROS_COLLECT_LOG_FILE.\nLogging is off by default and is written only to an explicitly selected local file."
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_COLLECT_DIAGNOSTIC_FORMAT,\nAROS_COLLECT_LOG_LEVEL, AROS_COLLECT_LOG_FORMAT, and AROS_COLLECT_LOG_FILE.\nLogging is off by default. A selected file without a selected level uses info;\nexplicit off creates no sink, and a non-off level requires a local file."
 )]
 struct Cli {
     /// The real linker to drive.

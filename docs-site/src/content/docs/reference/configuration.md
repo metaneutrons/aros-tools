@@ -148,10 +148,11 @@ and `LOG_FILE` suffix contract. The exact public names are:
 - `AROS_TRANSPILER_DIAGNOSTIC_FORMAT`, `AROS_TRANSPILER_LOG_LEVEL`, `AROS_TRANSPILER_LOG_FORMAT`, `AROS_TRANSPILER_LOG_FILE`
 - `AROS_VERIFY_DIAGNOSTIC_FORMAT`, `AROS_VERIFY_LOG_LEVEL`, `AROS_VERIFY_LOG_FORMAT`, `AROS_VERIFY_LOG_FILE`
 
-Logging is off by default and requires an explicit local file. Pass both a
-non-off level and a file for portable behavior. For the `aros` frontend, a
-file without a selected level uses `info`, while an explicit command-line or
-environment `off` disables logging and creates no sink. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
+Logging is off by default and requires an explicit local file. Across the
+frontend and every companion, a selected file without a selected level uses
+`info`, while an explicit command-line or environment `off` disables logging
+and creates no sink. Command-line values override their environment
+equivalents. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
 retaining its temporary directory; it can disclose intermediate object and
 link state and should not be set in routine or release builds.
 

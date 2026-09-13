@@ -1,5 +1,6 @@
 //! Process-boundary tests for the stable verifier diagnostics contract.
 
+use std::fs;
 use std::process::Command;
 
 fn json_failure(arguments: &[&str]) -> serde_json::Value {
@@ -115,4 +116,46 @@ fn version_matches_the_workspace_package() {
         format!("aros-verify {}", env!("CARGO_PKG_VERSION"))
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing-source");
+    let generated = directory.path().join("generated.cmake");
+    let work = directory.path().join("work");
+    let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aros-verify"));
+        command
+            .args(["--source"])
+            .arg(&missing)
+            .args(["--generated"])
+            .arg(&generated)
+            .args(["--work"])
+            .arg(&work)
+            .args(["--log-file"])
+            .arg(log)
+            .arg("--log-format=jsonl");
+        if let Some(level) = level {
+            command.arg(format!("--log-level={level}"));
+        }
+        if environment_off {
+            command.env("AROS_VERIFY_LOG_LEVEL", "off");
+        }
+        command.output().unwrap()
+    };
+    let file_only = directory.path().join("file-only.jsonl");
+    assert!(!run(&file_only, None, false).status.success());
+    assert!(file_only.is_file());
+    assert!(fs::read_to_string(&file_only)
+        .unwrap()
+        .contains("invocation.start"));
+
+    let explicit_off = directory.path().join("explicit-off.jsonl");
+    assert!(!run(&explicit_off, Some("off"), false).status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = directory.path().join("environment-off.jsonl");
+    assert!(!run(&environment_off, None, true).status.success());
+    assert!(!environment_off.exists());
 }

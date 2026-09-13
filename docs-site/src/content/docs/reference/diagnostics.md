@@ -41,11 +41,11 @@ Supported levels are `off`, `error`, `warn`, `info`, `debug`,
 Logging is off by default and requires an explicit local file.
 
 Use both `--log-level` and `--log-file` in portable examples.
-For `aros`, a file without an explicitly selected level uses `info`. An
-explicit `--log-level off` or `AROS_LOG_LEVEL=off` always disables logging and
-does not create the selected file. A command-line level overrides the
-environment; a non-`off` level without a file fails with an actionable
-diagnostic.
+Every shipped tool uses the same precedence: a file without an explicitly
+selected level uses `info`; an explicit `--log-level off` or matching
+`AROS_*_LOG_LEVEL=off` always disables logging and does not create the selected
+file. A command-line level overrides the environment; a non-`off` level
+without a file fails with an actionable diagnostic.
 
 Logs are local observations and are not uploaded automatically. Standard
 records omit ambient timestamps and host identity, but explicit paths,

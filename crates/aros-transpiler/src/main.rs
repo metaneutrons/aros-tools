@@ -1,9 +1,9 @@
 //! Fail-closed command boundary for MetaMake-to-CMake transpilation.
 
 use aros_common::{
-    requested_diagnostic_format, ArosError, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFormat, DiagnosticSet, DiagnosticSeverity, DiagnosticStage, LogFormat, LogLevel,
-    Logger, Result, SourceLocation,
+    effective_log_level, requested_diagnostic_format, ArosError, Diagnostic, DiagnosticCode,
+    DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticSeverity, DiagnosticStage,
+    LogFormat, LogLevel, Logger, Result, SourceLocation,
 };
 use aros_transpiler::dirs::DirVars;
 use aros_transpiler::{
@@ -11,7 +11,7 @@ use aros_transpiler::{
     generated_header, parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context_and_fetches,
     read_default_link_set, DependencyGraph, TargetContext,
 };
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, Parser};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fmt::Write as _;
@@ -29,7 +29,7 @@ use publication::Publication;
     author,
     version,
     about = "Fail-closed AROS MetaMake-to-CMake transpiler",
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default and is written only to an\nexplicitly selected local file."
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_TRANSPILER_DIAGNOSTIC_FORMAT,\nAROS_TRANSPILER_LOG_LEVEL, AROS_TRANSPILER_LOG_FORMAT, and\nAROS_TRANSPILER_LOG_FILE. Logging is off by default. A selected file without a\nselected level uses info; explicit off creates no sink, and a non-off level\nrequires a local file."
 )]
 struct Args {
     /// Root directory of AROS source tree
@@ -112,8 +112,8 @@ fn main() -> ExitCode {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let requested_format =
         requested_diagnostic_format(&arguments, "AROS_TRANSPILER_DIAGNOSTIC_FORMAT");
-    let args = match Args::try_parse_from(arguments) {
-        Ok(args) => args,
+    let matches = match Args::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -146,8 +146,25 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(error) => {
+            observability::render(
+                &DiagnosticSet::single(observability::clap_diagnostic(&error)),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let logger = match Logger::open(
-        args.log_level,
+        effective_log_level(
+            args.log_level,
+            log_level_was_explicit,
+            args.log_file.is_some(),
+        ),
         args.log_format,
         args.log_file.clone(),
         "aros-transpiler",

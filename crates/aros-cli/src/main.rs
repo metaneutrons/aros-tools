@@ -48,7 +48,7 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
     version,
     about = "Build, verify, and deploy AROS with explicit source and toolchain inputs",
     long_about = "Upstream-compatible host tooling for reproducible AROS and AROS-NX development workflows.",
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default and is written\nonly to an explicitly selected local file."
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default. A selected file\nwithout a selected level uses info; explicit off creates no sink, and a non-off\nlevel requires a local file."
 )]
 struct Cli {
     #[command(flatten)]
@@ -953,7 +953,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
 async fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments, "AROS_DIAGNOSTIC_FORMAT");
-    let matches = match Cli::command().try_get_matches_from(arguments.clone()) {
+    let matches = match Cli::command().try_get_matches_from(arguments) {
         Ok(matches) => matches,
         Err(error)
             if matches!(

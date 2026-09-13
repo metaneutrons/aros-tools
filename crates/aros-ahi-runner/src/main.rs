@@ -8,9 +8,10 @@ use aros_ahi_runner::observability::{
     render, requested_diagnostic_format, DiagnosticFormat, LogFormat, LogLevel, Logger,
 };
 use aros_common::{
-    CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage,
+    effective_log_level, CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet,
+    DiagnosticStage,
 };
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, Parser};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,7 +19,7 @@ use clap::{error::ErrorKind, Parser};
     version,
     about = "Validate and execute the closed AROS AHI build contract",
     long_about = "Validate one generated, declarative AROS AHI build contract and either audit its complete input/filesystem closure or execute its fixed native build stages without evaluating arbitrary CMake or shell code.",
-    after_help = "CLOSED CONTRACT:\n  The contract must be a generated regular file with the exact supported schema,\n  contained source/build paths, declared source and product manifests, and measured SHA-256 identities.\n  --validate-only performs parsing, identity, filesystem, and input validation without build execution.\n\nOBSERVABILITY:\n  Diagnostics are written to stderr; --diagnostic-format=json selects the stable JSON contract.\n  Logging is off by default. A non-off --log-level requires an explicit --log-file.\n  --log-format selects human or jsonl.\n  Environment: AROS_AHI_DIAGNOSTIC_FORMAT, AROS_AHI_LOG_LEVEL,\n  AROS_AHI_LOG_FORMAT, AROS_AHI_LOG_FILE."
+    after_help = "CLOSED CONTRACT:\n  The contract must be a generated regular file with the exact supported schema,\n  contained source/build paths, declared source and product manifests, and measured SHA-256 identities.\n  --validate-only performs parsing, identity, filesystem, and input validation without build execution.\n\nOBSERVABILITY:\n  Diagnostics are written to stderr; --diagnostic-format=json selects the stable JSON contract.\n  Logging is off by default. A selected --log-file without a selected level uses info;\n  explicit --log-level off creates no sink. A non-off level requires --log-file.\n  --log-format selects human or jsonl.\n  Environment: AROS_AHI_DIAGNOSTIC_FORMAT, AROS_AHI_LOG_LEVEL,\n  AROS_AHI_LOG_FORMAT, AROS_AHI_LOG_FILE."
 )]
 struct Cli {
     /// Generated closed AHI contract file to validate and execute.
@@ -49,8 +50,8 @@ struct Cli {
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments);
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -92,7 +93,37 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut logger = match Logger::open(cli.log_level, cli.log_format, cli.log_file.clone()) {
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::AhiInvocation,
+                        DiagnosticStage::AhiInvocation,
+                        error.to_string().trim().to_owned(),
+                    )
+                    .with_hint(
+                        "run 'aros-ahi-runner --help' and provide one generated --contract file",
+                    ),
+                ),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut logger = match Logger::open(
+        effective_log_level(
+            cli.log_level,
+            log_level_was_explicit,
+            cli.log_file.is_some(),
+        ),
+        cli.log_format,
+        cli.log_file.clone(),
+    ) {
         Ok(logger) => logger,
         Err(error) => {
             render(

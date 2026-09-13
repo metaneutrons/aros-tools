@@ -182,6 +182,38 @@ fn explicit_jsonl_log_uses_the_stable_schema() {
 }
 
 #[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let package = directory.path().join("missing.pkg");
+    let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aros-romtool"));
+        command
+            .args(["--log-file"])
+            .arg(log)
+            .args(["--log-format=jsonl", "pkg", "list"])
+            .arg(&package);
+        if let Some(level) = level {
+            command.arg(format!("--log-level={level}"));
+        }
+        if environment_off {
+            command.env("AROS_ROMTOOL_LOG_LEVEL", "off");
+        }
+        command.output().unwrap()
+    };
+    let file_only = directory.path().join("file-only.jsonl");
+    assert!(!run(&file_only, None, false).status.success());
+    assert!(file_only.is_file());
+
+    let explicit_off = directory.path().join("explicit-off.jsonl");
+    assert!(!run(&explicit_off, Some("off"), false).status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = directory.path().join("environment-off.jsonl");
+    assert!(!run(&environment_off, None, true).status.success());
+    assert!(!environment_off.exists());
+}
+
+#[test]
 fn version_comes_from_the_crate_package() {
     let result = Command::new(env!("CARGO_BIN_EXE_aros-romtool"))
         .arg("--version")

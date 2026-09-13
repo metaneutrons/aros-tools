@@ -82,6 +82,40 @@ fn jsonl_logging_is_local_structured_and_separate_from_diagnostics() {
         .all(|record| record.get("timestamp").is_none()));
 }
 
+#[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let linker = directory.path().join("missing-ld.lld");
+    let output_object = directory.path().join("output.o");
+    let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
+        let mut command = Command::new(collector());
+        command
+            .args(["--log-file"])
+            .arg(log)
+            .args(["--log-format=jsonl", "--ld"])
+            .arg(&linker);
+        if let Some(level) = level {
+            command.arg(format!("--log-level={level}"));
+        }
+        command.arg("--").arg("-o").arg(&output_object);
+        if environment_off {
+            command.env("AROS_COLLECT_LOG_LEVEL", "off");
+        }
+        command.output().unwrap()
+    };
+    let file_only = directory.path().join("file-only.jsonl");
+    assert!(!run(&file_only, None, false).status.success());
+    assert!(file_only.is_file());
+
+    let explicit_off = directory.path().join("explicit-off.jsonl");
+    assert!(!run(&explicit_off, Some("off"), false).status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = directory.path().join("environment-off.jsonl");
+    assert!(!run(&environment_off, None, true).status.success());
+    assert!(!environment_off.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn collect_aros_alias_uses_the_same_json_diagnostic_contract() {

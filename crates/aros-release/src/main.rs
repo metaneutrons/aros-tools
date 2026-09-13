@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use aros_common::{
-    write_stdout, CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet,
-    DiagnosticStage,
+    effective_log_level, write_stdout, CommitState, Diagnostic, DiagnosticCode, DiagnosticContext,
+    DiagnosticSet, DiagnosticStage,
 };
 use aros_release::archive;
 use aros_release::contract::{Cli, Command};
@@ -13,13 +13,13 @@ use aros_release::observability::{
     render, requested_diagnostic_format, DiagnosticFormat, LogLevel, Logger,
 };
 use aros_release::ReleaseFailure;
-use clap::{error::ErrorKind, Parser, ValueEnum};
+use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, ValueEnum};
 
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments);
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -53,7 +53,32 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut logger = match Logger::open(cli.log_level, cli.log_format, cli.log_file) {
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render(
+                &DiagnosticSet::single(Diagnostic::error(
+                    DiagnosticCode::ReleaseInvocation,
+                    DiagnosticStage::Invocation,
+                    error.to_string().trim().to_owned(),
+                )),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut logger = match Logger::open(
+        effective_log_level(
+            cli.log_level,
+            log_level_was_explicit,
+            cli.log_file.is_some(),
+        ),
+        cli.log_format,
+        cli.log_file,
+    ) {
         Ok(logger) => logger,
         Err(error) => return render_failure(error, cli.diagnostic_format),
     };
