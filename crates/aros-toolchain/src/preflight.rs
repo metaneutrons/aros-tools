@@ -185,12 +185,11 @@ fn version_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     #[cfg(unix)]
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
 
     use serde_json::json;
-    use tempfile::Builder;
+    use tempfile::tempdir;
 
     use super::{inspect, probe_selected};
     use crate::profiles::Profiles;
@@ -222,23 +221,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preserves_proxy_invocation_path_after_validating_its_resolved_target() {
-        // Some hardened native runners mount the system temporary directory
-        // `noexec`. Keep this executable fixture alongside the running test
-        // binary, whose mount has already proved executable to Cargo.
-        let test_binary = std::env::current_exe().unwrap();
-        let temporary = Builder::new()
-            .prefix("aros-toolchain-proxy-")
-            .tempdir_in(test_binary.parent().unwrap())
-            .unwrap();
-        let target = temporary.path().join("cargo-proxy-target");
-        fs::write(
-            &target,
-            "#!/bin/sh\ntest \"${0##*/}\" = cargo || exit 97\nprintf '%s\\n' 'cargo fixture 1.0'\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&target).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&target, permissions).unwrap();
+        // A symlink itself does not need an executable temporary directory:
+        // keep the real target in Cargo's proven toolchain location. This
+        // exercises the same invocation-name behaviour as rustup's `cargo`
+        // proxy without assuming that a runner permits executing new scripts
+        // beneath its test-output directory.
+        let temporary = tempdir().unwrap();
+        let target = which::which("cargo").unwrap();
         let proxy = temporary.path().join("cargo");
         symlink(&target, &proxy).unwrap();
 
@@ -246,6 +235,6 @@ mod tests {
 
         assert_eq!(tool.path, target.canonicalize().unwrap());
         assert_eq!(tool.invocation_path, proxy);
-        assert_eq!(tool.version, "cargo fixture 1.0");
+        assert!(tool.version.starts_with("cargo "), "{}", tool.version);
     }
 }
