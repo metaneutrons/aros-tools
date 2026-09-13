@@ -753,10 +753,6 @@ impl Commands {
             | Self::Golden { .. } => RepositoryRequirement::Required,
         }
     }
-
-    const fn commits_on_success(&self) -> bool {
-        matches!(self, Self::Install { .. })
-    }
 }
 
 fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, DiagnosticContext) {
@@ -1063,6 +1059,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    observability::reset_recorded_mutation_state();
     let (boundary, context) = command_boundary(&cli.command);
     if let Err(error) = logger.event(
         LogLevel::Info,
@@ -1103,7 +1100,6 @@ async fn main() -> ExitCode {
             }
         };
 
-    let commits_on_success = cli.command.commits_on_success();
     let result = run(cli, repo_root).await;
     match result {
         Ok(()) => {
@@ -1111,7 +1107,13 @@ async fn main() -> ExitCode {
                 DiagnosticCode::CliObservability,
                 DiagnosticStage::Observability,
             ) {
-                let mut diagnostics = vec![diagnostic];
+                let mut diagnostics = vec![diagnostic.with_context(context.clone())];
+                observability::attach_recorded_mutation_state(
+                    diagnostics[0]
+                        .context
+                        .as_mut()
+                        .expect("deferred stdout diagnostic received command context"),
+                );
                 if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
                     diagnostics.push(log_error.into_diagnostic());
                 }
@@ -1125,14 +1127,12 @@ async fn main() -> ExitCode {
             for warning in observability::take_machine_subprocess_warnings() {
                 if let Err(error) = logger.diagnostic(&warning) {
                     let mut diagnostic = error.into_diagnostic();
-                    if commits_on_success {
-                        let mut committed = context.clone();
-                        committed.commit_state = Some(aros_common::CommitState::Committed);
-                        if let Some(error_context) = diagnostic.context.take() {
-                            committed.log_path = error_context.log_path;
-                        }
-                        diagnostic.context = Some(committed);
+                    let mut reporting_context = context.clone();
+                    if let Some(error_context) = diagnostic.context.take() {
+                        reporting_context.log_path = error_context.log_path;
                     }
+                    observability::attach_recorded_mutation_state(&mut reporting_context);
+                    diagnostic.context = Some(reporting_context);
                     render_diagnostics(
                         &DiagnosticSet::single(diagnostic),
                         format,
@@ -1150,14 +1150,12 @@ async fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     let mut diagnostic = error.into_diagnostic();
-                    if commits_on_success {
-                        let mut committed = context.clone();
-                        committed.commit_state = Some(aros_common::CommitState::Committed);
-                        if let Some(error_context) = diagnostic.context.take() {
-                            committed.log_path = error_context.log_path;
-                        }
-                        diagnostic.context = Some(committed);
+                    let mut reporting_context = context.clone();
+                    if let Some(error_context) = diagnostic.context.take() {
+                        reporting_context.log_path = error_context.log_path;
                     }
+                    observability::attach_recorded_mutation_state(&mut reporting_context);
+                    diagnostic.context = Some(reporting_context);
                     render_diagnostics(
                         &DiagnosticSet::single(diagnostic),
                         format,
@@ -1168,7 +1166,10 @@ async fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            let diagnostic = observability::report_diagnostic(&error, boundary, context);
+            let mut diagnostic = observability::report_diagnostic(&error, boundary, context);
+            if let Some(context) = diagnostic.context.as_mut() {
+                observability::attach_recorded_mutation_state(context);
+            }
             let mut diagnostics = observability::take_machine_subprocess_warnings();
             diagnostics.push(diagnostic);
             for diagnostic in diagnostics.clone() {

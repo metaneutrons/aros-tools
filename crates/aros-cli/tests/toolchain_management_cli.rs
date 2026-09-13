@@ -131,6 +131,50 @@ fn import_preview_apply_and_inventory_work_outside_an_aros_checkout() {
 }
 
 #[test]
+fn final_log_failure_after_import_reports_the_actual_committed_publication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let working_directory = temporary.path().join("not-an-aros-checkout");
+    let source = temporary.path().join("candidate");
+    let store = temporary.path().join("store");
+    let log = temporary.path().join("import.jsonl");
+    fs::create_dir(&working_directory).unwrap();
+    write_candidate(&source);
+
+    let preview = output_json(
+        &command(&working_directory)
+            .args(["toolchain", "import", "--format", "json", "--source"])
+            .arg(&source)
+            .arg("--store")
+            .arg(&store)
+            .output()
+            .unwrap(),
+    );
+    let token = preview["apply_token"].as_str().unwrap().to_owned();
+
+    let output = command(&working_directory)
+        .env("AROS_TEST_LOG_FAIL_EVENT", "invocation.complete")
+        .args(["--diagnostic-format=json", "--log-level=info", "--log-file"])
+        .arg(&log)
+        .args(["toolchain", "import", "--format", "json", "--source"])
+        .arg(&source)
+        .arg("--store")
+        .arg(&store)
+        .args(["--apply", &token])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "committed"
+    );
+    assert!(
+        store.join("imports").exists(),
+        "the owned import must have crossed its publication boundary before final logging failed"
+    );
+}
+
+#[test]
 fn registration_remains_non_owning_outside_an_aros_checkout() {
     let temporary = tempfile::tempdir().unwrap();
     let working_directory = temporary.path().join("not-an-aros-checkout");

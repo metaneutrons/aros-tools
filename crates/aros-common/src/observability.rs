@@ -415,6 +415,24 @@ impl Logger {
         if self.level == LogLevel::Off || level > self.level {
             return Ok(());
         }
+        // The public logger intentionally accepts only regular files, which
+        // rules out using a FIFO to make a real post-mutation write fail in a
+        // process test. Keep a narrowly named, debug-only fault boundary so
+        // executable tests can exercise the actual final event without
+        // weakening the released logger's destination policy.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("AROS_TEST_LOG_FAIL_EVENT")
+            .is_some_and(|configured| configured == std::ffi::OsStr::new(event))
+        {
+            return Err(observability_failure(
+                self.policy,
+                self.path.as_deref(),
+                format!(
+                    "test injection rejected {} log event '{event}'",
+                    self.policy.component
+                ),
+            ));
+        }
         let Some(file) = &self.file else {
             return Ok(());
         };

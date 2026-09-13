@@ -12,6 +12,7 @@ use xz2::read::XzDecoder;
 
 use aros_common::{
     normalized_toolchain_file_mode, parse_credential_free_https_url, payload_casefold_path_key,
+    publication_failure_class, CommitState, PublicationFailureClass,
 };
 
 /// Marker published only after a toolchain envelope is complete.
@@ -495,14 +496,34 @@ pub fn commit_staging(staging: &TempDir, destination: &Path) -> Result<()> {
     match aros_common::publish_prepared_tree_noclobber(staging.path(), destination) {
         Ok(_) => Ok(()),
         Err(error) => {
-            let failure_class = aros_common::publication_failure_class(&error);
-            Err(error).into_diagnostic().wrap_err_with(|| {
-                format!(
-                    "failed to durably install toolchain at '{}' ({failure_class:?})",
-                    destination.display()
-                )
-            })
+            let failure_class = publication_failure_class(&error);
+            let state = publication_commit_state(failure_class);
+            crate::observability::commit_state(
+                Err(error).into_diagnostic().wrap_err_with(|| {
+                    format!(
+                        "failed to durably install toolchain at '{}' ({failure_class:?})",
+                        destination.display()
+                    )
+                }),
+                state,
+                "toolchain installation publication state",
+            )
         }
+    }
+}
+
+/// Classify a failed prepared-tree publication without guessing from a command
+/// or path. Recovery failure and post-rename durability uncertainty both
+/// require inspection; all remaining publication classes prove no new final
+/// installation was committed.
+const fn publication_commit_state(failure_class: PublicationFailureClass) -> CommitState {
+    match failure_class {
+        PublicationFailureClass::CommitStateUncertain
+        | PublicationFailureClass::RecoveryIncomplete => CommitState::Indeterminate,
+        PublicationFailureClass::Conflict
+        | PublicationFailureClass::UnsafeTarget
+        | PublicationFailureClass::Unsupported
+        | PublicationFailureClass::Io => CommitState::RolledBack,
     }
 }
 
@@ -762,10 +783,47 @@ mod tests {
         fs::write(conflicting.path().join("payload"), b"second").unwrap();
         let error = commit_staging(&conflicting, &destination).unwrap_err();
         assert!(format!("{error:?}").contains("Conflict"));
+        let diagnostic = crate::observability::report_diagnostic(
+            &error,
+            crate::observability::ErrorBoundary::REPOSITORY,
+            aros_common::DiagnosticContext::default(),
+        );
+        assert_eq!(
+            diagnostic.context.unwrap().commit_state,
+            Some(CommitState::RolledBack)
+        );
         assert_eq!(fs::read(destination.join("payload")).unwrap(), b"first");
         assert_eq!(
             fs::read(conflicting.path().join("payload")).unwrap(),
             b"second"
+        );
+    }
+
+    #[test]
+    fn prepared_tree_publication_states_are_conservative() {
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::Conflict),
+            CommitState::RolledBack
+        );
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::UnsafeTarget),
+            CommitState::RolledBack
+        );
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::Unsupported),
+            CommitState::RolledBack
+        );
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::Io),
+            CommitState::RolledBack
+        );
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::CommitStateUncertain),
+            CommitState::Indeterminate
+        );
+        assert_eq!(
+            publication_commit_state(PublicationFailureClass::RecoveryIncomplete),
+            CommitState::Indeterminate
         );
     }
 

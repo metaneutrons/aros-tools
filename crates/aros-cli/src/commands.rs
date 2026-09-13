@@ -136,7 +136,10 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
 fn install_suite(source_bin: PathBuf, prefix: PathBuf) -> Result<()> {
     let args = aros_release::contract::InstallArgs { source_bin, prefix };
     match aros_release::install::install(&args) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            observability::record_committed_mutation();
+            Ok(())
+        }
         Err(error) => {
             let state = error
                 .diagnostic()
@@ -175,15 +178,20 @@ async fn setup(
         (true, None, Some(_)) => miette::bail!("--all cannot be combined with --local"),
         (true, None, None) => {
             for profile in repo::load_target_profiles(repo_root)? {
-                toolchain::install(repo_root, &profile.name, offline, force, None).await?;
+                let outcome =
+                    toolchain::install(repo_root, &profile.name, offline, force, None).await?;
+                record_toolchain_install(&outcome);
             }
         }
         (false, Some(preset), local) => {
-            toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
+            let outcome =
+                toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
+            record_toolchain_install(&outcome);
         }
         (false, None, Some(_)) => miette::bail!("--local requires --preset"),
         (false, None, None) => {
-            host_compiler::install(repo_root, force, offline).await?;
+            let outcome = host_compiler::install(repo_root, force, offline).await?;
+            record_host_compiler_install(outcome);
         }
     }
     Ok(())
@@ -192,7 +200,8 @@ async fn setup(
 async fn host_compiler_command(repo_root: &Path, command: HostCompilerCommands) -> Result<()> {
     match command {
         HostCompilerCommands::Install { force, offline } => {
-            crate::host_compiler::install(repo_root, force, offline).await?;
+            let outcome = crate::host_compiler::install(repo_root, force, offline).await?;
+            record_host_compiler_install(outcome);
         }
     }
     Ok(())
@@ -223,7 +232,10 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
             offline,
             local,
         } => {
-            crate::toolchain::install(repo_root, &preset, offline, force, local.as_deref()).await?;
+            let outcome =
+                crate::toolchain::install(repo_root, &preset, offline, force, local.as_deref())
+                    .await?;
+            record_toolchain_install(&outcome);
         }
         ToolchainCommands::List => crate::toolchain::list(repo_root)?,
         ToolchainCommands::Verify { preset, local } => {
@@ -235,6 +247,18 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
         }
     }
     Ok(())
+}
+
+fn record_toolchain_install(outcome: &crate::toolchain::ToolchainInstallOutcome) {
+    if outcome.publication_committed() {
+        observability::record_committed_mutation();
+    }
+}
+
+fn record_host_compiler_install(outcome: crate::host_compiler::HostCompilerInstallOutcome) {
+    if outcome.publication_committed() {
+        observability::record_committed_mutation();
+    }
 }
 
 async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Result<()> {

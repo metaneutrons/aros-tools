@@ -19,6 +19,7 @@ use super::{
     MAX_CONTROL_ENTRIES, MAX_LEASE_RECEIPT_BYTES, MAX_RELEASE_LOCK_BYTES, PROJECT_LOCKS_DIRECTORY,
     PROJECT_REFERENCES_DIRECTORY, REGISTRATIONS_DIRECTORY, REMOVALS_DIRECTORY, REMOVAL_SCHEMA,
 };
+use crate::observability;
 use aros_common::{publish_atomic_file, remove_tree_from_snapshot_nofollow};
 use std::fs;
 
@@ -227,6 +228,13 @@ fn run_lifecycle(
             "validated ownership, project references, registrations, leases, and exact byte scope; no managed envelope was removed",
         )
     };
+    if result
+        .candidates
+        .iter()
+        .any(|candidate| candidate.status == "removed")
+    {
+        observability::record_committed_mutation();
+    }
     print_lifecycle_result(&result, format);
     Ok(())
 }

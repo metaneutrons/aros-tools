@@ -102,13 +102,20 @@ normal failure envelope on stderr. Do not interpret exit 0 as build permission.
 An `AR0113` owner-record file persists by design. Its presence is not proof
 of an active or stale lock; the operating system owns the actual lock.
 
-An `AR0116` diagnostic may carry `context.commit_state`:
+Publication and final-reporting diagnostics may carry `context.commit_state`.
+The value comes from the owner that crossed (or could not prove) its durable
+boundary; the frontend never infers it from a command name or from the presence
+of `--apply`:
 
 | Value | Meaning |
 | --- | --- |
-| `rolled_back` | The original branch/index/submodule snapshot was restored |
-| `committed` | The mutation succeeded but a later reporting operation failed |
-| `indeterminate` | Neither final state could be proved |
+| `rolled_back` | The relevant publication boundary was not crossed, or its rollback was proven complete |
+| `committed` | The owner proved a mutation succeeded before a later output or log operation failed |
+| `indeterminate` | The owner could prove neither final state |
+
+An absent value after a final reporting failure means no owner reported a
+durable mutation; this includes ordinary previews. It is not a claim that a
+requested `--apply` would have succeeded.
 
 Preserve the reported state and inspect it before retrying an indeterminate
 operation. Do not infer success or rollback from message wording.

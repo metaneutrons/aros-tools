@@ -248,6 +248,173 @@ fn file_only_logging_uses_the_documented_info_default() {
 }
 
 #[test]
+fn final_log_failure_reports_only_the_mutation_state_proved_by_the_board_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let applied_config = directory.path().join("applied-boards.toml");
+    let applied_log = directory.path().join("applied.jsonl");
+    let applied = command()
+        .env("AROS_TEST_LOG_FAIL_EVENT", "invocation.complete")
+        .args(["--diagnostic-format=json", "--log-level=info", "--log-file"])
+        .arg(&applied_log)
+        .args([
+            "board",
+            "init",
+            "--profile",
+            "rpi4-test",
+            "--model",
+            "rpi4",
+            "--config",
+        ])
+        .arg(&applied_config)
+        .arg("--apply")
+        .output()
+        .unwrap();
+    let applied_diagnostic = json(&applied);
+    assert_eq!(
+        applied_diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "committed"
+    );
+    assert!(
+        applied_config.is_file(),
+        "the board owner must have published the template before final reporting failed"
+    );
+
+    let preview_config = directory.path().join("preview-boards.toml");
+    let preview_log = directory.path().join("preview.jsonl");
+    let preview = command()
+        .env("AROS_TEST_LOG_FAIL_EVENT", "invocation.complete")
+        .args(["--diagnostic-format=json", "--log-level=info", "--log-file"])
+        .arg(&preview_log)
+        .args([
+            "board",
+            "init",
+            "--profile",
+            "rpi4-preview",
+            "--model",
+            "rpi4",
+            "--config",
+        ])
+        .arg(&preview_config)
+        .output()
+        .unwrap();
+    let preview_diagnostic = json(&preview);
+    assert!(
+        preview_diagnostic["diagnostics"][0]["context"]
+            .get("commit_state")
+            .is_none(),
+        "a preview must not be reported as committed merely because final logging failed"
+    );
+    assert!(!preview_config.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn final_log_failure_after_native_suite_publication_is_committed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let prefix = directory.path().join("prefix");
+    let log = directory.path().join("install.jsonl");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&prefix).unwrap();
+    for binary in [
+        "aros",
+        "aros-ahi-runner",
+        "aros-collect",
+        "aros-fetch",
+        "aros-genmodule",
+        "aros-romtool",
+        "aros-transpiler",
+        "aros-verify",
+    ] {
+        let path = source.join(binary);
+        fs::write(&path, binary).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let output = command()
+        .current_dir(directory.path())
+        .env("AROS_TEST_LOG_FAIL_EVENT", "invocation.complete")
+        .args(["--diagnostic-format=json", "--log-level=info", "--log-file"])
+        .arg(&log)
+        .arg("install")
+        .arg("--source-bin")
+        .arg(&source)
+        .arg("--prefix")
+        .arg(&prefix)
+        .output()
+        .unwrap();
+    let diagnostic = json(&output);
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "committed"
+    );
+    assert_eq!(fs::read(prefix.join("bin/aros")).unwrap(), b"aros");
+}
+
+#[cfg(unix)]
+#[test]
+fn final_log_failure_after_source_initialization_retains_the_committed_state() {
+    fn git(root: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let upstream = directory.path().join("upstream");
+    let destination = directory.path().join("new-checkout");
+    let log = directory.path().join("source.jsonl");
+    fs::create_dir(&upstream).unwrap();
+    for directory in ["arch", "compiler", "rom", "developer"] {
+        fs::create_dir(upstream.join(directory)).unwrap();
+    }
+    fs::write(upstream.join("configure"), "fixture configure\n").unwrap();
+    fs::write(upstream.join("Makefile.in"), "fixture makefile\n").unwrap();
+    git(&upstream, &["init", "--initial-branch=main"]);
+    git(&upstream, &["add", "."]);
+    git(
+        &upstream,
+        &[
+            "-c",
+            "user.name=AROS Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+
+    let output = command()
+        .current_dir(directory.path())
+        .env("AROS_TEST_LOG_FAIL_EVENT", "invocation.complete")
+        .args(["--diagnostic-format=json", "--log-level=info", "--log-file"])
+        .arg(&log)
+        .args(["source", "init"])
+        .arg(&destination)
+        .arg("--upstream")
+        .arg(&upstream)
+        .output()
+        .unwrap();
+    let diagnostic = json(&output);
+    assert_eq!(
+        diagnostic["diagnostics"][0]["context"]["commit_state"],
+        "committed"
+    );
+    assert!(destination.join(".git").is_dir());
+    assert!(destination.join("configure").is_file());
+}
+
+#[test]
 fn repository_discovery_has_its_own_stable_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let output = command()
