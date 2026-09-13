@@ -1,7 +1,8 @@
 # Public CLI contracts and continuously aligned documentation
 
 Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
-Decision state: CLI-M1 through CLI-M5 accepted; CLI-M6 integrated qualification is in progress.
+Decision state: CLI-M1 through CLI-M6 accepted. The exact integrated evidence
+is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
 
 ## Outcome and boundaries
 
@@ -443,3 +444,10 @@ slices whose evidence the cache plan may reuse.
 #160 and #161. The narrow CACHE-M1-A3 F05/F06 repair was merged in #163;
 CACHE-M1 and cache epic #139 remain open. CLI-M6 collects integrated final
 evidence without claiming either cache milestone complete.
+
+2026-09-13: CLI-M6 was accepted after #164 merged as
+[`bd9346d`](https://github.com/metaneutrons/aros-tools/commit/bd9346da7f5fcffb7f1b7f1e4b3099a995259a94).
+The [CLI-M6 evidence ledger](public-cli-m6-evidence.md) records the exact
+candidate tree, source input, supported hosts, CI, parser/documentation
+coverage and deliberate omissions. It reuses the narrow F05/F06 evidence from
+#163 without closing CACHE-M1 or cache epic #139.
