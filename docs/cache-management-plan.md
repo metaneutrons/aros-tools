@@ -303,6 +303,26 @@ installed tree's validity or provenance; those remain separate checks.
 
 ## Delivery and acceptance
 
+### Shared CLI ownership and continuous documentation
+
+The [public CLI plan](https://github.com/metaneutrons/aros-tools/blob/fix/public-cli-contract-plan/docs/public-cli-contract-plan.md),
+tracked by [epic #148](https://github.com/metaneutrons/aros-tools/issues/148),
+owns current consumer force/local/offline validation (CLI-M2) and native
+build/plan cache-only invocation migration (CLI-M3). CACHE-M3-A3 and
+CACHE-M7-A1 consume that exact implementation evidence and extend it for the
+new cache interfaces; they do not schedule duplicate implementations. CLI-M3
+does not depend on CACHE-M7. CACHE-M1 owns early repair of both the redundant
+legacy stats option and false sccache clear, independently of final migration.
+
+Every milestone and every implementation PR that changes a public interface
+must update the affected Astro/Starlight reference, task examples,
+configuration and troubleshooting in the same slice. Reuse the CLI-M1
+source-derived reference and semantic-example gate when available; until then,
+provide equivalent focused parser/behavior evidence and the canonical docs
+gate. Proposed interfaces remain in this repository plan, not presented as
+shipped commands on the website. CACHE-M7 checks integrated completeness; it
+does not permit stale documentation in earlier milestones.
+
 ### CACHE-M1
 
 Contracts, shared foundations and truthful compiler-cache behavior.
@@ -317,10 +337,17 @@ Execution: [#140](https://github.com/metaneutrons/aros-tools/issues/140). Depend
 - CACHE-M1-A3: Prove distinct stats/reset/clear effects with fake-backend tests
   and isolated real sccache/ccache tests. False sccache clearing is rejected
   until the owned-namespace implementation can demonstrate actual removal.
+  Remove the redundant legacy `ccache --stats` option in this early slice;
+  if the legacy frontend remains, bare `ccache` keeps its documented stats
+  operation. Record breaking-change notes and updated callers. This supplies
+  the CLI audit F05/F06 repair evidence without waiting for CACHE-M7.
 - CACHE-M1-A4: Build/CMake share exact backend selection, explicit off removes
   stale launchers, offline policy handles remote backends, and C/C++/ASM
   eligibility has focused integration evidence. No real user daemon/cache is
   mutated by tests. Shared compiler deletion remains disabled until CACHE-M6.
+- CACHE-M1-A5: Update Astro compiler-cache usage, options, side effects and
+  unsupported cases with the shipped changes; prove copied examples and run
+  the canonical docs gate before accepting this milestone.
 
 ### CACHE-M2
 
@@ -342,6 +369,9 @@ Execution: [#141](https://github.com/metaneutrons/aros-tools/issues/141). Depend
 - CACHE-M2-A4: Replace the public producer cache/verify-only combination with
   the shared source operations; record migration requirements for pinned
   producer workflows before removing their old parser path.
+- CACHE-M2-A5: Update Astro source preparation, producer migration, offline
+  and integrity examples with each public slice; validate their semantics
+  against the implementation and pass the canonical docs gate.
 
 ### CACHE-M3
 
@@ -355,11 +385,15 @@ Execution: [#142](https://github.com/metaneutrons/aros-tools/issues/142). Depend
   host configuration versus toolchain-lock selection, shared-object dedup,
   expected/unknown size handling and checksum failure behavior.
 - CACHE-M3-A3: Freeze consistent refresh/offline semantics across direct cache
-  and consumer entry points. Test force/local/offline conflicts explicitly;
-  no accepted flag may silently mean something else or be ignored.
+  and consumer entry points. Reuse CLI-M2 evidence for existing consumer
+  force/local/offline conflicts and extend tests to the new cache/refresh
+  interfaces; no accepted flag may silently mean something else or be ignored.
 - CACHE-M3-A4: Archive verification never claims install/tree/attestation
   validity; active obtain/extract consumers hold participating guards.
   Installed stores and external prefixes remain untouched.
+- CACHE-M3-A5: Update Astro archive acquisition and consumer installation
+  examples, including refresh/offline conflicts and verification limits, in
+  the introducing PRs; prove examples and pass the canonical docs gate.
 
 ### CACHE-M4
 
@@ -379,6 +413,9 @@ Execution: [#143](https://github.com/metaneutrons/aros-tools/issues/143). Depend
 - CACHE-M4-A4: Demonstrate a cold population followed by verified offline
   producer consumption, with no pip/Python bootstrap glue and no implicit
   access to global Cargo state. Existing upstream Python use is unchanged.
+- CACHE-M4-A5: Replace the public Astro manual-bootstrap examples alongside the
+  implementation; document exact vendor inputs and offline limits, validate
+  copied commands and pass the canonical docs gate.
 
 ### CACHE-M5
 
@@ -399,6 +436,9 @@ Execution: [#144](https://github.com/metaneutrons/aros-tools/issues/144). Depend
 - CACHE-M5-A4: `aros-verify --refresh` and cache commands share implementation.
   Existing mtime-only entries are unverified until regenerated; migration
   never deletes verification evidence or rewrites upstream generator code.
+- CACHE-M5-A5: Update Astro verification and refresh workflows alongside the
+  implementation, with tested freshness/migration examples and a passing
+  canonical docs gate.
 
 ### CACHE-M6
 
@@ -421,6 +461,9 @@ pruning of an adapter whose consumers have not migrated.
   counters without deleting objects, actual local clearing, scope containment
   and correct server isolation. Unsupported external/remote deletion fails
   with an actionable explanation, never a guessed filesystem fallback.
+- CACHE-M6-A5: Update Astro retention, preview/apply cleanup and recovery
+  instructions alongside each exposed operation. Validate safe fixture
+  examples, clearly state excluded storage, and pass the canonical docs gate.
 
 ### CACHE-M7
 
@@ -430,8 +473,10 @@ Dependencies: CACHE-M1 through CACHE-M6.
 
 - CACHE-M7-A1: Migrate CLI, CMake, producer consumers, tests, completions and
   public Astro/Starlight docs together. Remove `aros ccache` and redundant
-  native build/plan offline flags without hidden aliases; coordinated
-  aros-toolchains PRs pin an exact compatible tools revision.
+  legacy syntax without hidden aliases. Reuse CLI-M3's native build/plan
+  offline-flag migration and CACHE-M1's stats-option repair evidence; verify
+  that current callers remain compatible. Coordinated aros-toolchains PRs
+  pin an exact compatible tools revision.
 - CACHE-M7-A2: Publish task-oriented examples for inspection, offline
   preparation, both compiler backends, integrity failure, retained inputs and
   preview/apply cleanup. Every documented command has parser/behavior coverage,
