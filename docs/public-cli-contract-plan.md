@@ -3,8 +3,9 @@
 Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
 Decision state: CLI-M1, CLI-M2, CLI-M4 and CLI-M5 are accepted. CLI-M3's
 caller migration and CLI-M6's integrated acceptance remain open until the
-next immutable tools release is consumed by the native producer. The earlier
-integrated evidence is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
+native producer consumes an exact reviewed tools revision. A package or tag
+release is a separate maintainer action. The earlier integrated evidence is
+recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
 
 ## Outcome and boundaries
 
@@ -33,7 +34,7 @@ hardware, operating systems or compiler outputs.
 
 ## Ownership and relationship to the cache initiative
 
-The proposed [cache plan](https://github.com/metaneutrons/aros-tools/blob/fix/cache-management-plan/docs/cache-management-plan.md)
+The proposed [cache plan](https://github.com/metaneutrons/aros-tools/blob/main/docs/cache-management-plan.md)
 is tracked by [epic #139](https://github.com/metaneutrons/aros-tools/issues/139)
 and [PR #147](https://github.com/metaneutrons/aros-tools/pull/147).
 Keep one normative owner for each change:

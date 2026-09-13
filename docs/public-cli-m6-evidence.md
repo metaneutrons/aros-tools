@@ -5,7 +5,7 @@ Status: historical integrated implementation evidence, recorded 2026-09-13.
 This ledger records the evidence originally assembled for
 [CLI-M6](https://github.com/metaneutrons/aros-tools/issues/154) of the
 [public CLI contract plan](public-cli-contract-plan.md). The issue remains
-open until CLI-M3's released caller migration is accepted. It does not qualify
+open until CLI-M3's exact pinned caller migration is accepted. It does not qualify
 hardware boot, compiler artifacts, a toolchain release, or the remaining
 cache-management initiative.
 

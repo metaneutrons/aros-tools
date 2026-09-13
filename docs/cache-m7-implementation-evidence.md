@@ -1,13 +1,15 @@
 # CACHE-M7 implementation evidence
 
-Status: implementation qualified locally on 2026-09-14; not yet accepted.
+Status: implementation integrated and CI-qualified on 2026-09-14; not yet
+accepted.
 
 This record covers the cache-frontend migration implemented by
 [`cef4f0e`](https://github.com/metaneutrons/aros-tools/commit/cef4f0e).
-It deliberately does not claim a published tools release, an
-`aros-toolchains` consumer migration, GitHub review status, or final
-CACHE-M7 acceptance. Those remain required by
-[issue #146](https://github.com/metaneutrons/aros-tools/issues/146).
+It deliberately does not claim an `aros-toolchains` consumer migration or
+final CACHE-M7 acceptance. Publication is a separate maintainer action: the
+acceptance authority requires a coordinated consumer pin to an exact reviewed
+tools revision, not a new package or tag. The consumer migration remains
+required by [issue #146](https://github.com/metaneutrons/aros-tools/issues/146).
 
 ## Exact inputs and scope
 
@@ -15,6 +17,7 @@ CACHE-M7 acceptance. Those remain required by
 | --- | --- | --- |
 | Parent release-candidate tree | [`807f828d1deae003e35c7c462618ca06511840de`](https://github.com/metaneutrons/aros-tools/commit/807f828d1deae003e35c7c462618ca06511840de) | Reviewed base before this breaking CLI migration |
 | M7 implementation | [`cef4f0e`](https://github.com/metaneutrons/aros-tools/commit/cef4f0e) | Removes the visible `aros ccache` command family without an alias |
+| Integrated M7 tree | [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4) | Squash merge of [PR #175](https://github.com/metaneutrons/aros-tools/pull/175), with successful [main Workspace CI](https://github.com/metaneutrons/aros-tools/actions/runs/34789234321), [documentation](https://github.com/metaneutrons/aros-tools/actions/runs/34789234327) and [CodeQL](https://github.com/metaneutrons/aros-tools/actions/runs/34789234329) gates |
 | Toolchain consumer audit input | [`2f371bf900cfd93ee26fd861ec1333432d7561ba`](https://github.com/metaneutrons/aros-toolchains/commit/2f371bf900cfd93ee26fd861ec1333432d7561ba) | Current producer-executor contract examined for legacy callers |
 
 The change removes only the obsolete root command. `ccache` remains a supported
@@ -43,8 +46,9 @@ backend configuration, data root and (for sccache) Unix-domain socket.
 
 ## Remaining acceptance work
 
-The next immutable `aros-tools` release must contain this breaking command
-model. A narrow `aros-toolchains` change must then pin that exact released
-identity, remove any incompatible legacy caller if one is introduced, and pass
-its producer-contract gate. Only after that consumer evidence, normal PR
-review and the release qualification can CACHE-M7 and the cache epic be closed.
+A narrow `aros-toolchains` change must pin the exact reviewed immutable Git
+revision containing this command model, remove any incompatible legacy caller
+if one is introduced, and pass its producer-contract gate. Only after that
+consumer evidence and normal PR review can CACHE-M7 and the cache epic be
+closed. A later package or tag release remains a separate maintainer action;
+it is neither created nor implied by this acceptance record.
