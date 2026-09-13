@@ -157,6 +157,8 @@ capabilities must not be documented as already shipped.
   diagnostics, discoverability and continuous source-aligned Astro documentation;
   its [audit baseline](docs/public-cli-audit.md) distinguishes measured findings
   from proposed capabilities.
+- [Cache management plan](docs/cache-management-plan.md): proposed resource-based
+  CLI, typed cache ownership, missing capabilities and CACHE milestone gates.
 - [Toolchain producer integration plan](docs/toolchain-producer-plan.md):
   native producer design, staged migration and TCP-M0 through TCP-M7 gates.
   Its [M0 contract](docs/toolchain-producer-contract.md) and
