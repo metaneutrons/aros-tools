@@ -68,6 +68,15 @@ commands cannot silently be treated as passive inventory.
 also allows remote/multi-level stores. A local directory is not necessarily
 the complete effective cache.
 
+The M1 backend-contract qualification floor is ccache 4.14.0 and sccache
+0.17.0. Older backends can still be passively observed, but no lifecycle
+behavior is promised for them. The repeatable
+[`verify-compiler-cache-backends.sh`](../scripts/verify-compiler-cache-backends.sh)
+probe starts from an empty private temporary root, Home, config, cache and
+sccache Unix-domain socket. It proves that ccache reset preserves a cached
+entry, ccache clear removes it, and sccache reset preserves an entry; it always
+stops only that private server. It never reads, creates or clears user state.
+
 ## CLI contract
 
 ### Vocabulary and capability boundaries
