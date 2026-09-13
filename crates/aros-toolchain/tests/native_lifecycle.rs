@@ -9,7 +9,9 @@ use std::process::{Command, Stdio};
 
 use aros_common::{measure_tree_content_cas, sha256_bytes, CancellationToken};
 use aros_toolchain::canonical;
-use aros_toolchain::cargo_vendor::{select_vendor_generation, CargoVendorRequest};
+use aros_toolchain::cargo_vendor::{
+    fetch_vendor_generation, select_vendor_generation, CargoVendorRequest,
+};
 use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -25,6 +27,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::new_inner(false)
+    }
+
+    fn new_with_cold_vendor_generation() -> Self {
+        Self::new_inner(true)
+    }
+
+    fn new_inner(cold_vendor_generation: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary
             .path()
@@ -86,31 +96,32 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
         );
         fs::write(cache.join("mako.tar.gz"), &mako).unwrap();
         fs::write(cache.join("markupsafe.tar.gz"), &markupsafe).unwrap();
-        let vendor = cache.join("cargo-vendor/fixture-dependency-1.0.0");
-        fs::create_dir_all(vendor.join("src")).unwrap();
-        let vendor_manifest =
-            b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
-        let vendor_source = b"pub fn answer() -> u8 { 42 }\n";
-        fs::write(vendor.join("Cargo.toml"), vendor_manifest).unwrap();
-        fs::write(vendor.join("src/lib.rs"), vendor_source).unwrap();
         let package_checksum = "d".repeat(64);
-        fs::write(
-            vendor.join(".cargo-checksum.json"),
-            serde_json::to_vec(&json!({
-                "package": package_checksum,
-                "files": {
-                    "Cargo.toml": sha256_bytes(vendor_manifest),
-                    "src/lib.rs": sha256_bytes(vendor_source)
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        fs::write(
-            cache.join("cargo-vendor-config.toml"),
-            "[source.crates-io]\nreplace-with = \"vendored-sources\"\n[source.vendored-sources]\ndirectory = \"__CARGO_VENDOR_DIRECTORY__\"\n",
-        )
-        .unwrap();
+        if !cold_vendor_generation {
+            let vendor = cache.join("cargo-vendor/fixture-dependency-1.0.0");
+            fs::create_dir_all(vendor.join("src")).unwrap();
+            let vendor_manifest = b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
+            let vendor_source = b"pub fn answer() -> u8 { 42 }\n";
+            fs::write(vendor.join("Cargo.toml"), vendor_manifest).unwrap();
+            fs::write(vendor.join("src/lib.rs"), vendor_source).unwrap();
+            fs::write(
+                vendor.join(".cargo-checksum.json"),
+                serde_json::to_vec(&json!({
+                    "package": package_checksum,
+                    "files": {
+                        "Cargo.toml": sha256_bytes(vendor_manifest),
+                        "src/lib.rs": sha256_bytes(vendor_source)
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                cache.join("cargo-vendor-config.toml"),
+                "[source.crates-io]\nreplace-with = \"vendored-sources\"\n[source.vendored-sources]\ndirectory = \"__CARGO_VENDOR_DIRECTORY__\"\n",
+            )
+            .unwrap();
+        }
 
         fs::create_dir_all(root.join("tools/contracts")).unwrap();
         fs::create_dir_all(root.join("tools/src")).unwrap();
@@ -192,38 +203,42 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
                 &["commit", "-qm", "test: native lifecycle inputs"],
             );
         }
-        let selection = select_vendor_generation(&CargoVendorRequest {
+        let vendor_request = CargoVendorRequest {
             producer_dir: root.join("producer"),
             tools_dir: root.join("tools"),
             tools_tree: Some(git(&root.join("tools"), &["rev-parse", "HEAD^{tree}"])),
             cargo: which::which("cargo").unwrap(),
             cache_dir: cache.clone(),
-        })
-        .unwrap();
-        let generation = cache.join("cargo").join("v1").join(&selection.generation);
-        fs::create_dir_all(&generation).unwrap();
-        fs::rename(cache.join("cargo-vendor"), generation.join("cargo-vendor")).unwrap();
-        fs::rename(
-            cache.join("cargo-vendor-config.toml"),
-            generation.join("cargo-vendor-config.toml"),
-        )
-        .unwrap();
-        let vendor_tree_sha256 = measure_tree_content_cas(&generation.join("cargo-vendor"))
-            .unwrap()
-            .payload_digest_excluding(None);
-        let template = fs::read(generation.join("cargo-vendor-config.toml")).unwrap();
-        fs::write(
-            generation.join("receipt.json"),
-            serde_json::to_vec_pretty(&json!({
-                "schema": "aros-cargo-vendor-generation-v1",
-                "identity": selection.identity(),
-                "package_count": 1,
-                "vendor_tree_sha256": vendor_tree_sha256,
-                "configuration_template_sha256": sha256_bytes(&template),
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        };
+        if cold_vendor_generation {
+            fetch_vendor_generation(&vendor_request, false, &CancellationToken::default()).unwrap();
+        } else {
+            let selection = select_vendor_generation(&vendor_request).unwrap();
+            let generation = cache.join("cargo").join("v1").join(&selection.generation);
+            fs::create_dir_all(&generation).unwrap();
+            fs::rename(cache.join("cargo-vendor"), generation.join("cargo-vendor")).unwrap();
+            fs::rename(
+                cache.join("cargo-vendor-config.toml"),
+                generation.join("cargo-vendor-config.toml"),
+            )
+            .unwrap();
+            let vendor_tree_sha256 = measure_tree_content_cas(&generation.join("cargo-vendor"))
+                .unwrap()
+                .payload_digest_excluding(None);
+            let template = fs::read(generation.join("cargo-vendor-config.toml")).unwrap();
+            fs::write(
+                generation.join("receipt.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "schema": "aros-cargo-vendor-generation-v1",
+                    "identity": selection.identity(),
+                    "package_count": 1,
+                    "vendor_tree_sha256": vendor_tree_sha256,
+                    "configuration_template_sha256": sha256_bytes(&template),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
         let mut recipe = json!({
             "schema": "aros-toolchain-recipe-v2",
             "source_commit": git(&root.join("source"), &["rev-parse", "HEAD"]),
@@ -411,6 +426,126 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     )
     .unwrap();
     assert_eq!(usage, "llvm-11.0.0.src.tar.xz\n");
+}
+
+#[test]
+fn native_lifecycle_consumes_a_cold_vendor_generation_offline() {
+    if std::env::var_os("AROS_CARGO_VENDOR_CREDENTIAL_TEST_CHILD").is_none() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bin = temporary.path().join("bin");
+        let poison = temporary.path().join("poisoned-cargo-home");
+        let trace = temporary.path().join("cargo-trace");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&poison).unwrap();
+        fs::write(
+            poison.join("config.toml"),
+            "[source.crates-io]\nreplace-with = \"poisoned\"\n[source.poisoned]\ndirectory = \"/definitely-not-a-cargo-registry\"\n",
+        )
+        .unwrap();
+        let real_cargo = which::which("cargo").unwrap();
+        write_executable(
+            &bin.join("cargo"),
+            &cold_vendor_cargo_wrapper(&real_cargo, &poison, &trace),
+        );
+        let inherited_path = std::env::var_os("PATH").unwrap();
+        let mut child_path = bin.into_os_string();
+        child_path.push(":");
+        child_path.push(inherited_path);
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_lifecycle_consumes_a_cold_vendor_generation_offline",
+                "--nocapture",
+            ])
+            .env("AROS_CARGO_VENDOR_CREDENTIAL_TEST_CHILD", "1")
+            .env("PATH", child_path)
+            .env("CARGO_HOME", &poison)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cold vendor lifecycle child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let trace = fs::read_to_string(trace).unwrap();
+        assert!(trace.lines().any(|line| line.starts_with("vendor ")));
+        assert!(trace.lines().any(|line| line.starts_with("build ")));
+        assert!(!trace.contains("poisoned-cargo-home"));
+        return;
+    }
+
+    let fixture = Fixture::new_with_cold_vendor_generation();
+    let result = executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+    assert_eq!(result.commit_state, "committed");
+    assert!(fixture
+        .root
+        .join("output/toolchain/bin/aros-collect")
+        .is_file());
+    assert_eq!(
+        fs::read_dir(fixture.root.join("cache/cargo/v1"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count(),
+        1
+    );
+    assert!(!fixture.root.join("cache/cargo-vendor").exists());
+}
+
+fn cold_vendor_cargo_wrapper(real_cargo: &Path, poison: &Path, trace: &Path) -> String {
+    let package_manifest =
+        b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
+    let package_source = b"pub fn answer() -> u8 { 42 }\n";
+    let real_cargo = shell_quote(real_cargo);
+    let poison = shell_quote(poison);
+    let trace = shell_quote(trace);
+    format!(
+        r#"#!/bin/sh
+set -eu
+case "$1" in
+  --version)
+    exec {real_cargo} "$@"
+    ;;
+  vendor)
+    test "${{CARGO_HOME:-}}" != {poison}
+    printf '%s %s\n' "$1" "$CARGO_HOME" >> {trace}
+    vendor=
+    for argument in "$@"; do vendor="$argument"; done
+    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src"
+    printf '%s' '[package]
+name = "fixture-dependency"
+version = "1.0.0"
+edition = "2021"
+' > "$vendor/fixture-dependency-1.0.0/Cargo.toml"
+    printf '%s' 'pub fn answer() -> u8 {{ 42 }}
+' > "$vendor/fixture-dependency-1.0.0/src/lib.rs"
+    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
+    printf '%s\n' '[source.crates-io]' 'replace-with = "vendored-sources"' '[source.vendored-sources]' "directory = \"$vendor\""
+    ;;
+  *)
+    for argument in "$@"; do
+      if [ "$argument" = build ]; then
+        test "${{CARGO_HOME:-}}" != {poison}
+        printf '%s %s\n' build "$CARGO_HOME" >> {trace}
+        exec {real_cargo} "$@"
+      fi
+    done
+    exit 64
+    ;;
+esac
+"#,
+        sha256_bytes(package_manifest),
+        sha256_bytes(package_source),
+        "d".repeat(64),
+    )
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.display().to_string().replace('\'', "'\\\"'\\\"'")
+    )
 }
 
 #[test]
