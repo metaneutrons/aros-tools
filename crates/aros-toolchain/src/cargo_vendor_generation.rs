@@ -10,7 +10,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aros_cache::{
     observe_root, resolve_explicit_root, CacheCapability, CacheSideEffects, RootObservation,
@@ -385,8 +386,7 @@ pub fn fetch_vendor_generation(
     }
     let generation_parent = ensure_generation_parent(&request.cache_dir)?;
     let lock_path = generation_parent.join(format!("{}.lock", selection.generation));
-    let _lock = AdvisoryFileLock::acquire(&lock_path)
-        .map_err(|_| ContractError::state("cannot acquire Cargo vendor generation lock"))?;
+    let _lock = acquire_generation_lock(&lock_path, cancellation)?;
     if generation.exists() {
         return verify_vendor_generation_at(&generation, &selection, "cargo.fetch");
     }
@@ -401,6 +401,36 @@ pub fn fetch_vendor_generation(
             verify_vendor_generation_at(&generation, &selection, "cargo.fetch")
         }
         Err(error) => Err(error),
+    }
+}
+
+fn acquire_generation_lock(
+    lock_path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<AdvisoryFileLock, ContractError> {
+    let deadline = Instant::now() + CARGO_VENDOR_TIMEOUT;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(ContractError::state(
+                "Cargo vendor generation cancelled while waiting for its cache lock",
+            ));
+        }
+        match AdvisoryFileLock::acquire(lock_path) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(ContractError::state(
+                        "Cargo vendor generation exceeded its 15 minute cache-lock wait limit",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                return Err(ContractError::state(
+                    "cannot acquire Cargo vendor generation lock",
+                ))
+            }
+        }
     }
 }
 

@@ -4,12 +4,15 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use aros_common::{sha256_bytes, CancellationToken};
 use aros_toolchain::cargo_vendor::{
-    fetch_vendor_generation, verify_vendor_generation, CargoVendorEnvironment, CargoVendorRequest,
+    fetch_vendor_generation, select_vendor_generation, verify_vendor_generation,
+    CargoVendorEnvironment, CargoVendorRequest,
 };
 use serde_json::json;
 
@@ -301,6 +304,266 @@ esac
     assert!(generation.generation_dir.join("cargo-vendor").is_dir());
     let verified = verify_vendor_generation(&request).unwrap();
     assert_eq!(verified.vendor_tree_sha256, generation.vendor_tree_sha256);
+}
+
+struct VendorGenerationFixture {
+    _temporary: tempfile::TempDir,
+    producer: PathBuf,
+    tools: PathBuf,
+    cache: PathBuf,
+    cargo: PathBuf,
+}
+
+impl VendorGenerationFixture {
+    fn new() -> Self {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let producer = root.join("producer");
+        let tools = root.join("tools");
+        let cache = root.join("cache");
+        let bin = root.join("bin");
+        fs::create_dir_all(producer.join("toolchains")).unwrap();
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir(&cache).unwrap();
+        fs::create_dir(&bin).unwrap();
+        fs::write(
+            producer.join("toolchains/rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"minimal\"\n",
+        )
+        .unwrap();
+        fs::write(
+            tools.join("Cargo.toml"),
+            "[package]\nname = \"fixture-tools\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            tools.join("Cargo.lock"),
+            format!(
+                "version = 4\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{PACKAGE_CHECKSUM}\"\n"
+            ),
+        )
+        .unwrap();
+        git(&tools, &["init", "-q", "--template="]);
+        git(&tools, &["add", "."]);
+        git(&tools, &["commit", "-qm", "test: fixture Cargo workspace"]);
+        let cargo = bin.join("cargo");
+        write_executable(&cargo, &fixture_cargo_script("", "", true));
+        Self {
+            _temporary: temporary,
+            producer,
+            tools,
+            cache,
+            cargo,
+        }
+    }
+
+    fn request(&self) -> CargoVendorRequest {
+        CargoVendorRequest {
+            producer_dir: self.producer.clone(),
+            tools_dir: self.tools.clone(),
+            tools_tree: None,
+            cargo: self.cargo.clone(),
+            cache_dir: self.cache.clone(),
+        }
+    }
+
+    fn generation(&self) -> PathBuf {
+        let selection = select_vendor_generation(&self.request()).unwrap();
+        self.cache.join("cargo/v1").join(selection.generation)
+    }
+
+    fn set_cargo_script(&self, prologue: &str, configuration_suffix: &str, populate: bool) {
+        write_executable(
+            &self.cargo,
+            &fixture_cargo_script(prologue, configuration_suffix, populate),
+        );
+    }
+
+    fn replace_lock(&self, lock: &str) {
+        fs::write(self.tools.join("Cargo.lock"), lock).unwrap();
+        git(&self.tools, &["add", "Cargo.lock"]);
+        git(&self.tools, &["commit", "-qm", "test: change Cargo lock"]);
+    }
+
+    fn replace_manifest(&self, manifest: &str) {
+        fs::write(self.tools.join("Cargo.toml"), manifest).unwrap();
+        git(&self.tools, &["add", "Cargo.toml"]);
+        git(
+            &self.tools,
+            &["commit", "-qm", "test: change Cargo manifest"],
+        );
+    }
+}
+
+fn fixture_cargo_script(prologue: &str, configuration_suffix: &str, populate: bool) -> String {
+    let package_manifest = b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\n";
+    let package_source = b"pub fn value() {}\n";
+    let payload = if populate {
+        format!(
+            r#"\
+    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src"
+    printf '%s' '[package]
+name = "fixture-dependency"
+version = "1.0.0"
+' > "$vendor/fixture-dependency-1.0.0/Cargo.toml"
+    printf '%s' 'pub fn value() {{}}
+' > "$vendor/fixture-dependency-1.0.0/src/lib.rs"
+    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
+"#,
+            sha256_bytes(package_manifest),
+            sha256_bytes(package_source),
+            PACKAGE_CHECKSUM,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"#!/bin/sh
+set -eu
+if /usr/bin/env | /usr/bin/grep -q '^AROS_CARGO_VENDOR_TEST_SECRET='; then
+  exit 91
+fi
+if /usr/bin/env | /usr/bin/grep -q '^CARGO_REGISTRIES_CRATES_IO_TOKEN='; then
+  exit 92
+fi
+case "$1" in
+  --version)
+    printf '%s\n' 'cargo 1.96.1 (fixture)'
+    ;;
+  vendor)
+    {prologue}
+    vendor=
+    for argument in "$@"; do vendor="$argument"; done
+{payload}    printf '%s\n' '[source.crates-io]' 'replace-with = "vendored-sources"' '[source.vendored-sources]' "directory = \"$vendor\""
+    {configuration_suffix}
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+    )
+}
+
+#[test]
+fn cancellation_never_publishes_a_partial_vendor_generation() {
+    let fixture = VendorGenerationFixture::new();
+    let marker = fixture.cache.join("vendor-started");
+    fixture.set_cargo_script(
+        &format!(": > {}\n    /bin/sleep 5", shell_quote(&marker)),
+        "",
+        true,
+    );
+    let generation = fixture.generation();
+    let request = fixture.request();
+    let cancellation = CancellationToken::default();
+    let operation_cancellation = cancellation.clone();
+    let operation =
+        thread::spawn(move || fetch_vendor_generation(&request, false, &operation_cancellation));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.is_file(), "fixture Cargo process did not start");
+    cancellation.cancel();
+    let error = operation.join().unwrap().unwrap_err();
+    assert!(error.to_string().contains("cancelled"), "{error}");
+    assert!(!generation.exists(), "cancelled generation was published");
+    assert!(verify_vendor_generation(&fixture.request()).is_err());
+}
+
+#[test]
+fn cooperating_fetchers_publish_one_complete_vendor_generation() {
+    let fixture = VendorGenerationFixture::new();
+    let calls = fixture.cache.join("vendor-calls");
+    fixture.set_cargo_script(
+        &format!(
+            "printf '%s\\n' vendor >> {}\n    /bin/sleep 1",
+            shell_quote(&calls)
+        ),
+        "",
+        true,
+    );
+    let first_request = fixture.request();
+    let second_request = fixture.request();
+    let first = thread::spawn(move || {
+        fetch_vendor_generation(&first_request, false, &CancellationToken::default())
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !calls.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(calls.is_file(), "first fixture Cargo process did not start");
+    let second =
+        fetch_vendor_generation(&second_request, false, &CancellationToken::default()).unwrap();
+    let first = first.join().unwrap().unwrap();
+    assert_eq!(first.generation_dir, second.generation_dir);
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    assert_eq!(
+        verify_vendor_generation(&fixture.request())
+            .unwrap()
+            .vendor_tree_sha256,
+        first.vendor_tree_sha256
+    );
+}
+
+#[test]
+fn verification_rejects_changed_tools_source_lock_or_cargo_identity() {
+    let source = VendorGenerationFixture::new();
+    fetch_vendor_generation(&source.request(), false, &CancellationToken::default()).unwrap();
+    source.replace_manifest(
+        "[package]\nname = \"fixture-tools\"\nversion = \"0.0.1\"\nedition = \"2021\"\n",
+    );
+    assert!(verify_vendor_generation(&source.request()).is_err());
+
+    let lock = VendorGenerationFixture::new();
+    fetch_vendor_generation(&lock.request(), false, &CancellationToken::default()).unwrap();
+    lock.replace_lock(&format!(
+        "version = 4\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{PACKAGE_CHECKSUM}\"\n"
+    ));
+    assert!(verify_vendor_generation(&lock.request()).is_err());
+
+    let cargo = VendorGenerationFixture::new();
+    fetch_vendor_generation(&cargo.request(), false, &CancellationToken::default()).unwrap();
+    cargo.set_cargo_script("# changed selected Cargo bytes", "", true);
+    assert!(verify_vendor_generation(&cargo.request()).is_err());
+}
+
+#[test]
+fn fetch_rejects_a_missing_git_dependency_and_unsupported_configuration() {
+    let git_dependency = VendorGenerationFixture::new();
+    git_dependency.replace_lock(
+        "version = 4\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/fixture#0123456789abcdef0123456789abcdef01234567\"\n",
+    );
+    git_dependency.set_cargo_script("", "", false);
+    let generation = git_dependency.generation();
+    assert!(fetch_vendor_generation(
+        &git_dependency.request(),
+        false,
+        &CancellationToken::default(),
+    )
+    .is_err());
+    assert!(!generation.exists());
+
+    let unsupported = VendorGenerationFixture::new();
+    unsupported.set_cargo_script(
+        "",
+        "printf '%s\\n' '[source.untrusted]' 'registry = \"https://example.invalid/index\"'",
+        true,
+    );
+    let generation = unsupported.generation();
+    assert!(
+        fetch_vendor_generation(&unsupported.request(), false, &CancellationToken::default(),)
+            .is_err()
+    );
+    assert!(!generation.exists());
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.display().to_string().replace('\'', "'\\\"'\\\"'")
+    )
 }
 
 fn write_executable(path: &Path, contents: &str) {

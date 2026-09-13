@@ -191,8 +191,11 @@ may use network transport only during this explicit online operation. The
 generated configuration is parsed and rewritten by Rust only when it contains
 the one expected vendor-directory mapping. Registry and HTTPS Git dependencies
 must match the selected lock closure; unsupported source mappings, a missing
-Git dependency, a checksum mismatch, a cancellation, or a competing incomplete
-writer are failures. An existing generation is never repaired or replaced.
+Git dependency, a checksum mismatch, a cancellation, or an invalid published
+generation are failures. Fetchers selecting the same missing generation
+cooperate through a cancellable, bounded cache lock: one publishes the
+complete object and waiters independently reverify it before reuse. An
+existing generation is never repaired or replaced.
 
 Neither global `CARGO_HOME` nor user Cargo configuration, credentials, or
 temporary data enters the published generation. `--cargo FILE` selects a
