@@ -28,6 +28,24 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache archives verify` | preset | --preset | — | optional | 1 |  |  | — |  |
 | `aros cache archives verify` | host | --host | — | optional | 1 |  |  | — |  |
 | `aros cache archives verify` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo fetch` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo fetch` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo fetch` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo fetch` | cargo | --cargo | — | optional | 1 |  |  | — |  |
+| `aros cache cargo fetch` | offline | --offline | — | optional | 0 | false |  | AROS_OFFLINE |  |
+| `aros cache cargo fetch` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo list` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo list` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo list` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo list` | cargo | --cargo | — | optional | 1 |  |  | — |  |
+| `aros cache cargo list` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo status` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo status` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo verify` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo verify` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo verify` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo verify` | cargo | --cargo | — | optional | 1 |  |  | — |  |
+| `aros cache cargo verify` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache compiler status` | backend | --backend | — | optional | 1 | auto | auto, sccache, ccache | — |  |
 | `aros cache compiler status` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler status` | format | --format | — | optional | 1 | human | human, json | — |  |

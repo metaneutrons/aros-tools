@@ -193,11 +193,13 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_TEST_SOURCE_ROOT`, `AROS_TEST_TOOLS_DIR`
 - `AROS_PUBLICATION_TEST_FAIL_AT`, `AROS_PUBLICATION_TEST_FAIL_PATH`, `AROS_PUBLICATION_TEST_PAUSE_AT`, `AROS_PUBLICATION_TEST_PAUSE_MS`, `AROS_PUBLICATION_TEST_CRASH_AT`
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
+- `AROS_CARGO_VENDOR_CREDENTIAL_TEST_CHILD`
 - `AROS_TEST_LOG_FAIL_EVENT`
 - `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
 - `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`
 
-The guard, process-escape and final-log-failure names are used only by
+The guard, process-escape, Cargo-vendor credential-isolation and
+final-log-failure names are used only by
 integration-test executables to coordinate isolated filesystem/process
 fixtures; no supported released command configuration reads them.
 
@@ -216,7 +218,7 @@ versioned checkout configuration, then a documented constant default. There is
 no fallback to a neighboring checkout or an arbitrary compiler on `PATH`.
 
 Use `aros info`, `aros cache status`, `aros cache compiler status`, `aros
-cache archives status`, `aros toolchain list`, `aros toolchain inventory` and
+cache archives status`, `aros cache cargo status --dir DIR`, `aros toolchain list`, `aros toolchain inventory` and
 `aros board doctor` to inspect
 selected values without mutating source or hardware. Cache-status commands do
 not create roots, traverse their contents, start a compiler-cache daemon, or

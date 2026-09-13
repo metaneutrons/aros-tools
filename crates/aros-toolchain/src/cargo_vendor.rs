@@ -1,10 +1,9 @@
-//! Private, verified Cargo vendor preparation for the native producer.
+//! Private, verified Cargo runtime preparation for the native producer.
 //!
-//! The source cache is mutable input, not an execution root.  This module
-//! copies the selected vendor tree through no-follow descriptors into a fresh
-//! private directory, validates every Cargo checksum record, and writes the
-//! only Cargo configuration supplied to later collector phases.  It does not
-//! invoke Cargo, resolve a registry, compile code, or change the cache.
+//! Immutable Cargo vendor generations are selected, published and verified in
+//! the sibling generation module. This module validates one selected generation
+//! through no-follow descriptors and copies it into a fresh private runtime
+//! directory for a later offline collector invocation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -19,9 +18,9 @@ use serde::Deserialize;
 use crate::filesystem::{open_directory, DIRECTORY};
 use crate::ContractError;
 
-const VENDOR_DIRECTORY: &str = "cargo-vendor";
-const VENDOR_TEMPLATE: &str = "cargo-vendor-config.toml";
-const VENDOR_PLACEHOLDER: &str = "__CARGO_VENDOR_DIRECTORY__";
+pub(crate) const VENDOR_DIRECTORY: &str = "cargo-vendor";
+pub(crate) const VENDOR_TEMPLATE: &str = "cargo-vendor-config.toml";
+pub(crate) const VENDOR_PLACEHOLDER: &str = "__CARGO_VENDOR_DIRECTORY__";
 const PRIVATE_VENDOR_DIRECTORY: &str = "vendor";
 const CARGO_HOME_DIRECTORY: &str = "cargo-home";
 const CARGO_CONFIG: &str = "config.toml";
@@ -29,11 +28,17 @@ const CHECKSUM_FILE: &str = ".cargo-checksum.json";
 const MAX_ENTRIES: usize = 200_000;
 const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_TEMPLATE_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_TEMPLATE_BYTES: u64 = 64 * 1024;
 const MAX_CHECKSUM_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LOCK_PACKAGES: usize = 100_000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+pub use crate::cargo_vendor_generation::{
+    cargo_vendor_status, fetch_vendor_generation, list_vendor_generation, select_vendor_generation,
+    verify_vendor_generation, CargoVendorGeneration, CargoVendorIdentity, CargoVendorRequest,
+    CargoVendorSelection, CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
+    CARGO_VENDOR_RECEIPT_SCHEMA, CARGO_VENDOR_STATUS_SCHEMA, CARGO_VENDOR_VERIFY_SCHEMA,
+};
 
 /// A private Cargo vendor environment ready for a later offline collector.
 #[derive(Debug, Clone)]
@@ -293,7 +298,7 @@ struct ChecksumRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PackageIdentity {
+pub(crate) struct PackageIdentity {
     name: String,
     version: String,
 }
@@ -318,7 +323,7 @@ struct CargoLockPackage {
     replace: Option<String>,
 }
 
-fn open_existing_directory(path: &Path, label: &str) -> Result<File, ContractError> {
+pub(crate) fn open_existing_directory(path: &Path, label: &str) -> Result<File, ContractError> {
     if !path.is_absolute() {
         return Err(ContractError::environment(
             "selected Cargo vendor cache path must be absolute",
@@ -359,7 +364,7 @@ fn create_private_directory(destination: &Path) -> Result<PathBuf, ContractError
     Ok(root)
 }
 
-fn normalize_system_parent(parent: &Path) -> Result<PathBuf, ContractError> {
+pub(crate) fn normalize_system_parent(parent: &Path) -> Result<PathBuf, ContractError> {
     if !parent.is_absolute() {
         return Err(ContractError::environment(
             "private Cargo vendor destination parent must be absolute",
@@ -380,7 +385,7 @@ fn normalize_system_parent(parent: &Path) -> Result<PathBuf, ContractError> {
     Ok(parent.to_path_buf())
 }
 
-fn safe_leaf(path: &Path) -> Result<String, ContractError> {
+pub(crate) fn safe_leaf(path: &Path) -> Result<String, ContractError> {
     let Some(leaf) = path.file_name().and_then(|value| value.to_str()) else {
         return Err(ContractError::environment(
             "private Cargo vendor destination must have a portable UTF-8 leaf",
@@ -405,7 +410,11 @@ fn mkdir_private(parent: &File, name: &str) -> Result<(), ContractError> {
         .map_err(|_| ContractError::environment("cannot create private Cargo vendor directory"))
 }
 
-fn read_direct_regular(parent: &File, name: &str, limit: u64) -> Result<Vec<u8>, ContractError> {
+pub(crate) fn read_direct_regular(
+    parent: &File,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<u8>, ContractError> {
     let before = rfs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| {
         ContractError::environment("required Cargo vendor cache file is unavailable")
     })?;
@@ -627,7 +636,7 @@ fn directory_names(directory: &File) -> Result<Vec<String>, ContractError> {
     Ok(names.into_iter().collect())
 }
 
-fn validate_vendor_tree(
+pub(crate) fn validate_vendor_tree(
     vendor: &Path,
 ) -> Result<BTreeMap<PackageIdentity, Option<String>>, ContractError> {
     let mut packages = BTreeMap::new();
@@ -711,7 +720,7 @@ fn validate_vendor_package(
     Ok((identity, checksum.package))
 }
 
-fn validate_cargo_lock(
+pub(crate) fn validate_cargo_lock(
     path: &Path,
     vendor_packages: &BTreeMap<PackageIdentity, Option<String>>,
 ) -> Result<(), ContractError> {
@@ -762,7 +771,7 @@ fn validate_cargo_lock(
     Ok(())
 }
 
-fn read_cargo_lock(path: &Path) -> Result<Vec<u8>, ContractError> {
+pub(crate) fn read_cargo_lock(path: &Path) -> Result<Vec<u8>, ContractError> {
     if !path.is_absolute() {
         return Err(ContractError::environment(
             "selected Cargo.lock path must be absolute",
@@ -924,7 +933,10 @@ fn read_private_regular(path: &Path, limit: u64) -> Result<Vec<u8>, ContractErro
         .map_err(|_| ContractError::environment("cannot read required private vendored Cargo file"))
 }
 
-fn render_vendor_configuration(template: &str, vendor: &Path) -> Result<Vec<u8>, ContractError> {
+pub(crate) fn render_vendor_configuration(
+    template: &str,
+    vendor: &Path,
+) -> Result<Vec<u8>, ContractError> {
     let mut document: toml::Value = toml::from_str(template).map_err(|_| {
         ContractError::environment("Cargo vendor configuration template is malformed")
     })?;

@@ -9,6 +9,7 @@
 pub mod canonical;
 #[cfg(unix)]
 pub mod cargo_vendor;
+mod cargo_vendor_generation;
 #[cfg(unix)]
 pub mod compatibility;
 #[cfg(unix)]

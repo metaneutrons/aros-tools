@@ -293,7 +293,21 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                 ),
             },
             unregistered(CacheFamily::Sources, "source and patch caches require an explicit reviewed lock and root; this command does not guess a producer or product cache"),
-            unregistered(CacheFamily::Cargo, "Cargo vendor data requires an explicit tools checkout and managed root; global Cargo state is excluded"),
+            CacheFamilyStatus {
+                family: CacheFamily::Cargo,
+                status: CacheFamilyStatusKind::RequiresExplicitSelection,
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::List,
+                    CacheCapability::Fetch,
+                    CacheCapability::Verify,
+                ],
+                root: None,
+                backends: Vec::new(),
+                detail: Some(
+                    "Cargo vendor generations require explicit producer, tools, Cargo and managed-root inputs; global Cargo state is excluded",
+                ),
+            },
             unregistered(CacheFamily::Genmf, "GenMF expansions require an explicit expansion root and source selection; reports and work trees are excluded"),
         ],
     })

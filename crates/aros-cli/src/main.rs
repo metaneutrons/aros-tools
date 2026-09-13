@@ -51,8 +51,9 @@ mod toolchain_selection;
 
 use build_cache::BuildCompilerCache;
 use cache_command::{
-    CacheArchiveSelector, CacheArchivesCommand, CacheCommand, CacheCompilerBackend,
-    CacheCompilerCommand, CacheSourceSelector, CacheSourcesCommand,
+    CacheArchiveSelector, CacheArchivesCommand, CacheCargoCommand, CacheCargoSelector,
+    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourceSelector,
+    CacheSourcesCommand,
 };
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
@@ -1060,6 +1061,40 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     "cache.archives.verify",
                     None,
                     "restore the exact configured archive bytes; verify checks only declared size and SHA-256, not extraction, installation, or attestation",
+                ),
+            },
+            CacheCommand::Cargo { command } => match command {
+                CacheCargoCommand::Status { .. } => (
+                    DiagnosticCode::CliConfiguration,
+                    DiagnosticStage::Configuration,
+                    "cache.cargo.status",
+                    None,
+                    "pass an absolute cache --dir; status observes only root metadata and never creates or scans Cargo generations",
+                ),
+                CacheCargoCommand::List { .. } => (
+                    DiagnosticCode::CliToolResolution,
+                    DiagnosticStage::Configuration,
+                    "cache.cargo.list",
+                    None,
+                    "select readable producer and tools checkouts, an absolute cache root and a pinned Cargo executable; list proves the selection with bounded Git and Cargo version probes, then reads only its generation receipt",
+                ),
+                CacheCargoCommand::Fetch { offline, .. } => (
+                    if *offline {
+                        DiagnosticCode::CliToolResolution
+                    } else {
+                        DiagnosticCode::CliNetwork
+                    },
+                    DiagnosticStage::Configuration,
+                    "cache.cargo.fetch",
+                    None,
+                    "use cache cargo fetch before an offline native producer build; offline mode requires a fully verified immutable generation",
+                ),
+                CacheCargoCommand::Verify { .. } => (
+                    DiagnosticCode::CliSourceLock,
+                    DiagnosticStage::Configuration,
+                    "cache.cargo.verify",
+                    None,
+                    "restore the exact producer pin, tools lock and Cargo executable; verify hashes vendor content but never resolves, downloads or rewrites it",
                 ),
             },
         },

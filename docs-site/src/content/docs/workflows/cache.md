@@ -22,6 +22,14 @@ aros cache archives list --project /work/AROS --toolchain --preset pc-x86_64 \
 aros cache archives fetch --project /work/AROS --host-compiler --offline
 aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
 
+aros cache cargo status --dir /work/aros-source-cache
+aros cache cargo list --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+aros cache cargo fetch --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache
+aros cache cargo verify --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+
 aros cache sources status --dir /work/aros-source-cache
 aros cache sources list --source-lock toolchains/llvm.sources.json \
   --dir /work/aros-source-cache --format json
@@ -44,7 +52,7 @@ contents:
 | `compiler` | Discovers `sccache` and `ccache` on `PATH`, then records recognized configuration-variable names without reading their values or starting either backend. |
 | `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
 | `sources` | `status` never guesses a root. `list`, `fetch`, and `verify` require an explicit reviewed selector and root. |
-| `cargo` | Requires a future explicit tools checkout and managed vendor root. Your global Cargo home is excluded. |
+| `cargo` | `status` observes an explicit parent root. `list`, `fetch`, and `verify` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
 | `genmf` | Requires a future explicit expansion root and source selection. Verification reports and build trees are excluded. |
 
 Archive-root resolution is deterministic: `AROS_CACHE_DIR` wins when set;
@@ -132,6 +140,68 @@ identity, a host-compiler/toolchain receipt, release provenance, or an
 attestation; installation owns those stronger checks. A host compiler may have
 an unknown declared size, in which case download remains bounded by the
 consumer's hard archive limit and the output says so explicitly.
+
+## Cargo vendor generations
+
+`aros cache cargo` owns only immutable, AROS-managed Cargo vendor generations.
+It is the required cache handoff before a native toolchain producer builds its
+Rust collector offline; it neither builds a collector nor changes a selected
+`Cargo.lock`.
+
+`status --dir DIR` observes only that explicit parent root. The other commands
+select a generation from four inputs:
+
+- the producer's `toolchains/rust-toolchain.toml` pin;
+- a clean tools checkout's committed Git tree plus its `Cargo.toml` and
+  `Cargo.lock`;
+- the exact Cargo executable and its version under that pin; and
+- the explicit managed cache root.
+
+The resulting object is published once at
+`cargo/v1/<selection-sha256>/` with `cargo-vendor/`, a single-placeholder
+`cargo-vendor-config.toml`, and `receipt.json`. The receipt binds the portable
+input identity and measured vendor-tree/template digests. Checkout paths are
+reported for diagnosis but do not select an object, so the producer can consume
+the same generation after it snapshots the selected committed sources into a
+private work directory.
+
+```sh
+# No dependency resolution, vendor-tree hashing, or cache mutation. The command
+# runs bounded Git and `cargo --version` probes to prove the exact selection.
+aros cache cargo list --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+
+# The only population boundary. Cargo runs with a private CARGO_HOME, HOME,
+# temporary directory and working directory.
+aros cache cargo fetch --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache
+
+# Rehash every vendored package and compare it with Cargo.lock and receipt.
+aros cache cargo verify --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache
+
+# Require the existing verified object and prohibit Cargo resolution.
+aros cache cargo fetch --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --offline
+```
+
+`fetch` invokes Cargo's own `vendor --locked --versioned-dirs` through bounded
+process control; AROS does not reimplement Cargo's dependency resolver. Cargo
+may use network transport only during this explicit online operation. The
+generated configuration is parsed and rewritten by Rust only when it contains
+the one expected vendor-directory mapping. Registry and HTTPS Git dependencies
+must match the selected lock closure; unsupported source mappings, a missing
+Git dependency, a checksum mismatch, a cancellation, or a competing incomplete
+writer are failures. An existing generation is never repaired or replaced.
+
+Neither global `CARGO_HOME` nor user Cargo configuration, credentials, or
+temporary data enters the published generation. `--cargo FILE` selects a
+specific executable when `PATH` is not the intended one; otherwise `aros`
+records the absolute Cargo path it resolved. The native lifecycle revalidates
+the selected generation before copying it into a fresh private collector
+environment and always passes Cargo `--locked --offline`. `cache cargo list`
+does not hash a vendor tree, but it runs bounded Git and `cargo --version`
+probes before it reads the selected generation receipt.
 
 ## Reviewed source-cache operations
 
@@ -233,8 +303,7 @@ replace every removed producer-cache invocation before upgrading aros-tools.
 
 ## Current limits
 
-The following operations are not yet public cache commands: Cargo population
-and verification, GenMF refresh, retention, removal, prune,
+The following operations are not yet public cache commands: GenMF refresh, retention, removal, prune,
 compiler statistics reset, and compiler cache clearing. Do not replace them
 with ad-hoc directory deletion. Their interfaces require verified ownership,
 cooperating reader/writer leases, preview/apply protection, and explicit scope
