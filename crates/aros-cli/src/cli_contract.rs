@@ -1,8 +1,9 @@
 //! Shared parser predicates and repository-routing policy for the frontend.
 
-use super::{BoardCommand, Commands, SourceCommand, ToolchainCommands};
+use super::{repo, BoardCommand, Commands, SourceCommand, ToolchainCommands};
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
+use miette::Result;
+use std::path::{Path, PathBuf};
 
 /// Parse an opaque removable-media scan identity without accepting a path.
 pub fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
@@ -81,6 +82,7 @@ impl Commands {
             },
             Self::Ccache { .. }
             | Self::Install { .. }
+            | Self::Completions { .. }
             | Self::Toolchain {
                 command:
                     ToolchainCommands::Plan(_)
@@ -93,7 +95,7 @@ impl Commands {
                     | ToolchainCommands::Remove(_)
                     | ToolchainCommands::Gc(_),
             } => RepositoryRequirement::Global,
-            Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
+            Self::Info { .. } | Self::BuildTools { .. } => RepositoryRequirement::Optional,
             Self::Board { command } => match command {
                 BoardCommand::Init { .. }
                 | BoardCommand::Scan
@@ -112,5 +114,17 @@ impl Commands {
             | Self::Test { .. }
             | Self::Golden { .. } => RepositoryRequirement::Required,
         }
+    }
+}
+
+/// Resolve an optional or required source checkout according to command policy.
+pub fn resolve_repository(
+    invocation_directory: &Path,
+    requirement: RepositoryRequirement,
+) -> Result<Option<PathBuf>> {
+    match requirement {
+        RepositoryRequirement::Global => Ok(None),
+        RepositoryRequirement::Optional => repo::find_root_optional_from(invocation_directory),
+        RepositoryRequirement::Required => repo::find_root_from(invocation_directory).map(Some),
     }
 }

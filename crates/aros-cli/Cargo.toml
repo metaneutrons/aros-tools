@@ -49,6 +49,7 @@ aros-common.workspace = true
 aros-toolchain.workspace = true
 aros-release.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 console.workspace = true
 indicatif.workspace = true
 miette.workspace = true
