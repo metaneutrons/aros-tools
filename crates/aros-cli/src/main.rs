@@ -2,11 +2,12 @@
 
 #![warn(missing_docs)]
 
+use aros_board::config::{BoardModel, Transport};
 use aros_common::{
     render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode, DiagnosticContext,
     DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
 };
-use clap::{error::ErrorKind, Args, Parser, Subcommand};
+use clap::{error::ErrorKind, Args, Parser, Subcommand, ValueEnum};
 use console::{style, Emoji};
 use miette::Result;
 use std::ffi::OsString;
@@ -410,13 +411,64 @@ enum BuildToolsCommand {
     Check,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum BoardInitModel {
+    #[value(name = "rpi3")]
+    Rpi3,
+    #[value(name = "rpi4")]
+    Rpi4,
+    #[value(name = "rpi5")]
+    Rpi5,
+    #[value(name = "milk-v-titan")]
+    MilkVTitan,
+}
+
+impl From<BoardInitModel> for BoardModel {
+    fn from(value: BoardInitModel) -> Self {
+        match value {
+            BoardInitModel::Rpi3 => Self::Rpi3,
+            BoardInitModel::Rpi4 => Self::Rpi4,
+            BoardInitModel::Rpi5 => Self::Rpi5,
+            BoardInitModel::MilkVTitan => Self::MilkVTitan,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum BoardInitTransport {
+    #[value(name = "native-tftp")]
+    NativeTftp,
+    #[value(name = "uboot-usb-ecm")]
+    UbootUsbEcm,
+    #[value(name = "uefi-esp")]
+    UefiEsp,
+}
+
+impl From<BoardInitTransport> for Transport {
+    fn from(value: BoardInitTransport) -> Self {
+        match value {
+            BoardInitTransport::NativeTftp => Self::NativeTftp,
+            BoardInitTransport::UbootUsbEcm => Self::UbootUsbEcm,
+            BoardInitTransport::UefiEsp => Self::UefiEsp,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum BoardCommand {
-    /// Print or explicitly create a new local USB-ECM board-profile template
+    /// Print or explicitly create a typed local board-profile template
     Init {
-        /// Local profile name to create
+        /// Local profile name to create; this does not select hardware
         #[arg(long)]
         board: String,
+
+        /// Required physical hardware model for the generated profile
+        #[arg(long, value_enum)]
+        model: BoardInitModel,
+
+        /// Reviewed boot transport; defaults to the model's conservative transport
+        #[arg(long, value_enum)]
+        transport: Option<BoardInitTransport>,
 
         /// Board configuration file; defaults to ~/.config/aros/boards.toml
         #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
@@ -1089,7 +1141,10 @@ async fn run(cli: Cli, repo_root: Option<PathBuf>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Parser, RepositoryRequirement};
+    use super::{
+        BoardCommand, BoardInitModel, BoardInitTransport, Cli, Commands, Parser,
+        RepositoryRequirement,
+    };
     use clap::error::ErrorKind;
 
     fn requirement(arguments: &[&str]) -> RepositoryRequirement {
@@ -1174,6 +1229,52 @@ mod tests {
             ErrorKind::ValueValidation
         );
         assert!(Cli::try_parse_from(["aros", "build", "--jobs", "1"]).is_ok());
+    }
+
+    #[test]
+    fn board_init_requires_a_typed_model_and_never_inferrs_one_from_the_label() {
+        assert_eq!(
+            parse_error(&["aros", "board", "init", "--board", "pi5-usb"]),
+            ErrorKind::MissingRequiredArgument
+        );
+
+        let parsed = Cli::try_parse_from([
+            "aros",
+            "board",
+            "init",
+            "--board",
+            "pi5-usb",
+            "--model",
+            "rpi3",
+            "--transport",
+            "native-tftp",
+        ])
+        .expect("explicit model and transport parse");
+        let Commands::Board {
+            command:
+                BoardCommand::Init {
+                    board,
+                    model,
+                    transport,
+                    ..
+                },
+        } = parsed.command
+        else {
+            panic!("expected board init command");
+        };
+        assert_eq!(board, "pi5-usb");
+        assert_eq!(model, BoardInitModel::Rpi3);
+        assert_eq!(transport, Some(BoardInitTransport::NativeTftp));
+        assert!(Cli::try_parse_from([
+            "aros",
+            "board",
+            "init",
+            "--board",
+            "titan",
+            "--model",
+            "milk-v-titan",
+        ])
+        .is_ok());
     }
 
     #[test]

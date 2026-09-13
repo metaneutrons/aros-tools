@@ -142,6 +142,28 @@ impl BoardModel {
             Self::MilkVTitan => None,
         }
     }
+
+    /// Conservative transport used when a generated profile omits an explicit
+    /// transport selection.
+    #[must_use]
+    pub const fn default_transport(self) -> Transport {
+        match self {
+            Self::Rpi3 | Self::Rpi4 | Self::Rpi5 => Transport::NativeTftp,
+            Self::MilkVTitan => Transport::UefiEsp,
+        }
+    }
+
+    /// Whether the board engine has a reviewed contract for this model and
+    /// transport pair.
+    #[must_use]
+    pub const fn supports_transport(self, transport: Transport) -> bool {
+        matches!(
+            (self, transport),
+            (Self::Rpi3 | Self::Rpi5, Transport::NativeTftp)
+                | (Self::Rpi4, Transport::NativeTftp | Transport::UbootUsbEcm)
+                | (Self::MilkVTitan, Transport::UefiEsp)
+        )
+    }
 }
 
 impl std::fmt::Display for BoardModel {
@@ -186,10 +208,18 @@ pub enum Transport {
 
 impl std::fmt::Display for Transport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Transport {
+    /// Stable transport spelling used in profiles and command-line output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::NativeTftp => formatter.write_str("native-tftp"),
-            Self::UbootUsbEcm => formatter.write_str("uboot-usb-ecm"),
-            Self::UefiEsp => formatter.write_str("uefi-esp"),
+            Self::NativeTftp => "native-tftp",
+            Self::UbootUsbEcm => "uboot-usb-ecm",
+            Self::UefiEsp => "uefi-esp",
         }
     }
 }
@@ -704,6 +734,8 @@ pub fn load_board(config_override: Option<&Path>, board_name: &str) -> Result<Bo
 pub struct BoardTemplate {
     path: PathBuf,
     board_name: String,
+    model: BoardModel,
+    transport: Transport,
     contents: String,
 }
 
@@ -720,6 +752,18 @@ impl BoardTemplate {
         &self.board_name
     }
 
+    /// Explicit hardware model encoded by the template.
+    #[must_use]
+    pub const fn model(&self) -> BoardModel {
+        self.model
+    }
+
+    /// Explicit boot transport encoded by the template.
+    #[must_use]
+    pub const fn transport(&self) -> Transport {
+        self.transport
+    }
+
     /// Complete TOML document that will be created.
     #[must_use]
     pub fn contents(&self) -> &str {
@@ -727,21 +771,41 @@ impl BoardTemplate {
     }
 }
 
-/// Prepare an intentionally incomplete USB-ECM board profile without writing.
+/// Prepare an intentionally incomplete board profile without writing.
+///
+/// The caller must select the hardware model. Omitting a transport selects the
+/// model's conservative default; callers can select another reviewed transport
+/// explicitly where the model supports it.
 ///
 /// # Errors
 ///
 /// Returns an error for an invalid board name or destination.
-pub fn prepare_template(config_override: Option<&Path>, board_name: &str) -> Result<BoardTemplate> {
+pub fn prepare_template(
+    config_override: Option<&Path>,
+    board_name: &str,
+    model: BoardModel,
+    transport: Option<Transport>,
+) -> Result<BoardTemplate> {
     validate_board_name(board_name)?;
     let path = config_override.map_or_else(default_config_path, Path::to_path_buf);
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         miette::bail!("Board configuration destination must name a file.");
     }
+    let transport = transport.unwrap_or_else(|| model.default_transport());
+    if !model.supports_transport(transport) {
+        miette::bail!(
+            "Model '{}' has no reviewed '{}' template. Supported transports: {}.",
+            model,
+            transport,
+            supported_transports(model)
+        );
+    }
     Ok(BoardTemplate {
         path,
         board_name: board_name.to_string(),
-        contents: board_template(board_name),
+        model,
+        transport,
+        contents: board_template(board_name, model, transport),
     })
 }
 
@@ -826,13 +890,140 @@ pub fn default_config_path_from(
     PathBuf::from(".aros/boards.toml")
 }
 
-fn board_template(board_name: &str) -> String {
+const fn supported_transports(model: BoardModel) -> &'static str {
+    match model {
+        BoardModel::Rpi3 | BoardModel::Rpi5 => "native-tftp",
+        BoardModel::Rpi4 => "native-tftp, uboot-usb-ecm",
+        BoardModel::MilkVTitan => "uefi-esp",
+    }
+}
+
+fn board_template(board_name: &str, model: BoardModel, transport: Transport) -> String {
+    match (model, transport) {
+        (BoardModel::Rpi3, Transport::NativeTftp) => native_tftp_template(
+            board_name,
+            NativeTftpTemplate {
+                model: "rpi3",
+                preset: "rpi3-arm-debug",
+                toolchain_preset: "arm-raspi",
+                artifact_dir: "build/rpi3-arm-debug/boot/rpi3",
+                dtb_filename: "bcm2710-rpi-3-b-plus.dtb",
+                legacy_arch: "raspi-arm",
+                debug_transport: "jtag",
+                server_address: "192.168.73.1",
+                target_address: "192.168.73.2",
+                expected_target_mac: "02:aa:00:00:03:01",
+            },
+        ),
+        (BoardModel::Rpi4, Transport::NativeTftp) => native_tftp_template(
+            board_name,
+            NativeTftpTemplate {
+                model: "rpi4",
+                preset: "rpi4-aarch64-debug",
+                toolchain_preset: "rpi-aarch64",
+                artifact_dir: "build/rpi4-aarch64-debug/boot/rpi4",
+                dtb_filename: "bcm2711-rpi-4-b.dtb",
+                legacy_arch: "raspi-aarch64",
+                debug_transport: "jtag",
+                server_address: "192.168.74.1",
+                target_address: "192.168.74.2",
+                expected_target_mac: "02:aa:00:00:04:01",
+            },
+        ),
+        (BoardModel::Rpi4, Transport::UbootUsbEcm) => usb_ecm_template(board_name),
+        (BoardModel::Rpi5, Transport::NativeTftp) => native_tftp_template(
+            board_name,
+            NativeTftpTemplate {
+                model: "rpi5",
+                preset: "rpi5-aarch64-debug",
+                toolchain_preset: "rpi-aarch64",
+                artifact_dir: "build/rpi5-aarch64-debug/boot/rpi5",
+                dtb_filename: "bcm2712-rpi-5-b.dtb",
+                legacy_arch: "raspi-aarch64",
+                debug_transport: "swd",
+                server_address: "192.168.75.1",
+                target_address: "192.168.75.2",
+                expected_target_mac: "02:aa:00:00:05:01",
+            },
+        ),
+        (BoardModel::MilkVTitan, Transport::UefiEsp) => milk_v_titan_template(board_name),
+        _ => unreachable!("caller validates reviewed model and transport pairs"),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeTftpTemplate {
+    model: &'static str,
+    preset: &'static str,
+    toolchain_preset: &'static str,
+    artifact_dir: &'static str,
+    dtb_filename: &'static str,
+    legacy_arch: &'static str,
+    debug_transport: &'static str,
+    server_address: &'static str,
+    target_address: &'static str,
+    expected_target_mac: &'static str,
+}
+
+fn native_tftp_template(board_name: &str, template: NativeTftpTemplate) -> String {
     format!(
         r#"# Local AROS board profile. This file contains host-specific data;
 # do not commit it to the AROS source checkout.
 #
-# First: connect the Pi's U-Boot USB-ECM gadget, run `aros board scan`, then
-# replace the USB descriptor values and Pi-side gadget MAC below.
+# This is a native-RJ45 TFTP profile. Replace every REPLACE_ME value, configure
+# the selected Ethernet interface, then use `aros board serve --board {board_name}`.
+
+format_version = 2
+
+[boards.{board_name}]
+backend = "raspberry-pi"
+model = "{model}"
+preset = "{preset}"
+toolchain_preset = "{toolchain_preset}"
+build_target = "rpi-artifacts"
+transport = "native-tftp"
+artifact_dir = "{artifact_dir}"
+tftp_root = "/REPLACE_ME/aros-tftp"
+tftp_prefix = "{board_name}/current"
+serial_device = "/dev/REPLACE_ME"
+serial_baud = 115200
+debug_transport = "{debug_transport}"
+power_control = "manual"
+
+[boards.{board_name}.raspberry_pi]
+dtb_path = "/REPLACE_ME/{dtb_filename}"
+core_kobj_dir = "/REPLACE_ME/legacy-build/bin/{legacy_arch}/gen/kobjs"
+
+[boards.{board_name}.network]
+# Native-RJ45 interface and Pi Ethernet MAC. `aros board serve` validates both
+# before binding DHCP or TFTP.
+interface = "REPLACE_ME"
+server_address = "{server_address}"
+target_address = "{target_address}"
+subnet_mask = "255.255.255.0"
+expected_target_mac = "{expected_target_mac}"
+"#,
+        model = template.model,
+        preset = template.preset,
+        toolchain_preset = template.toolchain_preset,
+        artifact_dir = template.artifact_dir,
+        dtb_filename = template.dtb_filename,
+        legacy_arch = template.legacy_arch,
+        debug_transport = template.debug_transport,
+        server_address = template.server_address,
+        target_address = template.target_address,
+        expected_target_mac = template.expected_target_mac,
+    )
+}
+
+fn usb_ecm_template(board_name: &str) -> String {
+    format!(
+        r#"# Local AROS board profile. This file contains host-specific data;
+# do not commit it to the AROS source checkout.
+#
+# This Pi-4-only U-Boot USB-ECM transport is optional. Connect the Pi's gadget,
+# run `aros board scan`, then replace every USB descriptor value and the Pi-side
+# gadget MAC below. Do not store a dynamic host interface name.
 
 format_version = 2
 
@@ -856,10 +1047,10 @@ dtb_path = "/REPLACE_ME/bcm2711-rpi-4-b.dtb"
 core_kobj_dir = "/REPLACE_ME/legacy-build/bin/raspi-aarch64/gen/kobjs"
 
 [boards.{board_name}.usb_ecm]
-# Use private lab addresses that are already configured on the selected USB
-# interface. `aros board serve` refuses wildcard or wrong-interface addresses.
-host_address = "192.168.77.1"
-target_address = "192.168.77.2"
+# Use private lab addresses already configured on the selected USB interface.
+# `aros board serve` refuses wildcard or wrong-interface addresses.
+host_address = "192.168.74.1"
+target_address = "192.168.74.2"
 subnet_mask = "255.255.255.0"
 
 [boards.{board_name}.usb_ecm.identity]
@@ -868,7 +1059,36 @@ vendor_id = 0xffff # REPLACE_ME
 product_id = 0xffff # REPLACE_ME
 serial = "REPLACE_ME"
 # Pi/U-Boot CDC-ECM MAC, never the host interface MAC.
-expected_target_mac = "02:aa:00:00:00:01"
+expected_target_mac = "02:aa:00:00:04:02"
+"#
+    )
+}
+
+fn milk_v_titan_template(board_name: &str) -> String {
+    format!(
+        r#"# Local AROS board profile. This file contains host-specific data;
+# do not commit it to the AROS source checkout.
+#
+# Milk-V Titan boots from a verified UEFI ESP. It has no DHCP/TFTP deployment
+# path: create the image with `aros board sd image` and write it explicitly.
+
+format_version = 2
+
+[boards.{board_name}]
+backend = "opensbi-uefi"
+model = "milk-v-titan"
+preset = "milk-v-titan-riscv64-debug"
+toolchain_preset = "opensbi-riscv64"
+build_target = "opensbi-uefi-artifacts"
+transport = "uefi-esp"
+artifact_dir = "build/milk-v-titan-riscv64-debug/boot/milk-v-titan"
+serial_device = "/dev/REPLACE_ME"
+serial_baud = 115200
+debug_transport = "jtag"
+power_control = "manual"
+
+[boards.{board_name}.opensbi_uefi]
+core_kobj_dir = "/REPLACE_ME/legacy-build/bin/opensbi-riscv64/gen/kobjs"
 "#
     )
 }
@@ -1061,7 +1281,8 @@ fn validate_raspberry_pi_dtb(model: BoardModel, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_template, default_config_path_from, load_board, prepare_template, Transport,
+        create_template, default_config_path_from, load_board, prepare_template, BoardModel,
+        Transport,
     };
     use std::ffi::OsString;
 
@@ -1122,13 +1343,81 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let path = temporary.path().join("nested/boards.toml");
 
-        let template = prepare_template(Some(&path), "rpi4-usb").expect("template");
+        let template = prepare_template(
+            Some(&path),
+            "rpi4-usb",
+            BoardModel::Rpi4,
+            Some(Transport::UbootUsbEcm),
+        )
+        .expect("template");
         assert!(!path.exists());
+        assert_eq!(template.model(), BoardModel::Rpi4);
+        assert_eq!(template.transport(), Transport::UbootUsbEcm);
 
         create_template(&template).expect("created template");
         let board = load_board(Some(&path), "rpi4-usb").expect("template parses");
+        assert_eq!(board.config.model, BoardModel::Rpi4);
         assert_eq!(board.config.transport, Transport::UbootUsbEcm);
         assert!(create_template(&template).is_err());
+    }
+
+    #[test]
+    fn templates_cover_each_reviewed_model_and_transport_pair() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let cases = [
+            ("pi3-lab", BoardModel::Rpi3, Transport::NativeTftp),
+            ("pi4-lab", BoardModel::Rpi4, Transport::NativeTftp),
+            ("pi4-usb", BoardModel::Rpi4, Transport::UbootUsbEcm),
+            ("pi5-lab", BoardModel::Rpi5, Transport::NativeTftp),
+            ("titan-lab", BoardModel::MilkVTitan, Transport::UefiEsp),
+        ];
+
+        for (name, model, transport) in cases {
+            let path = temporary.path().join(format!("{name}.toml"));
+            let template = prepare_template(Some(&path), name, model, Some(transport))
+                .expect("reviewed template");
+            assert_eq!(template.model(), model);
+            assert_eq!(template.transport(), transport);
+            create_template(&template).expect("created template");
+
+            let board = load_board(Some(&path), name).expect("template parses and validates");
+            assert_eq!(board.config.model, model);
+            assert_eq!(board.config.transport, transport);
+        }
+    }
+
+    #[test]
+    fn templates_reject_unreviewed_model_and_transport_pairs() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let error = prepare_template(
+            Some(&temporary.path().join("boards.toml")),
+            "pi5-usb",
+            BoardModel::Rpi5,
+            Some(Transport::UbootUsbEcm),
+        )
+        .expect_err("Pi 5 USB-ECM has no reviewed contract");
+
+        assert!(error
+            .to_string()
+            .contains("Model 'rpi5' has no reviewed 'uboot-usb-ecm' template"));
+    }
+
+    #[test]
+    fn template_defaults_are_model_specific() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let cases = [
+            (BoardModel::Rpi3, Transport::NativeTftp),
+            (BoardModel::Rpi4, Transport::NativeTftp),
+            (BoardModel::Rpi5, Transport::NativeTftp),
+            (BoardModel::MilkVTitan, Transport::UefiEsp),
+        ];
+
+        for (model, transport) in cases {
+            let path = temporary.path().join(format!("{}.toml", model.as_str()));
+            let template = prepare_template(Some(&path), "local", model, None)
+                .expect("model default template");
+            assert_eq!(template.transport(), transport);
+        }
     }
 
     #[test]

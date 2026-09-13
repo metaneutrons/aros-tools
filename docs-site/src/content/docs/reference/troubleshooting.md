@@ -121,12 +121,13 @@ eight binaries on one version. Package-manager repositories are supported only
 after the [release-status page](/aros-tools/reference/release-status/) marks
 their public verification complete.
 
-## Board name does not match the hardware
+## Board label does not select the hardware
 
-`board init --board NAME` uses NAME as a registry label and always emits a
-Pi-4 USB-ECM template. Edit the actual model/backend/transport using the
-[board examples](/aros-tools/workflows/boards/). USB-ECM is not enabled for
-Pi 3/5, and Milk-V needs the OpenSBI/UEFI profile and its legacy inputs.
+`board init --board NAME --model MODEL` uses NAME only as a registry label.
+Select the actual model explicitly; the template selects the matching backend
+and default transport. Use `--transport uboot-usb-ecm` only for Pi 4. Pi 3
+and Pi 5 reject USB-ECM, and Milk-V Titan rejects Pi TFTP transports. See the
+[board workflow](/aros-tools/workflows/boards/) for the supported matrix.
 
 If the documented checks do not explain a failure, open a GitHub issue with the
 tool version, host target, stable diagnostic document and minimal reproduction.

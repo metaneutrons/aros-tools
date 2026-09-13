@@ -5,7 +5,7 @@ pub mod doctor;
 pub use aros_board::{config, deploy, scan, sd, sd_disk, sd_unmount};
 
 use crate::build::{self, BuildOptions};
-use config::{Board, Transport};
+use config::{Board, BoardModel, Transport};
 use console::ConsoleProgram;
 use miette::Result;
 use std::path::{Path, PathBuf};
@@ -13,16 +13,22 @@ use std::path::{Path, PathBuf};
 pub fn initialize_template(
     config_override: Option<&Path>,
     board_name: &str,
+    model: BoardModel,
+    transport: Option<Transport>,
     apply: bool,
 ) -> Result<()> {
-    let template = config::prepare_template(config_override, board_name)?;
+    let template = config::prepare_template(config_override, board_name, model, transport)?;
     aros_common::outputln!("🧭 AROS board profile template");
     aros_common::outputln!("  • File:  {}", template.path().display());
     aros_common::outputln!("  • Board: {}", template.board_name());
+    aros_common::outputln!("  • Model: {}", template.model());
+    aros_common::outputln!("  • Transport: {}", template.transport());
     if !apply {
         aros_common::outputln!("\n{}", template.contents());
         aros_common::outputln!(
-            "Dry run: no file was created. Review the values, then rerun with `aros board init --board {board_name} --apply`."
+            "Dry run: no file was created. Review the values, then rerun with `aros board init --board {board_name} --model {} --transport {} --apply`.",
+            template.model(),
+            template.transport(),
         );
         return Ok(());
     }

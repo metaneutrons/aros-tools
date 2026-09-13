@@ -237,9 +237,17 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
     match command {
         BoardCommand::Init {
             board,
+            model,
+            transport,
             config,
             apply,
-        } => crate::board::initialize_template(config.as_deref(), &board, apply),
+        } => crate::board::initialize_template(
+            config.as_deref(),
+            &board,
+            model.into(),
+            transport.map(Into::into),
+            apply,
+        ),
         BoardCommand::Scan => crate::board::scan(),
         BoardCommand::Doctor(selection) => {
             let board = load_board(&selection)?;
