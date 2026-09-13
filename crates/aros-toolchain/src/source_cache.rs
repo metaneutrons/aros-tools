@@ -41,6 +41,10 @@ pub const SOURCE_CACHE_LIST_SCHEMA: &str = "aros-cache-sources-list-v1";
 #[cfg(unix)]
 pub const SOURCE_CACHE_VERIFY_SCHEMA: &str = "aros-cache-sources-verify-v1";
 
+/// Stable schema for source-cache population through a reviewed selector.
+#[cfg(unix)]
+pub const SOURCE_CACHE_FETCH_SCHEMA: &str = "aros-cache-sources-fetch-v1";
+
 /// Passive observation of an explicit source-cache root.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -146,6 +150,24 @@ pub struct SourceCacheVerification {
     pub entries: Vec<VerifiedSourceCacheEntry>,
 }
 
+/// Exact result of source-cache population through a reviewed selector.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceCacheFetch {
+    /// Versioned schema identifier.
+    pub schema: &'static str,
+    /// Stable operation name.
+    pub operation: &'static str,
+    /// Origin of the reviewed selector.
+    pub request_kind: SourceCacheRequestKind,
+    /// SHA-256 of the exact selector bytes.
+    pub request_sha256: Sha256Digest,
+    /// Explicit population boundary. `network` is false only for offline runs.
+    pub side_effects: CacheSideEffects,
+    /// Exact locked objects present after the operation completes.
+    pub entries: Vec<VerifiedSourceCacheEntry>,
+}
+
 #[cfg(unix)]
 const PASSIVE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
     creates_state: false,
@@ -160,6 +182,22 @@ const PASSIVE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
 const VERIFY_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
     hashes_payloads: true,
     ..PASSIVE_SIDE_EFFECTS
+};
+
+#[cfg(unix)]
+const FETCH_OFFLINE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
+    creates_state: true,
+    mutates_state: true,
+    network: false,
+    backend_process: false,
+    locks: true,
+    hashes_payloads: true,
+};
+
+#[cfg(unix)]
+const FETCH_ONLINE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
+    network: true,
+    ..FETCH_OFFLINE_SIDE_EFFECTS
 };
 
 /// Observe an explicit source-cache root without creating or traversing it.
@@ -251,6 +289,63 @@ pub fn verify_request(
         request_sha256: request.request_sha256.clone(),
         side_effects: VERIFY_SIDE_EFFECTS,
         entries,
+    })
+}
+
+/// Acquire missing strict source-cache objects, then verify the full closure.
+///
+/// Existing entries are snapshotted and verified before transport. They are
+/// never refreshed, replaced or repaired. The caller must select an existing
+/// real cache root; source-cache population creates only private transfer
+/// staging and no-clobber declared payloads below that root.
+///
+/// # Errors
+///
+/// Returns AX0301 when the selected root/object is unsafe, an integrity check
+/// fails, a transfer cannot complete, or offline mode encounters a miss.
+/// Unverified product declarations require the separate explicit M2 path and
+/// cannot enter a strict producer/compatibility cache closure.
+#[cfg(unix)]
+pub async fn fetch_request(
+    cache_root: &Path,
+    request: &SourceCacheRequest,
+    offline: bool,
+) -> Result<SourceCacheFetch, ContractError> {
+    checked_real_cache_root(cache_root)?;
+    for entry in &request.entries {
+        let candidate = exact_candidate(entry)?;
+        let SourceCacheIntegrity::Locked { sha256, size } = &entry.integrity else {
+            return Err(ContractError::sources(
+                "unverified product source declarations require --allow-unverified and cannot enter a strict source cache closure",
+            ));
+        };
+        let snapshot = aros_fetch::engine::cache::acquire_https_cache_payload_with_normalization(
+            cache_root,
+            &candidate.filename,
+            &candidate.url,
+            *size,
+            sha256,
+            entry.normalization,
+            offline,
+        )
+        .await
+        .map_err(|error| map_fetch_failure(&error))?;
+        snapshot
+            .revalidate()
+            .map_err(|error| map_fetch_failure(&error))?;
+    }
+    let verified = verify_request(cache_root, request)?;
+    Ok(SourceCacheFetch {
+        schema: SOURCE_CACHE_FETCH_SCHEMA,
+        operation: "sources.fetch",
+        request_kind: verified.request_kind,
+        request_sha256: verified.request_sha256,
+        side_effects: if offline {
+            FETCH_OFFLINE_SIDE_EFFECTS
+        } else {
+            FETCH_ONLINE_SIDE_EFFECTS
+        },
+        entries: verified.entries,
     })
 }
 
@@ -440,8 +535,9 @@ mod m2_tests {
     use aros_fetch::engine::cache::CachePayloadNormalization;
 
     use super::{
-        list, status, verify_request, SourceCacheEntryState, SourceCacheIntegrity, SourceCacheList,
-        SourceCacheRequest, SourceCacheRequestKind, SourceCacheStatus, SourceCacheVerification,
+        fetch_request, list, status, verify_request, SourceCacheEntryState, SourceCacheFetch,
+        SourceCacheIntegrity, SourceCacheList, SourceCacheRequest, SourceCacheRequestKind,
+        SourceCacheStatus, SourceCacheVerification, SOURCE_CACHE_FETCH_SCHEMA,
         SOURCE_CACHE_LIST_SCHEMA, SOURCE_CACHE_STATUS_SCHEMA, SOURCE_CACHE_VERIFY_SCHEMA,
     };
     use crate::source_cache_request::{SourceCacheCandidate, SourceCacheEntry};
@@ -521,6 +617,30 @@ mod m2_tests {
         assert_eq!(verified.entries[0].size, payload.len() as u64);
         assert!(verified.side_effects.hashes_payloads);
         assert!(!verified.side_effects.mutates_state);
+    }
+
+    #[tokio::test]
+    async fn offline_fetch_reuses_only_a_verified_existing_object() {
+        let temporary = real_tempdir();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let payload = b"exact locked payload";
+        fs::write(cache.join("llvm.tar.xz"), payload).unwrap();
+        let fetched: SourceCacheFetch =
+            fetch_request(&cache, &strict_request("llvm.tar.xz", payload), true)
+                .await
+                .unwrap();
+        assert_eq!(fetched.schema, SOURCE_CACHE_FETCH_SCHEMA);
+        assert_eq!(fetched.operation, "sources.fetch");
+        assert!(!fetched.side_effects.network);
+        assert!(fetched.side_effects.hashes_payloads);
+        assert_eq!(fetched.entries[0].sha256, sha256_bytes(payload));
+
+        let error = fetch_request(&cache, &strict_request("missing.tar.xz", payload), true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("missing, unsafe or changed"));
+        assert!(!cache.join("missing.tar.xz").exists());
     }
 
     #[test]
