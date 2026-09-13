@@ -283,6 +283,10 @@ pub enum CacheLifecycleError {
     /// A named retention reference prevents deletion.
     #[error("cache object is retained by: {0}")]
     Retained(String),
+    /// A family-specific verifier rejected the exact object while its
+    /// lifecycle lock was held.
+    #[error("cache lifecycle object validation failed: {0}")]
+    Validation(String),
     /// One descriptor-relative filesystem operation failed.
     #[error("cache lifecycle {action} failed for '{}': {source}", path.display())]
     Io {
@@ -302,6 +306,13 @@ pub enum CacheLifecycleError {
 impl CacheLifecycleError {
     fn invalid(message: impl Into<String>) -> Self {
         Self::Invalid(message.into())
+    }
+
+    /// Convert a bounded family-specific validation failure into the shared
+    /// lifecycle error channel.
+    #[must_use]
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
     }
 
     fn io(action: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Self {
@@ -328,6 +339,30 @@ pub fn keep(
     name: &str,
 ) -> Result<CacheRetentionRecord, CacheLifecycleError> {
     keep_many(std::slice::from_ref(request), name)
+}
+
+/// Create one named retention reference after validating an exact object
+/// under its exclusive lifecycle lock.
+///
+/// The supplied verifier must only inspect the object selected by `request`.
+/// It runs while the same no-follow lock used to measure and retain the object
+/// is held, so a cooperating writer cannot replace bytes between the
+/// family-specific integrity check and durable retention publication.
+///
+/// # Errors
+///
+/// Returns the same errors as [`keep`], or [`CacheLifecycleError::Validation`]
+/// when the family verifier rejects the locked object. A failed verifier never
+/// creates a retention receipt.
+pub fn keep_validated<F>(
+    request: &CacheObjectRequest,
+    name: &str,
+    validate: F,
+) -> Result<CacheRetentionRecord, CacheLifecycleError>
+where
+    F: FnOnce() -> Result<(), CacheLifecycleError>,
+{
+    keep_many_validated(std::slice::from_ref(request), name, validate)
 }
 
 /// Acquire a shared no-follow lease for one exact active cache read.
@@ -375,11 +410,24 @@ pub fn keep_many(
     requests: &[CacheObjectRequest],
     name: &str,
 ) -> Result<CacheRetentionRecord, CacheLifecycleError> {
+    keep_many_validated(requests, name, || Ok(()))
+}
+
+fn keep_many_validated<F>(
+    requests: &[CacheObjectRequest],
+    name: &str,
+    validate: F,
+) -> Result<CacheRetentionRecord, CacheLifecycleError>
+where
+    F: FnOnce() -> Result<(), CacheLifecycleError>,
+{
     let name = retention_name(name)?;
     let (family, root, relative_paths) = common_selection(requests)?;
     validate_private_directory_nofollow(&root)
         .map_err(|error| CacheLifecycleError::io("validate private root", &root, error))?;
     let locks = acquire_object_locks(&root, family, &relative_paths)?;
+    validate()?;
+    revalidate_object_locks(&locks)?;
     let mut selected = requests
         .iter()
         .map(SelectedObject::measure)
@@ -1125,9 +1173,9 @@ fn current_unix_seconds() -> Result<u64, CacheLifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_read_lease, acquire_write_lease, keep, keep_many, preview_removal_until, release,
-        CacheLifecycleError, CacheObjectKind, CacheObjectRequest, CacheRetentionRelease,
-        PREVIEW_LIFETIME_SECONDS,
+        acquire_read_lease, acquire_write_lease, keep, keep_many, keep_validated,
+        preview_removal_until, release, CacheLifecycleError, CacheObjectKind, CacheObjectRequest,
+        CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
     };
     use crate::CacheFamily;
     use std::path::PathBuf;
@@ -1221,6 +1269,40 @@ mod tests {
         let preview = preview_removal_until(&request, 4_000).unwrap();
         apply_removal_with_now(&request, &preview.apply_token, 3_900).unwrap();
         assert!(!entry.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validated_keep_holds_the_object_lock_and_never_retains_a_rejected_object() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("archive"), b"approved").unwrap();
+        let request = file_request(&root, "archive");
+        let mut validation_ran = false;
+
+        let record = keep_validated(&request, "release-candidate", || {
+            validation_ran = true;
+            assert!(matches!(
+                acquire_write_lease(&request),
+                Err(CacheLifecycleError::Io {
+                    action: "acquire lifecycle lease",
+                    ..
+                })
+            ));
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(validation_ran);
+        assert_eq!(record.name, "release-candidate");
+        assert!(matches!(
+            keep_validated(&request, "rejected", || Err(CacheLifecycleError::validation("mismatch"))),
+            Err(CacheLifecycleError::Validation(message)) if message == "mismatch"
+        ));
+        assert!(!root
+            .join(".aros-cache-lifecycle/v1/retention/archives/rejected.json")
+            .exists());
     }
 
     #[test]

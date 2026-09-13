@@ -12,7 +12,7 @@ use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
 use crate::{CacheArchiveSelector, CacheCargoSelector, CacheGenmfSelector, CacheSourceSelector};
 use aros_cache::{
-    apply_removal, cache_status, compiler_cache_status, keep, preview_removal, release,
+    apply_removal, cache_status, compiler_cache_status, keep_validated, preview_removal, release,
     CacheCapability, CacheFamily, CacheFamilyStatus, CacheRemovalPreview, CacheRemovalResult,
     CacheRetentionRecord, CacheRetentionRelease, CacheSideEffects, CacheStatus,
     CompilerBackendChoice, CompilerCacheStatus, RootObservation,
@@ -614,14 +614,17 @@ pub fn archive_keep(
 ) -> Result<()> {
     let selection = archive_selection(selector)?;
     let request = archive_cache_request(&selection.sha256, selection.expected_size)?;
-    let verified = open_verified_archive(&selection.sha256, selection.expected_size)?;
-    if verified.path() != selection.cache_path {
+    let expected_path = request.cache_root.join(&request.relative_path);
+    if expected_path != selection.cache_path {
         return Err(miette::miette!(
-            "selected archive cache path changed while verifying its retention candidate"
+            "selected archive cache path does not match its declared lifecycle identity"
         ));
     }
-    drop(verified);
-    let retention = keep(&request, name).map_err(|error| miette::miette!(error))?;
+    let retention = keep_validated(&request, name, || {
+        crate::artifact::verify_archive(&expected_path, &selection.sha256, selection.expected_size)
+            .map_err(|error| aros_cache::CacheLifecycleError::validation(error.to_string()))
+    })
+    .map_err(|error| miette::miette!(error))?;
     let report = ArchiveCacheRetention {
         schema: ARCHIVE_KEEP_SCHEMA,
         operation: "archives.keep",
