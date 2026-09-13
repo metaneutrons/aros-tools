@@ -118,16 +118,25 @@ the limits safe for automation to check rather than infer from prose.
 ### Managed local namespaces
 
 `prepare` is the explicit ownership boundary. It accepts exactly one concrete
-backend and an absolute path. The path must be an empty private directory (or
-not exist yet); a non-empty directory, symbolic link, malformed marker, or a
-marker for the other backend is rejected. AROS writes a generated local-only
-configuration, a private `data/` directory, and a no-clobber ownership marker.
-Running the command again only revalidates that exact state.
+backend and, without `--dir`, uses that backend's candidate below
+`AROS_HOME/cache/compiler/v1/`. An explicit path must be absolute. The selected
+path must be an empty private directory (or not exist yet); a non-empty
+directory, symbolic link, malformed marker, or a marker for the other backend
+is rejected. AROS writes a generated local-only configuration, a private
+`data/` directory, and a no-clobber ownership marker. Running the command again
+only revalidates that exact state.
 
 ```sh
 aros cache compiler prepare --backend sccache --dir /work/cache/aros-sccache
 aros build --compiler-cache sccache \
   --compiler-cache-dir /work/cache/aros-sccache --offline
+```
+
+For the default namespace, omit `--dir`:
+
+```sh
+aros cache compiler prepare --backend sccache
+aros build --compiler-cache sccache --offline
 ```
 
 The generated environment removes every ambient `SCCACHE_*` and `CCACHE_*`

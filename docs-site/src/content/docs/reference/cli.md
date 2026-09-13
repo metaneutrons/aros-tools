@@ -417,11 +417,13 @@ explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
 
-`aros cache compiler prepare --backend sccache|ccache --dir DIR` is the only
-command that establishes compiler-cache ownership. `DIR` must be absolute,
-private, and empty (or absent); existing cache bytes are never adopted. It
-generates a local-only configuration, data directory and ownership marker. The
-same invocation later revalidates that marker instead of overwriting it.
+`aros cache compiler prepare --backend sccache|ccache [--dir DIR]` is the only
+command that establishes compiler-cache ownership. Without `--dir`, it selects
+the backend's `AROS_HOME/cache/compiler/v1/` candidate. An explicit `DIR` must
+be absolute, private, and empty (or absent); existing cache bytes are never
+adopted. It generates a local-only configuration, data directory and ownership
+marker. The same invocation later revalidates that marker instead of
+overwriting it.
 
 `aros cache archives` manages only downloaded host/compiler archive bytes,
 never their installed payloads. `status` remains passive. `list`, `fetch`,

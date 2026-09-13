@@ -391,9 +391,20 @@ pub fn compiler_status(
 /// already owned by another backend, or cannot be atomically initialized.
 pub fn compiler_prepare(
     backend: CompilerBackend,
-    dir: PathBuf,
+    dir: Option<PathBuf>,
     format: ResultFormat,
 ) -> Result<()> {
+    let dir = match dir {
+        Some(dir) => dir,
+        None => {
+            aros_cache::resolve_default_compiler_cache_root(
+                &aros_cache::CacheEnvironment::current(),
+                backend,
+            )
+            .map_err(|error| miette::miette!(error))?
+            .path
+        }
+    };
     let report = aros_cache::prepare_managed_compiler_cache(backend, dir)
         .map_err(|error| miette::miette!(error))?;
     match format {

@@ -58,13 +58,17 @@ pub fn cache_boundary(command: &CacheCommand) -> CacheLifecycleBoundary {
             }
         }
         CacheCommand::Compiler {
-            command: CacheCompilerCommand::Prepare { .. },
+            command: CacheCompilerCommand::Prepare { dir, .. },
         } => (
             DiagnosticCode::CliConfiguration,
             DiagnosticStage::Configuration,
             "cache.compiler.prepare",
             None,
-            "pass an absolute empty private --dir; preparation refuses foreign state and creates only a local AROS-managed compiler-cache namespace",
+            if dir.is_some() {
+                "pass an absolute empty private --dir; preparation refuses foreign state and creates only a local AROS-managed compiler-cache namespace"
+            } else {
+                "set AROS_HOME to an absolute private state root, or pass an explicit empty private --dir; preparation refuses foreign state"
+            },
         ),
         CacheCommand::Sources { command } => match command {
             CacheSourcesCommand::Status { .. } => (

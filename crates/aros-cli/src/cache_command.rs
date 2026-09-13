@@ -70,9 +70,9 @@ pub enum CacheCompilerCommand {
         #[arg(long, value_enum)]
         backend: ManagedCompilerBackend,
 
-        /// Empty existing or new absolute root to claim; foreign state is refused.
+        /// Empty absolute root to claim; default is the backend's AROS_HOME candidate.
         #[arg(long, value_name = "DIR")]
-        dir: PathBuf,
+        dir: Option<PathBuf>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
