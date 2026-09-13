@@ -51,11 +51,6 @@ pub fn run(
     request: &BuildRequest,
     cancellation: &CancellationToken,
 ) -> Result<BuildResult, ContractError> {
-    if !request.offline {
-        return Err(ContractError::preflight(
-            "native toolchain builds require --offline and a fully prepared verified source cache",
-        ));
-    }
     validate_request(request)?;
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(request.timeout_seconds))
@@ -145,7 +140,7 @@ fn run_owned(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
-    let cache = source_cache::verify(&request.cache_dir, bound.source_lock())?;
+    let cache = verify_prepared_cache(&request.cache_dir, bound.source_lock())?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -455,7 +450,7 @@ fn resume_after_compiler(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
-    let cache = source_cache::verify(&request.cache_dir, bound.source_lock())?;
+    let cache = verify_prepared_cache(&request.cache_dir, bound.source_lock())?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source_root,
@@ -689,8 +684,18 @@ fn plan_request(request: &BuildRequest) -> PlanRequest {
         cache_dir: Some(request.cache_dir.clone()),
         jobs: Some(request.jobs),
         timeout_seconds: Some(request.timeout_seconds),
-        offline: true,
     }
+}
+
+fn verify_prepared_cache(
+    cache_dir: &Path,
+    lock: &crate::source_lock::SourceLock,
+) -> Result<source_cache::CacheObservation, ContractError> {
+    source_cache::verify(cache_dir, lock).map_err(|error| {
+        ContractError::sources(format!(
+            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros toolchain producer cache`, then prove it with `aros toolchain producer cache --verify-only --offline` before retrying: {error}"
+        ))
+    })
 }
 
 struct LifecyclePaths {

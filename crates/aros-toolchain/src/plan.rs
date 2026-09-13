@@ -40,11 +40,9 @@ pub struct PlanRequest {
     pub jobs: Option<u64>,
     /// Whole-build deadline, not the bounded inspection timeout.
     pub timeout_seconds: Option<u64>,
-    /// Effective frontend offline policy. Planning is always offline.
-    pub offline: bool,
 }
 
-/// A non-authorizing inspection result in the frozen plan-v1 envelope.
+/// A non-authorizing inspection result in the plan-v2 envelope.
 #[derive(Debug, Serialize)]
 pub struct Plan {
     /// Versioned schema.
@@ -123,10 +121,8 @@ pub struct Resources {
     pub jobs: Option<u64>,
     /// Explicit future build deadline.
     pub timeout_seconds: Option<u64>,
-    /// Effective frontend policy; inspection itself never uses the network.
-    pub offline: bool,
-    /// Planned legacy policy, not an active or proven OS sandbox.
-    pub network_isolation: &'static str,
+    /// Execution policy is fixed: lifecycle inputs are prepared and never fetched.
+    pub input_mode: &'static str,
     /// This slice does not measure storage capacity.
     pub free_bytes: Option<u64>,
 }
@@ -232,7 +228,10 @@ pub fn inspect_with_timeout(
     producer.recheck()?;
     tools.recheck()?;
     Ok(Plan {
-        schema: "aros-toolchain-plan-v1",
+        // v2 makes the fixed prepared-input execution model explicit. v1
+        // exposed an `offline` switch even though native execution never had
+        // an online mode.
+        schema: "aros-toolchain-plan-v2",
         operation: "plan",
         identity: Identity {
             recipe_sha256: recipe.sha256().clone(),
@@ -247,8 +246,7 @@ pub fn inspect_with_timeout(
         resources: Resources {
             jobs: request.jobs,
             timeout_seconds: request.timeout_seconds,
-            offline: request.offline,
-            network_isolation: "fetch-guard",
+            input_mode: "prepared-cache-only",
             free_bytes: None,
         },
         steps: steps(),
@@ -346,13 +344,6 @@ fn findings(request: &PlanRequest) -> Vec<Diagnostic> {
             "Work/output/cache roots or explicit resource budgets are incomplete.")
             .with_hint("Select --work-dir, --output-dir, --cache-dir, --jobs and --timeout-seconds; this does not remove the other blockers."));
     }
-    if !request.offline {
-        findings.push(Diagnostic::warning(
-            DiagnosticCode::ProducerPreflight,
-            DiagnosticStage::Configuration,
-            "Native execution requires the explicit offline policy.",
-        ).with_hint("Pass --offline after preparing the verified source cache; the lifecycle never falls back to producer-controlled network access."));
-    }
     findings
 }
 
@@ -373,7 +364,6 @@ const fn readiness(request: &PlanRequest) -> &'static str {
         || request.cache_dir.is_none()
         || request.jobs.is_none()
         || request.timeout_seconds.is_none()
-        || !request.offline
     {
         "incomplete"
     } else {

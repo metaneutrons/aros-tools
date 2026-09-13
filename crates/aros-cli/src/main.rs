@@ -1829,4 +1829,65 @@ mod tests {
             Cli::try_parse_from(["aros", "toolchain", "inventory", "--max-entries", "1"]).is_ok()
         );
     }
+
+    #[test]
+    fn native_producer_surface_has_one_prepared_input_mode_and_structural_package_output() {
+        let native_roots = [
+            "--preset",
+            "pc-x86_64",
+            "--recipe",
+            "/recipe.json",
+            "--source-dir",
+            "/source",
+            "--producer-dir",
+            "/producer",
+            "--tools-dir",
+            "/tools",
+        ];
+        for command in ["plan", "build"] {
+            let mut arguments = vec!["aros", "toolchain", command];
+            arguments.extend(native_roots);
+            arguments.push("--offline");
+            assert_eq!(parse_error(&arguments), ErrorKind::UnknownArgument);
+        }
+
+        let package_context = [
+            "--recipe",
+            "/recipe.json",
+            "--source-lock",
+            "/producer/toolchains/lock.sources.json",
+            "--profiles",
+            "/producer/toolchains/profiles.json",
+            "--preset",
+            "pc-x86_64",
+            "--release-id",
+            "candidate-1",
+            "--host",
+            "linux-x86_64",
+            "--build-environment",
+            "/evidence/environment.json",
+        ];
+        let mut package = vec!["aros", "toolchain", "producer", "package"];
+        package.extend(package_context);
+        package.extend(["--input-dir", "/candidate/toolchain"]);
+        assert_eq!(
+            parse_error(&package),
+            ErrorKind::MissingRequiredArgument,
+            "package cannot silently choose an output root"
+        );
+
+        let mut verify = vec!["aros", "toolchain", "producer", "verify-package"];
+        verify.extend(package_context);
+        verify.extend([
+            "--input-dir",
+            "/candidate/toolchain",
+            "--output-dir",
+            "/packages/out",
+        ]);
+        assert_eq!(
+            parse_error(&verify),
+            ErrorKind::UnknownArgument,
+            "verification must not accept a packaging output option"
+        );
+    }
 }

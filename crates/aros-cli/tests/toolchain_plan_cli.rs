@@ -284,7 +284,7 @@ fn global_json_plan_has_exact_identity_and_no_filesystem_mutation() {
     let before = inventory(&fixture.root);
     let plan = fixture.plan();
     assert_eq!(inventory(&fixture.root), before);
-    assert_eq!(plan["schema"], "aros-toolchain-plan-v1");
+    assert_eq!(plan["schema"], "aros-toolchain-plan-v2");
     assert_eq!(plan["operation"], "plan");
     assert_eq!(plan["readiness"], "incomplete");
     assert_eq!(
@@ -350,7 +350,6 @@ fn complete_budgets_remain_blocked_and_do_not_create_roots() {
             "--work-dir=missing/work",
             "--output-dir=missing/output",
             "--cache-dir=missing/cache",
-            "--offline",
         ])
         .output()
         .unwrap();
@@ -363,7 +362,7 @@ fn complete_budgets_remain_blocked_and_do_not_create_roots() {
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(plan["readiness"], "ready");
     assert_eq!(plan["resources"]["jobs"], 2);
-    assert_eq!(plan["resources"]["offline"], true);
+    assert_eq!(plan["resources"]["input_mode"], "prepared-cache-only");
     assert_eq!(
         plan["paths"]["work"],
         json!(fixture.root.join("missing/work"))
@@ -798,24 +797,8 @@ fn native_plan_binds_its_declared_contract_without_mutation() {
 }
 
 #[test]
-fn native_plan_requires_offline_policy_before_reporting_ready() {
+fn native_plan_exposes_a_fixed_prepared_input_mode_when_ready() {
     let fixture = Fixture::new();
-    let mut command = fixture.command();
-    command.args([
-        "--work-dir=work",
-        "--output-dir=output",
-        "--cache-dir=cache",
-        "--jobs=1",
-        "--timeout-seconds=60",
-    ]);
-    let output = command.output().unwrap();
-    assert!(output.status.success());
-    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["readiness"], "incomplete");
-    assert!(plan["findings"].as_array().unwrap().iter().any(|finding| {
-        finding["message"] == "Native execution requires the explicit offline policy."
-    }));
-
     let output = fixture
         .command()
         .args([
@@ -824,13 +807,14 @@ fn native_plan_requires_offline_policy_before_reporting_ready() {
             "--cache-dir=cache",
             "--jobs=1",
             "--timeout-seconds=60",
-            "--offline",
         ])
         .output()
         .unwrap();
     assert!(output.status.success());
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(plan["readiness"], "ready");
+    assert_eq!(plan["resources"]["input_mode"], "prepared-cache-only");
+    assert!(plan["resources"].get("offline").is_none());
 }
 
 #[test]
@@ -871,7 +855,7 @@ fn oversized_recipe_is_bounded_and_invalid_input_is_not_echoed() {
 }
 
 #[test]
-fn offline_environment_is_reflected_without_fetching() {
+fn offline_environment_does_not_change_the_fixed_native_input_mode() {
     let fixture = Fixture::new();
     let output = fixture
         .command()
@@ -880,7 +864,8 @@ fn offline_environment_is_reflected_without_fetching() {
         .unwrap();
     assert!(output.status.success());
     let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(plan["resources"]["offline"], true);
+    assert_eq!(plan["resources"]["input_mode"], "prepared-cache-only");
+    assert!(plan["resources"].get("offline").is_none());
 }
 
 #[test]
