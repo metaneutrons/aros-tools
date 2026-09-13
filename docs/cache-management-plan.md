@@ -251,6 +251,52 @@ same-name/different-identity declaration fails closed. Source-archive
 deduplication, retention references, removal and pruning are separate later
 contracts; CACHE-M2 does not infer ownership from an arbitrary directory.
 
+### M3 compiler-archive contract
+
+CACHE-M3 adds only the following standalone archive operations. They reuse the
+consumer archive cache and its verified acquisition primitive but never invoke
+an extractor, compiler, collector, installer, tree verifier, receipt verifier,
+provenance verifier, or attestation verifier.
+
+```text
+aros cache archives status [--format human|json]
+aros cache archives list --project DIR SELECTOR [--format human|json]
+aros cache archives fetch --project DIR SELECTOR [--offline|--refresh] [--format human|json]
+aros cache archives verify --project DIR SELECTOR [--format human|json]
+```
+
+`SELECTOR` is exactly one of `--host-compiler` or
+`--toolchain --preset NAME`. `--host HOST` is optional; its absence selects the
+running host and its presence selects a declared release-matrix host without
+executing that host's binaries. `--project DIR` resolves to one explicit AROS
+source checkout. Host compiler selection reads its effective `aros-targets.toml`
+contract; cross-toolchain selection reads its `aros-toolchains.lock.toml` and
+checks the selected artifact triple against the target profile. JSON output
+records the canonical project, configuration path/kind, host and host-selection
+origin, release/profile/triple when relevant, archive URL, SHA-256, known or
+unknown expected size, content-addressed cache path, and transport provenance.
+An explicit `AROS_HOST_COMPILER_URL` override is honored for host-compiler
+transport while its configured version and digest remain authoritative.
+
+`status` emits `aros-cache-archives-status-v1` and observes only the archive
+root metadata. `list` emits `aros-cache-archives-list-v1`; it observes only the
+selected final archive path and labels it `missing`, `present_unverified`,
+`unsafe`, or `inaccessible`. `fetch` emits `aros-cache-archives-fetch-v1`; it
+uses the shared `obtain_archive` identity/path, revalidates an available object,
+and stages a missing transfer before no-clobber publication. `--offline`
+forbids transfer and creates no state; `--refresh` conflicts with it and only
+reacquires the already declared identity. Neither option replaces an existing
+content-addressed object or an installed tree. `verify` emits
+`aros-cache-archives-verify-v1` and proves only archive file regularity, exact
+known size and SHA-256. It explicitly does not claim extraction safety,
+payload-tree, installed-receipt, provenance, or attestation validity.
+
+Host compiler assets may not declare a size. That is a distinct `unknown`
+contract value, never zero: downloads retain the bounded maximum enforced by
+the common acquisition primitive. Missing SHA-256 values are rejected before a
+cache identity is derived. Archive lifecycle, ownership, retention and removal
+remain CACHE-M6 work.
+
 ### Everyday examples
 
 The examples describe the target interface; exact parser/schema fixtures are

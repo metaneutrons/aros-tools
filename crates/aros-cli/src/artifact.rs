@@ -44,6 +44,31 @@ pub fn archive_cache_root() -> Result<PathBuf> {
     aros_cache::archive_cache_root().map_err(|error| miette::miette!(error))
 }
 
+/// Resolve one archive's content-addressed cache path without creating it.
+///
+/// # Errors
+///
+/// Returns an error when the supplied SHA-256 is malformed or the AROS cache
+/// root cannot be resolved safely.
+pub fn archive_cache_path(expected_sha256: &str) -> Result<PathBuf> {
+    let expected_sha256 = require_sha256(Some(expected_sha256), "archive")?;
+    Ok(archive_cache_root()?
+        .join("downloads")
+        .join("sha256")
+        .join(format!("{expected_sha256}.tar.xz")))
+}
+
+/// Validate one credential-free HTTPS archive URL without transferring it.
+///
+/// # Errors
+///
+/// Returns an error for a non-HTTPS URL, embedded credentials, query or
+/// fragment, or malformed URL. Callers can therefore render a selected URL
+/// without exposing an unvalidated transport value.
+pub fn validate_archive_url(url: &str) -> Result<()> {
+    validate_download_url(url).map(|_| ())
+}
+
 pub fn require_absolute_state_path(label: &str, path: PathBuf) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("{label} must be an absolute path, got '{}'", path.display());
@@ -122,12 +147,10 @@ pub async fn obtain_archive(
         bail!("archive has an invalid declared size of zero bytes");
     }
     let download_url = validate_download_url(url)?;
-    let cache_dir = archive_cache_root()?.join("downloads").join("sha256");
-    fs::create_dir_all(&cache_dir)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to create cache '{}'", cache_dir.display()))?;
-    let cache_path = cache_dir.join(format!("{expected_sha256}.tar.xz"));
-
+    let cache_path = archive_cache_path(&expected_sha256)?;
+    let cache_dir = cache_path
+        .parent()
+        .ok_or_else(|| miette::miette!("archive cache path has no parent"))?;
     if cache_path.exists() && !force_download {
         verify_archive(&cache_path, &expected_sha256, expected_size)?;
         return Ok(cache_path);
@@ -139,6 +162,9 @@ pub async fn obtain_archive(
             cache_dir.display()
         );
     }
+    fs::create_dir_all(cache_dir)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("failed to create cache '{}'", cache_dir.display()))?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -200,7 +226,7 @@ pub async fn obtain_archive(
         .progress_chars("#>-");
     progress.set_style(progress_style);
 
-    let named = tempfile::NamedTempFile::new_in(&cache_dir)
+    let named = tempfile::NamedTempFile::new_in(cache_dir)
         .into_diagnostic()
         .wrap_err("failed to create temporary archive in cache")?;
     let (file, temp_path) = named.into_parts();
@@ -249,7 +275,7 @@ pub async fn obtain_archive(
             });
         }
     }
-    sync_directory(&cache_dir)?;
+    sync_directory(cache_dir)?;
     verify_archive(&cache_path, &expected_sha256, expected_size)?;
     Ok(cache_path)
 }

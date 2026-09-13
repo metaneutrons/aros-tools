@@ -51,8 +51,8 @@ mod toolchain_selection;
 
 use build_cache::BuildCompilerCache;
 use cache_command::{
-    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourceSelector,
-    CacheSourcesCommand,
+    CacheArchiveSelector, CacheArchivesCommand, CacheCommand, CacheCompilerBackend,
+    CacheCompilerCommand, CacheSourceSelector, CacheSourcesCommand,
 };
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
@@ -1026,6 +1026,40 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     "cache.sources.verify",
                     None,
                     "restore the exact reviewed selector and cache objects; verify hashes payloads but never changes them",
+                ),
+            },
+            CacheCommand::Archives { command } => match command {
+                CacheArchivesCommand::Status { .. } => (
+                    DiagnosticCode::CliConfiguration,
+                    DiagnosticStage::Configuration,
+                    "cache.archives.status",
+                    None,
+                    "set AROS_HOME or AROS_CACHE_DIR to an absolute accessible path; archive status observes root metadata only",
+                ),
+                CacheArchivesCommand::List { .. } => (
+                    DiagnosticCode::CliToolResolution,
+                    DiagnosticStage::Configuration,
+                    "cache.archives.list",
+                    None,
+                    "select one readable AROS checkout, archive purpose, and optional supported host; list reads cache-entry metadata without hashing or downloading it",
+                ),
+                CacheArchivesCommand::Fetch { offline, .. } => (
+                    if *offline {
+                        DiagnosticCode::CliToolResolution
+                    } else {
+                        DiagnosticCode::CliNetwork
+                    },
+                    DiagnosticStage::Configuration,
+                    "cache.archives.fetch",
+                    None,
+                    "restore the exact configured host/compiler archive; offline fetch requires an already verified cache object and refresh never replaces it",
+                ),
+                CacheArchivesCommand::Verify { .. } => (
+                    DiagnosticCode::CliToolResolution,
+                    DiagnosticStage::Configuration,
+                    "cache.archives.verify",
+                    None,
+                    "restore the exact configured archive bytes; verify checks only declared size and SHA-256, not extraction, installation, or attestation",
                 ),
             },
         },
