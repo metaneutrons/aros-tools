@@ -23,6 +23,7 @@ mod board;
 mod boot;
 mod build;
 mod build_tools;
+mod cli_contract;
 mod commands;
 mod golden;
 mod host_compiler;
@@ -37,6 +38,11 @@ mod toolchain_management;
 mod toolchain_plan;
 mod toolchain_producer;
 mod toolchain_selection;
+
+use cli_contract::{
+    parse_opaque_scan_id, parse_positive_usize, BoardProfileSelection, GoldenAction,
+    RepositoryRequirement,
+};
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -302,27 +308,6 @@ enum SourceCommand {
         /// Skip standalone-candidate target-graph validation
         #[arg(long = "no-transpile", action = clap::ArgAction::SetFalse)]
         transpile: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum GoldenAction {
-    /// Run the transpiler twice and store its output as the baseline
-    Capture {
-        /// Preset to capture; repeatable. Default: every configured preset
-        #[arg(long = "preset")]
-        presets: Vec<String>,
-    },
-
-    /// Run the transpiler and compare its output against the baseline
-    Verify {
-        /// Preset to check; repeatable. Default: every configured preset
-        #[arg(long = "preset")]
-        presets: Vec<String>,
-
-        /// Replace the baseline with this run instead of reporting differences
-        #[arg(long)]
-        update: bool,
     },
 }
 
@@ -664,95 +649,6 @@ enum SdCommand {
         #[arg(long)]
         dry_run: bool,
     },
-}
-
-fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
-    if value.is_empty() || value.trim() != value || value.contains('/') || value.contains('\\') {
-        return Err(
-            "expected an opaque scan ID printed by the corresponding `aros board sd` scan command, not a device path"
-                .to_string(),
-        );
-    }
-    Ok(value.to_string())
-}
-
-#[derive(Args, Clone)]
-struct BoardProfileSelection {
-    /// Local board profile name from ~/.config/aros/boards.toml
-    #[arg(long)]
-    profile: String,
-
-    /// Board configuration file; overrides AROS_BOARDS_FILE and the default path
-    #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
-    config: Option<PathBuf>,
-}
-
-/// Repository context needed before a command may run.
-///
-/// Keeping this policy beside the command model prevents a new global command
-/// from accidentally inheriting checkout discovery merely because most build
-/// commands need it.
-fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("'{value}' is not a valid positive integer"))?;
-    if parsed == 0 {
-        return Err("parallel job count must be greater than zero".to_owned());
-    }
-    Ok(parsed)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RepositoryRequirement {
-    /// The command is independent of an AROS source checkout.
-    Global,
-    /// Use a checkout when one is discoverable, but remain useful without one.
-    Optional,
-    /// Refuse to run until an AROS source checkout has been discovered.
-    Required,
-}
-
-impl Commands {
-    const fn repository_requirement(&self) -> RepositoryRequirement {
-        match self {
-            Self::Source { command } => match command {
-                SourceCommand::Init { .. } => RepositoryRequirement::Global,
-                SourceCommand::Sync { .. } => RepositoryRequirement::Required,
-            },
-            Self::Ccache { .. }
-            | Self::Install { .. }
-            | Self::Toolchain {
-                command:
-                    ToolchainCommands::Plan(_)
-                    | ToolchainCommands::Build(_)
-                    | ToolchainCommands::Producer(_)
-                    | ToolchainCommands::MetaMakeFetch(_)
-                    | ToolchainCommands::Inventory(_)
-                    | ToolchainCommands::Import(_)
-                    | ToolchainCommands::Register(_)
-                    | ToolchainCommands::Remove(_)
-                    | ToolchainCommands::Gc(_),
-            } => RepositoryRequirement::Global,
-            Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
-            Self::Board { command } => match command {
-                BoardCommand::Init { .. }
-                | BoardCommand::Scan
-                | BoardCommand::Serve { .. }
-                | BoardCommand::Sd { .. }
-                | BoardCommand::Console { .. } => RepositoryRequirement::Global,
-                BoardCommand::Doctor(_)
-                | BoardCommand::Build { .. }
-                | BoardCommand::Deploy { .. } => RepositoryRequirement::Required,
-            },
-            Self::Setup { .. }
-            | Self::HostCompiler { .. }
-            | Self::Toolchain { .. }
-            | Self::Build { .. }
-            | Self::Clean { .. }
-            | Self::Test { .. }
-            | Self::Golden { .. } => RepositoryRequirement::Required,
-        }
-    }
 }
 
 fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, DiagnosticContext) {
