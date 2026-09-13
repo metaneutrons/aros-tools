@@ -305,7 +305,7 @@ installed tree's validity or provenance; those remain separate checks.
 
 ### Shared CLI ownership and continuous documentation
 
-The [public CLI plan](https://github.com/metaneutrons/aros-tools/blob/fix/public-cli-contract-plan/docs/public-cli-contract-plan.md),
+The [public CLI plan](public-cli-contract-plan.md),
 tracked by [epic #148](https://github.com/metaneutrons/aros-tools/issues/148),
 owns current consumer force/local/offline validation (CLI-M2) and native
 build/plan cache-only invocation migration (CLI-M3). CACHE-M3-A3 and
@@ -316,10 +316,9 @@ legacy stats option and false sccache clear, independently of final migration.
 
 Every milestone and every implementation PR that changes a public interface
 must update the affected Astro/Starlight reference, task examples,
-configuration and troubleshooting in the same slice. Reuse the CLI-M1
-source-derived reference and semantic-example gate when available; until then,
-provide equivalent focused parser/behavior evidence and the canonical docs
-gate. Proposed interfaces remain in this repository plan, not presented as
+  configuration and troubleshooting in the same slice. Reuse the CLI-M1
+  source-derived reference and semantic-example gate, alongside the canonical
+  docs gate. Proposed interfaces remain in this repository plan, not presented as
 shipped commands on the website. CACHE-M7 checks integrated completeness; it
 does not permit stale documentation in earlier milestones.
 
@@ -553,3 +552,7 @@ maintainer action, not an implied effect of closing this epic.
 2026-09-13: Initial source-backed proposal, including missing acquisition,
 verification, retention, cleanup and GenMF identity capabilities. No
 implementation or qualification is claimed by this planning record.
+
+2026-09-13: Rebased onto the accepted CLI-M1 through CLI-M5 contracts. CACHE-M1
+uses their existing reference and semantic-example gates; its early F05/F06
+repair remains the sole cache dependency of CLI-M6.
