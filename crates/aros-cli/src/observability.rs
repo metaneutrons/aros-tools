@@ -688,7 +688,12 @@ pub fn report_diagnostic(
     if let Some(process) = error.downcast_ref::<ProcessFailure>() {
         process.apply_context(&mut context);
         if let Some(process_boundary) = process.boundary {
-            boundary = process_boundary;
+            // A child owns its stable code and lifecycle stage, but the
+            // frontend owns the exact public command leaf and its recovery
+            // guidance. Replacing the whole boundary here used to turn a
+            // `toolchain.plan` failure into a generic process hint.
+            boundary.code = process_boundary.code;
+            boundary.stage = process_boundary.stage;
         }
     }
     if let Some(commit) = error.downcast_ref::<CommitStateFailure>() {
