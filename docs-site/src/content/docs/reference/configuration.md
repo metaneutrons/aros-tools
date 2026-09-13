@@ -180,7 +180,7 @@ configuration variables without reading their values or invoking a backend:
 `CCACHE_CONFIGPATH`, `CCACHE_DIR`, `CCACHE_REMOTE_STORAGE`,
 `CCACHE_SECONDARY_STORAGE`, `SCCACHE_AZURE_BLOB_CONTAINER`, `SCCACHE_CONF`,
 `SCCACHE_DIR`, `SCCACHE_ENDPOINT`, `SCCACHE_GCS_BUCKET`, `SCCACHE_MEMCACHED`,
-`SCCACHE_REDIS`, and `SCCACHE_S3_BUCKET`. They remain backend-owned ambient
+`SCCACHE_REDIS`, `SCCACHE_S3_BUCKET`, and `SCCACHE_SERVER_UDS`. They remain backend-owned ambient
 configuration, not AROS cache settings: current status output reports only
 their names and marks effective storage scope as uninspected. `--dir DIR` on
 `aros cache compiler status` is a separate absolute, status-only root selector;
