@@ -23,7 +23,7 @@ mod build;
 mod build_tools;
 mod cli_contract;
 mod commands;
-mod completions;
+mod completion_model;
 mod golden;
 mod host_compiler;
 mod observability;
@@ -42,7 +42,7 @@ use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
     GoldenAction,
 };
-use completions::CompletionShell;
+use completion_model::CompletionShell;
 
 #[derive(Parser)]
 #[command(
@@ -1040,7 +1040,7 @@ async fn main() -> ExitCode {
     };
     let format = cli.observability.diagnostic_format;
     if let Commands::Completions { shell } = cli.command {
-        return completions::emit(shell, format);
+        return completion_model::emit(shell, format);
     }
     let invocation_directory = match std::env::current_dir() {
         Ok(directory) => directory,

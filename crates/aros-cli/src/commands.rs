@@ -134,7 +134,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         ),
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
-        Commands::Completions { shell } => crate::completions::write(shell),
+        Commands::Completions { shell } => crate::completion_model::write(shell),
         Commands::Info { format } => info(repo_root, format),
     }
 }

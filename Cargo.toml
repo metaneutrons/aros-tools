@@ -66,7 +66,6 @@ aros-macos-disk-claim = { path = "crates/aros-macos-disk-claim" }
 
 # CLI & UX
 clap = { version = "4.5", features = ["derive", "env", "cargo", "color"] }
-clap_complete = "4.5"
 indicatif = { version = "0.18.6", default-features = false, features = ["rayon", "unicode-width"] }
 console = "0.16.4"
 miette = { version = "7.4", features = ["fancy"] }
