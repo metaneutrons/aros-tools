@@ -91,7 +91,7 @@ No hidden aliases and no generic `aros cache clear --all`.
 | `sources` | Product/producer source archives and reusable patch payloads | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
 | `archives` | Downloaded host/cross-compiler packages, not installed toolchains | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
 | `cargo` | AROS-managed Cargo vendor inputs, not the user's global Cargo home | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
-| `genmf` | Reusable GenMF reference expansions, not verification reports | `status`, `list`, `verify`, `refresh`, `remove`, `prune` |
+| `genmf` | Reusable GenMF reference expansions, not verification reports | `status`, `list`, `verify`, `refresh`, `keep`, `release`, `remove` |
 
 Expose only meaningful capabilities; do not add compiler `fetch` or pretend
 that a statistics reset verifies compiler outputs. `keep` creates a named,
@@ -739,6 +739,14 @@ implementation or qualification is claimed by this planning record.
 2026-09-13: Rebased onto the accepted CLI-M1 through CLI-M5 contracts. CACHE-M1
 uses their existing reference and semantic-example gates; its early F05/F06
 repair remains the sole cache dependency of CLI-M6.
+
+2026-09-13: GenMF now participates in the CACHE-M6 lifecycle substrate: a
+verified generation can be retained under a named reference, released, and
+removed only through an exact source-root-relative selection with a
+snapshot-bound preview/apply token. Materialization holds a shared lease from
+verification through template-shape consumption. This does not make a generic
+GenMF `prune` safe or public, and it does not satisfy the still-open
+owned-local compiler lifecycle criteria.
 
 2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
 status schemas, absolute archive-root precedence, no-follow single-root
