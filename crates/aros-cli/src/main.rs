@@ -1142,10 +1142,346 @@ async fn run(cli: Cli, repo_root: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardCommand, BoardInitModel, BoardInitTransport, Cli, Commands, Parser,
+        BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli, Commands, Parser,
         RepositoryRequirement,
     };
-    use clap::error::ErrorKind;
+    use clap::{error::ErrorKind, Arg, Command, CommandFactory};
+    use std::fmt::Write;
+
+    const CLI_CONTRACT_INDEX: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs-site/src/content/docs/reference/cli-contract.md"
+    ));
+    const CLI_CONTRACT_SECTIONS: &[(&str, &str)] = &[
+        (
+            "board",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/board.md"
+            )),
+        ),
+        (
+            "build",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/build.md"
+            )),
+        ),
+        (
+            "build-tools",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/build-tools.md"
+            )),
+        ),
+        (
+            "ccache",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/ccache.md"
+            )),
+        ),
+        (
+            "clean",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/clean.md"
+            )),
+        ),
+        (
+            "golden",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/golden.md"
+            )),
+        ),
+        (
+            "host-compiler",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/host-compiler.md"
+            )),
+        ),
+        (
+            "info",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/info.md"
+            )),
+        ),
+        (
+            "install",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/install.md"
+            )),
+        ),
+        (
+            "setup",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/setup.md"
+            )),
+        ),
+        (
+            "source",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/source.md"
+            )),
+        ),
+        (
+            "test",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/test.md"
+            )),
+        ),
+        (
+            "toolchain",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs-site/src/content/docs/reference/cli-contract/toolchain.md"
+            )),
+        ),
+    ];
+
+    fn is_public_contract_argument(argument: &Arg) -> bool {
+        !argument.is_hide_set() && !matches!(argument.get_id().as_str(), "help" | "version")
+    }
+
+    fn is_public_contract_command(command: &Command) -> bool {
+        !command.is_hide_set() && command.get_name() != "help"
+    }
+
+    fn visible_arguments(command: &Command) -> Vec<&Arg> {
+        command
+            .get_arguments()
+            .filter(|argument| is_public_contract_argument(argument))
+            .collect()
+    }
+
+    fn table_cell(value: impl AsRef<str>) -> String {
+        value.as_ref().replace('|', "\\|")
+    }
+
+    #[test]
+    fn cli_contract_escapes_markdown_table_separators_once() {
+        assert_eq!(table_cell("one|two"), "one\\|two");
+    }
+
+    fn argument_contract(command: &Command, argument: &Arg) -> String {
+        let spelling = match (argument.get_short(), argument.get_long()) {
+            (Some(short), Some(long)) => format!("-{short}, --{long}"),
+            (Some(short), None) => format!("-{short}"),
+            (None, Some(long)) => format!("--{long}"),
+            (None, None) => argument.get_id().to_string(),
+        };
+        let conflicts = command
+            .get_arg_conflicts_with(argument)
+            .into_iter()
+            .filter(|candidate| is_public_contract_argument(candidate))
+            .map(|candidate| candidate.get_id().to_string())
+            .collect::<Vec<_>>();
+        let values = argument
+            .get_possible_values()
+            .into_iter()
+            .filter(|value| !value.is_hide_set())
+            .map(|value| value.get_name().to_owned())
+            .collect::<Vec<_>>();
+
+        [
+            argument.get_id().to_string(),
+            spelling,
+            argument
+                .get_index()
+                .map_or_else(|| "—".to_owned(), |index| index.to_string()),
+            if argument.is_required_set() {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_owned(),
+            argument
+                .get_num_args()
+                .map_or_else(|| "—".to_owned(), |range| range.to_string()),
+            argument
+                .get_default_values()
+                .iter()
+                .map(|value| value.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", "),
+            values.join(", "),
+            argument.get_env().map_or_else(
+                || "—".to_owned(),
+                |value| value.to_string_lossy().into_owned(),
+            ),
+            conflicts.join(", "),
+        ]
+        .into_iter()
+        .map(table_cell)
+        .collect::<Vec<_>>()
+        .join(" | ")
+    }
+
+    fn collect_command_contract(command: &Command, path: &[String], document: &mut String) {
+        if !is_public_contract_command(command) {
+            return;
+        }
+
+        let mut children = command
+            .get_subcommands()
+            .filter(|child| is_public_contract_command(child))
+            .collect::<Vec<_>>();
+        children.sort_by_key(|child| child.get_name());
+
+        if children.is_empty() {
+            for argument in visible_arguments(command)
+                .into_iter()
+                .filter(|argument| !argument.is_global_set())
+            {
+                writeln!(
+                    document,
+                    "| `{}` | {} |",
+                    path.join(" "),
+                    argument_contract(command, argument),
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+
+        for child in children {
+            let mut child_path = path.to_vec();
+            child_path.push(child.get_name().to_owned());
+            collect_command_contract(child, &child_path, document);
+        }
+    }
+
+    fn rendered_cli_contract_index(command: &Command) -> String {
+        let sections = public_contract_commands(command)
+            .into_iter()
+            .map(|child| {
+                format!(
+                    "- [`aros {}`](/aros-tools/reference/cli-contract/{}/)\n",
+                    child.get_name(),
+                    child.get_name(),
+                )
+            })
+            .collect::<String>();
+        let mut document = String::from("---\ntitle: Generated CLI contract\ndescription: Source-derived structural facts for the current public aros command model.\n---\n\nThis reference is generated from the `aros` Clap command model and committed for review. It records visible commands and structural argument facts; task semantics, side effects, and recovery remain in the [command reference](/aros-tools/reference/cli/). Hidden lifecycle bridges are deliberately excluded.\n\nThe `position` column is one-based for positional arguments and `—` for options. Empty `default`, `values`, `environment`, and `conflicts` cells mean that Clap declares none.\n\n## Global arguments\n\n| ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        for argument in visible_arguments(&command)
+            .into_iter()
+            .filter(|argument| argument.is_global_set())
+        {
+            writeln!(document, "| {} |", argument_contract(&command, argument))
+                .expect("writing to a string cannot fail");
+        }
+        document.push_str("\n## Command sections\n\n");
+        document.push_str(&sections);
+        document
+    }
+
+    fn rendered_cli_contract_section(command: &Command) -> String {
+        let mut document = format!("---\ntitle: Generated CLI contract: {}\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the `aros` Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/).\n\n| Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", command.get_name(), command.get_name());
+        collect_command_contract(
+            command,
+            &["aros".to_owned(), command.get_name().to_owned()],
+            &mut document,
+        );
+        document
+    }
+
+    fn public_contract_commands(command: &Command) -> Vec<&Command> {
+        let mut commands = command
+            .get_subcommands()
+            .filter(|child| is_public_contract_command(child))
+            .collect::<Vec<_>>();
+        commands.sort_by_key(|child| child.get_name());
+        commands
+    }
+
+    #[test]
+    fn generated_public_cli_contract_matches_the_clap_model() {
+        let mut command = Cli::command();
+        command.build();
+        assert_eq!(
+            CLI_CONTRACT_INDEX,
+            rendered_cli_contract_index(&command),
+            "a public CLI-model change requires an intentional reviewed update to docs-site/src/content/docs/reference/cli-contract.md"
+        );
+        let expected_sections = CLI_CONTRACT_SECTIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        let actual_sections = public_contract_commands(&command)
+            .iter()
+            .map(|child| child.get_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_sections, actual_sections,
+            "every visible top-level command needs exactly one generated contract section"
+        );
+        for (name, expected) in CLI_CONTRACT_SECTIONS {
+            let section = command
+                .find_subcommand(name)
+                .expect("declared public contract section must resolve");
+            assert_eq!(
+                *expected,
+                rendered_cli_contract_section(section),
+                "a public CLI-model change requires an intentional reviewed update to docs-site/src/content/docs/reference/cli-contract/{name}.md"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "developer aid for regenerating the reviewed CLI contract"]
+    fn print_generated_public_cli_contract() {
+        let mut command = Cli::command();
+        command.build();
+        match std::env::var("AROS_CLI_CONTRACT_SECTION").as_deref() {
+            Ok("index") => print!("{}", rendered_cli_contract_index(&command)),
+            Ok(name) => {
+                let section = command
+                    .find_subcommand(name)
+                    .expect("requested public contract section must exist");
+                print!("{}", rendered_cli_contract_section(section));
+            }
+            Err(_) => {
+                panic!("set AROS_CLI_CONTRACT_SECTION to index or a visible top-level command")
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "developer aid for regenerating the reviewed CLI contract snapshots"]
+    fn regenerate_public_cli_contract_snapshots() {
+        assert_eq!(
+            std::env::var("AROS_CLI_CONTRACT_REGENERATE").as_deref(),
+            Ok("1"),
+            "set AROS_CLI_CONTRACT_REGENERATE=1 to rewrite the reviewed snapshots"
+        );
+        let mut command = Cli::command();
+        command.build();
+        let documentation_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs-site/src/content/docs/reference");
+        std::fs::write(
+            documentation_root.join("cli-contract.md"),
+            rendered_cli_contract_index(&command),
+        )
+        .expect("write generated contract index");
+        for (name, _) in CLI_CONTRACT_SECTIONS {
+            let section = command
+                .find_subcommand(name)
+                .expect("declared public contract section must resolve");
+            std::fs::write(
+                documentation_root
+                    .join("cli-contract")
+                    .join(format!("{name}.md")),
+                rendered_cli_contract_section(section),
+            )
+            .expect("write generated contract section");
+        }
+    }
 
     fn requirement(arguments: &[&str]) -> RepositoryRequirement {
         Cli::try_parse_from(arguments)
@@ -1280,6 +1616,41 @@ mod tests {
         ])
         .is_ok());
         assert!(Cli::try_parse_from(["aros", "board", "doctor", "--profile", "pi5-usb"]).is_ok());
+    }
+
+    #[test]
+    fn board_init_model_contract_covers_each_reviewed_default_transport() {
+        let defaults = [
+            ("rpi3", BoardModel::Rpi3, "native-tftp"),
+            ("rpi4", BoardModel::Rpi4, "native-tftp"),
+            ("rpi5", BoardModel::Rpi5, "native-tftp"),
+            ("milk-v-titan", BoardModel::MilkVTitan, "uefi-esp"),
+        ];
+        for (model_argument, expected_model, expected_transport) in defaults {
+            let parsed = Cli::try_parse_from([
+                "aros",
+                "board",
+                "init",
+                "--profile",
+                "deliberately-unrelated-label",
+                "--model",
+                model_argument,
+            ])
+            .expect("reviewed model must parse independently of the profile label");
+            let Commands::Board {
+                command:
+                    BoardCommand::Init {
+                        model, transport, ..
+                    },
+            } = parsed.command
+            else {
+                panic!("expected board init command");
+            };
+            let model: BoardModel = model.into();
+            assert_eq!(model, expected_model);
+            assert_eq!(transport, None);
+            assert_eq!(model.default_transport().to_string(), expected_transport);
+        }
     }
 
     #[test]
