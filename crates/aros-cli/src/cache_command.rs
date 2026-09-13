@@ -182,6 +182,44 @@ pub enum CacheArchivesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Retain one selected archive under a named no-clobber reference.
+    Keep {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Release one named archive retention reference without deleting bytes.
+    Release {
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one exact selected archive.
+    Remove {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// Cargo vendor-cache resource operations.

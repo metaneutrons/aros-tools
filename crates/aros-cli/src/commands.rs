@@ -211,6 +211,25 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Archives {
             command: CacheArchivesCommand::Verify { selector, format },
         } => cache::archive_verify(selector, format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::archive_keep(selector, &name, format),
+        CacheCommand::Archives {
+            command: CacheArchivesCommand::Release { name, format },
+        } => cache::archive_release(&name, format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Remove {
+                    selector,
+                    apply,
+                    format,
+                },
+        } => cache::archive_remove(selector, apply.as_deref(), format),
         CacheCommand::Cargo {
             command: CacheCargoCommand::Status { dir, format },
         } => cache::cargo_status(&dir, format),

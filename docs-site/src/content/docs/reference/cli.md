@@ -56,6 +56,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
 | `aros cache archives verify` | Verify one selected archive's declared byte identity only |
+| `aros cache archives keep` | Retain one selected archive under a named no-clobber reference |
+| `aros cache archives release` | Release one named archive retention reference without deleting bytes |
+| `aros cache archives remove` | Preview or token-confirm removal of one exact selected archive |
 | `aros cache cargo status` | Passively observe one explicit Cargo vendor-cache parent root |
 | `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
 | `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
@@ -341,6 +344,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache archives list` | No | Read direct metadata for one project-selected archive without hashing or downloading it |
 | `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
 | `cache archives verify` | No | Hash one project-selected archive and check only declared size/SHA-256 identity |
+| `cache archives keep` | No | Hash and retain one project-selected archive under a named reference; no download or deletion |
+| `cache archives release` | No | Remove one named retention receipt only; no archive bytes are deleted |
+| `cache archives remove` | No | Hash and preview one exact project-selected archive, then require its short-lived token before deletion |
 | `cache cargo status` | No | Passively observe one explicit Cargo cache root without selecting a generation |
 | `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
 | `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
@@ -392,14 +398,18 @@ directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
 
 `aros cache archives` manages only downloaded host/compiler archive bytes,
-never their installed payloads. `status` remains passive. `list`, `fetch`, and
-`verify` require `--project DIR` plus exactly one archive purpose:
+never their installed payloads. `status` remains passive. `list`, `fetch`,
+`verify`, `keep`, and `remove` require `--project DIR` plus exactly one archive
+purpose:
 `--host-compiler`, or `--toolchain --preset NAME`. `--host HOST` makes a
 cross-host prefetch explicit without executing a foreign binary. Archive
 verification is intentionally limited to declared size and SHA-256; extraction,
 payload-tree, receipt, provenance, and attestation checks remain installation
-responsibilities. See [cache inspection](/aros-tools/workflows/cache/) for
-offline and refresh semantics.
+responsibilities. `keep --name NAME` creates an immutable retention reference;
+`release --name NAME` removes that reference only. `remove` is preview-first
+and accepts `--apply TOKEN` only after a short-lived exact-object preview.
+See [cache inspection](/aros-tools/workflows/cache/) for offline, refresh, and
+lifecycle semantics.
 
 `aros cache cargo` manages only immutable producer Cargo vendor generations,
 not a global Cargo home or collector build output. `status --dir DIR` is a

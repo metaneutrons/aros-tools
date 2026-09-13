@@ -3,14 +3,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::artifact::{archive_cache_path, obtain_archive, open_verified_archive, require_sha256};
+use crate::artifact::{
+    archive_cache_path, archive_cache_request, obtain_archive, open_verified_archive,
+    require_sha256,
+};
 use crate::host_compiler;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
 use crate::{CacheArchiveSelector, CacheCargoSelector, CacheGenmfSelector, CacheSourceSelector};
 use aros_cache::{
-    cache_status, compiler_cache_status, CacheCapability, CacheFamily, CacheFamilyStatus,
-    CacheSideEffects, CacheStatus, CompilerBackendChoice, CompilerCacheStatus, RootObservation,
+    apply_removal, cache_status, compiler_cache_status, keep, preview_removal, release,
+    CacheCapability, CacheFamily, CacheFamilyStatus, CacheRemovalPreview, CacheRemovalResult,
+    CacheRetentionRecord, CacheRetentionRelease, CacheSideEffects, CacheStatus,
+    CompilerBackendChoice, CompilerCacheStatus, RootObservation,
 };
 use aros_toolchain::{
     cargo_vendor::{
@@ -38,6 +43,9 @@ const ARCHIVE_STATUS_SCHEMA: &str = "aros-cache-archives-status-v1";
 const ARCHIVE_LIST_SCHEMA: &str = "aros-cache-archives-list-v1";
 const ARCHIVE_FETCH_SCHEMA: &str = "aros-cache-archives-fetch-v1";
 const ARCHIVE_VERIFY_SCHEMA: &str = "aros-cache-archives-verify-v1";
+const ARCHIVE_KEEP_SCHEMA: &str = "aros-cache-archives-keep-v1";
+const ARCHIVE_RELEASE_SCHEMA: &str = "aros-cache-archives-release-v1";
+const ARCHIVE_REMOVE_SCHEMA: &str = "aros-cache-archives-remove-v1";
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -45,7 +53,7 @@ struct ArchiveCacheStatus {
     operation: &'static str,
     observation: &'static str,
     side_effects: CacheSideEffects,
-    capabilities: [CacheCapability; 4],
+    capabilities: [CacheCapability; 7],
     root: RootObservation,
     object_layout: &'static str,
     boundary: &'static str,
@@ -136,6 +144,45 @@ struct ArchiveCacheVerification {
     selection: ArchiveSelection,
     verification_scope: &'static str,
     not_verified: [&'static str; 4],
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRelease {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    release: CacheRemovalResult,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    preview: CacheRemovalPreview,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    removal: CacheRemovalResult,
+    boundary: &'static str,
 }
 
 #[derive(Serialize)]
@@ -441,6 +488,9 @@ pub fn archive_status(format: ResultFormat) -> Result<()> {
             CacheCapability::List,
             CacheCapability::Fetch,
             CacheCapability::Verify,
+            CacheCapability::Keep,
+            CacheCapability::Release,
+            CacheCapability::Remove,
         ],
         root: archive_root_observation()?,
         object_layout: "downloads/sha256/<archive-sha256>.tar.xz",
@@ -551,6 +601,120 @@ pub fn archive_verify(selector: CacheArchiveSelector, format: ResultFormat) -> R
     Ok(())
 }
 
+/// Create a named no-clobber retention reference for one selected archive.
+///
+/// # Errors
+///
+/// Returns an error for an invalid selection/reference name, an unsafe cache
+/// root, an unavailable archive, or an active lifecycle writer.
+pub fn archive_keep(
+    selector: CacheArchiveSelector,
+    name: &str,
+    format: ResultFormat,
+) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let request = archive_cache_request(&selection.sha256, selection.expected_size)?;
+    let verified = open_verified_archive(&selection.sha256, selection.expected_size)?;
+    if verified.path() != selection.cache_path {
+        return Err(miette::miette!(
+            "selected archive cache path changed while verifying its retention candidate"
+        ));
+    }
+    drop(verified);
+    let retention = keep(&request, name).map_err(|error| miette::miette!(error))?;
+    let report = ArchiveCacheRetention {
+        schema: ARCHIVE_KEEP_SCHEMA,
+        operation: "archives.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep binds one declared content-addressed archive under an immutable named reference; it neither downloads, installs, replaces, nor deletes archive bytes",
+    };
+    match format {
+        ResultFormat::Human => print_archive_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache keep")?,
+    }
+    Ok(())
+}
+
+/// Release one named archive retention reference without deleting archive bytes.
+///
+/// # Errors
+///
+/// Returns an error for an invalid name, unsafe root, or a missing, malformed
+/// or substituted retention receipt.
+pub fn archive_release(name: &str, format: ResultFormat) -> Result<()> {
+    let cache_root = aros_cache::archive_cache_root().map_err(|error| miette::miette!(error))?;
+    let release = release(&CacheRetentionRelease {
+        family: CacheFamily::Archives,
+        cache_root,
+        name: name.to_owned(),
+    })
+    .map_err(|error| miette::miette!(error))?;
+    let report = ArchiveCacheRelease {
+        schema: ARCHIVE_RELEASE_SCHEMA,
+        operation: "archives.release",
+        side_effects: lifecycle_release_side_effects(),
+        release,
+        boundary: "release removes one named retention receipt only; it never enumerates or deletes archive bytes",
+    };
+    match format {
+        ResultFormat::Human => print_archive_release_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache release")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm removal of one exact selected archive.
+///
+/// Without `apply_token`, the command hashes the selected archive and emits a
+/// five-minute token-bound preview. Supplying that exact token repeats every
+/// binding check under an exclusive lifecycle lock before removal.
+///
+/// # Errors
+///
+/// Returns an error for invalid selection/token/root state, active readers or
+/// writers, changed archive bytes, or named retention blockers.
+pub fn archive_remove(
+    selector: CacheArchiveSelector,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let request = archive_cache_request(&selection.sha256, selection.expected_size)?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&request, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = ArchiveCacheRemovalApplied {
+            schema: ARCHIVE_REMOVE_SCHEMA,
+            operation: "archives.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            boundary: "apply removes only the exact previewed archive after token, retention, reader/writer lease, identity and SHA-256 bindings still match; no root-wide scan occurs",
+        };
+        match format {
+            ResultFormat::Human => print_archive_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "archive cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&request).map_err(|error| miette::miette!(error))?;
+        let report = ArchiveCacheRemovalPreview {
+            schema: ARCHIVE_REMOVE_SCHEMA,
+            operation: "archives.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            boundary: "preview hashes one exact selected archive and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_archive_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "archive cache remove preview")?,
+        }
+    }
+    Ok(())
+}
+
 const fn passive_side_effects() -> CacheSideEffects {
     CacheSideEffects {
         creates_state: false,
@@ -586,6 +750,50 @@ const fn archive_verify_side_effects() -> CacheSideEffects {
         network: false,
         backend_process: false,
         locks: false,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_keep_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: true,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: true,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_release_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: false,
+    }
+}
+
+const fn lifecycle_remove_preview_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_remove_apply_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: true,
         hashes_payloads: true,
     }
 }
@@ -967,7 +1175,7 @@ fn print_archive_status_human(report: &ArchiveCacheStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1100,6 +1308,48 @@ fn print_archive_verify_human(report: &ArchiveCacheVerification) {
     print_archive_selection_human(&report.selection);
     aros_common::outputln!("  verified: {}", report.verification_scope);
     aros_common::outputln!("  not verified: {}", report.not_verified.join("; "));
+}
+
+fn print_archive_retention_human(report: &ArchiveCacheRetention) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_release_human(report: &ArchiveCacheRelease) {
+    aros_common::outputln!("Archive retention reference released:");
+    aros_common::outputln!("  root: {}", report.release.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.release.relative_path);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_removal_preview_human(report: &ArchiveCacheRemovalPreview) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  expires: {}", report.preview.expires_unix_seconds);
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_removal_applied_human(report: &ArchiveCacheRemovalApplied) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_archive_selection_human(selection: &ArchiveSelection) {

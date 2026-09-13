@@ -15,12 +15,28 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache archives fetch` | offline | --offline | — | optional | 0 | false |  | AROS_OFFLINE | refresh |
 | `aros cache archives fetch` | refresh | --refresh | — | optional | 0 | false |  | — | offline |
 | `aros cache archives fetch` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives keep` | project | --project | — | required | 1 |  |  | — |  |
+| `aros cache archives keep` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives keep` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives keep` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros cache archives keep` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros cache archives keep` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache archives keep` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache archives list` | project | --project | — | required | 1 |  |  | — |  |
 | `aros cache archives list` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
 | `aros cache archives list` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
 | `aros cache archives list` | preset | --preset | — | optional | 1 |  |  | — |  |
 | `aros cache archives list` | host | --host | — | optional | 1 |  |  | — |  |
 | `aros cache archives list` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache archives release` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives remove` | project | --project | — | required | 1 |  |  | — |  |
+| `aros cache archives remove` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives remove` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives remove` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros cache archives remove` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros cache archives remove` | apply | --apply | — | optional | 1 |  |  | — |  |
+| `aros cache archives remove` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache archives status` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache archives verify` | project | --project | — | required | 1 |  |  | — |  |
 | `aros cache archives verify` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |

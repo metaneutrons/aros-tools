@@ -21,6 +21,10 @@ aros cache archives list --project /work/AROS --toolchain --preset pc-x86_64 \
   --host linux-x86_64 --format json
 aros cache archives fetch --project /work/AROS --host-compiler --offline
 aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
+aros cache archives keep --project /work/AROS --toolchain --preset pc-x86_64 \
+  --name release-candidate
+aros cache archives remove --project /work/AROS --toolchain --preset pc-x86_64 --format json
+aros cache archives release --name release-candidate
 
 aros cache cargo status --dir /work/aros-source-cache
 aros cache cargo list --producer-dir /work/aros-toolchains \
@@ -128,6 +132,9 @@ aros cache archives fetch --project /work/AROS --toolchain --preset pc-x86_64 \
 # Inspect or prove only the selected archive bytes.
 aros cache archives list --project /work/AROS --host-compiler --format json
 aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
+aros cache archives keep --project /work/AROS --toolchain --preset pc-x86_64 \
+  --name release-candidate
+aros cache archives remove --project /work/AROS --toolchain --preset pc-x86_64 --format json
 ```
 
 `fetch` uses the same verified acquisition primitive as `aros host-compiler
@@ -145,6 +152,34 @@ identity, a host-compiler/toolchain receipt, release provenance, or an
 attestation; installation owns those stronger checks. A host compiler may have
 an unknown declared size, in which case download remains bounded by the
 consumer's hard archive limit and the output says so explicitly.
+
+### Archive retention and exact removal
+
+Archive cleanup is deliberately selector-based. `keep` creates one durable,
+no-clobber named reference for the archive selected by the same reviewed
+`--project` / `--host-compiler` or `--toolchain --preset` inputs used by
+`fetch` and `verify`. A retained object cannot be removed. `release --name`
+removes only that reference; it never removes archive bytes.
+
+`remove` without `--apply` is a non-mutating preview. It hashes exactly the
+selected archive, records every retention blocker, and emits a short-lived
+`apply_token`. Review the JSON or human output, then pass that exact token
+unchanged to the same selector:
+
+```sh
+preview="$(aros cache archives remove --project /work/AROS --toolchain \
+  --preset pc-x86_64 --format json)"
+token="$(printf '%s' "$preview" | jq -r '.preview.apply_token')"
+aros cache archives remove --project /work/AROS --toolchain --preset pc-x86_64 \
+  --apply "$token"
+```
+
+Apply remeasures the archive and repeats root, policy, retention, identity and
+SHA-256 checks under an exclusive lifecycle lease. It refuses an expired or
+tampered token, any changed object, and active cooperating readers or writers.
+It never scans an archive root, infers unused data, or removes a different
+object. `prune` is intentionally unavailable until every cache family has a
+verified ownership and reader-lease contract.
 
 ## Cargo vendor generations
 

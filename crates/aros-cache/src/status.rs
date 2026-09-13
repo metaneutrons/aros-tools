@@ -33,6 +33,12 @@ pub enum CacheCapability {
     Verify,
     /// Explicit regeneration of a cache object from its selected inputs.
     Refresh,
+    /// Create a named immutable-object retention reference.
+    Keep,
+    /// Release a named retention reference without deleting cache data.
+    Release,
+    /// Preview or token-confirm exact-object removal.
+    Remove,
 }
 
 /// Side-effect contract of a versioned cache result.
@@ -287,6 +293,9 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     CacheCapability::List,
                     CacheCapability::Fetch,
                     CacheCapability::Verify,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
                 ],
                 root: Some(archives),
                 backends: Vec::new(),

@@ -414,7 +414,7 @@ fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
     assert_eq!(status["root"]["state"], "missing");
     assert_eq!(
         status["capabilities"],
-        serde_json::json!(["status", "list", "fetch", "verify"])
+        serde_json::json!(["status", "list", "fetch", "verify", "keep", "release", "remove"])
     );
     assert_eq!(status["side_effects"]["creates_state"], false);
     assert!(
@@ -532,6 +532,127 @@ fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
         .unwrap()
         .iter()
         .any(|value| value == "payload tree identity"));
+
+    let kept = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "keep",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--name",
+            "release-candidate",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive keep executes");
+    assert_success(&kept, "archive retention creation");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-archives-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let blocked = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("blocked archive removal preview executes");
+    assert_success(&blocked, "retained archive removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-archives-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+
+    let released = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "release",
+            "--name",
+            "release-candidate",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive release executes");
+    assert_success(&released, "archive retention release");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-archives-release-v1");
+
+    let preview = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("eligible archive removal preview executes");
+    assert_success(&preview, "eligible archive removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("removal preview returns an apply token");
+
+    let removed = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--apply",
+            token,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive removal apply executes");
+    assert_success(&removed, "token-confirmed archive removal");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "archives.remove.apply");
+    assert!(!cache_path.exists(), "exact selected archive was removed");
+
+    fs::write(&cache_path, payload).expect("restore cached archive fixture after lifecycle test");
 
     fs::write(&cache_path, b"corrupt compiler archive files!\n")
         .expect("corrupt cached archive fixture");

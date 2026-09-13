@@ -1062,6 +1062,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     None,
                     "restore the exact configured archive bytes; verify checks only declared size and SHA-256, not extraction, installation, or attestation",
                 ),
+                lifecycle @ (CacheArchivesCommand::Keep { .. }
+                | CacheArchivesCommand::Release { .. }
+                | CacheArchivesCommand::Remove { .. }) => archive_lifecycle_boundary(lifecycle),
             },
             CacheCommand::Cargo { command } => match command {
                 CacheCargoCommand::Status { .. } => (
@@ -1174,6 +1177,50 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             ..DiagnosticContext::default()
         },
     )
+}
+
+fn archive_lifecycle_boundary(
+    command: &CacheArchivesCommand,
+) -> (
+    DiagnosticCode,
+    DiagnosticStage,
+    &'static str,
+    Option<String>,
+    &'static str,
+) {
+    match command {
+        CacheArchivesCommand::Keep { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.archives.keep",
+            None,
+            "select one declared archive and an unused portable --name; keep creates a named retention receipt but never transfers or removes bytes",
+        ),
+        CacheArchivesCommand::Release { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.archives.release",
+            None,
+            "pass an existing portable --name below the current archive root; release removes only that retention receipt",
+        ),
+        CacheArchivesCommand::Remove { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliToolResolution
+            },
+            DiagnosticStage::Publication,
+            "cache.archives.remove",
+            None,
+            "run the preview first and pass its exact unexpired --apply token only after checking blockers; removal never scans or clears a cache root",
+        ),
+        CacheArchivesCommand::Status { .. }
+        | CacheArchivesCommand::List { .. }
+        | CacheArchivesCommand::Fetch { .. }
+        | CacheArchivesCommand::Verify { .. } => {
+            unreachable!("only archive lifecycle commands call archive_lifecycle_boundary")
+        }
+    }
 }
 
 #[tokio::main]
