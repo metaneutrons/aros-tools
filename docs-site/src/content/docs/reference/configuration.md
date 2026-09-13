@@ -81,13 +81,15 @@ Board profiles default to `~/.config/aros/boards.toml`. Override the file with
 serial and physical-device identity, so it should not be committed to an AROS
 source repository.
 
-Use `aros board init --board NAME` to print a schema-correct template and add
-`--apply` only when you intend to create the file. Existing profiles are never
-silently overwritten.
+Use `aros board init --board NAME --model MODEL` to print a schema-correct
+template and add `--apply` only when you intend to create the file. Existing
+profiles are never silently overwritten.
 
-The generated template is specifically Pi-4 USB-ECM; `NAME` is only the local
-profile label. Use [board configuration](/aros-tools/workflows/boards/) for
-other models and transports.
+`NAME` is only the local profile label. `MODEL` is required and selects the
+hardware contract; supported values are `rpi3`, `rpi4`, `rpi5` and
+`milk-v-titan`. Use `--transport` to select a reviewed non-default transport,
+such as Pi 4 `uboot-usb-ecm`. Use [board configuration](/aros-tools/workflows/boards/)
+for the model and transport matrix.
 
 ## Environment variables
 

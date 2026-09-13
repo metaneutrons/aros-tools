@@ -27,22 +27,28 @@ Source: [board schema and validation](https://github.com/metaneutrons/aros-tools
 For a **Pi 4 USB-ECM** profile, preview the generated template:
 
 ```sh
-aros board init --board rpi4-usb
+aros board init --board rpi4-usb --model rpi4 --transport uboot-usb-ecm
 ```
 
 Then create a new config file explicitly:
 
 ```sh
-aros board init --board rpi4-usb --apply
+aros board init --board rpi4-usb --model rpi4 --transport uboot-usb-ecm --apply
 aros board scan
 ```
 
-:::note[The name does not select a model]
-`board init` always emits the Pi-4 USB-ECM template. Naming it `pi5`
-does not make it a Pi-5 template. For Pi 3, Pi 5, native TFTP or Milk-V,
-adapt the matching profile from the
-[reviewed example registry](https://github.com/metaneutrons/aros-tools/blob/main/support/rpi-debug/boards.example.toml).
+:::note[Model and transport are explicit]
+`--board` is only your local label. `--model` is required and selects the
+hardware contract; it is never inferred from the label. `--transport` is
+optional only where the model has one conservative default: Pi 3, Pi 4 and Pi
+5 default to `native-tftp`; Milk-V Titan defaults to `uefi-esp`. Pi 4 USB-ECM
+must be selected explicitly, as shown above.
 :::
+
+The generated profile is based on the same reviewed contracts as the
+[example registry](https://github.com/metaneutrons/aros-tools/blob/main/support/rpi-debug/boards.example.toml).
+Unsupported model/transport pairs fail before a file is written. For example,
+Pi 3 and Pi 5 cannot select USB-ECM, and Titan cannot select a Pi TFTP path.
 
 Edit the printed file (normally `~/.config/aros/boards.toml`) with the real
 paths, interfaces, serial device and device identity. Use a matching target

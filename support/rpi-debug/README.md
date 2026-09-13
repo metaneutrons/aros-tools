@@ -89,12 +89,15 @@ It contains host paths, IP addresses, USB identities, serial-device names and
 debugger selection. Copy and adapt `boards.example.toml`; do not commit the
 result.
 
-`aros board init --board <local-name>` prints an intentionally incomplete
-USB-ECM template without writing anything. Add `--apply` to create a *new*
-configuration file at the selected `--config` path (or the normal default).
-It creates parent directories when needed but refuses to overwrite or merge an
-existing file, so comments and local choices cannot be lost. Replace every
-`REPLACE_ME` value before using the profile.
+`aros board init --board <local-name> --model <model>` prints an intentionally
+incomplete template without writing anything. The local name does not choose
+hardware: `--model` is required. Pi 3, Pi 4 and Pi 5 default to
+`native-tftp`; Milk-V Titan defaults to `uefi-esp`. Select the Pi-4-only USB
+path explicitly with `--transport uboot-usb-ecm`. Add `--apply` to create a
+*new* configuration file at the selected `--config` path (or the normal
+default). It creates parent directories when needed but refuses to overwrite
+or merge an existing file, so comments and local choices cannot be lost.
+Replace every `REPLACE_ME` value before using the profile.
 
 The board's `preset` selects its CMake configuration. Its
 `toolchain_preset` independently selects the locked cross-toolchain profile;

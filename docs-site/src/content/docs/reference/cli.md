@@ -292,11 +292,13 @@ one preset.
 ## Boards
 
 `--board NAME` selects a local profile; it is not a hardware-model argument.
-Commands using profiles also accept `--config PATH`.
+`board init` additionally requires `--model rpi3|rpi4|rpi5|milk-v-titan` and
+accepts an optional reviewed `--transport`. Commands using existing profiles
+also accept `--config PATH`.
 
 | Command | Checkout | Behavior |
 | --- | --- | --- |
-| `board init --board NAME` | No | Print the Pi-4 USB-ECM template; `--apply` creates a new config file |
+| `board init --board NAME --model MODEL` | No | Print a model-specific template; `--transport` selects a reviewed non-default transport and `--apply` creates a new config file |
 | `board scan` | No | Discover USB CDC-ECM adapters |
 | `board doctor --board NAME` | Required | Inspect profile, host prerequisites and artifacts |
 | `board build --board NAME` | Required | Build the profile's target with its toolchain |
