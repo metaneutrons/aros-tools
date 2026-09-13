@@ -275,6 +275,121 @@ fn snapshot_bound_tree_removal_refuses_a_same_name_swap_before_unlink() {
 
 #[cfg(unix)]
 #[test]
+fn snapshot_bound_regular_removal_removes_only_the_exact_verified_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+
+    remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .unwrap();
+
+    assert!(!target.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_changed_or_multiply_linked_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    std::fs::write(&target, b"changed").unwrap();
+
+    assert!(remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"changed");
+
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    let alias = temporary.path().join("outside-alias");
+    std::fs::hard_link(&target, &alias).unwrap();
+    let error = remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(std::fs::read(&target).unwrap(), b"changed");
+    assert_eq!(std::fs::read(alias).unwrap(), b"changed");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_a_same_name_swap_before_unlink() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    let displaced = temporary.path().join("displaced-approved");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    let displaced_for_action = displaced.clone();
+
+    let result = at_boundary(
+        "regular-remove-before-final-unlink",
+        |path| path.file_name() == Some(std::ffi::OsStr::new("owned-cache-entry")),
+        move |path| {
+            std::fs::rename(path, &displaced_for_action).unwrap();
+            std::fs::write(path, b"unapproved replacement").unwrap();
+        },
+        || {
+            remove_regular_file_from_snapshot_nofollow(
+                &target,
+                identity,
+                &sha256_bytes(&bytes),
+                bytes.len().try_into().unwrap(),
+                1024,
+            )
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"unapproved replacement");
+    assert_eq!(std::fs::read(displaced).unwrap(), b"approved");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_a_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    let external = temporary.path().join("external-content");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    std::fs::write(&external, b"must-survive").unwrap();
+    std::fs::remove_file(&target).unwrap();
+    symlink(&external, &target).unwrap();
+
+    assert!(remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .is_err());
+    assert!(target.is_symlink());
+    assert_eq!(std::fs::read(&external).unwrap(), b"must-survive");
+}
+
+#[cfg(unix)]
+#[test]
 fn bounded_nofollow_directory_listing_refuses_a_symlink() {
     use std::os::unix::fs::symlink;
 

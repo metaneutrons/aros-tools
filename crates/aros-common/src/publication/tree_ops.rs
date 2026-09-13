@@ -3,8 +3,8 @@
 #[cfg(not(unix))]
 use super::unsupported_durability;
 use super::{
-    absolute_path, unix, validate_target_leaf, PortableOutputName, TreeContentCas,
-    TreeTraversalLimits,
+    absolute_path, unix, validate_target_leaf, FileIdentity, PortableOutputName, Sha256Digest,
+    TreeContentCas, TreeTraversalLimits,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -208,6 +208,50 @@ pub fn remove_tree_from_snapshot_nofollow(
     #[cfg(not(unix))]
     {
         let _ = (target, expected, limits);
+        Err(unsupported_durability())
+    }
+}
+
+/// Remove exactly one previously measured regular file through no-follow
+/// descriptor traversal.
+///
+/// The file must retain its exact inode identity, byte length and SHA-256
+/// digest through the final descriptor-relative unlink. The target must be
+/// inside the same private Unix trust boundary required by
+/// [`remove_tree_from_snapshot_nofollow`].
+///
+/// # Errors
+///
+/// Returns an I/O, unsafe-path, identity-race, content-mismatch, durability,
+/// unsupported-host, or byte-limit error. It never follows a link or removes
+/// a different pathname when the selected file changed after preview.
+pub fn remove_regular_file_from_snapshot_nofollow(
+    target: &Path,
+    expected_identity: FileIdentity,
+    expected_sha256: &Sha256Digest,
+    expected_size: u64,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    validate_target_leaf(target)?;
+    #[cfg(unix)]
+    {
+        unix::remove_regular_file_from_snapshot_impl(
+            &absolute_path(target)?,
+            expected_identity,
+            expected_sha256,
+            expected_size,
+            max_bytes,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            target,
+            expected_identity,
+            expected_sha256,
+            expected_size,
+            max_bytes,
+        );
         Err(unsupported_durability())
     }
 }

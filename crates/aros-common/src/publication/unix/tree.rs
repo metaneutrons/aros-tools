@@ -278,7 +278,7 @@ fn validate_private_removal_boundary(
     validate_private_tree(directory, target, &mut budget)
 }
 
-fn validate_private_ancestor_chain(target: &Path) -> std::io::Result<()> {
+pub(super) fn validate_private_ancestor_chain(target: &Path) -> std::io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(
             ErrorKind::InvalidInput,
@@ -412,7 +412,7 @@ fn validate_private_ancestor_directory(stat: &rfs::Stat, path: &Path) -> std::io
     Ok(())
 }
 
-fn validate_private_regular_file(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
+pub(super) fn validate_private_regular_file(stat: &rfs::Stat, path: &Path) -> std::io::Result<()> {
     validate_not_group_or_world_writable(stat, path, "regular file")?;
     if stat.st_nlink != 1 {
         return Err(std::io::Error::new(
