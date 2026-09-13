@@ -74,7 +74,7 @@ fn status_is_passive_and_refresh_publishes_a_verified_immutable_generation() {
 
 #[test]
 fn content_identities_reject_preserved_mtime_staleness_and_legacy_path_collisions() {
-    let (_temporary, request) = fixture();
+    let (temporary, request) = fixture();
     let first = refresh(&request, &CancellationToken::default()).unwrap();
     let first_generation = first.entries[0].selection.generation.clone();
     let source = request.source_dir.join("rom/mmakefile");
@@ -89,6 +89,38 @@ fn content_identities_reject_preserved_mtime_staleness_and_legacy_path_collision
     let refreshed = refresh(&request, &CancellationToken::default()).unwrap();
     assert_ne!(refreshed.entries[0].selection.generation, first_generation);
     assert!(verify(&request).is_ok());
+
+    let alternate_source = temporary.path().join("alternate-source");
+    fs::create_dir_all(alternate_source.join("config")).unwrap();
+    fs::create_dir_all(alternate_source.join("tools/genmf")).unwrap();
+    fs::create_dir_all(alternate_source.join("rom")).unwrap();
+    for relative in [
+        "config/make.tmpl",
+        "config/make-common.tmpl",
+        "tools/genmf/genmf.py",
+    ] {
+        fs::copy(
+            request.source_dir.join(relative),
+            alternate_source.join(relative),
+        )
+        .unwrap();
+    }
+    fs::write(
+        alternate_source.join("rom/mmakefile"),
+        "%build_program alternate-root\n",
+    )
+    .unwrap();
+    let alternate_request = GenmfCacheRequest {
+        source_dir: alternate_source,
+        ..request.clone()
+    };
+    let alternate = refresh(&alternate_request, &CancellationToken::default()).unwrap();
+    assert_ne!(
+        alternate.entries[0].selection.generation,
+        refreshed.entries[0].selection.generation,
+        "a same-named MMake file in another source root with different bytes must not reuse a stale generation"
+    );
+    assert!(verify(&alternate_request).is_ok());
 
     fs::create_dir_all(request.source_dir.join("a%b")).unwrap();
     fs::create_dir_all(request.source_dir.join("a")).unwrap();
