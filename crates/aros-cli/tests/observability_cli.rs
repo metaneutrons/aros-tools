@@ -376,6 +376,9 @@ fn final_log_failure_after_source_initialization_retains_the_committed_state() {
     fs::create_dir(&upstream).unwrap();
     for directory in ["arch", "compiler", "rom", "developer"] {
         fs::create_dir(upstream.join(directory)).unwrap();
+        // Git does not retain empty directories; the cloned fixture must carry
+        // the exact AROS-root markers through source initialization.
+        fs::write(upstream.join(directory).join(".fixture"), "fixture\n").unwrap();
     }
     fs::write(upstream.join("configure"), "fixture configure\n").unwrap();
     fs::write(upstream.join("Makefile.in"), "fixture makefile\n").unwrap();
@@ -428,6 +431,30 @@ fn repository_discovery_has_its_own_stable_boundary() {
     assert_eq!(value["diagnostics"][0]["code"], "AR0101");
     assert_eq!(value["diagnostics"][0]["stage"], "repository_discovery");
     assert_eq!(value["diagnostics"][0]["context"]["mode"], "clean");
+}
+
+#[test]
+fn exact_leaf_context_and_hint_survive_a_library_failure() {
+    let output = command()
+        .args([
+            "--diagnostic-format=json",
+            "toolchain",
+            "path",
+            "--preset",
+            "pc-x86_64",
+        ])
+        .output()
+        .unwrap();
+
+    let value = json(&output);
+    let diagnostic = &value["diagnostics"][0];
+    assert_eq!(diagnostic["context"]["mode"], "toolchain.path");
+    assert!(
+        diagnostic["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("install") && hint.contains("verified path")),
+        "leaf-specific recovery guidance was lost: {diagnostic}"
+    );
 }
 
 #[test]
