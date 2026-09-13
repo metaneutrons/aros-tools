@@ -7,6 +7,10 @@ const CLI_REFERENCE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs-site/src/content/docs/reference/cli.md"
 ));
+const DIAGNOSTICS_REFERENCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs-site/src/content/docs/reference/diagnostics.md"
+));
 
 const fn aros() -> &'static str {
     env!("CARGO_BIN_EXE_aros")
@@ -73,17 +77,13 @@ fn public_cli_reference_covers_every_visible_leaf_command() {
     let mut leaves = BTreeSet::new();
     collect_leaves(&[], &mut leaves);
 
-    assert_eq!(
-        leaves.len(),
-        53,
-        "a visible CLI change must update the public command-reference count intentionally"
+    assert!(
+        !leaves.is_empty(),
+        "the root command must expose at least one visible public leaf command"
     );
     assert!(
-        CLI_REFERENCE.contains(&format!(
-            "All {} visible frontend leaf commands",
-            leaves.len()
-        )),
-        "the public command reference must declare the current visible command count"
+        CLI_REFERENCE.contains("/aros-tools/reference/cli-contract/"),
+        "the public command reference must link to the source-derived CLI contract"
     );
 
     let missing = leaves
@@ -94,5 +94,29 @@ fn public_cli_reference_covers_every_visible_leaf_command() {
     assert!(
         missing.is_empty(),
         "visible public commands absent from docs-site/src/content/docs/reference/cli.md: {missing:?}"
+    );
+}
+
+#[test]
+fn public_reference_preserves_the_current_board_native_lifecycle_and_installation_boundaries() {
+    assert!(
+        CLI_REFERENCE.contains("typed model-specific profile template"),
+        "board init must describe the selected model rather than a legacy fixed template"
+    );
+    assert!(
+        !CLI_REFERENCE.contains("Pi-4 USB-ECM profile template"),
+        "board init must not promise a fixed Pi-4 USB-ECM template"
+    );
+    assert!(
+        CLI_REFERENCE.contains("`--resume-from compiler`"),
+        "the documented native lifecycle must expose its compiler-only resume boundary"
+    );
+    assert!(
+        CLI_REFERENCE.contains("checks their inventory, modes, sizes, and snapshotted bytes"),
+        "the installer reference must state its actual verification boundary"
+    );
+    assert!(
+        DIAGNOSTICS_REFERENCE.contains("`aros toolchain build` also exposes `AX0801`"),
+        "the diagnostics reference must connect AX0801 to the public native build command"
     );
 }

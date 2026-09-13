@@ -1,6 +1,6 @@
 ---
 title: Command reference
-description: All 53 visible frontend leaf commands, their boundaries, and the canonical option reference.
+description: Public aros commands, their boundaries, and the canonical option reference.
 ---
 
 The executable is `aros`. The tables below cover the current
@@ -28,11 +28,12 @@ documented separately.
 
 ## Complete public CLI inventory
 
-**All 53 visible frontend leaf commands** are listed below. The inventory is
-checked against the built CLI in the portable test suite, so adding a visible
-command requires an intentional documentation update. The hidden
-`__metamake-fetch` lifecycle bridge is not a public command and is deliberately
-excluded.
+Every visible frontend leaf command is listed below. The source-derived
+[generated CLI contract](/aros-tools/reference/cli-contract/) records its
+current options, defaults, values, environment bindings, and parser-level
+conflicts. Both references are checked against the built CLI, so exposing a
+command or changing a public argument requires an intentional documentation
+update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 
 ### Setup, source and product workflow
 
@@ -101,7 +102,7 @@ the safe entry stages and explains the required checkout/cache separation.
 
 | Command | Effect and boundary |
 | --- | --- |
-| `aros board init` | Print or explicitly create a Pi-4 USB-ECM profile template |
+| `aros board init` | Print or explicitly create a typed model-specific profile template |
 | `aros board scan` | Find USB CDC-ECM adapters eligible for local profile pairing |
 | `aros board doctor` | Inspect a profile, host prerequisites and built artifacts without mutating hardware |
 | `aros board build` | Build the selected board profile's CMake target with its locked toolchain |
@@ -120,7 +121,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | `source init PATH` | No | Clone into a new destination; `--upstream URL`, `--fork URL`, optional `--ref REF` |
 | `source sync` | Required | Validate a candidate and fast-forward a clean attached branch; `--upstream URL`, `--ref BRANCH`, `--no-transpile` |
 | `info` | Optional | Report host/state paths and any discovered target/toolchain contracts |
-| `install --source-bin DIR --prefix DIR` | No | Publish exactly eight version-matched executables without replacing existing programs |
+| `install --source-bin DIR --prefix DIR` | No | Publish exactly eight pre-verified executable files without replacing existing programs |
 
 `source init --ref` requires a full branch/tag ref or exact commit OID and
 leaves HEAD detached, even for a branch ref. Omit it to use the clone's default
@@ -133,9 +134,12 @@ It never implicitly merges divergent history.
 See [source workflows](/aros-tools/workflows/source/).
 
 The native installer requires an existing absolute prefix and an input
-directory containing exactly the eight programs. A Cargo output directory
-contains additional files and is **not** an `install --source-bin` input.
-Use PATH for a source build or the verified archive installation procedure.
+directory containing exactly the eight expected regular executable files. It
+checks their inventory, modes, sizes, and snapshotted bytes before publishing;
+release identity, version matching, and provenance verification are upstream
+release-preparation responsibilities. A Cargo output directory contains
+additional files and is **not** an `install --source-bin` input. Use PATH for a
+source build or the verified archive installation procedure.
 
 ## Toolchains and helpers
 
@@ -238,9 +242,11 @@ settings. Ctrl-C and the whole-operation deadline terminate and reap process
 groups; retained material is never adopted or deleted. The command requires
 `--offline`; it does not publish, tag, package or authorize a release.
 
-There is no backend switch or legacy fallback. Receipt reuse/resume, complete
-candidate inventory and real host/profile qualification remain separately
-qualified capabilities.
+There is no backend switch or legacy fallback. The sole recovery boundary is
+`--resume-from compiler`: it revalidates retained ownership, predecessor
+receipts, snapshots, cache inputs, and measured compiler outputs before running
+only the collector phase. Generic receipt reuse, candidate inventory, and real
+host/profile qualification remain separately qualified capabilities.
 
 For the required checkout layout, cache bootstrap, resource boundary and
 failure handling, follow the [native producer workflow](/aros-tools/workflows/toolchain-producer/).

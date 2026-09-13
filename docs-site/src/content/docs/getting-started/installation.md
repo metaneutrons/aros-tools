@@ -117,13 +117,15 @@ cleanup
 trap - EXIT HUP INT TERM
 ```
 
-The installer validates the exact eight-file inventory and executable modes,
-then publishes the suite through one locked, crash-recoverable no-clobber
-transaction. It never changes the mode of an existing `bin` directory and
-never replaces an existing program. `aros` intentionally calls its specialized
-executables as separate processes, so mixed versions are unsupported. For an
-existing installation, follow [Update and uninstall](/aros-tools/getting-started/update-uninstall/)
-instead of overwriting individual files.
+The installer validates the exact eight-file inventory and requires each member
+to be a regular executable with mode `0755`. It snapshots the bytes and their
+file identity before the first destination mutation, then publishes the suite
+through one locked, crash-recoverable no-clobber transaction. It never changes
+the mode of an existing `bin` directory and never replaces an existing program.
+`aros` intentionally calls its specialized executables as separate processes,
+so mixed versions are unsupported. For an existing installation, follow
+[Update and uninstall](/aros-tools/getting-started/update-uninstall/) instead
+of overwriting individual files.
 
 </details>
 
