@@ -88,7 +88,7 @@ enum Commands {
     /// Install the declared host compiler or verified AROS cross-toolchains
     Setup {
         /// Re-download the archive cache; never overwrite an installed tree
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["local", "offline"])]
         force: bool,
 
         /// Install the AROS cross-toolchain for this target preset
@@ -100,11 +100,11 @@ enum Commands {
         all: bool,
 
         /// Never access the network; use only verified cache/store content
-        #[arg(long, env = "AROS_OFFLINE")]
+        #[arg(long, env = "AROS_OFFLINE", conflicts_with = "force")]
         offline: bool,
 
         /// Use and verify an existing AROS-built prefix without copying it
-        #[arg(long, requires = "preset", conflicts_with = "all")]
+        #[arg(long, requires = "preset", conflicts_with_all = ["all", "force"])]
         local: Option<PathBuf>,
     },
 
@@ -197,11 +197,19 @@ enum Commands {
         engine_dir: Option<PathBuf>,
     },
 
-    /// Clean build directory
+    /// Remove one explicitly selected build scope
     Clean {
         /// Target preset to clean
-        #[arg(short, long)]
+        #[arg(short, long, required_unless_present = "all", conflicts_with = "all")]
         preset: Option<String>,
+
+        /// Remove the checkout's complete build directory
+        #[arg(long, conflicts_with = "preset")]
+        all: bool,
+
+        /// Print the selected build directory without removing it
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Boot the target in QEMU and report how far it got
@@ -216,7 +224,7 @@ enum Commands {
         preset: String,
 
         /// Seconds to let the guest run before stopping it
-        #[arg(short, long, default_value_t = 20)]
+        #[arg(short, long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
 
         /// Also pass every built package as a multiboot module
@@ -232,7 +240,7 @@ enum Commands {
         evidence: Option<PathBuf>,
 
         /// Guest memory in MiB
-        #[arg(long, default_value_t = 512)]
+        #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u32).range(1..))]
         memory: u32,
     },
 
@@ -294,8 +302,8 @@ enum SourceCommand {
         upstream: String,
 
         /// Exact upstream branch name under refs/heads/
-        #[arg(long = "ref", value_name = "BRANCH", default_value = "master")]
-        upstream_ref: String,
+        #[arg(long = "branch", value_name = "BRANCH", default_value = "master")]
+        upstream_branch: String,
 
         /// Skip standalone-candidate target-graph validation
         #[arg(long = "no-transpile", action = clap::ArgAction::SetFalse)]
@@ -329,11 +337,11 @@ enum HostCompilerCommands {
     /// Download and install the pinned host LLVM tools
     Install {
         /// Re-download the archive cache; never overwrite an installed tree
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "offline")]
         force: bool,
 
         /// Never access the network; use only verified cached content
-        #[arg(long, env = "AROS_OFFLINE")]
+        #[arg(long, env = "AROS_OFFLINE", conflicts_with = "force")]
         offline: bool,
     },
 }
@@ -356,15 +364,15 @@ enum ToolchainCommands {
         preset: String,
 
         /// Re-download the archive cache; never overwrite an installed tree
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with_all = ["local", "offline"])]
         force: bool,
 
         /// Never access the network; use only verified cached content
-        #[arg(long, env = "AROS_OFFLINE")]
+        #[arg(long, env = "AROS_OFFLINE", conflicts_with = "force")]
         offline: bool,
 
         /// Verify and use an existing AROS-built prefix without copying it
-        #[arg(long)]
+        #[arg(long, conflicts_with = "force")]
         local: Option<PathBuf>,
     },
     /// List locked artifacts for the current host
@@ -548,11 +556,11 @@ enum BoardCommand {
         artifact_dir: Option<PathBuf>,
 
         /// Publish the staged bundle. Without this flag deploy is a dry run.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dry_run")]
         apply: bool,
 
         /// Explicitly request dry-run output (the default unless --apply is given)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "apply")]
         dry_run: bool,
     },
 
@@ -586,7 +594,7 @@ enum BoardCommand {
         device: Option<PathBuf>,
 
         /// Override the configured serial baud rate for this invocation
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         baud: Option<u32>,
 
         /// Print the external terminal command without starting it
@@ -611,11 +619,11 @@ enum SdCommand {
         output: PathBuf,
 
         /// Create the image after validation. Without this flag it is a dry run.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dry_run")]
         apply: bool,
 
         /// Explicitly request dry-run output (the default unless --apply is given)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "apply")]
         dry_run: bool,
     },
 
@@ -873,11 +881,13 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 Some(path.display().to_string()),
                 "verify Git, the source URLs and ref, and select a new destination path",
             ),
-            SourceCommand::Sync { upstream_ref, .. } => (
+            SourceCommand::Sync {
+                upstream_branch, ..
+            } => (
                 DiagnosticCode::CliSourceState,
                 DiagnosticStage::RepositoryDiscovery,
                 "source.sync",
-                Some(upstream_ref.clone()),
+                Some(upstream_branch.clone()),
                 "inspect the stable source diagnostic code, reviewed upstream, branch state, and candidate-validation failure",
             ),
         },
@@ -895,12 +905,16 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             Some(preset.clone()),
             "inspect the preserved configure/build output and retry the exact reported target",
         ),
-        Commands::Clean { preset } => (
+        Commands::Clean { preset, all, .. } => (
             DiagnosticCode::CliPublication,
             DiagnosticStage::Publication,
             "clean",
-            preset.clone(),
-            "verify that the selected build directory belongs to the intended AROS preset",
+            if *all {
+                Some("all".into())
+            } else {
+                preset.clone()
+            },
+            "verify the explicit clean scope and selected build directory before applying it",
         ),
         Commands::Test { preset, .. } => (
             DiagnosticCode::CliBoot,
@@ -982,6 +996,24 @@ async fn main() -> ExitCode {
         }
     };
     let format = cli.observability.diagnostic_format;
+    let invocation_directory = match std::env::current_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::CliConfiguration,
+                        DiagnosticStage::Configuration,
+                        format!("could not determine the invocation directory: {error}"),
+                    )
+                    .with_hint("run from an accessible directory and retry"),
+                ),
+                format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let logger = match Logger::open(
         cli.observability.effective_log_level(),
         cli.observability.log_format,
@@ -1035,17 +1067,7 @@ async fn main() -> ExitCode {
     }
 
     let repo_root =
-        match resolve_repository(cli.command.repository_requirement()).and_then(|repo_root| {
-            if let Some(path) = &repo_root {
-                std::env::set_current_dir(path).map_err(|error| {
-                    miette::miette!(
-                        "Could not enter AROS checkout '{}': {error}",
-                        path.display()
-                    )
-                })?;
-            }
-            Ok(repo_root)
-        }) {
+        match resolve_repository(&invocation_directory, cli.command.repository_requirement()) {
             Ok(repo_root) => repo_root,
             Err(error) => {
                 let diagnostic = observability::report_diagnostic(
@@ -1127,11 +1149,14 @@ async fn main() -> ExitCode {
     }
 }
 
-fn resolve_repository(requirement: RepositoryRequirement) -> Result<Option<PathBuf>> {
+fn resolve_repository(
+    invocation_directory: &std::path::Path,
+    requirement: RepositoryRequirement,
+) -> Result<Option<PathBuf>> {
     match requirement {
         RepositoryRequirement::Global => Ok(None),
-        RepositoryRequirement::Optional => repo::find_root_optional(),
-        RepositoryRequirement::Required => repo::find_root().map(Some),
+        RepositoryRequirement::Optional => repo::find_root_optional_from(invocation_directory),
+        RepositoryRequirement::Required => repo::find_root_from(invocation_directory).map(Some),
     }
 }
 
@@ -1485,7 +1510,7 @@ mod tests {
             RepositoryRequirement::Optional
         );
         assert_eq!(
-            requirement(&["aros", "clean"]),
+            requirement(&["aros", "clean", "--preset", "pc-x86_64"]),
             RepositoryRequirement::Required
         );
         assert_eq!(
@@ -1531,6 +1556,112 @@ mod tests {
     }
 
     #[test]
+    fn installation_transport_modes_fail_before_repository_discovery() {
+        for arguments in [
+            &[
+                "aros",
+                "setup",
+                "--preset",
+                "pc-x86_64",
+                "--local",
+                "/opt/aros",
+                "--force",
+            ][..],
+            &[
+                "aros",
+                "setup",
+                "--preset",
+                "pc-x86_64",
+                "--force",
+                "--offline",
+            ][..],
+            &["aros", "host-compiler", "install", "--force", "--offline"][..],
+            &[
+                "aros",
+                "toolchain",
+                "install",
+                "--preset",
+                "pc-x86_64",
+                "--local",
+                "/opt/aros",
+                "--force",
+            ][..],
+            &[
+                "aros",
+                "toolchain",
+                "install",
+                "--preset",
+                "pc-x86_64",
+                "--force",
+                "--offline",
+            ][..],
+        ] {
+            assert_eq!(
+                parse_error(arguments),
+                ErrorKind::ArgumentConflict,
+                "{arguments:?}"
+            );
+        }
+
+        assert!(Cli::try_parse_from([
+            "aros",
+            "setup",
+            "--preset",
+            "pc-x86_64",
+            "--local",
+            "/opt/aros",
+            "--offline",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from(["aros", "host-compiler", "install", "--offline"]).is_ok());
+        assert!(Cli::try_parse_from([
+            "aros",
+            "toolchain",
+            "install",
+            "--preset",
+            "pc-x86_64",
+            "--local",
+            "/opt/aros",
+            "--offline",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn source_sync_uses_branch_while_source_init_retains_ref() {
+        assert!(Cli::try_parse_from(["aros", "source", "sync", "--branch", "main"]).is_ok());
+        assert_eq!(
+            parse_error(&["aros", "source", "sync", "--ref", "main"]),
+            ErrorKind::UnknownArgument
+        );
+        assert!(Cli::try_parse_from([
+            "aros",
+            "source",
+            "init",
+            "AROS",
+            "--ref",
+            "refs/heads/main",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn clean_requires_one_explicit_scope_and_supports_preview() {
+        assert_eq!(
+            parse_error(&["aros", "clean"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&["aros", "clean", "--preset", "pc-x86_64", "--all"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(
+            Cli::try_parse_from(["aros", "clean", "--preset", "pc-x86_64", "--dry-run",]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["aros", "clean", "--all", "--dry-run"]).is_ok());
+    }
+
+    #[test]
     fn build_job_limits_reject_zero_at_the_cli_boundary() {
         assert_eq!(
             parse_error(&["aros", "build", "--jobs", "0"]),
@@ -1541,6 +1672,61 @@ mod tests {
             ErrorKind::ValueValidation
         );
         assert!(Cli::try_parse_from(["aros", "build", "--jobs", "1"]).is_ok());
+    }
+
+    #[test]
+    fn resource_and_board_mutation_contracts_are_enforced_by_the_parser() {
+        for arguments in [
+            &["aros", "test", "--timeout", "0"][..],
+            &["aros", "test", "--memory", "0"][..],
+            &[
+                "aros",
+                "board",
+                "console",
+                "--profile",
+                "rpi5",
+                "--baud",
+                "0",
+            ][..],
+        ] {
+            assert_eq!(
+                parse_error(arguments),
+                ErrorKind::ValueValidation,
+                "{arguments:?}"
+            );
+        }
+        for arguments in [
+            &[
+                "aros",
+                "board",
+                "deploy",
+                "--profile",
+                "rpi5",
+                "--apply",
+                "--dry-run",
+            ][..],
+            &[
+                "aros",
+                "board",
+                "sd",
+                "image",
+                "--profile",
+                "rpi5",
+                "--boot-bundle",
+                "/bundle",
+                "--output",
+                "/output",
+                "--apply",
+                "--dry-run",
+            ][..],
+        ] {
+            assert_eq!(
+                parse_error(arguments),
+                ErrorKind::ArgumentConflict,
+                "{arguments:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["aros", "test", "--timeout", "1", "--memory", "1",]).is_ok());
     }
 
     #[test]

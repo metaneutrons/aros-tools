@@ -73,7 +73,8 @@ for physical targets.
 Ordinary `build` reuses the configured build directory.
 `build --clean --preset pc-x86_64` removes it first, including retained
 evidence. `aros clean --preset pc-x86_64` only cleans that preset;
-`aros clean` removes the whole checkout build tree.
+`aros clean --all` removes the whole checkout build tree. Add `--dry-run` to
+either form to inspect the exact directory first.
 
 For source updates, follow [source synchronization](/aros-tools/workflows/source/#synchronize-upstream).
 It requires a clean tree, including ignored build outputs.

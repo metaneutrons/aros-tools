@@ -65,7 +65,7 @@ detached so the result cannot be mistaken for a moving tracking branch.
 
 `aros source sync` accepts only a clean attached branch and verifies the
 configured `upstream` URL against the official URL or an explicit
-`--upstream`. It fetches the `refs/heads/BRANCH` selected by `--ref` into an
+`--upstream`. It fetches the `refs/heads/BRANCH` selected by `--branch` into an
 isolated quarantine, resolves one exact commit OID, imports only that OID under
 a run-owned ref, and leaves the caller's `FETCH_HEAD` untouched. It rejects
 divergence and validates recursive submodules plus every declared target graph

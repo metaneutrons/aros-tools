@@ -7,8 +7,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `aros setup` | force | -f, --force | — | no | 0 | false |  | — |  |
+| `aros setup` | force | -f, --force | — | no | 0 | false |  | — | local, offline |
 | `aros setup` | preset | -p, --preset | — | no | 1 |  |  | — | all |
 | `aros setup` | all | --all | — | no | 0 | false |  | — | preset, local |
-| `aros setup` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
-| `aros setup` | local | --local | — | no | 1 |  |  | — | all |
+| `aros setup` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE | force |
+| `aros setup` | local | --local | — | no | 1 |  |  | — | all, force |

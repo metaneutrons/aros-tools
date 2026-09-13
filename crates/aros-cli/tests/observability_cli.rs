@@ -187,7 +187,7 @@ fn repository_discovery_has_its_own_stable_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let output = command()
         .current_dir(directory.path())
-        .args(["--diagnostic-format=json", "clean"])
+        .args(["--diagnostic-format=json", "clean", "--preset", "pc-x86_64"])
         .output()
         .unwrap();
 
@@ -479,15 +479,22 @@ fn boot_test_rejects_an_early_qemu_exit_without_positive_evidence() {
     fs::create_dir_all(&boot).unwrap();
     fs::write(boot.join("bootstrap"), b"bootstrap fixture").unwrap();
     fs::write(boot.join("kernel"), b"kernel fixture").unwrap();
+    let nested = checkout.path().join("developer/invocation");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("module.elf"), b"module fixture").unwrap();
 
     let tools = tempfile::tempdir().unwrap();
     let qemu = tools.path().join("qemu-system-x86_64");
-    fs::write(&qemu, "#!/bin/sh\nexit 42\n").unwrap();
+    fs::write(
+        &qemu,
+        "#!/bin/sh\nif test -f module.elf; then exit 42; fi\nexit 43\n",
+    )
+    .unwrap();
     fs::set_permissions(&qemu, fs::Permissions::from_mode(0o755)).unwrap();
-    let evidence_root = checkout.path().join("evidence");
+    let evidence_root = nested.join("evidence");
 
     let output = command()
-        .current_dir(checkout.path())
+        .current_dir(&nested)
         .env("PATH", tools.path())
         .args([
             "--diagnostic-format=json",
@@ -496,9 +503,11 @@ fn boot_test_rejects_an_early_qemu_exit_without_positive_evidence() {
             "pc-x86_64",
             "--timeout",
             "1",
+            "--module",
+            "module.elf",
             "--evidence",
         ])
-        .arg(&evidence_root)
+        .arg("evidence")
         .output()
         .unwrap();
 

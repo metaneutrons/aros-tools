@@ -7,5 +7,5 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `aros host-compiler install` | force | -f, --force | — | no | 0 | false |  | — |  |
-| `aros host-compiler install` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
+| `aros host-compiler install` | force | -f, --force | — | no | 0 | false |  | — | offline |
+| `aros host-compiler install` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE | force |

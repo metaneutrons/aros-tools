@@ -111,6 +111,87 @@ fn public_board_init_semantic_cases_cover_models_defaults_and_environment() {
 }
 
 #[test]
+fn relative_board_configuration_stays_at_the_invocation_directory() {
+    let temporary = tempfile::tempdir().expect("temporary board configuration root");
+    let nested = temporary.path().join("nested");
+    fs::create_dir_all(&nested).expect("create nested invocation directory");
+
+    let output = Command::new(aros())
+        .current_dir(&nested)
+        .args([
+            "board",
+            "init",
+            "--profile",
+            "relative-rpi4",
+            "--model",
+            "rpi4",
+            "--config",
+            "boards.toml",
+            "--apply",
+        ])
+        .output()
+        .expect("relative board configuration case must execute");
+    assert_success(&output, "relative board configuration");
+    assert!(
+        nested.join("boards.toml").is_file(),
+        "a relative board configuration must be created below the invocation directory"
+    );
+    assert!(
+        !temporary.path().join("boards.toml").exists(),
+        "repository discovery must not reinterpret board configuration relative to an ancestor"
+    );
+}
+
+#[test]
+fn relative_local_prefix_and_sd_artifact_stay_at_the_invocation_directory() {
+    let temporary = tempfile::tempdir().expect("temporary relative-path root");
+    let checkout = temporary.path().join("AROS");
+    create_checkout_markers(&checkout);
+    let nested = checkout.join("developer/invocation");
+    fs::create_dir_all(&nested).expect("create nested invocation directory");
+
+    let local_prefix = nested.join("local-toolchain");
+    fs::create_dir_all(&local_prefix).expect("create relative local prefix");
+    let local = Command::new(aros())
+        .current_dir(&nested)
+        .args([
+            "toolchain",
+            "path",
+            "--preset",
+            "pc-x86_64",
+            "--local",
+            "local-toolchain",
+        ])
+        .output()
+        .expect("relative local-prefix case must execute");
+    let local_diagnostic = assert_failure(&local, "relative local prefix");
+    assert!(
+        local_diagnostic.contains("has no manifest"),
+        "the existing nested prefix must be selected before its validation fails: {local_diagnostic}"
+    );
+
+    let artifact = nested.join("sd-artifact");
+    fs::create_dir_all(&artifact).expect("create relative artifact directory");
+    let artifact_result = Command::new(aros())
+        .current_dir(&nested)
+        .args([
+            "--diagnostic-format=json",
+            "board",
+            "sd",
+            "scan",
+            "--artifact",
+            "sd-artifact",
+        ])
+        .output()
+        .expect("relative SD artifact case must execute");
+    let artifact_diagnostic = assert_failure(&artifact_result, "relative SD artifact");
+    assert!(
+        artifact_diagnostic.contains(&artifact.display().to_string()),
+        "the diagnostic must identify the nested artifact path: {artifact_diagnostic}"
+    );
+}
+
+#[test]
 fn public_parser_semantic_cases_reject_stale_values_and_conflicts_before_setup() {
     let missing_model = assert_failure(
         &run(&["board", "init", "--profile", "missing-model"]),
@@ -157,13 +238,220 @@ fn diagnostic_format_environment_has_the_documented_process_effect() {
     assert_eq!(diagnostic["diagnostics"][0]["code"], "AR0001");
 }
 
+#[test]
+fn installation_intent_conflicts_are_rejected_before_logging_or_repository_access() {
+    let temporary = tempfile::tempdir().expect("temporary invocation root");
+    let cases: &[&[&str]] = &[
+        &["setup", "--preset", "pc-x86_64", "--force"],
+        &["host-compiler", "install", "--force"],
+        &["toolchain", "install", "--preset", "pc-x86_64", "--force"],
+    ];
+    for (index, arguments) in cases.iter().enumerate() {
+        let log_file = temporary.path().join(format!("conflict-{index}.jsonl"));
+        let output = Command::new(aros())
+            .current_dir(temporary.path())
+            .env("AROS_OFFLINE", "true")
+            .arg("--log-file")
+            .arg(&log_file)
+            .args(*arguments)
+            .output()
+            .expect("installation conflict semantic case must execute");
+        let diagnostic = assert_failure(&output, "environment-selected offline conflict");
+        assert!(diagnostic.contains("cannot be used with"));
+        assert!(diagnostic.contains("--force"));
+        assert!(diagnostic.contains("--offline"));
+        assert!(
+            !diagnostic.contains("repository discovery"),
+            "an invocation conflict must precede repository discovery"
+        );
+        assert!(
+            !log_file.exists(),
+            "an invocation conflict must precede log-file creation"
+        );
+    }
+}
+
+fn create_checkout_markers(root: &Path) {
+    for directory in ["arch", "compiler", "rom", "nested"] {
+        fs::create_dir_all(root.join(directory)).expect("checkout marker directory");
+    }
+    for file in ["configure", "Makefile.in"] {
+        fs::write(root.join(file), "").expect("checkout marker file");
+    }
+}
+
+#[test]
+fn explicit_clean_scope_and_relative_log_file_keep_the_invocation_origin() {
+    let temporary = tempfile::tempdir().expect("temporary checkout root");
+    let checkout = temporary.path().join("AROS");
+    create_checkout_markers(&checkout);
+    let selected = checkout.join("build/pc-x86_64");
+    let preserved = checkout.join("build/other-preset");
+    let cache = checkout.join("cache/sentinel");
+    fs::create_dir_all(&selected).expect("selected build directory");
+    fs::create_dir_all(&preserved).expect("other build directory");
+    fs::create_dir_all(cache.parent().expect("cache parent")).expect("cache directory");
+    fs::write(selected.join("selected"), "remove").expect("selected build payload");
+    fs::write(preserved.join("preserved"), "keep").expect("preserved build payload");
+    fs::write(&cache, "keep").expect("cache sentinel");
+
+    let nested = checkout.join("nested");
+    let preview = Command::new(aros())
+        .current_dir(&nested)
+        .args(["clean", "--preset", "pc-x86_64", "--dry-run"])
+        .output()
+        .expect("clean preview semantic case must execute");
+    assert_success(&preview, "explicit clean preview");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains(&selected.display().to_string()));
+    assert!(
+        selected.exists(),
+        "clean preview must not remove its target"
+    );
+
+    let log_file = nested.join("invocation.jsonl");
+    let applied = Command::new(aros())
+        .current_dir(&nested)
+        .args([
+            "--log-level",
+            "info",
+            "--log-file",
+            "invocation.jsonl",
+            "clean",
+            "--preset",
+            "pc-x86_64",
+        ])
+        .output()
+        .expect("explicit clean apply semantic case must execute");
+    assert_success(&applied, "explicit preset clean");
+    assert!(
+        !selected.exists(),
+        "selected build directory must be removed"
+    );
+    assert!(preserved.exists(), "other build presets must be preserved");
+    assert!(cache.exists(), "checkout caches must be preserved");
+    assert!(
+        log_file.is_file(),
+        "a relative log file must resolve from the invocation directory"
+    );
+}
+
 #[cfg(unix)]
 fn write_executable(path: &Path, contents: &[u8]) {
     use std::os::unix::fs::PermissionsExt as _;
 
+    fs::create_dir_all(path.parent().expect("synthetic executable parent"))
+        .expect("create synthetic executable parent");
     fs::write(path, contents).expect("write synthetic suite member");
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .expect("make synthetic suite member executable");
+}
+
+#[cfg(unix)]
+fn write_legacy_pc_toolchain(root: &Path) {
+    for tool in [
+        "clang",
+        "clang++",
+        "ld.lld",
+        "llvm-ar",
+        "aros-collect",
+        "collect-aros",
+        "collect-aros32",
+    ] {
+        write_executable(
+            &root.join("bin").join(tool),
+            b"#!/bin/sh\nprintf '%s\\n' 'fixture 1.0'\n",
+        );
+    }
+    for marker in [
+        ".installflag-llvm-x86_64",
+        ".installflag-compiler_rt-x86_64",
+    ] {
+        fs::write(root.join(marker), b"complete\n").expect("write legacy toolchain marker");
+    }
+    let headers = root.join("include/c++/v1");
+    fs::create_dir_all(&headers).expect("create legacy C++ header directory");
+    for header in [
+        "algorithm",
+        "cerrno",
+        "cinttypes",
+        "cstddef",
+        "cstdint",
+        "deque",
+        "memory",
+        "string",
+        "system_error",
+        "vector",
+    ] {
+        fs::write(headers.join(header), b"fixture\n").expect("write legacy C++ header");
+    }
+    let libraries = root.join("lib");
+    fs::create_dir_all(&libraries).expect("create legacy library directory");
+    for library in ["libc++.a", "libc++abi.a", "libunwind.a"] {
+        fs::write(libraries.join(library), b"fixture\n").expect("write legacy C++ library");
+    }
+}
+
+#[cfg(unix)]
+fn write_complete_build_tool_suite(root: &Path) {
+    for tool in [
+        "aros-transpiler",
+        "aros-genmodule",
+        "aros-romtool",
+        "aros-collect",
+        "aros-ahi-runner",
+        "aros-fetch",
+    ] {
+        write_executable(
+            &root.join(tool),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{tool} {}'\n",
+                env!("CARGO_PKG_VERSION")
+            )
+            .as_bytes(),
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_engine_override_stays_at_the_invocation_directory() {
+    let temporary = tempfile::tempdir().expect("temporary engine-path root");
+    let checkout = temporary.path().join("AROS");
+    create_checkout_markers(&checkout);
+    let nested = checkout.join("developer/invocation");
+    fs::create_dir_all(&nested).expect("create nested invocation directory");
+
+    let local_toolchain = nested.join("local-toolchain");
+    write_legacy_pc_toolchain(&local_toolchain);
+    let build_tools = nested.join("build-tools");
+    write_complete_build_tool_suite(&build_tools);
+    let engine = nested.join("engine");
+    fs::create_dir_all(&engine).expect("create relative engine override");
+
+    let output = Command::new(aros())
+        .current_dir(&nested)
+        .env("AROS_BUILD_TOOLS_DIR", &build_tools)
+        .args([
+            "build",
+            "--preset",
+            "pc-x86_64",
+            "--offline",
+            "--toolchain-dir",
+            "local-toolchain",
+            "--engine-dir",
+            "engine",
+        ])
+        .output()
+        .expect("relative engine override case must execute");
+    let diagnostic = assert_failure(&output, "relative engine override");
+    assert!(
+        diagnostic.contains(&engine.display().to_string()),
+        "the engine diagnostic must identify the nested explicit override: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("AROS.cmake is missing"),
+        "the existing nested engine must reach engine validation: {diagnostic}"
+    );
 }
 
 #[cfg(unix)]

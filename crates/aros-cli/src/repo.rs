@@ -50,23 +50,16 @@ pub fn find_root_from(start: &Path) -> Result<PathBuf> {
     );
 }
 
-pub fn find_root() -> Result<PathBuf> {
-    let current_dir = std::env::current_dir()
-        .map_err(|error| miette::miette!("Could not determine the current directory: {error}"))?;
-    find_root_from(&current_dir)
-}
-
-/// Return a discovered checkout when the current directory is inside one.
+/// Return a discovered checkout when `start` is inside one.
 ///
-/// Unlike [`find_root`], absence is not an error. Filesystem failures while
-/// resolving the current directory remain explicit.
-pub fn find_root_optional() -> Result<Option<PathBuf>> {
-    let current_dir = std::env::current_dir()
-        .map_err(|error| miette::miette!("Could not determine the current directory: {error}"))?;
-    let start = current_dir.canonicalize().map_err(|error| {
+/// The frontend captures the invocation directory exactly once and uses this
+/// variant so later command execution never changes the origin of relative
+/// user-supplied paths.
+pub fn find_root_optional_from(start: &Path) -> Result<Option<PathBuf>> {
+    let start = start.canonicalize().map_err(|error| {
         miette::miette!(
             "Could not resolve working directory '{}': {error}",
-            current_dir.display()
+            start.display()
         )
     })?;
     Ok(start
