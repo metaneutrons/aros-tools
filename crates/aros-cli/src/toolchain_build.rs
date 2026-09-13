@@ -51,9 +51,6 @@ pub struct BuildArgs {
     /// Whole-operation deadline in seconds.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub timeout_seconds: u64,
-    /// Require the prepared offline cache and disable all producer transport.
-    #[arg(long, env = "AROS_OFFLINE")]
-    pub offline: bool,
     /// Explicit local candidate identifier; this does not publish or tag.
     #[arg(long)]
     pub release_id: String,
@@ -88,7 +85,6 @@ pub async fn run(args: BuildArgs) -> miette::Result<()> {
         cache_dir: args.cache_dir,
         jobs: args.jobs,
         timeout_seconds: args.timeout_seconds,
-        offline: args.offline,
         release_id: args.release_id,
         fetch_bridge: Some(fetch_bridge),
         resume_from: args.resume_from,

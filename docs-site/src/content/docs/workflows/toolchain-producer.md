@@ -114,7 +114,7 @@ creation never replaces an existing file.
 "$AROS" toolchain plan --preset pc-x86_64 --recipe "$RECIPE" \
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
   --work-dir "$WORK" --output-dir "$OUTPUT" --cache-dir "$CACHE" \
-  --jobs 8 --timeout-seconds 21600 --offline --format json
+  --jobs 8 --timeout-seconds 21600 --format json
 ```
 
 Proceed only when `readiness` is `ready`. A blocked or invalid plan is a
@@ -127,7 +127,7 @@ diagnostic, not an invitation to change its identities manually.
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
   --work-dir "$WORK" --output-dir "$OUTPUT" --cache-dir "$CACHE" \
   --jobs 8 --timeout-seconds 21600 --release-id local-pc-candidate \
-  --offline --format json
+  --format json
 
 cd "$AROS_SOURCE"
 "$AROS" toolchain verify --preset pc-x86_64 --local "$OUTPUT/toolchain"

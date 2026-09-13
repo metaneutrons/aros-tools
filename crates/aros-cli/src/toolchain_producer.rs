@@ -61,7 +61,7 @@ enum ProducerCommand {
     /// Create one deterministic local package set from a completed candidate
     Package(PackageArgs),
     /// Read back and verify one complete deterministic local package set
-    VerifyPackage(PackageArgs),
+    VerifyPackage(VerifyPackageArgs),
     /// Compare two complete local package sets byte-for-byte
     Compare(CompareArgs),
     /// Repackage one evidence-bound retained package into two fresh package sets
@@ -215,17 +215,30 @@ struct PackageContextArgs {
     forbidden_prefixes: Vec<PathBuf>,
 }
 
-/// Inputs for native package creation or read-back verification.
+/// Inputs for native package creation.
 #[derive(Args)]
 struct PackageArgs {
     #[command(flatten)]
     context: PackageContextArgs,
-    /// Completed candidate prefix for `package`, or complete package directory for `verify-package`
+    /// Completed local candidate prefix to package
     #[arg(long)]
     input_dir: PathBuf,
-    /// Absent final package-set directory; required only by `package`
+    /// Absent final package-set directory
     #[arg(long)]
-    output_dir: Option<PathBuf>,
+    output_dir: PathBuf,
+    /// Result representation on stdout
+    #[arg(long, value_enum, default_value = "human")]
+    format: ResultFormat,
+}
+
+/// Inputs for native package read-back verification.
+#[derive(Args)]
+struct VerifyPackageArgs {
+    #[command(flatten)]
+    context: PackageContextArgs,
+    /// Complete package directory to verify without mutation
+    #[arg(long)]
+    input_dir: PathBuf,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -677,13 +690,10 @@ fn environment(args: &EnvironmentArgs) -> miette::Result<()> {
 }
 
 fn package(args: PackageArgs) -> miette::Result<()> {
-    let output_dir = args.output_dir.ok_or_else(|| {
-        miette::miette!("native producer package requires an absent --output-dir")
-    })?;
     let context = package_context(args.context.clone())?;
     let output = package::package(&package::PackageRequest {
         candidate_root: args.input_dir,
-        output_dir,
+        output_dir: args.output_dir,
         release_id: context.release_id,
         host: context.host,
         recipe: context.recipe,
@@ -715,12 +725,7 @@ fn package(args: PackageArgs) -> miette::Result<()> {
     Ok(())
 }
 
-fn verify_package(args: PackageArgs) -> miette::Result<()> {
-    if args.output_dir.is_some() {
-        return Err(miette::miette!(
-            "native producer verify-package does not accept --output-dir"
-        ));
-    }
+fn verify_package(args: VerifyPackageArgs) -> miette::Result<()> {
     let context = package_context(args.context)?;
     let output = package_verify::verify(&package_verify::PackageVerificationRequest {
         package_dir: args.input_dir,

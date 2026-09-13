@@ -17,7 +17,6 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain build` | cache_dir | --cache-dir | — | yes | 1 |  |  | — |  |
 | `aros toolchain build` | jobs | --jobs | — | yes | 1 |  |  | — |  |
 | `aros toolchain build` | timeout_seconds | --timeout-seconds | — | yes | 1 |  |  | — |  |
-| `aros toolchain build` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
 | `aros toolchain build` | release_id | --release-id | — | yes | 1 |  |  | — |  |
 | `aros toolchain build` | resume_from | --resume-from | — | no | 1 |  |  | — |  |
 | `aros toolchain build` | format | --format | — | no | 1 | human | human, json | — |  |
@@ -47,7 +46,6 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain plan` | cache_dir | --cache-dir | — | no | 1 |  |  | — |  |
 | `aros toolchain plan` | jobs | --jobs | — | no | 1 |  |  | — |  |
 | `aros toolchain plan` | timeout_seconds | --timeout-seconds | — | no | 1 |  |  | — |  |
-| `aros toolchain plan` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
 | `aros toolchain plan` | format | --format | — | no | 1 | human | human, json | — |  |
 | `aros toolchain producer cache` | source_lock | --source-lock | — | yes | 1 |  |  | — |  |
 | `aros toolchain producer cache` | cache_dir | --cache-dir | — | yes | 1 |  |  | — |  |
@@ -119,7 +117,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer package` | build_environment | --build-environment | — | yes | 1 |  |  | — |  |
 | `aros toolchain producer package` | forbidden_prefixes | --forbidden-prefix | — | no | 1 |  |  | — |  |
 | `aros toolchain producer package` | input_dir | --input-dir | — | yes | 1 |  |  | — |  |
-| `aros toolchain producer package` | output_dir | --output-dir | — | no | 1 |  |  | — |  |
+| `aros toolchain producer package` | output_dir | --output-dir | — | yes | 1 |  |  | — |  |
 | `aros toolchain producer package` | format | --format | — | no | 1 | human | human, json | — |  |
 | `aros toolchain producer prepare-recovery` | qualification_evidence | --qualification-evidence | — | yes | 1 |  |  | — |  |
 | `aros toolchain producer prepare-recovery` | release_dir | --release-dir | — | yes | 1 |  |  | — |  |
@@ -194,7 +192,6 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain producer verify-package` | build_environment | --build-environment | — | yes | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | forbidden_prefixes | --forbidden-prefix | — | no | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | input_dir | --input-dir | — | yes | 1 |  |  | — |  |
-| `aros toolchain producer verify-package` | output_dir | --output-dir | — | no | 1 |  |  | — |  |
 | `aros toolchain producer verify-package` | format | --format | — | no | 1 | human | human, json | — |  |
 | `aros toolchain register` | source | --source | — | yes | 1 |  |  | — |  |
 | `aros toolchain register` | store | --store | — | no | 1 |  |  | — |  |

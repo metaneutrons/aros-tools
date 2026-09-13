@@ -65,8 +65,10 @@ fetching and inherited Git/credential settings. No build, source script,
 download, cache scan, directory reservation, installation or cleanup runs.
 
 Native plans bind a declared contract and profile and report `ready` only when
-the caller supplied `--offline`, disjoint work/output/cache roots and positive
-resource budgets. A plan never reserves those roots or verifies cache payload bytes; the
+the caller supplied disjoint work/output/cache roots and positive resource
+budgets. Native planning and execution are fixed to prepared-cache-only inputs;
+there is no online mode and no `--offline` selector. A plan never reserves those
+roots or verifies cache payload bytes; the
 lifecycle repeats all binding after reservation and performs those checks.
 The native lifecycle is the only local build implementation. It does not attest
 executor origin, publish, or claim release readiness. A valid inspection exits
@@ -191,9 +193,9 @@ This is neither a same-user sandbox nor independent Git-object/origin verificati
 ## Current CLI scope
 
 The CLI consumer `install`, `list`, `verify` and `path` commands are unchanged.
-`toolchain build` defaults to the native lifecycle and requires `--offline`, a
-prepared verified source cache, an exact declaration, fresh work/output roots,
-and explicit jobs/deadline. It invokes unchanged AROS `configure`, MetaMake's
+`toolchain build` defaults to the native lifecycle and requires a prepared,
+verified source cache, an exact declaration, fresh work/output roots, and
+explicit jobs/deadline. It has no online mode. It invokes unchanged AROS `configure`, MetaMake's
 source-owned `crosstools-release` target and a hidden Rust fetch bridge that
 serves only declared cache payloads, then builds the exact vendored
 `aros-collect`. Every phase writes a canonical self-verifying receipt and the

@@ -45,9 +45,6 @@ pub struct PlanArgs {
     /// Explicit future whole-build deadline in seconds
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     timeout_seconds: Option<u64>,
-    /// Record offline build policy; planning itself never fetches
-    #[arg(long, env = "AROS_OFFLINE")]
-    offline: bool,
     /// Result representation on stdout, independent of diagnostic-format
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -71,7 +68,6 @@ pub fn run(args: PlanArgs) -> miette::Result<()> {
         cache_dir: args.cache_dir,
         jobs: args.jobs,
         timeout_seconds: args.timeout_seconds,
-        offline: args.offline,
     };
     let plan = aros_toolchain::plan::inspect(&request).map_err(|error|
         // ContractError owns exactly one structured shared diagnostic.

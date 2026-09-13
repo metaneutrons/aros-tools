@@ -37,7 +37,6 @@ impl Fixture {
                 cache_dir: Some(path.join("cache")),
                 jobs: Some(1),
                 timeout_seconds: Some(30),
-                offline: true,
             },
             root,
             token: CancellationToken::default(),

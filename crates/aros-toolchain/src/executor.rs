@@ -35,8 +35,6 @@ pub struct BuildRequest {
     pub jobs: u64,
     /// Whole operation deadline.
     pub timeout_seconds: u64,
-    /// Native execution requires prepared offline inputs.
-    pub offline: bool,
     /// Explicit local candidate identifier; it is never a publication target.
     pub release_id: String,
     /// Exact frontend executable exposing the private MetaMake fetch bridge.

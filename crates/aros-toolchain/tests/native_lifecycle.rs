@@ -231,7 +231,6 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
             cache_dir: self.root.join("cache"),
             jobs: 1,
             timeout_seconds: 120,
-            offline: true,
             release_id: "native-fixture".into(),
             fetch_bridge: Some(self.bridge.clone()),
             resume_from: None,
@@ -371,6 +370,29 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     )
     .unwrap();
     assert_eq!(usage, "llvm-11.0.0.src.tar.xz\n");
+}
+
+#[test]
+fn native_lifecycle_rejects_an_unprepared_cache_before_environment_or_source_execution() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request();
+    request.cache_dir = fixture.root.join("missing-cache");
+
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("prepared cache inputs only"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("aros toolchain producer cache"),
+        "{diagnostic}"
+    );
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    assert!(!lifecycle.join("receipts/preflight.json").exists());
+    assert!(!lifecycle.join("receipts/environment.json").exists());
+    assert!(!lifecycle.join("verified-source-usage.log").exists());
+    assert!(!fixture.root.join("missing-cache").exists());
 }
 
 #[test]

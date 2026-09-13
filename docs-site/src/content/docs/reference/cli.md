@@ -176,7 +176,7 @@ requires three explicit source roots and works from any directory.
 | `toolchain verify` | Requires `--preset NAME`; optionally verify `--local DIR` |
 | `toolchain path` | Requires `--preset NAME`; print the verified prefix; optionally `--local DIR` |
 | `toolchain plan` | Experimental read-only producer inspection; explicit roots and recipe, no checkout discovery or build |
-| `toolchain build` | Experimental controlled local native candidate; explicit roots, prepared offline cache, fresh isolated snapshots and bounded cancellation |
+| `toolchain build` | Experimental controlled local native candidate; explicit roots, prepared and verified cache inputs, fresh isolated snapshots and bounded cancellation |
 | `toolchain producer` | Low-level native producer operations for exact recipe, cache, package, comparison, compatibility and recovery inputs; maintainer-only, never a publication shortcut |
 | `build-tools build` | Build helpers from the explicitly selected tools source workspace; checkout optional |
 | `build-tools check` | Probe the six mandatory CMake helpers and their versions; checkout optional |
@@ -195,7 +195,7 @@ See [toolchain workflows](/aros-tools/workflows/toolchains/).
 aros toolchain plan --preset pc-x86_64 \
   --recipe /work/recipe.json --source-dir /work/AROS \
   --producer-dir /work/aros-toolchains --tools-dir /work/collector-tools \
-  --format json --offline
+  --format json
 ```
 
 All five selections (`preset`, `recipe`, `source-dir`, `producer-dir`,
@@ -208,7 +208,9 @@ Use regular recipe/input files without symlink ancestors.
 Optional `--work-dir`, `--output-dir`, `--cache-dir`, positive `--jobs` and
 positive `--timeout-seconds` describe a native build; omitted values stay null.
 No directories are created, no locks reserved and no cache contents scanned.
-`--offline` also honors `AROS_OFFLINE`; planning itself is always offline.
+Native planning and execution have one fixed input policy: they accept only a
+prepared, verified cache and never fetch. There is deliberately no native
+`--offline` flag or environment override to select a second mode.
 `--format human|json` controls stdout independently of `--diagnostic-format`.
 As with other commands, explicit `--log-file` can write the selected log;
 keep that optional destination outside source roots.
@@ -225,10 +227,11 @@ The native lifecycle requires a committed producer declaration at
 commit, source lock and profile matrix to the recipe. Without that exact
 declaration, native inspection returns AX0202 and never guesses historical
 producer state. With it, `readiness` is `ready` only when all build roots and
-positive resource budgets are present and `--offline` is set; cache verification and root reservation
+positive resource budgets are present; cache verification and root reservation
 still happen at build time. Every local result has `qualification: local-only`:
-there is no origin attestation or release authorization. `fetch-guard`
-describes the controlled no-network policy, not a proven OS sandbox. Exit 0 means inspection
+there is no origin attestation or release authorization. The prepared-cache-only
+policy describes the controlled no-network input boundary, not a proven OS
+sandbox. Exit 0 means inspection
 completed; inspect `readiness` and `findings`. Invalid inputs exit 1 with no
 result on stdout.
 
@@ -240,7 +243,7 @@ aros toolchain build --preset pc-x86_64 \
   --producer-dir /work/aros-toolchains --tools-dir /work/aros-tools \
   --work-dir /work/toolchain-run --output-dir /work/toolchain-candidate \
   --cache-dir /work/source-cache --jobs 8 --timeout-seconds 21600 \
-  --release-id local-pc-2026-09-06 --offline --format json
+  --release-id local-pc-2026-09-06 --format json
 ```
 
 `toolchain build` rechecks every selection, verifies the prepared cache, and
@@ -253,8 +256,8 @@ same lifecycle builds the vendored `aros-collect`, installs the collector aliase
 and writes a canonical receipt after each completed phase. The child environment
 has explicit PATH, HOME, TMPDIR, locale, timezone, Git and Cargo offline
 settings. Ctrl-C and the whole-operation deadline terminate and reap process
-groups; retained material is never adopted or deleted. The command requires
-`--offline`; it does not publish, tag, package or authorize a release.
+groups; retained material is never adopted or deleted. The command has no
+online mode; it does not publish, tag, package or authorize a release.
 
 There is no backend switch or legacy fallback. The sole recovery boundary is
 `--resume-from compiler`: it revalidates retained ownership, predecessor
