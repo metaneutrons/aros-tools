@@ -134,10 +134,10 @@ It never implicitly merges divergent history.
 See [source workflows](/aros-tools/workflows/source/).
 
 Every user-supplied relative filesystem path is interpreted from the directory
-where `aros` was invoked. Checkout-relative defaults remain checkout-relative;
-producer recipe members and board-config members keep the origins documented by
-their owning contracts. `aros` never changes its process working directory
-during repository discovery.
+where `aros` was invoked. Checkout-relative defaults, including `golden`'s
+`build/` baseline root, remain checkout-relative; producer recipe members and
+board-config members keep the origins documented by their owning contracts.
+`aros` never changes its process working directory during repository discovery.
 
 ## Explicit cleanup
 

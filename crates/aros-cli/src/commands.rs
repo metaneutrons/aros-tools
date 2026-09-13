@@ -532,7 +532,10 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
     } else {
         "aros-transpiler"
     });
-    let build_root = PathBuf::from("build");
+    // Golden baselines are an explicit checkout-owned contract, unlike paths
+    // supplied by the caller. Keep this root stable when a user invokes the
+    // command from a nested checkout directory.
+    let build_root = repo_root.join("build");
     let snapshot_root = build_root.join("golden");
     match action {
         GoldenAction::Capture { presets } => {
