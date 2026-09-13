@@ -81,7 +81,6 @@ impl Commands {
                 SourceCommand::Sync { .. } => RepositoryRequirement::Required,
             },
             Self::Cache { .. }
-            | Self::Ccache { .. }
             | Self::Install { .. }
             | Self::Completions { .. }
             | Self::Toolchain {

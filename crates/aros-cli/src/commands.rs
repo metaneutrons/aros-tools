@@ -15,7 +15,6 @@ use miette::Result;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
@@ -139,7 +138,6 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             memory,
         ),
         Commands::Cache { command } => cache_command(command).await,
-        Commands::Ccache => compiler_cache(),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Completions { shell } => crate::completion_model::write(shell),
         Commands::Info { format } => info(repo_root, format),
@@ -803,16 +801,6 @@ fn test(
             "the boot did not come up clean; every finding above is read from the retained logs, not inferred"
         );
     }
-}
-
-fn compiler_cache() -> Result<()> {
-    let cache = build::detected_compiler_cache()
-        .ok_or_else(|| miette::miette!("neither sccache nor ccache is available on PATH"))?;
-    observability::run_command(
-        Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
-        "compiler cache statistics query",
-    )?;
-    Ok(())
 }
 
 fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {

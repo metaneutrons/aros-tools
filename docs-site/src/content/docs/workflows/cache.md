@@ -560,14 +560,12 @@ ad-hoc directory deletion. Compiler reset and clear are limited to their
 prepared AROS-owned namespace and their documented preview/apply operation;
 they are not a generic local or remote cache-management facility.
 
-`aros ccache` remains the legacy statistics frontend during the transition. It
-may start sccache because it queries backend statistics. Its former `--clear`
-flag is intentionally rejected at parser level: the command had neither a
-shared ownership boundary nor preview/apply protection, and `sccache -z`
-resets counters rather than deleting entries. Use `aros cache compiler
-reset-stats` or `aros cache compiler clear` for the managed lifecycle.
-Retention for compiler-result caches remains deliberately unavailable because
-the backends do not expose a portable immutable-object retention model.
+The legacy `aros ccache` frontend has no compatibility alias. Use `aros cache
+compiler status` for passive inspection, `aros cache compiler stats` for
+backend statistics, and the preview-first `reset-stats` or `clear` operations
+for managed mutation. Retention for compiler-result caches remains deliberately
+unavailable because the backends do not expose a portable immutable-object
+retention model.
 
 ## Build launcher policy
 

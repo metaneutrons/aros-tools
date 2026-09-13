@@ -273,9 +273,6 @@ enum Commands {
         command: CacheCommand,
     },
 
-    /// Query statistics through the legacy compiler-cache frontend
-    Ccache,
-
     /// Capture or check a baseline of the transpiler's generated output
     Golden {
         #[command(subcommand)]
@@ -969,13 +966,6 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             "inspect the retained boot evidence and the first reported serial or QEMU failure",
         ),
         Commands::Cache { command } => cache_diagnostics::cache_boundary(command),
-        Commands::Ccache => (
-            DiagnosticCode::CliToolResolution,
-            DiagnosticStage::ToolResolution,
-            "ccache",
-            None,
-            "install ccache or sccache before querying legacy statistics; use `aros cache compiler status` for a passive inspection that does not start a backend",
-        ),
         Commands::Golden { action } => match action {
             GoldenAction::Capture { .. } => (
                 DiagnosticCode::CliPublication,

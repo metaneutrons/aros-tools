@@ -1,12 +1,13 @@
 # CLI-M6 integrated public CLI qualification evidence
 
-Status: accepted implementation evidence, recorded 2026-09-13.
+Status: historical integrated implementation evidence, recorded 2026-09-13.
 
-This ledger closes [CLI-M6](https://github.com/metaneutrons/aros-tools/issues/154)
-of [the public CLI contract plan](public-cli-contract-plan.md). It qualifies
-the integrated public-command, diagnostic and documentation boundaries. It
-does not qualify hardware boot, compiler artifacts, a toolchain release, or
-the remaining cache-management initiative.
+This ledger records the evidence originally assembled for
+[CLI-M6](https://github.com/metaneutrons/aros-tools/issues/154) of the
+[public CLI contract plan](public-cli-contract-plan.md). The issue remains
+open until CLI-M3's released caller migration is accepted. It does not qualify
+hardware boot, compiler artifacts, a toolchain release, or the remaining
+cache-management initiative.
 
 ## Exact accepted identities
 
@@ -47,7 +48,7 @@ and [the documentation gate](https://github.com/metaneutrons/aros-tools/actions/
 | F02 incomplete documentation coverage | [PR #157](https://github.com/metaneutrons/aros-tools/pull/157) established source-derived command facts; [PR #164](https://github.com/metaneutrons/aros-tools/pull/164) adds the all-pages parser-backed example gate. |
 | F03 native `--offline` contradiction | [PR #159](https://github.com/metaneutrons/aros-tools/pull/159) encoded cache-only native requests and removed the false choice; #164 aligns public and producer-contract prose. |
 | F04 ignored/conflicting acquisition switches | [PR #158](https://github.com/metaneutrons/aros-tools/pull/158) makes invalid local/force and offline/force combinations parser errors. |
-| F05 redundant compiler-statistics switch | [PR #163](https://github.com/metaneutrons/aros-tools/pull/163) removes the no-op `--stats` switch; bare `aros ccache` is the statistics operation. |
+| F05 redundant compiler-statistics switch | [PR #163](https://github.com/metaneutrons/aros-tools/pull/163) removed the no-op `--stats` switch. CACHE-M7 subsequently removes the unscoped legacy frontend entirely in favour of `aros cache compiler stats`. |
 | F06 false sccache-clear success | [PR #163](https://github.com/metaneutrons/aros-tools/pull/163) rejects unsupported sccache clearing before backend execution and retains real ccache clearing evidence. |
 | F07 ambiguous source selector | [PR #158](https://github.com/metaneutrons/aros-tools/pull/158) distinguishes `source init --ref` from `source sync --branch`. |
 | F08 producer package parser shape | [PR #159](https://github.com/metaneutrons/aros-tools/pull/159) separates packaging output from verification arguments. |

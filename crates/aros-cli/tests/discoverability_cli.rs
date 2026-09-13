@@ -109,6 +109,11 @@ fn completions_are_deterministic_public_and_side_effect_free() {
             "{shell} completion lacks its marker"
         );
         assert!(generated.contains("toolchain"));
+        assert!(generated.contains("root/cache"));
+        assert!(
+            !generated.contains("root:ccache") && !generated.contains("root/ccache"),
+            "{shell} completion retained the removed ccache root subcommand"
+        );
         assert!(
             generated.contains("--diagnostic-format"),
             "{shell} completion omitted a visible global option"

@@ -33,13 +33,6 @@ pub const CLI_CONTRACT_SECTIONS: &[(&str, &str)] = &[
         )),
     ),
     (
-        "ccache",
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs-site/src/content/docs/reference/cli-contract/ccache.md"
-        )),
-    ),
-    (
         "clean",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
