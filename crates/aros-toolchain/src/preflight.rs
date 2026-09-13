@@ -190,7 +190,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use serde_json::json;
-    use tempfile::tempdir;
+    use tempfile::Builder;
 
     use super::{inspect, probe_selected};
     use crate::profiles::Profiles;
@@ -222,7 +222,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preserves_proxy_invocation_path_after_validating_its_resolved_target() {
-        let temporary = tempdir().unwrap();
+        // Some hardened native runners mount the system temporary directory
+        // `noexec`. Keep this executable fixture alongside the running test
+        // binary, whose mount has already proved executable to Cargo.
+        let test_binary = std::env::current_exe().unwrap();
+        let temporary = Builder::new()
+            .prefix("aros-toolchain-proxy-")
+            .tempdir_in(test_binary.parent().unwrap())
+            .unwrap();
         let target = temporary.path().join("cargo-proxy-target");
         fs::write(
             &target,
