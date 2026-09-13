@@ -20,8 +20,7 @@ use std::path::{Path, PathBuf};
 
 use aros_common::{open_regular_file_nofollow, sha256_reader, Sha256Digest, Sha256Result};
 use aros_fetch::engine::cache::{
-    acquire_https_cache_payload_with_normalization, snapshot_verified_cache_payload,
-    CachePayloadNormalization, VerifiedCachePayload,
+    snapshot_verified_cache_payload, CachePayloadNormalization, VerifiedCachePayload,
 };
 use serde::Deserialize;
 use url::Url;
@@ -60,13 +59,6 @@ pub struct CompatibilityPortsPayload {
     pub sha256: Sha256Digest,
     /// Exact byte size.
     pub size: u64,
-}
-
-/// Complete cache observation for one ports lock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompatibilityPortsCache {
-    /// Inputs in stable cache-filename order.
-    pub payloads: Vec<CompatibilityPortsPayload>,
 }
 
 /// Fresh, private and revalidatable `--with-portssources` directory.
@@ -218,64 +210,6 @@ impl CompatibilityPortsLock {
         selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Ok(selected)
     }
-}
-
-/// Verify that every selected compatibility payload is already present in `cache`.
-///
-/// # Errors
-///
-/// Returns AX0301 when the cache or one selected payload is absent, unsafe, or
-/// differs from its measured lock identity.
-pub fn verify_cache(
-    cache: &Path,
-    lock: &CompatibilityPortsLock,
-) -> Result<CompatibilityPortsCache, ContractError> {
-    let payloads = lock.payloads();
-    let snapshots = snapshots(cache, &payloads)?;
-    let payloads = snapshots
-        .iter()
-        .map(|(_, payload)| payload.clone())
-        .collect();
-    Ok(CompatibilityPortsCache { payloads })
-}
-
-/// Acquire only missing lock-selected compatibility payloads, then verify all of them.
-///
-/// # Errors
-///
-/// Returns AX0301 when the cache is unsafe, a transport fails, offline mode
-/// encounters a cache miss, or any payload differs from its lock identity.
-pub async fn acquire_cache(
-    cache: &Path,
-    lock: &CompatibilityPortsLock,
-    offline: bool,
-) -> Result<CompatibilityPortsCache, ContractError> {
-    let cache = checked_cache(cache)?;
-    for payload in lock.payloads() {
-        let snapshot = acquire_https_cache_payload_with_normalization(
-            &cache,
-            &payload.cache_filename,
-            &payload.url,
-            payload.size,
-            &payload.sha256,
-            payload.normalization,
-            offline,
-        )
-        .await
-        .map_err(|error| {
-            ContractError::sources(format!(
-                "compatibility ports input '{}' could not be acquired or verified: {error}",
-                payload.id
-            ))
-        })?;
-        snapshot.revalidate().map_err(|_| {
-            ContractError::sources(format!(
-                "compatibility ports input '{}' changed after acquisition",
-                payload.id
-            ))
-        })?;
-    }
-    verify_cache(&cache, lock)
 }
 
 /// Materialize a fresh private `--with-portssources` directory from verified
@@ -864,7 +798,7 @@ mod tests {
     use aros_common::sha256_bytes;
     use serde_json::json;
 
-    use super::{acquire_cache, materialize, verify_cache, CompatibilityPortsLock};
+    use super::{materialize, CompatibilityPortsLock};
     use crate::recipe::GitObjectId;
 
     fn lock(payloads: &[(&str, &str, &str, &str, &[u8])]) -> CompatibilityPortsLock {
@@ -985,7 +919,6 @@ mod tests {
         sources.clear_upstream_fetch_markers().unwrap();
         assert!(!sources.root.join("ports/.bzip2-1.0.8-fetched").exists());
         sources.revalidate().unwrap();
-        assert_eq!(verify_cache(&cache, &lock).unwrap().payloads.len(), 3);
     }
 
     #[test]
@@ -1067,24 +1000,5 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[tokio::test]
-    async fn acquisition_names_the_missing_locked_input() {
-        let temporary = tempfile::tempdir().unwrap();
-        let cache = temporary.path().join("cache");
-        fs::create_dir(&cache).unwrap();
-        let lock = lock(&[(
-            "unicode-data",
-            "UnicodeData.txt",
-            "UnicodeData.txt",
-            "",
-            b"unicode",
-        )]);
-
-        let error = acquire_cache(&cache, &lock, true).await.unwrap_err();
-        let diagnostic = error.to_string();
-        assert!(diagnostic.contains("unicode-data"));
-        assert!(diagnostic.contains("offline mode forbids acquisition"));
     }
 }

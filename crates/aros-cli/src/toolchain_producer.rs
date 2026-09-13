@@ -22,12 +22,10 @@ use aros_toolchain::recovery::{
 };
 use aros_toolchain::release_index::{self, IndexRequest, IndexStage, NativeReleaseIndex};
 use aros_toolchain::repackage::{self, VerifiedPackageRepackageRequest};
-use aros_toolchain::source_cache;
 use aros_toolchain::source_lock::SourceLock;
 use aros_toolchain::{package, package_verify, Recipe};
 use clap::{Args, Subcommand, ValueEnum};
 use std::collections::BTreeSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
@@ -52,8 +50,6 @@ impl ProducerArgs {
     pub const fn diagnostic_mode(&self) -> &'static str {
         match &self.command {
             ProducerCommand::Recipe(_) => "toolchain.producer.recipe",
-            ProducerCommand::Cache(_) => "toolchain.producer.cache",
-            ProducerCommand::CompatibilityPorts(_) => "toolchain.producer.compatibility-ports",
             ProducerCommand::Environment(_) => "toolchain.producer.environment",
             ProducerCommand::Profile(_) => "toolchain.producer.profile",
             ProducerCommand::MaterializeEngineFreeSource(_) => {
@@ -80,10 +76,6 @@ impl ProducerArgs {
 enum ProducerCommand {
     /// Construct one non-overwriting recipe-v2 from committed Git inputs
     Recipe(RecipeArgs),
-    /// Acquire or verify the exact source-cache closure selected by a lock
-    Cache(CacheArgs),
-    /// Acquire or verify the exact upstream ports-source closure for compatibility
-    CompatibilityPorts(native_compatibility::CompatibilityPortsArgs),
     /// Write the deterministic build-environment receipt embedded in a package
     Environment(EnvironmentArgs),
     /// Read one recipe-bound producer profile without duplicating its selectors
@@ -145,26 +137,6 @@ struct RecipeArgs {
     /// Absent recipe-v2 output file; an existing file is never replaced
     #[arg(long)]
     output: PathBuf,
-    /// Result representation on stdout
-    #[arg(long, value_enum, default_value = "human")]
-    format: ResultFormat,
-}
-
-/// Inputs for native source-cache acquisition or verification.
-#[derive(Args)]
-struct CacheArgs {
-    /// Source-lock-v2 document selecting the complete archive closure
-    #[arg(long)]
-    source_lock: PathBuf,
-    /// Existing local cache root; only lock-selected direct children are used
-    #[arg(long)]
-    cache_dir: PathBuf,
-    /// Refuse transport and report a typed error for every cache miss
-    #[arg(long, env = "AROS_OFFLINE")]
-    offline: bool,
-    /// Verify the selected closure without inserting a missing cache object
-    #[arg(long)]
-    verify_only: bool,
     /// Result representation on stdout
     #[arg(long, value_enum, default_value = "human")]
     format: ResultFormat,
@@ -518,10 +490,6 @@ struct IndexArgs {
 pub async fn run(args: ProducerArgs) -> miette::Result<()> {
     match args.command {
         ProducerCommand::Recipe(args) => recipe(args),
-        ProducerCommand::Cache(args) => cache(args).await,
-        ProducerCommand::CompatibilityPorts(args) => {
-            native_compatibility::compatibility_ports(args).await
-        }
         ProducerCommand::Environment(args) => environment(&args),
         ProducerCommand::Profile(args) => profile(&args),
         ProducerCommand::MaterializeEngineFreeSource(args) => {
@@ -637,58 +605,6 @@ fn recipe(args: RecipeArgs) -> miette::Result<()> {
                 "operation": "recipe",
                 "path": output.path,
                 "sha256": output.sha256,
-            });
-            print_json(&document)?;
-        }
-    }
-    Ok(())
-}
-
-async fn cache(args: CacheArgs) -> miette::Result<()> {
-    let lock = SourceLock::parse(&read_regular_input(&args.source_lock, "source lock")?)
-        .map_err(|error| native_error(&error))?;
-    let observation = if args.verify_only {
-        source_cache::verify(&args.cache_dir, &lock)
-    } else {
-        source_cache::acquire(&args.cache_dir, &lock, args.offline).await
-    }
-    .map_err(|error| native_error(&error))?;
-    match args.format {
-        ResultFormat::Human => {
-            let operation = if args.verify_only {
-                "verified"
-            } else {
-                "acquired"
-            };
-            let mut text = format!(
-                "Native source cache {operation}: {} payload(s)",
-                observation.payloads.len()
-            );
-            for payload in observation.payloads {
-                let _ = write!(
-                    text,
-                    "\n  {} {} ({})",
-                    payload.sha256, payload.size, payload.filename
-                );
-            }
-            aros_common::outputln!("{text}");
-        }
-        ResultFormat::Json => {
-            let payloads = observation
-                .payloads
-                .into_iter()
-                .map(|payload| {
-                    serde_json::json!({
-                        "filename": payload.filename,
-                        "sha256": payload.sha256,
-                        "size": payload.size,
-                    })
-                })
-                .collect::<Vec<_>>();
-            let document = serde_json::json!({
-                "schema": "aros-toolchain-producer-stage-v1",
-                "operation": if args.verify_only { "cache-verify" } else { "cache-acquire" },
-                "payloads": payloads,
             });
             print_json(&document)?;
         }
@@ -1595,7 +1511,7 @@ mod tests {
     use crate::Cli;
 
     #[test]
-    fn producer_recipe_and_cache_stages_are_publicly_parseable() {
+    fn producer_stage_surface_excludes_the_migrated_source_cache_frontends() {
         let recipe = Cli::try_parse_from([
             "aros",
             "toolchain",
@@ -1615,7 +1531,7 @@ mod tests {
             "/output/recipe.json",
         ]);
         assert!(recipe.is_ok());
-        let cache = Cli::try_parse_from([
+        let removed_cache = Cli::try_parse_from([
             "aros",
             "toolchain",
             "producer",
@@ -1626,7 +1542,7 @@ mod tests {
             "/cache",
             "--verify-only",
         ]);
-        assert!(cache.is_ok());
+        assert!(removed_cache.is_err());
         let profile = Cli::try_parse_from([
             "aros",
             "toolchain",

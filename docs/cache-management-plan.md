@@ -208,13 +208,15 @@ result. Selection is never based on a filename, inferred project state or a
 source-tree scan.
 
 The source-fetch plan represents the exact data formerly implicit in one
-product source-fetch declaration: a stable role, ordered credential-free HTTPS
-candidates, the declared archive/patch representation, normalization policy,
-and either a size/SHA-256 identity or an explicit `unverified` integrity
-classification. The parser rejects duplicate role/candidate identities,
-unsafe names, relative paths, credentials, non-HTTPS origins, unbounded input
-sets and unsupported normalization. An unverified declaration is not upgraded
-to a pin: a successful fetch records its measured identity as
+product source-fetch declaration: a stable role, one portable direct cache
+filename, ordered credential-free HTTPS candidates, an explicit `archive` or
+`patch` representation, normalization policy, and either a size/SHA-256
+identity or an explicit `unverified` integrity classification. A patch also
+binds its relative target subdirectory and reviewed option sequence. The parser
+rejects duplicate role/candidate identities, unsafe names, relative paths,
+credentials, non-HTTPS origins, unbounded input sets and unsupported
+normalization. An unverified declaration is not upgraded to a pin: a
+successful fetch records its measured identity as
 `measured_unpinned`, and verify can report presence but cannot report upstream
 integrity. Product-plan acquisition is permitted only with an explicit
 `--allow-unverified`; producer and compatibility locks remain strict.

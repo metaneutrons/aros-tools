@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # existing SHA-2 primitive required for bounded archive/content verification;
 # producer lifecycle/publication owners remain forbidden below.
 ALLOWED = {
+    "aros-cache",
     "aros-cmake-engine",
     "aros-common",
     "aros-fetch",
@@ -57,6 +58,7 @@ class ToolchainBoundaryTests(unittest.TestCase):
         manifest = tomllib.loads((directory / "Cargo.toml").read_text())
         names = dependency_names(manifest, workspace["dependencies"])
         self.assertEqual(names - ALLOWED, set())
+        self.assertIn("aros-cache", names)
         self.assertIn("aros-common", names)
         self.assertFalse(manifest["package"]["publish"])
         self.assertNotIn("bin", manifest)

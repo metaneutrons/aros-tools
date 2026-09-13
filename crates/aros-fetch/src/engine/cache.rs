@@ -148,27 +148,7 @@ pub async fn acquire_https_cache_payload_with_normalization(
             "offline mode forbids acquisition of a missing selected source payload",
         ));
     }
-    let client = reqwest::Client::builder()
-        .connect_timeout(DIRECT_CONNECT_TIMEOUT)
-        .timeout(DIRECT_TRANSFER_TIMEOUT)
-        // Lock identities describe the archive representation, not a
-        // transparently decoded HTTP body. Keep response bytes raw so the
-        // streaming length and SHA-256 checks below measure the exact object
-        // received from the locked HTTPS origin.
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .redirect(Policy::custom(|attempt| {
-            if attempt.url().scheme() == "https" {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .user_agent(concat!("aros-fetch/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| network_failure("cannot initialize locked HTTPS transport"))?;
+    let client = direct_https_client()?;
     match normalization {
         CachePayloadNormalization::ExactBytesV1 => {
             download_exact_https(
@@ -201,6 +181,68 @@ pub async fn acquire_https_cache_payload_with_normalization(
         }
     }
     snapshot_verified_cache_payload(cache_root, filename, expected_size, expected_sha256)
+}
+
+/// Acquire a reviewed HTTPS payload whose upstream declaration intentionally
+/// has no content hash.
+///
+/// The caller must make that opt-in visible at its own public boundary. This
+/// primitive does not manufacture a lock: it enforces only a finite transfer
+/// limit and returns a no-follow private snapshot with its measured identity.
+/// An existing direct cache object is measured and retained as-is; it is never
+/// refreshed, replaced, or silently repaired.
+///
+/// # Errors
+///
+/// Returns a structured cache, network, or contract diagnostic if the root,
+/// declaration, origin, existing object, transfer, or no-clobber publication
+/// is unsafe. `offline` forbids all transport for a missing object.
+pub async fn acquire_unverified_https_cache_payload(
+    cache_root: &Path,
+    filename: &str,
+    url: &str,
+    maximum_size: u64,
+    offline: bool,
+) -> FetchResult<VerifiedCachePayload> {
+    if !cache_root.is_dir() {
+        return Err(cache_failure(
+            "measured cache root is not an existing directory",
+        ));
+    }
+    if maximum_size == 0 || maximum_size > super::MAX_DOWNLOAD_BYTES || !portable_basename(filename)
+    {
+        return Err(cache_failure(
+            "unverified cache payload declaration has an unsafe name or invalid byte limit",
+        ));
+    }
+    let origin = validate_https_origin(url)?;
+    let destination = direct_child(cache_root, filename)?;
+    let _lock = FetchLock::acquire_candidate(&destination)?;
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return snapshot_measured_cache_payload(cache_root, filename, maximum_size),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(cache_failure(
+                "cannot inspect selected direct cache payload before acquisition",
+            ))
+        }
+    }
+    if offline {
+        return Err(cache_failure(
+            "offline mode forbids acquisition of a missing selected source payload",
+        ));
+    }
+    let client = direct_https_client()?;
+    download_unverified_https(
+        &client,
+        &origin,
+        cache_root,
+        &destination,
+        filename,
+        maximum_size,
+    )
+    .await?;
+    snapshot_measured_cache_payload(cache_root, filename, maximum_size)
 }
 
 impl VerifiedCachePayload {
@@ -281,6 +323,41 @@ pub fn snapshot_verified_cache_payload(
     Ok(VerifiedCachePayload { payload, size })
 }
 
+/// Snapshot and measure one direct regular cache entry without asserting an
+/// upstream identity.
+///
+/// This function is deliberately separate from
+/// [`snapshot_verified_cache_payload`]: the returned digest is a local
+/// measurement and never proof that an upstream source was pinned.
+///
+/// # Errors
+///
+/// Returns a structured failure if the root/name is unsafe, the object is
+/// absent or changing, or it exceeds the reviewed finite limit.
+pub fn snapshot_measured_cache_payload(
+    cache_root: &Path,
+    filename: &str,
+    maximum_size: u64,
+) -> FetchResult<VerifiedCachePayload> {
+    if !cache_root.is_dir() {
+        return Err(cache_failure(
+            "measured cache root is not an existing directory",
+        ));
+    }
+    if maximum_size == 0 || maximum_size > super::MAX_DOWNLOAD_BYTES || !portable_basename(filename)
+    {
+        return Err(cache_failure(
+            "unverified cache payload declaration has an unsafe name or invalid byte limit",
+        ));
+    }
+    let path = direct_child(cache_root, filename)?;
+    let payload = PreparedPayload::import(&path, filename, maximum_size)?;
+    let size = std::fs::metadata(&payload.path)
+        .map_err(|_| cache_failure("cannot remeasure private cache payload snapshot"))?
+        .len();
+    Ok(VerifiedCachePayload { payload, size })
+}
+
 fn direct_child(root: &Path, filename: &str) -> FetchResult<PathBuf> {
     let path = root.join(filename);
     if path.parent() != Some(root) {
@@ -306,6 +383,114 @@ fn validate_https_origin(value: &str) -> FetchResult<reqwest::Url> {
         ));
     }
     Ok(url)
+}
+
+fn direct_https_client() -> FetchResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(DIRECT_CONNECT_TIMEOUT)
+        .timeout(DIRECT_TRANSFER_TIMEOUT)
+        // The representation that a caller measures must be the received
+        // response bytes, never a transparent HTTP content-decoder result.
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .redirect(Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .user_agent(concat!("aros-fetch/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| network_failure("cannot initialize locked HTTPS transport"))
+}
+
+async fn download_unverified_https(
+    client: &reqwest::Client,
+    origin: &reqwest::Url,
+    cache_root: &Path,
+    destination: &Path,
+    filename: &str,
+    maximum_size: u64,
+) -> FetchResult<()> {
+    let mut last_failure = None;
+    for _ in 0..DIRECT_RETRIES {
+        let response = match client.get(origin.clone()).send().await {
+            Ok(response)
+                if response.status().is_success() && response.url().scheme() == "https" =>
+            {
+                response
+            }
+            Ok(response) if response.url().scheme() != "https" => {
+                last_failure = Some("redirect did not preserve HTTPS".to_owned());
+                continue;
+            }
+            Ok(response) => {
+                last_failure = Some(format!("HTTP server returned status {}", response.status()));
+                continue;
+            }
+            Err(error) => {
+                last_failure = Some(http_failure_summary(&error));
+                continue;
+            }
+        };
+        let mut staged = Builder::new()
+            .prefix(".aros-fetch-unverified-")
+            .tempfile_in(cache_root)
+            .map_err(|_| cache_failure("cannot create unverified source transfer staging file"))?;
+        let mut written = 0_u64;
+        let mut stream = response.bytes_stream();
+        let mut failed = None;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    written = written.checked_add(chunk.len() as u64).ok_or_else(|| {
+                        integrity_failure(
+                            filename,
+                            "unverified source transfer byte count overflowed",
+                        )
+                    })?;
+                    if written > maximum_size {
+                        failed = Some(format!(
+                            "unverified source transfer exceeded its declared byte limit ({written} > {maximum_size})"
+                        ));
+                        break;
+                    }
+                    if let Err(error) = staged.write_all(&chunk) {
+                        failed = Some(format!("cannot write transfer staging file: {error}"));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    failed = Some(http_failure_summary(&error));
+                    break;
+                }
+            }
+        }
+        if let Some(failure) = failed {
+            last_failure = Some(failure);
+            continue;
+        }
+        if written == 0 {
+            last_failure = Some("unverified source transfer returned an empty payload".to_owned());
+            continue;
+        }
+        staged
+            .as_file_mut()
+            .sync_all()
+            .map_err(|_| cache_failure("cannot sync unverified source transfer staging file"))?;
+        let measured = PreparedPayload::import(staged.path(), filename, maximum_size)?;
+        measured.revalidate()?;
+        drop(measured);
+        super::payload::publish_download_noclobber(staged.path(), destination, filename)?;
+        return Ok(());
+    }
+    Err(network_failure(format!(
+        "reviewed unverified HTTPS source transfer failed after {DIRECT_RETRIES} attempts: {}",
+        last_failure.unwrap_or_else(|| "unknown transport failure".to_owned())
+    )))
 }
 
 async fn download_exact_https(
@@ -1055,7 +1240,10 @@ mod tests {
     use flate2::read::MultiGzDecoder;
     use flate2::{Compression, GzBuilder};
 
-    use super::{canonicalize_tar_gzip, snapshot_verified_cache_payload};
+    use super::{
+        acquire_unverified_https_cache_payload, canonicalize_tar_gzip,
+        snapshot_measured_cache_payload, snapshot_verified_cache_payload,
+    };
 
     fn write_transport_variant(
         path: &Path,
@@ -1179,6 +1367,54 @@ mod tests {
             "payload.tar.gz",
             6,
             &sha256_bytes(b"other\n"),
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn unverified_payloads_remain_measured_and_offline_never_transfer() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bytes = b"reviewed but intentionally unpinned\n";
+        fs::write(temporary.path().join("product.tar.xz"), bytes).unwrap();
+        let payload = acquire_unverified_https_cache_payload(
+            temporary.path(),
+            "product.tar.xz",
+            "https://example.invalid/product.tar.xz",
+            bytes.len() as u64,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(payload.sha256(), &sha256_bytes(bytes));
+        assert_eq!(payload.size(), bytes.len() as u64);
+        payload.revalidate().unwrap();
+
+        assert!(acquire_unverified_https_cache_payload(
+            temporary.path(),
+            "missing.tar.xz",
+            "https://example.invalid/missing.tar.xz",
+            1,
+            true,
+        )
+        .await
+        .is_err());
+        assert!(!temporary.path().join("missing.tar.xz").exists());
+    }
+
+    #[test]
+    fn measured_snapshot_is_bounded_but_never_claims_an_upstream_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bytes = b"measured payload\n";
+        fs::write(temporary.path().join("product.tar.xz"), bytes).unwrap();
+        let payload =
+            snapshot_measured_cache_payload(temporary.path(), "product.tar.xz", bytes.len() as u64)
+                .unwrap();
+        assert_eq!(payload.sha256(), &sha256_bytes(bytes));
+        assert_eq!(payload.size(), bytes.len() as u64);
+        assert!(snapshot_measured_cache_payload(
+            temporary.path(),
+            "product.tar.xz",
+            bytes.len() as u64 - 1,
         )
         .is_err());
     }

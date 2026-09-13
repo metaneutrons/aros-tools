@@ -385,7 +385,7 @@ fn native_lifecycle_rejects_an_unprepared_cache_before_environment_or_source_exe
         "{diagnostic}"
     );
     assert!(
-        diagnostic.contains("aros toolchain producer cache"),
+        diagnostic.contains("aros cache sources fetch --source-lock"),
         "{diagnostic}"
     );
     let lifecycle = fixture.root.join("work/native-lifecycle");

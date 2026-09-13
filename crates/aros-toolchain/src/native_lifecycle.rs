@@ -34,6 +34,7 @@ use crate::producer_environment::{ProducerEnvironment, ReproducibilityRoots};
 use crate::python_environment::{PythonEnvironment, PythonInterpreter};
 use crate::snapshot::{SourceRole, SourceSnapshot};
 use crate::source_cache;
+use crate::source_cache_request::SourceCacheRequest;
 use crate::workspace::RunDirectories;
 use crate::{canonical, ContractError, Recipe};
 
@@ -140,7 +141,8 @@ fn run_owned(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
-    let cache = verify_prepared_cache(&request.cache_dir, bound.source_lock())?;
+    let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
+    let cache = verify_prepared_cache(&request.cache_dir, &cache_request)?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -450,7 +452,8 @@ fn resume_after_compiler(
     )?;
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
-    let cache = verify_prepared_cache(&request.cache_dir, bound.source_lock())?;
+    let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
+    let cache = verify_prepared_cache(&request.cache_dir, &cache_request)?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source_root,
@@ -689,11 +692,11 @@ fn plan_request(request: &BuildRequest) -> PlanRequest {
 
 fn verify_prepared_cache(
     cache_dir: &Path,
-    lock: &crate::source_lock::SourceLock,
-) -> Result<source_cache::CacheObservation, ContractError> {
-    source_cache::verify(cache_dir, lock).map_err(|error| {
+    request: &SourceCacheRequest,
+) -> Result<source_cache::SourceCacheVerification, ContractError> {
+    source_cache::verify_request(cache_dir, request).map_err(|error| {
         ContractError::sources(format!(
-            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros toolchain producer cache`, then prove it with `aros toolchain producer cache --verify-only --offline` before retrying: {error}"
+            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros cache sources fetch --source-lock SOURCE_LOCK --dir CACHE`, then prove it with `aros cache sources verify --source-lock SOURCE_LOCK --dir CACHE` before retrying: {error}"
         ))
     })
 }
@@ -1383,7 +1386,7 @@ struct PhaseInputContext<'a> {
     recipe: &'a Recipe,
     declaration: &'a NativeExecutorDeclaration,
     host: Option<&'a HostPreflight>,
-    cache: Option<&'a source_cache::CacheObservation>,
+    cache: Option<&'a source_cache::SourceCacheVerification>,
     jobs: u64,
     snapshots: &'a SnapshotDigests,
     environment: Option<&'a ProducerEnvironment>,
@@ -1409,9 +1412,19 @@ fn phase_input(
     });
     let payloads = context.cache.map(|cache| {
         cache
-            .payloads
+            .entries
             .iter()
-            .map(|payload| json!({"filename": payload.filename, "sha256": payload.sha256, "size": payload.size}))
+            .map(|payload| {
+                json!({
+                    "role": payload.role,
+                    "filename": payload.filename,
+                    "sha256": payload.sha256,
+                    "size": payload.size,
+                    "representation": payload.representation,
+                    "normalization": payload.normalization,
+                    "integrity": payload.integrity,
+                })
+            })
             .collect::<Vec<_>>()
     });
     let value = json!({
@@ -1436,6 +1449,10 @@ fn phase_input(
             "cargo_jobs": context.jobs,
         })),
         "tools": tools,
+        "source_cache_request": context.cache.map(|cache| json!({
+            "kind": cache.request_kind,
+            "sha256": cache.request_sha256,
+        })),
         "payloads": payloads,
         "previous_receipt_sha256": previous_receipt_sha256,
     });

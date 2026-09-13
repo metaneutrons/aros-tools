@@ -11,14 +11,13 @@ use std::path::Path;
 use std::{fs, io::ErrorKind};
 
 use aros_common::{DiagnosticCode, Sha256Digest};
-use aros_fetch::engine::cache::snapshot_verified_cache_payload;
+use aros_fetch::engine::cache::{snapshot_measured_cache_payload, snapshot_verified_cache_payload};
 
 #[cfg(unix)]
 use aros_cache::{observe_root, resolve_explicit_root, CacheSideEffects, RootObservation};
 #[cfg(unix)]
 use serde::Serialize;
 
-use crate::source_lock::SourceLock;
 use crate::ContractError;
 #[cfg(unix)]
 use crate::{
@@ -82,8 +81,14 @@ pub enum SourceCacheEntryState {
 pub struct SourceCacheListEntry {
     /// Semantic declaration role, never inferred from a filename.
     pub role: String,
-    /// The sole currently selected candidate.
-    pub candidate: SourceCacheCandidate,
+    /// Reviewed transport candidates in declaration order. They share one
+    /// direct cache filename and differ only by origin, so a fallback cannot
+    /// silently select a different cache object.
+    pub candidates: Vec<SourceCacheCandidate>,
+    /// Direct cache filename shared by every reviewed candidate.
+    pub filename: String,
+    /// Semantic archive/patch representation declared by the selector.
+    pub representation: crate::source_cache_request::SourceCacheRepresentation,
     /// Declared cache representation policy.
     pub normalization: aros_fetch::engine::cache::CachePayloadNormalization,
     /// Declared integrity policy.
@@ -116,10 +121,34 @@ pub struct SourceCacheList {
     pub entries: Vec<SourceCacheListEntry>,
 }
 
-/// Exact object identity consumed by a successful strict source-cache verify.
+/// Integrity classification of one measured source-cache object.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCacheObjectIntegrity {
+    /// A measured object matched a declared size and SHA-256 lock.
+    Locked,
+    /// A product plan explicitly permitted an unpinned object. Its displayed
+    /// size and digest are local measurements, not upstream verification.
+    MeasuredUnpinned,
+}
+
+#[cfg(unix)]
+impl SourceCacheObjectIntegrity {
+    /// Stable human-oriented integrity label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::MeasuredUnpinned => "measured_unpinned",
+        }
+    }
+}
+
+/// Exact object identity consumed by a source-cache verification.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct VerifiedSourceCacheEntry {
+pub struct ObservedSourceCacheEntry {
     /// Semantic declaration role.
     pub role: String,
     /// Filename from the reviewed direct-cache declaration.
@@ -128,11 +157,15 @@ pub struct VerifiedSourceCacheEntry {
     pub sha256: Sha256Digest,
     /// Measured byte length, equal to the lock declaration on success.
     pub size: u64,
+    /// Whether this measurement is lock-verified or deliberately unpinned.
+    pub integrity: SourceCacheObjectIntegrity,
+    /// Semantic archive/patch representation declared by the selector.
+    pub representation: crate::source_cache_request::SourceCacheRepresentation,
     /// Declared representation policy.
     pub normalization: aros_fetch::engine::cache::CachePayloadNormalization,
 }
 
-/// Exact strict source-cache verification result.
+/// Exact source-cache verification result.
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceCacheVerification {
@@ -146,8 +179,8 @@ pub struct SourceCacheVerification {
     pub request_sha256: Sha256Digest,
     /// Verification hashes declared payloads but has no other side effect.
     pub side_effects: CacheSideEffects,
-    /// Exact locked objects consumed by this verification.
-    pub entries: Vec<VerifiedSourceCacheEntry>,
+    /// Exact measured objects consumed by this verification.
+    pub entries: Vec<ObservedSourceCacheEntry>,
 }
 
 /// Exact result of source-cache population through a reviewed selector.
@@ -164,8 +197,8 @@ pub struct SourceCacheFetch {
     pub request_sha256: Sha256Digest,
     /// Explicit population boundary. `network` is false only for offline runs.
     pub side_effects: CacheSideEffects,
-    /// Exact locked objects present after the operation completes.
-    pub entries: Vec<VerifiedSourceCacheEntry>,
+    /// Exact measured objects present after the operation completes.
+    pub entries: Vec<ObservedSourceCacheEntry>,
 }
 
 #[cfg(unix)]
@@ -231,6 +264,7 @@ pub fn list(
     request: &SourceCacheRequest,
 ) -> Result<SourceCacheList, ContractError> {
     checked_real_cache_root(cache_root)?;
+    request.validate()?;
     let entries = request
         .entries
         .iter()
@@ -246,38 +280,46 @@ pub fn list(
     })
 }
 
-/// Verify every strict selector entry against its declared cache identity.
+/// Measure every selector entry and verify every strict declaration.
 ///
 /// # Errors
 ///
 /// Returns AX0301 when the cache root/object is unsafe, absent or changed.
-/// Unverified product declarations require their dedicated M2 acquisition and
-/// observation path; this strict verifier never upgrades them to a lock.
+/// Unverified product declarations are measured within their declared finite
+/// limit and returned as `measured_unpinned`; the result never claims upstream
+/// integrity for them.
 #[cfg(unix)]
 pub fn verify_request(
     cache_root: &Path,
     request: &SourceCacheRequest,
 ) -> Result<SourceCacheVerification, ContractError> {
     checked_real_cache_root(cache_root)?;
+    request.validate()?;
     let mut entries = Vec::with_capacity(request.entries.len());
     for entry in &request.entries {
-        let candidate = exact_candidate(entry)?;
-        let SourceCacheIntegrity::Locked { sha256, size } = &entry.integrity else {
-            return Err(ContractError::sources(
-                "unverified product source declarations cannot be reported as verified",
-            ));
+        let filename = cache_filename(entry)?;
+        let (snapshot, integrity) = match &entry.integrity {
+            SourceCacheIntegrity::Locked { sha256, size } => (
+                snapshot_verified_cache_payload(cache_root, filename, *size, sha256)
+                    .map_err(|error| map_fetch_failure(&error))?,
+                SourceCacheObjectIntegrity::Locked,
+            ),
+            SourceCacheIntegrity::Unverified { max_size } => (
+                snapshot_measured_cache_payload(cache_root, filename, *max_size)
+                    .map_err(|error| map_fetch_failure(&error))?,
+                SourceCacheObjectIntegrity::MeasuredUnpinned,
+            ),
         };
-        let snapshot =
-            snapshot_verified_cache_payload(cache_root, &candidate.filename, *size, sha256)
-                .map_err(|error| map_fetch_failure(&error))?;
         snapshot
             .revalidate()
             .map_err(|error| map_fetch_failure(&error))?;
-        entries.push(VerifiedSourceCacheEntry {
+        entries.push(ObservedSourceCacheEntry {
             role: entry.role.clone(),
-            filename: candidate.filename.clone(),
+            filename: filename.to_owned(),
             sha256: snapshot.sha256().clone(),
             size: snapshot.size(),
+            integrity,
+            representation: entry.representation,
             normalization: entry.normalization,
         });
     }
@@ -292,7 +334,7 @@ pub fn verify_request(
     })
 }
 
-/// Acquire missing strict source-cache objects, then verify the full closure.
+/// Acquire missing source-cache objects, then measure the complete closure.
 ///
 /// Existing entries are snapshotted and verified before transport. They are
 /// never refreshed, replaced or repaired. The caller must select an existing
@@ -301,38 +343,22 @@ pub fn verify_request(
 ///
 /// # Errors
 ///
-/// Returns AX0301 when the selected root/object is unsafe, an integrity check
-/// fails, a transfer cannot complete, or offline mode encounters a miss.
-/// Unverified product declarations require the separate explicit M2 path and
-/// cannot enter a strict producer/compatibility cache closure.
+/// Returns AX0301 when the selected root/object is unsafe, a strict integrity
+/// check fails, a transfer cannot complete, or offline mode encounters a miss.
+/// An unverified product declaration is rejected unless the caller has made
+/// the explicit `--allow-unverified` decision at its public boundary.
 #[cfg(unix)]
 pub async fn fetch_request(
     cache_root: &Path,
     request: &SourceCacheRequest,
     offline: bool,
+    allow_unverified: bool,
 ) -> Result<SourceCacheFetch, ContractError> {
     checked_real_cache_root(cache_root)?;
+    request.validate()?;
+    preflight_existing_entries(cache_root, &request.entries)?;
     for entry in &request.entries {
-        let candidate = exact_candidate(entry)?;
-        let SourceCacheIntegrity::Locked { sha256, size } = &entry.integrity else {
-            return Err(ContractError::sources(
-                "unverified product source declarations require --allow-unverified and cannot enter a strict source cache closure",
-            ));
-        };
-        let snapshot = aros_fetch::engine::cache::acquire_https_cache_payload_with_normalization(
-            cache_root,
-            &candidate.filename,
-            &candidate.url,
-            *size,
-            sha256,
-            entry.normalization,
-            offline,
-        )
-        .await
-        .map_err(|error| map_fetch_failure(&error))?;
-        snapshot
-            .revalidate()
-            .map_err(|error| map_fetch_failure(&error))?;
+        fetch_entry(cache_root, entry, offline, allow_unverified).await?;
     }
     let verified = verify_request(cache_root, request)?;
     Ok(SourceCacheFetch {
@@ -360,20 +386,108 @@ fn checked_real_cache_root(cache_root: &Path) -> Result<(), ContractError> {
 }
 
 #[cfg(unix)]
-fn exact_candidate(entry: &SourceCacheEntry) -> Result<&SourceCacheCandidate, ContractError> {
-    let [candidate] = entry.candidates.as_slice() else {
+fn cache_filename(entry: &SourceCacheEntry) -> Result<&str, ContractError> {
+    if entry.filename.is_empty() {
         return Err(ContractError::sources(
-            "this source-cache operation requires one exact candidate for each declared role",
-        ));
-    };
-    if candidate.filename.is_empty()
-        || Path::new(&candidate.filename).parent() != Some(Path::new(""))
-    {
-        return Err(ContractError::sources(
-            "source-cache request has an unsafe direct-cache candidate filename",
+            "source-cache request has no reviewed direct cache filename for a declared role",
         ));
     }
-    Ok(candidate)
+    Ok(&entry.filename)
+}
+
+/// Reject every invalid existing object before acquisition can publish a
+/// different missing object from the same closed request.
+#[cfg(unix)]
+fn preflight_existing_entries(
+    cache_root: &Path,
+    entries: &[SourceCacheEntry],
+) -> Result<(), ContractError> {
+    for entry in entries {
+        let filename = cache_filename(entry)?;
+        match fs::symlink_metadata(cache_root.join(filename)) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(_) => {
+                return Err(ContractError::sources(
+                    "cannot inspect a selected source-cache object before acquisition",
+                ));
+            }
+            Ok(_) => {}
+        }
+        let snapshot = match &entry.integrity {
+            SourceCacheIntegrity::Locked { sha256, size } => {
+                snapshot_verified_cache_payload(cache_root, filename, *size, sha256)
+            }
+            SourceCacheIntegrity::Unverified { max_size } => {
+                snapshot_measured_cache_payload(cache_root, filename, *max_size)
+            }
+        }
+        .map_err(|error| map_fetch_failure(&error))?;
+        snapshot
+            .revalidate()
+            .map_err(|error| map_fetch_failure(&error))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn fetch_entry(
+    cache_root: &Path,
+    entry: &SourceCacheEntry,
+    offline: bool,
+    allow_unverified: bool,
+) -> Result<(), ContractError> {
+    let filename = cache_filename(entry)?;
+    if matches!(entry.integrity, SourceCacheIntegrity::Unverified { .. }) && !allow_unverified {
+        return Err(ContractError::sources(
+            "an explicitly unverified product source requires --allow-unverified; no cache object was changed",
+        ));
+    }
+    let mut last_failure = None;
+    for candidate in &entry.candidates {
+        let result = match &entry.integrity {
+            SourceCacheIntegrity::Locked { sha256, size } => {
+                aros_fetch::engine::cache::acquire_https_cache_payload_with_normalization(
+                    cache_root,
+                    filename,
+                    &candidate.url,
+                    *size,
+                    sha256,
+                    entry.normalization,
+                    offline,
+                )
+                .await
+            }
+            SourceCacheIntegrity::Unverified { max_size } => {
+                if entry.normalization
+                    != aros_fetch::engine::cache::CachePayloadNormalization::ExactBytesV1
+                {
+                    return Err(ContractError::sources(
+                        "an explicitly unverified product source cannot request archive normalization",
+                    ));
+                }
+                aros_fetch::engine::cache::acquire_unverified_https_cache_payload(
+                    cache_root,
+                    filename,
+                    &candidate.url,
+                    *max_size,
+                    offline,
+                )
+                .await
+            }
+        };
+        match result {
+            Ok(snapshot) => {
+                snapshot
+                    .revalidate()
+                    .map_err(|error| map_fetch_failure(&error))?;
+                return Ok(());
+            }
+            Err(error) => last_failure = Some(map_fetch_failure(&error)),
+        }
+    }
+    Err(last_failure.unwrap_or_else(|| {
+        ContractError::sources("source-cache role has no reviewed transport candidates")
+    }))
 }
 
 #[cfg(unix)]
@@ -381,8 +495,8 @@ fn list_entry(
     cache_root: &Path,
     entry: &SourceCacheEntry,
 ) -> Result<SourceCacheListEntry, ContractError> {
-    let candidate = exact_candidate(entry)?.clone();
-    let path = cache_root.join(&candidate.filename);
+    let filename = cache_filename(entry)?.to_owned();
+    let path = cache_root.join(&filename);
     let (state, metadata_size, error_kind) = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             (SourceCacheEntryState::Unsafe, None, None)
@@ -403,7 +517,9 @@ fn list_entry(
     };
     Ok(SourceCacheListEntry {
         role: entry.role.clone(),
-        candidate,
+        candidates: entry.candidates.clone(),
+        filename,
+        representation: entry.representation,
         normalization: entry.normalization,
         integrity: entry.integrity.clone(),
         state,
@@ -422,108 +538,21 @@ const fn io_error_kind(kind: ErrorKind) -> &'static str {
     }
 }
 
-/// One verified payload observation, safe to retain in an M2 plan/report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PayloadObservation {
-    /// Lock-selected portable basename.
-    pub filename: String,
-    /// Measured digest, equal to the lock on success.
-    pub sha256: Sha256Digest,
-    /// Measured byte size, equal to the lock on success.
-    pub size: u64,
-}
-
-/// Complete verified cache closure for one selected source lock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheObservation {
-    /// Payloads in stable filename order.
-    pub payloads: Vec<PayloadObservation>,
-}
-
-/// Verify every source-lock payload as an immutable direct cache child.
-///
-/// No network operation, cache insertion, extraction or source execution is
-/// permitted.  `aros-fetch` creates private temporary snapshots only; they are
-/// dropped after their source and snapshot CAS checks pass.
-///
-/// # Errors
-///
-/// Returns AX0301 when a cache root/payload is missing, changing, unsafe or has
-/// a different measured identity.  It deliberately does not echo cache paths.
-pub fn verify(cache_root: &Path, lock: &SourceLock) -> Result<CacheObservation, ContractError> {
-    if !cache_root.is_absolute() || !cache_root.is_dir() {
-        return Err(ContractError::sources(
-            "selected verified source cache is not an existing directory",
-        ));
-    }
-    let mut payloads = Vec::new();
-    for expected in lock.payloads() {
-        let snapshot = snapshot_verified_cache_payload(
-            cache_root,
-            expected.filename(),
-            expected.size(),
-            expected.sha256(),
-        )
-        .map_err(|error| map_fetch_failure(&error))?;
-        snapshot
-            .revalidate()
-            .map_err(|error| map_fetch_failure(&error))?;
-        payloads.push(PayloadObservation {
-            filename: expected.filename().to_owned(),
-            sha256: snapshot.sha256().clone(),
-            size: snapshot.size(),
-        });
-    }
-    payloads.sort_by(|left, right| left.filename.cmp(&right.filename));
-    Ok(CacheObservation { payloads })
-}
-
-/// Acquire only lock-selected missing payloads, then return their exact cache observation.
-///
-/// Existing cache entries are never refreshed: any stale or poisoned object
-/// fails closed before a compiler process could start.
-///
-/// # Errors
-///
-/// Returns AX0301 for every source/cache/transport failure. `offline` permits
-/// no network transfer and therefore turns a cache miss into the same typed
-/// source-preflight failure.
-pub async fn acquire(
-    cache_root: &Path,
-    lock: &SourceLock,
-    offline: bool,
-) -> Result<CacheObservation, ContractError> {
-    if !cache_root.is_absolute() || !cache_root.is_dir() {
-        return Err(ContractError::sources(
-            "selected verified source cache is not an existing directory",
-        ));
-    }
-    for expected in lock.payloads() {
-        let snapshot = aros_fetch::engine::cache::acquire_https_cache_payload(
-            cache_root,
-            expected.filename(),
-            expected.url(),
-            expected.size(),
-            expected.sha256(),
-            offline,
-        )
-        .await
-        .map_err(|error| map_fetch_failure(&error))?;
-        snapshot
-            .revalidate()
-            .map_err(|error| map_fetch_failure(&error))?;
-    }
-    verify(cache_root, lock)
-}
-
 fn map_fetch_failure(error: &aros_fetch::FetchFailure) -> ContractError {
     match error.diagnostic().code {
+        DiagnosticCode::FetchContract => ContractError::sources(
+            "a selected source-cache declaration violates the reviewed cache transport contract",
+        ),
+        DiagnosticCode::FetchCache => ContractError::sources(
+            "a selected source-cache payload is missing, unsafe or changed during verification",
+        ),
+        DiagnosticCode::FetchNetwork => ContractError::sources(
+            "a reviewed source-cache transport failed; no existing cache object was replaced",
+        ),
         DiagnosticCode::FetchIntegrity => ContractError::sources(
             "a selected source-cache payload does not match its locked size or SHA-256",
         ),
-        _ => ContractError::sources(
-            "a selected source-cache payload is missing, unsafe or changed during verification",
-        ),
+        _ => ContractError::sources("a selected source-cache operation failed safely"),
     }
 }
 
@@ -536,11 +565,14 @@ mod m2_tests {
 
     use super::{
         fetch_request, list, status, verify_request, SourceCacheEntryState, SourceCacheFetch,
-        SourceCacheIntegrity, SourceCacheList, SourceCacheRequest, SourceCacheRequestKind,
-        SourceCacheStatus, SourceCacheVerification, SOURCE_CACHE_FETCH_SCHEMA,
-        SOURCE_CACHE_LIST_SCHEMA, SOURCE_CACHE_STATUS_SCHEMA, SOURCE_CACHE_VERIFY_SCHEMA,
+        SourceCacheIntegrity, SourceCacheList, SourceCacheObjectIntegrity, SourceCacheRequest,
+        SourceCacheRequestKind, SourceCacheStatus, SourceCacheVerification,
+        SOURCE_CACHE_FETCH_SCHEMA, SOURCE_CACHE_LIST_SCHEMA, SOURCE_CACHE_STATUS_SCHEMA,
+        SOURCE_CACHE_VERIFY_SCHEMA,
     };
-    use crate::source_cache_request::{SourceCacheCandidate, SourceCacheEntry};
+    use crate::source_cache_request::{
+        SourceCacheCandidate, SourceCacheEntry, SourceCacheRepresentation,
+    };
 
     fn real_tempdir() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -555,14 +587,36 @@ mod m2_tests {
             request_sha256: sha256_bytes(b"reviewed selector"),
             entries: vec![SourceCacheEntry {
                 role: "producer:toolchain_component:llvm-project@20.1.7".to_owned(),
+                filename: filename.to_owned(),
                 candidates: vec![SourceCacheCandidate {
-                    filename: filename.to_owned(),
                     url: format!("https://example.invalid/{filename}"),
                 }],
+                representation: SourceCacheRepresentation::Archive,
+                patch: None,
                 normalization: CachePayloadNormalization::ExactBytesV1,
                 integrity: SourceCacheIntegrity::Locked {
                     sha256: sha256_bytes(payload),
                     size: payload.len() as u64,
+                },
+            }],
+        }
+    }
+
+    fn unverified_product_request(filename: &str, maximum_size: u64) -> SourceCacheRequest {
+        SourceCacheRequest {
+            kind: SourceCacheRequestKind::ProductSourceFetchPlan,
+            request_sha256: sha256_bytes(b"reviewed product selector"),
+            entries: vec![SourceCacheEntry {
+                role: "product:grub@2.12".to_owned(),
+                filename: filename.to_owned(),
+                candidates: vec![SourceCacheCandidate {
+                    url: format!("https://example.invalid/{filename}"),
+                }],
+                representation: SourceCacheRepresentation::Archive,
+                patch: None,
+                normalization: CachePayloadNormalization::ExactBytesV1,
+                integrity: SourceCacheIntegrity::Unverified {
+                    max_size: maximum_size,
                 },
             }],
         }
@@ -627,7 +681,7 @@ mod m2_tests {
         let payload = b"exact locked payload";
         fs::write(cache.join("llvm.tar.xz"), payload).unwrap();
         let fetched: SourceCacheFetch =
-            fetch_request(&cache, &strict_request("llvm.tar.xz", payload), true)
+            fetch_request(&cache, &strict_request("llvm.tar.xz", payload), true, false)
                 .await
                 .unwrap();
         assert_eq!(fetched.schema, SOURCE_CACHE_FETCH_SCHEMA);
@@ -636,11 +690,80 @@ mod m2_tests {
         assert!(fetched.side_effects.hashes_payloads);
         assert_eq!(fetched.entries[0].sha256, sha256_bytes(payload));
 
-        let error = fetch_request(&cache, &strict_request("missing.tar.xz", payload), true)
-            .await
-            .unwrap_err();
+        let error = fetch_request(
+            &cache,
+            &strict_request("missing.tar.xz", payload),
+            true,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("missing, unsafe or changed"));
         assert!(!cache.join("missing.tar.xz").exists());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_existing_member_blocks_publication_of_every_missing_member() {
+        let temporary = real_tempdir();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let expected = b"locked source payload";
+        fs::write(cache.join("corrupt.tar.xz"), b"different bytes").unwrap();
+        let mut request = strict_request("missing.tar.xz", expected);
+        request.entries.push(SourceCacheEntry {
+            role: "producer:target_build_dependency:corrupt@1".to_owned(),
+            filename: "corrupt.tar.xz".to_owned(),
+            candidates: vec![SourceCacheCandidate {
+                url: "https://example.invalid/corrupt.tar.xz".to_owned(),
+            }],
+            representation: SourceCacheRepresentation::Archive,
+            patch: None,
+            normalization: CachePayloadNormalization::ExactBytesV1,
+            integrity: SourceCacheIntegrity::Locked {
+                sha256: sha256_bytes(expected),
+                size: expected.len() as u64,
+            },
+        });
+        request
+            .entries
+            .sort_by(|left, right| left.role.cmp(&right.role));
+
+        let error = fetch_request(&cache, &request, false, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        assert!(!cache.join("missing.tar.xz").exists());
+    }
+
+    #[tokio::test]
+    async fn unverified_product_entries_require_opt_in_and_remain_measured_unpinned() {
+        let temporary = real_tempdir();
+        let cache = temporary.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let payload = b"deliberately unpinned product source";
+        fs::write(cache.join("grub.tar.xz"), payload).unwrap();
+        let request = unverified_product_request("grub.tar.xz", payload.len() as u64);
+
+        let refusal = fetch_request(&cache, &request, true, false)
+            .await
+            .unwrap_err();
+        assert!(refusal.to_string().contains("--allow-unverified"));
+        assert_eq!(fs::read(cache.join("grub.tar.xz")).unwrap(), payload);
+
+        let verification = verify_request(&cache, &request).unwrap();
+        assert_eq!(
+            verification.entries[0].integrity,
+            SourceCacheObjectIntegrity::MeasuredUnpinned
+        );
+        assert_eq!(verification.entries[0].sha256, sha256_bytes(payload));
+        assert_eq!(verification.entries[0].size, payload.len() as u64);
+
+        let fetched = fetch_request(&cache, &request, true, true).await.unwrap();
+        assert_eq!(
+            fetched.entries[0].integrity,
+            SourceCacheObjectIntegrity::MeasuredUnpinned
+        );
+        assert!(!fetched.side_effects.network);
     }
 
     #[test]
