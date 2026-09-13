@@ -434,6 +434,43 @@ mod tests {
     #[cfg(unix)]
     static PUBLICATION_FAULT_ENV: OnceLock<Mutex<()>> = OnceLock::new();
 
+    /// Serialize deployment-publication tests with the process-global
+    /// fault-injection environment. The publication primitive reads that
+    /// variable at its real durability boundary, so every concurrent publisher
+    /// must participate in the same guard.
+    #[cfg(unix)]
+    fn publication_fault_guard() -> std::sync::MutexGuard<'static, ()> {
+        PUBLICATION_FAULT_ENV
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(unix)]
+    struct ScopedPublicationFault {
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedPublicationFault {
+        fn set(value: &str) -> Self {
+            let original = std::env::var_os("AROS_PUBLICATION_TEST_FAIL_AT");
+            std::env::set_var("AROS_PUBLICATION_TEST_FAIL_AT", value);
+            Self { original }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedPublicationFault {
+        fn drop(&mut self) {
+            if let Some(original) = &self.original {
+                std::env::set_var("AROS_PUBLICATION_TEST_FAIL_AT", original);
+            } else {
+                std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+            }
+        }
+    }
+
     fn board(name: &str, tftp_root: &Path) -> Board {
         Board {
             name: name.to_string(),
@@ -495,6 +532,9 @@ mod tests {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt as _;
 
+        #[cfg(unix)]
+        let _guard = publication_fault_guard();
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -526,6 +566,9 @@ mod tests {
 
     #[test]
     fn publish_refuses_to_clobber_an_unmanaged_directory() {
+        #[cfg(unix)]
+        let _guard = publication_fault_guard();
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -547,10 +590,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn injected_pre_and_post_boundary_failures_preserve_the_actual_deployment_state() {
-        let _guard = PUBLICATION_FAULT_ENV
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = publication_fault_guard();
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -560,9 +600,10 @@ mod tests {
         let board = board("rpi4", &tftp);
         let plan = DeploymentPlan::create(&board, temp.path(), Some(&artifacts)).expect("plan");
 
-        std::env::set_var("AROS_PUBLICATION_TEST_FAIL_AT", "stage-before-write");
-        let rolled_back = publish(&plan).expect_err("pre-boundary failure must be injected");
-        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+        let rolled_back = {
+            let _fault = ScopedPublicationFault::set("stage-before-write");
+            publish(&plan).expect_err("pre-boundary failure must be injected")
+        };
         assert_eq!(
             publication_state(&rolled_back),
             Some(CommitState::RolledBack)
@@ -572,12 +613,10 @@ mod tests {
             "the pre-boundary injection must not publish a deployment"
         );
 
-        std::env::set_var(
-            "AROS_PUBLICATION_TEST_FAIL_AT",
-            "prepared-tree-after-rename-before-sync",
-        );
-        let indeterminate = publish(&plan).expect_err("post-rename failure must be injected");
-        std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+        let indeterminate = {
+            let _fault = ScopedPublicationFault::set("prepared-tree-after-rename-before-sync");
+            publish(&plan).expect_err("post-rename failure must be injected")
+        };
         assert_eq!(
             publication_state(&indeterminate),
             Some(CommitState::Indeterminate)
@@ -614,6 +653,8 @@ mod tests {
     #[test]
     fn publish_rejects_a_prefix_parent_swapped_after_preview() {
         use std::os::unix::fs::symlink;
+
+        let _guard = publication_fault_guard();
 
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
