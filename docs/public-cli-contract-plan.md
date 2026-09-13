@@ -1,8 +1,10 @@
 # Public CLI contracts and continuously aligned documentation
 
 Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
-Decision state: CLI-M1 through CLI-M6 accepted. The exact integrated evidence
-is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
+Decision state: CLI-M1, CLI-M2, CLI-M4 and CLI-M5 are accepted. CLI-M3's
+caller migration and CLI-M6's integrated acceptance remain open until the
+next immutable tools release is consumed by the native producer. The earlier
+integrated evidence is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
 
 ## Outcome and boundaries
 
@@ -41,7 +43,7 @@ Keep one normative owner for each change:
 | Public command facts, examples, path/argument contracts and shared output/diagnostics | This plan | CLI-M1 through CLI-M6 |
 | Current install `force/local/offline` validation | CLI-M2; evidence reusable by CACHE-M3-A3 | Coordinate future `--refresh` spelling with the cache plan |
 | Native `build`/`plan` cache-only invariant and flag removal | CLI-M3; evidence reusable by CACHE-M7-A1 | Migrate exact pinned producer callers before removing their accepted syntax |
-| `aros cache compiler` hierarchy; redundant `ccache --stats`; false sccache clear; backend/root selection | CACHE-M1, issue #140 | CLI-M6 requires the F05/F06 repair evidence under CACHE-M1-A3, without claiming the whole cache milestone is accepted |
+| `aros cache compiler` hierarchy; legacy `aros ccache` removal; false sccache clear; backend/root selection | CACHE-M1 and CACHE-M7, issues #140 and #146 | CLI-M6 reuses F05/F06 repair evidence without claiming the whole cache initiative is accepted |
 | Source/archive/vendor/GenMF operations, shared leases and retention | CACHE-M2 through CACHE-M6 | New surfaces use the CLI-M1 docs/semantic contract when introduced |
 | Final cache frontend/consumer migration | CACHE-M7, issue #146 | Reuse CLI-M2/M3 evidence and extend the same docs gate; do not create another command catalog |
 

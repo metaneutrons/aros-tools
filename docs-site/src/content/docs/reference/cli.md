@@ -84,7 +84,6 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache sources keep` | Retain one fully verified reviewed source closure under a named reference |
 | `aros cache sources release` | Preview or token-confirm release of one named source retention reference |
 | `aros cache sources remove` | Preview or token-confirm removal of one role-selected source object |
-| `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
 | `aros completions` | Generate a deterministic Bash, Zsh, or Fish completion script from the visible command model |
@@ -385,24 +384,14 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
 | `cache sources release` | No | Preview one named source retention receipt; `--apply TOKEN` releases it without deleting source bytes |
 | `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
-| `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
 
-`aros ccache` is the current legacy compiler-cache frontend. It prefers
-`sccache` when both backends are on `PATH`; otherwise it uses `ccache`. A
-statistics query asks the selected backend and can start an sccache server. It
-does not inventory every local, remote, or shared storage location.
-
-:::note[CLI change]
-`aros ccache --stats` was removed because it never selected a different
-operation. Use bare `aros ccache` to query statistics.
-
-`aros ccache --clear` remains removed. Use the managed replacement instead:
-`aros cache compiler clear --backend sccache|ccache [--dir DIR]` first prints a
-short-lived preview token and mutates only when that token is returned with
-`--apply`.
-:::
+Compiler-cache operations are exclusively nested under `aros cache compiler`.
+`status` is passive; `stats` queries one prepared backend and can start its
+private sccache server. `reset-stats` and `clear` are separate preview-first
+mutations: each requires the exact short-lived token returned by its preview.
+No legacy `aros ccache` alias exists.
 
 ## Cache inspection
 

@@ -22,7 +22,6 @@ The `position` column is one-based for positional arguments and `—` for option
 - [`aros build`](/aros-tools/reference/cli-contract/build/)
 - [`aros build-tools`](/aros-tools/reference/cli-contract/build-tools/)
 - [`aros cache`](/aros-tools/reference/cli-contract/cache/)
-- [`aros ccache`](/aros-tools/reference/cli-contract/ccache/)
 - [`aros clean`](/aros-tools/reference/cli-contract/clean/)
 - [`aros completions`](/aros-tools/reference/cli-contract/completions/)
 - [`aros golden`](/aros-tools/reference/cli-contract/golden/)

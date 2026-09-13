@@ -702,33 +702,7 @@ fn clean_rejects_a_preset_path_before_touching_the_filesystem() {
 
 #[cfg(unix)]
 #[test]
-fn child_exit_status_is_preserved_as_structured_context() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let tool = directory.path().join("ccache");
-    fs::write(&tool, "#!/bin/sh\necho raw-child-error >&2\nexit 23\n").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-    let output = command()
-        .env("PATH", directory.path())
-        .args(["ccache", "--diagnostic-format=json"])
-        .output()
-        .unwrap();
-
-    assert!(output.stdout.is_empty());
-    let value = json(&output);
-    assert_eq!(value["diagnostics"][0]["code"], "AR0301");
-    assert_eq!(value["diagnostics"][0]["context"]["tool"], "ccache");
-    assert_eq!(value["diagnostics"][0]["context"]["exit_code"], 23);
-    assert!(value["diagnostics"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("stderr:\nraw-child-error"));
-}
-
-#[cfg(unix)]
-#[test]
-fn compiler_cache_clear_is_rejected_by_the_parser_without_starting_a_backend() {
+fn legacy_ccache_subcommand_is_rejected_without_starting_a_backend() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -743,7 +717,7 @@ fn compiler_cache_clear_is_rejected_by_the_parser_without_starting_a_backend() {
     let output = command()
         .env("PATH", directory.path())
         .env("AROS_TEST_CACHE_MARKER", marker.as_os_str())
-        .args(["--diagnostic-format=json", "ccache", "--clear"])
+        .args(["--diagnostic-format=json", "ccache"])
         .output()
         .unwrap();
 
@@ -755,53 +729,11 @@ fn compiler_cache_clear_is_rejected_by_the_parser_without_starting_a_backend() {
     assert_eq!(diagnostics[0]["code"], "AR0001");
     assert!(diagnostics[0]["message"]
         .as_str()
-        .is_some_and(|message| message.contains("unexpected argument '--clear'")));
+        .is_some_and(|message| message.contains("unrecognized subcommand 'ccache'")));
     assert!(
         !marker.exists(),
-        "the removed legacy clear flag must fail before a backend is discovered or started"
+        "the removed legacy frontend must fail before a backend is discovered or started"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn compiler_cache_statistics_are_the_bare_legacy_action() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let marker = directory.path().join("arguments");
-    let tool = directory.path().join("ccache");
-    fs::write(
-        &tool,
-        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$AROS_TEST_CACHE_MARKER\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let output = command()
-        .env("PATH", directory.path())
-        .env("AROS_TEST_CACHE_MARKER", marker.as_os_str())
-        .arg("ccache")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fs::read_to_string(&marker).unwrap(), "-s\n");
-
-    let removed_option = command()
-        .env("PATH", directory.path())
-        .env("AROS_TEST_CACHE_MARKER", marker.as_os_str())
-        .args(["--diagnostic-format=json", "ccache", "--stats"])
-        .output()
-        .unwrap();
-    let diagnostic = json(&removed_option);
-    assert_eq!(diagnostic["diagnostics"][0]["code"], "AR0001");
-    assert!(diagnostic["diagnostics"][0]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("unexpected argument '--stats'")));
-    assert_eq!(fs::read_to_string(&marker).unwrap(), "-s\n");
 }
 
 #[cfg(unix)]
