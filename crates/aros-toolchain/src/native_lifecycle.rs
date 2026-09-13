@@ -24,7 +24,9 @@ use aros_common::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::cargo_vendor::CargoVendorEnvironment;
+use crate::cargo_vendor::{
+    verify_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration, CargoVendorRequest,
+};
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
 use crate::native_declaration::NativeExecutorDeclaration;
@@ -163,10 +165,7 @@ fn run_owned(
         jobs: request.jobs,
         snapshots: &snapshots,
         environment: None,
-    };
-    let execution_context = PhaseInputContext {
-        environment: Some(&environment),
-        ..preflight_context
+        cargo: None,
     };
     let preflight_input = phase_input("preflight", &preflight_context, None)?;
     let preflight_receipt = persist_receipt(
@@ -186,11 +185,23 @@ fn run_owned(
         &lifecycle.python,
         &interpreter,
     )?;
-    let cargo = CargoVendorEnvironment::prepare(
+    let cargo_generation = required_cargo_generation(
         &request.cache_dir,
+        producer.root(),
+        tools.root(),
+        recipe.tools().1.as_str(),
+        &host,
+    )?;
+    let cargo = CargoVendorEnvironment::prepare(
+        &cargo_generation.generation_dir,
         &tools.root().join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
+    let execution_context = PhaseInputContext {
+        environment: Some(&environment),
+        cargo: Some(&cargo_generation),
+        ..preflight_context
+    };
     let environment_input =
         phase_input("environment", &execution_context, Some(&preflight_receipt))?;
     let environment_receipt = persist_receipt(
@@ -474,10 +485,7 @@ fn resume_after_compiler(
         jobs: request.jobs,
         snapshots: &snapshots,
         environment: None,
-    };
-    let execution_context = PhaseInputContext {
-        environment: Some(&environment),
-        ..preflight_context
+        cargo: None,
     };
 
     let preflight_input = phase_input("preflight", &preflight_context, None)?;
@@ -490,6 +498,18 @@ fn resume_after_compiler(
         &[],
         None,
     )?;
+    let cargo_generation = required_cargo_generation(
+        &request.cache_dir,
+        &producer_root,
+        &tools_root,
+        recipe.tools().1.as_str(),
+        &host,
+    )?;
+    let execution_context = PhaseInputContext {
+        environment: Some(&environment),
+        cargo: Some(&cargo_generation),
+        ..preflight_context
+    };
     let environment_input =
         phase_input("environment", &execution_context, Some(&preflight_receipt))?;
     let environment_receipt = revalidate_receipt(
@@ -531,7 +551,7 @@ fn resume_after_compiler(
     run_dirs.revalidate(cancellation)?;
 
     let cargo = CargoVendorEnvironment::open_existing(
-        &request.cache_dir,
+        &cargo_generation.generation_dir,
         &tools_root.join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
@@ -925,6 +945,27 @@ fn host_tool(host: &HostPreflight, name: &str) -> Result<PathBuf, ContractError>
         .find(|candidate| candidate.name == name)
         .map(|candidate| candidate.invocation_path.clone())
         .ok_or_else(|| ContractError::prerequisite(format!("native preflight omitted {name}")))
+}
+
+fn required_cargo_generation(
+    cache_dir: &Path,
+    producer_dir: &Path,
+    tools_dir: &Path,
+    tools_tree: &str,
+    host: &HostPreflight,
+) -> Result<CargoVendorGeneration, ContractError> {
+    let request = CargoVendorRequest {
+        producer_dir: producer_dir.to_owned(),
+        tools_dir: tools_dir.to_owned(),
+        tools_tree: Some(tools_tree.to_owned()),
+        cargo: host_tool(host, "cargo")?,
+        cache_dir: cache_dir.to_owned(),
+    };
+    verify_vendor_generation(&request).map_err(|error| {
+        ContractError::environment(format!(
+            "required immutable Cargo vendor generation is unavailable or invalid: {error}"
+        ))
+    })
 }
 
 fn apply_child_environment(
@@ -1390,6 +1431,7 @@ struct PhaseInputContext<'a> {
     jobs: u64,
     snapshots: &'a SnapshotDigests,
     environment: Option<&'a ProducerEnvironment>,
+    cargo: Option<&'a CargoVendorGeneration>,
 }
 
 fn phase_input(
@@ -1454,6 +1496,12 @@ fn phase_input(
             "sha256": cache.request_sha256,
         })),
         "payloads": payloads,
+        "cargo_vendor_generation": context.cargo.map(|cargo| json!({
+            "selection": cargo.selection,
+            "package_count": cargo.package_count,
+            "vendor_tree_sha256": cargo.vendor_tree_sha256,
+            "configuration_template_sha256": cargo.configuration_template_sha256,
+        })),
         "previous_receipt_sha256": previous_receipt_sha256,
     });
     Ok(sha256_bytes(&canonical::bytes(&value)?))

@@ -56,6 +56,10 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
 | `aros cache archives verify` | Verify one selected archive's declared byte identity only |
+| `aros cache cargo status` | Passively observe one explicit Cargo vendor-cache parent root |
+| `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
+| `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
+| `aros cache cargo verify` | Fully validate one selected Cargo vendor generation against its lockfile and receipt |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
@@ -333,6 +337,10 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache archives list` | No | Read direct metadata for one project-selected archive without hashing or downloading it |
 | `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
 | `cache archives verify` | No | Hash one project-selected archive and check only declared size/SHA-256 identity |
+| `cache cargo status` | No | Passively observe one explicit Cargo cache root without selecting a generation |
+| `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
+| `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
+| `cache cargo verify` | No | Rehash a selected vendor tree and verify its lockfile/template/receipt binding |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
@@ -384,6 +392,18 @@ verification is intentionally limited to declared size and SHA-256; extraction,
 payload-tree, receipt, provenance, and attestation checks remain installation
 responsibilities. See [cache inspection](/aros-tools/workflows/cache/) for
 offline and refresh semantics.
+
+`aros cache cargo` manages only immutable producer Cargo vendor generations,
+not a global Cargo home or collector build output. `status --dir DIR` is a
+passive root observation. `list`, `fetch`, and `verify` require explicit
+`--producer-dir`, `--tools-dir`, and `--dir`; `--cargo FILE` optionally replaces
+the absolute Cargo resolved from `PATH`. The selection binds the producer Rust
+pin, clean tools Git tree, manifest, lockfile and Cargo identity. `list` reads
+only its receipt; `fetch` is the bounded Cargo-resolution boundary and
+publishes only a complete, checksum-validated object; `verify` hashes the
+vendor tree and checks the receipt. The native producer consumes only that
+revalidated object through `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
+for exact layout, isolation, and offline semantics.
 
 `aros cache sources` never guesses a cache root or a source closure. Every
 operation needs an explicit absolute `--dir` and exactly one reviewed selector:

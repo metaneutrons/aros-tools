@@ -68,38 +68,35 @@ payload.
 ```
 
 The native build also compiles Rust helpers from the exact tools `Cargo.lock`.
-Prepare its vendor closure once while transport is allowed, before verifying
-that cache through the explicit `cache sources verify` operation below. This is
-Cargo cache preparation, not a producer stage and not
-a claim that the subsequent native build used the network:
+Prepare the immutable vendor generation through `aros`; it selects the clean
+tools Git tree, the producer's pinned Rust channel, and the exact Cargo
+executable. It runs Cargo with a private `CARGO_HOME`, writes a single
+validated directory placeholder, checks every vendor checksum and publishes
+only a complete generation under `$CACHE/cargo/v1/…`. It never copies a user
+Cargo configuration or credential into the cache.
 
 ```sh
-(
-  cd "$TOOLS"
-  cargo vendor --locked --versioned-dirs "$CACHE/cargo-vendor" \
-    > "$CACHE/cargo-vendor-config.toml"
-)
-python3 - "$CACHE/cargo-vendor-config.toml" "$CACHE/cargo-vendor" <<'PY'
-from pathlib import Path
-import sys
+"$AROS" cache cargo fetch \
+  --producer-dir "$PRODUCER" --tools-dir "$TOOLS" --dir "$CACHE" \
+  --format json
 
-config = Path(sys.argv[1])
-vendor = str(Path(sys.argv[2]).resolve())
-content = config.read_text(encoding="utf-8")
-if content.count(vendor) != 1:
-    raise SystemExit("Cargo vendor configuration does not contain one expected directory")
-config.write_text(content.replace(vendor, "__CARGO_VENDOR_DIRECTORY__"), encoding="utf-8")
-PY
+"$AROS" cache cargo verify \
+  --producer-dir "$PRODUCER" --tools-dir "$TOOLS" --dir "$CACHE" \
+  --format json
 
 "$AROS" cache sources verify \
   --source-lock "$PRODUCER/toolchains/llvm-11.0.0.sources.json" \
   --dir "$CACHE" --format json
 ```
 
-The resulting `cargo-vendor` tree and its template are checked against the
-selected `Cargo.lock` before the native lifecycle invokes Cargo. A changed tools
-commit requires a new matching vendor closure. Never repair a missing entry
-during an offline build.
+Use `cache cargo list` when only the selected generation receipt is needed; it
+does not hash the vendor tree, but it runs bounded Git and `cargo --version`
+probes to prove the selection. A changed tools tree, lockfile, producer Rust
+pin, or Cargo executable identity selects a different generation. The native
+lifecycle then accepts only that exact generation, copies it into a private
+runtime directory and invokes its collector with `--locked --offline`. Never
+repair a missing generation during an offline build; use `cache cargo fetch
+--offline` only to require a previously verified one.
 
 ## Construct the recipe and inspect readiness
 

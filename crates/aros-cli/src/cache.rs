@@ -7,12 +7,18 @@ use crate::artifact::{archive_cache_path, obtain_archive, require_sha256, verify
 use crate::host_compiler;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
-use crate::{CacheArchiveSelector, CacheSourceSelector};
+use crate::{CacheArchiveSelector, CacheCargoSelector, CacheSourceSelector};
 use aros_cache::{
     cache_status, compiler_cache_status, CacheCapability, CacheFamily, CacheFamilyStatus,
     CacheSideEffects, CacheStatus, CompilerBackendChoice, CompilerCacheStatus, RootObservation,
 };
 use aros_toolchain::{
+    cargo_vendor::{
+        cargo_vendor_status, fetch_vendor_generation, list_vendor_generation,
+        select_vendor_generation, verify_vendor_generation, CargoVendorGeneration,
+        CargoVendorRequest, CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
+        CARGO_VENDOR_VERIFY_SCHEMA,
+    },
     source_cache::{
         fetch_request, list as list_source_cache, status as source_cache_status, verify_request,
         SourceCacheFetch, SourceCacheList, SourceCacheStatus, SourceCacheVerification,
@@ -125,6 +131,17 @@ struct ArchiveCacheVerification {
     selection: ArchiveSelection,
     verification_scope: &'static str,
     not_verified: [&'static str; 4],
+}
+
+#[derive(Serialize)]
+struct CargoVendorList {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: aros_toolchain::cargo_vendor::CargoVendorSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<CargoVendorGeneration>,
+    boundary: &'static str,
 }
 
 /// Render the top-level passive cache overview.
@@ -247,6 +264,75 @@ pub fn source_verify(
     match format {
         ResultFormat::Human => print_source_verify_human(&report),
         ResultFormat::Json => print_json(&report, "source cache verify")?,
+    }
+    Ok(())
+}
+
+/// Render a passive observation of the caller-selected Cargo cache root.
+///
+/// # Errors
+///
+/// Returns a structured configuration diagnostic only for an invalid root or
+/// result serialization failure. It never resolves Cargo, reads a checkout,
+/// scans generations or creates state.
+pub fn cargo_status(dir: &Path, format: ResultFormat) -> Result<()> {
+    let report = cargo_vendor_status(dir).map_err(|error| contract_error(&error))?;
+    match format {
+        ResultFormat::Human => print_cargo_status_human(&report),
+        ResultFormat::Json => print_json(&report, "cargo cache status")?,
+    }
+    Ok(())
+}
+
+/// Render metadata from one selected immutable Cargo generation without
+/// hashing the vendor payload.
+pub fn cargo_list(selector: CacheCargoSelector, format: ResultFormat) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let selection = select_vendor_generation(&request).map_err(|error| contract_error(&error))?;
+    let generation = list_vendor_generation(&request).map_err(|error| contract_error(&error))?;
+    let report = CargoVendorList {
+        schema: CARGO_VENDOR_LIST_SCHEMA,
+        operation: "cargo.list",
+        side_effects: cargo_selection_side_effects(),
+        selection,
+        generation,
+        boundary: "list proves explicit producer/tools/Cargo selection inputs through bounded Git and Cargo version probes, then reads only a generation receipt; it never reads vendor payloads, resolves dependencies or creates cache state",
+    };
+    match format {
+        ResultFormat::Human => print_cargo_list_human(&report),
+        ResultFormat::Json => print_json(&report, "cargo cache list")?,
+    }
+    Ok(())
+}
+
+/// Populate or strictly reuse one selected immutable Cargo vendor generation.
+pub fn cargo_fetch(
+    selector: CacheCargoSelector,
+    offline: bool,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let cancellation = aros_common::CancellationToken::default();
+    let mut report = fetch_vendor_generation(&request, offline, &cancellation)
+        .map_err(|error| contract_error(&error))?;
+    report.schema = CARGO_VENDOR_FETCH_SCHEMA;
+    report.operation = "cargo.fetch";
+    match format {
+        ResultFormat::Human => print_cargo_generation_human(&report, offline),
+        ResultFormat::Json => print_json(&report, "cargo cache fetch")?,
+    }
+    Ok(())
+}
+
+/// Fully validate one selected Cargo vendor generation.
+pub fn cargo_verify(selector: CacheCargoSelector, format: ResultFormat) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let mut report = verify_vendor_generation(&request).map_err(|error| contract_error(&error))?;
+    report.schema = CARGO_VENDOR_VERIFY_SCHEMA;
+    report.operation = "cargo.verify";
+    match format {
+        ResultFormat::Human => print_cargo_generation_human(&report, false),
+        ResultFormat::Json => print_json(&report, "cargo cache verify")?,
     }
     Ok(())
 }
@@ -414,6 +500,17 @@ const fn archive_verify_side_effects() -> CacheSideEffects {
         backend_process: false,
         locks: false,
         hashes_payloads: true,
+    }
+}
+
+const fn cargo_selection_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: true,
+        locks: false,
+        hashes_payloads: false,
     }
 }
 
@@ -590,6 +687,21 @@ fn source_request(selector: CacheSourceSelector) -> Result<SourceCacheRequest> {
     }
 }
 
+fn cargo_request(selector: CacheCargoSelector) -> Result<CargoVendorRequest> {
+    let cargo = match selector.cargo {
+        Some(path) => path,
+        None => which::which("cargo")
+            .map_err(|_| miette::miette!("could not resolve Cargo from PATH; pass --cargo FILE"))?,
+    };
+    Ok(CargoVendorRequest {
+        producer_dir: selector.producer_dir,
+        tools_dir: selector.tools_dir,
+        tools_tree: None,
+        cargo,
+        cache_dir: selector.dir,
+    })
+}
+
 fn contract_error(error: &ContractError) -> miette::Report {
     crate::observability::native_diagnostic(error.diagnostics().diagnostics[0].clone())
 }
@@ -751,6 +863,61 @@ fn print_archive_status_human(report: &ArchiveCacheStatus) {
     aros_common::outputln!("  object layout: {}", report.object_layout);
     aros_common::outputln!("  operations: status, list, fetch, verify");
     aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_status_human(report: &CargoVendorStatus) {
+    aros_common::outputln!(
+        "Cargo vendor cache status (passive): {} ({}, {})",
+        report.root.root.path.display(),
+        report.root.root.origin.as_str(),
+        report.root.state.as_str()
+    );
+    aros_common::outputln!("  object layout: {}", report.object_layout);
+    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_list_human(report: &CargoVendorList) {
+    aros_common::outputln!("Cargo vendor cache selection:");
+    print_cargo_selection_human(&report.selection);
+    match &report.generation {
+        Some(generation) => aros_common::outputln!(
+            "  generation receipt: present ({} packages; vendor {})",
+            generation.package_count,
+            generation.vendor_tree_sha256
+        ),
+        None => aros_common::outputln!("  generation receipt: missing"),
+    }
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_generation_human(report: &CargoVendorGeneration, offline: bool) {
+    aros_common::outputln!("Cargo vendor {}:", report.operation);
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  generation: {}", report.generation_dir.display());
+    aros_common::outputln!("  packages: {}", report.package_count);
+    aros_common::outputln!("  vendor tree SHA-256: {}", report.vendor_tree_sha256);
+    aros_common::outputln!(
+        "  configuration template SHA-256: {}",
+        report.configuration_template_sha256
+    );
+    if report.operation == "cargo.fetch" {
+        aros_common::outputln!("  offline: {offline}");
+    }
+}
+
+fn print_cargo_selection_human(selection: &aros_toolchain::cargo_vendor::CargoVendorSelection) {
+    aros_common::outputln!("  producer: {}", selection.producer_dir.display());
+    aros_common::outputln!("  tools: {}", selection.tools_dir.display());
+    aros_common::outputln!("  tools Git tree: {}", selection.tools_tree);
+    aros_common::outputln!("  Cargo.lock SHA-256: {}", selection.cargo_lock_sha256);
+    aros_common::outputln!("  Rust/Cargo channel: {}", selection.rust_channel);
+    aros_common::outputln!(
+        "  Cargo: {} ({})",
+        selection.cargo_invocation_path.display(),
+        selection.cargo_version
+    );
+    aros_common::outputln!("  selection SHA-256: {}", selection.generation);
 }
 
 fn print_archive_list_human(report: &ArchiveCacheList) {

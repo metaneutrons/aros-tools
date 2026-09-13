@@ -7,8 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use aros_common::{sha256_bytes, CancellationToken};
+use aros_common::{measure_tree_content_cas, sha256_bytes, CancellationToken};
 use aros_toolchain::canonical;
+use aros_toolchain::cargo_vendor::{select_vendor_generation, CargoVendorRequest};
 use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -165,6 +166,14 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
         }))
         .unwrap();
         fs::create_dir_all(root.join("producer/toolchains")).unwrap();
+        let cargo_channel = current_cargo_channel();
+        fs::write(
+            root.join("producer/toolchains/rust-toolchain.toml"),
+            format!(
+                "[toolchain]\nchannel = \"{cargo_channel}\"\nprofile = \"minimal\"\ncomponents = [\"clippy\", \"rustfmt\"]\n"
+            ),
+        )
+        .unwrap();
         fs::write(root.join("producer/toolchains/fixture.sources.json"), &lock).unwrap();
         fs::write(root.join("producer/toolchains/profiles-v1.json"), &profiles).unwrap();
         fs::write(
@@ -183,6 +192,38 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
                 &["commit", "-qm", "test: native lifecycle inputs"],
             );
         }
+        let selection = select_vendor_generation(&CargoVendorRequest {
+            producer_dir: root.join("producer"),
+            tools_dir: root.join("tools"),
+            tools_tree: Some(git(&root.join("tools"), &["rev-parse", "HEAD^{tree}"])),
+            cargo: which::which("cargo").unwrap(),
+            cache_dir: cache.clone(),
+        })
+        .unwrap();
+        let generation = cache.join("cargo").join("v1").join(&selection.generation);
+        fs::create_dir_all(&generation).unwrap();
+        fs::rename(cache.join("cargo-vendor"), generation.join("cargo-vendor")).unwrap();
+        fs::rename(
+            cache.join("cargo-vendor-config.toml"),
+            generation.join("cargo-vendor-config.toml"),
+        )
+        .unwrap();
+        let vendor_tree_sha256 = measure_tree_content_cas(&generation.join("cargo-vendor"))
+            .unwrap()
+            .payload_digest_excluding(None);
+        let template = fs::read(generation.join("cargo-vendor-config.toml")).unwrap();
+        fs::write(
+            generation.join("receipt.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": "aros-cargo-vendor-generation-v1",
+                "identity": selection.identity(),
+                "package_count": 1,
+                "vendor_tree_sha256": vendor_tree_sha256,
+                "configuration_template_sha256": sha256_bytes(&template),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let mut recipe = json!({
             "schema": "aros-toolchain-recipe-v2",
             "source_commit": git(&root.join("source"), &["rev-parse", "HEAD"]),
@@ -393,6 +434,32 @@ fn native_lifecycle_rejects_an_unprepared_cache_before_environment_or_source_exe
     assert!(!lifecycle.join("receipts/environment.json").exists());
     assert!(!lifecycle.join("verified-source-usage.log").exists());
     assert!(!fixture.root.join("missing-cache").exists());
+}
+
+#[test]
+fn native_lifecycle_rejects_a_tampered_cargo_generation_before_upstream_execution() {
+    let fixture = Fixture::new();
+    let generations = fixture.root.join("cache/cargo/v1");
+    let generation = fs::read_dir(&generations)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(
+        generation.join("cargo-vendor/fixture-dependency-1.0.0/src/lib.rs"),
+        b"pub fn answer() -> u8 { 0 }\n",
+    )
+    .unwrap();
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    let diagnostic = error.to_string();
+    assert!(diagnostic.contains("AX0401"), "{diagnostic}");
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    assert!(lifecycle.join("receipts/preflight.json").is_file());
+    assert!(!lifecycle.join("receipts/environment.json").exists());
+    assert!(!lifecycle.join("build/configure.args").exists());
+    assert!(!lifecycle.join("verified-source-usage.log").exists());
 }
 
 #[test]
@@ -664,6 +731,17 @@ fn python_archive(root: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         archive.finish().unwrap();
     }
     encoder.finish().unwrap()
+}
+
+fn current_cargo_channel() -> String {
+    let output = Command::new("cargo").arg("--version").output().unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned()
 }
 
 fn git(root: &Path, arguments: &[&str]) -> String {

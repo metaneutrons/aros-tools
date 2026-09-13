@@ -33,6 +33,12 @@ pub enum CacheCommand {
         #[command(subcommand)]
         command: CacheArchivesCommand,
     },
+    /// Prepare and verify immutable Cargo vendor generations for the native producer.
+    Cargo {
+        /// One Cargo vendor-cache subcommand.
+        #[command(subcommand)]
+        command: CacheCargoCommand,
+    },
 }
 
 /// Compiler-cache resource operations.
@@ -170,6 +176,75 @@ pub enum CacheArchivesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+}
+
+/// Cargo vendor-cache resource operations.
+#[derive(Subcommand)]
+pub enum CacheCargoCommand {
+    /// Passively observe one explicit parent cache root.
+    Status {
+        /// Existing or missing absolute cache root to observe.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Resolve one exact selection, then read its generation receipt without hashing its vendor tree.
+    List {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Populate one selected immutable generation, or reuse it after full verification.
+    Fetch {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// Refuse Cargo resolution and require an already verified generation.
+        #[arg(long, env = "AROS_OFFLINE")]
+        offline: bool,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Fully validate one selected generation against its lockfile and receipts.
+    Verify {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+}
+
+/// Explicit selector for one immutable Cargo vendor generation.
+#[derive(Args)]
+pub struct CacheCargoSelector {
+    /// Producer checkout containing toolchains/rust-toolchain.toml.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) producer_dir: PathBuf,
+
+    /// aros-tools checkout containing Cargo.toml and Cargo.lock.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) tools_dir: PathBuf,
+
+    /// Existing AROS-managed source-cache root used for cargo/v1 generations.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dir: PathBuf,
+
+    /// Exact Cargo executable; defaults to the absolute Cargo resolved from PATH.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) cargo: Option<PathBuf>,
 }
 
 /// One exclusive configured archive declaration.
