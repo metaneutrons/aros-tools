@@ -268,6 +268,386 @@ fn source_cache_product_plan_keeps_unpinned_measurements_explicit() {
 }
 
 #[test]
+fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
+    let temporary = tempfile::tempdir().expect("temporary archive-cache semantic root");
+    let project = temporary.path().join("AROS");
+    fs::create_dir(&project).expect("create selected project");
+    for directory in ["arch", "compiler", "rom"] {
+        fs::create_dir(project.join(directory)).expect("create AROS checkout marker directory");
+    }
+    fs::write(project.join("configure"), "").expect("write AROS configure marker");
+    fs::write(project.join("Makefile.in"), "").expect("write AROS Makefile marker");
+    let payload = b"reviewed compiler archive bytes\n";
+    let payload_file = temporary.path().join("payload.tar.xz");
+    fs::write(&payload_file, payload).expect("write archive payload fixture");
+    let sha256 = aros_common::sha256_file(&payload_file)
+        .expect("hash archive payload fixture")
+        .digest
+        .to_string();
+    let tree_sha256 = "b".repeat(64);
+    fs::write(
+        project.join("aros-targets.toml"),
+        format!(
+            "[host_compiler]\nllvm_version = '18.1.8'\nbase_url = 'https://example.invalid/llvm/{{version}}'\n\n[host_compiler.hosts.linux-x86_64]\nasset = 'llvm-{{version}}-linux-x86_64.tar.xz'\nsha256 = '{sha256}'\n\n[[targets]]\nname = 'pc-x86_64'\narch = 'x86_64'\nplatform = 'pc'\nbsp = 'pc'\n"
+        ),
+    )
+    .expect("write target configuration");
+    fs::write(
+        project.join("aros-toolchains.lock.toml"),
+        format!(
+            "schema = 1\nrelease_id = 'fixture-release'\nbase_url = 'https://example.invalid/toolchains'\n\n[[artifacts]]\nhost = 'linux-x86_64'\ntarget_profile = 'pc-x86_64'\ntarget_triple = 'x86_64-unknown-aros'\nasset = 'fixture.tar.xz'\nsha256 = '{sha256}'\ntree_sha256 = '{tree_sha256}'\nsize = {}\nenabled = true\nrequired_paths = []\n",
+            payload.len()
+        ),
+    )
+    .expect("write toolchain lock");
+
+    let empty_root = temporary.path().join("empty-archive-cache");
+    let status = Command::new(aros())
+        .env("AROS_CACHE_DIR", &empty_root)
+        .args(["cache", "archives", "status", "--format", "json"])
+        .output()
+        .expect("archive status executes");
+    assert_success(&status, "archive cache passive status");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema"], "aros-cache-archives-status-v1");
+    assert_eq!(status["root"]["state"], "missing");
+    assert_eq!(
+        status["capabilities"],
+        serde_json::json!(["status", "list", "fetch", "verify"])
+    );
+    assert_eq!(status["side_effects"]["creates_state"], false);
+    assert!(
+        !empty_root.exists(),
+        "archive status must not create its root"
+    );
+
+    let offline_miss = Command::new(aros())
+        .env("AROS_CACHE_DIR", &empty_root)
+        .args([
+            "cache",
+            "archives",
+            "fetch",
+            "--project",
+            project.to_str().expect("project path is UTF-8"),
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--offline",
+        ])
+        .output()
+        .expect("offline archive miss executes");
+    let offline_diagnostic = assert_failure(&offline_miss, "offline archive cache miss");
+    assert!(
+        offline_diagnostic.contains("offline mode"),
+        "{offline_diagnostic}"
+    );
+    assert!(
+        !empty_root.exists(),
+        "offline archive fetch must not create a missing cache root"
+    );
+
+    let cache_root = temporary.path().join("archive-cache");
+    let installed_host_compiler = temporary.path().join("installed-host-compiler");
+    let installed_cross_toolchains = temporary.path().join("installed-cross-toolchains");
+    fs::create_dir(&installed_host_compiler).expect("create host compiler sentinel root");
+    fs::create_dir(&installed_cross_toolchains).expect("create cross-toolchain sentinel root");
+    fs::write(
+        installed_host_compiler.join("sentinel"),
+        b"host installation",
+    )
+    .expect("write host compiler sentinel");
+    fs::write(
+        installed_cross_toolchains.join("sentinel"),
+        b"cross installation",
+    )
+    .expect("write cross-toolchain sentinel");
+    let cache_path = cache_root
+        .join("downloads/sha256")
+        .join(format!("{sha256}.tar.xz"));
+    fs::create_dir_all(cache_path.parent().unwrap()).expect("create archive cache fixture");
+    fs::write(&cache_path, payload).expect("write cached archive fixture");
+    let project = project.to_str().expect("project path is UTF-8");
+    let cache_arguments = [
+        "cache",
+        "archives",
+        "list",
+        "--project",
+        project,
+        "--toolchain",
+        "--preset",
+        "pc-x86_64",
+        "--host",
+        "linux-x86_64",
+        "--format",
+        "json",
+    ];
+    let listed = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args(cache_arguments)
+        .output()
+        .expect("archive list executes");
+    assert_success(&listed, "cross-host archive metadata list");
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["schema"], "aros-cache-archives-list-v1");
+    assert_eq!(listed["selection"]["host"], "linux-x86_64");
+    assert_eq!(listed["selection"]["host_selection"], "explicit");
+    assert_eq!(
+        listed["selection"]["configuration_kind"],
+        "aros-toolchains.lock.toml"
+    );
+    assert_eq!(listed["selection"]["expected_size"], payload.len());
+    assert_eq!(listed["entry"]["state"], "present_unverified");
+    assert_eq!(listed["side_effects"]["hashes_payloads"], false);
+
+    let verified = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "verify",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive verify executes");
+    assert_success(&verified, "cross-host archive byte verification");
+    let verified: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(verified["schema"], "aros-cache-archives-verify-v1");
+    assert_eq!(
+        verified["verification_scope"],
+        "archive_bytes_exact_size_and_sha256"
+    );
+    assert!(verified["not_verified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "payload tree identity"));
+
+    fs::write(&cache_path, b"corrupt compiler archive files!\n")
+        .expect("corrupt cached archive fixture");
+    let mismatch = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "verify",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+        ])
+        .output()
+        .expect("mismatched archive verify executes");
+    let mismatch_diagnostic = assert_failure(&mismatch, "mismatched archive verification");
+    assert!(
+        mismatch_diagnostic.contains("SHA256 mismatch"),
+        "{mismatch_diagnostic}"
+    );
+    assert_eq!(
+        fs::read(&cache_path).unwrap(),
+        b"corrupt compiler archive files!\n",
+        "archive verification must not repair or replace a mismatched object"
+    );
+    fs::write(&cache_path, payload).expect("restore cached archive fixture");
+
+    let fetched = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .env("AROS_HOST_COMPILER_DIR", &installed_host_compiler)
+        .env("AROS_CROSS_TOOLCHAINS_DIR", &installed_cross_toolchains)
+        .args([
+            "cache",
+            "archives",
+            "fetch",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--offline",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("offline archive fetch executes");
+    assert_success(&fetched, "offline archive cache reuse");
+    let fetched: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    assert_eq!(fetched["schema"], "aros-cache-archives-fetch-v1");
+    assert_eq!(fetched["side_effects"]["network"], false);
+    assert_eq!(fetched["side_effects"]["creates_state"], false);
+    assert_eq!(fs::read(&cache_path).unwrap(), payload);
+    assert_eq!(
+        fs::read(installed_host_compiler.join("sentinel")).unwrap(),
+        b"host installation"
+    );
+    assert_eq!(
+        fs::read(installed_cross_toolchains.join("sentinel")).unwrap(),
+        b"cross installation"
+    );
+
+    let online_reuse = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "fetch",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("online archive cache reuse executes");
+    assert_success(&online_reuse, "verified archive cache reuse");
+    let online_reuse: Value = serde_json::from_slice(&online_reuse.stdout).unwrap();
+    assert_eq!(online_reuse["side_effects"]["network"], false);
+    assert_eq!(online_reuse["side_effects"]["creates_state"], false);
+
+    let host_compiler = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "list",
+            "--project",
+            project,
+            "--host-compiler",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("host compiler archive list executes");
+    assert_success(&host_compiler, "configured host compiler archive list");
+    let host_compiler: Value = serde_json::from_slice(&host_compiler.stdout).unwrap();
+    assert_eq!(host_compiler["selection"]["kind"], "host_compiler");
+    assert_eq!(
+        host_compiler["selection"]["configuration_kind"],
+        "aros-targets.toml host_compiler"
+    );
+    assert!(host_compiler["selection"]["expected_size"].is_null());
+    assert_eq!(
+        host_compiler["selection"]["cache_path"], listed["selection"]["cache_path"],
+        "host and cross-toolchain selection with one SHA-256 must share exactly one archive object"
+    );
+
+    let overridden_host_compiler = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .env(
+            "AROS_HOST_COMPILER_URL",
+            "https://mirror.example.invalid/llvm",
+        )
+        .args([
+            "cache",
+            "archives",
+            "list",
+            "--project",
+            project,
+            "--host-compiler",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("overridden host compiler archive list executes");
+    assert_success(
+        &overridden_host_compiler,
+        "host compiler archive transport override",
+    );
+    let overridden_host_compiler: Value =
+        serde_json::from_slice(&overridden_host_compiler.stdout).unwrap();
+    assert_eq!(
+        overridden_host_compiler["selection"]["transport_source"],
+        "AROS_HOST_COMPILER_URL"
+    );
+    assert!(overridden_host_compiler["selection"]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://mirror.example.invalid/llvm/"));
+
+    let rejected_override = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .env(
+            "AROS_HOST_COMPILER_URL",
+            "https://operator:secret@example.invalid/llvm",
+        )
+        .args([
+            "cache",
+            "archives",
+            "list",
+            "--project",
+            project,
+            "--host-compiler",
+            "--host",
+            "linux-x86_64",
+        ])
+        .output()
+        .expect("invalid host compiler transport override executes");
+    let override_diagnostic = assert_failure(
+        &rejected_override,
+        "credential-bearing host compiler transport override",
+    );
+    assert!(
+        override_diagnostic.contains("URL must not contain credentials"),
+        "{override_diagnostic}"
+    );
+    assert!(
+        !override_diagnostic.contains("secret"),
+        "credential-bearing transport must be redacted: {override_diagnostic}"
+    );
+
+    let missing_preset = assert_failure(
+        &run(&[
+            "cache",
+            "archives",
+            "list",
+            "--project",
+            project,
+            "--toolchain",
+        ]),
+        "toolchain archive selector without preset",
+    );
+    assert!(missing_preset.contains("--preset"), "{missing_preset}");
+    let conflicting_transport = assert_failure(
+        &run(&[
+            "cache",
+            "archives",
+            "fetch",
+            "--project",
+            project,
+            "--host-compiler",
+            "--offline",
+            "--refresh",
+        ]),
+        "archive offline and refresh conflict",
+    );
+    assert!(
+        conflicting_transport.contains("--offline"),
+        "{conflicting_transport}"
+    );
+}
+
+#[test]
 fn relative_local_prefix_and_sd_artifact_stay_at_the_invocation_directory() {
     let temporary = tempfile::tempdir().expect("temporary relative-path root");
     let checkout = temporary.path().join("AROS");

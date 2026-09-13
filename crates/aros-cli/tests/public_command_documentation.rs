@@ -49,7 +49,7 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
     ),
     (
         "workflows/cache.md",
-        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit",
+        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit; public_cli_semantics.rs::archive_cache_uses_one_explicit_cross_host_selection_without_installing",
     ),
     (
         "workflows/cross-development.md",

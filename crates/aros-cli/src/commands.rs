@@ -6,8 +6,9 @@
 use super::{
     artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
-    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourcesCommand, Commands,
-    GoldenAction, HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
+    CacheArchivesCommand, CacheCommand, CacheCompilerBackend, CacheCompilerCommand,
+    CacheSourcesCommand, Commands, GoldenAction, HostCompilerCommands, SdCommand, SourceCommand,
+    ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -192,6 +193,24 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::source_verify(selector, &dir, format),
+        CacheCommand::Archives {
+            command: CacheArchivesCommand::Status { format },
+        } => cache::archive_status(format),
+        CacheCommand::Archives {
+            command: CacheArchivesCommand::List { selector, format },
+        } => cache::archive_list(selector, format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Fetch {
+                    selector,
+                    offline,
+                    refresh,
+                    format,
+                },
+        } => cache::archive_fetch(selector, offline, refresh, format).await,
+        CacheCommand::Archives {
+            command: CacheArchivesCommand::Verify { selector, format },
+        } => cache::archive_verify(selector, format),
     }
 }
 

@@ -27,6 +27,12 @@ pub enum CacheCommand {
         #[command(subcommand)]
         command: CacheSourcesCommand,
     },
+    /// Inspect, verify, and populate host and cross-compiler archive bytes.
+    Archives {
+        /// One compiler-archive subcommand.
+        #[command(subcommand)]
+        command: CacheArchivesCommand,
+    },
 }
 
 /// Compiler-cache resource operations.
@@ -115,6 +121,85 @@ pub enum CacheSourcesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+}
+
+/// Compiler-archive resource operations.
+#[derive(Subcommand)]
+pub enum CacheArchivesCommand {
+    /// Passively observe the shared compiler-archive cache root.
+    Status {
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// List one selected archive's direct cache-entry metadata without hashing bytes.
+    List {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Acquire and verify one selected archive without extracting or installing it.
+    Fetch {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// Refuse every network transfer and require an already verified archive.
+        #[arg(long, env = "AROS_OFFLINE", conflicts_with = "refresh")]
+        offline: bool,
+
+        /// Reacquire the same declared identity without replacing a cached object.
+        #[arg(long, conflicts_with = "offline")]
+        refresh: bool,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Hash and verify one selected archive's declared byte identity only.
+    Verify {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+}
+
+/// One exclusive configured archive declaration.
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("archive_selector")
+        .required(true)
+        .multiple(false)
+        .args(["host_compiler", "toolchain"])
+))]
+pub struct CacheArchiveSelector {
+    /// AROS checkout carrying the configuration required by the selected archive.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) project: PathBuf,
+
+    /// Use the configured host LLVM compiler archive.
+    #[arg(long)]
+    pub(crate) host_compiler: bool,
+
+    /// Use one locked AROS cross-toolchain archive; requires --preset.
+    #[arg(long, requires = "preset")]
+    pub(crate) toolchain: bool,
+
+    /// Locked AROS target preset selected with --toolchain.
+    #[arg(long, value_name = "NAME", requires = "toolchain")]
+    pub(crate) preset: Option<String>,
+
+    /// Host release-matrix key; defaults to the running host when omitted.
+    #[arg(long, value_name = "HOST")]
+    pub(crate) host: Option<String>,
 }
 
 /// One exclusive reviewed declaration that selects a source-cache closure.

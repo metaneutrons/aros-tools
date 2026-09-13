@@ -1,12 +1,16 @@
 //! Rendering adapter for the bounded cache-status commands.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use crate::artifact::{archive_cache_path, obtain_archive, require_sha256, verify_archive};
+use crate::host_compiler;
+use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
-use crate::CacheSourceSelector;
+use crate::{CacheArchiveSelector, CacheSourceSelector};
 use aros_cache::{
-    cache_status, compiler_cache_status, CacheFamilyStatus, CacheStatus, CompilerBackendChoice,
-    CompilerCacheStatus,
+    cache_status, compiler_cache_status, CacheCapability, CacheFamily, CacheFamilyStatus,
+    CacheSideEffects, CacheStatus, CompilerBackendChoice, CompilerCacheStatus, RootObservation,
 };
 use aros_toolchain::{
     source_cache::{
@@ -17,6 +21,111 @@ use aros_toolchain::{
     ContractError,
 };
 use miette::Result;
+use serde::Serialize;
+
+const ARCHIVE_STATUS_SCHEMA: &str = "aros-cache-archives-status-v1";
+const ARCHIVE_LIST_SCHEMA: &str = "aros-cache-archives-list-v1";
+const ARCHIVE_FETCH_SCHEMA: &str = "aros-cache-archives-fetch-v1";
+const ARCHIVE_VERIFY_SCHEMA: &str = "aros-cache-archives-verify-v1";
+
+#[derive(Serialize)]
+struct ArchiveCacheStatus {
+    schema: &'static str,
+    operation: &'static str,
+    observation: &'static str,
+    side_effects: CacheSideEffects,
+    capabilities: [CacheCapability; 4],
+    root: RootObservation,
+    object_layout: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchiveKind {
+    HostCompiler,
+    CrossToolchain,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchiveHostSelection {
+    Explicit,
+    RunningHost,
+}
+
+#[derive(Serialize)]
+struct ArchiveSelection {
+    kind: ArchiveKind,
+    project: PathBuf,
+    configuration_source: String,
+    configuration_kind: &'static str,
+    transport_source: &'static str,
+    host: String,
+    host_selection: ArchiveHostSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_triple: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llvm_version: Option<String>,
+    url: String,
+    sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_size: Option<u64>,
+    cache_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchiveCacheEntryState {
+    Missing,
+    PresentUnverified,
+    Unsafe,
+    Inaccessible,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheEntry {
+    state: ArchiveCacheEntryState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_size: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheList {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    entry: ArchiveCacheEntry,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheFetch {
+    schema: &'static str,
+    operation: &'static str,
+    offline: bool,
+    refresh_requested: bool,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    prior_entry: ArchiveCacheEntry,
+    verification_scope: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheVerification {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    verification_scope: &'static str,
+    not_verified: [&'static str; 4],
+}
 
 /// Render the top-level passive cache overview.
 ///
@@ -140,6 +249,311 @@ pub fn source_verify(
         ResultFormat::Json => print_json(&report, "source cache verify")?,
     }
     Ok(())
+}
+
+/// Render the passive archive-cache root observation.
+///
+/// # Errors
+///
+/// Returns an error when the AROS archive root cannot be resolved safely or
+/// result serialization fails. This operation neither reads an archive nor
+/// creates the archive directory.
+pub fn archive_status(format: ResultFormat) -> Result<()> {
+    let report = ArchiveCacheStatus {
+        schema: ARCHIVE_STATUS_SCHEMA,
+        operation: "archives.status",
+        observation: "passive",
+        side_effects: passive_side_effects(),
+        capabilities: [
+            CacheCapability::Status,
+            CacheCapability::List,
+            CacheCapability::Fetch,
+            CacheCapability::Verify,
+        ],
+        root: archive_root_observation()?,
+        object_layout: "downloads/sha256/<archive-sha256>.tar.xz",
+        boundary: "installed host compilers and cross-toolchain stores are outside this cache; status does not enumerate or hash archive objects",
+    };
+    match format {
+        ResultFormat::Human => print_archive_status_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache status")?,
+    }
+    Ok(())
+}
+
+/// List metadata for one configured compiler archive without hashing it.
+///
+/// # Errors
+///
+/// Returns an error for an invalid selected project/configuration or result
+/// serialization. A missing or unsafe cache object is a successful list result.
+pub fn archive_list(selector: CacheArchiveSelector, format: ResultFormat) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let report = ArchiveCacheList {
+        schema: ARCHIVE_LIST_SCHEMA,
+        operation: "archives.list",
+        side_effects: passive_side_effects(),
+        entry: observe_archive_entry(&selection.cache_path),
+        selection,
+        boundary: "list reads final-path metadata only; it does not hash, download, extract, install, or validate a payload tree",
+    };
+    match format {
+        ResultFormat::Human => print_archive_list_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache list")?,
+    }
+    Ok(())
+}
+
+/// Acquire and verify one configured archive without extracting it.
+///
+/// # Errors
+///
+/// Returns an error for invalid selection, offline cache misses, transfer
+/// failures, or archive identity mismatches. The shared acquisition primitive
+/// publishes only verified content-addressed bytes; it never installs a tree.
+pub async fn archive_fetch(
+    selector: CacheArchiveSelector,
+    offline: bool,
+    refresh: bool,
+    format: ResultFormat,
+) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let prior_entry = observe_archive_entry(&selection.cache_path);
+    obtain_archive(
+        &selection.url,
+        &selection.sha256,
+        selection.expected_size,
+        offline,
+        refresh,
+    )
+    .await?;
+    let report = ArchiveCacheFetch {
+        schema: ARCHIVE_FETCH_SCHEMA,
+        operation: "archives.fetch",
+        offline,
+        refresh_requested: refresh,
+        side_effects: archive_fetch_side_effects(offline, refresh, prior_entry.state),
+        selection,
+        prior_entry,
+        verification_scope: "archive_bytes_exact_size_and_sha256",
+        boundary: "fetch never extracts, installs, replaces a content-addressed cache object, or validates a payload tree, manifest, provenance, or attestation",
+    };
+    match format {
+        ResultFormat::Human => print_archive_fetch_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache fetch")?,
+    }
+    Ok(())
+}
+
+/// Hash and verify one selected archive's declared byte identity.
+///
+/// # Errors
+///
+/// Returns an error for a missing, unsafe, inaccessible, or mismatched cache
+/// object. Verification does not extract or install an archive.
+pub fn archive_verify(selector: CacheArchiveSelector, format: ResultFormat) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    verify_archive(
+        &selection.cache_path,
+        &selection.sha256,
+        selection.expected_size,
+    )?;
+    let report = ArchiveCacheVerification {
+        schema: ARCHIVE_VERIFY_SCHEMA,
+        operation: "archives.verify",
+        side_effects: archive_verify_side_effects(),
+        selection,
+        verification_scope: "archive_bytes_exact_size_and_sha256",
+        not_verified: [
+            "archive extraction safety",
+            "payload tree identity",
+            "installed toolchain or host-compiler receipt",
+            "release provenance or attestation",
+        ],
+    };
+    match format {
+        ResultFormat::Human => print_archive_verify_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache verify")?,
+    }
+    Ok(())
+}
+
+const fn passive_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: false,
+    }
+}
+
+const fn archive_fetch_side_effects(
+    offline: bool,
+    refresh: bool,
+    prior_state: ArchiveCacheEntryState,
+) -> CacheSideEffects {
+    let transfers_or_stages =
+        !offline && (refresh || matches!(prior_state, ArchiveCacheEntryState::Missing));
+    CacheSideEffects {
+        creates_state: transfers_or_stages,
+        mutates_state: transfers_or_stages,
+        network: transfers_or_stages,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: true,
+    }
+}
+
+const fn archive_verify_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: true,
+    }
+}
+
+fn archive_root_observation() -> Result<RootObservation> {
+    cache_status()
+        .map_err(|error| miette::miette!(error))?
+        .families
+        .into_iter()
+        .find(|family| family.family == CacheFamily::Archives)
+        .and_then(|family| family.root)
+        .ok_or_else(|| miette::miette!("archive cache status did not return its configured root"))
+}
+
+fn archive_selection(selector: CacheArchiveSelector) -> Result<ArchiveSelection> {
+    let project = canonical_project(&selector.project)?;
+    let (host, host_selection) = match selector.host {
+        Some(host) => (host, ArchiveHostSelection::Explicit),
+        None => (
+            host_compiler::host_platform_key()?.to_owned(),
+            ArchiveHostSelection::RunningHost,
+        ),
+    };
+
+    if selector.host_compiler {
+        let config = host_compiler::load_host_compiler_config(&project)?;
+        let selected = host_compiler::select_host_compiler_for_host(&config, &host)?;
+        let sha256 = require_sha256(
+            selected.sha256.as_deref(),
+            &format!("host compiler asset for {}", selected.host_key),
+        )?;
+        return Ok(ArchiveSelection {
+            kind: ArchiveKind::HostCompiler,
+            configuration_source: target_configuration_source(&project),
+            configuration_kind: target_configuration_kind(&project),
+            transport_source: if std::env::var("AROS_HOST_COMPILER_URL").is_ok() {
+                "AROS_HOST_COMPILER_URL"
+            } else {
+                "aros-targets.toml host_compiler.base_url"
+            },
+            project,
+            host: selected.host_key,
+            host_selection,
+            release_id: None,
+            target_profile: None,
+            target_triple: None,
+            llvm_version: Some(selected.version),
+            url: selected.url,
+            cache_path: archive_cache_path(&sha256)?,
+            sha256,
+            expected_size: None,
+        });
+    }
+
+    let preset = selector
+        .preset
+        .ok_or_else(|| miette::miette!("--toolchain requires --preset NAME"))?;
+    let lock = toolchain::load_lock(&project)?;
+    let artifact = toolchain::select_locked_artifact(&project, &lock, &host, &preset)?;
+    let sha256 = artifact.sha256.to_ascii_lowercase();
+    Ok(ArchiveSelection {
+        kind: ArchiveKind::CrossToolchain,
+        configuration_source: toolchain::lock_file_path(&project).display().to_string(),
+        configuration_kind: "aros-toolchains.lock.toml",
+        transport_source: "aros-toolchains.lock.toml",
+        project,
+        host,
+        host_selection,
+        release_id: Some(lock.release_id.clone()),
+        target_profile: Some(artifact.target_profile.clone()),
+        target_triple: Some(artifact.target_triple.clone()),
+        llvm_version: artifact.llvm_version.clone(),
+        url: lock
+            .asset_url(artifact)
+            .map_err(|error| miette::miette!("invalid locked archive URL: {error}"))?,
+        cache_path: archive_cache_path(&sha256)?,
+        sha256,
+        expected_size: artifact.size,
+    })
+}
+
+fn canonical_project(project: &Path) -> Result<PathBuf> {
+    let canonical = project.canonicalize().map_err(|error| {
+        miette::miette!(
+            "failed to resolve --project '{}': {error}",
+            project.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(miette::miette!(
+            "--project '{}' is not a directory",
+            canonical.display()
+        ));
+    }
+    if !crate::repo::is_repo_root(&canonical) {
+        return Err(miette::miette!(
+            "--project '{}' is not an AROS source checkout",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn target_configuration_source(project: &Path) -> String {
+    let path = crate::repo::targets_file(project);
+    if path.is_file() {
+        path.display().to_string()
+    } else {
+        "<built-in aros-targets.toml>".to_owned()
+    }
+}
+
+fn target_configuration_kind(project: &Path) -> &'static str {
+    if project.join(crate::repo::TARGETS_FILE).is_file() {
+        "aros-targets.toml host_compiler"
+    } else {
+        "embedded aros-tools host_compiler contract"
+    }
+}
+
+fn observe_archive_entry(path: &Path) -> ArchiveCacheEntry {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            ArchiveCacheEntry {
+                state: ArchiveCacheEntryState::PresentUnverified,
+                metadata_size: Some(metadata.len()),
+            }
+        }
+        Ok(_) => ArchiveCacheEntry {
+            state: ArchiveCacheEntryState::Unsafe,
+            metadata_size: None,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ArchiveCacheEntry {
+            state: ArchiveCacheEntryState::Missing,
+            metadata_size: None,
+        },
+        Err(_) => ArchiveCacheEntry {
+            state: ArchiveCacheEntryState::Inaccessible,
+            metadata_size: None,
+        },
+    }
 }
 
 fn source_request(selector: CacheSourceSelector) -> Result<SourceCacheRequest> {
@@ -324,6 +738,95 @@ fn print_source_verify_human(report: &SourceCacheVerification) {
             entry.sha256,
             entry.filename
         );
+    }
+}
+
+fn print_archive_status_human(report: &ArchiveCacheStatus) {
+    aros_common::outputln!(
+        "Compiler archive cache status (passive): {} ({}, {})",
+        report.root.root.path.display(),
+        report.root.root.origin.as_str(),
+        report.root.state.as_str()
+    );
+    aros_common::outputln!("  object layout: {}", report.object_layout);
+    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_list_human(report: &ArchiveCacheList) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!(
+        "  cache entry: {}{}",
+        archive_entry_state_label(report.entry.state),
+        report
+            .entry
+            .metadata_size
+            .map_or_else(String::new, |size| format!(" ({size} metadata bytes)"))
+    );
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_fetch_human(report: &ArchiveCacheFetch) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!(
+        "  prior cache entry: {}; offline: {}; refresh requested: {}",
+        archive_entry_state_label(report.prior_entry.state),
+        report.offline,
+        report.refresh_requested
+    );
+    aros_common::outputln!("  verified: {}", report.verification_scope);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_verify_human(report: &ArchiveCacheVerification) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  verified: {}", report.verification_scope);
+    aros_common::outputln!("  not verified: {}", report.not_verified.join("; "));
+}
+
+fn print_archive_selection_human(selection: &ArchiveSelection) {
+    let kind = match selection.kind {
+        ArchiveKind::HostCompiler => "host compiler",
+        ArchiveKind::CrossToolchain => "cross toolchain",
+    };
+    let host_origin = match selection.host_selection {
+        ArchiveHostSelection::Explicit => "explicit host",
+        ArchiveHostSelection::RunningHost => "running host",
+    };
+    aros_common::outputln!("Compiler archive ({kind}; {}):", selection.host);
+    aros_common::outputln!("  host selection: {host_origin}");
+    aros_common::outputln!(
+        "  configuration: {} ({})",
+        selection.configuration_source,
+        selection.configuration_kind
+    );
+    aros_common::outputln!("  archive transport: {}", selection.transport_source);
+    if let Some(release_id) = &selection.release_id {
+        aros_common::outputln!("  release: {release_id}");
+    }
+    if let Some(profile) = &selection.target_profile {
+        aros_common::outputln!("  target preset: {profile}");
+    }
+    if let Some(triple) = &selection.target_triple {
+        aros_common::outputln!("  target triple: {triple}");
+    }
+    if let Some(version) = &selection.llvm_version {
+        aros_common::outputln!("  LLVM version: {version}");
+    }
+    aros_common::outputln!("  archive SHA-256: {}", selection.sha256);
+    match selection.expected_size {
+        Some(size) => aros_common::outputln!("  expected size: {size} bytes"),
+        None => aros_common::outputln!("  expected size: unknown (bounded during download)"),
+    }
+    aros_common::outputln!("  cache path: {}", selection.cache_path.display());
+}
+
+const fn archive_entry_state_label(state: ArchiveCacheEntryState) -> &'static str {
+    match state {
+        ArchiveCacheEntryState::Missing => "missing",
+        ArchiveCacheEntryState::PresentUnverified => "present, unverified",
+        ArchiveCacheEntryState::Unsafe => "unsafe",
+        ArchiveCacheEntryState::Inaccessible => "inaccessible",
     }
 }
 

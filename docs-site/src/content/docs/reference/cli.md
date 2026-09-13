@@ -52,6 +52,10 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
 | `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
 | `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros cache archives status` | Passively observe the shared compiler-archive cache root |
+| `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
+| `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
+| `aros cache archives verify` | Verify one selected archive's declared byte identity only |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
@@ -325,6 +329,10 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
 | `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
 | `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `cache archives status` | No | Passively observe the shared archive-cache root without enumerating archive objects |
+| `cache archives list` | No | Read direct metadata for one project-selected archive without hashing or downloading it |
+| `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
+| `cache archives verify` | No | Hash one project-selected archive and check only declared size/SHA-256 identity |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
@@ -366,6 +374,16 @@ from an unqueried backend configuration. `--dir DIR` passively observes one
 explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
+
+`aros cache archives` manages only downloaded host/compiler archive bytes,
+never their installed payloads. `status` remains passive. `list`, `fetch`, and
+`verify` require `--project DIR` plus exactly one archive purpose:
+`--host-compiler`, or `--toolchain --preset NAME`. `--host HOST` makes a
+cross-host prefetch explicit without executing a foreign binary. Archive
+verification is intentionally limited to declared size and SHA-256; extraction,
+payload-tree, receipt, provenance, and attestation checks remain installation
+responsibilities. See [cache inspection](/aros-tools/workflows/cache/) for
+offline and refresh semantics.
 
 `aros cache sources` never guesses a cache root or a source closure. Every
 operation needs an explicit absolute `--dir` and exactly one reviewed selector:

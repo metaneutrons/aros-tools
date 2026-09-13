@@ -56,6 +56,34 @@ usable lock entry stops the operation. It does not skip unsupported entries.
 `--force` refreshes the archive cache; it does not authorize overwriting an
 installed tree.
 
+## Prepare archive bytes separately
+
+Use `aros cache archives` when the archive transfer should be prepared or
+checked without extracting anything. This is useful for a controlled offline
+handoff, for CI prefetching, or for preparing another supported host from the
+current machine:
+
+```sh
+# Current host, selected host LLVM archive.
+aros cache archives fetch --project /work/AROS --host-compiler
+
+# A specific cross-toolchain archive for another release-matrix host.
+aros cache archives fetch --project /work/AROS --toolchain --preset pc-x86_64 \
+  --host linux-aarch64
+
+# Prove only the declared archive bytes before an offline installation.
+aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
+aros toolchain install --preset pc-x86_64 --offline
+```
+
+Archive fetch and verification share the exact same SHA-256-addressed object
+as installation, but they do not extract, execute, install, or validate the
+payload tree, manifest, provenance, or attestation. `--offline` refuses a
+transfer; `--refresh` reacquires the same locked identity and conflicts with
+`--offline`. Neither option permits replacing an installed tree or an existing
+content-addressed archive object. See [cache inspection](/aros-tools/workflows/cache/)
+for the complete command and integrity boundary.
+
 ## Inspect the local store without running a toolchain
 
 ```sh

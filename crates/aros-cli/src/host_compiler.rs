@@ -2,7 +2,7 @@
 
 use crate::artifact::{
     aros_home, command_exists, commit_staging, extract_to_staging, obtain_archive,
-    require_absolute_state_path, require_sha256,
+    require_absolute_state_path, require_sha256, validate_archive_url,
 };
 use aros_common::target::HostCompilerConfig;
 use aros_common::toolchain_manifest::ArosToolchainManifestEntry;
@@ -88,6 +88,7 @@ impl HostCompilerInstallOutcome {
 }
 
 /// Host-specific release asset selected from `aros-targets.toml`.
+#[derive(Debug, Clone)]
 pub struct HostCompilerSelection {
     /// Stable host matrix key.
     pub host_key: String,
@@ -156,6 +157,24 @@ pub fn load_host_compiler_config(repo_root: &Path) -> Result<HostCompilerConfig>
 /// Returns an error for unsupported hosts or absent matrix entries.
 pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSelection> {
     let host_key = host_platform_key()?;
+    select_host_compiler_for_host(cfg, host_key)
+}
+
+/// Resolve one configured host's deterministic compiler asset.
+///
+/// This selector does not infer the running host or execute a binary. An
+/// explicit `AROS_HOST_COMPILER_URL` transport override is applied exactly as
+/// it is for installation, while the configured version and digest remain
+/// authoritative. It is the stable cross-host selection boundary used by
+/// archive-cache management.
+///
+/// # Errors
+///
+/// Returns an error when the host has no declared configuration entry.
+pub fn select_host_compiler_for_host(
+    cfg: &HostCompilerConfig,
+    host_key: &str,
+) -> Result<HostCompilerSelection> {
     let version = cfg.llvm_version.clone();
     let host_asset = cfg.hosts.get(host_key).ok_or_else(|| {
         miette::miette!("host '{host_key}' is not configured in aros-targets.toml")
@@ -163,11 +182,13 @@ pub fn select_host_compiler(cfg: &HostCompilerConfig) -> Result<HostCompilerSele
     let asset = host_asset.asset.replace(VERSION_TOKEN, &version);
     let base_url = std::env::var("AROS_HOST_COMPILER_URL")
         .unwrap_or_else(|_| cfg.base_url.replace(VERSION_TOKEN, &version));
+    let url = format!("{}/{asset}", base_url.trim_end_matches('/'));
+    validate_archive_url(&url)?;
     Ok(HostCompilerSelection {
         host_key: host_key.into(),
         platform_label: host_platform_label(host_key).into(),
         version,
-        url: format!("{}/{asset}", base_url.trim_end_matches('/')),
+        url,
         sha256: host_asset.sha256.clone(),
     })
 }

@@ -25,6 +25,12 @@ pub const COMPILER_CACHE_STATUS_SCHEMA: &str = "aros-cache-compiler-status-v1";
 pub enum CacheCapability {
     /// Bounded passive observation.
     Status,
+    /// Bounded metadata projection of selected cache objects.
+    List,
+    /// Explicit verified cache-object acquisition.
+    Fetch,
+    /// Explicit cache-object byte-identity verification.
+    Verify,
 }
 
 /// Side-effect contract of a versioned cache result.
@@ -274,7 +280,12 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
             CacheFamilyStatus {
                 family: CacheFamily::Archives,
                 status: CacheFamilyStatusKind::Configured,
-                capabilities: vec![CacheCapability::Status],
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::List,
+                    CacheCapability::Fetch,
+                    CacheCapability::Verify,
+                ],
                 root: Some(archives),
                 backends: Vec::new(),
                 detail: Some(

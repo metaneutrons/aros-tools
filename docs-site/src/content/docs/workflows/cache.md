@@ -5,8 +5,8 @@ description: Inspect, verify, and deliberately populate reviewed AROS cache inpu
 
 `aros cache` is the resource-oriented cache interface. Passive status commands
 do not create a directory, acquire a lock, hash a tree, access a network, start
-a compiler-cache daemon, or change a backend. Source-cache `fetch` is the
-separate, explicit population boundary.
+a compiler-cache daemon, or change a backend. Source-cache and compiler-archive
+`fetch` are separate, explicit population boundaries.
 
 ```sh
 aros cache status
@@ -15,6 +15,12 @@ aros cache status --format json
 aros cache compiler status
 aros cache compiler status --backend ccache --format json
 aros cache compiler status --backend sccache --dir /work/aros-compiler-cache
+
+aros cache archives status
+aros cache archives list --project /work/AROS --toolchain --preset pc-x86_64 \
+  --host linux-x86_64 --format json
+aros cache archives fetch --project /work/AROS --host-compiler --offline
+aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
 
 aros cache sources status --dir /work/aros-source-cache
 aros cache sources list --source-lock toolchains/llvm.sources.json \
@@ -36,7 +42,7 @@ contents:
 | Family | Current status boundary |
 | --- | --- |
 | `compiler` | Discovers `sccache` and `ccache` on `PATH`, then records recognized configuration-variable names without reading their values or starting either backend. |
-| `archives` | Reports the existing state of the shared host/cross-compiler archive root only. Installed host compilers and cross-toolchains are outside this cache family. |
+| `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
 | `sources` | `status` never guesses a root. `list`, `fetch`, and `verify` require an explicit reviewed selector and root. |
 | `cargo` | Requires a future explicit tools checkout and managed vendor root. Your global Cargo home is excluded. |
 | `genmf` | Requires a future explicit expansion root and source selection. Verification reports and build trees are excluded. |
@@ -71,6 +77,61 @@ the same boundary through `root_binding: "status_only_not_applied"`, an
 explicit `selected_backend` value (or `null`), `selection_basis`,
 `effective_build_selection`, and a complete `side_effects` object. This makes
 the limits safe for automation to check rather than infer from prose.
+
+## Compiler archive operations
+
+Compiler archives are a shared, content-addressed byte cache beneath the
+archive root: `downloads/sha256/<archive-sha256>.tar.xz`. It is not the
+host-compiler installation and not the cross-toolchain store. `status` is
+passive and does not enumerate its contents. `list` reads metadata for exactly
+one declared archive; it reports `missing`, `present_unverified`, `unsafe`, or
+`inaccessible` and never hashes it.
+
+Every non-status archive operation requires an explicit `--project DIR` that
+resolves to an AROS source checkout, plus exactly one purpose:
+
+- `--host-compiler` reads the selected host LLVM asset from that checkout's
+  `aros-targets.toml`.
+- `--toolchain --preset NAME` reads the selected AROS cross-toolchain archive
+  from its `aros-toolchains.lock.toml` and checks the target triple against the
+  checkout's target contract.
+
+The optional `--host HOST` chooses a release-matrix host without running,
+extracting, or installing a foreign binary. Without it, AROS selects the
+running host. The JSON result records the resolved project, configuration file,
+selection origin, host, release/profile where applicable, expected size and
+SHA-256, cache path, HTTPS archive URL, and transport provenance. For a host
+compiler, the explicit `AROS_HOST_COMPILER_URL` transport override is honored;
+it changes no version or SHA-256 identity.
+
+```sh
+# Observe only the archive-root metadata.
+aros cache archives status --format json
+
+# Prepare a Linux cross-toolchain archive from macOS without executing it.
+aros cache archives fetch --project /work/AROS --toolchain --preset pc-x86_64 \
+  --host linux-x86_64
+
+# Inspect or prove only the selected archive bytes.
+aros cache archives list --project /work/AROS --host-compiler --format json
+aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
+```
+
+`fetch` uses the same verified acquisition primitive as `aros host-compiler
+install` and `aros toolchain install`: its cache identity is the declared
+SHA-256, an available object is reverified, a new transfer stages privately and
+is published without clobbering an existing object. It does not extract or
+install the archive. `--offline` forbids every transfer and succeeds only when
+the selected object is already verified. `--refresh` reacquires the exact same
+declared identity, conflicts with `--offline`, and still never replaces the
+content-addressed cache object or an installed tree.
+
+`verify` checks only exact archive size (when the lock declares it) and
+SHA-256. It deliberately does **not** validate extraction safety, payload-tree
+identity, a host-compiler/toolchain receipt, release provenance, or an
+attestation; installation owns those stronger checks. A host compiler may have
+an unknown declared size, in which case download remains bounded by the
+consumer's hard archive limit and the output says so explicitly.
 
 ## Reviewed source-cache operations
 
@@ -172,8 +233,8 @@ replace every removed producer-cache invocation before upgrading aros-tools.
 
 ## Current limits
 
-The following operations are not yet public cache commands: archive/Cargo
-population and verification, GenMF refresh, retention, removal, prune,
+The following operations are not yet public cache commands: Cargo population
+and verification, GenMF refresh, retention, removal, prune,
 compiler statistics reset, and compiler cache clearing. Do not replace them
 with ad-hoc directory deletion. Their interfaces require verified ownership,
 cooperating reader/writer leases, preview/apply protection, and explicit scope

@@ -134,6 +134,12 @@ probe deadline, and the explicit directory never falls back to ambient `PATH`.
 `AROS_BOARDS_FILE` may describe physical devices and network interfaces; keep
 it machine-local and review it before deploy or removable-media operations.
 
+The same host-compiler transport override is honored by `aros cache archives`
+when it selects `--host-compiler`; the result records whether its URL came from
+this environment override or `aros-targets.toml`. Cross-toolchain archive
+selection always uses the checkout lock's declared URL. Neither path changes an
+archive SHA-256 identity or installed compiler state.
+
 ### Component diagnostics and logging
 
 Each component uses the same `DIAGNOSTIC_FORMAT`, `LOG_LEVEL`, `LOG_FORMAT`,
@@ -210,7 +216,8 @@ versioned checkout configuration, then a documented constant default. There is
 no fallback to a neighboring checkout or an arbitrary compiler on `PATH`.
 
 Use `aros info`, `aros cache status`, `aros cache compiler status`, `aros
-toolchain list`, `aros toolchain inventory` and `aros board doctor` to inspect
+cache archives status`, `aros toolchain list`, `aros toolchain inventory` and
+`aros board doctor` to inspect
 selected values without mutating source or hardware. Cache-status commands do
 not create roots, traverse their contents, start a compiler-cache daemon, or
 read backend configuration values; see [cache inspection](/aros-tools/workflows/cache/)

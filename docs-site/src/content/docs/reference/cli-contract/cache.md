@@ -7,6 +7,27 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Constraint | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `aros cache archives fetch` | project | --project | — | required | 1 |  |  | — |  |
+| `aros cache archives fetch` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives fetch` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives fetch` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros cache archives fetch` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros cache archives fetch` | offline | --offline | — | optional | 0 | false |  | AROS_OFFLINE | refresh |
+| `aros cache archives fetch` | refresh | --refresh | — | optional | 0 | false |  | — | offline |
+| `aros cache archives fetch` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives list` | project | --project | — | required | 1 |  |  | — |  |
+| `aros cache archives list` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives list` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives list` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros cache archives list` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros cache archives list` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives status` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache archives verify` | project | --project | — | required | 1 |  |  | — |  |
+| `aros cache archives verify` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives verify` | toolchain | --toolchain | — | exactly one of archive_selector | 0 | false |  | — |  |
+| `aros cache archives verify` | preset | --preset | — | optional | 1 |  |  | — |  |
+| `aros cache archives verify` | host | --host | — | optional | 1 |  |  | — |  |
+| `aros cache archives verify` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache compiler status` | backend | --backend | — | optional | 1 | auto | auto, sccache, ccache | — |  |
 | `aros cache compiler status` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler status` | format | --format | — | optional | 1 | human | human, json | — |  |

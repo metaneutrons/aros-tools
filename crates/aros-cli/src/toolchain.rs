@@ -191,6 +191,44 @@ pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
     format!("{}-unknown-aros", profile.arch)
 }
 
+/// Resolve one enabled locked archive against the selected checkout's target
+/// contract without inspecting, downloading, extracting, or executing it.
+///
+/// # Errors
+///
+/// Returns an error for an unknown profile, absent or disabled matrix entry,
+/// or a lock/profile triple mismatch.
+pub fn select_locked_artifact<'a>(
+    repo_root: &Path,
+    lock: &'a ArosToolchainLock,
+    host: &str,
+    preset: &str,
+) -> Result<&'a ArosToolchainArtifact> {
+    let profile = target_profile(repo_root, preset)?;
+    let expected_triple = target_triple_for_profile(&profile);
+    let artifact = lock.resolve(host, preset).ok_or_else(|| {
+        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+    })?;
+    if artifact.target_triple != expected_triple {
+        bail!(
+            "locked target triple '{}' does not match preset '{}' ({})",
+            artifact.target_triple,
+            preset,
+            expected_triple
+        );
+    }
+    if !artifact.enabled {
+        bail!(
+            "AROS toolchain {host}/{preset} is locked but disabled: {}",
+            artifact
+                .disabled_reason
+                .as_deref()
+                .unwrap_or("no release asset is available")
+        );
+    }
+    Ok(artifact)
+}
+
 /// Return an artifact's content-addressed payload path.
 pub fn locked_store_path(
     lock: &ArosToolchainLock,
@@ -236,29 +274,8 @@ pub async fn install(
     }
 
     let host = host_platform_key()?;
-    let profile = target_profile(repo_root, preset)?;
-    let expected_triple = target_triple_for_profile(&profile);
     let lock = load_lock(repo_root)?;
-    let artifact = lock.resolve(host, preset).ok_or_else(|| {
-        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
-    })?;
-    if artifact.target_triple != expected_triple {
-        bail!(
-            "locked target triple '{}' does not match preset '{}' ({})",
-            artifact.target_triple,
-            preset,
-            expected_triple
-        );
-    }
-    if !artifact.enabled {
-        bail!(
-            "AROS toolchain {host}/{preset} is locked but disabled: {}",
-            artifact
-                .disabled_reason
-                .as_deref()
-                .unwrap_or("no release asset is available")
-        );
-    }
+    let artifact = select_locked_artifact(repo_root, &lock, host, preset)?;
 
     let envelope = locked_store_envelope(&lock, artifact)?;
     let payload = envelope.join("toolchain");
