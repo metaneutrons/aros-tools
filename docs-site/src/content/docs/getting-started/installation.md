@@ -51,6 +51,22 @@ For future sessions, add the **absolute** `target/release` path to your shell's
 PATH configuration. Do not put a relative path there: you will run `aros`
 from a separate operating-system checkout.
 
+## Shell completion
+
+`aros` generates completion scripts from its visible command model. Generate
+the variant for your shell, then install or source it using your shell's normal
+completion mechanism:
+
+```sh
+aros completions bash > aros.bash
+aros completions zsh > _aros
+aros completions fish > aros.fish
+```
+
+The generator is read-only: it does not need an AROS checkout and does not
+contact the network or create tool state. Run it again after each `aros`
+upgrade; do not maintain a hand-edited copy.
+
 Next: [create your first checkout and build](/aros-tools/getting-started/quick-start/).
 
 ## Native release archive

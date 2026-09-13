@@ -53,6 +53,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros ccache` | Inspect or explicitly clear the selected compiler cache |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
+| `aros completions` | Generate a deterministic Bash, Zsh, or Fish completion script from the visible command model |
 | `aros info` | Report the discovered checkout, host and toolchain state |
 
 ### Released-toolchain consumer and local-store controls
@@ -121,7 +122,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | --- | --- | --- |
 | `source init PATH` | No | Clone into a new destination; `--upstream URL`, `--fork URL`, optional `--ref REF` |
 | `source sync` | Required | Validate a candidate and fast-forward a clean attached branch; `--upstream URL`, `--branch BRANCH`, `--no-transpile` |
-| `info` | Optional | Report host/state paths and any discovered target/toolchain contracts |
+| `info` | Optional | Report host/state paths and any discovered target/toolchain contracts; `--format human\|json` |
 | `install --source-bin DIR --prefix DIR` | No | Publish exactly eight pre-verified executable files without replacing existing programs |
 
 `source init --ref` requires a full branch/tag ref or exact commit OID and
@@ -167,7 +168,7 @@ requires three explicit source roots and works from any directory.
 | `setup` | No preset: install the managed host compiler; `--preset NAME`: install that target; `--all`: attempt every configured target |
 | `host-compiler install` | Managed host LLVM installation; supports `--force`, `--offline` |
 | `toolchain install` | Requires `--preset NAME`; supports `--force`, `--offline`, `--local DIR` |
-| `toolchain list` | Show lock entries for the current host |
+| `toolchain list` | Show lock entries for the current host; `--format human\|json` |
 | `toolchain inventory` | Read-only metadata scan of the installed store; checkout optional; supports absolute `--store DIR`, bounded `--max-entries N`, and `--format human\|json` |
 | `toolchain import` | Checkout optional; preview then token-confirmed bounded, no-follow import of a manifest-verified local prefix into a no-clobber managed envelope; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
 | `toolchain register` | Checkout optional; preview then token-confirmed bounded validation and non-owning receipt for an external local prefix; supports absolute `--source DIR`, optional `--store DIR`, `--apply TOKEN`, and `--format human\|json` |
@@ -189,6 +190,42 @@ requires `--preset` and conflicts with `--all`.
 For helper source builds set `AROS_TOOLS_SOURCE_DIR` to the tools checkout.
 Installed suites normally need only `build-tools check`.
 See [toolchain workflows](/aros-tools/workflows/toolchains/).
+
+### Structured inspection
+
+`aros info --format json` emits the versioned `aros-info-v1` document. It
+separates observed host-compiler status (`verified`, `unverified`, or
+`invalid`), state paths, embedded CMake-engine identity, optional compiler
+cache discovery, and checkout availability. Outside a checkout,
+`checkout.state` is `unavailable` and checkout-specific fields are `null` or
+empty; the command does not create a state directory.
+
+`aros toolchain list --format json` emits `aros-toolchain-list-v1`. It lists
+only lock artifacts for the current host. Each entry records its profile,
+triple, lock enablement, and two deliberately separate observations:
+`status` is `disabled`, `available`, or `installed`; `verification` is
+`unavailable`, `metadata-only`, or `verified`. `available` and
+`metadata-only` mean that the lock describes an enabled artifact but no
+complete local installation was verified. Neither inspection command downloads,
+installs, or executes a compiler.
+
+### Shell completions
+
+Generate a script for one supported shell and load it using that shell's normal
+completion mechanism:
+
+```sh
+aros completions bash > aros.bash
+aros completions zsh > _aros
+aros completions fish > aros.fish
+```
+
+The scripts are generated from the same visible command model as `--help` and
+contain visible subcommands, options, and positional enum values. They never
+expose the internal `__metamake-fetch` bridge. Generation is pure: it neither
+discovers a checkout nor accesses the network, state store, cache, or log
+destination. Regenerate the script after upgrading `aros` rather than editing
+it by hand.
 
 ### Experimental producer inspection and local candidate build
 

@@ -34,6 +34,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain inventory` | store | --store | — | no | 1 |  |  | — |  |
 | `aros toolchain inventory` | max_entries | --max-entries | — | no | 1 | 10000 |  | — |  |
 | `aros toolchain inventory` | format | --format | — | no | 1 | human | human, json | — |  |
+| `aros toolchain list` | format | --format | — | no | 1 | human | human, json | — |  |
 | `aros toolchain path` | preset | -p, --preset | — | yes | 1 |  |  | — |  |
 | `aros toolchain path` | local | --local | — | no | 1 |  |  | — |  |
 | `aros toolchain plan` | preset | --preset | — | yes | 1 |  |  | — |  |

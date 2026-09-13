@@ -5,6 +5,7 @@ use crate::artifact::{
     require_absolute_state_path, INSTALL_COMPLETE_FILE,
 };
 use crate::host_compiler::host_platform_key;
+use crate::toolchain_management::ResultFormat;
 use aros_common::target::TargetProfile;
 use aros_common::toolchain_manifest::{
     ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, AROS_TOOLCHAIN_MANIFEST_FILE,
@@ -12,6 +13,7 @@ use aros_common::toolchain_manifest::{
 use aros_common::toolchain_tree_inventory;
 use console::{style, Emoji};
 use miette::{bail, IntoDiagnostic, Result, WrapErr};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,6 +37,7 @@ const REQUIRED_CXX_HEADERS: &[&str] = &[
 // first-launch security assessment before it reaches `main`. Keep the probe
 // bounded, but allow that legitimate cold-start path to finish.
 const TOOLCHAIN_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const LIST_SCHEMA: &str = "aros-toolchain-list-v1";
 
 /// Required executable layout of an installed AROS cross-toolchain.
 #[derive(Debug, Clone)]
@@ -437,31 +440,106 @@ pub fn verify(repo_root: &Path, preset: &str, local: Option<&Path>) -> Result<Re
 /// # Errors
 ///
 /// Returns an error when host detection or lock-file validation fails.
-pub fn list(repo_root: &Path) -> Result<()> {
+pub fn list(repo_root: &Path, format: ResultFormat) -> Result<()> {
     let lock = load_lock(repo_root)?;
     let current_host = host_platform_key()?;
-    aros_common::outputln!("Release: {}", style(&lock.release_id).cyan());
-    for artifact in lock
+    let artifacts = lock
         .artifacts
         .iter()
         .filter(|artifact| artifact.host == current_host)
-    {
-        let destination = locked_store_path(&lock, artifact)?;
-        let status = if !artifact.enabled {
-            "disabled"
-        } else if verify_locked_install(&destination, &lock, artifact, true).is_ok() {
-            "installed"
-        } else {
-            "available"
-        };
+        .map(|artifact| {
+            let destination = locked_store_path(&lock, artifact)?;
+            let (status, verification) = if !artifact.enabled {
+                (ListArtifactStatus::Disabled, ListVerification::Unavailable)
+            } else if verify_locked_install(&destination, &lock, artifact, true).is_ok() {
+                (ListArtifactStatus::Installed, ListVerification::Verified)
+            } else {
+                (
+                    ListArtifactStatus::Available,
+                    ListVerification::MetadataOnly,
+                )
+            };
+            Ok(ToolchainListEntry {
+                target_profile: artifact.target_profile.clone(),
+                target_triple: artifact.target_triple.clone(),
+                enabled: artifact.enabled,
+                status,
+                verification,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let result = ToolchainListResult {
+        schema: LIST_SCHEMA,
+        observation: "lock-and-local-installation",
+        host: current_host.to_string(),
+        release_id: lock.release_id,
+        artifacts,
+    };
+    match format {
+        ResultFormat::Human => print_list_human(&result),
+        ResultFormat::Json => {
+            let document = serde_json::to_string_pretty(&result)
+                .map_err(|error| miette::miette!("could not serialize toolchain list: {error}"))?;
+            aros_common::outputln!("{document}");
+        }
+    }
+    Ok(())
+}
+
+fn print_list_human(result: &ToolchainListResult) {
+    aros_common::outputln!("Release: {}", style(&result.release_id).cyan());
+    for artifact in &result.artifacts {
         aros_common::outputln!(
             "  {:<16} {:<22} {}",
             artifact.target_profile,
             artifact.target_triple,
-            status
+            artifact.status.as_str()
         );
     }
-    Ok(())
+}
+
+#[derive(Serialize)]
+struct ToolchainListResult {
+    schema: &'static str,
+    observation: &'static str,
+    host: String,
+    release_id: String,
+    artifacts: Vec<ToolchainListEntry>,
+}
+
+#[derive(Serialize)]
+struct ToolchainListEntry {
+    target_profile: String,
+    target_triple: String,
+    enabled: bool,
+    status: ListArtifactStatus,
+    verification: ListVerification,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ListArtifactStatus {
+    Disabled,
+    Available,
+    Installed,
+}
+
+impl ListArtifactStatus {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Available => "available",
+            Self::Installed => "installed",
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ListVerification {
+    Unavailable,
+    MetadataOnly,
+    Verified,
 }
 
 fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<ResolvedToolchain> {

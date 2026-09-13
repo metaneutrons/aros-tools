@@ -4,14 +4,19 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    artifact, board, boot, build, golden, host_compiler, observability, repo, source, style,
-    toolchain, BoardCommand, BoardProfileSelection, BuildToolsCommand, Commands, GoldenAction,
-    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands, CHECK, SPARKLES,
+    artifact, board, boot, build, golden, host_compiler, observability, repo, source, toolchain,
+    BoardCommand, BoardProfileSelection, BuildToolsCommand, Commands, GoldenAction,
+    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
 };
+use console::{style, Emoji};
 use miette::Result;
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
+static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 
 pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
     match command {
@@ -129,7 +134,8 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         ),
         Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
-        Commands::Info => info(repo_root),
+        Commands::Completions { shell } => crate::completion_model::write(shell),
+        Commands::Info { format } => info(repo_root, format),
     }
 }
 
@@ -237,7 +243,7 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
                     .await?;
             record_toolchain_install(&outcome);
         }
-        ToolchainCommands::List => crate::toolchain::list(repo_root)?,
+        ToolchainCommands::List { format } => crate::toolchain::list(repo_root, format)?,
         ToolchainCommands::Verify { preset, local } => {
             crate::toolchain::verify(repo_root, &preset, local.as_deref())?;
         }
@@ -628,21 +634,59 @@ fn golden_command(action: GoldenAction, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn info(repo_root: Option<&Path>) -> Result<()> {
-    let repository_configuration = repo_root
+fn info(repo_root: Option<&Path>, format: crate::toolchain_management::ResultFormat) -> Result<()> {
+    let report = inspect_info(repo_root)?;
+    match format {
+        crate::toolchain_management::ResultFormat::Human => print_info_human(&report),
+        crate::toolchain_management::ResultFormat::Json => {
+            let document = serde_json::to_string_pretty(&report).map_err(|error| {
+                miette::miette!("could not serialize environment information: {error}")
+            })?;
+            aros_common::outputln!("{document}");
+        }
+    }
+    Ok(())
+}
+
+fn inspect_info(repo_root: Option<&Path>) -> Result<InfoReport> {
+    let checkout = repo_root
         .map(|repo_root| {
             let targets_path = repo::targets_file(repo_root);
             let profiles_from_builtin = !path_entry_exists(&targets_path)?;
-            let profiles = repo::load_target_profiles(repo_root)?;
+            let target_profiles = repo::load_target_profiles(repo_root)?
+                .into_iter()
+                .map(|target| target.name)
+                .collect();
             let lock_path = toolchain::lock_file_path(repo_root);
-            let lock = if path_entry_exists(&lock_path)? {
-                Some(toolchain::load_lock(repo_root)?)
+            let toolchain_lock = if path_entry_exists(&lock_path)? {
+                let lock = toolchain::load_lock(repo_root)?;
+                Some(ToolchainLockSummary {
+                    release_id: lock.release_id,
+                    artifact_count: lock.artifacts.len(),
+                })
             } else {
                 None
             };
-            Ok::<_, miette::Report>((profiles, profiles_from_builtin, lock))
+            Ok::<_, miette::Report>(InfoCheckout {
+                state: CheckoutState::Available,
+                root: Some(repo_root.display().to_string()),
+                target_profiles,
+                target_profile_source: Some(if profiles_from_builtin {
+                    TargetProfileSource::BuiltIn
+                } else {
+                    TargetProfileSource::CheckoutOverride
+                }),
+                toolchain_lock,
+            })
         })
-        .transpose()?;
+        .transpose()?
+        .unwrap_or_else(|| InfoCheckout {
+            state: CheckoutState::Unavailable,
+            root: None,
+            target_profiles: Vec::new(),
+            target_profile_source: None,
+            toolchain_lock: None,
+        });
 
     let state_home = artifact::aros_home()?;
     let archive_cache = artifact::archive_cache_root()?;
@@ -655,7 +699,7 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
             .and_then(|config| host_compiler::select_host_compiler(&config).ok())
     });
     let managed_host_entry_exists = path_entry_exists(&host_dir)?;
-    let (status, status_kind) = if managed_host_entry_exists {
+    let (summary, status, path) = if managed_host_entry_exists {
         if expected_host.as_ref().is_some_and(|selection| {
             selection.sha256.as_deref().is_some_and(|digest| {
                 host_compiler::verify_host_compiler_install(&host_dir, digest, &selection.version)
@@ -668,6 +712,7 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
                     host_paths.clang.display()
                 ),
                 InfoStatus::Verified,
+                Some(host_paths.clang.display().to_string()),
             )
         } else if expected_host
             .as_ref()
@@ -679,6 +724,7 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
                     host_paths.clang.display()
                 ),
                 InfoStatus::Invalid,
+                Some(host_paths.clang.display().to_string()),
             )
         } else {
             (
@@ -687,91 +733,126 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
                     host_paths.clang.display()
                 ),
                 InfoStatus::Unverified,
+                Some(host_paths.clang.display().to_string()),
             )
         }
     } else if let Ok(clang) = which::which("clang") {
         (
             format!("Unmanaged system LLVM ({})", clang.display()),
             InfoStatus::Unverified,
+            Some(clang.display().to_string()),
         )
     } else {
         (
             "Not found (run `aros host-compiler install`)".to_string(),
             InfoStatus::Invalid,
+            None,
         )
     };
+    let compiler_cache = build::detected_compiler_cache().map(|cache| {
+        let path = which::which(cache.program())
+            .ok()
+            .map(|path| path.display().to_string());
+        CompilerCacheInfo {
+            program: cache.program(),
+            path,
+        }
+    });
+    Ok(InfoReport {
+        schema: "aros-info-v1",
+        tool_version: env!("CARGO_PKG_VERSION"),
+        build_frontend: "CMake + Ninja with explicit target profiles",
+        host_compiler: HostCompilerInfo {
+            status,
+            summary,
+            path,
+            managed: managed_host_entry_exists,
+        },
+        state: InfoState {
+            root: state_home.display().to_string(),
+            archive_cache: archive_cache.display().to_string(),
+            cross_toolchain_store: cross_store.display().to_string(),
+        },
+        cmake_engine: CmakeEngineInfo {
+            digest: aros_cmake_engine::digest().to_string(),
+            file_count: aros_cmake_engine::file_count(),
+            api_version: aros_cmake_engine::api_version(),
+        },
+        compiler_cache,
+        checkout,
+    })
+}
+
+fn print_info_human(report: &InfoReport) {
     aros_common::outputln!(
         "{SPARKLES} {}",
         style(format!(
             "AROS tools {}: environment information",
-            env!("CARGO_PKG_VERSION")
+            report.tool_version
         ))
         .cyan()
         .bold()
     );
-    aros_common::outputln!(
-        "  • Build frontend:         CMake + Ninja with explicit target profiles"
-    );
-    match status_kind {
+    aros_common::outputln!("  • Build frontend:         {}", report.build_frontend);
+    match report.host_compiler.status {
         InfoStatus::Verified => aros_common::outputln!(
             "  • Host C/C++ compiler:    {}",
-            style(status).green().bold()
+            style(&report.host_compiler.summary).green().bold()
         ),
         InfoStatus::Unverified => aros_common::outputln!(
             "  • Host C/C++ compiler:    {}",
-            style(status).yellow().bold()
+            style(&report.host_compiler.summary).yellow().bold()
         ),
         InfoStatus::Invalid => {
-            aros_common::outputln!("  • Host C/C++ compiler:    {}", style(status).red().bold());
+            aros_common::outputln!(
+                "  • Host C/C++ compiler:    {}",
+                style(&report.host_compiler.summary).red().bold()
+            );
         }
     }
-    aros_common::outputln!("  • AROS state root:        {}", state_home.display());
-    aros_common::outputln!("  • Archive cache:          {}", archive_cache.display());
-    aros_common::outputln!("  • Cross-toolchain store:  {}", cross_store.display());
+    aros_common::outputln!("  • AROS state root:        {}", report.state.root);
+    aros_common::outputln!("  • Archive cache:          {}", report.state.archive_cache);
+    aros_common::outputln!(
+        "  • Cross-toolchain store:  {}",
+        report.state.cross_toolchain_store
+    );
     // Which engine a build will use, and its identity. A reader debugging a
     // configure failure needs this before anything else: the modules are not in
     // the checkout any more, so there is nowhere else to look them up.
     aros_common::outputln!(
         "  • CMake engine:           embedded {} ({} files, api {})",
-        &aros_cmake_engine::digest()[..12],
-        aros_cmake_engine::file_count(),
-        aros_cmake_engine::api_version()
+        &report.cmake_engine.digest[..12],
+        report.cmake_engine.file_count,
+        report.cmake_engine.api_version
     );
     aros_common::outputln!(
         "  • C/C++ Compiler Launcher: {}",
-        build::detected_compiler_cache().map_or_else(
-            || "none".into(),
-            |cache| {
-                which::which(cache.program()).map_or_else(
-                    |_| cache.program().into(),
-                    |path| path.display().to_string(),
-                )
-            },
+        report.compiler_cache.as_ref().map_or_else(
+            || "none".to_string(),
+            |cache| cache
+                .path
+                .clone()
+                .unwrap_or_else(|| cache.program.to_string()),
         )
     );
-    if let Some((repo_root, (profiles, profiles_from_builtin, lock))) =
-        repo_root.zip(repository_configuration)
-    {
-        aros_common::outputln!("  • Source checkout:        {}", repo_root.display());
-        let target_names = profiles
-            .into_iter()
-            .map(|target| target.name)
-            .collect::<Vec<_>>();
-        let target_source = if profiles_from_builtin {
-            " (built into aros-tools; pristine upstream checkout)"
-        } else {
-            " (checkout override)"
-        };
+    if let Some(root) = report.checkout.root.as_deref() {
+        aros_common::outputln!("  • Source checkout:        {root}");
+        let target_source =
+            if report.checkout.target_profile_source == Some(TargetProfileSource::BuiltIn) {
+                " (built into aros-tools; pristine upstream checkout)"
+            } else {
+                " (checkout override)"
+            };
         aros_common::outputln!(
             "  • Configured targets:     {}{}",
-            target_names.join(", "),
+            report.checkout.target_profiles.join(", "),
             target_source
         );
-        match lock {
+        match &report.checkout.toolchain_lock {
             Some(lock) => aros_common::outputln!(
                 "  • AROS toolchain lock:    {} ({} assets)",
                 lock.release_id,
-                lock.artifacts.len()
+                lock.artifact_count
             ),
             None => aros_common::outputln!("  • AROS toolchain lock:    not configured"),
         }
@@ -781,14 +862,83 @@ fn info(repo_root: Option<&Path>) -> Result<()> {
             "    Create one with `aros source init PATH`, or run inside an existing checkout."
         );
     }
-    Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 enum InfoStatus {
     Verified,
     Unverified,
     Invalid,
+}
+
+#[derive(Serialize)]
+struct InfoReport {
+    schema: &'static str,
+    tool_version: &'static str,
+    build_frontend: &'static str,
+    host_compiler: HostCompilerInfo,
+    state: InfoState,
+    cmake_engine: CmakeEngineInfo,
+    compiler_cache: Option<CompilerCacheInfo>,
+    checkout: InfoCheckout,
+}
+
+#[derive(Serialize)]
+struct HostCompilerInfo {
+    status: InfoStatus,
+    summary: String,
+    path: Option<String>,
+    managed: bool,
+}
+
+#[derive(Serialize)]
+struct InfoState {
+    root: String,
+    archive_cache: String,
+    cross_toolchain_store: String,
+}
+
+#[derive(Serialize)]
+struct CmakeEngineInfo {
+    digest: String,
+    file_count: usize,
+    api_version: u32,
+}
+
+#[derive(Serialize)]
+struct CompilerCacheInfo {
+    program: &'static str,
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InfoCheckout {
+    state: CheckoutState,
+    root: Option<String>,
+    target_profiles: Vec<String>,
+    target_profile_source: Option<TargetProfileSource>,
+    toolchain_lock: Option<ToolchainLockSummary>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CheckoutState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum TargetProfileSource {
+    BuiltIn,
+    CheckoutOverride,
+}
+
+#[derive(Serialize)]
+struct ToolchainLockSummary {
+    release_id: String,
+    artifact_count: usize,
 }
 
 fn path_entry_exists(path: &Path) -> Result<bool> {

@@ -12,8 +12,6 @@ use clap::{
     error::ErrorKind, parser::ValueSource, Args, CommandFactory, FromArgMatches, Parser,
     Subcommand, ValueEnum,
 };
-use console::{style, Emoji};
-use miette::Result;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -24,7 +22,10 @@ mod boot;
 mod build;
 mod build_tools;
 mod cli_contract;
+#[cfg(test)]
+mod cli_contract_sections;
 mod commands;
+mod completion_model;
 mod golden;
 mod host_compiler;
 mod observability;
@@ -40,12 +41,10 @@ mod toolchain_producer;
 mod toolchain_selection;
 
 use cli_contract::{
-    parse_opaque_scan_id, parse_positive_usize, BoardProfileSelection, GoldenAction,
-    RepositoryRequirement,
+    parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
+    GoldenAction,
 };
-
-static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
-static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
+use completion_model::CompletionShell;
 
 #[derive(Parser)]
 #[command(
@@ -261,8 +260,19 @@ enum Commands {
         action: GoldenAction,
     },
 
-    /// Print system and toolchain information
-    Info,
+    /// Generate a shell completion script from the current public command model
+    Completions {
+        /// Shell syntax to generate
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+
+    /// Print observed system and toolchain information
+    Info {
+        /// Result representation on stdout, independent of diagnostic format
+        #[arg(long, value_enum, default_value = "human")]
+        format: toolchain_management::ResultFormat,
+    },
 }
 
 #[derive(Subcommand)]
@@ -354,8 +364,12 @@ enum ToolchainCommands {
         #[arg(long, conflicts_with = "force")]
         local: Option<PathBuf>,
     },
-    /// List locked artifacts for the current host
-    List,
+    /// List lock-selected artifacts for the current host without downloading them
+    List {
+        /// Result representation on stdout, independent of diagnostic format
+        #[arg(long, value_enum, default_value = "human")]
+        format: toolchain_management::ResultFormat,
+    },
     /// Inspect installed cross-toolchain envelopes without downloading or executing them
     Inventory(toolchain_management::InventoryArgs),
     /// Preview or import one verified local toolchain into the managed store
@@ -722,7 +736,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     Some(preset.clone()),
                     "verify the selected lock artifact, local prefix, cache policy, and installation destination",
                 ),
-                ToolchainCommands::List => (
+                ToolchainCommands::List { .. } => (
                     DiagnosticCode::CliToolchain,
                     DiagnosticStage::ToolResolution,
                     "toolchain.list",
@@ -947,7 +961,14 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 "inspect the named profile and generated product; update only after reviewing an intentional change",
             ),
         },
-        Commands::Info => (
+        Commands::Completions { .. } => (
+            DiagnosticCode::CliConfiguration,
+            DiagnosticStage::Configuration,
+            "completions",
+            None,
+            "select bash, zsh, or fish and write the generated script to your shell completion directory",
+        ),
+        Commands::Info { .. } => (
             DiagnosticCode::CliConfiguration,
             DiagnosticStage::Configuration,
             "info",
@@ -1020,6 +1041,9 @@ async fn main() -> ExitCode {
         }
     };
     let format = cli.observability.diagnostic_format;
+    if let Commands::Completions { shell } = cli.command {
+        return completion_model::emit(shell, format);
+    }
     let invocation_directory = match std::env::current_dir() {
         Ok(directory) => directory,
         Err(error) => {
@@ -1120,7 +1144,7 @@ async fn main() -> ExitCode {
             }
         };
 
-    let result = run(cli, repo_root).await;
+    let result = commands::run(cli.command, repo_root.as_deref()).await;
     match result {
         Ok(()) => {
             if let Some(diagnostic) = aros_common::take_stdout_failure_diagnostic(
@@ -1207,26 +1231,12 @@ async fn main() -> ExitCode {
     }
 }
 
-fn resolve_repository(
-    invocation_directory: &std::path::Path,
-    requirement: RepositoryRequirement,
-) -> Result<Option<PathBuf>> {
-    match requirement {
-        RepositoryRequirement::Global => Ok(None),
-        RepositoryRequirement::Optional => repo::find_root_optional_from(invocation_directory),
-        RepositoryRequirement::Required => repo::find_root_from(invocation_directory).map(Some),
-    }
-}
-
-async fn run(cli: Cli, repo_root: Option<PathBuf>) -> Result<()> {
-    commands::run(cli.command, repo_root.as_deref()).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
+        cli_contract::RepositoryRequirement, cli_contract_sections::CLI_CONTRACT_SECTIONS,
         command_boundary, BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli,
-        Commands, Parser, RepositoryRequirement,
+        Commands, Parser,
     };
     use clap::{error::ErrorKind, Arg, Command, CommandFactory};
     use std::fmt::Write;
@@ -1235,100 +1245,6 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs-site/src/content/docs/reference/cli-contract.md"
     ));
-    const CLI_CONTRACT_SECTIONS: &[(&str, &str)] = &[
-        (
-            "board",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/board.md"
-            )),
-        ),
-        (
-            "build",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/build.md"
-            )),
-        ),
-        (
-            "build-tools",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/build-tools.md"
-            )),
-        ),
-        (
-            "ccache",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/ccache.md"
-            )),
-        ),
-        (
-            "clean",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/clean.md"
-            )),
-        ),
-        (
-            "golden",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/golden.md"
-            )),
-        ),
-        (
-            "host-compiler",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/host-compiler.md"
-            )),
-        ),
-        (
-            "info",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/info.md"
-            )),
-        ),
-        (
-            "install",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/install.md"
-            )),
-        ),
-        (
-            "setup",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/setup.md"
-            )),
-        ),
-        (
-            "source",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/source.md"
-            )),
-        ),
-        (
-            "test",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/test.md"
-            )),
-        ),
-        (
-            "toolchain",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/toolchain.md"
-            )),
-        ),
-    ];
-
     fn is_public_contract_argument(argument: &Arg) -> bool {
         !argument.is_hide_set() && !matches!(argument.get_id().as_str(), "help" | "version")
     }
