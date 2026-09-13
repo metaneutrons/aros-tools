@@ -1137,8 +1137,9 @@ use filesystem::{
 };
 mod locks;
 pub(in crate::publication) use locks::{
-    acquire_advisory_file_lock, advisory_file_lock_identity, ensure_directory_nofollow,
-    probe_advisory_file_lock, revalidate_advisory_file_lock,
+    acquire_advisory_file_lock, advisory_file_lock_identity, create_unique_directory_nofollow,
+    ensure_directory_nofollow, probe_advisory_file_lock, revalidate_advisory_file_lock,
+    validate_existing_directory_prefix_nofollow,
 };
 mod regular;
 use regular::same_regular_snapshot;

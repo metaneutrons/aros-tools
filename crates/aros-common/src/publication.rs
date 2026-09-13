@@ -198,9 +198,10 @@ mod payload_path;
 pub use payload_path::payload_casefold_path_key;
 mod tree_ops;
 pub use tree_ops::{
-    copy_tree_from_snapshot_nofollow, directory_entry_names_nofollow_bounded,
-    ensure_directory_nofollow, measure_tree_content_cas_bounded,
-    remove_tree_from_snapshot_nofollow,
+    copy_tree_from_snapshot_nofollow, create_unique_directory_nofollow,
+    directory_entry_names_nofollow_bounded, ensure_directory_nofollow,
+    measure_tree_content_cas_bounded, remove_tree_from_snapshot_nofollow,
+    validate_existing_directory_prefix_nofollow,
 };
 
 /// Existing-target policy for one-file publication.
