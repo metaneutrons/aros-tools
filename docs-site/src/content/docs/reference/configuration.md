@@ -168,6 +168,17 @@ isolated local toolchain-producer collector build; its Cargo configuration and
 registry remain private and lock-verified. These ambient variables do not
 replace checkout locks, source identities, or artifact digests.
 
+`aros cache compiler status` passively observes these existing backend
+configuration variables without reading their values or invoking a backend:
+`CCACHE_CONFIGPATH`, `CCACHE_DIR`, `CCACHE_REMOTE_STORAGE`,
+`CCACHE_SECONDARY_STORAGE`, `SCCACHE_AZURE_BLOB_CONTAINER`, `SCCACHE_CONF`,
+`SCCACHE_DIR`, `SCCACHE_ENDPOINT`, `SCCACHE_GCS_BUCKET`, `SCCACHE_MEMCACHED`,
+`SCCACHE_REDIS`, and `SCCACHE_S3_BUCKET`. They remain backend-owned ambient
+configuration, not AROS cache settings: current status output reports only
+their names and marks effective storage scope as uninspected. `--dir DIR` on
+`aros cache compiler status` is a separate absolute, status-only root selector;
+it never rewrites or overrides any of these backend-owned variables.
+
 ### Qualification-only variables
 
 The following names are explicitly test-internal, are not supported user
@@ -198,8 +209,12 @@ The effective order is explicit CLI option, documented environment variable,
 versioned checkout configuration, then a documented constant default. There is
 no fallback to a neighboring checkout or an arbitrary compiler on `PATH`.
 
-Use `aros info`, `aros toolchain list`, `aros toolchain inventory` and `aros
-board doctor` to inspect selected values without mutating source or hardware.
+Use `aros info`, `aros cache status`, `aros cache compiler status`, `aros
+toolchain list`, `aros toolchain inventory` and `aros board doctor` to inspect
+selected values without mutating source or hardware. Cache-status commands do
+not create roots, traverse their contents, start a compiler-cache daemon, or
+read backend configuration values; see [cache inspection](/aros-tools/workflows/cache/)
+for their precise boundary.
 `inventory` works without a checkout and reads only bounded store metadata; it
 does not run a compiler or assert payload integrity. The checkout-independent
 `toolchain import`, `toolchain register`, `toolchain remove` and `toolchain gc`

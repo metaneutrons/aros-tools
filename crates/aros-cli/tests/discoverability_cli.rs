@@ -221,3 +221,140 @@ fn toolchain_list_json_preserves_lock_and_verification_states() {
     assert_eq!(artifacts[0]["enabled"], true);
     assert!(!state.exists(), "listing must not create an installation");
 }
+
+#[test]
+fn cache_status_is_passive_versioned_and_never_starts_a_backend() {
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = temporary.path().join("outside");
+    let state = temporary.path().join("state");
+    let tools = temporary.path().join("tools");
+    let marker = temporary.path().join("backend-was-run");
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(&tools).unwrap();
+
+    let sccache = tools.join("sccache");
+    fs::write(
+        &sccache,
+        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sccache, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let overview = output_json(
+        &command(&outside, &state)
+            .args(["cache", "status", "--format", "json"])
+            .env("PATH", &tools)
+            .env_remove("SCCACHE_DIR")
+            .env_remove("SCCACHE_CONF")
+            .env_remove("SCCACHE_ENDPOINT")
+            .env_remove("SCCACHE_REDIS")
+            .env_remove("SCCACHE_MEMCACHED")
+            .env_remove("SCCACHE_GCS_BUCKET")
+            .env_remove("SCCACHE_S3_BUCKET")
+            .env_remove("SCCACHE_AZURE_BLOB_CONTAINER")
+            .env_remove("CCACHE_DIR")
+            .env_remove("CCACHE_CONFIGPATH")
+            .env_remove("CCACHE_REMOTE_STORAGE")
+            .env_remove("CCACHE_SECONDARY_STORAGE")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(overview["schema"], "aros-cache-status-v1");
+    assert_eq!(overview["operation"], "status");
+    assert_eq!(overview["observation"], "passive");
+    assert_eq!(overview["side_effects"]["creates_state"], false);
+    assert_eq!(overview["side_effects"]["mutates_state"], false);
+    assert_eq!(overview["side_effects"]["network"], false);
+    assert_eq!(overview["side_effects"]["backend_process"], false);
+    assert_eq!(overview["side_effects"]["locks"], false);
+    assert_eq!(overview["side_effects"]["hashes_payloads"], false);
+    assert_eq!(overview["families"][0]["family"], "compiler");
+    assert_eq!(overview["families"][1]["family"], "archives");
+    assert_eq!(overview["families"][1]["root"]["state"], "missing");
+    assert!(!state.exists(), "cache status must not create state");
+    assert!(
+        !marker.exists(),
+        "cache status must not invoke an observed compiler-cache executable"
+    );
+
+    let compiler = output_json(
+        &command(&outside, &state)
+            .args([
+                "cache",
+                "compiler",
+                "status",
+                "--backend",
+                "sccache",
+                "--format",
+                "json",
+            ])
+            .env("PATH", &tools)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(compiler["schema"], "aros-cache-compiler-status-v1");
+    assert_eq!(compiler["operation"], "compiler.status");
+    assert_eq!(compiler["observation"], "passive");
+    assert_eq!(compiler["requested_backend"], "sccache");
+    assert_eq!(compiler["selected_backend"], "sccache");
+    assert_eq!(compiler["selection_basis"], "executable_availability_only");
+    assert_eq!(compiler["effective_build_selection"], "not_observed");
+    assert_eq!(compiler["root_binding"], "status_only_not_applied");
+    assert_eq!(compiler["root"]["origin"], "environment");
+    assert_eq!(compiler["root"]["coverage"], "root_metadata");
+    assert!(
+        !marker.exists(),
+        "compiler status must discover but never execute the backend"
+    );
+
+    let explicit_root = temporary.path().join("compiler-status-root");
+    let explicit = output_json(
+        &command(&outside, &state)
+            .args([
+                "cache",
+                "compiler",
+                "status",
+                "--backend",
+                "ccache",
+                "--dir",
+                explicit_root.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .env("PATH", &tools)
+            .output()
+            .unwrap(),
+    );
+    assert!(explicit["selected_backend"].is_null());
+    assert_eq!(
+        explicit["root"]["path"],
+        explicit_root.display().to_string()
+    );
+    assert_eq!(explicit["root"]["origin"], "explicit");
+    assert_eq!(explicit["root"]["state"], "missing");
+    assert!(!explicit_root.exists(), "status must not create --dir");
+
+    let relative = command(&outside, &state)
+        .args([
+            "--diagnostic-format",
+            "json",
+            "cache",
+            "compiler",
+            "status",
+            "--dir",
+            "relative",
+        ])
+        .env("PATH", &tools)
+        .output()
+        .unwrap();
+    assert!(!relative.status.success());
+    let diagnostic: Value = serde_json::from_slice(&relative.stderr).unwrap();
+    assert_eq!(diagnostic["diagnostics"][0]["code"], "AR0201");
+    assert!(diagnostic["diagnostics"][0]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("--dir must be an absolute path")));
+}

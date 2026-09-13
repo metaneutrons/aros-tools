@@ -80,7 +80,8 @@ impl Commands {
                 SourceCommand::Init { .. } => RepositoryRequirement::Global,
                 SourceCommand::Sync { .. } => RepositoryRequirement::Required,
             },
-            Self::Ccache { .. }
+            Self::Cache { .. }
+            | Self::Ccache { .. }
             | Self::Install { .. }
             | Self::Completions { .. }
             | Self::Toolchain {

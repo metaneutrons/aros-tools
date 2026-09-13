@@ -4,9 +4,10 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    artifact, board, boot, build, golden, host_compiler, observability, repo, source, toolchain,
-    BoardCommand, BoardProfileSelection, BuildToolsCommand, Commands, GoldenAction,
-    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
+    artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
+    toolchain, BoardCommand, BoardProfileSelection, BuildToolsCommand, CacheCommand,
+    CacheCompilerBackend, CacheCompilerCommand, Commands, GoldenAction, HostCompilerCommands,
+    SdCommand, SourceCommand, ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -132,10 +133,33 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             evidence,
             memory,
         ),
-        Commands::Ccache { clear } => compiler_cache(clear),
+        Commands::Cache { command } => cache_command(command),
+        Commands::Ccache => compiler_cache(),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Completions { shell } => crate::completion_model::write(shell),
         Commands::Info { format } => info(repo_root, format),
+    }
+}
+
+fn cache_command(command: CacheCommand) -> Result<()> {
+    match command {
+        CacheCommand::Status { format } => cache::status(format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Status {
+                    backend,
+                    dir,
+                    format,
+                },
+        } => cache::compiler_status(cache_backend(backend), dir, format),
+    }
+}
+
+const fn cache_backend(backend: CacheCompilerBackend) -> aros_cache::CompilerBackendChoice {
+    match backend {
+        CacheCompilerBackend::Auto => aros_cache::CompilerBackendChoice::Auto,
+        CacheCompilerBackend::Sccache => aros_cache::CompilerBackendChoice::Sccache,
+        CacheCompilerBackend::Ccache => aros_cache::CompilerBackendChoice::Ccache,
     }
 }
 
@@ -533,21 +557,9 @@ fn test(
     }
 }
 
-fn compiler_cache(clear: bool) -> Result<()> {
+fn compiler_cache() -> Result<()> {
     let cache = build::detected_compiler_cache()
         .ok_or_else(|| miette::miette!("neither sccache nor ccache is available on PATH"))?;
-    if clear {
-        let clear_argument = cache.clear_argument().ok_or_else(|| {
-            miette::miette!(
-                "sccache cache clearing is unavailable: sccache -z resets statistics but does not remove cached entries; AROS left the selected sccache storage unchanged"
-            )
-        })?;
-        observability::run_command(
-            Command::new(cache.program()).arg(clear_argument),
-            "compiler cache clear",
-        )?;
-        aros_common::outputln!("{CHECK} Compiler cache cleared.");
-    }
     observability::run_command(
         Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
         "compiler cache statistics query",

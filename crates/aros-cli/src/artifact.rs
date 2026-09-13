@@ -36,25 +36,12 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_hours(1);
 /// platform home directory is available. State is never silently rooted in
 /// the caller's current working directory.
 pub fn aros_home() -> Result<PathBuf> {
-    let path = if let Some(configured) = std::env::var_os("AROS_HOME") {
-        PathBuf::from(configured)
-    } else {
-        PathBuf::from(std::env::var_os("HOME").ok_or_else(|| {
-            miette::miette!(
-                "cannot resolve AROS state: HOME is unset; set AROS_HOME to an absolute path"
-            )
-        })?)
-        .join(".aros")
-    };
-    require_absolute_state_path("AROS_HOME", path)
+    aros_cache::aros_home().map_err(|error| miette::miette!(error))
 }
 
 /// Return the content-addressed archive-cache root.
 pub fn archive_cache_root() -> Result<PathBuf> {
-    match std::env::var_os("AROS_CACHE_DIR") {
-        Some(path) => require_absolute_state_path("AROS_CACHE_DIR", PathBuf::from(path)),
-        None => Ok(aros_home()?.join("cache")),
-    }
+    aros_cache::archive_cache_root().map_err(|error| miette::miette!(error))
 }
 
 pub fn require_absolute_state_path(label: &str, path: PathBuf) -> Result<PathBuf> {

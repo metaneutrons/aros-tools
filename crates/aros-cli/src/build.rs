@@ -383,49 +383,18 @@ pub fn validate_cmake_definition(definition: &CmakeDefinition) -> Result<()> {
     Ok(())
 }
 
-/// Supported compiler-cache implementation with its command-line contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompilerCache {
-    /// Mozilla's distributed/local compiler cache, preferred when available.
-    Sccache,
-    /// Traditional local compiler cache fallback.
-    Ccache,
-}
-
-impl CompilerCache {
-    /// Executable name used both as compiler launcher and management command.
-    pub const fn program(self) -> &'static str {
-        match self {
-            Self::Sccache => "sccache",
-            Self::Ccache => "ccache",
-        }
-    }
-
-    /// Verified legacy cache-entry clearing argument, when one exists.
-    ///
-    /// `sccache -z` only resets statistics. Returning `None` prevents the
-    /// frontend from representing that operation as deletion.
-    pub const fn clear_argument(self) -> Option<&'static str> {
-        match self {
-            Self::Sccache => None,
-            Self::Ccache => Some("-C"),
-        }
-    }
-
-    /// Argument which prints cache statistics.
-    pub const fn stats_argument() -> &'static str {
-        "-s"
-    }
-}
+/// Backwards-compatible local name for the shared compiler-cache backend
+/// contract. New callers should resolve it through `aros-cache` so frontend
+/// and future CMake integration share one selection vocabulary.
+pub use aros_cache::CompilerBackend as CompilerCache;
 
 /// Select the preferred available compiler cache once for all CLI commands.
 pub fn detected_compiler_cache() -> Option<CompilerCache> {
-    if which::which("sccache").is_ok() {
-        Some(CompilerCache::Sccache)
-    } else if which::which("ccache").is_ok() {
-        Some(CompilerCache::Ccache)
-    } else {
-        None
+    match aros_cache::resolve_compiler_cache(aros_cache::CompilerBackendChoice::Auto)
+        .expect("automatic compiler-cache discovery does not fail")
+    {
+        aros_cache::CompilerCacheSelection::Off => None,
+        aros_cache::CompilerCacheSelection::Backend { backend, .. } => Some(backend),
     }
 }
 
@@ -433,7 +402,7 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 mod tests {
     use super::{
         build_dir, run, validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions,
-        CmakeDefinition, CompilerCache,
+        CmakeDefinition,
     };
 
     #[test]
@@ -459,12 +428,6 @@ mod tests {
             value: "/tmp/board.dtb".to_string(),
         };
         assert!(validate_cmake_definition(&definition).is_err());
-    }
-
-    #[test]
-    fn only_ccache_has_a_verified_legacy_clear_operation() {
-        assert_eq!(CompilerCache::Sccache.clear_argument(), None);
-        assert_eq!(CompilerCache::Ccache.clear_argument(), Some("-C"));
     }
 
     #[tokio::test]

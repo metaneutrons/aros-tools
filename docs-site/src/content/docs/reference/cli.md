@@ -50,7 +50,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros build` | Configure the embedded CMake engine and build one target preset |
 | `aros clean` | Preview or remove exactly one selected preset, or explicitly the checkout's complete `build/` directory |
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
-| `aros ccache` | Inspect or explicitly clear the selected compiler cache |
+| `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
+| `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
 | `aros completions` | Generate a deterministic Bash, Zsh, or Fish completion script from the visible command model |
@@ -319,7 +321,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `build` | Required | Configure the embedded CMake engine and build with Ninja |
 | `clean` | Required | Remove `build/<preset>` with `--preset`; otherwise remove all of `build/` |
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
-| `ccache` | No | Show statistics for the discovered sccache/ccache; `--clear` only clears with ccache and otherwise fails without changing sccache |
+| `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
+| `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
 
@@ -331,7 +335,31 @@ does not inventory every local, remote, or shared storage location.
 :::note[CLI change]
 `aros ccache --stats` was removed because it never selected a different
 operation. Use bare `aros ccache` to query statistics.
+
+`aros ccache --clear` is also removed. The command had no safe shared
+ownership or preview/apply contract and could not provide an equivalent
+sccache operation. Use `aros cache compiler status` to inspect scope while the
+managed cache lifecycle is introduced; no public clear command exists yet.
 :::
+
+## Cache inspection
+
+`aros cache status` is checkout-independent and passive. It reports the
+configured archive-cache root, the status of that root itself, and the explicit
+boundaries of source, Cargo, and GenMF cache families that do not yet have an
+implicit managed root. It does not enumerate content, verify bytes, follow a
+root symlink, create state, acquire a lock, access the network, or start a
+backend process. Use `--format human|json` for normal stdout.
+
+`aros cache compiler status` reports both supported backends and accepts
+`--backend auto|sccache|ccache`; `auto` selects sccache first when its
+executable is available, then ccache. The report never silently substitutes a
+backend chosen explicitly. It records recognized environment variable names
+but redacts their values and does not infer local, remote, or mixed storage
+from an unqueried backend configuration. `--dir DIR` passively observes one
+explicit absolute candidate root; it never configures the backend to use that
+directory. See [cache inspection](/aros-tools/workflows/cache/)
+for the complete safety boundary and current capability limits.
 
 `build` options:
 
@@ -361,9 +389,8 @@ recorded transpiler invocations under `build/`.
 :::caution[Build cleanup removes evidence too]
 `clean` and `build --clean` delete the selected build directory without an
 interactive confirmation. Preserve logs, SDK outputs, packages and boot evidence
-you need first. `ccache --clear` affects the selected ccache storage, not just
-one preset. If sccache is selected, AROS rejects `--clear` before launching it:
-`sccache -z` resets counters but does not remove cached entries.
+you need first. Compiler-cache deletion is intentionally not public yet: its
+safe lifecycle needs an owned-root, lease and preview/apply contract.
 :::
 
 ## Boards

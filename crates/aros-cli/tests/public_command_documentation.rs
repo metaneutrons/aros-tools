@@ -48,6 +48,10 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
         "public_cli_semantics.rs::public_board_init_semantic_cases_cover_models_defaults_and_environment",
     ),
     (
+        "workflows/cache.md",
+        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend",
+    ),
+    (
         "workflows/cross-development.md",
         "public_cli_semantics.rs::relative_engine_override_stays_at_the_invocation_directory",
     ),

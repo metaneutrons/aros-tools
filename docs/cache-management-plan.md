@@ -123,6 +123,54 @@ never successful no-ops.
   dependency closure, plus explicit cache root. GenMF operations require an
   explicit expansion root; verify/refresh additionally select the source tree.
 
+### M1 status contract
+
+The first shipped CACHE-M1 surface is intentionally limited to passive status:
+
+```text
+aros cache status [--format human|json]
+aros cache compiler status [--backend auto|sccache|ccache] [--dir DIR] [--format human|json]
+```
+
+`aros cache` with no subcommand remains help-only. The command does not expose
+future `fetch`, `verify`, `remove`, `prune`, `keep`, `release`, `clear`,
+`reset-stats`, or `stats` operations before their owning acceptance criteria
+are met. There are no compatibility aliases for those future names.
+
+`cache status` returns `aros-cache-status-v1`. It contains exactly one
+non-recursive, no-follow observation of the selected archive root and passive
+compiler backend observations. Archive-root precedence is `AROS_CACHE_DIR`,
+then `AROS_HOME/cache`, then `$HOME/.aros/cache`; configured values must be
+absolute. Sources, Cargo and GenMF have no safe implicit root at this stage, so
+the result says `requires_explicit_selection` instead of guessing. A missing,
+symlinked, non-directory or inaccessible root is reported as such. Status does
+not create a path, reserve a lock, enumerate content, hash a file, contact a
+network, invoke a backend or parse a backend configuration file.
+
+`cache compiler status` returns `aros-cache-compiler-status-v1`. It exposes
+the observed executable path, availability and names of recognized backend
+environment variables only; their values are not serialized. `auto` selects
+available `sccache` first, then `ccache`; an explicit missing backend leaves
+`selected_backend` null rather than falling back. Effective local, remote and
+mixed storage remains `configuration_uninspected` until an explicit later
+query can prove it. The status command has no backend-version requirement
+because it never invokes a backend. Any future stats/reset/clear contract must
+declare its minimum backend versions and query side effects before becoming
+public. `--dir DIR` is absolute and observes one explicit root with an
+`explicit` provenance; without it, an available selected backend exposes only
+the AROS-owned candidate below `AROS_HOME/cache/compiler/v1/<backend>`. Both
+forms have `root_binding: status_only_not_applied`: status never configures or
+claims that a backend uses the root. Both status schemas include their stable
+operation name, all false side-effect flags, current capabilities,
+selection-basis and effective-build-selection boundary so automation need not
+infer safety from prose.
+
+The normal result schema is independent of the existing diagnostics envelope.
+An invalid relative state override is an ordinary frontend configuration error;
+an unavailable backend is a successful status observation. Both human and JSON
+rendering preserve these distinctions. The canonical Astro reference and
+parser-backed example gate are part of this contract.
+
 ### Everyday examples
 
 The examples describe the target interface; exact parser/schema fixtures are
@@ -556,3 +604,9 @@ implementation or qualification is claimed by this planning record.
 2026-09-13: Rebased onto the accepted CLI-M1 through CLI-M5 contracts. CACHE-M1
 uses their existing reference and semantic-example gates; its early F05/F06
 repair remains the sole cache dependency of CLI-M6.
+
+2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
+status schemas, absolute archive-root precedence, no-follow single-root
+observation, explicit compiler projection and no backend invocation. Future
+cache verbs remain proposal-only until their individual acceptance criteria are
+implemented and qualified.

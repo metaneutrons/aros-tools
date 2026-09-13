@@ -13,6 +13,7 @@ from pathlib import Path
 ENV_PATTERNS = (
     re.compile(r'\benv\s*=\s*"([A-Z][A-Z0-9_]*)"'),
     re.compile(r'\bstd::env::var(?:_os)?\(\s*"([A-Z][A-Z0-9_]*)"'),
+    re.compile(r'\benv::var(?:_os)?\(\s*"([A-Z][A-Z0-9_]*)"'),
     re.compile(r'\benvironment\(\s*"([A-Z][A-Z0-9_]*)"'),
     re.compile(r'\btest_point_matches\(\s*"([A-Z][A-Z0-9_]*)"'),
     re.compile(
