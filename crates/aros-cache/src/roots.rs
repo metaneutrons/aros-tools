@@ -251,11 +251,8 @@ pub fn archive_cache_root() -> Result<PathBuf, RootResolutionError> {
 #[must_use]
 pub fn observe_root(root: CacheRoot) -> RootObservation {
     let (state, error_kind) = match fs::symlink_metadata(&root.path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => (RootState::Symlink, None),
-        Ok(metadata) if metadata.is_dir() => (RootState::Directory, None),
-        Ok(_) => (RootState::Other, None),
-        Err(error) if error.kind() == ErrorKind::NotFound => (RootState::Missing, None),
-        Err(error) => (RootState::Inaccessible, Some(io_error_kind(error.kind()))),
+        Ok(metadata) => classify_root_metadata(&metadata),
+        Err(error) => classify_root_error(&error),
     };
     RootObservation {
         root,
@@ -267,6 +264,24 @@ pub fn observe_root(root: CacheRoot) -> RootObservation {
         measured_bytes: None,
         findings: Vec::new(),
         error_kind,
+    }
+}
+
+fn classify_root_metadata(metadata: &fs::Metadata) -> (RootState, Option<&'static str>) {
+    if metadata.file_type().is_symlink() {
+        (RootState::Symlink, None)
+    } else if metadata.is_dir() {
+        (RootState::Directory, None)
+    } else {
+        (RootState::Other, None)
+    }
+}
+
+fn classify_root_error(error: &std::io::Error) -> (RootState, Option<&'static str>) {
+    if error.kind() == ErrorKind::NotFound {
+        (RootState::Missing, None)
+    } else {
+        (RootState::Inaccessible, Some(io_error_kind(error.kind())))
     }
 }
 
@@ -300,10 +315,12 @@ const fn io_error_kind(kind: ErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        observe_root, resolve_archive_cache_root, resolve_aros_home, resolve_explicit_root,
-        CacheEnvironment, RootOrigin, RootResolutionError, RootState,
+        classify_root_error, observe_root, resolve_archive_cache_root, resolve_aros_home,
+        resolve_explicit_root, CacheEnvironment, RootOrigin, RootResolutionError, RootState,
     };
     use std::ffi::OsString;
+    use std::fs;
+    use std::io::{Error, ErrorKind};
 
     #[test]
     fn defaults_stay_below_an_absolute_home_without_creating_state() {
@@ -332,6 +349,95 @@ mod tests {
         assert_eq!(root.path, std::path::Path::new("/work/archives"));
         assert_eq!(root.origin, RootOrigin::Environment);
         assert_eq!(root.variable, Some("AROS_CACHE_DIR"));
+    }
+
+    #[test]
+    fn archive_root_precedence_is_environment_then_aros_home_then_default_home() {
+        let environment = CacheEnvironment {
+            aros_home: Some(OsString::from("/work/aros-state")),
+            archive_cache_dir: Some(OsString::from("/work/archive-cache")),
+            home: Some(OsString::from("/users/fabian")),
+        };
+        let explicit_archive = resolve_archive_cache_root(&environment).unwrap();
+        assert_eq!(
+            explicit_archive.path,
+            std::path::Path::new("/work/archive-cache")
+        );
+        assert_eq!(explicit_archive.origin, RootOrigin::Environment);
+        assert_eq!(explicit_archive.variable, Some("AROS_CACHE_DIR"));
+
+        let environment = CacheEnvironment {
+            aros_home: Some(OsString::from("/work/aros-state")),
+            home: Some(OsString::from("/users/fabian")),
+            ..CacheEnvironment::default()
+        };
+        let aros_home_archive = resolve_archive_cache_root(&environment).unwrap();
+        assert_eq!(
+            aros_home_archive.path,
+            std::path::Path::new("/work/aros-state/cache")
+        );
+        assert_eq!(aros_home_archive.origin, RootOrigin::Environment);
+        assert_eq!(aros_home_archive.variable, Some("AROS_HOME"));
+
+        let environment = CacheEnvironment {
+            home: Some(OsString::from("/users/fabian")),
+            ..CacheEnvironment::default()
+        };
+        let default_archive = resolve_archive_cache_root(&environment).unwrap();
+        assert_eq!(
+            default_archive.path,
+            std::path::Path::new("/users/fabian/.aros/cache")
+        );
+        assert_eq!(default_archive.origin, RootOrigin::Default);
+        assert_eq!(default_archive.variable, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_observation_never_follows_symlinks_or_inspects_children() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("directory");
+        let file = temporary.path().join("file");
+        let link = temporary.path().join("link");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&file, b"not a cache root").unwrap();
+        symlink(&directory, &link).unwrap();
+
+        for (path, expected) in [
+            (directory, RootState::Directory),
+            (file, RootState::Other),
+            (link, RootState::Symlink),
+        ] {
+            let observation = observe_root(resolve_explicit_root(path).unwrap());
+            assert_eq!(observation.state, expected);
+            assert_eq!(observation.coverage, "root_metadata");
+            assert_eq!(observation.inspected_entries, 0);
+            assert_eq!(observation.max_entries, None);
+            assert_eq!(observation.metadata_bytes, None);
+            assert_eq!(observation.measured_bytes, None);
+            assert!(observation.findings.is_empty());
+        }
+    }
+
+    #[test]
+    fn inaccessible_root_errors_are_not_misreported_as_missing() {
+        for (kind, expected_kind) in [
+            (ErrorKind::PermissionDenied, "permission_denied"),
+            (ErrorKind::NotADirectory, "not_a_directory"),
+            (ErrorKind::TooManyLinks, "too_many_links"),
+            (ErrorKind::Interrupted, "io_error"),
+        ] {
+            assert_eq!(
+                classify_root_error(&Error::from(kind)),
+                (RootState::Inaccessible, Some(expected_kind))
+            );
+        }
+        assert_eq!(
+            classify_root_error(&Error::from(ErrorKind::NotFound)),
+            (RootState::Missing, None)
+        );
     }
 
     #[test]
