@@ -89,7 +89,7 @@ It contains host paths, IP addresses, USB identities, serial-device names and
 debugger selection. Copy and adapt `boards.example.toml`; do not commit the
 result.
 
-`aros board init --board <local-name> --model <model>` prints an intentionally
+`aros board init --profile <local-name> --model <model>` prints an intentionally
 incomplete template without writing anything. The local name does not choose
 hardware: `--model` is required. Pi 3, Pi 4 and Pi 5 default to
 `native-tftp`; Milk-V Titan defaults to `uefi-esp`. Select the Pi-4-only USB
@@ -116,7 +116,7 @@ Mac TFTP server -- RJ45 --> Pi EEPROM firmware --> AROS boot bundle
 The published bundle contains the exact model-selected Pi DTB, the raw AROS
 bootstrap image, the AROS BSP package and a manifest. CMake creates it under
 `build/<preset>/boot/<model>` by way of `rpi-artifacts`; `aros board
-deploy --board <name> --apply` atomically publishes a completed bundle into
+deploy --profile <name> --apply` atomically publishes a completed bundle into
 the configured `<tftp_root>/<tftp_prefix>` directory. `aros board serve` exposes
 only that verified, AROS-managed deployment directory—never its parent TFTP
 root and never the build directory directly.
@@ -187,7 +187,7 @@ platforms:
 | macOS | USB device descriptors through IOKit/IORegistry, correlated with the registered USB network interface | BSD interface such as `en7` |
 | Linux | `/sys/class/net/<interface>/device` and its USB-device ancestors, with CDC-ECM class/driver validation | interface such as `enx…` |
 
-`aros board serve --board <name>` repeats discovery at service start. For
+`aros board serve --profile <name>` repeats discovery at service start. For
 `uboot-usb-ecm`, it accepts exactly one CDC-ECM match for USB VID, PID and
 serial, resolves that candidate's current interface, and verifies that
 `usb_ecm.host_address` is assigned to it. It then binds DHCP and TFTP only to
@@ -216,7 +216,7 @@ must supply `network.expected_target_mac`; `serve` verifies that
 `network.server_address` belongs to that named interface and applies the same
 one-MAC/one-lease restriction. The command does not configure either host
 interface; configure the private address first, then use
-`aros board serve --board <name> --dry-run` to prove the full selection and
+`aros board serve --profile <name> --dry-run` to prove the full selection and
 deployment plan without opening DHCP or TFTP sockets.
 
 `serve` is intentionally separate from `deploy`: deployment publishes a
@@ -227,15 +227,15 @@ finished bundle, while service startup is an explicit foreground lab action.
 Image creation, disk discovery and writing are deliberately separate:
 
 ```text
-aros board sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir>
-aros board sd image --board <name> --boot-bundle <dir> --output <new-artifact-dir> --apply
+aros board sd image --profile <name> --boot-bundle <dir> --output <new-artifact-dir>
+aros board sd image --profile <name> --boot-bundle <dir> --output <new-artifact-dir> --apply
 aros board sd unmount
 aros board sd unmount --device <scan-id>
 aros board sd unmount --device <scan-id> --apply
 aros board sd scan
 aros board sd scan --artifact <artifact-dir>
-aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id>
-aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
+aros board sd write --profile <name> --artifact <artifact-dir> --device <scan-id>
+aros board sd write --profile <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
 ```
 
 Without `--apply`, `sd image` is a read-only validation run: it checks the
@@ -359,6 +359,6 @@ aros board sd write   preview by default; token-gated physical write on Linux/ma
 aros board console    opens an external physical UART terminal
 ```
 
-Network-capable Pi transports expose the same `aros board deploy --board
+Network-capable Pi transports expose the same `aros board deploy --profile
 <name>` contract. Removable-media-only backends fail closed for deployment and
 service commands and use the common `aros board sd` verification pipeline.

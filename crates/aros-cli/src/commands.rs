@@ -5,7 +5,7 @@
 
 use super::{
     artifact, board, boot, build, golden, host_compiler, observability, repo, source, style,
-    toolchain, BoardCommand, BoardSelection, BuildToolsCommand, Commands, GoldenAction,
+    toolchain, BoardCommand, BoardProfileSelection, BuildToolsCommand, Commands, GoldenAction,
     HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands, CHECK, SPARKLES,
 };
 use miette::Result;
@@ -236,14 +236,14 @@ async fn toolchain_command(repo_root: &Path, command: ToolchainCommands) -> Resu
 async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Result<()> {
     match command {
         BoardCommand::Init {
-            board,
+            profile,
             model,
             transport,
             config,
             apply,
         } => crate::board::initialize_template(
             config.as_deref(),
-            &board,
+            &profile,
             model.into(),
             transport.map(Into::into),
             apply,
@@ -775,8 +775,8 @@ fn path_entry_exists(path: &Path) -> Result<bool> {
     }
 }
 
-fn load_board(selection: &BoardSelection) -> Result<board::config::Board> {
-    board::config::load_board(selection.config.as_deref(), &selection.board)
+fn load_board(selection: &BoardProfileSelection) -> Result<board::config::Board> {
+    board::config::load_board(selection.config.as_deref(), &selection.profile)
 }
 
 #[cfg(test)]

@@ -123,7 +123,7 @@ their public verification complete.
 
 ## Board label does not select the hardware
 
-`board init --board NAME --model MODEL` uses NAME only as a registry label.
+`board init --profile NAME --model MODEL` uses NAME only as a registry label.
 Select the actual model explicitly; the template selects the matching backend
 and default transport. Use `--transport uboot-usb-ecm` only for Pi 4. Pi 3
 and Pi 5 reject USB-ECM, and Milk-V Titan rejects Pi TFTP transports. See the

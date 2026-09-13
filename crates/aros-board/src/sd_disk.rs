@@ -554,7 +554,7 @@ pub fn validate_artifact_against_expectation(
 }
 
 /// Re-read and bind a verified image artifact to a selected local board
-/// profile.  This is the check a `--board` CLI path should run before it shows
+/// profile. This is the check a `--profile` CLI path should run before it shows
 /// a selectable SD disk.
 ///
 /// # Errors
@@ -636,7 +636,7 @@ pub fn prepare_write_for_board(
 /// Reverify, bind and write an image for exactly one selected board profile.
 ///
 /// This is the safe physical-write entry point for a CLI that accepts
-/// `--board`: the final board/manifest comparison occurs after the artifact is
+/// `--profile`: the final board/manifest comparison occurs after the artifact is
 /// re-read and before the disk scanner or raw-device opener are called.
 ///
 /// # Errors

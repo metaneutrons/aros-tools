@@ -384,7 +384,7 @@ fn published_deployment_dir(board: &Board) -> Result<PathBuf> {
     let deployment = board.deployment_dir()?;
     let metadata = std::fs::symlink_metadata(&deployment).map_err(|error| {
         miette::miette!(
-            "Board '{}' has no published deployment at '{}': {error}. Run `aros board deploy --board {} --apply` first.",
+            "Board '{}' has no published deployment at '{}': {error}. Run `aros board deploy --profile {} --apply` first.",
             board.name,
             deployment.display(),
             board.name

@@ -26,7 +26,7 @@ pub fn initialize_template(
     if !apply {
         aros_common::outputln!("\n{}", template.contents());
         aros_common::outputln!(
-            "Dry run: no file was created. Review the values, then rerun with `aros board init --board {board_name} --model {} --transport {} --apply`.",
+            "Dry run: no file was created. Review the values, then rerun with `aros board init --profile {board_name} --model {} --transport {} --apply`.",
             template.model(),
             template.transport(),
         );

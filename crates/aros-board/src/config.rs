@@ -971,7 +971,7 @@ fn native_tftp_template(board_name: &str, template: NativeTftpTemplate) -> Strin
 # do not commit it to the AROS source checkout.
 #
 # This is a native-RJ45 TFTP profile. Replace every REPLACE_ME value, configure
-# the selected Ethernet interface, then use `aros board serve --board {board_name}`.
+# the selected Ethernet interface, then use `aros board serve --profile {board_name}`.
 
 format_version = 2
 
