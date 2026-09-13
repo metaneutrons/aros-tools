@@ -15,8 +15,8 @@ selected AROS checkout's lock file.
 
 ## Supported native archives
 
-The four archive targets are listed under
-[platform support](/aros-tools/reference/platform-support/#native-host-matrix).
+The archive targets are listed under
+[platform support](/aros-tools/reference/platform-support/#native-release-target-contracts).
 Each archive contains eight public programs: `aros`, `aros-ahi-runner`,
 `aros-collect`, `aros-fetch`, `aros-genmodule`, `aros-romtool`,
 `aros-transpiler` and `aros-verify`. It does not install the internal

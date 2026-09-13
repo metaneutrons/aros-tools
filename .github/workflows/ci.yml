@@ -7,7 +7,7 @@ on:
     branches: [main]
   schedule:
     # A weekly native sweep catches runner/toolchain drift without charging
-    # every documentation-only pull request for four platform runners.
+    # every documentation-only pull request for three active platform runners.
     - cron: '41 3 * * 1'
   workflow_dispatch:
     inputs:

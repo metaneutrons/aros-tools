@@ -3,9 +3,9 @@ title: Platform support
 description: Distinguish native host support, implemented target profiles, available artifacts, and real boot evidence.
 ---
 
-## Native host matrix
+## Native release-target contracts
 
-| Archive target | Qualification host | Binary compatibility contract |
+| Archive target | Native qualification host when enabled | Binary compatibility contract |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | Native Linux x86-64 | glibc 2.36 or newer |
 | `aarch64-unknown-linux-gnu` | Native Linux ARM64 | glibc 2.36 or newer |
@@ -13,7 +13,11 @@ description: Distinguish native host support, implemented target profiles, avail
 | `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 13 or newer |
 
 These are native tools archive contracts, not a claim that stable archives are
-already published. Check [release status](/aros-tools/reference/release-status/).
+already published or that every lane currently runs in ordinary CI. The active
+workspace matrix is Linux x86-64, Linux AArch64 and macOS Apple silicon. Intel
+macOS qualification is temporarily suspended; it must be requalified before
+an Intel archive can be claimed. Check
+[release status](/aros-tools/reference/release-status/) for published evidence.
 
 The host mapping is implemented in
 [`host_compiler.rs`](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/host_compiler.rs).

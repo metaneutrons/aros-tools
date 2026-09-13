@@ -71,14 +71,17 @@ their own temporary work where needed. CMake-engine fixtures require clang,
 CMake and Ninja; platform-specific omissions are reported explicitly.
 
 Every PR has a stable Linux x86-64 check. A narrow documentation-only set
-(`README.md`, `CONTRIBUTING.md`, `docs/**` and `docs-site/**`) uses that lane's
-portable test; all other changes are fail-closed to the four real native hosts.
-The full Linux CMake sweep runs after integration into `main`. An explicit
-Workspace CI dispatch defaults to four hosts, and a weekly four-host sweep
-catches platform drift. Engine/source-boundary changes require a full check of
-their final candidate before merge; cross-cutting milestone acceptance and
-release candidates require Linux and Darwin/arm64 evidence. The real GRUB
-fixture runs only on Darwin/arm64, so Linux success alone cannot prove it.
+(`README.md`, `CONTRIBUTING.md`, `HANDOFF.md`, `docs/**` and `docs-site/**`)
+uses that lane's portable test; all other changes are fail-closed to the three
+active native hosts: Linux x86-64, Linux AArch64 and macOS AArch64. Intel macOS
+qualification is temporarily suspended; a three-host result never proves the
+Intel archive target. The full Linux CMake sweep runs after integration into
+`main`. An explicit Workspace CI dispatch defaults to those three hosts, and a
+weekly three-host sweep catches platform drift. Engine/source-boundary changes
+require a full check of their final candidate before merge; cross-cutting
+milestone acceptance and release candidates require Linux and Darwin/arm64
+evidence. The real GRUB fixture runs only on Darwin/arm64, so Linux success
+alone cannot prove it.
 See the authoritative [CI policy](/aros-tools/reference/ci-policy/) and
 [integration checkpoint policy](https://github.com/metaneutrons/aros-tools/blob/main/CONTRIBUTING.md#test-stages-and-integration-checkpoints).
 
