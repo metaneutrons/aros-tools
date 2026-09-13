@@ -54,7 +54,7 @@ Target-specific AROS dependencies are additional to these host tools.
 | Task | Additional tools |
 | --- | --- |
 | PC boot check with `aros test` | `qemu-system-x86_64` (Homebrew `qemu`; Debian `qemu-system-x86`) |
-| Compiler caching | `sccache` or `ccache`, discovered on `PATH` |
+| Compiler caching | `sccache` or `ccache` on `PATH`, plus an explicit `aros cache compiler prepare` local namespace |
 | Serial board console | `picocom`, `screen` or `minicom`; inspect `aros board console --help` |
 | Verify a native release | `jq`, GitHub CLI with `gh attestation verify`, cosign, tar, SHA-256 utility |
 | Install from signed APT | curl, GnuPG (`gpg` and `gpgconf`), dpkg |

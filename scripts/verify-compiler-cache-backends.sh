@@ -2,10 +2,12 @@
 # Verify the distinct statistics-reset and entry-lifecycle semantics of the
 # supported compiler-cache backends without reading or mutating user state.
 #
-# This is a focused M1 contract probe, not a public cache-management command.
-# Every config path, cache root, daemon socket, home directory and compilation
-# output lives below one mktemp directory. The trap stops only the server bound
-# to that private socket before deleting the validated temporary root.
+# This is a focused CACHE-M6 backend-semantics probe. It qualifies the exact
+# upstream ccache/sccache behaviour that the Rust-managed lifecycle wraps; it
+# is not a command against user cache state. Every config path, cache root,
+# daemon socket, home directory and compilation output lives below one mktemp
+# directory. The trap stops only the server bound to that private socket before
+# deleting the validated temporary root.
 
 set -eu
 
@@ -43,7 +45,7 @@ if sccache < (0, 17, 0):
     raise SystemExit(f"sccache {sccache!r} is older than the qualified 0.17.0 floor")
 PY
 
-temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/aros-cache-backends.XXXXXX")
+temporary_root=$(mktemp -d /tmp/aros-cache-backends.XXXXXX)
 private_sccache_env() {
     env -i \
         PATH="$PATH" \
@@ -55,13 +57,19 @@ private_sccache_env() {
 }
 
 cleanup() {
+    exit_status=$?
+    trap - EXIT HUP INT TERM
     private_sccache_env "$sccache_bin" --stop-server >/dev/null 2>&1 || true
     case "$temporary_root" in
-        "${TMPDIR:-/tmp}"/aros-cache-backends.*) command rm -rf -- "$temporary_root" ;;
+        /tmp/aros-cache-backends.*) command rm -rf -- "$temporary_root" ;;
         *) echo "refusing to remove unexpected temporary root: $temporary_root" >&2; exit 70 ;;
     esac
+    exit "$exit_status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$temporary_root/home" "$temporary_root/ccache" "$temporary_root/sccache"
 printf '%s\n' 'int cache_backend_fixture(void) { return 0; }' > "$temporary_root/fixture.c"

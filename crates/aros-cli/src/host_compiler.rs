@@ -461,7 +461,7 @@ pub async fn install(
     let parent = destination
         .parent()
         .ok_or_else(|| miette::miette!("host-compiler destination has no parent"))?;
-    let staging = extract_to_staging(&archive, parent, 1)?;
+    let staging = extract_to_staging(archive.path(), parent, 1)?;
     write_install_receipt(staging.path(), &expected_sha256, &selection.version)?;
     commit_staging(&staging, &destination)?;
     verify_host_compiler_install(&destination, &expected_sha256, &selection.version)?;

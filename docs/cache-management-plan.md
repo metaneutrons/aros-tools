@@ -1,7 +1,8 @@
 # Cache management: architecture and delivery plan
 
-Decision state: proposed; implementation and acceptance require review of this
-plan. Planning baseline: 2026-09-13, aros-tools
+Decision state: active delivery; the shipped CACHE-M1 and CACHE-M6 interfaces
+remain subject to their milestone acceptance evidence. Planning baseline:
+2026-09-13, aros-tools
 `1aed0c970f9a4df2fb047a1b5603ecea1d1a6bed`.
 Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 `TCP` producer milestones.
@@ -9,9 +10,10 @@ Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 Epic: [Unified and safe cache management / #139](https://github.com/metaneutrons/aros-tools/issues/139).
 
 This document owns requirements and design decisions. Linked milestone issues
-own execution state and evidence. Proposed commands below are **not shipped
-interfaces**. This initiative includes missing cache functionality, not just
-renaming existing commands.
+own execution state and evidence. The capability table distinguishes shipped
+interfaces from planned ones; it must not be read as a promise that every
+listed command is public. This initiative includes missing cache
+functionality, not just renaming existing commands.
 
 ## Outcome and boundaries
 
@@ -91,7 +93,7 @@ No hidden aliases and no generic `aros cache clear --all`.
 | `sources` | Product/producer source archives and reusable patch payloads | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
 | `archives` | Downloaded host/cross-compiler packages, not installed toolchains | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
 | `cargo` | AROS-managed Cargo vendor inputs, not the user's global Cargo home | `status`, `list`, `fetch`, `verify`, `keep`, `release`, `remove`, `prune` |
-| `genmf` | Reusable GenMF reference expansions, not verification reports | `status`, `list`, `verify`, `refresh`, `remove`, `prune` |
+| `genmf` | Reusable GenMF reference expansions, not verification reports | `status`, `list`, `verify`, `refresh`, `keep`, `release`, `remove` |
 
 Expose only meaningful capabilities; do not add compiler `fetch` or pretend
 that a statistics reset verifies compiler outputs. `keep` creates a named,
@@ -353,12 +355,11 @@ fetching, not as an OS-level network sandbox.
   `AROS_HOME/cache/compiler/v1/<backend>` namespace, but no build assigns it
   until its backend/server lifecycle is proven. Existing backend configuration
   is observed as external/uninspected, never silently adopted or rewritten.
-  A build-level `--compiler-cache-dir PATH` is deliberately deferred to
-  CACHE-M6: it requires a fresh/recognized owned root, rejection of conflicting
-  external configuration and a dedicated sccache server identity derived from
-  that root. Exposing the flag earlier would make `DIR` look isolated while it
-  could still connect to an unrelated daemon. `AROS_CACHE_DIR` remains
-  archive-only.
+  CACHE-M6 begins that lifecycle with `cache compiler prepare`: it claims only
+  an empty private root, generates a local-only configuration and a dedicated
+  sccache Unix-domain socket path, and holds a shared build lease. The
+  build-level `--compiler-cache-dir PATH` accepts only that prepared root with
+  an explicit backend. `AROS_CACHE_DIR` remains archive-only.
 - `stats` is an explicit backend query and documents potential daemon startup.
   `reset-stats` resets counters only. `clear` removes entries only when that
   operation's exact storage scope is proven and supported.
@@ -739,6 +740,37 @@ implementation or qualification is claimed by this planning record.
 2026-09-13: Rebased onto the accepted CLI-M1 through CLI-M5 contracts. CACHE-M1
 uses their existing reference and semantic-example gates; its early F05/F06
 repair remains the sole cache dependency of CLI-M6.
+
+2026-09-13: GenMF now participates in the CACHE-M6 lifecycle substrate: a
+verified generation can be retained under a named reference, released, and
+removed only through an exact source-root-relative selection with a
+snapshot-bound preview/apply token. Materialization holds a shared lease from
+verification through template-shape consumption. This does not make a generic
+GenMF `prune` safe or public, and it does not satisfy the still-open
+owned-local compiler lifecycle criteria.
+
+2026-09-13: CACHE-M6 compiler-cache lifecycle implementation now exposes
+`prepare`, `stats`, preview/apply `reset-stats`, and preview/apply `clear`.
+`prepare` claims only an empty private namespace, writes a no-clobber ownership
+marker and generated local-only configuration, and build/board-build retain a
+shared lease with a sanitized backend environment. `stats` is intentionally
+non-passive because both supported backends may materialize local metadata.
+Reset and clear require a five-minute token bound to the exact managed root,
+ownership marker, generated configuration and, for clear, a bounded measured
+data-tree snapshot. Apply holds an exclusive lease. ccache clear uses its
+controlled backend command; sccache clear stops only its generated private
+Unix-domain server, proves its exact socket no longer accepts connections,
+descriptor-unlinks that stale leaf, descriptor-removes only the unchanged owned
+data tree, and recreates that directory. The sccache namespace is rejected when
+its generated socket path exceeds the 103-byte cross-host Unix-domain-socket
+limit. Backend invocation requires ccache
+4.14.0 or sccache 0.17.0, matching the repeatable native qualification floor.
+`scripts/verify-managed-compiler-cache-lifecycle.sh` supplies the isolated
+real-CLI proof for both backends: reset preserves entries, clear is contained,
+and sccache removes only its private socket while an independent server remains
+available. This remains an acceptance input together with the required
+adversarial and documentation gates; generic root-wide prune and
+compiler-cache retention remain out of scope.
 
 2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
 status schemas, absolute archive-root precedence, no-follow single-root

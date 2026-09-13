@@ -39,7 +39,16 @@ impl TreeTraversalLimits {
     }
 }
 
-/// An OS-held exclusive advisory lock for one no-follow regular file.
+/// Lock mode for a no-follow advisory file lock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdvisoryLockMode {
+    /// Several cooperating readers may hold the lock simultaneously.
+    Shared,
+    /// Exactly one cooperating writer or lifecycle mutation may hold the lock.
+    Exclusive,
+}
+
+/// An OS-held advisory lock for one no-follow regular file.
 ///
 /// The guard owns the open descriptor. It is intentionally neither cloneable
 /// nor serializable: a pathname or PID alone is never evidence that a lock is
@@ -52,6 +61,8 @@ pub struct AdvisoryFileLock {
     path: PathBuf,
     #[cfg(unix)]
     identity: FileIdentity,
+    #[cfg(unix)]
+    mode: AdvisoryLockMode,
 }
 
 /// Observed state of one advisory lock without creating its path.
@@ -87,26 +98,45 @@ impl AdvisoryFileLock {
     /// Returns an error when the path is unsafe, another process owns the
     /// lock, or durable Unix locking is unavailable.
     pub fn acquire(path: &Path) -> std::io::Result<Self> {
+        Self::acquire_with_mode(path, AdvisoryLockMode::Exclusive)
+    }
+
+    /// Acquire a shared no-follow advisory lock.
+    ///
+    /// Several readers may coexist, while an exclusive lifecycle mutation is
+    /// refused until every reader releases its descriptor. The caller must
+    /// retain this guard for the complete duration of its read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is unsafe, an exclusive holder owns the
+    /// lock, or durable Unix locking is unavailable.
+    pub fn acquire_shared(path: &Path) -> std::io::Result<Self> {
+        Self::acquire_with_mode(path, AdvisoryLockMode::Shared)
+    }
+
+    fn acquire_with_mode(path: &Path, mode: AdvisoryLockMode) -> std::io::Result<Self> {
         validate_target_leaf(path)?;
         #[cfg(unix)]
         {
             let path = absolute_path(path)?;
-            let file = unix::acquire_advisory_file_lock(&path)?;
+            let file = unix::acquire_advisory_file_lock(&path, mode)?;
             let identity = unix::advisory_file_lock_identity(&file)?;
             Ok(Self {
                 file,
                 path,
                 identity,
+                mode,
             })
         }
         #[cfg(not(unix))]
         {
-            let _ = path;
+            let _ = (path, mode);
             Err(unsupported_durability())
         }
     }
 
-    /// Reassert that this process still holds the exclusive lock.
+    /// Reassert that this process still holds its selected lock mode.
     ///
     /// # Errors
     ///
@@ -114,7 +144,7 @@ impl AdvisoryFileLock {
     pub fn revalidate(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            unix::revalidate_advisory_file_lock(&self.file, &self.path, self.identity)
+            unix::revalidate_advisory_file_lock(&self.file, &self.path, self.identity, self.mode)
         }
         #[cfg(not(unix))]
         {

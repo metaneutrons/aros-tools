@@ -27,6 +27,7 @@ mod build_tools;
 mod cache;
 /// Parser model for resource-oriented cache commands.
 pub mod cache_command;
+mod cache_diagnostics;
 mod cli_contract;
 /// Source-derived renderer for reviewed CLI-contract snapshots.
 #[cfg(test)]
@@ -53,7 +54,7 @@ use build_cache::BuildCompilerCache;
 use cache_command::{
     CacheArchiveSelector, CacheArchivesCommand, CacheCargoCommand, CacheCargoSelector,
     CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheGenmfCommand,
-    CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand,
+    CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand, ManagedCompilerBackend,
 };
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
@@ -187,9 +188,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        /// Compiler-cache policy; auto uses only a prepared AROS-owned local namespace
         #[arg(long, value_enum, default_value = "auto")]
         compiler_cache: BuildCompilerCache,
+
+        /// Prepared AROS-owned compiler-cache namespace for an explicit backend
+        #[arg(long, value_name = "DIR")]
+        compiler_cache_dir: Option<PathBuf>,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
@@ -524,9 +529,13 @@ enum BoardCommand {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        /// Compiler-cache policy; auto uses only a prepared AROS-owned local namespace
         #[arg(long, value_enum, default_value = "auto")]
         compiler_cache: BuildCompilerCache,
+
+        /// Prepared AROS-owned compiler-cache namespace for an explicit backend
+        #[arg(long, value_name = "DIR")]
+        compiler_cache_dir: Option<PathBuf>,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
@@ -959,175 +968,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             Some(preset.clone()),
             "inspect the retained boot evidence and the first reported serial or QEMU failure",
         ),
-        Commands::Cache { command } => match command {
-            CacheCommand::Status { .. } => (
-                DiagnosticCode::CliConfiguration,
-                DiagnosticStage::Configuration,
-                "cache.status",
-                None,
-                "set AROS_HOME or AROS_CACHE_DIR to an absolute accessible path; cache status never creates or clears cache state",
-            ),
-            CacheCommand::Compiler {
-                command: CacheCompilerCommand::Status { backend, dir, .. },
-            } => {
-                if dir.is_some() {
-                    (
-                        DiagnosticCode::CliConfiguration,
-                        DiagnosticStage::Configuration,
-                        "cache.compiler.status",
-                        None,
-                        "pass an absolute --dir path; compiler-cache status observes it only and never configures a backend",
-                    )
-                } else {
-                    (
-                        DiagnosticCode::CliToolResolution,
-                        DiagnosticStage::ToolResolution,
-                        "cache.compiler.status",
-                        Some(
-                            match backend {
-                                CacheCompilerBackend::Auto => "auto",
-                                CacheCompilerBackend::Sccache => "sccache",
-                                CacheCompilerBackend::Ccache => "ccache",
-                            }
-                            .to_owned(),
-                        ),
-                        "inspect the passive availability report; this command does not start a compiler-cache backend or alter its storage",
-                    )
-                }
-            }
-            CacheCommand::Sources { command } => match command {
-                CacheSourcesCommand::Status { .. } => (
-                    DiagnosticCode::CliConfiguration,
-                    DiagnosticStage::Configuration,
-                    "cache.sources.status",
-                    None,
-                    "pass an absolute source-cache --dir; status observes root metadata only and never creates cache state",
-                ),
-                CacheSourcesCommand::List { .. } => (
-                    DiagnosticCode::CliSourceInput,
-                    DiagnosticStage::Configuration,
-                    "cache.sources.list",
-                    None,
-                    "select one readable reviewed source lock or product plan and an existing real source-cache root; list never hashes or acquires payloads",
-                ),
-                CacheSourcesCommand::Fetch { offline, .. } => (
-                    if *offline {
-                        DiagnosticCode::CliSourceLock
-                    } else {
-                        DiagnosticCode::CliNetwork
-                    },
-                    DiagnosticStage::Configuration,
-                    "cache.sources.fetch",
-                    None,
-                    "restore the selected reviewed closure and cache entries; offline fetch never accesses the network and online fetch never replaces an existing object",
-                ),
-                CacheSourcesCommand::Verify { .. } => (
-                    DiagnosticCode::CliSourceLock,
-                    DiagnosticStage::Configuration,
-                    "cache.sources.verify",
-                    None,
-                    "restore the exact reviewed selector and cache objects; verify hashes payloads but never changes them",
-                ),
-            },
-            CacheCommand::Archives { command } => match command {
-                CacheArchivesCommand::Status { .. } => (
-                    DiagnosticCode::CliConfiguration,
-                    DiagnosticStage::Configuration,
-                    "cache.archives.status",
-                    None,
-                    "set AROS_HOME or AROS_CACHE_DIR to an absolute accessible path; archive status observes root metadata only",
-                ),
-                CacheArchivesCommand::List { .. } => (
-                    DiagnosticCode::CliToolResolution,
-                    DiagnosticStage::Configuration,
-                    "cache.archives.list",
-                    None,
-                    "select one readable AROS checkout, archive purpose, and optional supported host; list reads cache-entry metadata without hashing or downloading it",
-                ),
-                CacheArchivesCommand::Fetch { offline, .. } => (
-                    if *offline {
-                        DiagnosticCode::CliToolResolution
-                    } else {
-                        DiagnosticCode::CliNetwork
-                    },
-                    DiagnosticStage::Configuration,
-                    "cache.archives.fetch",
-                    None,
-                    "restore the exact configured host/compiler archive; offline fetch requires an already verified cache object and refresh never replaces it",
-                ),
-                CacheArchivesCommand::Verify { .. } => (
-                    DiagnosticCode::CliToolResolution,
-                    DiagnosticStage::Configuration,
-                    "cache.archives.verify",
-                    None,
-                    "restore the exact configured archive bytes; verify checks only declared size and SHA-256, not extraction, installation, or attestation",
-                ),
-            },
-            CacheCommand::Cargo { command } => match command {
-                CacheCargoCommand::Status { .. } => (
-                    DiagnosticCode::CliConfiguration,
-                    DiagnosticStage::Configuration,
-                    "cache.cargo.status",
-                    None,
-                    "pass an absolute cache --dir; status observes only root metadata and never creates or scans Cargo generations",
-                ),
-                CacheCargoCommand::List { .. } => (
-                    DiagnosticCode::CliToolResolution,
-                    DiagnosticStage::Configuration,
-                    "cache.cargo.list",
-                    None,
-                    "select readable producer and tools checkouts, an absolute cache root and a pinned Cargo executable; list proves the selection with bounded Git and Cargo version probes, then reads only its generation receipt",
-                ),
-                CacheCargoCommand::Fetch { offline, .. } => (
-                    if *offline {
-                        DiagnosticCode::CliToolResolution
-                    } else {
-                        DiagnosticCode::CliNetwork
-                    },
-                    DiagnosticStage::Configuration,
-                    "cache.cargo.fetch",
-                    None,
-                    "use cache cargo fetch before an offline native producer build; offline mode requires a fully verified immutable generation",
-                ),
-                CacheCargoCommand::Verify { .. } => (
-                    DiagnosticCode::CliSourceLock,
-                    DiagnosticStage::Configuration,
-                    "cache.cargo.verify",
-                    None,
-                    "restore the exact producer pin, tools lock and Cargo executable; verify hashes vendor content but never resolves, downloads or rewrites it",
-                ),
-            },
-            CacheCommand::Genmf { command } => match command {
-                CacheGenmfCommand::Status { .. } => (
-                    DiagnosticCode::CliConfiguration,
-                    DiagnosticStage::Configuration,
-                    "cache.genmf.status",
-                    None,
-                    "pass an absolute cache --dir; status observes only root metadata and never selects source inputs or creates a generation",
-                ),
-                CacheGenmfCommand::List { .. } => (
-                    DiagnosticCode::CliSourceInput,
-                    DiagnosticStage::Configuration,
-                    "cache.genmf.list",
-                    None,
-                    "pass existing no-follow --source-dir and --dir roots plus an absolute Python interpreter when PATH does not select the intended one; list reads no expansion payload and starts no generator",
-                ),
-                CacheGenmfCommand::Verify { .. } => (
-                    DiagnosticCode::CliSourceLock,
-                    DiagnosticStage::Configuration,
-                    "cache.genmf.verify",
-                    None,
-                    "restore the exact source/template/generator/interpreter selection and its immutable generation; verify makes only its bounded Python version probe and never invokes GenMF or repairs cache state",
-                ),
-                CacheGenmfCommand::Refresh { .. } => (
-                    DiagnosticCode::CliBuild,
-                    DiagnosticStage::BuildExecution,
-                    "cache.genmf.refresh",
-                    None,
-                    "inspect the selected upstream GenMF inputs and Python interpreter; refresh publishes only missing complete generations and rejects any existing byte mismatch without replacement",
-                ),
-            },
-        },
+        Commands::Cache { command } => cache_diagnostics::cache_boundary(command),
         Commands::Ccache => (
             DiagnosticCode::CliToolResolution,
             DiagnosticStage::ToolResolution,

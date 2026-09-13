@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cargo_vendor::{
-    verify_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration, CargoVendorRequest,
+    open_verified_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration,
+    CargoVendorGenerationLease, CargoVendorRequest,
 };
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
@@ -144,7 +145,13 @@ fn run_owned(
     let bound = declaration.bind(recipe, &contract, &lock_bytes, &profiles, &request.preset)?;
     let host = preflight::inspect(bound.selected_profile())?;
     let cache_request = SourceCacheRequest::from_source_lock(&lock_bytes)?;
-    let cache = verify_prepared_cache(&request.cache_dir, &cache_request)?;
+    // Keep the exact source-lock closure leased for the full upstream
+    // configure/MetaMake consumption window. The fetch bridge revalidates its
+    // individual input too, but this outer closure lease prevents a
+    // cooperating lifecycle writer or removal from changing another selected
+    // source between preflight and the actual `%fetch` invocation.
+    let source_cache = open_prepared_cache(&request.cache_dir, &cache_request)?;
+    let cache = source_cache.verification();
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -161,7 +168,7 @@ fn run_owned(
         recipe,
         declaration: &declaration,
         host: Some(&host),
-        cache: Some(&cache),
+        cache: Some(cache),
         jobs: request.jobs,
         snapshots: &snapshots,
         environment: None,
@@ -185,7 +192,7 @@ fn run_owned(
         &lifecycle.python,
         &interpreter,
     )?;
-    let cargo_generation = required_cargo_generation(
+    let cargo_generation = open_required_cargo_generation(
         &request.cache_dir,
         producer.root(),
         tools.root(),
@@ -193,10 +200,11 @@ fn run_owned(
         &host,
     )?;
     let cargo = CargoVendorEnvironment::prepare(
-        &cargo_generation.generation_dir,
+        &cargo_generation.generation().generation_dir,
         &tools.root().join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
+    let cargo_generation = cargo_generation.into_generation();
     let execution_context = PhaseInputContext {
         environment: Some(&environment),
         cargo: Some(&cargo_generation),
@@ -710,13 +718,28 @@ fn plan_request(request: &BuildRequest) -> PlanRequest {
     }
 }
 
+fn open_prepared_cache(
+    cache_dir: &Path,
+    request: &SourceCacheRequest,
+) -> Result<source_cache::VerifiedSourceCacheLease, ContractError> {
+    source_cache::open_verified_request(cache_dir, request).map_err(|error| {
+        ContractError::sources(format!(
+            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros cache sources fetch --source-lock SOURCE_LOCK --dir CACHE`, then prove it with `aros cache sources verify --source-lock SOURCE_LOCK --dir CACHE` before retrying: {error}"
+        ))
+    })
+}
+
+// A collector-only resume no longer reads upstream source-cache objects. It
+// nevertheless remeasures the closure recorded in its predecessor receipt so
+// stale input evidence cannot silently resume a different candidate. This
+// short verification deliberately does not retain a consumer lease.
 fn verify_prepared_cache(
     cache_dir: &Path,
     request: &SourceCacheRequest,
 ) -> Result<source_cache::SourceCacheVerification, ContractError> {
     source_cache::verify_request(cache_dir, request).map_err(|error| {
         ContractError::sources(format!(
-            "native execution accepts prepared cache inputs only; prepare the selected source-lock closure with `aros cache sources fetch --source-lock SOURCE_LOCK --dir CACHE`, then prove it with `aros cache sources verify --source-lock SOURCE_LOCK --dir CACHE` before retrying: {error}"
+            "native collector resume requires the same verified source-lock closure as its predecessor: {error}"
         ))
     })
 }
@@ -954,6 +977,19 @@ fn required_cargo_generation(
     tools_tree: &str,
     host: &HostPreflight,
 ) -> Result<CargoVendorGeneration, ContractError> {
+    Ok(
+        open_required_cargo_generation(cache_dir, producer_dir, tools_dir, tools_tree, host)?
+            .into_generation(),
+    )
+}
+
+fn open_required_cargo_generation(
+    cache_dir: &Path,
+    producer_dir: &Path,
+    tools_dir: &Path,
+    tools_tree: &str,
+    host: &HostPreflight,
+) -> Result<CargoVendorGenerationLease, ContractError> {
     let request = CargoVendorRequest {
         producer_dir: producer_dir.to_owned(),
         tools_dir: tools_dir.to_owned(),
@@ -961,7 +997,7 @@ fn required_cargo_generation(
         cargo: host_tool(host, "cargo")?,
         cache_dir: cache_dir.to_owned(),
     };
-    verify_vendor_generation(&request).map_err(|error| {
+    open_verified_vendor_generation(&request).map_err(|error| {
         ContractError::environment(format!(
             "required immutable Cargo vendor generation is unavailable or invalid: {error}"
         ))

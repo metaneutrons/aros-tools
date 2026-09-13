@@ -81,6 +81,232 @@ fn genmf_cache_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::P
     (temporary, source, cache)
 }
 
+#[cfg(unix)]
+fn cargo_lifecycle_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = source_cache_tempdir();
+    let producer = temporary.path().join("producer");
+    let tools = temporary.path().join("tools");
+    let cache = temporary.path().join("cache");
+    let bin = temporary.path().join("bin");
+    fs::create_dir_all(producer.join("toolchains")).expect("create producer fixture");
+    fs::create_dir(&tools).expect("create tools fixture");
+    fs::create_dir(&cache).expect("create Cargo cache root");
+    fs::create_dir(&bin).expect("create fixture executable root");
+    fs::write(
+        producer.join("toolchains/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"minimal\"\n",
+    )
+    .expect("write producer Rust pin");
+    fs::write(
+        tools.join("Cargo.toml"),
+        "[package]\nname = \"fixture-tools\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write tools manifest");
+    let package_checksum = "a".repeat(64);
+    fs::write(
+        tools.join("Cargo.lock"),
+        format!(
+            "version = 4\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{package_checksum}\"\n"
+        ),
+    )
+    .expect("write tools lock");
+    let git_init = Command::new("git")
+        .current_dir(&tools)
+        .args(["init", "-q", "--template="])
+        .output()
+        .expect("initialize tools fixture repository");
+    assert_success(&git_init, "initialize tools fixture repository");
+    let git_add = Command::new("git")
+        .current_dir(&tools)
+        .args(["add", "."])
+        .output()
+        .expect("stage tools fixture repository");
+    assert_success(&git_add, "stage tools fixture repository");
+    let git_commit = Command::new("git")
+        .current_dir(&tools)
+        .args([
+            "-c",
+            "user.name=AROS cache fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "test: fixture Cargo workspace",
+        ])
+        .output()
+        .expect("commit tools fixture repository");
+    assert_success(&git_commit, "commit tools fixture repository");
+
+    let manifest = b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\n";
+    let source = b"pub fn value() {}\n";
+    let cargo = bin.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  --version)
+    printf '%s\n' 'cargo 1.96.1 (fixture)'
+    ;;
+  vendor)
+    vendor=
+    for argument in "$@"; do vendor="$argument"; done
+    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src"
+    printf '%s' '[package]
+name = "fixture-dependency"
+version = "1.0.0"
+' > "$vendor/fixture-dependency-1.0.0/Cargo.toml"
+    printf '%s' 'pub fn value() {{}}
+' > "$vendor/fixture-dependency-1.0.0/src/lib.rs"
+    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
+    printf '%s\n' '[source.crates-io]' 'replace-with = "vendored-sources"' '[source.vendored-sources]' "directory = \"$vendor\""
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+            aros_common::sha256_bytes(manifest),
+            aros_common::sha256_bytes(source),
+            package_checksum,
+        ),
+    )
+    .expect("write fixture Cargo executable");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make fixture Cargo executable");
+    (temporary, producer, tools, cache, cargo)
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_cache_lifecycle_is_exact_retained_and_preview_applied() {
+    let (_temporary, producer, tools, cache, cargo) = cargo_lifecycle_fixture();
+    let producer = producer.to_str().expect("producer path is UTF-8");
+    let tools = tools.to_str().expect("tools path is UTF-8");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+    let cargo = cargo.to_str().expect("Cargo path is UTF-8");
+    let selection = [
+        "--producer-dir",
+        producer,
+        "--tools-dir",
+        tools,
+        "--dir",
+        cache,
+        "--cargo",
+        cargo,
+    ];
+
+    let status = run(&[
+        "cache", "cargo", "status", "--dir", cache, "--format", "json",
+    ]);
+    assert_success(&status, "Cargo cache passive status");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema"], "aros-cache-cargo-status-v1");
+    assert_eq!(
+        status["capabilities"],
+        serde_json::json!(["status", "list", "fetch", "verify", "keep", "release", "remove"])
+    );
+
+    let mut fetch_arguments = vec!["cache", "cargo", "fetch"];
+    fetch_arguments.extend(selection);
+    fetch_arguments.extend(["--format", "json"]);
+    let fetched = run(&fetch_arguments);
+    assert_success(&fetched, "Cargo vendor fetch");
+    let fetched: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    assert_eq!(fetched["schema"], "aros-cache-cargo-fetch-v1");
+
+    let mut keep_arguments = vec!["cache", "cargo", "keep"];
+    keep_arguments.extend(selection);
+    keep_arguments.extend(["--name", "release-candidate", "--format", "json"]);
+    let kept = run(&keep_arguments);
+    assert_success(&kept, "Cargo vendor retention creation");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-cargo-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let mut remove_arguments = vec!["cache", "cargo", "remove"];
+    remove_arguments.extend(selection);
+    remove_arguments.extend(["--format", "json"]);
+    let blocked = run(&remove_arguments);
+    assert_success(&blocked, "retained Cargo removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-cargo-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+    assert!(blocked["recoverability"]
+        .as_str()
+        .expect("Cargo preview reports recovery")
+        .contains("cache cargo fetch"));
+    assert!(blocked["offline_impact"]
+        .as_str()
+        .expect("Cargo preview reports offline impact")
+        .contains("offline"));
+
+    let released = run(&[
+        "cache",
+        "cargo",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "Cargo vendor retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-cargo-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("Cargo release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "cargo",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "Cargo vendor retention release apply");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-cargo-release-v1");
+
+    let preview = run(&remove_arguments);
+    assert_success(&preview, "eligible Cargo removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("Cargo removal preview returns a token")
+        .to_owned();
+    let mut apply_arguments = vec!["cache", "cargo", "remove"];
+    apply_arguments.extend(selection);
+    apply_arguments.extend(["--apply", &token, "--format", "json"]);
+    let removed = run(&apply_arguments);
+    assert_success(&removed, "Cargo removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "cargo.remove.apply");
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
+}
+
 #[test]
 fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
     let (_temporary, source, cache) = genmf_cache_fixture();
@@ -161,6 +387,93 @@ fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
         !Path::new(cache).join("rom%mmakefile.mk").exists(),
         "the public command must never recreate the legacy flat mtime cache"
     );
+
+    let kept = run(&[
+        "cache",
+        "genmf",
+        "keep",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--format",
+        "json",
+    ]);
+    assert_success(&kept, "GenMF cache retention");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-genmf-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let removal = [
+        "cache",
+        "genmf",
+        "remove",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--source",
+        "rom/mmakefile",
+        "--format",
+        "json",
+    ];
+    let retained_preview = run(&removal);
+    assert_success(&retained_preview, "retained GenMF removal preview");
+    let retained_preview: Value = serde_json::from_slice(&retained_preview.stdout).unwrap();
+    assert_eq!(retained_preview["preview"]["eligible"], false);
+
+    let released = run(&[
+        "cache",
+        "genmf",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "GenMF cache retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-genmf-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("GenMF release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "genmf",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "GenMF cache retention release apply");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-genmf-release-v1");
+
+    let preview = run(&removal);
+    assert_success(&preview, "eligible GenMF removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("GenMF removal preview returns a token")
+        .to_owned();
+    let mut apply = removal.to_vec();
+    apply.extend(["--apply", &token]);
+    let removed = run(&apply);
+    assert_success(&removed, "GenMF removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "genmf.remove.apply");
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
 }
 
 #[test]
@@ -369,6 +682,199 @@ fn source_cache_product_plan_keeps_unpinned_measurements_explicit() {
 }
 
 #[test]
+fn source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role() {
+    let temporary = source_cache_tempdir();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).expect("create source cache root");
+    let payload = b"reviewed product input without an upstream pin\n";
+    fs::write(cache.join("grub-2.12.tar.xz"), payload).expect("write cached product input");
+    let plan = temporary.path().join("grub.fetch-plan.json");
+    fs::write(
+        &plan,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "aros-cache-source-fetch-plan-v1",
+            "entries": [{
+                "role": "product:grub@2.12",
+                "filename": "grub-2.12.tar.xz",
+                "candidates": [{"url": "https://example.invalid/grub-2.12.tar.xz"}],
+                "representation": "archive",
+                "normalization": "exact-bytes-v1",
+                "integrity": {"kind": "unverified", "max_size": 1_048_576}
+            }]
+        }))
+        .expect("serialize product source plan"),
+    )
+    .expect("write product source plan");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+    let plan = plan.to_str().expect("plan path is UTF-8");
+    let role = "product:grub@2.12";
+
+    let kept = run(&[
+        "cache",
+        "sources",
+        "keep",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&kept, "source cache keep");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-sources-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let blocked = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--format",
+        "json",
+    ]);
+    assert_success(&blocked, "retained source cache removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-sources-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+    assert!(blocked["recoverability"]
+        .as_str()
+        .unwrap()
+        .contains("same reviewed selector"));
+
+    let released = run(&[
+        "cache",
+        "sources",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "source cache release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-sources-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("source release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "sources",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "source cache release apply");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-sources-release-v1");
+
+    let preview = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--format",
+        "json",
+    ]);
+    assert_success(&preview, "unretained source cache removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("preview returns a token")
+        .to_owned();
+
+    let removed = run(&[
+        "cache",
+        "sources",
+        "remove",
+        "--source-fetch-plan",
+        plan,
+        "--dir",
+        cache,
+        "--role",
+        role,
+        "--apply",
+        &token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&removed, "source cache removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
+    assert!(
+        !Path::new(cache).join("grub-2.12.tar.xz").exists(),
+        "source lifecycle removal must delete only the previewed direct object"
+    );
+}
+
+fn release_archive_retention(cache_root: &Path) {
+    let released = Command::new(aros())
+        .env("AROS_CACHE_DIR", cache_root)
+        .args([
+            "cache",
+            "archives",
+            "release",
+            "--name",
+            "release-candidate",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive release preview executes");
+    assert_success(&released, "archive retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-archives-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("archive release preview returns a token")
+        .to_owned();
+    let released = Command::new(aros())
+        .env("AROS_CACHE_DIR", cache_root)
+        .args([
+            "cache",
+            "archives",
+            "release",
+            "--name",
+            "release-candidate",
+            "--apply",
+            &release_token,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive release apply executes");
+    assert_success(&released, "archive retention release apply");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-archives-release-v1");
+}
+
+#[test]
 fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
     let temporary = tempfile::tempdir().expect("temporary archive-cache semantic root");
     let project = temporary.path().join("AROS");
@@ -414,7 +920,7 @@ fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
     assert_eq!(status["root"]["state"], "missing");
     assert_eq!(
         status["capabilities"],
-        serde_json::json!(["status", "list", "fetch", "verify"])
+        serde_json::json!(["status", "list", "fetch", "verify", "keep", "release", "remove"])
     );
     assert_eq!(status["side_effects"]["creates_state"], false);
     assert!(
@@ -532,6 +1038,110 @@ fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
         .unwrap()
         .iter()
         .any(|value| value == "payload tree identity"));
+
+    let kept = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "keep",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--name",
+            "release-candidate",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive keep executes");
+    assert_success(&kept, "archive retention creation");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-archives-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let blocked = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("blocked archive removal preview executes");
+    assert_success(&blocked, "retained archive removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-archives-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+    release_archive_retention(&cache_root);
+    let preview = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("eligible archive removal preview executes");
+    assert_success(&preview, "eligible archive removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("removal preview returns an apply token");
+
+    let removed = Command::new(aros())
+        .env("AROS_CACHE_DIR", &cache_root)
+        .args([
+            "cache",
+            "archives",
+            "remove",
+            "--project",
+            project,
+            "--toolchain",
+            "--preset",
+            "pc-x86_64",
+            "--host",
+            "linux-x86_64",
+            "--apply",
+            token,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive removal apply executes");
+    assert_success(&removed, "token-confirmed archive removal");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "archives.remove.apply");
+    assert!(!cache_path.exists(), "exact selected archive was removed");
+
+    fs::write(&cache_path, payload).expect("restore cached archive fixture after lifecycle test");
 
     fs::write(&cache_path, b"corrupt compiler archive files!\n")
         .expect("corrupt cached archive fixture");
@@ -939,6 +1549,222 @@ fn explicit_clean_scope_and_relative_log_file_keep_the_invocation_origin() {
         log_file.is_file(),
         "a relative log file must resolve from the invocation directory"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_compiler_cache_lifecycle_is_preview_bound_and_backend_scoped() {
+    let temporary = tempfile::tempdir().expect("temporary compiler-cache root");
+    let bin = temporary.path().join("bin");
+    let root = temporary.path().join("managed-ccache");
+    write_executable(
+        &bin.join("ccache"),
+        br#"#!/bin/sh
+set -eu
+case "$*" in
+  "--version")
+    printf '%s\n' 'ccache version 4.14.0'
+    ;;
+  "--format json --print-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-query"
+    printf '%s\n' '{"fixture_statistics":true}'
+    ;;
+  "--show-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-query"
+    printf '%s\n' 'fixture statistics'
+    ;;
+  "--zero-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-reset"
+    ;;
+  "--clear")
+    /usr/bin/find "$CCACHE_DIR" -mindepth 1 -maxdepth 1 -exec /bin/rm -rf {} +
+    ;;
+  *)
+    printf '%s\n' "unexpected fixture ccache arguments: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+    );
+    let run_with_fixture = |arguments: &[&str]| {
+        Command::new(aros())
+            .env("PATH", &bin)
+            .args(arguments)
+            .output()
+            .expect("managed compiler-cache semantic case must execute")
+    };
+    let root = root.to_str().expect("compiler-cache fixture root is UTF-8");
+
+    let prepared = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "prepare",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&prepared, "managed ccache preparation");
+
+    let overlong_sccache_root = temporary.path().join("x".repeat(128));
+    let overlong_sccache_root = overlong_sccache_root
+        .to_str()
+        .expect("overlong sccache fixture root is UTF-8");
+    let overlong_sccache = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "prepare",
+        "--backend",
+        "sccache",
+        "--dir",
+        overlong_sccache_root,
+        "--format",
+        "json",
+    ]);
+    let diagnostic = assert_failure(
+        &overlong_sccache,
+        "managed sccache preparation with an overlong socket path",
+    );
+    assert!(diagnostic.contains("cross-host limit is 103 bytes"));
+
+    let statistics = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&statistics, "managed ccache statistics");
+    let statistics: Value = serde_json::from_slice(&statistics.stdout).unwrap();
+    assert_eq!(statistics["schema"], "aros-cache-compiler-stats-v1");
+    assert_eq!(statistics["backend_report"]["fixture_statistics"], true);
+    assert_eq!(statistics["side_effects"]["creates_state"], true);
+
+    let reset_preview = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "reset-stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&reset_preview, "managed ccache reset preview");
+    let reset_preview: Value = serde_json::from_slice(&reset_preview.stdout).unwrap();
+    assert_eq!(
+        reset_preview["schema"],
+        "aros-cache-compiler-reset-stats-preview-v1"
+    );
+    assert!(
+        !Path::new(root).join("data/statistics-reset").exists(),
+        "preview must not invoke the backend"
+    );
+    let reset_token = reset_preview["preview"]["apply_token"]
+        .as_str()
+        .expect("reset preview token");
+    let reset_applied = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "reset-stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--apply",
+        reset_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&reset_applied, "managed ccache reset apply");
+    assert!(Path::new(root).join("data/statistics-reset").is_file());
+
+    fs::write(
+        Path::new(root).join("data/compiler-output"),
+        b"fixture cache output",
+    )
+    .expect("write managed compiler-cache fixture output");
+    let clear_preview = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "clear",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&clear_preview, "managed ccache clear preview");
+    let clear_preview: Value = serde_json::from_slice(&clear_preview.stdout).unwrap();
+    assert_eq!(
+        clear_preview["schema"],
+        "aros-cache-compiler-clear-preview-v1"
+    );
+    assert!(clear_preview["preview"]["data_scope"]["entry_count"]
+        .as_u64()
+        .is_some_and(|entries| entries > 0));
+    let clear_token = clear_preview["preview"]["apply_token"]
+        .as_str()
+        .expect("clear preview token");
+    let clear_applied = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "clear",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--apply",
+        clear_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&clear_applied, "managed ccache clear apply");
+    let clear_report: Value = serde_json::from_slice(&clear_applied.stdout).unwrap();
+    assert_eq!(
+        clear_report["side_effects"]["backend_process"], true,
+        "an applied clear executes the selected backend"
+    );
+    assert_eq!(
+        clear_applied
+            .status
+            .code()
+            .expect("managed ccache clear exit status"),
+        0
+    );
+    assert!(
+        fs::read_dir(Path::new(root).join("data"))
+            .expect("read cleared managed data root")
+            .next()
+            .is_none(),
+        "clear must be limited to the selected backend data root"
+    );
+
+    write_executable(
+        &bin.join("ccache"),
+        b"#!/bin/sh\nprintf '%s\\n' 'ccache version 4.13.9'\n",
+    );
+    let rejected = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    let diagnostic = assert_failure(&rejected, "unqualified managed ccache statistics");
+    assert!(diagnostic.contains("below the qualified minimum 4.14.0"));
 }
 
 #[cfg(unix)]

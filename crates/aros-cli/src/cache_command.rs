@@ -39,7 +39,7 @@ pub enum CacheCommand {
         #[command(subcommand)]
         command: CacheCargoCommand,
     },
-    /// Inspect, verify, and regenerate immutable GenMF reference expansions.
+    /// Inspect, regenerate, retain, and safely remove immutable GenMF reference expansions.
     Genmf {
         /// One GenMF reference-cache subcommand.
         #[command(subcommand)]
@@ -59,6 +59,70 @@ pub enum CacheCompilerCommand {
         /// Explicit absolute compiler-cache root to inspect without configuring a backend.
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Claim one empty private root as a local-only compiler-cache namespace.
+    Prepare {
+        /// Backend that will exclusively own this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Empty absolute root to claim; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Query statistics for one managed local compiler-cache namespace.
+    Stats {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm reset of statistics in one managed local namespace.
+    ResetStats {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Exact token from a prior reset preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm clear of one managed local compiler-cache namespace.
+    Clear {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Exact token from a prior clear preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -133,6 +197,64 @@ pub enum CacheSourcesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Retain one fully verified reviewed source closure under a named no-clobber reference.
+    Keep {
+        /// One exact reviewed source-cache selector.
+        #[command(flatten)]
+        selector: CacheSourceSelector,
+
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm release of one named source-cache retention reference.
+    Release {
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one role-selected source object.
+    Remove {
+        /// One exact reviewed source-cache selector.
+        #[command(flatten)]
+        selector: CacheSourceSelector,
+
+        /// Existing real absolute source-cache root.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Exact semantic role from the reviewed selector to remove.
+        #[arg(long, value_name = "ROLE")]
+        role: String,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// Compiler-archive resource operations.
@@ -177,6 +299,48 @@ pub enum CacheArchivesCommand {
         /// One exact configured host or locked cross-toolchain archive.
         #[command(flatten)]
         selector: CacheArchiveSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Retain one selected archive under a named no-clobber reference.
+    Keep {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm release of one named archive retention reference.
+    Release {
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one exact selected archive.
+    Remove {
+        /// One exact configured host or locked cross-toolchain archive.
+        #[command(flatten)]
+        selector: CacheArchiveSelector,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -231,6 +395,52 @@ pub enum CacheCargoCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Retain one verified Cargo vendor generation under a named no-clobber reference.
+    Keep {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm release of one named Cargo retention reference.
+    Release {
+        /// Existing AROS-managed parent cache root holding the reference.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one exact verified Cargo vendor generation.
+    Remove {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// GenMF reference-cache resource operations.
@@ -271,6 +481,56 @@ pub enum CacheGenmfCommand {
         /// Exact source/cache/interpreter selection.
         #[command(flatten)]
         selector: CacheGenmfSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Retain every verified generation in the exact current GenMF selection.
+    Keep {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm release of one named GenMF retention reference.
+    Release {
+        /// Existing no-follow parent cache root holding the reference.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one current input-selected immutable generation.
+    Remove {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// Exact source-root-relative MMake input from the current selection, for example rom/mmakefile.
+        #[arg(long, value_name = "PATH")]
+        source: String,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -383,5 +643,14 @@ pub enum CacheCompilerBackend {
     /// Project the sccache backend only.
     Sccache,
     /// Project the ccache backend only.
+    Ccache,
+}
+
+/// One concrete backend permitted to own a managed local cache namespace.
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ManagedCompilerBackend {
+    /// Mozilla sccache with a private local disk store and private UDS socket.
+    Sccache,
+    /// ccache with a private local store and generated local-only configuration.
     Ccache,
 }

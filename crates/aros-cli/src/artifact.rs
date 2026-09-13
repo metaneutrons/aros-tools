@@ -10,9 +10,13 @@ use std::time::Duration;
 use tempfile::TempDir;
 use xz2::read::XzDecoder;
 
+use aros_cache::{
+    acquire_read_lease, acquire_write_lease, CacheFamily, CacheObjectKind, CacheObjectLease,
+    CacheObjectRequest,
+};
 use aros_common::{
-    normalized_toolchain_file_mode, parse_credential_free_https_url, payload_casefold_path_key,
-    publication_failure_class, CommitState, PublicationFailureClass,
+    ensure_directory_nofollow, normalized_toolchain_file_mode, parse_credential_free_https_url,
+    payload_casefold_path_key, publication_failure_class, CommitState, PublicationFailureClass,
 };
 
 /// Marker published only after a toolchain envelope is complete.
@@ -27,6 +31,25 @@ const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSFER_TIMEOUT: Duration = Duration::from_hours(1);
+
+/// A verified archive path guarded by an active lifecycle lease.
+///
+/// The lease remains held until this value is dropped, so a cooperating cache
+/// lifecycle command cannot remove the archive while it is being extracted or
+/// otherwise consumed.
+#[derive(Debug)]
+pub struct CachedArchive {
+    path: PathBuf,
+    _lease: CacheObjectLease,
+}
+
+impl CachedArchive {
+    /// Return the verified immutable archive path while retaining its lease.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// Resolve the user-controlled AROS state directory.
 ///
@@ -52,10 +75,8 @@ pub fn archive_cache_root() -> Result<PathBuf> {
 /// root cannot be resolved safely.
 pub fn archive_cache_path(expected_sha256: &str) -> Result<PathBuf> {
     let expected_sha256 = require_sha256(Some(expected_sha256), "archive")?;
-    Ok(archive_cache_root()?
-        .join("downloads")
-        .join("sha256")
-        .join(format!("{expected_sha256}.tar.xz")))
+    let root = archive_cache_root()?;
+    Ok(root.join(archive_relative_path(&expected_sha256)))
 }
 
 /// Validate one credential-free HTTPS archive URL without transferring it.
@@ -141,19 +162,25 @@ pub async fn obtain_archive(
     expected_size: Option<u64>,
     offline: bool,
     force_download: bool,
-) -> Result<PathBuf> {
+) -> Result<CachedArchive> {
     let expected_sha256 = require_sha256(Some(expected_sha256), "archive")?;
     if expected_size == Some(0) {
         bail!("archive has an invalid declared size of zero bytes");
     }
     let download_url = validate_download_url(url)?;
-    let cache_path = archive_cache_path(&expected_sha256)?;
+    let request = archive_cache_request(&expected_sha256, expected_size)?;
+    let cache_path = request.cache_root.join(&request.relative_path);
     let cache_dir = cache_path
         .parent()
         .ok_or_else(|| miette::miette!("archive cache path has no parent"))?;
     if cache_path.exists() && !force_download {
+        let lease = acquire_read_lease(&request).map_err(|error| miette::miette!(error))?;
         verify_archive(&cache_path, &expected_sha256, expected_size)?;
-        return Ok(cache_path);
+        lease.revalidate().map_err(|error| miette::miette!(error))?;
+        return Ok(CachedArchive {
+            path: cache_path,
+            _lease: lease,
+        });
     }
     if offline {
         bail!(
@@ -162,9 +189,18 @@ pub async fn obtain_archive(
             cache_dir.display()
         );
     }
-    fs::create_dir_all(cache_dir)
+    ensure_directory_nofollow(cache_dir)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to create cache '{}'", cache_dir.display()))?;
+    let lease = acquire_write_lease(&request).map_err(|error| miette::miette!(error))?;
+    if cache_path.exists() && !force_download {
+        verify_archive(&cache_path, &expected_sha256, expected_size)?;
+        lease.revalidate().map_err(|error| miette::miette!(error))?;
+        return Ok(CachedArchive {
+            path: cache_path,
+            _lease: lease,
+        });
+    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -277,7 +313,62 @@ pub async fn obtain_archive(
     }
     sync_directory(cache_dir)?;
     verify_archive(&cache_path, &expected_sha256, expected_size)?;
-    Ok(cache_path)
+    lease.revalidate().map_err(|error| miette::miette!(error))?;
+    Ok(CachedArchive {
+        path: cache_path,
+        _lease: lease,
+    })
+}
+
+/// Open one existing selected archive under a shared lifecycle lease and
+/// verify its declared byte identity.
+///
+/// # Errors
+///
+/// Returns an error when the archive cache root is unsafe, a writer is active,
+/// or the selected archive fails its declared size or SHA-256 verification.
+pub fn open_verified_archive(
+    expected_sha256: &str,
+    expected_size: Option<u64>,
+) -> Result<CachedArchive> {
+    let expected_sha256 = require_sha256(Some(expected_sha256), "archive")?;
+    if expected_size == Some(0) {
+        bail!("archive has an invalid declared size of zero bytes");
+    }
+    let request = archive_cache_request(&expected_sha256, expected_size)?;
+    let path = request.cache_root.join(&request.relative_path);
+    let lease = acquire_read_lease(&request).map_err(|error| miette::miette!(error))?;
+    verify_archive(&path, &expected_sha256, expected_size)?;
+    lease.revalidate().map_err(|error| miette::miette!(error))?;
+    Ok(CachedArchive {
+        path,
+        _lease: lease,
+    })
+}
+
+/// Construct the only archive-cache lifecycle request used by CLI consumers.
+pub fn archive_cache_request(
+    expected_sha256: &str,
+    expected_size: Option<u64>,
+) -> Result<CacheObjectRequest> {
+    let expected_sha256 = require_sha256(Some(expected_sha256), "archive")?;
+    if expected_size == Some(0) {
+        bail!("archive has an invalid declared size of zero bytes");
+    }
+    Ok(CacheObjectRequest {
+        family: CacheFamily::Archives,
+        cache_root: archive_cache_root()?,
+        relative_path: archive_relative_path(&expected_sha256),
+        kind: CacheObjectKind::RegularFile {
+            max_bytes: expected_size.unwrap_or(MAX_UNSIZED_ARCHIVE_BYTES),
+        },
+    })
+}
+
+fn archive_relative_path(expected_sha256: &str) -> PathBuf {
+    PathBuf::from("downloads")
+        .join("sha256")
+        .join(format!("{expected_sha256}.tar.xz"))
 }
 
 fn validate_download_url(value: &str) -> Result<reqwest::Url> {

@@ -1,10 +1,15 @@
 use std::fs;
 use std::time::Duration;
 
+use aros_cache::{
+    apply_removal, apply_retention_release, preview_removal, preview_retention_release,
+    CacheFamily, CacheRetentionRelease,
+};
 use aros_common::CancellationToken;
 
 use crate::genmf_cache::{
-    list, refresh, select, status, verify, GenmfCacheEntryState, GenmfCacheRequest,
+    list, materialize, refresh, retain, select, select_lifecycle_object, status, verify,
+    GenmfCacheEntryState, GenmfCacheRequest,
 };
 
 fn fixture() -> (tempfile::TempDir, GenmfCacheRequest) {
@@ -69,6 +74,66 @@ fn status_is_passive_and_refresh_publishes_a_verified_immutable_generation() {
     assert_eq!(
         fs::read(verified.entries[0].generation_dir.join("expansion.mk")).unwrap(),
         b"%include make-common.tmpl\nmain-template\n%build_program one\n"
+    );
+}
+
+#[test]
+fn lifecycle_retention_is_closed_and_removal_is_exact_and_lease_safe() {
+    let (_temporary, request) = fixture();
+    fs::create_dir_all(request.source_dir.join("workbench")).unwrap();
+    fs::write(
+        request.source_dir.join("workbench/mmakefile"),
+        "%build_program two\n",
+    )
+    .unwrap();
+    let refreshed = refresh(&request, &CancellationToken::default()).unwrap();
+    assert_eq!(refreshed.entries.len(), 2);
+
+    let (selection, retention) = retain(&request, "reference-set").unwrap();
+    assert_eq!(selection.entries.len(), 2);
+    assert_eq!(retention.objects.len(), 2);
+
+    let (entry, object) = select_lifecycle_object(&request, "rom/mmakefile").unwrap();
+    let retained = preview_removal(&object).unwrap();
+    assert!(!retained.eligible);
+    assert_eq!(retained.blockers[0].name, "reference-set");
+
+    let release = CacheRetentionRelease {
+        family: CacheFamily::Genmf,
+        cache_root: request.cache_dir.clone(),
+        name: "reference-set".to_owned(),
+    };
+    let release_preview = preview_retention_release(&release).unwrap();
+    let released = apply_retention_release(&release, &release_preview.apply_token).unwrap();
+    assert_eq!(released.outcome, "retention_reference_released");
+
+    let preview = preview_removal(&object).unwrap();
+    assert!(preview.eligible);
+    let active = materialize(&request, false, &CancellationToken::default()).unwrap();
+    assert!(
+        apply_removal(&object, &preview.apply_token).is_err(),
+        "an active verifier materialization lease must reject removal"
+    );
+    drop(active);
+
+    let preview = preview_removal(&object).unwrap();
+    let removed = apply_removal(&object, &preview.apply_token).unwrap();
+    assert_eq!(removed.outcome, "object_removed");
+    assert!(!request
+        .cache_dir
+        .join("genmf/v1")
+        .join(&entry.generation)
+        .exists());
+    let other = select_lifecycle_object(&request, "workbench/mmakefile")
+        .unwrap()
+        .0;
+    assert!(
+        request
+            .cache_dir
+            .join("genmf/v1")
+            .join(other.generation)
+            .is_dir(),
+        "removal must not affect another current selected generation"
     );
 }
 

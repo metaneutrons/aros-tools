@@ -1,6 +1,6 @@
 //! Bounded, non-creating cache status documents.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     observe_compiler_backends, observe_root, resolve_archive_cache_root,
@@ -25,6 +25,14 @@ pub const COMPILER_CACHE_STATUS_SCHEMA: &str = "aros-cache-compiler-status-v1";
 pub enum CacheCapability {
     /// Bounded passive observation.
     Status,
+    /// Claim an empty private root under an explicit ownership contract.
+    Prepare,
+    /// Query statistics through one prepared local compiler-cache backend.
+    Stats,
+    /// Preview or token-confirm backend counter reset in one owned namespace.
+    ResetStats,
+    /// Preview or token-confirm clear of one owned local compiler-cache namespace.
+    Clear,
     /// Bounded metadata projection of selected cache objects.
     List,
     /// Explicit verified cache-object acquisition.
@@ -33,6 +41,12 @@ pub enum CacheCapability {
     Verify,
     /// Explicit regeneration of a cache object from its selected inputs.
     Refresh,
+    /// Create a named immutable-object retention reference.
+    Keep,
+    /// Release a named retention reference without deleting cache data.
+    Release,
+    /// Preview or token-confirm exact-object removal.
+    Remove,
 }
 
 /// Side-effect contract of a versioned cache result.
@@ -69,7 +83,7 @@ const PASSIVE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
 };
 
 /// One cache family in the public resource-oriented interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheFamily {
     /// Compiler-result acceleration backends.
@@ -250,7 +264,13 @@ pub fn compiler_cache_status(
         operation: "compiler.status",
         observation: "passive",
         side_effects: PASSIVE_SIDE_EFFECTS,
-        capabilities: vec![CacheCapability::Status],
+        capabilities: vec![
+            CacheCapability::Status,
+            CacheCapability::Prepare,
+            CacheCapability::Stats,
+            CacheCapability::ResetStats,
+            CacheCapability::Clear,
+        ],
         requested_backend,
         selected_backend,
         selection_basis: "executable_availability_only",
@@ -272,7 +292,13 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
             CacheFamilyStatus {
                 family: CacheFamily::Compiler,
                 status: CacheFamilyStatusKind::Configured,
-                capabilities: vec![CacheCapability::Status],
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::Prepare,
+                    CacheCapability::Stats,
+                    CacheCapability::ResetStats,
+                    CacheCapability::Clear,
+                ],
                 root: None,
                 backends: observe_compiler_backends(),
                 detail: Some(
@@ -287,6 +313,9 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     CacheCapability::List,
                     CacheCapability::Fetch,
                     CacheCapability::Verify,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
                 ],
                 root: Some(archives),
                 backends: Vec::new(),
@@ -294,7 +323,24 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     "shared host and cross-compiler download cache; installed toolchains are outside this family",
                 ),
             },
-            unregistered(CacheFamily::Sources, "source and patch caches require an explicit reviewed lock and root; this command does not guess a producer or product cache"),
+            CacheFamilyStatus {
+                family: CacheFamily::Sources,
+                status: CacheFamilyStatusKind::RequiresExplicitSelection,
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::List,
+                    CacheCapability::Fetch,
+                    CacheCapability::Verify,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
+                ],
+                root: None,
+                backends: Vec::new(),
+                detail: Some(
+                    "source and patch caches require an explicit reviewed lock and root; keep retains one closed selection and remove is role-selected, preview-first and never root-wide",
+                ),
+            },
             CacheFamilyStatus {
                 family: CacheFamily::Cargo,
                 status: CacheFamilyStatusKind::RequiresExplicitSelection,
@@ -303,11 +349,14 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     CacheCapability::List,
                     CacheCapability::Fetch,
                     CacheCapability::Verify,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
                 ],
                 root: None,
                 backends: Vec::new(),
                 detail: Some(
-                    "Cargo vendor generations require explicit producer, tools, Cargo and managed-root inputs; global Cargo state is excluded",
+                    "Cargo vendor generations require explicit producer, tools, Cargo and managed-root inputs; keep retains one verified generation and remove is preview-first and exact; global Cargo state is excluded",
                 ),
             },
             CacheFamilyStatus {
@@ -318,26 +367,18 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     CacheCapability::List,
                     CacheCapability::Verify,
                     CacheCapability::Refresh,
+                    CacheCapability::Keep,
+                    CacheCapability::Release,
+                    CacheCapability::Remove,
                 ],
                 root: None,
                 backends: Vec::new(),
                 detail: Some(
-                    "immutable GenMF expansions require explicit source, interpreter and parent-cache roots; verifier reports and source/build trees remain outside this family",
+                    "immutable GenMF expansions require explicit source, interpreter and parent-cache roots; keep retains one closed current selection and remove is input-selected and preview-first; verifier reports and source/build trees remain outside this family",
                 ),
             },
         ],
     })
-}
-
-fn unregistered(family: CacheFamily, detail: &'static str) -> CacheFamilyStatus {
-    CacheFamilyStatus {
-        family,
-        status: CacheFamilyStatusKind::RequiresExplicitSelection,
-        capabilities: vec![CacheCapability::Status],
-        root: None,
-        backends: Vec::new(),
-        detail: Some(detail),
-    }
 }
 
 #[cfg(test)]

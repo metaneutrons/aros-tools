@@ -14,6 +14,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros board build` | clean | --clean | — | optional | 0 | false |  | — |  |
 | `aros board build` | verbose | -v, --verbose | — | optional | 0 | false |  | — |  |
 | `aros board build` | compiler_cache | --compiler-cache | — | optional | 1 | auto | auto, off, sccache, ccache | — |  |
+| `aros board build` | compiler_cache_dir | --compiler-cache-dir | — | optional | 1 |  |  | — |  |
 | `aros board build` | offline | --offline | — | optional | 0 | false |  | AROS_OFFLINE |  |
 | `aros board build` | require_fetch_checksums | --require-fetch-checksums | — | optional | 0 | false |  | AROS_FETCH_REQUIRE_CHECKSUMS |  |
 | `aros board build` | toolchain_dir | --toolchain-dir | — | optional | 1 |  |  | — |  |

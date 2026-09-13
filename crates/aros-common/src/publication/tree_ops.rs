@@ -3,8 +3,8 @@
 #[cfg(not(unix))]
 use super::unsupported_durability;
 use super::{
-    absolute_path, unix, validate_target_leaf, PortableOutputName, TreeContentCas,
-    TreeTraversalLimits,
+    absolute_path, unix, validate_target_leaf, FileIdentity, PortableOutputName, Sha256Digest,
+    TreeContentCas, TreeTraversalLimits,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,30 @@ pub fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         unix::ensure_directory_nofollow(&absolute_path(path)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(unsupported_durability())
+    }
+}
+
+/// Prove that an existing directory is a private, no-follow mutation
+/// namespace.
+///
+/// The directory and every non-sticky ancestor must not be group- or
+/// world-writable. This is the same ownership boundary required before a
+/// snapshot-bound destructive operation can create locks, receipts, or
+/// journals below the directory.
+///
+/// # Errors
+///
+/// Returns an error when the directory is missing, unsafe, a symlink, not a
+/// directory, or descriptor-relative durability is unavailable.
+pub fn validate_private_directory_nofollow(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::validate_private_directory_nofollow_impl(&absolute_path(path)?)
     }
     #[cfg(not(unix))]
     {
@@ -208,6 +232,50 @@ pub fn remove_tree_from_snapshot_nofollow(
     #[cfg(not(unix))]
     {
         let _ = (target, expected, limits);
+        Err(unsupported_durability())
+    }
+}
+
+/// Remove exactly one previously measured regular file through no-follow
+/// descriptor traversal.
+///
+/// The file must retain its exact inode identity, byte length and SHA-256
+/// digest through the final descriptor-relative unlink. The target must be
+/// inside the same private Unix trust boundary required by
+/// [`remove_tree_from_snapshot_nofollow`].
+///
+/// # Errors
+///
+/// Returns an I/O, unsafe-path, identity-race, content-mismatch, durability,
+/// unsupported-host, or byte-limit error. It never follows a link or removes
+/// a different pathname when the selected file changed after preview.
+pub fn remove_regular_file_from_snapshot_nofollow(
+    target: &Path,
+    expected_identity: FileIdentity,
+    expected_sha256: &Sha256Digest,
+    expected_size: u64,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    validate_target_leaf(target)?;
+    #[cfg(unix)]
+    {
+        unix::remove_regular_file_from_snapshot_impl(
+            &absolute_path(target)?,
+            expected_identity,
+            expected_sha256,
+            expected_size,
+            max_bytes,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            target,
+            expected_identity,
+            expected_sha256,
+            expected_size,
+            max_bytes,
+        );
         Err(unsupported_durability())
     }
 }

@@ -52,22 +52,38 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
 | `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
 | `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros cache compiler prepare` | Claim an empty private root for one local-only compiler-cache backend |
+| `aros cache compiler stats` | Query statistics only through one prepared AROS-owned local compiler-cache namespace |
+| `aros cache compiler reset-stats` | Preview or token-confirm reset of backend counters in one prepared local namespace |
+| `aros cache compiler clear` | Preview or token-confirm clear of one prepared AROS-owned local compiler-cache namespace |
 | `aros cache archives status` | Passively observe the shared compiler-archive cache root |
 | `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
 | `aros cache archives verify` | Verify one selected archive's declared byte identity only |
+| `aros cache archives keep` | Retain one selected archive under a named no-clobber reference |
+| `aros cache archives release` | Preview or token-confirm release of one named archive retention reference |
+| `aros cache archives remove` | Preview or token-confirm removal of one exact selected archive |
 | `aros cache cargo status` | Passively observe one explicit Cargo vendor-cache parent root |
 | `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
 | `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
 | `aros cache cargo verify` | Fully validate one selected Cargo vendor generation against its lockfile and receipt |
+| `aros cache cargo keep` | Retain one selected verified Cargo vendor generation under a named no-clobber reference |
+| `aros cache cargo release` | Preview or token-confirm release of one named Cargo retention reference |
+| `aros cache cargo remove` | Preview or token-confirm removal of one exact Cargo vendor generation |
 | `aros cache genmf status` | Passively observe one explicit GenMF cache parent root |
 | `aros cache genmf list` | Select current GenMF inputs and list immutable-generation metadata without reading expansions |
 | `aros cache genmf verify` | Fully validate immutable GenMF expansions selected by current source inputs |
 | `aros cache genmf refresh` | Regenerate current references and prove every existing immutable generation matches |
+| `aros cache genmf keep` | Retain every verified generation in the exact current GenMF selection |
+| `aros cache genmf release` | Preview or token-confirm release of one named GenMF retention reference |
+| `aros cache genmf remove` | Preview or token-confirm removal of one current input-selected immutable generation |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
 | `aros cache sources verify` | Measure selected source objects and verify every declared lock identity |
+| `aros cache sources keep` | Retain one fully verified reviewed source closure under a named reference |
+| `aros cache sources release` | Preview or token-confirm release of one named source retention reference |
+| `aros cache sources remove` | Preview or token-confirm removal of one role-selected source object |
 | `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
@@ -337,22 +353,38 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
 | `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
 | `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `cache compiler prepare` | No | Claim an empty private root for exactly one backend; it refuses foreign state and writes generated local configuration and an ownership marker |
+| `cache compiler stats` | No | Query one prepared local backend under a shared lifecycle lease; backend statistics may materialize local metadata |
+| `cache compiler reset-stats` | No | Preview reset of one prepared local backend; `--apply TOKEN` takes an exclusive lease and resets counters without selecting compiler outputs for deletion |
+| `cache compiler clear` | No | Preview the bounded data tree of one prepared local backend; `--apply TOKEN` takes an exclusive lease and clears only that namespace |
 | `cache archives status` | No | Passively observe the shared archive-cache root without enumerating archive objects |
 | `cache archives list` | No | Read direct metadata for one project-selected archive without hashing or downloading it |
 | `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
 | `cache archives verify` | No | Hash one project-selected archive and check only declared size/SHA-256 identity |
+| `cache archives keep` | No | Hash and retain one project-selected archive under a named reference; no download or deletion |
+| `cache archives release` | No | Preview one named retention receipt; `--apply TOKEN` releases it without deleting archive bytes |
+| `cache archives remove` | No | Hash and preview one exact project-selected archive, then require its short-lived token before deletion |
 | `cache cargo status` | No | Passively observe one explicit Cargo cache root without selecting a generation |
 | `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
 | `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
 | `cache cargo verify` | No | Rehash a selected vendor tree and verify its lockfile/template/receipt binding |
+| `cache cargo keep` | No | Revalidate and retain one selected vendor generation under a named reference; no Cargo invocation or deletion |
+| `cache cargo release` | No | Preview one named Cargo retention receipt; `--apply TOKEN` releases it without deleting generation data |
+| `cache cargo remove` | No | Preview one exact immutable vendor generation, then require its short-lived token before deletion |
 | `cache genmf status` | No | Passively observe one explicit GenMF cache parent root without selecting source inputs |
 | `cache genmf list` | No | Hash selected current source inputs and probe the selected Python version, then list final-generation metadata without reading expansion payloads |
 | `cache genmf verify` | No | Hash selected inputs, probe the selected Python version, and hash immutable expansion generations without invoking GenMF or changing cache state |
 | `cache genmf refresh` | No | Run upstream GenMF in a private Python environment, publish only missing complete generations, and reject byte mismatches |
+| `cache genmf keep` | No | Revalidate and retain every exact current GenMF expansion under one named reference; no generation or deletion occurs |
+| `cache genmf release` | No | Preview one named GenMF retention receipt; `--apply TOKEN` releases it without deleting expansion data |
+| `cache genmf remove` | No | Preview one exact source-input-selected immutable generation, then require its short-lived token before deletion |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
 | `cache sources verify` | No | Measure every selected cached object; strict declarations must match their lock |
+| `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
+| `cache sources release` | No | Preview one named source retention receipt; `--apply TOKEN` releases it without deleting source bytes |
+| `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
@@ -366,10 +398,10 @@ does not inventory every local, remote, or shared storage location.
 `aros ccache --stats` was removed because it never selected a different
 operation. Use bare `aros ccache` to query statistics.
 
-`aros ccache --clear` is also removed. The command had no safe shared
-ownership or preview/apply contract and could not provide an equivalent
-sccache operation. Use `aros cache compiler status` to inspect scope while the
-managed cache lifecycle is introduced; no public clear command exists yet.
+`aros ccache --clear` remains removed. Use the managed replacement instead:
+`aros cache compiler clear --backend sccache|ccache [--dir DIR]` first prints a
+short-lived preview token and mutates only when that token is returned with
+`--apply`.
 :::
 
 ## Cache inspection
@@ -391,15 +423,48 @@ explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
 
+`aros cache compiler prepare --backend sccache|ccache [--dir DIR]` is the only
+command that establishes compiler-cache ownership. Without `--dir`, it selects
+the backend's `AROS_HOME/cache/compiler/v1/` candidate. An explicit `DIR` must
+be absolute, private, and empty (or absent); existing cache bytes are never
+adopted. It generates a local-only configuration, data directory and ownership
+marker. The same invocation later revalidates that marker instead of
+overwriting it. For sccache, the resulting `<namespace>/server.sock` path must
+be at most 103 bytes, the cross-host Unix-domain-socket limit. Use a shorter
+`AROS_HOME` or explicit `--dir` when the CLI reports that constraint.
+
+`aros cache compiler stats --backend sccache|ccache [--dir DIR]` queries only
+that prepared namespace and holds a shared lifecycle lease. Backend statistics
+can create local metadata or start the namespace's private sccache server, so
+this is deliberately not a passive status command. `reset-stats` and `clear`
+are preview-first: invoke either without `--apply` to obtain a token valid for
+five minutes, inspect the selected root (and, for `clear`, the bounded measured
+data tree), then return the exact token using `--apply TOKEN`. Apply takes the
+same namespace's exclusive lifecycle lease. Reset asks the backend to reset
+counters only. ccache clear uses ccache's own controlled clear command;
+sccache clear stops only its private Unix-domain server, proves that its exact
+socket no longer accepts connections, descriptor-unlinks a stale socket name,
+then descriptor-removes the measured owned `data/` tree before recreating that
+empty directory. Foreign, remote, ambient, unprepared, changed, oversized, or
+symlinked storage is refused. `stats` and token-confirmed mutations require
+ccache 4.14.0 or later, or sccache 0.17.0 or later; passive status and namespace
+preparation do not invoke a backend and have no version requirement.
+
 `aros cache archives` manages only downloaded host/compiler archive bytes,
-never their installed payloads. `status` remains passive. `list`, `fetch`, and
-`verify` require `--project DIR` plus exactly one archive purpose:
+never their installed payloads. `status` remains passive. `list`, `fetch`,
+`verify`, `keep`, and `remove` require `--project DIR` plus exactly one archive
+purpose:
 `--host-compiler`, or `--toolchain --preset NAME`. `--host HOST` makes a
 cross-host prefetch explicit without executing a foreign binary. Archive
 verification is intentionally limited to declared size and SHA-256; extraction,
 payload-tree, receipt, provenance, and attestation checks remain installation
-responsibilities. See [cache inspection](/aros-tools/workflows/cache/) for
-offline and refresh semantics.
+responsibilities. `keep --name NAME` creates an immutable retention reference;
+`release --name NAME` is preview-first and accepts `--apply TOKEN` only after
+a short-lived exact-receipt preview; applying it removes that reference only.
+`remove` is likewise preview-first and accepts `--apply TOKEN` only after a
+short-lived exact-object preview.
+See [cache inspection](/aros-tools/workflows/cache/) for offline, refresh, and
+lifecycle semantics.
 
 `aros cache cargo` manages only immutable producer Cargo vendor generations,
 not a global Cargo home or collector build output. `status --dir DIR` is a
@@ -409,8 +474,14 @@ the absolute Cargo resolved from `PATH`. The selection binds the producer Rust
 pin, clean tools Git tree, manifest, lockfile and Cargo identity. `list` reads
 only its receipt; `fetch` is the bounded Cargo-resolution boundary and
 publishes only a complete, checksum-validated object; `verify` hashes the
-vendor tree and checks the receipt. The native producer consumes only that
-revalidated object through `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
+vendor tree and checks the receipt. `keep --name NAME` repeats that
+verification while holding the exclusive lifecycle lock, then publishes an
+immutable named reference. `release --dir DIR --name NAME` is preview-first
+and accepts `--apply TOKEN`; applying it removes only that reference. `remove`
+is preview-first and accepts `--apply TOKEN` only after a short-lived
+exact-generation preview. The native producer holds a shared lease
+while copying the revalidated object into its private runtime before invoking
+Cargo with `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
 for exact layout, isolation, and offline semantics.
 
 `aros cache sources` never guesses a cache root or a source closure. Every
@@ -422,6 +493,16 @@ snapshots and measures every selected object. `fetch` is the only source-cache
 network boundary: it verifies every existing object in the selected closure
 before considering transport, downloads only a missing object, and never
 refreshes, replaces or repairs a cache entry.
+
+`keep` verifies the whole selected closure while holding deterministic
+exclusive lifecycle leases, then records every object beneath one immutable
+named reference. `release` first shows an exact short-lived receipt preview
+and deletes that reference only with its `--apply TOKEN`. `remove` requires the
+same selector plus one semantic `--role`; it shows an exact short-lived preview
+first and accepts `--apply TOKEN` only if retention, content identity, and
+active reader/writer leases still permit removal. A native producer holds a
+shared lease over its complete source-lock closure through its upstream
+Configure and MetaMake consumption window.
 
 A product source-fetch plan uses the schema
 `aros-cache-source-fetch-plan-v1`. Each entry has a stable role, one direct
@@ -440,21 +521,20 @@ Product and board builds accept the same explicit launcher policy:
 ```sh
 aros build --compiler-cache auto
 aros build --compiler-cache off
-aros board build --profile rpi4-usb --compiler-cache ccache
+aros cache compiler prepare --backend ccache --dir /work/cache/aros-ccache
+aros board build --profile rpi4-usb --compiler-cache ccache \
+  --compiler-cache-dir /work/cache/aros-ccache --offline
 ```
 
-`auto` selects `sccache` first, then `ccache`, when the build is not offline;
-an explicitly requested missing backend fails instead of falling back. Offline
-`auto` deliberately configures no launcher because passive discovery cannot
-prove an external backend's effective storage local-only. Offline explicit
-`sccache` or `ccache` fails with `--compiler-cache off` as the safe remedy. The
-frontend passes the exact absolute selected executable to CMake for C and C++;
-CMake never performs a second `PATH` search. CMake has no supported
-language-specific compiler-launcher interface for ASM, so assembly remains a
-direct deterministic invocation rather than a falsely claimed cache hit. A
-later cache-lifecycle milestone will add owned compiler namespaces and
-controlled clearing. No build option currently assigns `CCACHE_DIR` or
-`SCCACHE_DIR`.
+`auto` selects the first available prepared AROS-owned namespace: `sccache`,
+then `ccache`. If neither namespace is prepared, it selects `off` without
+starting a backend. An explicit backend requires a prepared default namespace;
+`--compiler-cache-dir DIR` selects another prepared namespace and is valid only
+with `sccache` or `ccache`. The frontend removes every ambient `SCCACHE_*` and
+`CCACHE_*` setting, then passes the exact absolute launcher and generated local
+environment to CMake for C and C++. CMake never performs a second `PATH`
+search. CMake has no supported language-specific compiler-launcher interface
+for ASM, so assembly remains a direct deterministic invocation.
 
 `build` options:
 
@@ -465,7 +545,8 @@ controlled clearing. No build option currently assigns `CCACHE_DIR` or
 | `--jobs N`, `-j` | Positive parallel job count |
 | `--clean` | Delete this preset's build directory before configuring |
 | `--verbose`, `-v` | Verbose CMake configure messages |
-| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; offline `auto` disables the launcher and explicit backends fail until local storage can be verified |
+| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; only prepared AROS-owned local namespaces are eligible |
+| `--compiler-cache-dir DIR` | Prepared local namespace for an explicit `sccache` or `ccache` selection |
 | `--debug` | Unoptimized build with debug information; default is Release |
 | `--offline` | Require local toolchain/source inputs |
 | `--require-fetch-checksums` | Require source-authored SHA-256 coverage for fetched inputs |

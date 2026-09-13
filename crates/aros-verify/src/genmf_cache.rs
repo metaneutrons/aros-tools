@@ -15,7 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aros_cache::{
-    observe_root, resolve_explicit_root, CacheCapability, CacheSideEffects, RootObservation,
+    acquire_read_lease, acquire_write_lease, keep_many_validated, observe_root,
+    resolve_explicit_root, CacheCapability, CacheFamily, CacheLifecycleError, CacheObjectKind,
+    CacheObjectLease, CacheObjectRequest, CacheRetentionRecord, CacheSideEffects, RootObservation,
 };
 use aros_common::{
     bounded_output_detail, directory_entry_names_nofollow_bounded, ensure_directory_nofollow,
@@ -37,6 +39,7 @@ const MAX_EXPANSION_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_INTERPRETER_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RECEIPT_BYTES: u64 = 256 * 1024;
 const MAX_GENERATION_ENTRIES: usize = 2;
+const MAX_GENERATION_BYTES: u64 = MAX_EXPANSION_BYTES + MAX_RECEIPT_BYTES;
 
 /// Stable schema for an immutable GenMF expansion receipt.
 pub const GENMF_RECEIPT_SCHEMA: &str = "aros-genmf-cache-generation-v1";
@@ -48,6 +51,8 @@ pub const GENMF_LIST_SCHEMA: &str = "aros-cache-genmf-list-v1";
 pub const GENMF_VERIFY_SCHEMA: &str = "aros-cache-genmf-verify-v1";
 /// Stable schema for GenMF cache refresh.
 pub const GENMF_REFRESH_SCHEMA: &str = "aros-cache-genmf-refresh-v1";
+/// Stable schema for retaining the exact current GenMF selection.
+pub const GENMF_KEEP_SCHEMA: &str = "aros-cache-genmf-keep-v1";
 
 /// One failure at the GenMF cache authority boundary.
 #[derive(Debug, Error)]
@@ -111,7 +116,7 @@ pub struct GenmfCacheStatus {
     /// Hard side-effect contract.
     pub side_effects: CacheSideEffects,
     /// Available GenMF cache operations.
-    pub capabilities: [CacheCapability; 4],
+    pub capabilities: [CacheCapability; 7],
     /// Caller-selected cache-root observation.
     pub root: RootObservation,
     /// Immutable object layout below `root`.
@@ -161,7 +166,7 @@ pub struct GenmfExpansionIdentity {
 }
 
 /// Selected generation metadata, including diagnostic-only filesystem paths.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GenmfCacheSelection {
     /// Cache root after explicit root validation.
     pub cache_dir: PathBuf,
@@ -182,7 +187,7 @@ pub struct GenmfCacheSelection {
 }
 
 /// One exact GenMF expansion selection.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GenmfCacheEntrySelection {
     /// Deterministic immutable generation key.
     pub generation: String,
@@ -252,6 +257,25 @@ pub struct GenmfCacheGeneration {
     pub output_size: u64,
 }
 
+/// One verified GenMF generation held under an active lifecycle lease.
+///
+/// The lease is intentionally non-cloneable. Consumers must retain this value
+/// while reading `expansion.mk`, so a cooperating lifecycle removal cannot
+/// remove the exact generation after verification but before consumption.
+#[derive(Debug)]
+pub struct GenmfCacheGenerationLease {
+    generation: GenmfCacheGeneration,
+    _lease: CacheObjectLease,
+}
+
+impl GenmfCacheGenerationLease {
+    /// Verified immutable generation metadata protected by this lease.
+    #[must_use]
+    pub const fn generation(&self) -> &GenmfCacheGeneration {
+        &self.generation
+    }
+}
+
 /// Versioned verification result for every current GenMF selection.
 #[derive(Clone, Debug, Serialize)]
 pub struct GenmfCacheVerification {
@@ -268,12 +292,12 @@ pub struct GenmfCacheVerification {
 }
 
 /// One selected expansion materialized for verifier consumption.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct GenmfCacheMaterializedEntry {
     /// Exact selection that was either reused or rejected.
     pub selection: GenmfCacheEntrySelection,
     /// Verified immutable output or the isolated failure for this input.
-    pub result: Result<GenmfCacheGeneration, GenmfCacheMaterializationFailure>,
+    pub result: Result<GenmfCacheGenerationLease, GenmfCacheMaterializationFailure>,
 }
 
 /// A per-input failure retained by the verifier rather than hiding other results.
@@ -286,7 +310,7 @@ pub struct GenmfCacheMaterializationFailure {
 }
 
 /// Selection plus one materialization outcome for every discovered MMake input.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct GenmfCacheMaterialization {
     /// Exact source/interpreter/template selection used for this operation.
     pub selection: GenmfCacheSelection,
@@ -313,6 +337,9 @@ pub fn status(dir: &Path) -> Result<GenmfCacheStatus, GenmfCacheError> {
             CacheCapability::List,
             CacheCapability::Verify,
             CacheCapability::Refresh,
+            CacheCapability::Keep,
+            CacheCapability::Release,
+            CacheCapability::Remove,
         ],
         root: observe_root(root),
         object_layout: "genmf/v1/<selection-sha256>/{expansion.mk,receipt.json}",
@@ -432,6 +459,76 @@ pub fn verify(request: &GenmfCacheRequest) -> Result<GenmfCacheVerification, Gen
     })
 }
 
+/// Retain every fully verified generation in the current GenMF selection.
+///
+/// The single no-clobber retention reference binds the complete current
+/// source/template/generator/interpreter closure. The family verifier runs
+/// while every selected immutable generation has an exclusive lifecycle lock,
+/// so no cooperating refresh or removal can invalidate the receipt between
+/// verification and publication.
+///
+/// # Errors
+///
+/// Returns an error when the exact current selection changes, a generation is
+/// absent or altered, a reader or writer is active, or `name` is unsafe or
+/// already occupied. It never invokes GenMF or changes expansion bytes.
+pub fn retain(
+    request: &GenmfCacheRequest,
+    name: &str,
+) -> Result<(GenmfCacheSelection, CacheRetentionRecord), GenmfCacheError> {
+    let selection = select(request)?;
+    let objects = lifecycle_objects(&selection)?;
+    keep_many_validated(&objects, name, || {
+        let current = select(request).map_err(|error| lifecycle_validation_error(&error))?;
+        if current != selection {
+            return Err(CacheLifecycleError::validation(
+                "current GenMF source, template, generator or interpreter selection changed while retaining generations",
+            ));
+        }
+        for entry in &selection.entries {
+            verify_generation(
+                &selection.cache_dir,
+                entry,
+                GENMF_KEEP_SCHEMA,
+                "genmf.keep",
+            )
+            .map_err(|error| lifecycle_validation_error(&error))?;
+        }
+        Ok(())
+    })
+    .map(|retention| (selection, retention))
+    .map_err(|error| lifecycle_error(&error))
+}
+
+/// Select one exact current GenMF generation for preview/apply removal.
+///
+/// `source_relative_path` is an exact portable MMake input path from the
+/// current selection, such as `rom/mmakefile`. It is never inferred from a
+/// cache filename or searched across generations.
+///
+/// # Errors
+///
+/// Returns an error when the source/interpreter selection is invalid or the
+/// requested input is not one of its exact current entries.
+pub fn select_lifecycle_object(
+    request: &GenmfCacheRequest,
+    source_relative_path: &str,
+) -> Result<(GenmfCacheEntrySelection, CacheObjectRequest), GenmfCacheError> {
+    let selection = select(request)?;
+    let entry = selection
+        .entries
+        .iter()
+        .find(|entry| entry.source_relative_path == source_relative_path)
+        .cloned()
+        .ok_or_else(|| {
+            GenmfCacheError::input(
+                "the requested GenMF removal input is not part of the current exact selection",
+            )
+        })?;
+    let object = lifecycle_object(&selection.cache_dir, &entry)?;
+    Ok((entry, object))
+}
+
 /// Reuse verified expansions and create only missing immutable generations.
 ///
 /// Existing incomplete, unsafe, changed or otherwise invalid generations are
@@ -487,7 +584,16 @@ pub fn refresh(
     let results = selection
         .entries
         .par_iter()
-        .map(|entry| refresh_entry(&selection, entry, request.timeout, cancellation))
+        .map(|entry| {
+            let object = lifecycle_object(&selection.cache_dir, entry)?;
+            let deadline = Instant::now() + request.timeout;
+            let lease = acquire_write_lifecycle_lease(&object, deadline, cancellation)?;
+            let generation = refresh_entry(&selection, entry, deadline, cancellation)?;
+            lease
+                .revalidate()
+                .map_err(|error| lifecycle_error(&error))?;
+            Ok(generation)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(GenmfCacheVerification {
         schema: GENMF_REFRESH_SCHEMA,
@@ -761,6 +867,42 @@ fn generation_path(cache_dir: &Path, entry: &GenmfCacheEntrySelection) -> PathBu
         .join(&entry.generation)
 }
 
+fn lifecycle_object(
+    cache_dir: &Path,
+    entry: &GenmfCacheEntrySelection,
+) -> Result<CacheObjectRequest, GenmfCacheError> {
+    let root = checked_directory(cache_dir, "selected GenMF cache root")?;
+    Ok(CacheObjectRequest {
+        family: CacheFamily::Genmf,
+        cache_root: root,
+        relative_path: PathBuf::from(CACHE_NAMESPACE)
+            .join(CACHE_VERSION)
+            .join(&entry.generation),
+        kind: CacheObjectKind::Tree {
+            max_entries: MAX_GENERATION_ENTRIES,
+            max_regular_file_bytes: MAX_GENERATION_BYTES,
+        },
+    })
+}
+
+fn lifecycle_objects(
+    selection: &GenmfCacheSelection,
+) -> Result<Vec<CacheObjectRequest>, GenmfCacheError> {
+    selection
+        .entries
+        .iter()
+        .map(|entry| lifecycle_object(&selection.cache_dir, entry))
+        .collect()
+}
+
+fn lifecycle_error(error: &CacheLifecycleError) -> GenmfCacheError {
+    GenmfCacheError::state(format!("GenMF cache lifecycle operation rejected: {error}"))
+}
+
+fn lifecycle_validation_error(error: &GenmfCacheError) -> CacheLifecycleError {
+    CacheLifecycleError::validation(error.to_string())
+}
+
 fn generation_state(path: &Path) -> GenmfCacheEntryState {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -838,7 +980,7 @@ fn verify_generation(
 fn refresh_entry(
     selection: &GenmfCacheSelection,
     entry: &GenmfCacheEntrySelection,
-    timeout: Duration,
+    deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<GenmfCacheGeneration, GenmfCacheError> {
     let parent = selection
@@ -849,7 +991,6 @@ fn refresh_entry(
         GenmfCacheError::state("cannot create or validate the GenMF cache namespace")
     })?;
     let lock_path = parent.join(format!("{}.lock", entry.generation));
-    let deadline = Instant::now() + timeout;
     let _lock = acquire_generation_lock(&lock_path, deadline, cancellation)?;
     let final_path = generation_path(&selection.cache_dir, entry);
     let output = generate_output(selection, entry, deadline, cancellation)?;
@@ -891,19 +1032,65 @@ fn materialize_entry(
     timeout: Duration,
     refresh: bool,
     cancellation: &CancellationToken,
-) -> Result<GenmfCacheGeneration, GenmfCacheError> {
+) -> Result<GenmfCacheGenerationLease, GenmfCacheError> {
+    let object = lifecycle_object(&selection.cache_dir, entry)?;
     if refresh
         || generation_state(&generation_path(&selection.cache_dir, entry))
             == GenmfCacheEntryState::Missing
     {
-        return refresh_entry(selection, entry, timeout, cancellation);
+        let deadline = Instant::now() + timeout;
+        let lease = acquire_write_lifecycle_lease(&object, deadline, cancellation)?;
+        let generation = refresh_entry(selection, entry, deadline, cancellation)?;
+        lease
+            .revalidate()
+            .map_err(|error| lifecycle_error(&error))?;
+        return Ok(GenmfCacheGenerationLease {
+            generation,
+            _lease: lease,
+        });
     }
-    verify_generation(
+    let lease = acquire_read_lease(&object).map_err(|error| lifecycle_error(&error))?;
+    let generation = verify_generation(
         &selection.cache_dir,
         entry,
         GENMF_VERIFY_SCHEMA,
         "genmf.materialize",
-    )
+    )?;
+    lease
+        .revalidate()
+        .map_err(|error| lifecycle_error(&error))?;
+    Ok(GenmfCacheGenerationLease {
+        generation,
+        _lease: lease,
+    })
+}
+
+fn acquire_write_lifecycle_lease(
+    object: &CacheObjectRequest,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+) -> Result<CacheObjectLease, GenmfCacheError> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(GenmfCacheError::state(
+                "GenMF cache refresh cancelled while waiting for its lifecycle lease",
+            ));
+        }
+        match acquire_write_lease(object) {
+            Ok(lease) => return Ok(lease),
+            Err(CacheLifecycleError::Io { source, .. })
+                if source.kind() == ErrorKind::WouldBlock =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(GenmfCacheError::timeout(
+                        "GenMF cache refresh exceeded its lifecycle-lease deadline",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(lifecycle_error(&error)),
+        }
+    }
 }
 
 fn acquire_generation_lock(
@@ -927,10 +1114,11 @@ fn acquire_generation_lock(
                 }
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(_) => {
-                return Err(GenmfCacheError::state(
-                    "cannot acquire GenMF cache generation lock",
-                ))
+            Err(error) => {
+                return Err(GenmfCacheError::state(format!(
+                    "cannot acquire GenMF cache generation lock '{}': {error}",
+                    lock_path.display()
+                )))
             }
         }
     }

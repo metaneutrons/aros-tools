@@ -366,7 +366,7 @@ pub async fn install(
     let parent = envelope
         .parent()
         .ok_or_else(|| miette::miette!("toolchain destination has no parent"))?;
-    let payload_staging = extract_to_staging(&archive, parent, artifact.strip_components)?;
+    let payload_staging = extract_to_staging(archive.path(), parent, artifact.strip_components)?;
     verify_locked_install(payload_staging.path(), &lock, artifact, false)?;
     let envelope_staging = tempfile::Builder::new()
         .prefix(".envelope-")

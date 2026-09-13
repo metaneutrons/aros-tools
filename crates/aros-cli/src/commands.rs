@@ -8,7 +8,7 @@ use super::{
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
     CacheArchivesCommand, CacheCargoCommand, CacheCommand, CacheCompilerBackend,
     CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand, Commands, GoldenAction,
-    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
+    HostCompilerCommands, ManagedCompilerBackend, SdCommand, SourceCommand, ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -83,6 +83,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             clean,
             verbose,
             compiler_cache,
+            compiler_cache_dir,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -99,6 +100,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
                     clean,
                     verbose,
                     compiler_cache: build_compiler_cache(compiler_cache),
+                    compiler_cache_dir,
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,
@@ -164,6 +166,50 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::compiler_status(cache_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Prepare {
+                    backend,
+                    dir,
+                    format,
+                },
+        } => cache::compiler_prepare(managed_compiler_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Stats {
+                    backend,
+                    dir,
+                    format,
+                },
+        } => cache::compiler_stats(managed_compiler_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::ResetStats {
+                    backend,
+                    dir,
+                    apply,
+                    format,
+                },
+        } => cache::compiler_reset_stats(
+            managed_compiler_backend(backend),
+            dir,
+            apply.as_deref(),
+            format,
+        ),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Clear {
+                    backend,
+                    dir,
+                    apply,
+                    format,
+                },
+        } => cache::compiler_clear(
+            managed_compiler_backend(backend),
+            dir,
+            apply.as_deref(),
+            format,
+        ),
         CacheCommand::Sources {
             command: CacheSourcesCommand::Status { dir, format },
         } => cache::source_status(&dir, format),
@@ -193,6 +239,34 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::source_verify(selector, &dir, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Keep {
+                    selector,
+                    dir,
+                    name,
+                    format,
+                },
+        } => cache::source_keep(selector, &dir, &name, format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::source_release(&dir, &name, apply.as_deref(), format),
+        CacheCommand::Sources {
+            command:
+                CacheSourcesCommand::Remove {
+                    selector,
+                    dir,
+                    role,
+                    apply,
+                    format,
+                },
+        } => cache::source_remove(selector, &dir, &role, apply.as_deref(), format),
         CacheCommand::Archives {
             command: CacheArchivesCommand::Status { format },
         } => cache::archive_status(format),
@@ -211,6 +285,30 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Archives {
             command: CacheArchivesCommand::Verify { selector, format },
         } => cache::archive_verify(selector, format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::archive_keep(selector, &name, format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Release {
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::archive_release(&name, apply.as_deref(), format),
+        CacheCommand::Archives {
+            command:
+                CacheArchivesCommand::Remove {
+                    selector,
+                    apply,
+                    format,
+                },
+        } => cache::archive_remove(selector, apply.as_deref(), format),
         CacheCommand::Cargo {
             command: CacheCargoCommand::Status { dir, format },
         } => cache::cargo_status(&dir, format),
@@ -228,6 +326,31 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Cargo {
             command: CacheCargoCommand::Verify { selector, format },
         } => cache::cargo_verify(selector, format),
+        CacheCommand::Cargo {
+            command:
+                CacheCargoCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::cargo_keep(selector, &name, format),
+        CacheCommand::Cargo {
+            command:
+                CacheCargoCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::cargo_release(&dir, &name, apply.as_deref(), format),
+        CacheCommand::Cargo {
+            command:
+                CacheCargoCommand::Remove {
+                    selector,
+                    apply,
+                    format,
+                },
+        } => cache::cargo_remove(selector, apply.as_deref(), format),
         CacheCommand::Genmf {
             command: CacheGenmfCommand::Status { dir, format },
         } => cache::genmf_status(&dir, format),
@@ -240,6 +363,32 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Genmf {
             command: CacheGenmfCommand::Refresh { selector, format },
         } => cache::genmf_refresh(selector, format).await,
+        CacheCommand::Genmf {
+            command:
+                CacheGenmfCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::genmf_keep(selector, &name, format),
+        CacheCommand::Genmf {
+            command:
+                CacheGenmfCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::genmf_release(&dir, &name, apply.as_deref(), format),
+        CacheCommand::Genmf {
+            command:
+                CacheGenmfCommand::Remove {
+                    selector,
+                    source,
+                    apply,
+                    format,
+                },
+        } => cache::genmf_remove(selector, &source, apply.as_deref(), format),
     }
 }
 
@@ -248,6 +397,13 @@ const fn cache_backend(backend: CacheCompilerBackend) -> aros_cache::CompilerBac
         CacheCompilerBackend::Auto => aros_cache::CompilerBackendChoice::Auto,
         CacheCompilerBackend::Sccache => aros_cache::CompilerBackendChoice::Sccache,
         CacheCompilerBackend::Ccache => aros_cache::CompilerBackendChoice::Ccache,
+    }
+}
+
+const fn managed_compiler_backend(backend: ManagedCompilerBackend) -> aros_cache::CompilerBackend {
+    match backend {
+        ManagedCompilerBackend::Sccache => aros_cache::CompilerBackend::Sccache,
+        ManagedCompilerBackend::Ccache => aros_cache::CompilerBackend::Ccache,
     }
 }
 
@@ -406,6 +562,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
             clean,
             verbose,
             compiler_cache,
+            compiler_cache_dir,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -426,6 +583,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
                     clean,
                     verbose,
                     compiler_cache: build_compiler_cache(compiler_cache),
+                    compiler_cache_dir,
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,

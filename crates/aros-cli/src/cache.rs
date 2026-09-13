@@ -1,35 +1,53 @@
 //! Rendering adapter for the bounded cache-status commands.
 
+mod compiler;
+mod status;
+
+pub use compiler::{
+    clear as compiler_clear, prepare as compiler_prepare, reset_stats as compiler_reset_stats,
+    stats as compiler_stats, status as compiler_status,
+};
+pub use status::render_status as status;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::artifact::{archive_cache_path, obtain_archive, require_sha256, verify_archive};
+use crate::artifact::{
+    archive_cache_path, archive_cache_request, obtain_archive, open_verified_archive,
+    require_sha256,
+};
 use crate::host_compiler;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
 use crate::{CacheArchiveSelector, CacheCargoSelector, CacheGenmfSelector, CacheSourceSelector};
 use aros_cache::{
-    cache_status, compiler_cache_status, CacheCapability, CacheFamily, CacheFamilyStatus,
-    CacheSideEffects, CacheStatus, CompilerBackendChoice, CompilerCacheStatus, RootObservation,
+    apply_removal, apply_retention_release, cache_status, keep_validated, preview_removal,
+    preview_retention_release, CacheCapability, CacheFamily, CacheRemovalPreview,
+    CacheRemovalResult, CacheRetentionRecord, CacheRetentionRelease, CacheRetentionReleasePreview,
+    CacheSideEffects, RootObservation,
 };
 use aros_toolchain::{
     cargo_vendor::{
         cargo_vendor_status, fetch_vendor_generation, list_vendor_generation,
-        select_vendor_generation, verify_vendor_generation, CargoVendorGeneration,
-        CargoVendorRequest, CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
+        retain_vendor_generation, select_vendor_generation, select_vendor_lifecycle_object,
+        verify_vendor_generation, CargoVendorGeneration, CargoVendorRequest, CargoVendorSelection,
+        CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
         CARGO_VENDOR_VERIFY_SCHEMA,
     },
     source_cache::{
-        fetch_request, list as list_source_cache, status as source_cache_status, verify_request,
-        SourceCacheFetch, SourceCacheList, SourceCacheStatus, SourceCacheVerification,
+        fetch_request, list as list_source_cache, retain_request, select_lifecycle_object,
+        status as source_cache_status, verify_request, SourceCacheFetch, SourceCacheList,
+        SourceCacheStatus, SourceCacheVerification, SOURCE_CACHE_KEEP_SCHEMA,
     },
     source_cache_request::{read_selector, SourceCacheRequest},
     ContractError,
 };
 use aros_verify::genmf_cache::{
-    list as list_genmf_cache, refresh as refresh_genmf_cache, status as genmf_cache_status,
-    verify as verify_genmf_cache, GenmfCacheError, GenmfCacheList, GenmfCacheRequest,
-    GenmfCacheStatus, GenmfCacheVerification,
+    list as list_genmf_cache, refresh as refresh_genmf_cache, retain as retain_genmf_cache,
+    select_lifecycle_object as select_genmf_lifecycle_object, status as genmf_cache_status,
+    verify as verify_genmf_cache, GenmfCacheEntrySelection, GenmfCacheError, GenmfCacheList,
+    GenmfCacheRequest, GenmfCacheSelection, GenmfCacheStatus, GenmfCacheVerification,
+    GENMF_KEEP_SCHEMA,
 };
 use miette::Result;
 use serde::Serialize;
@@ -38,6 +56,28 @@ const ARCHIVE_STATUS_SCHEMA: &str = "aros-cache-archives-status-v1";
 const ARCHIVE_LIST_SCHEMA: &str = "aros-cache-archives-list-v1";
 const ARCHIVE_FETCH_SCHEMA: &str = "aros-cache-archives-fetch-v1";
 const ARCHIVE_VERIFY_SCHEMA: &str = "aros-cache-archives-verify-v1";
+const ARCHIVE_KEEP_SCHEMA: &str = "aros-cache-archives-keep-v1";
+const ARCHIVE_RELEASE_PREVIEW_SCHEMA: &str = "aros-cache-archives-release-preview-v1";
+const ARCHIVE_RELEASE_SCHEMA: &str = "aros-cache-archives-release-v1";
+const ARCHIVE_REMOVE_SCHEMA: &str = "aros-cache-archives-remove-v1";
+const CARGO_KEEP_SCHEMA: &str = "aros-cache-cargo-keep-v1";
+const CARGO_RELEASE_PREVIEW_SCHEMA: &str = "aros-cache-cargo-release-preview-v1";
+const CARGO_RELEASE_SCHEMA: &str = "aros-cache-cargo-release-v1";
+const CARGO_REMOVE_SCHEMA: &str = "aros-cache-cargo-remove-v1";
+const SOURCE_RELEASE_PREVIEW_SCHEMA: &str = "aros-cache-sources-release-preview-v1";
+const SOURCE_RELEASE_SCHEMA: &str = "aros-cache-sources-release-v1";
+const SOURCE_REMOVE_SCHEMA: &str = "aros-cache-sources-remove-v1";
+const GENMF_RELEASE_PREVIEW_SCHEMA: &str = "aros-cache-genmf-release-preview-v1";
+const GENMF_RELEASE_SCHEMA: &str = "aros-cache-genmf-release-v1";
+const GENMF_REMOVE_SCHEMA: &str = "aros-cache-genmf-remove-v1";
+const ARCHIVE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache archives fetch for the same declared host or toolchain identity; the command never redownloads or reconstructs archive bytes";
+const ARCHIVE_REMOVAL_OFFLINE_IMPACT: &str = "offline archive fetch and any consumer requiring these exact bytes will fail until the declared archive is restored and verified";
+const CARGO_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit online cache cargo fetch with the same producer, tools, Cargo and cache selection; the command never uses global Cargo state";
+const CARGO_REMOVAL_OFFLINE_IMPACT: &str = "offline cache cargo fetch and native producer execution requiring this generation will fail until an exact verified generation is restored";
+const SOURCE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache sources fetch with the same reviewed selector; the command never guesses an origin, redownloads automatically, or reconstructs source bytes";
+const SOURCE_REMOVAL_OFFLINE_IMPACT: &str = "offline source fetch and any producer or compatibility consumer requiring this exact role will fail until the reviewed closure is restored and verified";
+const GENMF_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache genmf refresh with the same source, template, generator and Python selection; the command never regenerates automatically or reconstructs an unselected generation";
+const GENMF_REMOVAL_OFFLINE_IMPACT: &str = "verification and reference-shape comparison requiring this exact generation will fail until the matching immutable expansion is refreshed and verified";
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -45,7 +85,7 @@ struct ArchiveCacheStatus {
     operation: &'static str,
     observation: &'static str,
     side_effects: CacheSideEffects,
-    capabilities: [CacheCapability; 4],
+    capabilities: [CacheCapability; 7],
     root: RootObservation,
     object_layout: &'static str,
     boundary: &'static str,
@@ -139,6 +179,69 @@ struct ArchiveCacheVerification {
 }
 
 #[derive(Serialize)]
+struct ArchiveCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct RetentionReleasePreviewReport {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    preview: CacheRetentionReleasePreview,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct RetentionReleaseAppliedReport {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    release: CacheRemovalResult,
+    boundary: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct RetentionReleaseRenderContract {
+    preview_schema: &'static str,
+    applied_schema: &'static str,
+    preview_operation: &'static str,
+    applied_operation: &'static str,
+    preview_boundary: &'static str,
+    applied_boundary: &'static str,
+    label: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct ArchiveCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: ArchiveSelection,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
 struct CargoVendorList {
     schema: &'static str,
     operation: &'static str,
@@ -149,39 +252,108 @@ struct CargoVendorList {
     boundary: &'static str,
 }
 
-/// Render the top-level passive cache overview.
-///
-/// # Errors
-///
-/// Returns an error only when an explicit cache root is invalid or result
-/// serialization fails. The observation never creates, scans or mutates cache
-/// state.
-pub fn status(format: ResultFormat) -> Result<()> {
-    let report = cache_status().map_err(|error| miette::miette!(error))?;
-    match format {
-        ResultFormat::Human => print_status_human(&report),
-        ResultFormat::Json => print_json(&report, "cache status")?,
-    }
-    Ok(())
+#[derive(Serialize)]
+struct CargoVendorRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
 }
 
-/// Render the passive compiler-cache backend projection.
-///
-/// # Errors
-///
-/// Returns an error only when result serialization fails. An unavailable
-/// backend is a successful status observation, never an implicit fallback.
-pub fn compiler_status(
-    backend: CompilerBackendChoice,
-    dir: Option<std::path::PathBuf>,
-    format: ResultFormat,
-) -> Result<()> {
-    let report = compiler_cache_status(backend, dir).map_err(|error| miette::miette!(error))?;
-    match format {
-        ResultFormat::Human => print_compiler_status_human(&report),
-        ResultFormat::Json => print_json(&report, "compiler cache status")?,
-    }
-    Ok(())
+#[derive(Serialize)]
+struct CargoVendorRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CargoVendorRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    role: String,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheEntrySelection,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheEntrySelection,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct SourceCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: SourceCacheRequest,
+    role: String,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
 }
 
 /// Render the passive observation of one explicit source-cache root.
@@ -273,6 +445,125 @@ pub fn source_verify(
     Ok(())
 }
 
+/// Retain a fully verified reviewed source closure under one named reference.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when a selected object is
+/// missing, unsafe, changed, actively consumed, or cannot be retained under
+/// the supplied portable name. The command never downloads, replaces or
+/// deletes source bytes.
+pub fn source_keep(
+    selector: CacheSourceSelector,
+    dir: &Path,
+    name: &str,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = source_request(selector)?;
+    let retention = retain_request(dir, &request, name).map_err(|error| contract_error(&error))?;
+    let report = SourceCacheRetention {
+        schema: SOURCE_CACHE_KEEP_SCHEMA,
+        operation: "sources.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection: request,
+        retention,
+        boundary: "keep verifies and retains every exact role in one reviewed source closure under a no-clobber named reference; it neither downloads, replaces, nor deletes source bytes",
+    };
+    match format {
+        ResultFormat::Human => print_source_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "source cache keep")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm release of one named source-cache retention reference.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when the root or receipt is
+/// missing, unsafe, substituted or malformed.
+pub fn source_release(
+    dir: &Path,
+    name: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    render_retention_release(
+        &CacheRetentionRelease {
+        family: CacheFamily::Sources,
+        cache_root: dir.to_path_buf(),
+        name: name.to_owned(),
+        },
+        apply_token,
+        format,
+        RetentionReleaseRenderContract {
+            preview_schema: SOURCE_RELEASE_PREVIEW_SCHEMA,
+            applied_schema: SOURCE_RELEASE_SCHEMA,
+            preview_operation: "sources.release.preview",
+            applied_operation: "sources.release.apply",
+            preview_boundary: "release preview measures one named source retention receipt without enumerating or changing source-cache bytes; applying its exact short-lived token removes only that receipt",
+            applied_boundary: "release removes one named source retention receipt only; it never enumerates or deletes source-cache bytes",
+            label: "source cache retention release",
+        },
+    )
+}
+
+/// Preview or token-confirm removal of one role-selected source object.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic when the role is not selected by
+/// the reviewed closure, the object is unsafe/changed, retention blocks it, or
+/// an active reader or writer lease prevents removal.
+pub fn source_remove(
+    selector: CacheSourceSelector,
+    dir: &Path,
+    role: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = source_request(selector)?;
+    let object =
+        select_lifecycle_object(dir, &request, role).map_err(|error| contract_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = SourceCacheRemovalApplied {
+            schema: SOURCE_REMOVE_SCHEMA,
+            operation: "sources.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection: request,
+            role: role.to_owned(),
+            removal,
+            recoverability: SOURCE_REMOVAL_RECOVERABILITY,
+            offline_impact: SOURCE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the direct object selected by one reviewed semantic role after token, retention, reader/writer lease, identity and content bindings still match; no source-cache root scan occurs",
+        };
+        match format {
+            ResultFormat::Human => print_source_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "source cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = SourceCacheRemovalPreview {
+            schema: SOURCE_REMOVE_SCHEMA,
+            operation: "sources.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection: request,
+            role: role.to_owned(),
+            preview,
+            recoverability: SOURCE_REMOVAL_RECOVERABILITY,
+            offline_impact: SOURCE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures only the direct object selected by one reviewed semantic role and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_source_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "source cache remove preview")?,
+        }
+    }
+    Ok(())
+}
+
 /// Render a passive observation of the caller-selected Cargo cache root.
 ///
 /// # Errors
@@ -338,6 +629,117 @@ pub fn cargo_verify(selector: CacheCargoSelector, format: ResultFormat) -> Resul
     match format {
         ResultFormat::Human => print_cargo_generation_human(&report, false),
         ResultFormat::Json => print_json(&report, "cargo cache verify")?,
+    }
+    Ok(())
+}
+
+/// Retain one verified Cargo vendor generation under a named no-clobber
+/// reference.
+///
+/// # Errors
+///
+/// Returns a structured selection, vendor-integrity or lifecycle diagnostic.
+/// The selected generation is revalidated while its exclusive lifecycle lock
+/// is held; this command neither resolves dependencies nor changes bytes.
+pub fn cargo_keep(selector: CacheCargoSelector, name: &str, format: ResultFormat) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let (selection, retention) =
+        retain_vendor_generation(&request, name).map_err(|error| contract_error(&error))?;
+    let report = CargoVendorRetention {
+        schema: CARGO_KEEP_SCHEMA,
+        operation: "cargo.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep retains one fully verified immutable Cargo vendor generation under a named reference; it never resolves dependencies, rewrites Cargo inputs, replaces data, or deletes bytes",
+    };
+    match format {
+        ResultFormat::Human => print_cargo_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "cargo cache keep")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm release of one named Cargo vendor retention reference.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic for an invalid root, name or
+/// receipt. It cannot enumerate or remove Cargo generations.
+pub fn cargo_release(
+    dir: &Path,
+    name: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    render_retention_release(
+        &CacheRetentionRelease {
+        family: CacheFamily::Cargo,
+        cache_root: dir.to_owned(),
+        name: name.to_owned(),
+        },
+        apply_token,
+        format,
+        RetentionReleaseRenderContract {
+            preview_schema: CARGO_RELEASE_PREVIEW_SCHEMA,
+            applied_schema: CARGO_RELEASE_SCHEMA,
+            preview_operation: "cargo.release.preview",
+            applied_operation: "cargo.release.apply",
+            preview_boundary: "release preview measures one named Cargo retention receipt without inspecting or changing a vendor generation; applying its exact short-lived token removes only that receipt",
+            applied_boundary: "release removes one named retention receipt only; it neither inspects nor deletes Cargo vendor generations",
+            label: "Cargo vendor retention release",
+        },
+    )
+}
+
+/// Preview or token-confirm removal of one exact Cargo vendor generation.
+///
+/// # Errors
+///
+/// Returns a structured selection or lifecycle diagnostic. Without `apply`,
+/// it only emits a five-minute preview. With the exact token, removal
+/// remeasures the selected tree under an exclusive lifecycle lock.
+pub fn cargo_remove(
+    selector: CacheCargoSelector,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let (selection, object) =
+        select_vendor_lifecycle_object(&request).map_err(|error| contract_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = CargoVendorRemovalApplied {
+            schema: CARGO_REMOVE_SCHEMA,
+            operation: "cargo.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            recoverability: CARGO_REMOVAL_RECOVERABILITY,
+            offline_impact: CARGO_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the preview-bound immutable Cargo generation; it never clears a parent root, global CARGO_HOME, user Cargo credentials, or an unselected generation",
+        };
+        match format {
+            ResultFormat::Human => print_cargo_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "cargo cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = CargoVendorRemovalPreview {
+            schema: CARGO_REMOVE_SCHEMA,
+            operation: "cargo.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            recoverability: CARGO_REMOVAL_RECOVERABILITY,
+            offline_impact: CARGO_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures one exact immutable Cargo generation and reports retained or active-use blockers; it never removes data or scans a cache root",
+        };
+        match format {
+            ResultFormat::Human => print_cargo_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "cargo cache remove preview")?,
+        }
     }
     Ok(())
 }
@@ -423,6 +825,118 @@ pub async fn genmf_refresh(selector: CacheGenmfSelector, format: ResultFormat) -
     Ok(())
 }
 
+/// Retain the complete current verified GenMF selection under one name.
+///
+/// # Errors
+///
+/// Returns a source, interpreter, cache-integrity or lifecycle diagnostic. The
+/// full source/template/generator/interpreter closure is reselected and every
+/// immutable expansion reverified while exclusive lifecycle locks are held.
+/// It does not invoke GenMF or change expansion bytes.
+pub fn genmf_keep(selector: CacheGenmfSelector, name: &str, format: ResultFormat) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let (selection, retention) =
+        retain_genmf_cache(&request, name).map_err(|error| genmf_error(&error))?;
+    let report = GenmfCacheRetention {
+        schema: GENMF_KEEP_SCHEMA,
+        operation: "genmf.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep retains every fully verified immutable expansion in the exact current GenMF source/template/generator/interpreter closure under one named reference; it never invokes GenMF, replaces data, or deletes bytes",
+    };
+    match format {
+        ResultFormat::Human => print_genmf_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache keep")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm release of one named GenMF retention reference.
+///
+/// # Errors
+///
+/// Returns a lifecycle diagnostic when the root or named receipt is absent,
+/// unsafe, malformed, or bound to a different cache family.
+pub fn genmf_release(
+    dir: &Path,
+    name: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    render_retention_release(
+        &CacheRetentionRelease {
+        family: CacheFamily::Genmf,
+        cache_root: dir.to_path_buf(),
+        name: name.to_owned(),
+        },
+        apply_token,
+        format,
+        RetentionReleaseRenderContract {
+            preview_schema: GENMF_RELEASE_PREVIEW_SCHEMA,
+            applied_schema: GENMF_RELEASE_SCHEMA,
+            preview_operation: "genmf.release.preview",
+            applied_operation: "genmf.release.apply",
+            preview_boundary: "release preview measures one named GenMF retention receipt without enumerating, regenerating or changing expansion bytes; applying its exact short-lived token removes only that receipt",
+            applied_boundary: "release removes one named GenMF retention receipt only; it never enumerates, regenerates, or removes expansion bytes",
+            label: "GenMF cache retention release",
+        },
+    )
+}
+
+/// Preview or token-confirm removal of one source-selected GenMF generation.
+///
+/// # Errors
+///
+/// Returns a source, interpreter, selection or lifecycle diagnostic. The
+/// requested input must be part of the current exact selection; the command
+/// never enumerates a cache root or removes an unselected generation.
+pub fn genmf_remove(
+    selector: CacheGenmfSelector,
+    source_relative_path: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let (selection, object) = select_genmf_lifecycle_object(&request, source_relative_path)
+        .map_err(|error| genmf_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = GenmfCacheRemovalApplied {
+            schema: GENMF_REMOVE_SCHEMA,
+            operation: "genmf.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            recoverability: GENMF_REMOVAL_RECOVERABILITY,
+            offline_impact: GENMF_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the immutable generation selected by one current source-root-relative MMake input after token, retention, reader/writer lease, snapshot and payload bindings still match; it never scans, clears or prunes a GenMF cache root",
+        };
+        match format {
+            ResultFormat::Human => print_genmf_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "GenMF cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = GenmfCacheRemovalPreview {
+            schema: GENMF_REMOVE_SCHEMA,
+            operation: "genmf.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            recoverability: GENMF_REMOVAL_RECOVERABILITY,
+            offline_impact: GENMF_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures only the immutable generation selected by one current source-root-relative MMake input and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_genmf_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "GenMF cache remove preview")?,
+        }
+    }
+    Ok(())
+}
+
 /// Render the passive archive-cache root observation.
 ///
 /// # Errors
@@ -441,6 +955,9 @@ pub fn archive_status(format: ResultFormat) -> Result<()> {
             CacheCapability::List,
             CacheCapability::Fetch,
             CacheCapability::Verify,
+            CacheCapability::Keep,
+            CacheCapability::Release,
+            CacheCapability::Remove,
         ],
         root: archive_root_observation()?,
         object_layout: "downloads/sha256/<archive-sha256>.tar.xz",
@@ -525,11 +1042,12 @@ pub async fn archive_fetch(
 /// object. Verification does not extract or install an archive.
 pub fn archive_verify(selector: CacheArchiveSelector, format: ResultFormat) -> Result<()> {
     let selection = archive_selection(selector)?;
-    verify_archive(
-        &selection.cache_path,
-        &selection.sha256,
-        selection.expected_size,
-    )?;
+    let archive = open_verified_archive(&selection.sha256, selection.expected_size)?;
+    if archive.path() != selection.cache_path {
+        return Err(miette::miette!(
+            "selected archive cache path changed while opening its lifecycle lease"
+        ));
+    }
     let report = ArchiveCacheVerification {
         schema: ARCHIVE_VERIFY_SCHEMA,
         operation: "archives.verify",
@@ -546,6 +1064,127 @@ pub fn archive_verify(selector: CacheArchiveSelector, format: ResultFormat) -> R
     match format {
         ResultFormat::Human => print_archive_verify_human(&report),
         ResultFormat::Json => print_json(&report, "archive cache verify")?,
+    }
+    Ok(())
+}
+
+/// Create a named no-clobber retention reference for one selected archive.
+///
+/// # Errors
+///
+/// Returns an error for an invalid selection/reference name, an unsafe cache
+/// root, an unavailable archive, or an active lifecycle writer.
+pub fn archive_keep(
+    selector: CacheArchiveSelector,
+    name: &str,
+    format: ResultFormat,
+) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let request = archive_cache_request(&selection.sha256, selection.expected_size)?;
+    let expected_path = request.cache_root.join(&request.relative_path);
+    if expected_path != selection.cache_path {
+        return Err(miette::miette!(
+            "selected archive cache path does not match its declared lifecycle identity"
+        ));
+    }
+    let retention = keep_validated(&request, name, || {
+        crate::artifact::verify_archive(&expected_path, &selection.sha256, selection.expected_size)
+            .map_err(|error| aros_cache::CacheLifecycleError::validation(error.to_string()))
+    })
+    .map_err(|error| miette::miette!(error))?;
+    let report = ArchiveCacheRetention {
+        schema: ARCHIVE_KEEP_SCHEMA,
+        operation: "archives.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep binds one declared content-addressed archive under an immutable named reference; it neither downloads, installs, replaces, nor deletes archive bytes",
+    };
+    match format {
+        ResultFormat::Human => print_archive_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "archive cache keep")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm release of one named archive retention reference.
+///
+/// # Errors
+///
+/// Returns an error for an invalid name, unsafe root, or a missing, malformed
+/// or substituted retention receipt.
+pub fn archive_release(name: &str, apply_token: Option<&str>, format: ResultFormat) -> Result<()> {
+    let cache_root = aros_cache::archive_cache_root().map_err(|error| miette::miette!(error))?;
+    render_retention_release(
+        &CacheRetentionRelease {
+        family: CacheFamily::Archives,
+        cache_root,
+        name: name.to_owned(),
+        },
+        apply_token,
+        format,
+        RetentionReleaseRenderContract {
+            preview_schema: ARCHIVE_RELEASE_PREVIEW_SCHEMA,
+            applied_schema: ARCHIVE_RELEASE_SCHEMA,
+            preview_operation: "archives.release.preview",
+            applied_operation: "archives.release.apply",
+            preview_boundary: "release preview measures one named archive retention receipt without enumerating or changing archive bytes; applying its exact short-lived token removes only that receipt",
+            applied_boundary: "release removes one named archive retention receipt only; it never enumerates or deletes archive bytes",
+            label: "archive cache retention release",
+        },
+    )
+}
+
+/// Preview or token-confirm removal of one exact selected archive.
+///
+/// Without `apply_token`, the command hashes the selected archive and emits a
+/// five-minute token-bound preview. Supplying that exact token repeats every
+/// binding check under an exclusive lifecycle lock before removal.
+///
+/// # Errors
+///
+/// Returns an error for invalid selection/token/root state, active readers or
+/// writers, changed archive bytes, or named retention blockers.
+pub fn archive_remove(
+    selector: CacheArchiveSelector,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let selection = archive_selection(selector)?;
+    let request = archive_cache_request(&selection.sha256, selection.expected_size)?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&request, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = ArchiveCacheRemovalApplied {
+            schema: ARCHIVE_REMOVE_SCHEMA,
+            operation: "archives.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            recoverability: ARCHIVE_REMOVAL_RECOVERABILITY,
+            offline_impact: ARCHIVE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the exact previewed archive after token, retention, reader/writer lease, identity and SHA-256 bindings still match; no root-wide scan occurs",
+        };
+        match format {
+            ResultFormat::Human => print_archive_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "archive cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&request).map_err(|error| miette::miette!(error))?;
+        let report = ArchiveCacheRemovalPreview {
+            schema: ARCHIVE_REMOVE_SCHEMA,
+            operation: "archives.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            recoverability: ARCHIVE_REMOVAL_RECOVERABILITY,
+            offline_impact: ARCHIVE_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview hashes one exact selected archive and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_archive_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "archive cache remove preview")?,
+        }
     }
     Ok(())
 }
@@ -585,6 +1224,98 @@ const fn archive_verify_side_effects() -> CacheSideEffects {
         network: false,
         backend_process: false,
         locks: false,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_keep_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: true,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: true,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_release_preview_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: false,
+    }
+}
+
+const fn lifecycle_release_apply_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: true,
+        hashes_payloads: false,
+    }
+}
+
+fn render_retention_release(
+    request: &CacheRetentionRelease,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+    contract: RetentionReleaseRenderContract,
+) -> Result<()> {
+    if let Some(apply_token) = apply_token {
+        let release = apply_retention_release(request, apply_token)
+            .map_err(|error| miette::miette!(error))?;
+        let report = RetentionReleaseAppliedReport {
+            schema: contract.applied_schema,
+            operation: contract.applied_operation,
+            side_effects: lifecycle_release_apply_side_effects(),
+            release,
+            boundary: contract.applied_boundary,
+        };
+        match format {
+            ResultFormat::Human => print_retention_release_applied_human(&report, contract.label),
+            ResultFormat::Json => print_json(&report, contract.label)?,
+        }
+    } else {
+        let preview = preview_retention_release(request).map_err(|error| miette::miette!(error))?;
+        let report = RetentionReleasePreviewReport {
+            schema: contract.preview_schema,
+            operation: contract.preview_operation,
+            side_effects: lifecycle_release_preview_side_effects(),
+            preview,
+            boundary: contract.preview_boundary,
+        };
+        match format {
+            ResultFormat::Human => print_retention_release_preview_human(&report, contract.label),
+            ResultFormat::Json => print_json(&report, contract.label)?,
+        }
+    }
+    Ok(())
+}
+
+const fn lifecycle_remove_preview_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: true,
+    }
+}
+
+const fn lifecycle_remove_apply_side_effects() -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: true,
+        network: false,
+        backend_process: false,
+        locks: true,
         hashes_payloads: true,
     }
 }
@@ -811,88 +1542,6 @@ fn genmf_error(error: &GenmfCacheError) -> miette::Report {
     miette::miette!(error.to_string())
 }
 
-fn print_status_human(report: &CacheStatus) {
-    aros_common::outputln!(
-        "Cache status (passive; no directories, locks, network, or backend processes are created):"
-    );
-    for family in &report.families {
-        aros_common::outputln!("  {}: {}", family.family.as_str(), family.status.as_str());
-        if let Some(root) = &family.root {
-            aros_common::outputln!(
-                "    root: {} ({}, {})",
-                root.root.path.display(),
-                root.root.origin.as_str(),
-                root.state.as_str()
-            );
-        }
-        print_backend_details(family);
-        if let Some(detail) = family.detail {
-            aros_common::outputln!("    boundary: {detail}");
-        }
-    }
-}
-
-fn print_backend_details(family: &CacheFamilyStatus) {
-    for backend in &family.backends {
-        let executable = backend.executable.as_ref().map_or_else(
-            || "not on PATH".to_owned(),
-            |path| path.display().to_string(),
-        );
-        aros_common::outputln!(
-            "    {}: {}; {}; configuration {}",
-            backend.backend.program(),
-            backend.state.as_str(),
-            executable,
-            backend.configuration_scope.as_str()
-        );
-        if !backend.configuration_sources.is_empty() {
-            let sources = backend
-                .configuration_sources
-                .iter()
-                .map(|source| source.variable)
-                .collect::<Vec<_>>()
-                .join(", ");
-            aros_common::outputln!("      environment provenance: {sources} (values redacted)");
-        }
-    }
-}
-
-fn print_compiler_status_human(report: &CompilerCacheStatus) {
-    let selected = report
-        .selected_backend
-        .map_or_else(|| "none".to_owned(), |backend| backend.program().to_owned());
-    aros_common::outputln!(
-        "Compiler cache status (passive; requested {}, selected {}):",
-        match report.requested_backend {
-            CompilerBackendChoice::Auto => "auto",
-            CompilerBackendChoice::Off => "off",
-            CompilerBackendChoice::Sccache => "sccache",
-            CompilerBackendChoice::Ccache => "ccache",
-        },
-        selected
-    );
-    if let Some(root) = &report.root {
-        aros_common::outputln!(
-            "  candidate root: {} ({}, {}; status only, not applied)",
-            root.root.path.display(),
-            root.root.origin.as_str(),
-            root.state.as_str(),
-        );
-    }
-    let family = CacheFamilyStatus {
-        family: aros_cache::CacheFamily::Compiler,
-        status: aros_cache::CacheFamilyStatusKind::Configured,
-        capabilities: vec![aros_cache::CacheCapability::Status],
-        root: None,
-        backends: report.backends.clone(),
-        detail: Some(
-            "no backend process or configuration file was queried; storage scope remains uninspected",
-        ),
-    };
-    print_backend_details(&family);
-    aros_common::outputln!("  boundary: {}", family.detail.unwrap());
-}
-
 fn print_source_status_human(report: &SourceCacheStatus) {
     aros_common::outputln!(
         "Source cache status (passive): {} ({}, {})",
@@ -900,6 +1549,7 @@ fn print_source_status_human(report: &SourceCacheStatus) {
         report.root.root.origin.as_str(),
         report.root.state.as_str()
     );
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
 }
 
 fn print_source_list_human(report: &SourceCacheList) {
@@ -958,6 +1608,78 @@ fn print_source_verify_human(report: &SourceCacheVerification) {
     }
 }
 
+fn print_source_retention_human(report: &SourceCacheRetention) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_retention_release_preview_human(report: &RetentionReleasePreviewReport, label: &str) {
+    aros_common::outputln!("{label} preview:");
+    aros_common::outputln!("  root: {}", report.preview.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.preview.relative_path);
+    aros_common::outputln!(
+        "  retained objects: {}",
+        report.preview.retained_object_count
+    );
+    aros_common::outputln!("  expires: {}", report.preview.expires_unix_seconds);
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_retention_release_applied_human(report: &RetentionReleaseAppliedReport, label: &str) {
+    aros_common::outputln!("{label} applied:");
+    aros_common::outputln!("  root: {}", report.release.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.release.relative_path);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_removal_preview_human(report: &SourceCacheRemovalPreview) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  removal role: {}", report.role);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_removal_applied_human(report: &SourceCacheRemovalApplied) {
+    print_source_selection_human(&report.selection);
+    aros_common::outputln!("  removal role: {}", report.role);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_source_selection_human(request: &SourceCacheRequest) {
+    aros_common::outputln!(
+        "Source cache selection: {} (request {})",
+        request.kind.as_str(),
+        request.request_sha256
+    );
+    for entry in &request.entries {
+        aros_common::outputln!("  {}: {}", entry.role, entry.filename);
+    }
+}
+
 fn print_archive_status_human(report: &ArchiveCacheStatus) {
     aros_common::outputln!(
         "Compiler archive cache status (passive): {} ({}, {})",
@@ -966,7 +1688,7 @@ fn print_archive_status_human(report: &ArchiveCacheStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -978,7 +1700,7 @@ fn print_cargo_status_human(report: &CargoVendorStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1011,6 +1733,45 @@ fn print_cargo_generation_human(report: &CargoVendorGeneration, offline: bool) {
     }
 }
 
+fn print_cargo_retention_human(report: &CargoVendorRetention) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_removal_preview_human(report: &CargoVendorRemovalPreview) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_removal_applied_human(report: &CargoVendorRemovalApplied) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
 fn print_genmf_status_human(report: &GenmfCacheStatus) {
     aros_common::outputln!(
         "GenMF cache status (passive): {} ({}, {})",
@@ -1019,7 +1780,7 @@ fn print_genmf_status_human(report: &GenmfCacheStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, verify, refresh");
+    aros_common::outputln!("  operations: status, list, verify, refresh, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1053,6 +1814,50 @@ fn print_genmf_verification_human(report: &GenmfCacheVerification) {
             entry.output_sha256
         );
     }
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_retention_human(report: &GenmfCacheRetention) {
+    aros_common::outputln!(
+        "GenMF cache retention: {} selected immutable expansion(s)",
+        report.selection.entries.len()
+    );
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_removal_preview_human(report: &GenmfCacheRemovalPreview) {
+    aros_common::outputln!("  removal input: {}", report.selection.source_relative_path);
+    aros_common::outputln!("  generation: {}", report.selection.generation);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_removal_applied_human(report: &GenmfCacheRemovalApplied) {
+    aros_common::outputln!("  removal input: {}", report.selection.source_relative_path);
+    aros_common::outputln!("  generation: {}", report.selection.generation);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1099,6 +1904,45 @@ fn print_archive_verify_human(report: &ArchiveCacheVerification) {
     print_archive_selection_human(&report.selection);
     aros_common::outputln!("  verified: {}", report.verification_scope);
     aros_common::outputln!("  not verified: {}", report.not_verified.join("; "));
+}
+
+fn print_archive_retention_human(report: &ArchiveCacheRetention) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_removal_preview_human(report: &ArchiveCacheRemovalPreview) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  expires: {}", report.preview.expires_unix_seconds);
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_archive_removal_applied_human(report: &ArchiveCacheRemovalApplied) {
+    print_archive_selection_human(&report.selection);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_archive_selection_human(selection: &ArchiveSelection) {

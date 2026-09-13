@@ -14,7 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aros_cache::{
-    observe_root, resolve_explicit_root, CacheCapability, CacheSideEffects, RootObservation,
+    acquire_read_lease, acquire_write_lease, keep_validated, observe_root, resolve_explicit_root,
+    CacheCapability, CacheFamily, CacheLifecycleError, CacheObjectKind, CacheObjectLease,
+    CacheObjectRequest, CacheRetentionRecord, CacheSideEffects, RootObservation,
 };
 use aros_common::{
     create_unique_directory_nofollow, measure_tree_content_cas, publish_prepared_tree_noclobber,
@@ -27,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::cargo_vendor::{
     normalize_system_parent, open_existing_directory, read_cargo_lock, read_direct_regular,
     render_vendor_configuration, safe_leaf, validate_cargo_lock, validate_vendor_tree,
-    MAX_TEMPLATE_BYTES, VENDOR_DIRECTORY, VENDOR_PLACEHOLDER, VENDOR_TEMPLATE,
+    CARGO_VENDOR_MAX_ENTRIES, CARGO_VENDOR_MAX_TOTAL_BYTES, MAX_TEMPLATE_BYTES, VENDOR_DIRECTORY,
+    VENDOR_PLACEHOLDER, VENDOR_TEMPLATE,
 };
 use crate::filesystem::{open_directory, DIRECTORY};
 use crate::ContractError;
@@ -66,7 +69,7 @@ pub struct CargoVendorStatus {
     /// Hard side-effect contract.
     pub side_effects: CacheSideEffects,
     /// Supported explicit-generation operations.
-    pub capabilities: [CacheCapability; 4],
+    pub capabilities: [CacheCapability; 7],
     /// Observed caller-selected cache root.
     pub root: RootObservation,
     /// Namespaced immutable object layout below the root.
@@ -196,6 +199,32 @@ pub struct CargoVendorGeneration {
     pub configuration_template_sha256: Sha256Digest,
 }
 
+/// A verified Cargo vendor generation guarded by an active shared lifecycle
+/// lease.
+///
+/// Consumers retain this value until they have copied all required data into a
+/// private execution environment. Cooperating lifecycle cleanup therefore
+/// cannot remove or replace the selected generation during consumption.
+#[derive(Debug)]
+pub struct CargoVendorGenerationLease {
+    generation: CargoVendorGeneration,
+    _lease: CacheObjectLease,
+}
+
+impl CargoVendorGenerationLease {
+    /// Return the verified generation while retaining its lifecycle lease.
+    #[must_use]
+    pub const fn generation(&self) -> &CargoVendorGeneration {
+        &self.generation
+    }
+
+    /// Consume the lease after the caller has finished reading the generation.
+    #[must_use]
+    pub fn into_generation(self) -> CargoVendorGeneration {
+        self.generation
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CargoVendorReceipt {
@@ -233,6 +262,9 @@ pub fn cargo_vendor_status(cache_root: &Path) -> Result<CargoVendorStatus, Contr
             CacheCapability::List,
             CacheCapability::Fetch,
             CacheCapability::Verify,
+            CacheCapability::Keep,
+            CacheCapability::Release,
+            CacheCapability::Remove,
         ],
         root: observe_root(root),
         object_layout: "cargo/v1/<selection-sha256>/{cargo-vendor,cargo-vendor-config.toml,receipt.json}",
@@ -312,6 +344,97 @@ pub fn select_vendor_generation(
     })
 }
 
+/// Select the exact immutable vendor generation together with its lifecycle
+/// object identity.
+///
+/// The object is always one `cargo/v1/<selection-sha256>` tree below the
+/// caller-owned cache root. The lifecycle bounds deliberately match the
+/// consumer validation limits; no cleanup operation may inspect a larger tree
+/// than the native producer can consume.
+///
+/// # Errors
+///
+/// Returns the regular selection errors if any producer, tools, Cargo or cache
+/// input is invalid. It neither reads a generation nor takes a lifecycle lock.
+pub fn select_vendor_lifecycle_object(
+    request: &CargoVendorRequest,
+) -> Result<(CargoVendorSelection, CacheObjectRequest), ContractError> {
+    let selection = select_vendor_generation(request)?;
+    let cache_root = canonical_directory(&request.cache_dir, "selected Cargo cache root")?;
+    let object = CacheObjectRequest {
+        family: CacheFamily::Cargo,
+        cache_root,
+        relative_path: PathBuf::from(CARGO_CACHE_NAMESPACE)
+            .join(CARGO_CACHE_VERSION)
+            .join(&selection.generation),
+        kind: CacheObjectKind::Tree {
+            max_entries: CARGO_VENDOR_MAX_ENTRIES,
+            max_regular_file_bytes: CARGO_VENDOR_MAX_TOTAL_BYTES,
+        },
+    };
+    Ok((selection, object))
+}
+
+/// Open one verified Cargo vendor generation under a shared lifecycle lease.
+///
+/// The lease remains active until the returned value is dropped. Consumers
+/// must retain it through their complete cache read, normally until they have
+/// copied the generation into a private execution directory.
+///
+/// # Errors
+///
+/// Returns an environment failure when the selected generation is missing or
+/// invalid, or when a lifecycle writer/removal operation is already active.
+pub fn open_verified_vendor_generation(
+    request: &CargoVendorRequest,
+) -> Result<CargoVendorGenerationLease, ContractError> {
+    let (selection, object) = select_vendor_lifecycle_object(request)?;
+    let lease = acquire_read_lease(&object).map_err(|error| lifecycle_contract_error(&error))?;
+    let generation = object.cache_root.join(&object.relative_path);
+    let generation = verify_vendor_generation_at(&generation, &selection, "cargo.consume")?;
+    lease
+        .revalidate()
+        .map_err(|error| lifecycle_contract_error(&error))?;
+    Ok(CargoVendorGenerationLease {
+        generation,
+        _lease: lease,
+    })
+}
+
+/// Retain one selected Cargo vendor generation only after revalidating its
+/// producer, tools, lock and Cargo identity under the exclusive lifecycle
+/// lock.
+///
+/// # Errors
+///
+/// Returns an environment failure for an invalid current selection or a
+/// lifecycle failure for a busy, unsafe, missing or unretained object. A
+/// rejected generation never receives a retention receipt.
+pub fn retain_vendor_generation(
+    request: &CargoVendorRequest,
+    name: &str,
+) -> Result<(CargoVendorSelection, CacheRetentionRecord), ContractError> {
+    let (selection, object) = select_vendor_lifecycle_object(request)?;
+    let retention = keep_validated(&object, name, || {
+        let (current_selection, current_object) = select_vendor_lifecycle_object(request)
+            .map_err(|error| CacheLifecycleError::validation(error.to_string()))?;
+        if current_selection != selection
+            || current_object.cache_root != object.cache_root
+            || current_object.relative_path != object.relative_path
+        {
+            return Err(CacheLifecycleError::validation(
+                "selected Cargo vendor identity changed while waiting for the lifecycle lock",
+            ));
+        }
+        let generation = object.cache_root.join(&object.relative_path);
+        verify_vendor_generation_at(&generation, &selection, "cargo.keep")
+            .map_err(|error| CacheLifecycleError::validation(error.to_string()))?;
+        Ok(())
+    })
+    .map_err(|error| lifecycle_contract_error(&error))?;
+    Ok((selection, retention))
+}
+
 /// Passively list the exact generation selected by explicit producer, tools,
 /// Cargo and cache inputs.
 ///
@@ -354,9 +477,7 @@ pub fn list_vendor_generation(
 pub fn verify_vendor_generation(
     request: &CargoVendorRequest,
 ) -> Result<CargoVendorGeneration, ContractError> {
-    let selection = select_vendor_generation(request)?;
-    let generation = generation_path(&request.cache_dir, &selection)?;
-    verify_vendor_generation_at(&generation, &selection, "cargo.verify")
+    Ok(open_verified_vendor_generation(request)?.into_generation())
 }
 
 /// Populate one immutable Cargo vendor generation through the selected Cargo
@@ -379,14 +500,27 @@ pub fn fetch_vendor_generation(
     offline: bool,
     cancellation: &CancellationToken,
 ) -> Result<CargoVendorGeneration, ContractError> {
-    let selection = select_vendor_generation(request)?;
-    let generation = generation_path(&request.cache_dir, &selection)?;
+    let (selection, lifecycle_object) = select_vendor_lifecycle_object(request)?;
+    let generation = lifecycle_object
+        .cache_root
+        .join(&lifecycle_object.relative_path);
     if offline {
-        return verify_vendor_generation_at(&generation, &selection, "cargo.fetch.offline");
+        let lease = acquire_read_lease(&lifecycle_object)
+            .map_err(|error| lifecycle_contract_error(&error))?;
+        let generation =
+            verify_vendor_generation_at(&generation, &selection, "cargo.fetch.offline")?;
+        lease
+            .revalidate()
+            .map_err(|error| lifecycle_contract_error(&error))?;
+        return Ok(generation);
     }
+    let lifecycle_lease = acquire_vendor_write_lease(&lifecycle_object, cancellation)?;
     let generation_parent = ensure_generation_parent(&request.cache_dir)?;
     let lock_path = generation_parent.join(format!("{}.lock", selection.generation));
     let _lock = acquire_generation_lock(&lock_path, cancellation)?;
+    lifecycle_lease
+        .revalidate()
+        .map_err(|error| lifecycle_contract_error(&error))?;
     if generation.exists() {
         return verify_vendor_generation_at(&generation, &selection, "cargo.fetch");
     }
@@ -395,10 +529,17 @@ pub fn fetch_vendor_generation(
     let result = populate_vendor_generation(&staging, &selection, cancellation);
     match result {
         Ok(_) => {
+            lifecycle_lease
+                .revalidate()
+                .map_err(|error| lifecycle_contract_error(&error))?;
             publish_prepared_tree_noclobber(&staging, &generation).map_err(|_| {
                 ContractError::state("cannot atomically publish verified Cargo vendor generation")
             })?;
-            verify_vendor_generation_at(&generation, &selection, "cargo.fetch")
+            let result = verify_vendor_generation_at(&generation, &selection, "cargo.fetch")?;
+            lifecycle_lease
+                .revalidate()
+                .map_err(|error| lifecycle_contract_error(&error))?;
+            Ok(result)
         }
         Err(error) => Err(error),
     }
@@ -430,6 +571,34 @@ fn acquire_generation_lock(
                     "cannot acquire Cargo vendor generation lock",
                 ))
             }
+        }
+    }
+}
+
+fn acquire_vendor_write_lease(
+    object: &CacheObjectRequest,
+    cancellation: &CancellationToken,
+) -> Result<CacheObjectLease, ContractError> {
+    let deadline = Instant::now() + CARGO_VENDOR_TIMEOUT;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(ContractError::state(
+                "Cargo vendor generation cancelled while waiting for its lifecycle lease",
+            ));
+        }
+        match acquire_write_lease(object) {
+            Ok(lease) => return Ok(lease),
+            Err(CacheLifecycleError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(ContractError::state(
+                        "timed out waiting for the selected Cargo vendor generation lifecycle lease",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(lifecycle_contract_error(&error)),
         }
     }
 }
@@ -536,6 +705,12 @@ fn generation_path(
         .join(CARGO_CACHE_NAMESPACE)
         .join(CARGO_CACHE_VERSION)
         .join(&selection.generation))
+}
+
+fn lifecycle_contract_error(error: &CacheLifecycleError) -> ContractError {
+    ContractError::environment(format!(
+        "Cargo vendor lifecycle cannot prove a safe selected generation: {error}"
+    ))
 }
 
 fn ensure_generation_parent(cache_dir: &Path) -> Result<PathBuf, ContractError> {

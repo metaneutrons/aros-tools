@@ -63,6 +63,71 @@ fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
 
 #[cfg(unix)]
 #[test]
+fn shared_advisory_readers_exclude_lifecycle_writers_until_the_last_reader_releases() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("cache/object.lock");
+
+    let first = AdvisoryFileLock::acquire_shared(&lock_path).unwrap();
+    let second = AdvisoryFileLock::acquire_shared(&lock_path).unwrap();
+    first.revalidate().unwrap();
+    second.revalidate().unwrap();
+    assert!(matches!(
+        AdvisoryFileLock::acquire(&lock_path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    drop(first);
+    assert!(matches!(
+        AdvisoryFileLock::acquire(&lock_path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    drop(second);
+
+    let writer = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    writer.revalidate().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_initial_advisory_lock_acquisition_has_one_holder() {
+    use std::sync::{Arc, Barrier};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("management/initial.lock");
+    let start = Arc::new(Barrier::new(3));
+    let attempted = Arc::new(Barrier::new(3));
+    let spawn_worker = || {
+        let path = lock_path.clone();
+        let start = Arc::clone(&start);
+        let attempted = Arc::clone(&attempted);
+        std::thread::spawn(move || {
+            start.wait();
+            let result = AdvisoryFileLock::acquire(&path);
+            attempted.wait();
+            result.and_then(|guard| guard.revalidate())
+        })
+    };
+    let workers = [spawn_worker(), spawn_worker()];
+    start.wait();
+    attempted.wait();
+
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap().map_err(|error| error.kind()))
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![std::io::ErrorKind::WouldBlock]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn advisory_lock_probe_is_read_only_and_distinguishes_live_ownership() {
     let temporary = tempfile::tempdir().unwrap();
     let lock_path = temporary.path().join("management/store.lock");
@@ -247,6 +312,22 @@ fn snapshot_bound_tree_removal_permits_a_sticky_writable_ancestor() {
 
 #[cfg(unix)]
 #[test]
+fn private_directory_validation_refuses_a_group_writable_root() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("managed-root");
+    std::fs::create_dir(&root).unwrap();
+    let mode = std::fs::metadata(&root).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode | 0o020)).unwrap();
+
+    let error = validate_private_directory_nofollow(&root).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[cfg(unix)]
+#[test]
 fn snapshot_bound_tree_removal_refuses_a_same_name_swap_before_unlink() {
     let temporary = tempfile::tempdir().unwrap();
     let owned = temporary.path().join("owned");
@@ -271,6 +352,121 @@ fn snapshot_bound_tree_removal_refuses_a_same_name_swap_before_unlink() {
     assert!(result.is_err());
     assert_eq!(std::fs::read(&payload).unwrap(), b"unapproved replacement");
     assert_eq!(std::fs::read(displaced).unwrap(), b"approved");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_removes_only_the_exact_verified_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+
+    remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .unwrap();
+
+    assert!(!target.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_changed_or_multiply_linked_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    std::fs::write(&target, b"changed").unwrap();
+
+    assert!(remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"changed");
+
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    let alias = temporary.path().join("outside-alias");
+    std::fs::hard_link(&target, &alias).unwrap();
+    let error = remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(std::fs::read(&target).unwrap(), b"changed");
+    assert_eq!(std::fs::read(alias).unwrap(), b"changed");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_a_same_name_swap_before_unlink() {
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    let displaced = temporary.path().join("displaced-approved");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    let displaced_for_action = displaced.clone();
+
+    let result = at_boundary(
+        "regular-remove-before-final-unlink",
+        |path| path.file_name() == Some(std::ffi::OsStr::new("owned-cache-entry")),
+        move |path| {
+            std::fs::rename(path, &displaced_for_action).unwrap();
+            std::fs::write(path, b"unapproved replacement").unwrap();
+        },
+        || {
+            remove_regular_file_from_snapshot_nofollow(
+                &target,
+                identity,
+                &sha256_bytes(&bytes),
+                bytes.len().try_into().unwrap(),
+                1024,
+            )
+        },
+    );
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"unapproved replacement");
+    assert_eq!(std::fs::read(displaced).unwrap(), b"approved");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_bound_regular_removal_refuses_a_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let target = temporary.path().join("owned-cache-entry");
+    let external = temporary.path().join("external-content");
+    std::fs::write(&target, b"approved").unwrap();
+    let (identity, bytes) = measure_regular_file(&target).unwrap().unwrap();
+    std::fs::write(&external, b"must-survive").unwrap();
+    std::fs::remove_file(&target).unwrap();
+    symlink(&external, &target).unwrap();
+
+    assert!(remove_regular_file_from_snapshot_nofollow(
+        &target,
+        identity,
+        &sha256_bytes(&bytes),
+        bytes.len().try_into().unwrap(),
+        1024,
+    )
+    .is_err());
+    assert!(target.is_symlink());
+    assert_eq!(std::fs::read(&external).unwrap(), b"must-survive");
 }
 
 #[cfg(unix)]

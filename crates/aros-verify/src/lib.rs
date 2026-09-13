@@ -887,7 +887,19 @@ fn run(args: &Args) -> std::result::Result<(), VerifyFailure> {
         args.refresh,
         Duration::from_secs(args.genmf_timeout_seconds),
     );
-    let shapes = collect_shapes(&expansion.expanded).map_err(coverage_read_failure)?;
+    // `expansion` retains a lifecycle lease for every path in this temporary
+    // vector until `collect_shapes` has completed all reference reads.
+    let expansion_paths: Vec<(String, PathBuf)> = expansion
+        .expanded
+        .iter()
+        .map(|(source, generation)| {
+            (
+                source.clone(),
+                generation.generation().generation_dir.join("expansion.mk"),
+            )
+        })
+        .collect();
+    let shapes = collect_shapes(&expansion_paths).map_err(coverage_read_failure)?;
     let expansion_failures: Vec<String> = expansion
         .failures
         .iter()
