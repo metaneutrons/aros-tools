@@ -245,11 +245,7 @@ enum Commands {
 
     /// Manage and inspect compiler cache (`ccache` / `sccache`)
     Ccache {
-        /// Show cache hit/miss statistics
-        #[arg(long, default_value_t = true)]
-        stats: bool,
-
-        /// Clear compilation cache
+        /// Clear cache entries only when the selected backend has a verified clear operation
         #[arg(long)]
         clear: bool,
     },
@@ -943,7 +939,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             DiagnosticStage::ToolResolution,
             "ccache",
             None,
-            "install ccache or sccache and verify that the selected executable can be started",
+            "install ccache or sccache and verify that the selected executable can be started; AROS leaves sccache entries unchanged because it has no verified clear operation here",
         ),
         Commands::Golden { action } => match action {
             GoldenAction::Capture { .. } => (

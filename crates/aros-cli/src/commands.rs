@@ -132,7 +132,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             evidence,
             memory,
         ),
-        Commands::Ccache { stats, clear } => compiler_cache(stats, clear),
+        Commands::Ccache { clear } => compiler_cache(clear),
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Completions { shell } => crate::completion_model::write(shell),
         Commands::Info { format } => info(repo_root, format),
@@ -533,25 +533,25 @@ fn test(
     }
 }
 
-fn compiler_cache(stats: bool, clear: bool) -> Result<()> {
-    if !stats && !clear {
-        return Ok(());
-    }
+fn compiler_cache(clear: bool) -> Result<()> {
     let cache = build::detected_compiler_cache()
         .ok_or_else(|| miette::miette!("neither sccache nor ccache is available on PATH"))?;
     if clear {
+        let clear_argument = cache.clear_argument().ok_or_else(|| {
+            miette::miette!(
+                "sccache cache clearing is unavailable: sccache -z resets statistics but does not remove cached entries; AROS left the selected sccache storage unchanged"
+            )
+        })?;
         observability::run_command(
-            Command::new(cache.program()).arg(cache.clear_argument()),
+            Command::new(cache.program()).arg(clear_argument),
             "compiler cache clear",
         )?;
         aros_common::outputln!("{CHECK} Compiler cache cleared.");
     }
-    if stats {
-        observability::run_command(
-            Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
-            "compiler cache statistics query",
-        )?;
-    }
+    observability::run_command(
+        Command::new(cache.program()).arg(build::CompilerCache::stats_argument()),
+        "compiler cache statistics query",
+    )?;
     Ok(())
 }
 
