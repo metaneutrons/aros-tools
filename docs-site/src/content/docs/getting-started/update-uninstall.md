@@ -77,5 +77,6 @@ Removing the tools does not automatically remove:
 - AROS source checkouts, build directories and retained evidence.
 
 Review those exact paths separately if you want to remove them.
-`aros clean` is a build-output command, not an uninstall or general
-state-purge command.
+`aros clean --preset NAME` or `aros clean --all` is a build-output command,
+not an uninstall or general state-purge command. Use `--dry-run` before either
+removal form when checking a workspace.

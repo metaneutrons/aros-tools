@@ -29,9 +29,9 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain import` | apply | --apply | — | no | 1 |  |  | — |  |
 | `aros toolchain import` | format | --format | — | no | 1 | human | human, json | — |  |
 | `aros toolchain install` | preset | -p, --preset | — | yes | 1 |  |  | — |  |
-| `aros toolchain install` | force | -f, --force | — | no | 0 | false |  | — |  |
-| `aros toolchain install` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
-| `aros toolchain install` | local | --local | — | no | 1 |  |  | — |  |
+| `aros toolchain install` | force | -f, --force | — | no | 0 | false |  | — | local, offline |
+| `aros toolchain install` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE | force |
+| `aros toolchain install` | local | --local | — | no | 1 |  |  | — | force |
 | `aros toolchain inventory` | store | --store | — | no | 1 |  |  | — |  |
 | `aros toolchain inventory` | max_entries | --max-entries | — | no | 1 | 10000 |  | — |  |
 | `aros toolchain inventory` | format | --format | — | no | 1 | human | human, json | — |  |

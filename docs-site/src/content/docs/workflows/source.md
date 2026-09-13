@@ -64,7 +64,7 @@ git submodule status --recursive
 From a clean upstream checkout on an attached branch:
 
 ```sh
-aros source sync --ref master
+aros source sync --branch master
 ```
 
 For AROS-NX, supply its canonical URL and branch explicitly:
@@ -72,7 +72,7 @@ For AROS-NX, supply its canonical URL and branch explicitly:
 ```sh
 aros source sync \
   --upstream https://github.com/metaneutrons/AROS-NX.git \
-  --ref main
+  --branch main
 ```
 
 Unlike initialization, synchronization expects a branch name such as `main`,

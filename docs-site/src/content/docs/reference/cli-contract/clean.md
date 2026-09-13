@@ -7,4 +7,6 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `aros clean` | preset | -p, --preset | — | no | 1 |  |  | — |  |
+| `aros clean` | preset | -p, --preset | — | no | 1 |  |  | — | all |
+| `aros clean` | all | --all | — | no | 0 | false |  | — | preset |
+| `aros clean` | dry_run | --dry-run | — | no | 0 | false |  | — |  |

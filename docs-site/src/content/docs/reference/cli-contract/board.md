@@ -29,8 +29,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros board deploy` | profile | --profile | — | yes | 1 |  |  | — |  |
 | `aros board deploy` | config | --config | — | no | 1 |  |  | AROS_BOARDS_FILE |  |
 | `aros board deploy` | artifact_dir | --artifact-dir | — | no | 1 |  |  | — |  |
-| `aros board deploy` | apply | --apply | — | no | 0 | false |  | — |  |
-| `aros board deploy` | dry_run | --dry-run | — | no | 0 | false |  | — |  |
+| `aros board deploy` | apply | --apply | — | no | 0 | false |  | — | dry_run |
+| `aros board deploy` | dry_run | --dry-run | — | no | 0 | false |  | — | apply |
 | `aros board doctor` | profile | --profile | — | yes | 1 |  |  | — |  |
 | `aros board doctor` | config | --config | — | no | 1 |  |  | AROS_BOARDS_FILE |  |
 | `aros board init` | profile | --profile | — | yes | 1 |  |  | — |  |
@@ -42,8 +42,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros board sd image` | config | --config | — | no | 1 |  |  | AROS_BOARDS_FILE |  |
 | `aros board sd image` | boot_bundle | --boot-bundle | — | yes | 1 |  |  | — |  |
 | `aros board sd image` | output | --output | — | yes | 1 |  |  | — |  |
-| `aros board sd image` | apply | --apply | — | no | 0 | false |  | — |  |
-| `aros board sd image` | dry_run | --dry-run | — | no | 0 | false |  | — |  |
+| `aros board sd image` | apply | --apply | — | no | 0 | false |  | — | dry_run |
+| `aros board sd image` | dry_run | --dry-run | — | no | 0 | false |  | — | apply |
 | `aros board sd scan` | artifact | --artifact | — | no | 1 |  |  | — |  |
 | `aros board sd unmount` | device | --device | — | no | 1 |  |  | — |  |
 | `aros board sd unmount` | apply | --apply | — | no | 0 | false |  | — | dry_run |

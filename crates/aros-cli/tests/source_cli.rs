@@ -916,6 +916,10 @@ fn source_commands_have_one_canonical_surface_without_aliases() {
     assert!(!old_upstream.status.success());
     assert!(String::from_utf8_lossy(&old_upstream.stderr).contains("unexpected argument"));
 
+    let removed_sync_ref = run(Command::new(aros()).args(["source", "sync", "--ref", "master"]));
+    assert!(!removed_sync_ref.status.success());
+    assert!(String::from_utf8_lossy(&removed_sync_ref.stderr).contains("unexpected argument"));
+
     let old_origin = run(Command::new(aros()).args([
         "source",
         "init",
@@ -1580,7 +1584,7 @@ fn real_aros_source_sync_runs_the_real_transpiler_when_explicitly_configured() {
         .env("AROS_BUILD_TOOLS_DIR", &tools)
         .args(["source", "sync", "--upstream"])
         .arg(&qualified_upstream)
-        .args(["--ref", "qualified"]));
+        .args(["--branch", "qualified"]));
     assert!(
         synchronized.status.success(),
         "{}",

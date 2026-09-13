@@ -106,7 +106,11 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             )
             .await
         }
-        Commands::Clean { preset } => clean(required_repo(repo_root)?, preset),
+        Commands::Clean {
+            preset,
+            all,
+            dry_run,
+        } => clean(required_repo(repo_root)?, preset, all, dry_run),
         Commands::Test {
             preset,
             timeout,
@@ -300,9 +304,8 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
             board: selection,
             artifact_dir,
             apply,
-            dry_run,
+            dry_run: _,
         } => {
-            exclusive_apply_dry_run(apply, dry_run)?;
             let board = load_board(&selection)?;
             crate::board::deploy(
                 &board,
@@ -339,9 +342,8 @@ fn sd(command: SdCommand) -> Result<()> {
             boot_bundle,
             output,
             apply,
-            dry_run,
+            dry_run: _,
         } => {
-            exclusive_apply_dry_run(apply, dry_run)?;
             let board = load_board(&selection)?;
             crate::board::create_sd_image(&board, &boot_bundle, &output, apply)
         }
@@ -379,29 +381,27 @@ fn source_command(command: SourceCommand, repo_root: Option<&Path>) -> Result<()
         }),
         SourceCommand::Sync {
             upstream,
-            upstream_ref,
+            upstream_branch,
             transpile,
         } => source::sync(
             required_repo(repo_root)?,
             &upstream,
-            &upstream_ref,
+            &upstream_branch,
             transpile,
         ),
     }
 }
 
-fn exclusive_apply_dry_run(apply: bool, dry_run: bool) -> Result<()> {
-    if apply && dry_run {
-        miette::bail!("--apply and --dry-run cannot be used together.");
-    }
-    Ok(())
-}
-
-fn clean(repo_root: &Path, preset: Option<String>) -> Result<()> {
-    let target_dir = match preset {
-        Some(preset) => build::build_dir(repo_root, &preset)?,
-        None => repo_root.join("build"),
+fn clean(repo_root: &Path, preset: Option<String>, all: bool, dry_run: bool) -> Result<()> {
+    let target_dir = match (preset, all) {
+        (Some(preset), false) => build::build_dir(repo_root, &preset)?,
+        (None, true) => repo_root.join("build"),
+        _ => miette::bail!("select exactly one cleanup scope with --preset NAME or --all"),
     };
+    if dry_run {
+        aros_common::outputln!("Dry run: would remove directory {}.", target_dir.display());
+        return Ok(());
+    }
     aros_common::outputln!("🧹 Removing directory {}...", target_dir.display());
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir).map_err(|error| {
@@ -781,14 +781,7 @@ fn load_board(selection: &BoardProfileSelection) -> Result<board::config::Board>
 
 #[cfg(test)]
 mod tests {
-    use super::{exclusive_apply_dry_run, test};
-
-    #[test]
-    fn apply_and_dry_run_are_mutually_exclusive() {
-        assert!(exclusive_apply_dry_run(true, true).is_err());
-        assert!(exclusive_apply_dry_run(true, false).is_ok());
-        assert!(exclusive_apply_dry_run(false, true).is_ok());
-    }
+    use super::test;
 
     #[test]
     fn boot_test_rejects_a_preset_path_before_reading_a_build_tree() {

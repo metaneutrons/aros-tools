@@ -56,7 +56,7 @@ digests needed for managed host-compiler installation.
 ## Keep source current
 
 ```sh
-aros source sync --ref master
+aros source sync --branch master
 ```
 
 The command requires an attached, clean branch and clean recursive submodules,

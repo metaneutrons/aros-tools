@@ -47,7 +47,7 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros source sync` | Validate and fast-forward a clean attached checkout from its reviewed upstream |
 | `aros install` | Publish one verified, extracted eight-program native suite atomically |
 | `aros build` | Configure the embedded CMake engine and build one target preset |
-| `aros clean` | Remove one selected build preset or the checkout's complete `build/` directory |
+| `aros clean` | Preview or remove exactly one selected preset, or explicitly the checkout's complete `build/` directory |
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
 | `aros ccache` | Inspect or explicitly clear the selected compiler cache |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
@@ -119,19 +119,33 @@ the safe entry stages and explains the required checkout/cache separation.
 | Command | Checkout | Behavior |
 | --- | --- | --- |
 | `source init PATH` | No | Clone into a new destination; `--upstream URL`, `--fork URL`, optional `--ref REF` |
-| `source sync` | Required | Validate a candidate and fast-forward a clean attached branch; `--upstream URL`, `--ref BRANCH`, `--no-transpile` |
+| `source sync` | Required | Validate a candidate and fast-forward a clean attached branch; `--upstream URL`, `--branch BRANCH`, `--no-transpile` |
 | `info` | Optional | Report host/state paths and any discovered target/toolchain contracts |
 | `install --source-bin DIR --prefix DIR` | No | Publish exactly eight pre-verified executable files without replacing existing programs |
 
 `source init --ref` requires a full branch/tag ref or exact commit OID and
 leaves HEAD detached, even for a branch ref. Omit it to use the clone's default
-branch. `source sync --ref` takes a branch name **without** `refs/heads/`
+branch. `source sync --branch` takes a branch name **without** `refs/heads/`
 and defaults to `master`. Both default to canonical upstream AROS unless
 explicitly changed. Only sync reads `AROS_UPSTREAM_URL`.
 
 Sync requires clean recursive submodules and checks ignored files as well.
 It never implicitly merges divergent history.
 See [source workflows](/aros-tools/workflows/source/).
+
+Every user-supplied relative filesystem path is interpreted from the directory
+where `aros` was invoked. Checkout-relative defaults remain checkout-relative;
+producer recipe members and board-config members keep the origins documented by
+their owning contracts. `aros` never changes its process working directory
+during repository discovery.
+
+## Explicit cleanup
+
+`aros clean` requires one scope: `--preset NAME` selects that preset's build
+directory, while `--all` selects only the checkout's `build/` directory. They
+are mutually exclusive. Add `--dry-run` to print the exact directory without
+removing anything. Cleanup never includes archives, logs outside that build
+tree, or installed toolchains.
 
 The native installer requires an existing absolute prefix and an input
 directory containing exactly the eight expected regular executable files. It

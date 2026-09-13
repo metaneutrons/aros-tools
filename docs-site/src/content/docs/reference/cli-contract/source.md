@@ -12,5 +12,5 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros source init` | fork | --fork | — | no | 1 |  |  | — |  |
 | `aros source init` | source_ref | --ref | — | no | 1 |  |  | — |  |
 | `aros source sync` | upstream | --upstream | — | no | 1 | https://github.com/aros-development-team/AROS.git |  | AROS_UPSTREAM_URL |  |
-| `aros source sync` | upstream_ref | --ref | — | no | 1 | master |  | — |  |
+| `aros source sync` | upstream_branch | --branch | — | no | 1 | master |  | — |  |
 | `aros source sync` | transpile | --no-transpile | — | no | 0 | true |  | — |  |

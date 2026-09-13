@@ -157,6 +157,103 @@ fn diagnostic_format_environment_has_the_documented_process_effect() {
     assert_eq!(diagnostic["diagnostics"][0]["code"], "AR0001");
 }
 
+#[test]
+fn installation_intent_conflicts_are_rejected_before_logging_or_repository_access() {
+    let temporary = tempfile::tempdir().expect("temporary invocation root");
+    let cases: &[&[&str]] = &[
+        &["setup", "--preset", "pc-x86_64", "--force"],
+        &["host-compiler", "install", "--force"],
+        &["toolchain", "install", "--preset", "pc-x86_64", "--force"],
+    ];
+    for (index, arguments) in cases.iter().enumerate() {
+        let log_file = temporary.path().join(format!("conflict-{index}.jsonl"));
+        let output = Command::new(aros())
+            .current_dir(temporary.path())
+            .env("AROS_OFFLINE", "true")
+            .arg("--log-file")
+            .arg(&log_file)
+            .args(*arguments)
+            .output()
+            .expect("installation conflict semantic case must execute");
+        let diagnostic = assert_failure(&output, "environment-selected offline conflict");
+        assert!(diagnostic.contains("cannot be used with"));
+        assert!(diagnostic.contains("--force"));
+        assert!(diagnostic.contains("--offline"));
+        assert!(
+            !diagnostic.contains("repository discovery"),
+            "an invocation conflict must precede repository discovery"
+        );
+        assert!(
+            !log_file.exists(),
+            "an invocation conflict must precede log-file creation"
+        );
+    }
+}
+
+fn create_checkout_markers(root: &Path) {
+    for directory in ["arch", "compiler", "rom", "nested"] {
+        fs::create_dir_all(root.join(directory)).expect("checkout marker directory");
+    }
+    for file in ["configure", "Makefile.in"] {
+        fs::write(root.join(file), "").expect("checkout marker file");
+    }
+}
+
+#[test]
+fn explicit_clean_scope_and_relative_log_file_keep_the_invocation_origin() {
+    let temporary = tempfile::tempdir().expect("temporary checkout root");
+    let checkout = temporary.path().join("AROS");
+    create_checkout_markers(&checkout);
+    let selected = checkout.join("build/pc-x86_64");
+    let preserved = checkout.join("build/other-preset");
+    let cache = checkout.join("cache/sentinel");
+    fs::create_dir_all(&selected).expect("selected build directory");
+    fs::create_dir_all(&preserved).expect("other build directory");
+    fs::create_dir_all(cache.parent().expect("cache parent")).expect("cache directory");
+    fs::write(selected.join("selected"), "remove").expect("selected build payload");
+    fs::write(preserved.join("preserved"), "keep").expect("preserved build payload");
+    fs::write(&cache, "keep").expect("cache sentinel");
+
+    let nested = checkout.join("nested");
+    let preview = Command::new(aros())
+        .current_dir(&nested)
+        .args(["clean", "--preset", "pc-x86_64", "--dry-run"])
+        .output()
+        .expect("clean preview semantic case must execute");
+    assert_success(&preview, "explicit clean preview");
+    assert!(String::from_utf8_lossy(&preview.stdout).contains(&selected.display().to_string()));
+    assert!(
+        selected.exists(),
+        "clean preview must not remove its target"
+    );
+
+    let log_file = nested.join("invocation.jsonl");
+    let applied = Command::new(aros())
+        .current_dir(&nested)
+        .args([
+            "--log-level",
+            "info",
+            "--log-file",
+            "invocation.jsonl",
+            "clean",
+            "--preset",
+            "pc-x86_64",
+        ])
+        .output()
+        .expect("explicit clean apply semantic case must execute");
+    assert_success(&applied, "explicit preset clean");
+    assert!(
+        !selected.exists(),
+        "selected build directory must be removed"
+    );
+    assert!(preserved.exists(), "other build presets must be preserved");
+    assert!(cache.exists(), "checkout caches must be preserved");
+    assert!(
+        log_file.is_file(),
+        "a relative log file must resolve from the invocation directory"
+    );
+}
+
 #[cfg(unix)]
 fn write_executable(path: &Path, contents: &[u8]) {
     use std::os::unix::fs::PermissionsExt as _;
