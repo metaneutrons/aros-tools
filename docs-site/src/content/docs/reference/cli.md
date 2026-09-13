@@ -314,9 +314,19 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `build` | Required | Configure the embedded CMake engine and build with Ninja |
 | `clean` | Required | Remove `build/<preset>` with `--preset`; otherwise remove all of `build/` |
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
-| `ccache` | No | Show statistics for discovered sccache/ccache; `--clear` clears that cache |
+| `ccache` | No | Show statistics for the discovered sccache/ccache; `--clear` only clears with ccache and otherwise fails without changing sccache |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
+
+`aros ccache` is the current legacy compiler-cache frontend. It prefers
+`sccache` when both backends are on `PATH`; otherwise it uses `ccache`. A
+statistics query asks the selected backend and can start an sccache server. It
+does not inventory every local, remote, or shared storage location.
+
+:::note[CLI change]
+`aros ccache --stats` was removed because it never selected a different
+operation. Use bare `aros ccache` to query statistics.
+:::
 
 `build` options:
 
@@ -346,8 +356,9 @@ recorded transpiler invocations under `build/`.
 :::caution[Build cleanup removes evidence too]
 `clean` and `build --clean` delete the selected build directory without an
 interactive confirmation. Preserve logs, SDK outputs, packages and boot evidence
-you need first. `ccache --clear` affects the selected compiler cache, not just
-one preset.
+you need first. `ccache --clear` affects the selected ccache storage, not just
+one preset. If sccache is selected, AROS rejects `--clear` before launching it:
+`sccache -z` resets counters but does not remove cached entries.
 :::
 
 ## Boards

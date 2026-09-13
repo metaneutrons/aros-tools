@@ -401,11 +401,14 @@ impl CompilerCache {
         }
     }
 
-    /// Argument which clears the selected cache.
-    pub const fn clear_argument(self) -> &'static str {
+    /// Verified legacy cache-entry clearing argument, when one exists.
+    ///
+    /// `sccache -z` only resets statistics. Returning `None` prevents the
+    /// frontend from representing that operation as deletion.
+    pub const fn clear_argument(self) -> Option<&'static str> {
         match self {
-            Self::Sccache => "-z",
-            Self::Ccache => "-C",
+            Self::Sccache => None,
+            Self::Ccache => Some("-C"),
         }
     }
 
@@ -430,7 +433,7 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 mod tests {
     use super::{
         build_dir, run, validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions,
-        CmakeDefinition,
+        CmakeDefinition, CompilerCache,
     };
 
     #[test]
@@ -456,6 +459,12 @@ mod tests {
             value: "/tmp/board.dtb".to_string(),
         };
         assert!(validate_cmake_definition(&definition).is_err());
+    }
+
+    #[test]
+    fn only_ccache_has_a_verified_legacy_clear_operation() {
+        assert_eq!(CompilerCache::Sccache.clear_argument(), None);
+        assert_eq!(CompilerCache::Ccache.clear_argument(), Some("-C"));
     }
 
     #[tokio::test]
