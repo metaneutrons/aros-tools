@@ -326,6 +326,10 @@ fn public_reference_preserves_the_current_board_native_lifecycle_and_installatio
         DIAGNOSTICS_REFERENCE.contains("`aros toolchain build` also exposes `AX0801`"),
         "the diagnostics reference must connect AX0801 to the public native build command"
     );
+    assert!(
+        CLI_REFERENCE.contains("older unreleased revisions accepted bare `aros clean`"),
+        "the cleanup reference must retain its explicit migration boundary"
+    );
 }
 
 #[test]

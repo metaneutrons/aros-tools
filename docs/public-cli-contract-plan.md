@@ -1,7 +1,7 @@
 # Public CLI contracts and continuously aligned documentation
 
 Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
-Decision state: proposed for review; implementation has not started.
+Decision state: CLI-M1 through CLI-M5 accepted; CLI-M6 integrated qualification is in progress.
 
 ## Outcome and boundaries
 
@@ -438,3 +438,8 @@ effect of closing this planning epic.
 process probes. Astro alignment is a per-slice requirement. Cache ownership
 remains with #139 except for the explicitly allocated parser/native-invariant
 slices whose evidence the cache plan may reuse.
+
+2026-09-13: CLI-M1 through CLI-M5 were accepted through #157, #158, #159,
+#160 and #161. The narrow CACHE-M1-A3 F05/F06 repair was merged in #163;
+CACHE-M1 and cache epic #139 remain open. CLI-M6 collects integrated final
+evidence without claiming either cache milestone complete.
