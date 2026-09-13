@@ -7,7 +7,7 @@ use aros_common::{DiagnosticCode, DiagnosticStage};
 
 use crate::cache_command::{
     CacheArchivesCommand, CacheCargoCommand, CacheCommand, CacheCompilerBackend,
-    CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand,
+    CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand, ManagedCompilerBackend,
 };
 
 /// Exact structured boundary returned for one cache lifecycle command.
@@ -70,6 +70,37 @@ pub fn cache_boundary(command: &CacheCommand) -> CacheLifecycleBoundary {
                 "set AROS_HOME to an absolute private state root, or pass an explicit empty private --dir; preparation refuses foreign state"
             },
         ),
+        CacheCommand::Compiler {
+            command: CacheCompilerCommand::Stats { backend, dir, .. },
+        } => (
+            DiagnosticCode::CliToolResolution,
+            DiagnosticStage::ToolResolution,
+            "cache.compiler.stats",
+            Some(compiler_backend_name(*backend).to_owned()),
+            if dir.is_some() {
+                "pass an absolute prepared AROS-managed --dir and ensure the selected local backend is on PATH; statistics never select a foreign root or a remote backend, but the backend may materialize local metadata"
+            } else {
+                "prepare the selected backend's AROS_HOME namespace first and ensure its local backend is on PATH; statistics never adopt foreign state, but the backend may materialize metadata in its owned namespace"
+            },
+        ),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::ResetStats {
+                    backend,
+                    dir,
+                    apply,
+                    ..
+                },
+        } => compiler_mutation_boundary(*backend, dir.as_ref(), apply.is_some(), "reset-stats"),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Clear {
+                    backend,
+                    dir,
+                    apply,
+                    ..
+                },
+        } => compiler_mutation_boundary(*backend, dir.as_ref(), apply.is_some(), "clear"),
         CacheCommand::Sources { command } => match command {
             CacheSourcesCommand::Status { .. } => (
                 DiagnosticCode::CliConfiguration,
@@ -215,6 +246,49 @@ pub fn cache_boundary(command: &CacheCommand) -> CacheLifecycleBoundary {
             | CacheGenmfCommand::Remove { .. }) => genmf_lifecycle_boundary(lifecycle),
         },
     }
+}
+
+const fn compiler_backend_name(backend: ManagedCompilerBackend) -> &'static str {
+    match backend {
+        ManagedCompilerBackend::Sccache => "sccache",
+        ManagedCompilerBackend::Ccache => "ccache",
+    }
+}
+
+fn compiler_mutation_boundary(
+    backend: ManagedCompilerBackend,
+    dir: Option<&std::path::PathBuf>,
+    applying: bool,
+    operation: &'static str,
+) -> CacheLifecycleBoundary {
+    (
+        if applying {
+            DiagnosticCode::CliPublication
+        } else {
+            DiagnosticCode::CliToolResolution
+        },
+        if applying {
+            DiagnosticStage::Publication
+        } else {
+            DiagnosticStage::ToolResolution
+        },
+        match operation {
+            "reset-stats" => "cache.compiler.reset_stats",
+            "clear" => "cache.compiler.clear",
+            _ => "cache.compiler.mutation",
+        },
+        Some(match backend {
+            ManagedCompilerBackend::Sccache => "sccache".to_owned(),
+            ManagedCompilerBackend::Ccache => "ccache".to_owned(),
+        }),
+        if applying {
+            "run the matching preview again if its token expired or its owned root/configuration/data binding changed; apply uses one exclusive local lease and never falls back to foreign or remote storage"
+        } else if dir.is_some() {
+            "pass an absolute prepared AROS-managed --dir; inspect the preview and return its exact unexpired --apply token only after confirming the selected local namespace"
+        } else {
+            "prepare the selected backend's AROS_HOME namespace first; inspect the preview and return its exact unexpired --apply token only after confirming the selected local namespace"
+        },
+    )
 }
 
 /// Describe recovery for archive retention and preview/apply removal.

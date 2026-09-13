@@ -174,6 +174,42 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                     format,
                 },
         } => cache::compiler_prepare(managed_compiler_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Stats {
+                    backend,
+                    dir,
+                    format,
+                },
+        } => cache::compiler_stats(managed_compiler_backend(backend), dir, format),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::ResetStats {
+                    backend,
+                    dir,
+                    apply,
+                    format,
+                },
+        } => cache::compiler_reset_stats(
+            managed_compiler_backend(backend),
+            dir,
+            apply.as_deref(),
+            format,
+        ),
+        CacheCommand::Compiler {
+            command:
+                CacheCompilerCommand::Clear {
+                    backend,
+                    dir,
+                    apply,
+                    format,
+                },
+        } => cache::compiler_clear(
+            managed_compiler_backend(backend),
+            dir,
+            apply.as_deref(),
+            format,
+        ),
         CacheCommand::Sources {
             command: CacheSourcesCommand::Status { dir, format },
         } => cache::source_status(&dir, format),

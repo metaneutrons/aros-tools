@@ -1,7 +1,8 @@
 # Cache management: architecture and delivery plan
 
-Decision state: proposed; implementation and acceptance require review of this
-plan. Planning baseline: 2026-09-13, aros-tools
+Decision state: active delivery; the shipped CACHE-M1 and CACHE-M6 interfaces
+remain subject to their milestone acceptance evidence. Planning baseline:
+2026-09-13, aros-tools
 `1aed0c970f9a4df2fb047a1b5603ecea1d1a6bed`.
 Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 `TCP` producer milestones.
@@ -9,9 +10,10 @@ Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 Epic: [Unified and safe cache management / #139](https://github.com/metaneutrons/aros-tools/issues/139).
 
 This document owns requirements and design decisions. Linked milestone issues
-own execution state and evidence. Proposed commands below are **not shipped
-interfaces**. This initiative includes missing cache functionality, not just
-renaming existing commands.
+own execution state and evidence. The capability table distinguishes shipped
+interfaces from planned ones; it must not be read as a promise that every
+listed command is public. This initiative includes missing cache
+functionality, not just renaming existing commands.
 
 ## Outcome and boundaries
 
@@ -747,14 +749,24 @@ verification through template-shape consumption. This does not make a generic
 GenMF `prune` safe or public, and it does not satisfy the still-open
 owned-local compiler lifecycle criteria.
 
-2026-09-13: CACHE-M6 now has its first compiler-cache implementation slice:
-`aros cache compiler prepare` claims only an empty private namespace, writes a
-no-clobber ownership marker and generated local-only configuration, and
-revalidates both before a build selects it. Build and board-build use a shared
-lease plus a sanitized backend environment; `auto` considers only prepared
-AROS-owned roots. This establishes the ownership and server-isolation
-foundation, but does not yet expose `stats`, `reset-stats` or `clear`, and does
-not satisfy CACHE-M6 acceptance without their preview/apply and native evidence.
+2026-09-13: CACHE-M6 compiler-cache lifecycle implementation now exposes
+`prepare`, `stats`, preview/apply `reset-stats`, and preview/apply `clear`.
+`prepare` claims only an empty private namespace, writes a no-clobber ownership
+marker and generated local-only configuration, and build/board-build retain a
+shared lease with a sanitized backend environment. `stats` is intentionally
+non-passive because both supported backends may materialize local metadata.
+Reset and clear require a five-minute token bound to the exact managed root,
+ownership marker, generated configuration and, for clear, a bounded measured
+data-tree snapshot. Apply holds an exclusive lease. ccache clear uses its
+controlled backend command; sccache clear stops only its generated private
+Unix-domain server, proves its exact socket no longer accepts connections,
+descriptor-unlinks that stale leaf, descriptor-removes only the unchanged owned
+data tree, and recreates that directory. Backend invocation requires ccache
+4.14.0 or sccache 0.17.0, matching the repeatable native qualification floor.
+Live isolated ccache and sccache proof remains an
+acceptance input, together with the required adversarial and documentation
+gates; generic root-wide prune and compiler-cache retention remain out of
+scope.
 
 2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
 status schemas, absolute archive-root precedence, no-follow single-root

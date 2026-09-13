@@ -1,13 +1,17 @@
 //! Rendering adapter for the bounded cache-status commands.
 
 use std::fs;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 use crate::artifact::{
     archive_cache_path, archive_cache_request, obtain_archive, open_verified_archive,
     require_sha256,
 };
 use crate::host_compiler;
+use crate::observability;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
 use crate::{CacheArchiveSelector, CacheCargoSelector, CacheGenmfSelector, CacheSourceSelector};
@@ -16,7 +20,9 @@ use aros_cache::{
     preview_removal, preview_retention_release, CacheCapability, CacheFamily, CacheFamilyStatus,
     CacheRemovalPreview, CacheRemovalResult, CacheRetentionRecord, CacheRetentionRelease,
     CacheRetentionReleasePreview, CacheSideEffects, CacheStatus, CompilerBackend,
-    CompilerBackendChoice, CompilerCachePreparation, CompilerCacheStatus, RootObservation,
+    CompilerBackendChoice, CompilerCacheManagedRoot, CompilerCacheMutation,
+    CompilerCacheMutationOperation, CompilerCacheMutationPreview, CompilerCacheMutationRequest,
+    CompilerCacheMutationResult, CompilerCachePreparation, CompilerCacheStatus, RootObservation,
 };
 use aros_toolchain::{
     cargo_vendor::{
@@ -62,6 +68,14 @@ const SOURCE_REMOVE_SCHEMA: &str = "aros-cache-sources-remove-v1";
 const GENMF_RELEASE_PREVIEW_SCHEMA: &str = "aros-cache-genmf-release-preview-v1";
 const GENMF_RELEASE_SCHEMA: &str = "aros-cache-genmf-release-v1";
 const GENMF_REMOVE_SCHEMA: &str = "aros-cache-genmf-remove-v1";
+const COMPILER_STATS_SCHEMA: &str = "aros-cache-compiler-stats-v1";
+const COMPILER_RESET_PREVIEW_SCHEMA: &str = "aros-cache-compiler-reset-stats-preview-v1";
+const COMPILER_RESET_SCHEMA: &str = "aros-cache-compiler-reset-stats-v1";
+const COMPILER_CLEAR_PREVIEW_SCHEMA: &str = "aros-cache-compiler-clear-preview-v1";
+const COMPILER_CLEAR_SCHEMA: &str = "aros-cache-compiler-clear-v1";
+const COMPILER_BACKEND_TIMEOUT: Duration = Duration::from_secs(10);
+const MINIMUM_CCACHE_VERSION: (u64, u64, u64) = (4, 14, 0);
+const MINIMUM_SCCACHE_VERSION: (u64, u64, u64) = (0, 17, 0);
 const ARCHIVE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache archives fetch for the same declared host or toolchain identity; the command never redownloads or reconstructs archive bytes";
 const ARCHIVE_REMOVAL_OFFLINE_IMPACT: &str = "offline archive fetch and any consumer requiring these exact bytes will fail until the declared archive is restored and verified";
 const CARGO_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit online cache cargo fetch with the same producer, tools, Cargo and cache selection; the command never uses global Cargo state";
@@ -70,6 +84,38 @@ const SOURCE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit ca
 const SOURCE_REMOVAL_OFFLINE_IMPACT: &str = "offline source fetch and any producer or compatibility consumer requiring this exact role will fail until the reviewed closure is restored and verified";
 const GENMF_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache genmf refresh with the same source, template, generator and Python selection; the command never regenerates automatically or reconstructs an unselected generation";
 const GENMF_REMOVAL_OFFLINE_IMPACT: &str = "verification and reference-shape comparison requiring this exact generation will fail until the matching immutable expansion is refreshed and verified";
+
+#[derive(Serialize)]
+struct CompilerCacheStatsReport {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    backend: CompilerBackend,
+    backend_version: String,
+    cache_root: PathBuf,
+    data_root: PathBuf,
+    backend_report: serde_json::Value,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CompilerCacheMutationPreviewReport {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    preview: CompilerCacheMutationPreview,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CompilerCacheMutationAppliedReport {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    backend_version: String,
+    result: CompilerCacheMutationResult,
+    boundary: &'static str,
+}
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -412,6 +458,382 @@ pub fn compiler_prepare(
         ResultFormat::Json => print_json(&report, "compiler cache preparation")?,
     }
     Ok(())
+}
+
+/// Query bounded statistics from one verified local compiler-cache namespace.
+///
+/// # Errors
+///
+/// Returns an error when the selected namespace is unprepared, unsafe, busy,
+/// the backend is unavailable, times out, or returns malformed JSON.
+pub fn compiler_stats(
+    backend: CompilerBackend,
+    dir: Option<PathBuf>,
+    format: ResultFormat,
+) -> Result<()> {
+    let root = managed_compiler_root(backend, dir)?;
+    let _lease =
+        aros_cache::acquire_compiler_cache_build(&root).map_err(|error| miette::miette!(error))?;
+    let backend_version = verified_compiler_backend_version(&root)?;
+    let output = run_compiler_backend(&root, compiler_stats_arguments(backend, format))?;
+    match format {
+        ResultFormat::Human => {
+            aros_common::outputln!(
+                "Managed {} cache statistics ({})",
+                backend.program(),
+                root.root().display()
+            );
+            aros_common::outputln!("  backend version: {backend_version}");
+            aros_common::outputln!("{output}");
+        }
+        ResultFormat::Json => {
+            let backend_report = serde_json::from_str(&output).map_err(|error| {
+                miette::miette!(
+                    "managed {} statistics were not valid JSON: {error}",
+                    backend.program()
+                )
+            })?;
+            let report = CompilerCacheStatsReport {
+                schema: COMPILER_STATS_SCHEMA,
+                operation: "compiler.stats",
+                side_effects: compiler_stats_side_effects(backend),
+                backend,
+                backend_version,
+                cache_root: root.root().to_path_buf(),
+                data_root: root.data_root().to_path_buf(),
+                backend_report,
+                boundary: "statistics query is limited to one prepared AROS-owned local namespace and holds a shared lifecycle lease; sccache may start only its private configured server",
+            };
+            print_json(&report, "compiler cache statistics")?;
+        }
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm a managed compiler-cache counter reset.
+///
+/// # Errors
+///
+/// Returns an error for unprepared roots, invalid previews, active readers, or
+/// backend failures. A backend failure is reported as indeterminate because it
+/// may have reset some counters before returning an error.
+pub fn compiler_reset_stats(
+    backend: CompilerBackend,
+    dir: Option<PathBuf>,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    compiler_mutation(
+        backend,
+        dir,
+        apply_token,
+        format,
+        CompilerCacheMutationOperation::ResetStats,
+    )
+}
+
+/// Preview or token-confirm a managed local compiler-cache clear.
+///
+/// # Errors
+///
+/// Returns an error for unprepared roots, stale previews, active readers, an
+/// unsafe private socket, or backend failures. No external root or remote
+/// storage is selected as a fallback.
+pub fn compiler_clear(
+    backend: CompilerBackend,
+    dir: Option<PathBuf>,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    compiler_mutation(
+        backend,
+        dir,
+        apply_token,
+        format,
+        CompilerCacheMutationOperation::Clear,
+    )
+}
+
+fn compiler_mutation(
+    backend: CompilerBackend,
+    dir: Option<PathBuf>,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+    operation: CompilerCacheMutationOperation,
+) -> Result<()> {
+    let request = CompilerCacheMutationRequest {
+        backend,
+        cache_root: managed_compiler_root(backend, dir)?.root().to_path_buf(),
+    };
+    if let Some(apply_token) = apply_token {
+        let mut mutation =
+            aros_cache::begin_compiler_cache_mutation(&request, operation, apply_token)
+                .map_err(|error| miette::miette!(error))?;
+        let backend_version = verified_compiler_backend_version(mutation.root())?;
+        let applied = apply_compiler_mutation(&mut mutation, operation);
+        let result = match applied {
+            Ok(()) => mutation.finish().map_err(|error| miette::miette!(error)),
+            Err(error) => Err(error),
+        };
+        let result = observability::commit_state(
+            result,
+            aros_common::CommitState::Indeterminate,
+            "compiler-cache backend operation may have changed local state before failing",
+        )?;
+        observability::record_committed_mutation();
+        let report = CompilerCacheMutationAppliedReport {
+            schema: match operation {
+                CompilerCacheMutationOperation::ResetStats => COMPILER_RESET_SCHEMA,
+                CompilerCacheMutationOperation::Clear => COMPILER_CLEAR_SCHEMA,
+            },
+            operation: compiler_mutation_operation_name(operation),
+            side_effects: compiler_mutation_apply_side_effects(operation),
+            backend_version,
+            result,
+            boundary: compiler_mutation_boundary(operation),
+        };
+        match format {
+            ResultFormat::Human => print_compiler_mutation_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "compiler cache mutation")?,
+        }
+    } else {
+        let preview = match operation {
+            CompilerCacheMutationOperation::ResetStats => {
+                aros_cache::preview_compiler_cache_reset_stats(&request)
+            }
+            CompilerCacheMutationOperation::Clear => {
+                aros_cache::preview_compiler_cache_clear(&request)
+            }
+        }
+        .map_err(|error| miette::miette!(error))?;
+        let report = CompilerCacheMutationPreviewReport {
+            schema: match operation {
+                CompilerCacheMutationOperation::ResetStats => COMPILER_RESET_PREVIEW_SCHEMA,
+                CompilerCacheMutationOperation::Clear => COMPILER_CLEAR_PREVIEW_SCHEMA,
+            },
+            operation: compiler_mutation_preview_operation_name(operation),
+            side_effects: compiler_mutation_preview_side_effects(operation),
+            preview,
+            boundary: compiler_mutation_boundary(operation),
+        };
+        match format {
+            ResultFormat::Human => print_compiler_mutation_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "compiler cache mutation preview")?,
+        }
+    }
+    Ok(())
+}
+
+fn managed_compiler_root(
+    backend: CompilerBackend,
+    dir: Option<PathBuf>,
+) -> Result<CompilerCacheManagedRoot> {
+    let root = match dir {
+        Some(dir) => dir,
+        None => {
+            aros_cache::resolve_default_compiler_cache_root(
+                &aros_cache::CacheEnvironment::current(),
+                backend,
+            )
+            .map_err(|error| miette::miette!(error))?
+            .path
+        }
+    };
+    aros_cache::load_managed_compiler_cache(backend, root).map_err(|error| miette::miette!(error))
+}
+
+fn run_compiler_backend(root: &CompilerCacheManagedRoot, arguments: &[&str]) -> Result<String> {
+    let executable = root.executable().map_err(|error| miette::miette!(error))?;
+    let environment =
+        aros_cache::compiler_cache_environment(root).map_err(|error| miette::miette!(error))?;
+    let mut command = Command::new(executable);
+    environment.apply_to(&mut command);
+    command.args(arguments);
+    observability::capture_stdout_with_timeout(
+        &mut command,
+        &format!("managed {} cache operation", root.backend().program()),
+        COMPILER_BACKEND_TIMEOUT,
+    )
+    .map_err(miette::Report::new)
+}
+
+fn verified_compiler_backend_version(root: &CompilerCacheManagedRoot) -> Result<String> {
+    let output = run_compiler_backend(root, &["--version"])?;
+    let version = parse_compiler_backend_version(&output).ok_or_else(|| {
+        miette::miette!(
+            "managed {} did not report a parseable semantic version",
+            root.backend().program()
+        )
+    })?;
+    let minimum = minimum_compiler_backend_version(root.backend());
+    if version < minimum {
+        return Err(miette::miette!(
+            "managed {} version {}.{}.{} is below the qualified minimum {}.{}.{}",
+            root.backend().program(),
+            version.0,
+            version.1,
+            version.2,
+            minimum.0,
+            minimum.1,
+            minimum.2,
+        ));
+    }
+    Ok(format!("{}.{}.{}", version.0, version.1, version.2))
+}
+
+const fn minimum_compiler_backend_version(backend: CompilerBackend) -> (u64, u64, u64) {
+    match backend {
+        CompilerBackend::Ccache => MINIMUM_CCACHE_VERSION,
+        CompilerBackend::Sccache => MINIMUM_SCCACHE_VERSION,
+    }
+}
+
+fn parse_compiler_backend_version(output: &str) -> Option<(u64, u64, u64)> {
+    output
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find_map(|candidate| {
+            let mut components = candidate.split('.');
+            let major = components.next()?.parse().ok()?;
+            let minor = components.next()?.parse().ok()?;
+            let patch = match components.next() {
+                Some(component) => component.parse().ok()?,
+                None => 0,
+            };
+            if components.next().is_some() {
+                return None;
+            }
+            Some((major, minor, patch))
+        })
+}
+
+const fn compiler_stats_arguments(
+    backend: CompilerBackend,
+    format: ResultFormat,
+) -> &'static [&'static str] {
+    match (backend, format) {
+        (_, ResultFormat::Human) => &["--show-stats"],
+        (CompilerBackend::Ccache, ResultFormat::Json) => &["--format", "json", "--print-stats"],
+        (CompilerBackend::Sccache, ResultFormat::Json) => {
+            &["--show-stats", "--stats-format", "json"]
+        }
+    }
+}
+
+const fn compiler_mutation_operation_name(
+    operation: CompilerCacheMutationOperation,
+) -> &'static str {
+    match operation {
+        CompilerCacheMutationOperation::ResetStats => "compiler.reset_stats.apply",
+        CompilerCacheMutationOperation::Clear => "compiler.clear.apply",
+    }
+}
+
+const fn compiler_mutation_preview_operation_name(
+    operation: CompilerCacheMutationOperation,
+) -> &'static str {
+    match operation {
+        CompilerCacheMutationOperation::ResetStats => "compiler.reset_stats.preview",
+        CompilerCacheMutationOperation::Clear => "compiler.clear.preview",
+    }
+}
+
+const fn compiler_stats_side_effects(_backend: CompilerBackend) -> CacheSideEffects {
+    CacheSideEffects {
+        // Both currently supported backends may materialize local statistics
+        // state even for a read-looking query. The public contract must not
+        // misrepresent that backend behaviour as passive observation.
+        creates_state: true,
+        mutates_state: true,
+        network: false,
+        backend_process: true,
+        locks: true,
+        hashes_payloads: false,
+    }
+}
+
+const fn compiler_mutation_preview_side_effects(
+    operation: CompilerCacheMutationOperation,
+) -> CacheSideEffects {
+    CacheSideEffects {
+        creates_state: false,
+        mutates_state: false,
+        network: false,
+        backend_process: false,
+        locks: false,
+        hashes_payloads: matches!(operation, CompilerCacheMutationOperation::Clear),
+    }
+}
+
+const fn compiler_mutation_apply_side_effects(
+    operation: CompilerCacheMutationOperation,
+) -> CacheSideEffects {
+    CacheSideEffects {
+        // The backends are permitted to materialize their own local metadata
+        // during a controlled operation; sccache clear additionally recreates
+        // the AROS-owned data directory after descriptor removal.
+        creates_state: true,
+        mutates_state: true,
+        network: false,
+        backend_process: true,
+        locks: true,
+        hashes_payloads: matches!(operation, CompilerCacheMutationOperation::Clear),
+    }
+}
+
+const fn compiler_mutation_boundary(operation: CompilerCacheMutationOperation) -> &'static str {
+    match operation {
+        CompilerCacheMutationOperation::ResetStats => {
+            "preview is non-mutating; apply requires its exact unexpired token, holds an exclusive lease, and invokes only the selected backend counter reset in its AROS-owned local namespace"
+        }
+        CompilerCacheMutationOperation::Clear => {
+            "preview measures only the selected AROS-owned local data tree; apply requires its exact unexpired token, holds an exclusive lease, and never falls back to foreign or remote storage"
+        }
+    }
+}
+
+fn apply_compiler_mutation(
+    mutation: &mut CompilerCacheMutation,
+    operation: CompilerCacheMutationOperation,
+) -> Result<()> {
+    match (mutation.root().backend(), operation) {
+        (_, CompilerCacheMutationOperation::ResetStats) => {
+            let _ = run_compiler_backend(mutation.root(), &["--zero-stats"])?;
+        }
+        (CompilerBackend::Ccache, CompilerCacheMutationOperation::Clear) => {
+            let _ = run_compiler_backend(mutation.root(), &["--clear"])?;
+        }
+        (CompilerBackend::Sccache, CompilerCacheMutationOperation::Clear) => {
+            stop_private_sccache_server(mutation)?;
+            mutation
+                .clear_sccache_data()
+                .map_err(|error| miette::miette!(error))?;
+        }
+    }
+    Ok(())
+}
+
+fn stop_private_sccache_server(mutation: &mut CompilerCacheMutation) -> Result<()> {
+    let socket = mutation.root().root().join("server.sock");
+    let metadata = match fs::symlink_metadata(&socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(miette::miette!(
+                "cannot inspect managed sccache server socket '{}': {error}",
+                socket.display()
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err(miette::miette!(
+            "managed sccache server path '{}' is not a real Unix-domain socket; refusing clear",
+            socket.display()
+        ));
+    }
+    let _ = run_compiler_backend(mutation.root(), &["--stop-server"])?;
+    mutation
+        .remove_stopped_sccache_socket()
+        .map_err(|error| miette::miette!(error))
 }
 
 /// Render the passive observation of one explicit source-cache root.
@@ -1674,6 +2096,9 @@ fn print_compiler_status_human(report: &CompilerCacheStatus) {
         capabilities: vec![
             aros_cache::CacheCapability::Status,
             aros_cache::CacheCapability::Prepare,
+            aros_cache::CacheCapability::Stats,
+            aros_cache::CacheCapability::ResetStats,
+            aros_cache::CacheCapability::Clear,
         ],
         root: None,
         backends: report.backends.clone(),
@@ -1698,6 +2123,61 @@ fn print_compiler_prepare_human(report: &CompilerCachePreparation) {
         report.backend.program(),
         report.cache_root.display()
     );
+}
+
+fn print_compiler_mutation_preview_human(report: &CompilerCacheMutationPreviewReport) {
+    let preview = &report.preview;
+    aros_common::outputln!(
+        "{} preview for managed {} cache:",
+        match preview.operation {
+            "compiler.reset_stats" => "Reset statistics",
+            "compiler.clear" => "Clear",
+            _ => "Compiler-cache mutation",
+        },
+        preview.backend.program(),
+    );
+    aros_common::outputln!("  root: {}", preview.cache_root.display());
+    aros_common::outputln!("  data root: {}", preview.data_root.display());
+    if let Some(scope) = &preview.data_scope {
+        aros_common::outputln!(
+            "  selected data: {} entries, {} bytes (bounded at {} entries / {} bytes)",
+            scope.entry_count,
+            scope.regular_file_bytes,
+            scope.max_entries,
+            scope.max_regular_file_bytes,
+        );
+        aros_common::outputln!("  payload SHA-256: {}", scope.payload_sha256);
+    }
+    aros_common::outputln!("  recovery: {}", preview.recovery);
+    aros_common::outputln!(
+        "  apply before {}: aros cache compiler {} --backend {} --dir {} --apply {}",
+        preview.expires_unix_seconds,
+        match preview.operation {
+            "compiler.reset_stats" => "reset-stats",
+            "compiler.clear" => "clear",
+            _ => "<operation>",
+        },
+        preview.backend.program(),
+        preview.cache_root.display(),
+        preview.apply_token,
+    );
+}
+
+fn print_compiler_mutation_applied_human(report: &CompilerCacheMutationAppliedReport) {
+    aros_common::outputln!(
+        "{} completed for managed {} cache at {}",
+        match report.result.operation {
+            "compiler.reset_stats" => "Statistics reset",
+            "compiler.clear" => "Clear",
+            _ => "Compiler-cache mutation",
+        },
+        report.result.backend.program(),
+        report.result.cache_root.display(),
+    );
+    aros_common::outputln!("  backend version: {}", report.backend_version);
+    aros_common::outputln!("  data root: {}", report.result.data_root.display());
+    aros_common::outputln!("  outcome: {}", report.result.outcome);
+    aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_source_status_human(report: &SourceCacheStatus) {

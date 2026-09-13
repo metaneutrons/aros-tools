@@ -2,10 +2,12 @@
 # Verify the distinct statistics-reset and entry-lifecycle semantics of the
 # supported compiler-cache backends without reading or mutating user state.
 #
-# This is a focused M1 contract probe, not a public cache-management command.
-# Every config path, cache root, daemon socket, home directory and compilation
-# output lives below one mktemp directory. The trap stops only the server bound
-# to that private socket before deleting the validated temporary root.
+# This is a focused CACHE-M6 backend-semantics probe. It qualifies the exact
+# upstream ccache/sccache behaviour that the Rust-managed lifecycle wraps; it
+# is not a command against user cache state. Every config path, cache root,
+# daemon socket, home directory and compilation output lives below one mktemp
+# directory. The trap stops only the server bound to that private socket before
+# deleting the validated temporary root.
 
 set -eu
 

@@ -119,6 +119,7 @@ name = "aros-cache"
 version = "0.1.0"
 dependencies = [
  "aros-common",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

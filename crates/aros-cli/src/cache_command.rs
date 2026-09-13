@@ -78,6 +78,56 @@ pub enum CacheCompilerCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Query statistics for one managed local compiler-cache namespace.
+    Stats {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm reset of statistics in one managed local namespace.
+    ResetStats {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Exact token from a prior reset preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or token-confirm clear of one managed local compiler-cache namespace.
+    Clear {
+        /// Backend that exclusively owns this cache root.
+        #[arg(long, value_enum)]
+        backend: ManagedCompilerBackend,
+
+        /// Prepared namespace root; default is the backend's AROS_HOME candidate.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Exact token from a prior clear preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// Source-cache resource operations.

@@ -19,6 +19,9 @@ aros cache compiler status
 aros cache compiler status --backend ccache --format json
 aros cache compiler status --backend sccache --dir /work/aros-compiler-cache
 aros cache compiler prepare --backend sccache --dir /work/aros-compiler-cache
+aros cache compiler stats --backend sccache --dir /work/aros-compiler-cache --format json
+aros cache compiler reset-stats --backend sccache --dir /work/aros-compiler-cache --format json
+aros cache compiler clear --backend sccache --dir /work/aros-compiler-cache --format json
 
 aros cache archives status
 aros cache archives list --project /work/AROS --toolchain --preset pc-x86_64 \
@@ -146,6 +149,50 @@ receives a private store and generated configuration. A build retains a shared
 lifecycle lease from CMake configure through the final compile command. This is
 why a prepared cache can be used offline without trusting ambient compiler-cache
 configuration.
+
+### Statistics, counter reset and clear
+
+`stats` operates only on a namespace that `prepare` has already claimed. It
+holds a shared lifecycle lease while it invokes the selected local executable.
+Although statistics look observational, both supported backends may materialize
+local metadata and sccache may start its private server. Use
+`cache compiler status` when a strictly passive result is required.
+The managed operation floor is ccache 4.14.0 or sccache 0.17.0; preparation
+and passive status do not invoke a backend and have no version floor.
+
+```sh
+aros cache compiler stats --backend ccache --dir /work/cache/aros-ccache --format json
+aros cache compiler reset-stats --backend ccache --dir /work/cache/aros-ccache --format json
+aros cache compiler clear --backend ccache --dir /work/cache/aros-ccache --format json
+```
+
+The last two commands first return a JSON or human preview with an exact
+five-minute `apply_token`; they make no backend call at that stage. Re-run the
+same command with `--apply TOKEN` only after inspecting the preview:
+
+```sh
+aros cache compiler reset-stats --backend ccache --dir /work/cache/aros-ccache \
+  --apply "$TOKEN"
+aros cache compiler clear --backend ccache --dir /work/cache/aros-ccache \
+  --apply "$TOKEN"
+```
+
+Apply acquires an exclusive lease that excludes `aros build` and `aros board
+build` for that namespace. `reset-stats` invokes only the backend's counter
+reset and never selects compiler output files for deletion. `clear` measures
+the local `data/` tree before issuing its token, with a hard limit of 200,000
+entries and 6 GiB of regular-file data. ccache clearing uses the controlled
+ccache command to remove compiler-cache entries; ccache may retain or recreate
+its own statistics and sharding metadata. sccache clearing first stops its
+generated private Unix-domain server, proves that its exact socket no longer
+accepts connections, descriptor-unlinks any stale socket name, then
+descriptor-removes exactly the still-matching measured `data/` tree and
+recreates an empty owned directory. Neither operation can adopt, scan, clear,
+or fall back to ambient, foreign, remote, symlinked, or unprepared storage. A
+changed ownership marker, generated configuration, token expiry, active build
+reader, unsafe socket, or budget overrun fails closed for either operation; a
+changed data-tree snapshot also rejects `clear`. Run a fresh preview after
+correcting the condition.
 
 ## Compiler archive operations
 
@@ -505,19 +552,19 @@ removed producer-cache invocation before upgrading aros-tools.
 
 ## Current limits
 
-Root-wide pruning, compiler statistics reset, and compiler-cache clearing are
-not public cache commands yet. Do not replace them with ad-hoc directory
-deletion. `prepare` now establishes the required ownership, generated local
-configuration, and build-reader lease; reset and clear still require their own
-preview/apply tokens, backend-specific process proof, and destructive-operation
-tests before they become public.
+Root-wide pruning remains intentionally unavailable. Do not replace it with
+ad-hoc directory deletion. Compiler reset and clear are limited to their
+prepared AROS-owned namespace and their documented preview/apply operation;
+they are not a generic local or remote cache-management facility.
 
 `aros ccache` remains the legacy statistics frontend during the transition. It
 may start sccache because it queries backend statistics. Its former `--clear`
 flag is intentionally rejected at parser level: the command had neither a
 shared ownership boundary nor preview/apply protection, and `sccache -z`
-resets counters rather than deleting entries. Managed clearing, reset and
-retention arrive only with their dedicated lifecycle contract.
+resets counters rather than deleting entries. Use `aros cache compiler
+reset-stats` or `aros cache compiler clear` for the managed lifecycle.
+Retention for compiler-result caches remains deliberately unavailable because
+the backends do not expose a portable immutable-object retention model.
 
 ## Build launcher policy
 

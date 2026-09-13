@@ -53,6 +53,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
 | `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
 | `aros cache compiler prepare` | Claim an empty private root for one local-only compiler-cache backend |
+| `aros cache compiler stats` | Query statistics only through one prepared AROS-owned local compiler-cache namespace |
+| `aros cache compiler reset-stats` | Preview or token-confirm reset of backend counters in one prepared local namespace |
+| `aros cache compiler clear` | Preview or token-confirm clear of one prepared AROS-owned local compiler-cache namespace |
 | `aros cache archives status` | Passively observe the shared compiler-archive cache root |
 | `aros cache archives list` | List one selected host or cross-toolchain archive without hashing bytes |
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
@@ -350,6 +353,10 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
 | `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
 | `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `cache compiler prepare` | No | Claim an empty private root for exactly one backend; it refuses foreign state and writes generated local configuration and an ownership marker |
+| `cache compiler stats` | No | Query one prepared local backend under a shared lifecycle lease; backend statistics may materialize local metadata |
+| `cache compiler reset-stats` | No | Preview reset of one prepared local backend; `--apply TOKEN` takes an exclusive lease and resets counters without selecting compiler outputs for deletion |
+| `cache compiler clear` | No | Preview the bounded data tree of one prepared local backend; `--apply TOKEN` takes an exclusive lease and clears only that namespace |
 | `cache archives status` | No | Passively observe the shared archive-cache root without enumerating archive objects |
 | `cache archives list` | No | Read direct metadata for one project-selected archive without hashing or downloading it |
 | `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
@@ -378,7 +385,6 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
 | `cache sources release` | No | Preview one named source retention receipt; `--apply TOKEN` releases it without deleting source bytes |
 | `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
-| `cache compiler prepare` | No | Claim an empty private root for exactly one backend; it refuses foreign state and writes only generated local configuration and an ownership marker |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
@@ -392,10 +398,10 @@ does not inventory every local, remote, or shared storage location.
 `aros ccache --stats` was removed because it never selected a different
 operation. Use bare `aros ccache` to query statistics.
 
-`aros ccache --clear` is also removed. The command had no safe shared
-ownership or preview/apply contract and could not provide an equivalent
-sccache operation. Use `aros cache compiler prepare` to establish an owned
-local namespace; no public clear command exists yet.
+`aros ccache --clear` remains removed. Use the managed replacement instead:
+`aros cache compiler clear --backend sccache|ccache [--dir DIR]` first prints a
+short-lived preview token and mutates only when that token is returned with
+`--apply`.
 :::
 
 ## Cache inspection
@@ -424,6 +430,23 @@ be absolute, private, and empty (or absent); existing cache bytes are never
 adopted. It generates a local-only configuration, data directory and ownership
 marker. The same invocation later revalidates that marker instead of
 overwriting it.
+
+`aros cache compiler stats --backend sccache|ccache [--dir DIR]` queries only
+that prepared namespace and holds a shared lifecycle lease. Backend statistics
+can create local metadata or start the namespace's private sccache server, so
+this is deliberately not a passive status command. `reset-stats` and `clear`
+are preview-first: invoke either without `--apply` to obtain a token valid for
+five minutes, inspect the selected root (and, for `clear`, the bounded measured
+data tree), then return the exact token using `--apply TOKEN`. Apply takes the
+same namespace's exclusive lifecycle lease. Reset asks the backend to reset
+counters only. ccache clear uses ccache's own controlled clear command;
+sccache clear stops only its private Unix-domain server, proves that its exact
+socket no longer accepts connections, descriptor-unlinks a stale socket name,
+then descriptor-removes the measured owned `data/` tree before recreating that
+empty directory. Foreign, remote, ambient, unprepared, changed, oversized, or
+symlinked storage is refused. `stats` and token-confirmed mutations require
+ccache 4.14.0 or later, or sccache 0.17.0 or later; passive status and namespace
+preparation do not invoke a backend and have no version requirement.
 
 `aros cache archives` manages only downloaded host/compiler archive bytes,
 never their installed payloads. `status` remains passive. `list`, `fetch`,

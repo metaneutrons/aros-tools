@@ -79,9 +79,20 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache cargo verify` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo verify` | cargo | --cargo | — | optional | 1 |  |  | — |  |
 | `aros cache cargo verify` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache compiler clear` | backend | --backend | — | required | 1 |  | sccache, ccache | — |  |
+| `aros cache compiler clear` | dir | --dir | — | optional | 1 |  |  | — |  |
+| `aros cache compiler clear` | apply | --apply | — | optional | 1 |  |  | — |  |
+| `aros cache compiler clear` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache compiler prepare` | backend | --backend | — | required | 1 |  | sccache, ccache | — |  |
 | `aros cache compiler prepare` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler prepare` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache compiler reset-stats` | backend | --backend | — | required | 1 |  | sccache, ccache | — |  |
+| `aros cache compiler reset-stats` | dir | --dir | — | optional | 1 |  |  | — |  |
+| `aros cache compiler reset-stats` | apply | --apply | — | optional | 1 |  |  | — |  |
+| `aros cache compiler reset-stats` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache compiler stats` | backend | --backend | — | required | 1 |  | sccache, ccache | — |  |
+| `aros cache compiler stats` | dir | --dir | — | optional | 1 |  |  | — |  |
+| `aros cache compiler stats` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache compiler status` | backend | --backend | — | optional | 1 | auto | auto, sccache, ccache | — |  |
 | `aros cache compiler status` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler status` | format | --format | — | optional | 1 | human | human, json | — |  |

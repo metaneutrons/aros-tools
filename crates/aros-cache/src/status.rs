@@ -27,6 +27,12 @@ pub enum CacheCapability {
     Status,
     /// Claim an empty private root under an explicit ownership contract.
     Prepare,
+    /// Query statistics through one prepared local compiler-cache backend.
+    Stats,
+    /// Preview or token-confirm backend counter reset in one owned namespace.
+    ResetStats,
+    /// Preview or token-confirm clear of one owned local compiler-cache namespace.
+    Clear,
     /// Bounded metadata projection of selected cache objects.
     List,
     /// Explicit verified cache-object acquisition.
@@ -258,7 +264,13 @@ pub fn compiler_cache_status(
         operation: "compiler.status",
         observation: "passive",
         side_effects: PASSIVE_SIDE_EFFECTS,
-        capabilities: vec![CacheCapability::Status, CacheCapability::Prepare],
+        capabilities: vec![
+            CacheCapability::Status,
+            CacheCapability::Prepare,
+            CacheCapability::Stats,
+            CacheCapability::ResetStats,
+            CacheCapability::Clear,
+        ],
         requested_backend,
         selected_backend,
         selection_basis: "executable_availability_only",
@@ -280,7 +292,13 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
             CacheFamilyStatus {
                 family: CacheFamily::Compiler,
                 status: CacheFamilyStatusKind::Configured,
-                capabilities: vec![CacheCapability::Status, CacheCapability::Prepare],
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::Prepare,
+                    CacheCapability::Stats,
+                    CacheCapability::ResetStats,
+                    CacheCapability::Clear,
+                ],
                 root: None,
                 backends: observe_compiler_backends(),
                 detail: Some(

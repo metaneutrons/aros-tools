@@ -49,7 +49,7 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
     ),
     (
         "workflows/cache.md",
-        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit; public_cli_semantics.rs::source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role; public_cli_semantics.rs::archive_cache_uses_one_explicit_cross_host_selection_without_installing; public_cli_semantics.rs::cargo_cache_lifecycle_is_exact_retained_and_preview_applied; public_cli_semantics.rs::genmf_cache_commands_keep_content_addressed_generations_explicit",
+        "discoverability_cli.rs::cache_status_is_passive_versioned_and_never_starts_a_backend; public_cli_semantics.rs::managed_compiler_cache_lifecycle_is_preview_bound_and_backend_scoped; public_cli_semantics.rs::source_cache_product_plan_keeps_unpinned_measurements_explicit; public_cli_semantics.rs::source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role; public_cli_semantics.rs::archive_cache_uses_one_explicit_cross_host_selection_without_installing; public_cli_semantics.rs::cargo_cache_lifecycle_is_exact_retained_and_preview_applied; public_cli_semantics.rs::genmf_cache_commands_keep_content_addressed_generations_explicit",
     ),
     (
         "workflows/cross-development.md",

@@ -1552,6 +1552,201 @@ fn explicit_clean_scope_and_relative_log_file_keep_the_invocation_origin() {
 }
 
 #[cfg(unix)]
+#[test]
+fn managed_compiler_cache_lifecycle_is_preview_bound_and_backend_scoped() {
+    let temporary = tempfile::tempdir().expect("temporary compiler-cache root");
+    let bin = temporary.path().join("bin");
+    let root = temporary.path().join("managed-ccache");
+    write_executable(
+        &bin.join("ccache"),
+        br#"#!/bin/sh
+set -eu
+case "$*" in
+  "--version")
+    printf '%s\n' 'ccache version 4.14.0'
+    ;;
+  "--format json --print-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-query"
+    printf '%s\n' '{"fixture_statistics":true}'
+    ;;
+  "--show-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-query"
+    printf '%s\n' 'fixture statistics'
+    ;;
+  "--zero-stats")
+    /usr/bin/touch "$CCACHE_DIR/statistics-reset"
+    ;;
+  "--clear")
+    /usr/bin/find "$CCACHE_DIR" -mindepth 1 -maxdepth 1 -exec /bin/rm -rf {} +
+    ;;
+  *)
+    printf '%s\n' "unexpected fixture ccache arguments: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+    );
+    let run_with_fixture = |arguments: &[&str]| {
+        Command::new(aros())
+            .env("PATH", &bin)
+            .args(arguments)
+            .output()
+            .expect("managed compiler-cache semantic case must execute")
+    };
+    let root = root.to_str().expect("compiler-cache fixture root is UTF-8");
+
+    let prepared = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "prepare",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&prepared, "managed ccache preparation");
+
+    let statistics = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&statistics, "managed ccache statistics");
+    let statistics: Value = serde_json::from_slice(&statistics.stdout).unwrap();
+    assert_eq!(statistics["schema"], "aros-cache-compiler-stats-v1");
+    assert_eq!(statistics["backend_report"]["fixture_statistics"], true);
+    assert_eq!(statistics["side_effects"]["creates_state"], true);
+
+    let reset_preview = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "reset-stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&reset_preview, "managed ccache reset preview");
+    let reset_preview: Value = serde_json::from_slice(&reset_preview.stdout).unwrap();
+    assert_eq!(
+        reset_preview["schema"],
+        "aros-cache-compiler-reset-stats-preview-v1"
+    );
+    assert!(
+        !Path::new(root).join("data/statistics-reset").exists(),
+        "preview must not invoke the backend"
+    );
+    let reset_token = reset_preview["preview"]["apply_token"]
+        .as_str()
+        .expect("reset preview token");
+    let reset_applied = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "reset-stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--apply",
+        reset_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&reset_applied, "managed ccache reset apply");
+    assert!(Path::new(root).join("data/statistics-reset").is_file());
+
+    fs::write(
+        Path::new(root).join("data/compiler-output"),
+        b"fixture cache output",
+    )
+    .expect("write managed compiler-cache fixture output");
+    let clear_preview = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "clear",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    assert_success(&clear_preview, "managed ccache clear preview");
+    let clear_preview: Value = serde_json::from_slice(&clear_preview.stdout).unwrap();
+    assert_eq!(
+        clear_preview["schema"],
+        "aros-cache-compiler-clear-preview-v1"
+    );
+    assert!(clear_preview["preview"]["data_scope"]["entry_count"]
+        .as_u64()
+        .is_some_and(|entries| entries > 0));
+    let clear_token = clear_preview["preview"]["apply_token"]
+        .as_str()
+        .expect("clear preview token");
+    let clear_applied = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "clear",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--apply",
+        clear_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&clear_applied, "managed ccache clear apply");
+    let clear_report: Value = serde_json::from_slice(&clear_applied.stdout).unwrap();
+    assert_eq!(
+        clear_report["side_effects"]["backend_process"], true,
+        "an applied clear executes the selected backend"
+    );
+    assert_eq!(
+        clear_applied
+            .status
+            .code()
+            .expect("managed ccache clear exit status"),
+        0
+    );
+    assert!(
+        fs::read_dir(Path::new(root).join("data"))
+            .expect("read cleared managed data root")
+            .next()
+            .is_none(),
+        "clear must be limited to the selected backend data root"
+    );
+
+    write_executable(
+        &bin.join("ccache"),
+        b"#!/bin/sh\nprintf '%s\\n' 'ccache version 4.13.9'\n",
+    );
+    let rejected = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "stats",
+        "--backend",
+        "ccache",
+        "--dir",
+        root,
+        "--format",
+        "json",
+    ]);
+    let diagnostic = assert_failure(&rejected, "unqualified managed ccache statistics");
+    assert!(diagnostic.contains("below the qualified minimum 4.14.0"));
+}
+
+#[cfg(unix)]
 fn write_executable(path: &Path, contents: &[u8]) {
     use std::os::unix::fs::PermissionsExt as _;
 

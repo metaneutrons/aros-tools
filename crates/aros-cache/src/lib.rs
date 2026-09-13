@@ -17,10 +17,14 @@ pub use compiler::{
     CompilerCacheSelection, CompilerConfigurationScope,
 };
 pub use compiler_lifecycle::{
-    acquire_compiler_cache_build, compiler_cache_environment, load_managed_compiler_cache,
-    prepare_managed_compiler_cache, resolve_managed_compiler_cache_for_build, CompilerCacheBuild,
-    CompilerCacheBuildLease, CompilerCacheBuildSelection, CompilerCacheEnvironment,
-    CompilerCacheLifecycleError, CompilerCacheManagedRoot, CompilerCachePreparation,
+    acquire_compiler_cache_build, begin_compiler_cache_mutation, compiler_cache_environment,
+    load_managed_compiler_cache, prepare_managed_compiler_cache, preview_compiler_cache_clear,
+    preview_compiler_cache_reset_stats, resolve_managed_compiler_cache_for_build,
+    CompilerCacheBuild, CompilerCacheBuildLease, CompilerCacheBuildSelection,
+    CompilerCacheDataScope, CompilerCacheEnvironment, CompilerCacheLifecycleError,
+    CompilerCacheManagedRoot, CompilerCacheMutation, CompilerCacheMutationOperation,
+    CompilerCacheMutationPreview, CompilerCacheMutationRequest, CompilerCacheMutationResult,
+    CompilerCachePreparation,
 };
 pub use lifecycle::{
     acquire_read_lease, acquire_read_leases, acquire_write_lease, acquire_write_leases,
