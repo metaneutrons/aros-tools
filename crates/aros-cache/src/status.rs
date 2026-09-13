@@ -31,6 +31,8 @@ pub enum CacheCapability {
     Fetch,
     /// Explicit cache-object byte-identity verification.
     Verify,
+    /// Explicit regeneration of a cache object from its selected inputs.
+    Refresh,
 }
 
 /// Side-effect contract of a versioned cache result.
@@ -308,7 +310,21 @@ fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, Root
                     "Cargo vendor generations require explicit producer, tools, Cargo and managed-root inputs; global Cargo state is excluded",
                 ),
             },
-            unregistered(CacheFamily::Genmf, "GenMF expansions require an explicit expansion root and source selection; reports and work trees are excluded"),
+            CacheFamilyStatus {
+                family: CacheFamily::Genmf,
+                status: CacheFamilyStatusKind::RequiresExplicitSelection,
+                capabilities: vec![
+                    CacheCapability::Status,
+                    CacheCapability::List,
+                    CacheCapability::Verify,
+                    CacheCapability::Refresh,
+                ],
+                root: None,
+                backends: Vec::new(),
+                detail: Some(
+                    "immutable GenMF expansions require explicit source, interpreter and parent-cache roots; verifier reports and source/build trees remain outside this family",
+                ),
+            },
         ],
     })
 }

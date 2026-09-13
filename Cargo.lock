@@ -135,6 +135,7 @@ dependencies = [
  "aros-common",
  "aros-release",
  "aros-toolchain",
+ "aros-verify",
  "clap",
  "console",
  "futures-util",
@@ -308,12 +309,16 @@ name = "aros-verify"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aros-cache",
  "aros-common",
  "clap",
  "rayon",
  "regex",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+ "which",
 ]
 
 [[package]]

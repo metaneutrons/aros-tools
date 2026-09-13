@@ -62,6 +62,107 @@ fn source_cache_tempdir() -> tempfile::TempDir {
         .expect("create real source-cache fixture root")
 }
 
+fn genmf_cache_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let temporary = source_cache_tempdir();
+    let source = temporary.path().join("source");
+    let cache = temporary.path().join("cache");
+    fs::create_dir_all(source.join("config")).expect("create GenMF template directory");
+    fs::create_dir_all(source.join("tools/genmf")).expect("create GenMF generator directory");
+    fs::create_dir_all(source.join("rom")).expect("create GenMF MMake directory");
+    fs::create_dir(&cache).expect("create real GenMF cache root");
+    fs::write(source.join("config/make.tmpl"), "template\n").expect("write GenMF template");
+    fs::write(
+        source.join("tools/genmf/genmf.py"),
+        "import pathlib, sys\ntemplate, source, output = map(pathlib.Path, sys.argv[1:])\noutput.write_bytes(template.read_bytes() + source.read_bytes())\n",
+    )
+    .expect("write GenMF generator");
+    fs::write(source.join("rom/mmakefile"), "%build_program fixture\n")
+        .expect("write GenMF MMake input");
+    (temporary, source, cache)
+}
+
+#[test]
+fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
+    let (_temporary, source, cache) = genmf_cache_fixture();
+    let source = source.to_str().expect("source path is UTF-8");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+
+    let status = run(&[
+        "cache", "genmf", "status", "--dir", cache, "--format", "json",
+    ]);
+    assert_success(&status, "GenMF cache passive status");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema"], "aros-cache-genmf-status-v1");
+    assert_eq!(status["root"]["state"], "directory");
+    assert_eq!(status["side_effects"]["creates_state"], false);
+    assert!(
+        !Path::new(cache).join("genmf").exists(),
+        "status must not create a GenMF namespace"
+    );
+
+    let listed = run(&[
+        "cache",
+        "genmf",
+        "list",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--format",
+        "json",
+    ]);
+    assert_success(&listed, "GenMF cache metadata list");
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["schema"], "aros-cache-genmf-list-v1");
+    assert_eq!(listed["entries"][0]["state"], "missing");
+
+    let refreshed = run(&[
+        "cache",
+        "genmf",
+        "refresh",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--format",
+        "json",
+    ]);
+    assert_success(&refreshed, "GenMF cache refresh");
+    let refreshed: Value = serde_json::from_slice(&refreshed.stdout).unwrap();
+    assert_eq!(refreshed["schema"], "aros-cache-genmf-refresh-v1");
+    assert_eq!(refreshed["entries"].as_array().unwrap().len(), 1);
+    assert!(
+        refreshed["entries"][0]["generation_dir"]
+            .as_str()
+            .expect("generation directory is rendered")
+            .contains("/genmf/v1/"),
+        "refresh must publish only in the versioned GenMF namespace"
+    );
+
+    let verified = run(&[
+        "cache",
+        "genmf",
+        "verify",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--format",
+        "json",
+    ]);
+    assert_success(&verified, "GenMF cache verification");
+    let verified: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(verified["schema"], "aros-cache-genmf-verify-v1");
+    assert_eq!(
+        verified["entries"][0]["selection"]["source_relative_path"],
+        "rom/mmakefile"
+    );
+    assert!(
+        !Path::new(cache).join("rom%mmakefile.mk").exists(),
+        "the public command must never recreate the legacy flat mtime cache"
+    );
+}
+
 #[test]
 fn public_board_init_semantic_cases_cover_models_defaults_and_environment() {
     let temporary = tempfile::tempdir().expect("temporary semantic-case root");

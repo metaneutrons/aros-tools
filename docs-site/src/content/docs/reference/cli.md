@@ -60,6 +60,10 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
 | `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
 | `aros cache cargo verify` | Fully validate one selected Cargo vendor generation against its lockfile and receipt |
+| `aros cache genmf status` | Passively observe one explicit GenMF cache parent root |
+| `aros cache genmf list` | Select current GenMF inputs and list immutable-generation metadata without reading expansions |
+| `aros cache genmf verify` | Fully validate immutable GenMF expansions selected by current source inputs |
+| `aros cache genmf refresh` | Regenerate current references and prove every existing immutable generation matches |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
@@ -341,6 +345,10 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
 | `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
 | `cache cargo verify` | No | Rehash a selected vendor tree and verify its lockfile/template/receipt binding |
+| `cache genmf status` | No | Passively observe one explicit GenMF cache parent root without selecting source inputs |
+| `cache genmf list` | No | Hash selected current source inputs and probe the selected Python version, then list final-generation metadata without reading expansion payloads |
+| `cache genmf verify` | No | Hash selected inputs, probe the selected Python version, and hash immutable expansion generations without invoking GenMF or changing cache state |
+| `cache genmf refresh` | No | Run upstream GenMF in a private Python environment, publish only missing complete generations, and reject byte mismatches |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
@@ -368,8 +376,8 @@ managed cache lifecycle is introduced; no public clear command exists yet.
 
 `aros cache status` is checkout-independent and passive. It reports the
 configured archive-cache root, the status of that root itself, and the explicit
-boundaries of source, Cargo, and GenMF cache families that do not yet have an
-implicit managed root. It does not enumerate content, verify bytes, follow a
+boundaries of source, Cargo, and GenMF cache families that require a caller-
+selected root. It does not enumerate content, verify bytes, follow a
 root symlink, create state, acquire a lock, access the network, or start a
 backend process. Use `--format human|json` for normal stdout.
 

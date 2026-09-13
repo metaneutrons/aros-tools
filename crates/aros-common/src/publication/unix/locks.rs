@@ -141,8 +141,14 @@ pub(in crate::publication) fn ensure_directory_nofollow(path: &Path) -> std::io:
                 ) {
                     Ok(child) => child,
                     Err(rustix::io::Errno::NOENT) => {
-                        rfs::mkdirat(&directory, Path::new(name), Mode::from_raw_mode(0o755))?;
-                        rfs::fsync(&directory)?;
+                        match rfs::mkdirat(&directory, Path::new(name), Mode::from_raw_mode(0o755))
+                        {
+                            Ok(()) => rfs::fsync(&directory)?,
+                            // A cooperating creator won the race. Re-open
+                            // below through the same no-follow parent fd.
+                            Err(rustix::io::Errno::EXIST) => {}
+                            Err(error) => return Err(error.into()),
+                        }
                         rfs::openat(
                             &directory,
                             Path::new(name),

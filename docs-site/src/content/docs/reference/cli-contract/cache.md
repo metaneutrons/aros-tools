@@ -49,6 +49,23 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache compiler status` | backend | --backend | — | optional | 1 | auto | auto, sccache, ccache | — |  |
 | `aros cache compiler status` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler status` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf list` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf list` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf list` | python | --python | — | optional | 1 |  |  | — |  |
+| `aros cache genmf list` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
+| `aros cache genmf list` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf refresh` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf refresh` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf refresh` | python | --python | — | optional | 1 |  |  | — |  |
+| `aros cache genmf refresh` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
+| `aros cache genmf refresh` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf status` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf status` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf verify` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf verify` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf verify` | python | --python | — | optional | 1 |  |  | — |  |
+| `aros cache genmf verify` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
+| `aros cache genmf verify` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache sources fetch` | source_lock | --source-lock | — | exactly one of source_selector | 1 |  |  | — |  |
 | `aros cache sources fetch` | compatibility_ports_lock | --compatibility-ports-lock | — | exactly one of source_selector | 1 |  |  | — |  |
 | `aros cache sources fetch` | source_fetch_plan | --source-fetch-plan | — | exactly one of source_selector | 1 |  |  | — |  |

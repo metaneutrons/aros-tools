@@ -123,6 +123,7 @@ the command does not continue searching a lower-priority location.
 | `AROS_DIAGNOSTIC_FORMAT` | `human` or `json` frontend diagnostics |
 | `AROS_LOG_LEVEL`, `AROS_LOG_FORMAT`, `AROS_LOG_FILE` | Explicit local frontend logging |
 | `AROS_VERIFY_GENMF_TIMEOUT_SECONDS` | Verifier GenMF deadline in seconds (1–3600; default 30) |
+| `AROS_CACHE_GENMF_TIMEOUT_SECONDS` | `aros cache genmf` per-generation lock and GenMF deadline in seconds (1–3600; default 30) |
 | `SOURCE_DATE_EPOCH` | Standard deterministic timestamp consumed by release assembly |
 
 `AROS_HOST_COMPILER_URL` changes transport location, not artifact identity.

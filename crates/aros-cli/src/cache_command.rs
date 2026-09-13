@@ -39,6 +39,12 @@ pub enum CacheCommand {
         #[command(subcommand)]
         command: CacheCargoCommand,
     },
+    /// Inspect, verify, and regenerate immutable GenMF reference expansions.
+    Genmf {
+        /// One GenMF reference-cache subcommand.
+        #[command(subcommand)]
+        command: CacheGenmfCommand,
+    },
 }
 
 /// Compiler-cache resource operations.
@@ -225,6 +231,76 @@ pub enum CacheCargoCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+}
+
+/// GenMF reference-cache resource operations.
+#[derive(Subcommand)]
+pub enum CacheGenmfCommand {
+    /// Passively observe one explicit GenMF cache root.
+    Status {
+        /// Existing or missing absolute parent cache root to observe.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Select current source inputs and list generation metadata without reading payloads.
+    List {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Fully validate all immutable generations selected by current source inputs.
+    Verify {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Regenerate current references and prove existing immutable generations match.
+    Refresh {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+}
+
+/// Exact selection of the versioned GenMF reference-cache namespace.
+#[derive(Args)]
+pub struct CacheGenmfSelector {
+    /// Existing no-follow AROS source checkout containing GenMF and MMake files.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) source_dir: PathBuf,
+
+    /// Existing no-follow parent cache root owning genmf/v1 generations.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dir: PathBuf,
+
+    /// Exact absolute Python interpreter; defaults to the Python resolved from PATH.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) python: Option<PathBuf>,
+
+    /// Bounded lock wait and GenMF invocation deadline per selected expansion.
+    #[arg(
+        long,
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=3600),
+        env = "AROS_CACHE_GENMF_TIMEOUT_SECONDS"
+    )]
+    pub(crate) timeout_seconds: u64,
 }
 
 /// Explicit selector for one immutable Cargo vendor generation.
