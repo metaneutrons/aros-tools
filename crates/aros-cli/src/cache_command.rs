@@ -39,7 +39,7 @@ pub enum CacheCommand {
         #[command(subcommand)]
         command: CacheCargoCommand,
     },
-    /// Inspect, verify, and regenerate immutable GenMF reference expansions.
+    /// Inspect, regenerate, retain, and safely remove immutable GenMF reference expansions.
     Genmf {
         /// One GenMF reference-cache subcommand.
         #[command(subcommand)]
@@ -405,6 +405,52 @@ pub enum CacheGenmfCommand {
         /// Exact source/cache/interpreter selection.
         #[command(flatten)]
         selector: CacheGenmfSelector,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Retain every verified generation in the exact current GenMF selection.
+    Keep {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Release one named GenMF retention reference without deleting generations.
+    Release {
+        /// Existing no-follow parent cache root holding the reference.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one current input-selected immutable generation.
+    Remove {
+        /// Exact source/cache/interpreter selection.
+        #[command(flatten)]
+        selector: CacheGenmfSelector,
+
+        /// Exact source-root-relative MMake input from the current selection, for example rom/mmakefile.
+        #[arg(long, value_name = "PATH")]
+        source: String,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]

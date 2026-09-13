@@ -1,12 +1,14 @@
 ---
 title: Inspect cache state
-description: Inspect, verify, and deliberately populate reviewed AROS cache inputs without granting cleanup authority.
+description: Inspect, populate, retain, and safely remove exact reviewed AROS cache objects.
 ---
 
 `aros cache` is the resource-oriented cache interface. Passive status commands
 do not create a directory, acquire a lock, hash a tree, access a network, start
 a compiler-cache daemon, or change a backend. Source-cache and compiler-archive
-`fetch` are separate, explicit population boundaries.
+`fetch` are separate, explicit population boundaries. Lifecycle removal is always
+limited to one selected immutable object, begins with a preview, and requires
+the matching short-lived apply token.
 
 ```sh
 aros cache status
@@ -43,6 +45,11 @@ aros cache genmf status --dir /work/aros-genmf-cache
 aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache --format json
 aros cache genmf verify --source-dir /work/AROS --dir /work/aros-genmf-cache
 aros cache genmf refresh --source-dir /work/AROS --dir /work/aros-genmf-cache
+aros cache genmf keep --source-dir /work/AROS --dir /work/aros-genmf-cache \
+  --name release-candidate
+aros cache genmf remove --source-dir /work/AROS --dir /work/aros-genmf-cache \
+  --source rom/mmakefile --format json
+aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate
 
 aros cache sources status --dir /work/aros-source-cache
 aros cache sources list --source-lock toolchains/llvm.sources.json \
@@ -72,8 +79,8 @@ contents:
 | `compiler` | Discovers `sccache` and `ccache` on `PATH`, then records recognized configuration-variable names without reading their values or starting either backend. |
 | `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
 | `sources` | `status` never guesses a root. `list`, `fetch`, `verify`, `keep`, and role-selected preview/apply `remove` require an explicit reviewed selector and root. |
-| `cargo` | `status` observes an explicit parent root. `list`, `fetch`, and `verify` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
-| `genmf` | `status` observes an explicit parent root. `list`, `verify`, and `refresh` require explicit source, interpreter, and cache inputs. Verification reports and build trees are excluded. |
+| `cargo` | `status` observes an explicit parent root. `list`, `fetch`, `verify`, `keep`, and preview/apply `remove` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
+| `genmf` | `status` observes an explicit parent root. `list`, `verify`, `refresh`, `keep`, and input-selected preview/apply `remove` require explicit source, interpreter, and cache inputs. Verification reports and build trees are excluded. |
 
 Archive-root resolution is deterministic: `AROS_CACHE_DIR` wins when set;
 otherwise AROS uses `AROS_HOME/cache`, and `AROS_HOME` defaults to
@@ -277,7 +284,8 @@ transpiled CMake output with upstream MetaMake. It is not a build-output cache,
 does not own verifier reports, and does not inspect or delete legacy flat
 mtime entries from older unreleased tooling.
 
-Every `list`, `verify`, and `refresh` command needs three explicit inputs:
+Every `list`, `verify`, `refresh`, `keep`, and `remove` command needs three
+explicit inputs:
 
 - `--source-dir DIR`: an existing no-follow AROS checkout containing
   `config/make.tmpl`, its complete `%include` closure, `tools/genmf/genmf.py`,
@@ -309,10 +317,22 @@ aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache
 # still makes the bounded `python --version` probe needed for interpreter identity.
 aros cache genmf verify --source-dir /work/AROS --dir /work/aros-genmf-cache
 
-# The explicit refresh boundary. Ctrl-C is cooperative; each per-generation
-# lock wait and GenMF process use the selected bounded timeout.
+# The explicit refresh boundary. Ctrl-C is cooperative; the lifecycle lease,
+# generation lock, and GenMF process share the selected bounded timeout.
 aros cache genmf refresh --source-dir /work/AROS --dir /work/aros-genmf-cache \
   --timeout-seconds 60
+
+# Retain the exact fully verified current selection as one closed reference.
+aros cache genmf keep --source-dir /work/AROS --dir /work/aros-genmf-cache \
+  --name release-candidate
+
+# Preview exactly one current source-root-relative input; review its JSON
+# blockers and apply_token before passing that token back with --apply.
+aros cache genmf remove --source-dir /work/AROS --dir /work/aros-genmf-cache \
+  --source rom/mmakefile --format json
+
+# Release only the named retention receipt. It does not delete a generation.
+aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate
 ```
 
 `refresh` runs only the selected resolved interpreter and upstream GenMF in a
@@ -323,6 +343,18 @@ It is never repaired or replaced. Missing includes, symlinked inputs, source
 mutation, cancellation, timeout, unsafe final state, and a byte mismatch fail
 closed. `verify` never invokes GenMF and never repairs cache state; it makes
 only the bounded Python version probe needed to reconstruct the selection.
+The verifier keeps a shared lifecycle lease from successful materialization
+through the reference-shape read, so a cooperating removal cannot delete a
+generation after it was verified but before its contents are consumed.
+
+`keep` reselects and fully verifies every current immutable generation while
+exclusive lifecycle locks are held, then writes one no-clobber named receipt
+for the complete selection. `remove` accepts only an exact current
+source-root-relative MMake path via `--source`; it cannot infer or search an
+object from a cache filename. Without `--apply` it returns a five-minute
+preview with retention blockers and an apply token. With that exact token,
+removal rechecks the selected identity, object snapshot, retention references,
+and active reader/writer leases before deleting only that one generation.
 
 ## Reviewed source-cache operations
 

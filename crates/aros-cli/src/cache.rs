@@ -34,9 +34,11 @@ use aros_toolchain::{
     ContractError,
 };
 use aros_verify::genmf_cache::{
-    list as list_genmf_cache, refresh as refresh_genmf_cache, status as genmf_cache_status,
-    verify as verify_genmf_cache, GenmfCacheError, GenmfCacheList, GenmfCacheRequest,
-    GenmfCacheStatus, GenmfCacheVerification,
+    list as list_genmf_cache, refresh as refresh_genmf_cache, retain as retain_genmf_cache,
+    select_lifecycle_object as select_genmf_lifecycle_object, status as genmf_cache_status,
+    verify as verify_genmf_cache, GenmfCacheEntrySelection, GenmfCacheError, GenmfCacheList,
+    GenmfCacheRequest, GenmfCacheSelection, GenmfCacheStatus, GenmfCacheVerification,
+    GENMF_KEEP_SCHEMA,
 };
 use miette::Result;
 use serde::Serialize;
@@ -53,12 +55,16 @@ const CARGO_RELEASE_SCHEMA: &str = "aros-cache-cargo-release-v1";
 const CARGO_REMOVE_SCHEMA: &str = "aros-cache-cargo-remove-v1";
 const SOURCE_RELEASE_SCHEMA: &str = "aros-cache-sources-release-v1";
 const SOURCE_REMOVE_SCHEMA: &str = "aros-cache-sources-remove-v1";
+const GENMF_RELEASE_SCHEMA: &str = "aros-cache-genmf-release-v1";
+const GENMF_REMOVE_SCHEMA: &str = "aros-cache-genmf-remove-v1";
 const ARCHIVE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache archives fetch for the same declared host or toolchain identity; the command never redownloads or reconstructs archive bytes";
 const ARCHIVE_REMOVAL_OFFLINE_IMPACT: &str = "offline archive fetch and any consumer requiring these exact bytes will fail until the declared archive is restored and verified";
 const CARGO_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit online cache cargo fetch with the same producer, tools, Cargo and cache selection; the command never uses global Cargo state";
 const CARGO_REMOVAL_OFFLINE_IMPACT: &str = "offline cache cargo fetch and native producer execution requiring this generation will fail until an exact verified generation is restored";
 const SOURCE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache sources fetch with the same reviewed selector; the command never guesses an origin, redownloads automatically, or reconstructs source bytes";
 const SOURCE_REMOVAL_OFFLINE_IMPACT: &str = "offline source fetch and any producer or compatibility consumer requiring this exact role will fail until the reviewed closure is restored and verified";
+const GENMF_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache genmf refresh with the same source, template, generator and Python selection; the command never regenerates automatically or reconstructs an unselected generation";
+const GENMF_REMOVAL_OFFLINE_IMPACT: &str = "verification and reference-shape comparison requiring this exact generation will fail until the matching immutable expansion is refreshed and verified";
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -283,6 +289,49 @@ struct SourceCacheRemovalPreview {
     selection: SourceCacheRequest,
     role: String,
     preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRelease {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    release: CacheRemovalResult,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheEntrySelection,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct GenmfCacheRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: GenmfCacheEntrySelection,
+    removal: CacheRemovalResult,
     recoverability: &'static str,
     offline_impact: &'static str,
     boundary: &'static str,
@@ -791,6 +840,113 @@ pub async fn genmf_refresh(selector: CacheGenmfSelector, format: ResultFormat) -
     match format {
         ResultFormat::Human => print_genmf_verification_human(&report),
         ResultFormat::Json => print_json(&report, "GenMF cache refresh")?,
+    }
+    Ok(())
+}
+
+/// Retain the complete current verified GenMF selection under one name.
+///
+/// # Errors
+///
+/// Returns a source, interpreter, cache-integrity or lifecycle diagnostic. The
+/// full source/template/generator/interpreter closure is reselected and every
+/// immutable expansion reverified while exclusive lifecycle locks are held.
+/// It does not invoke GenMF or change expansion bytes.
+pub fn genmf_keep(selector: CacheGenmfSelector, name: &str, format: ResultFormat) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let (selection, retention) =
+        retain_genmf_cache(&request, name).map_err(|error| genmf_error(&error))?;
+    let report = GenmfCacheRetention {
+        schema: GENMF_KEEP_SCHEMA,
+        operation: "genmf.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep retains every fully verified immutable expansion in the exact current GenMF source/template/generator/interpreter closure under one named reference; it never invokes GenMF, replaces data, or deletes bytes",
+    };
+    match format {
+        ResultFormat::Human => print_genmf_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache keep")?,
+    }
+    Ok(())
+}
+
+/// Release one named GenMF retention reference without removing expansions.
+///
+/// # Errors
+///
+/// Returns a lifecycle diagnostic when the root or named receipt is absent,
+/// unsafe, malformed, or bound to a different cache family.
+pub fn genmf_release(dir: &Path, name: &str, format: ResultFormat) -> Result<()> {
+    let release = release(&CacheRetentionRelease {
+        family: CacheFamily::Genmf,
+        cache_root: dir.to_path_buf(),
+        name: name.to_owned(),
+    })
+    .map_err(|error| miette::miette!(error))?;
+    let report = GenmfCacheRelease {
+        schema: GENMF_RELEASE_SCHEMA,
+        operation: "genmf.release",
+        side_effects: lifecycle_release_side_effects(),
+        release,
+        boundary: "release removes one named GenMF retention receipt only; it never enumerates, regenerates, or removes expansion bytes",
+    };
+    match format {
+        ResultFormat::Human => print_genmf_release_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache release")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm removal of one source-selected GenMF generation.
+///
+/// # Errors
+///
+/// Returns a source, interpreter, selection or lifecycle diagnostic. The
+/// requested input must be part of the current exact selection; the command
+/// never enumerates a cache root or removes an unselected generation.
+pub fn genmf_remove(
+    selector: CacheGenmfSelector,
+    source_relative_path: &str,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let (selection, object) = select_genmf_lifecycle_object(&request, source_relative_path)
+        .map_err(|error| genmf_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = GenmfCacheRemovalApplied {
+            schema: GENMF_REMOVE_SCHEMA,
+            operation: "genmf.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            recoverability: GENMF_REMOVAL_RECOVERABILITY,
+            offline_impact: GENMF_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the immutable generation selected by one current source-root-relative MMake input after token, retention, reader/writer lease, snapshot and payload bindings still match; it never scans, clears or prunes a GenMF cache root",
+        };
+        match format {
+            ResultFormat::Human => print_genmf_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "GenMF cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = GenmfCacheRemovalPreview {
+            schema: GENMF_REMOVE_SCHEMA,
+            operation: "genmf.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            recoverability: GENMF_REMOVAL_RECOVERABILITY,
+            offline_impact: GENMF_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures only the immutable generation selected by one current source-root-relative MMake input and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
+        };
+        match format {
+            ResultFormat::Human => print_genmf_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "GenMF cache remove preview")?,
+        }
     }
     Ok(())
 }
@@ -1666,7 +1822,7 @@ fn print_genmf_status_human(report: &GenmfCacheStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, verify, refresh");
+    aros_common::outputln!("  operations: status, list, verify, refresh, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1700,6 +1856,57 @@ fn print_genmf_verification_human(report: &GenmfCacheVerification) {
             entry.output_sha256
         );
     }
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_retention_human(report: &GenmfCacheRetention) {
+    aros_common::outputln!(
+        "GenMF cache retention: {} selected immutable expansion(s)",
+        report.selection.entries.len()
+    );
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_release_human(report: &GenmfCacheRelease) {
+    aros_common::outputln!("GenMF cache retention reference released:");
+    aros_common::outputln!("  root: {}", report.release.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.release.relative_path);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_removal_preview_human(report: &GenmfCacheRemovalPreview) {
+    aros_common::outputln!("  removal input: {}", report.selection.source_relative_path);
+    aros_common::outputln!("  generation: {}", report.selection.generation);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_removal_applied_human(report: &GenmfCacheRemovalApplied) {
+    aros_common::outputln!("  removal input: {}", report.selection.source_relative_path);
+    aros_common::outputln!("  generation: {}", report.selection.generation);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 

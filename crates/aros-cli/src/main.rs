@@ -1135,6 +1135,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     None,
                     "inspect the selected upstream GenMF inputs and Python interpreter; refresh publishes only missing complete generations and rejects any existing byte mismatch without replacement",
                 ),
+                lifecycle @ (CacheGenmfCommand::Keep { .. }
+                | CacheGenmfCommand::Release { .. }
+                | CacheGenmfCommand::Remove { .. }) => genmf_lifecycle_boundary(lifecycle),
             },
         },
         Commands::Ccache => (
@@ -1309,6 +1312,50 @@ fn cargo_lifecycle_boundary(
         | CacheCargoCommand::Fetch { .. }
         | CacheCargoCommand::Verify { .. } => {
             unreachable!("only Cargo lifecycle commands call cargo_lifecycle_boundary")
+        }
+    }
+}
+
+fn genmf_lifecycle_boundary(
+    command: &CacheGenmfCommand,
+) -> (
+    DiagnosticCode,
+    DiagnosticStage,
+    &'static str,
+    Option<String>,
+    &'static str,
+) {
+    match command {
+        CacheGenmfCommand::Keep { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.genmf.keep",
+            None,
+            "select all current fully verified GenMF generations and an unused portable --name; keep retains the closed selection but never invokes GenMF, replaces bytes, or removes data",
+        ),
+        CacheGenmfCommand::Release { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.genmf.release",
+            None,
+            "pass the exact managed cache --dir and existing portable --name; release removes only that retention receipt",
+        ),
+        CacheGenmfCommand::Remove { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliSourceInput
+            },
+            DiagnosticStage::Publication,
+            "cache.genmf.remove",
+            None,
+            "select one exact current source-root-relative --source input, run the preview, and pass its exact unexpired --apply token only after checking blockers; removal never clears or scans a GenMF cache root",
+        ),
+        CacheGenmfCommand::Status { .. }
+        | CacheGenmfCommand::List { .. }
+        | CacheGenmfCommand::Verify { .. }
+        | CacheGenmfCommand::Refresh { .. } => {
+            unreachable!("only GenMF lifecycle commands call genmf_lifecycle_boundary")
         }
     }
 }

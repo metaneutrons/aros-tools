@@ -80,6 +80,12 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache compiler status` | backend | --backend | — | optional | 1 | auto | auto, sccache, ccache | — |  |
 | `aros cache compiler status` | dir | --dir | — | optional | 1 |  |  | — |  |
 | `aros cache compiler status` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf keep` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf keep` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf keep` | python | --python | — | optional | 1 |  |  | — |  |
+| `aros cache genmf keep` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
+| `aros cache genmf keep` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache genmf keep` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache genmf list` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
 | `aros cache genmf list` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache genmf list` | python | --python | — | optional | 1 |  |  | — |  |
@@ -90,6 +96,16 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache genmf refresh` | python | --python | — | optional | 1 |  |  | — |  |
 | `aros cache genmf refresh` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
 | `aros cache genmf refresh` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf release` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache genmf release` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache genmf remove` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf remove` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache genmf remove` | python | --python | — | optional | 1 |  |  | — |  |
+| `aros cache genmf remove` | timeout_seconds | --timeout-seconds | — | optional | 1 | 30 |  | AROS_CACHE_GENMF_TIMEOUT_SECONDS |  |
+| `aros cache genmf remove` | source | --source | — | required | 1 |  |  | — |  |
+| `aros cache genmf remove` | apply | --apply | — | optional | 1 |  |  | — |  |
+| `aros cache genmf remove` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache genmf status` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache genmf status` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache genmf verify` | source_dir | --source-dir | — | required | 1 |  |  | — |  |

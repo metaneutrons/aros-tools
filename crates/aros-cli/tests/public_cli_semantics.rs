@@ -367,6 +367,73 @@ fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
         !Path::new(cache).join("rom%mmakefile.mk").exists(),
         "the public command must never recreate the legacy flat mtime cache"
     );
+
+    let kept = run(&[
+        "cache",
+        "genmf",
+        "keep",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--format",
+        "json",
+    ]);
+    assert_success(&kept, "GenMF cache retention");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-genmf-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let removal = [
+        "cache",
+        "genmf",
+        "remove",
+        "--source-dir",
+        source,
+        "--dir",
+        cache,
+        "--source",
+        "rom/mmakefile",
+        "--format",
+        "json",
+    ];
+    let retained_preview = run(&removal);
+    assert_success(&retained_preview, "retained GenMF removal preview");
+    let retained_preview: Value = serde_json::from_slice(&retained_preview.stdout).unwrap();
+    assert_eq!(retained_preview["preview"]["eligible"], false);
+
+    let released = run(&[
+        "cache",
+        "genmf",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "GenMF cache retention release");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-genmf-release-v1");
+
+    let preview = run(&removal);
+    assert_success(&preview, "eligible GenMF removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("GenMF removal preview returns a token")
+        .to_owned();
+    let mut apply = removal.to_vec();
+    apply.extend(["--apply", &token]);
+    let removed = run(&apply);
+    assert_success(&removed, "GenMF removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "genmf.remove.apply");
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
 }
 
 #[test]

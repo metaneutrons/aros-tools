@@ -300,6 +300,26 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Genmf {
             command: CacheGenmfCommand::Refresh { selector, format },
         } => cache::genmf_refresh(selector, format).await,
+        CacheCommand::Genmf {
+            command:
+                CacheGenmfCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::genmf_keep(selector, &name, format),
+        CacheCommand::Genmf {
+            command: CacheGenmfCommand::Release { dir, name, format },
+        } => cache::genmf_release(&dir, &name, format),
+        CacheCommand::Genmf {
+            command:
+                CacheGenmfCommand::Remove {
+                    selector,
+                    source,
+                    apply,
+                    format,
+                },
+        } => cache::genmf_remove(selector, &source, apply.as_deref(), format),
     }
 }
 

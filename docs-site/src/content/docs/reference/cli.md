@@ -70,6 +70,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache genmf list` | Select current GenMF inputs and list immutable-generation metadata without reading expansions |
 | `aros cache genmf verify` | Fully validate immutable GenMF expansions selected by current source inputs |
 | `aros cache genmf refresh` | Regenerate current references and prove every existing immutable generation matches |
+| `aros cache genmf keep` | Retain every verified generation in the exact current GenMF selection |
+| `aros cache genmf release` | Release one named GenMF retention reference without deleting generations |
+| `aros cache genmf remove` | Preview or token-confirm removal of one current input-selected immutable generation |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
@@ -364,6 +367,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache genmf list` | No | Hash selected current source inputs and probe the selected Python version, then list final-generation metadata without reading expansion payloads |
 | `cache genmf verify` | No | Hash selected inputs, probe the selected Python version, and hash immutable expansion generations without invoking GenMF or changing cache state |
 | `cache genmf refresh` | No | Run upstream GenMF in a private Python environment, publish only missing complete generations, and reject byte mismatches |
+| `cache genmf keep` | No | Revalidate and retain every exact current GenMF expansion under one named reference; no generation or deletion occurs |
+| `cache genmf release` | No | Remove one named GenMF retention receipt only; no expansion data is deleted |
+| `cache genmf remove` | No | Preview one exact source-input-selected immutable generation, then require its short-lived token before deletion |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |

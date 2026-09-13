@@ -2,19 +2,23 @@
 
 #[cfg(test)]
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::time::Duration;
 #[cfg(test)]
 use std::time::SystemTime;
 
-use crate::genmf_cache::{materialize, GenmfCacheRequest};
+use crate::genmf_cache::{materialize, GenmfCacheGenerationLease, GenmfCacheRequest};
 #[cfg(test)]
 use aros_common::read_source;
 use aros_common::CancellationToken;
 
 #[derive(Debug)]
 pub struct ExpansionResult {
-    pub expanded: Vec<(String, PathBuf)>,
+    /// Every verified expansion remains lease-protected while the verifier
+    /// reads it. The result must not expose an unprotected cache path.
+    pub expanded: Vec<(String, GenmfCacheGenerationLease)>,
     pub failures: Vec<ExpansionFailure>,
 }
 
@@ -71,10 +75,7 @@ pub fn expand_all(root: &Path, cache: &Path, refresh: bool, timeout: Duration) -
     let mut failures = Vec::new();
     for entry in result.entries {
         match entry.result {
-            Ok(generation) => expanded.push((
-                entry.selection.source_relative_path,
-                generation.generation_dir.join("expansion.mk"),
-            )),
+            Ok(generation) => expanded.push((entry.selection.source_relative_path, generation)),
             Err(error) => failures.push(ExpansionFailure {
                 file: entry.selection.source_relative_path.clone(),
                 message: materialization_failure_message(
