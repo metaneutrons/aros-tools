@@ -45,6 +45,12 @@ requires every visible command to be named in the command reference. Update
 the reference and its declared count deliberately when adding or exposing a
 command; internal hidden lifecycle bridges remain undocumented by design.
 
+That test also extracts every fenced public `aros` invocation and asks the
+built CLI to parse it without dispatching the operation. Every page with an
+invocation names a focused fixture owner for its semantics. A new example page
+therefore needs both a parser-valid command and an intentional owner; changing
+or retiring a public option cannot leave an unchecked copied command behind.
+
 Separate **implemented**, **tested against an exact source**, **released** and
 **booted on hardware**. Never turn a profile name, zero exit code in report-only
 mode, or workflow definition into broader evidence.

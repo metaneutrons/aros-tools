@@ -244,13 +244,13 @@ recipe identity; they never substitute one invisibly.
 
 ## 4. Proposed command and source contracts
 
-### User-facing surface
+### Implemented user-facing surface
 
-Add `aros toolchain plan` and `aros toolchain build`; preserve the meaning of
-`install`, `list`, `verify` and `path`. No aliases and no automatic installation
-or release after a build.
+`aros toolchain plan` and `aros toolchain build` preserve the meaning of
+`install`, `list`, `verify` and `path`. There are no aliases and no automatic
+installation or release after a build.
 
-Illustrative interface, detailed by the TCP-M0 contract (not yet implemented):
+The implemented interface is detailed by the TCP-M0 contract:
 
 ```text
 aros toolchain plan --preset pc-x86_64 --recipe /work/recipe.json \
@@ -261,11 +261,15 @@ aros toolchain build --preset pc-x86_64 --recipe /work/recipe.json \
   --source-dir /work/AROS --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --work-dir /work/build-pc \
   --output-dir /work/candidate-pc --cache-dir /work/source-cache \
-  --jobs 8 --timeout-seconds 21600 --offline
+  --jobs 8 --timeout-seconds 21600
 ```
 
 The example deadline is a caller-selected budget, not a measured default.
-The retired M1 preview additionally required explicit backend selection.
+Native plan/build have one prepared-cache-only input mode; neither exposes a
+native `--offline` flag nor an `AROS_OFFLINE` alternate mode. Offline switches
+remain meaningful only for acquisition operations such as producer-cache
+verification. The retired M1 preview additionally required explicit backend
+selection.
 
 - Inputs are explicit; execution works from outside every checkout. Reject
   conflicting CLI/recipe selections. Do not infer a neighboring repository,

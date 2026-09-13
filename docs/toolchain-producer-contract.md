@@ -85,11 +85,13 @@ reviewed default; nested build tools must not multiply the job budget.
 
 The native lifecycle requires a selected committed
 `producer-executor-v1.toml` whose contract, tools commit, source lock and
-profiles bind exactly to the recipe. It then requires `--offline`, a verified
-prepared cache, fresh work/output roots, positive jobs/deadline and the
-frontend's internal verified MetaMake bridge. It runs only unchanged source
-programs (`configure` and `crosstools-release`) inside the controlled Rust
-lifecycle. There is no backend option and no historical producer fallback.
+profiles bind exactly to the recipe. It has one fixed prepared-cache-only input
+mode: a verified prepared cache, fresh work/output roots, positive
+jobs/deadline and the frontend's internal verified MetaMake bridge. It runs
+only unchanged source programs (`configure` and `crosstools-release`) inside
+the controlled Rust lifecycle. There is no native `--offline` selector,
+environment-selected alternate mode, backend option, or historical producer
+fallback.
 
 `plan` may omit output/resource choices; their fields are null and readiness is
 `incomplete`. It does not fetch, execute source scripts, bootstrap helpers,
@@ -99,18 +101,18 @@ produce `blocked` readiness and findings without switching sources. Invalid or
 unreadable arguments/contracts are errors, not successful plans. Readiness is
 an inspection result, not a promise that an ensuing build will succeed.
 
-Build revalidates every selection after acquiring locks. `--offline` (including
-the existing `AROS_OFFLINE` policy) prohibits producer-controlled network use;
-compilation always uses prepared, verified inputs. No new ambient source,
-recipe, compiler-flag or credential overrides are introduced. The current CLI
-exposes only `--resume-from compiler` for an interrupted local candidate. It
-reacquires the exact private roots only after owner-marker validation,
-remeasures the three retained snapshots and every compiler output, and validates
-every predecessor receipt against recomputed inputs, identities and predecessor
-digest. It then starts the collector in a fresh Cargo target directory. A
-partial compiler tree, a completed collector receipt, any altered
-receipt/input/output, and every other phase are rejected. Release jobs always
-select fresh work/install roots and no compiled-object cache.
+Build revalidates every selection after acquiring locks. Compilation always
+uses prepared, verified inputs; neither `--offline` nor `AROS_OFFLINE` selects
+an alternate native mode. No new ambient source, recipe, compiler-flag or
+credential overrides are introduced. The current CLI exposes only
+`--resume-from compiler` for an interrupted local candidate. It reacquires the
+exact private roots only after owner-marker validation, remeasures the three
+retained snapshots and every compiler output, and validates every predecessor
+receipt against recomputed inputs, identities and predecessor digest. It then
+starts the collector in a fresh Cargo target directory. A partial compiler
+tree, a completed collector receipt, any altered receipt/input/output, and
+every other phase are rejected. Release jobs always select fresh work/install
+roots and no compiled-object cache.
 
 The implemented M3 native path preserves the upstream build boundary rather
 than translating it: after new ownership reservations and three isolated

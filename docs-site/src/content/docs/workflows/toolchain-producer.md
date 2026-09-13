@@ -68,9 +68,10 @@ payload.
 ```
 
 The native build also compiles Rust helpers from the exact tools `Cargo.lock`.
-Prepare its vendor closure once, while online, before requesting `--offline`.
-This is Cargo cache preparation, not a producer stage and not a claim that the
-subsequent build used the network:
+Prepare its vendor closure once while transport is allowed, before verifying
+that cache through the explicit `producer cache --verify-only --offline`
+operation below. This is Cargo cache preparation, not a producer stage and not
+a claim that the subsequent native build used the network:
 
 ```sh
 (

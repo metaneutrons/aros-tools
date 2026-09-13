@@ -149,6 +149,11 @@ are mutually exclusive. Add `--dry-run` to print the exact directory without
 removing anything. Cleanup never includes archives, logs outside that build
 tree, or installed toolchains.
 
+Migration: older unreleased revisions accepted bare `aros clean` and selected
+the whole build tree implicitly. Current `aros` rejects an omitted scope before
+repository or filesystem work. Replace an intentional whole-tree cleanup with
+`aros clean --all`; use `aros clean --preset NAME` for one selected build.
+
 The native installer requires an existing absolute prefix and an input
 directory containing exactly the eight expected regular executable files. It
 checks their inventory, modes, sizes, and snapshotted bytes before publishing;
