@@ -124,10 +124,11 @@ if [ -n "$foreign_schema_literals" ]; then
     failed=1
 fi
 
-cache_policy_count=$(grep -R -h --include='*.rs' 'which::which("sccache")' \
-    crates/aros-cli/src | wc -l | tr -d ' ')
+cache_policy_count=$(grep -F -c \
+    'for backend in [CompilerBackend::Sccache, CompilerBackend::Ccache]' \
+    crates/aros-cache/src/compiler.rs | tr -d ' ')
 if [ "$cache_policy_count" -ne 1 ]; then
-    echo "aros-cli must have exactly one sccache-before-ccache selection policy" >&2
+    echo "aros-cache must have exactly one sccache-before-ccache selection policy" >&2
     failed=1
 fi
 

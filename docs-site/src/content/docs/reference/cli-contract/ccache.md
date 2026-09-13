@@ -7,4 +7,3 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 
 | Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `aros ccache` | clear | --clear | — | no | 0 | false |  | — |  |

@@ -20,7 +20,11 @@ mod artifact;
 mod board;
 mod boot;
 mod build;
+mod build_cache;
+#[cfg(test)]
+mod build_cache_tests;
 mod build_tools;
+mod cache;
 mod cli_contract;
 #[cfg(test)]
 mod cli_contract_sections;
@@ -40,6 +44,7 @@ mod toolchain_plan;
 mod toolchain_producer;
 mod toolchain_selection;
 
+use build_cache::BuildCompilerCache;
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
     GoldenAction,
@@ -172,6 +177,10 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
+        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        #[arg(long, value_enum, default_value = "auto")]
+        compiler_cache: BuildCompilerCache,
+
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
         offline: bool,
@@ -243,12 +252,14 @@ enum Commands {
         memory: u32,
     },
 
-    /// Manage and inspect compiler cache (`ccache` / `sccache`)
-    Ccache {
-        /// Clear cache entries only when the selected backend has a verified clear operation
-        #[arg(long)]
-        clear: bool,
+    /// Inspect AROS-managed cache roots and compiler-cache backends
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
     },
+
+    /// Query statistics through the legacy compiler-cache frontend
+    Ccache,
 
     /// Capture or check a baseline of the transpiler's generated output
     Golden {
@@ -269,6 +280,49 @@ enum Commands {
         #[arg(long, value_enum, default_value = "human")]
         format: toolchain_management::ResultFormat,
     },
+}
+
+#[derive(Subcommand)]
+enum CacheCommand {
+    /// Show the bounded passive status of every cache family
+    Status {
+        /// Result representation on stdout, independent of diagnostic format
+        #[arg(long, value_enum, default_value = "human")]
+        format: toolchain_management::ResultFormat,
+    },
+    /// Inspect compiler-cache backend selection without querying a backend
+    Compiler {
+        #[command(subcommand)]
+        command: CacheCompilerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCompilerCommand {
+    /// Show passive compiler-cache backend availability and configuration provenance
+    Status {
+        /// Backend projection; auto reports the stable sccache-first choice
+        #[arg(long, value_enum, default_value = "auto")]
+        backend: CacheCompilerBackend,
+
+        /// Explicit absolute compiler-cache root to inspect without configuring a backend
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+
+        /// Result representation on stdout, independent of diagnostic format
+        #[arg(long, value_enum, default_value = "human")]
+        format: toolchain_management::ResultFormat,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CacheCompilerBackend {
+    /// Select the first available backend in AROS's stable preference order
+    Auto,
+    /// Project the sccache backend only
+    Sccache,
+    /// Project the ccache backend only
+    Ccache,
 }
 
 #[derive(Subcommand)]
@@ -502,6 +556,10 @@ enum BoardCommand {
         /// Enable verbose CMake configure logs
         #[arg(short, long)]
         verbose: bool,
+
+        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        #[arg(long, value_enum, default_value = "auto")]
+        compiler_cache: BuildCompilerCache,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
@@ -934,12 +992,49 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             Some(preset.clone()),
             "inspect the retained boot evidence and the first reported serial or QEMU failure",
         ),
-        Commands::Ccache { .. } => (
+        Commands::Cache { command } => match command {
+            CacheCommand::Status { .. } => (
+                DiagnosticCode::CliConfiguration,
+                DiagnosticStage::Configuration,
+                "cache.status",
+                None,
+                "set AROS_HOME or AROS_CACHE_DIR to an absolute accessible path; cache status never creates or clears cache state",
+            ),
+            CacheCommand::Compiler {
+                command: CacheCompilerCommand::Status { backend, dir, .. },
+            } => {
+                if dir.is_some() {
+                    (
+                        DiagnosticCode::CliConfiguration,
+                        DiagnosticStage::Configuration,
+                        "cache.compiler.status",
+                        None,
+                        "pass an absolute --dir path; compiler-cache status observes it only and never configures a backend",
+                    )
+                } else {
+                    (
+                        DiagnosticCode::CliToolResolution,
+                        DiagnosticStage::ToolResolution,
+                        "cache.compiler.status",
+                        Some(
+                            match backend {
+                                CacheCompilerBackend::Auto => "auto",
+                                CacheCompilerBackend::Sccache => "sccache",
+                                CacheCompilerBackend::Ccache => "ccache",
+                            }
+                            .to_owned(),
+                        ),
+                        "inspect the passive availability report; this command does not start a compiler-cache backend or alter its storage",
+                    )
+                }
+            }
+        },
+        Commands::Ccache => (
             DiagnosticCode::CliToolResolution,
             DiagnosticStage::ToolResolution,
             "ccache",
             None,
-            "install ccache or sccache and verify that the selected executable can be started; AROS leaves sccache entries unchanged because it has no verified clear operation here",
+            "install ccache or sccache before querying legacy statistics; use `aros cache compiler status` for a passive inspection that does not start a backend",
         ),
         Commands::Golden { action } => match action {
             GoldenAction::Capture { .. } => (

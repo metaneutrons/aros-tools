@@ -115,10 +115,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aros-cache"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "which",
+]
+
+[[package]]
 name = "aros-cli"
 version = "0.1.0"
 dependencies = [
  "aros-board",
+ "aros-cache",
  "aros-cmake-engine",
  "aros-common",
  "aros-release",

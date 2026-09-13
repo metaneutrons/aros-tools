@@ -2824,13 +2824,17 @@ function(aros_build_external_cmake)
         "-DCMAKE_C_FLAGS=${_C_flags}"
         "-DCMAKE_CXX_FLAGS=${_CXX_flags}"
         "-DCMAKE_ASM_FLAGS=${_ASM_flags}")
-    if(CMAKE_C_COMPILER_LAUNCHER)
+    # Pass the frontend policy, not CMake's derived launcher variables. CMake
+    # implements compiler launchers for C/C++ only; each nested build must
+    # apply the same explicit policy through CompilerCache.cmake.
+    if(DEFINED AROS_COMPILER_CACHE_MODE)
         list(APPEND _forced_options
-            "-DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER}")
-    endif()
-    if(CMAKE_CXX_COMPILER_LAUNCHER)
-        list(APPEND _forced_options
-            "-DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}")
+            "-DAROS_COMPILER_CACHE_MODE=${AROS_COMPILER_CACHE_MODE}")
+        if(DEFINED AROS_COMPILER_CACHE_EXECUTABLE AND
+           NOT AROS_COMPILER_CACHE_EXECUTABLE STREQUAL "")
+            list(APPEND _forced_options
+                "-DAROS_COMPILER_CACHE_EXECUTABLE=${AROS_COMPILER_CACHE_EXECUTABLE}")
+        endif()
     endif()
 
     set(_stamp "${_binary}/.aros-${EC_MMAKE_ID}-installed")

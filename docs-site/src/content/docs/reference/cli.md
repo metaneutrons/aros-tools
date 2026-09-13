@@ -50,7 +50,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros build` | Configure the embedded CMake engine and build one target preset |
 | `aros clean` | Preview or remove exactly one selected preset, or explicitly the checkout's complete `build/` directory |
 | `aros test` | Run the PC x86 QEMU boot checker and retain its evidence |
-| `aros ccache` | Inspect or explicitly clear the selected compiler cache |
+| `aros cache status` | Passively report the bounded cache-family roots and compiler backend observations |
+| `aros cache compiler status` | Passively project compiler backend availability without starting a backend |
+| `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
 | `aros golden verify` | Compare recorded transpiler output with a baseline, or update it explicitly |
 | `aros completions` | Generate a deterministic Bash, Zsh, or Fish completion script from the visible command model |
@@ -319,7 +321,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `build` | Required | Configure the embedded CMake engine and build with Ninja |
 | `clean` | Required | Remove `build/<preset>` with `--preset`; otherwise remove all of `build/` |
 | `test` | Required | Run the PC x86 QEMU boot checker against the selected build directory |
-| `ccache` | No | Show statistics for the discovered sccache/ccache; `--clear` only clears with ccache and otherwise fails without changing sccache |
+| `cache status` | No | Read bounded root/backend metadata without creating state, contacting a network, or running a backend |
+| `cache compiler status` | No | Read compiler backend paths and configuration-variable provenance without querying a backend |
+| `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
 | `golden verify` | Required | Compare with baselines; `--update` replaces them |
 
@@ -331,7 +335,52 @@ does not inventory every local, remote, or shared storage location.
 :::note[CLI change]
 `aros ccache --stats` was removed because it never selected a different
 operation. Use bare `aros ccache` to query statistics.
+
+`aros ccache --clear` is also removed. The command had no safe shared
+ownership or preview/apply contract and could not provide an equivalent
+sccache operation. Use `aros cache compiler status` to inspect scope while the
+managed cache lifecycle is introduced; no public clear command exists yet.
 :::
+
+## Cache inspection
+
+`aros cache status` is checkout-independent and passive. It reports the
+configured archive-cache root, the status of that root itself, and the explicit
+boundaries of source, Cargo, and GenMF cache families that do not yet have an
+implicit managed root. It does not enumerate content, verify bytes, follow a
+root symlink, create state, acquire a lock, access the network, or start a
+backend process. Use `--format human|json` for normal stdout.
+
+`aros cache compiler status` reports both supported backends and accepts
+`--backend auto|sccache|ccache`; `auto` selects sccache first when its
+executable is available, then ccache. The report never silently substitutes a
+backend chosen explicitly. It records recognized environment variable names
+but redacts their values and does not infer local, remote, or mixed storage
+from an unqueried backend configuration. `--dir DIR` passively observes one
+explicit absolute candidate root; it never configures the backend to use that
+directory. See [cache inspection](/aros-tools/workflows/cache/)
+for the complete safety boundary and current capability limits.
+
+Product and board builds accept the same explicit launcher policy:
+
+```sh
+aros build --compiler-cache auto
+aros build --compiler-cache off
+aros board build --profile rpi4-usb --compiler-cache ccache
+```
+
+`auto` selects `sccache` first, then `ccache`, when the build is not offline;
+an explicitly requested missing backend fails instead of falling back. Offline
+`auto` deliberately configures no launcher because passive discovery cannot
+prove an external backend's effective storage local-only. Offline explicit
+`sccache` or `ccache` fails with `--compiler-cache off` as the safe remedy. The
+frontend passes the exact absolute selected executable to CMake for C and C++;
+CMake never performs a second `PATH` search. CMake has no supported
+language-specific compiler-launcher interface for ASM, so assembly remains a
+direct deterministic invocation rather than a falsely claimed cache hit. A
+later cache-lifecycle milestone will add owned compiler namespaces and
+controlled clearing. No build option currently assigns `CCACHE_DIR` or
+`SCCACHE_DIR`.
 
 `build` options:
 
@@ -342,6 +391,7 @@ operation. Use bare `aros ccache` to query statistics.
 | `--jobs N`, `-j` | Positive parallel job count |
 | `--clean` | Delete this preset's build directory before configuring |
 | `--verbose`, `-v` | Verbose CMake configure messages |
+| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; offline `auto` disables the launcher and explicit backends fail until local storage can be verified |
 | `--debug` | Unoptimized build with debug information; default is Release |
 | `--offline` | Require local toolchain/source inputs |
 | `--require-fetch-checksums` | Require source-authored SHA-256 coverage for fetched inputs |
@@ -361,9 +411,8 @@ recorded transpiler invocations under `build/`.
 :::caution[Build cleanup removes evidence too]
 `clean` and `build --clean` delete the selected build directory without an
 interactive confirmation. Preserve logs, SDK outputs, packages and boot evidence
-you need first. `ccache --clear` affects the selected ccache storage, not just
-one preset. If sccache is selected, AROS rejects `--clear` before launching it:
-`sccache -z` resets counters but does not remove cached entries.
+you need first. Compiler-cache deletion is intentionally not public yet: its
+safe lifecycle needs an owned-root, lease and preview/apply contract.
 :::
 
 ## Boards
@@ -383,8 +432,9 @@ also accept `--config PATH`.
 | `board serve --profile NAME` | No | Serve restricted DHCP/TFTP; `--dry-run` inspects without opening sockets |
 | `board console --profile NAME` | No | Launch external serial terminal; `--program`, `--device`, `--baud`, `--dry-run` |
 
-`board build` shares build options except `--preset`, which comes from the
-profile. It additionally accepts `--dtb-path PATH` and `--core-kobj-dir DIR`;
+`board build` shares build options, including `--compiler-cache`, except
+`--preset`, which comes from the profile. It additionally accepts
+`--dtb-path PATH` and `--core-kobj-dir DIR`;
 these overrides apply to Raspberry Pi profiles. There are no CLI commands
 for automated JTAG/SWD sessions or power control.
 

@@ -13,6 +13,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros board build` | jobs | -j, --jobs | — | no | 1 |  |  | — |  |
 | `aros board build` | clean | --clean | — | no | 0 | false |  | — |  |
 | `aros board build` | verbose | -v, --verbose | — | no | 0 | false |  | — |  |
+| `aros board build` | compiler_cache | --compiler-cache | — | no | 1 | auto | auto, off, sccache, ccache | — |  |
 | `aros board build` | offline | --offline | — | no | 0 | false |  | AROS_OFFLINE |  |
 | `aros board build` | require_fetch_checksums | --require-fetch-checksums | — | no | 0 | false |  | AROS_FETCH_REQUIRE_CHECKSUMS |  |
 | `aros board build` | toolchain_dir | --toolchain-dir | — | no | 1 |  |  | — |  |
