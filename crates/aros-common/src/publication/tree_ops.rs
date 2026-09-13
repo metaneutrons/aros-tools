@@ -2,9 +2,12 @@
 
 #[cfg(not(unix))]
 use super::unsupported_durability;
-use super::{absolute_path, unix, validate_target_leaf, TreeContentCas, TreeTraversalLimits};
+use super::{
+    absolute_path, unix, validate_target_leaf, PortableOutputName, TreeContentCas,
+    TreeTraversalLimits,
+};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// List one directory through no-follow descriptor traversal with a stable,
 /// bounded snapshot of its immediate entry names.
@@ -53,6 +56,56 @@ pub fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = path;
+        Err(unsupported_durability())
+    }
+}
+
+/// Inspect the existing portion of a directory path without following links.
+///
+/// Missing trailing components are accepted so callers can use this during a
+/// non-mutating preview.  Every component that already exists must be a real
+/// directory.  A later mutating operation must still acquire the path through
+/// a descriptor-relative primitive; this function deliberately holds no
+/// descriptor after it returns.
+///
+/// # Errors
+///
+/// Returns an error when an existing component is a symlink or not a
+/// directory, or when no-follow traversal is unavailable.
+pub fn validate_existing_directory_prefix_nofollow(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::validate_existing_directory_prefix_nofollow(&absolute_path(path)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(unsupported_durability())
+    }
+}
+
+/// Create an empty uniquely named public directory below `parent` without
+/// following a path component.
+///
+/// The returned path is for use with the other descriptor-relative publication
+/// primitives.  It is not authority to perform ordinary path-based mutation:
+/// callers must treat a path replacement after this function returns as a
+/// failure boundary.
+///
+/// # Errors
+///
+/// Returns an error when `prefix` is not a portable output component, a parent
+/// component is unsafe, the directory cannot be created, or no unique name can
+/// be allocated.
+pub fn create_unique_directory_nofollow(parent: &Path, prefix: &str) -> std::io::Result<PathBuf> {
+    PortableOutputName::new(prefix)?;
+    #[cfg(unix)]
+    {
+        unix::create_unique_directory_nofollow(&absolute_path(parent)?, prefix)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
         Err(unsupported_durability())
     }
 }

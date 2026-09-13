@@ -2,14 +2,31 @@
 
 use super::config::{Board, Transport};
 use crate::canonical_existing_directory;
+use aros_common::{
+    copy_tree_from_snapshot_nofollow, create_unique_directory_nofollow,
+    exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_tree_content_cas_bounded,
+    open_regular_file_nofollow, publication_failure_class, publish_atomic_file,
+    publish_prepared_tree_noclobber, remove_tree_from_snapshot_nofollow,
+    validate_existing_directory_prefix_nofollow, AtomicFilePolicy, PublicationFailureClass,
+    TreeContentCas, TreeTraversalLimits,
+};
 use miette::Result;
-use std::fs;
+use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const DEPLOY_MARKER: &str = ".aros-board-deploy";
 const DEPLOY_MARKER_CONTENT: &str = "AROS board deployment directory\n";
+const DEPLOY_TREE_LIMITS: TreeTraversalLimits = TreeTraversalLimits {
+    max_entries: 16_384,
+    max_regular_file_bytes: 2 * 1024 * 1024 * 1024,
+};
+
+#[derive(Debug)]
+enum StageFailure {
+    Cleanup(miette::Report),
+    Retain(miette::Report),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeployFile {
@@ -23,6 +40,7 @@ pub struct DeploymentPlan {
     pub source_dir: PathBuf,
     pub destination_dir: PathBuf,
     pub files: Vec<DeployFile>,
+    source_snapshot: TreeContentCas,
 }
 
 impl DeploymentPlan {
@@ -47,6 +65,12 @@ impl DeploymentPlan {
         let tftp_root = canonical_existing_directory(board.tftp_root()?, "tftp_root")?;
         reject_device_path(&tftp_root)?;
         let destination_dir = tftp_root.join(board.tftp_prefix()?);
+        validate_existing_directory_prefix_nofollow(&destination_dir).map_err(|error| {
+            miette::miette!(
+                "Configured deployment path '{}' is unsafe: {error}",
+                destination_dir.display()
+            )
+        })?;
 
         if destination_dir.starts_with(&source_dir) || source_dir.starts_with(&destination_dir) {
             miette::bail!(
@@ -56,6 +80,13 @@ impl DeploymentPlan {
             );
         }
 
+        let source_snapshot = measure_tree_content_cas_bounded(&source_dir, DEPLOY_TREE_LIMITS)
+            .map_err(|error| {
+                miette::miette!(
+                    "Could not take a stable no-follow snapshot of artifact directory '{}': {error}",
+                    source_dir.display()
+                )
+            })?;
         let files = collect_files(&source_dir)?;
         if files.is_empty() {
             miette::bail!(
@@ -69,6 +100,7 @@ impl DeploymentPlan {
             source_dir,
             destination_dir,
             files,
+            source_snapshot,
         })
     }
 
@@ -94,105 +126,107 @@ pub fn publish(plan: &DeploymentPlan) -> Result<()> {
             plan.destination_dir.display()
         )
     })?;
-    if !parent.exists() {
-        fs::create_dir_all(parent).map_err(|error| {
-            miette::miette!(
-                "Could not create configured deployment directory '{}': {error}",
-                parent.display()
-            )
-        })?;
+    let stage = create_unique_directory_nofollow(parent, ".aros-board-stage").map_err(|error| {
+        miette::miette!(
+            "Could not create a contained staging directory below '{}': {error}",
+            parent.display()
+        )
+    })?;
+    match stage_and_publish(plan, &stage) {
+        Ok(()) => Ok(()),
+        Err(StageFailure::Retain(error)) => Err(error),
+        Err(StageFailure::Cleanup(error)) => match remove_staging_tree(&stage) {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(miette::miette!(
+                "{error}; additionally could not remove the contained staging directory '{}': {cleanup_error}",
+                stage.display()
+            )),
+        },
     }
-    let parent = canonical_existing_directory(parent, "deployment parent")?;
-    reject_device_path(&parent)?;
-    let destination =
-        parent.join(plan.destination_dir.file_name().ok_or_else(|| {
-            miette::miette!("Deployment destination has no final path component.")
-        })?);
-
-    let stage = create_unique_directory(&parent, ".aros-board-stage")?;
-    let publish_result = stage_and_publish(plan, &stage, &destination);
-    if publish_result.is_err() && stage.exists() {
-        let _ = fs::remove_dir_all(&stage);
-    }
-    publish_result
 }
 
-fn stage_and_publish(plan: &DeploymentPlan, stage: &Path, destination: &Path) -> Result<()> {
-    for file in &plan.files {
-        let source = plan.source_dir.join(&file.relative_path);
-        let target = stage.join(&file.relative_path);
-        let target_parent = target.parent().ok_or_else(|| {
-            miette::miette!("Could not determine parent for '{}'.", target.display())
-        })?;
-        fs::create_dir_all(target_parent).map_err(|error| {
-            miette::miette!(
-                "Could not create staging directory '{}': {error}",
-                target_parent.display()
-            )
-        })?;
-        fs::copy(&source, &target).map_err(|error| {
-            miette::miette!(
-                "Could not copy '{}' to '{}': {error}",
-                source.display(),
-                target.display()
-            )
-        })?;
+fn stage_and_publish(plan: &DeploymentPlan, stage: &Path) -> std::result::Result<(), StageFailure> {
+    if let Err(error) = copy_tree_from_snapshot_nofollow(
+        &plan.source_dir,
+        stage,
+        &plan.source_snapshot,
+        DEPLOY_TREE_LIMITS,
+    ) {
+        return Err(StageFailure::Cleanup(miette::miette!(
+            "Could not copy the verified boot bundle into contained staging '{}': {error}",
+            stage.display()
+        )));
     }
-    fs::write(stage.join(DEPLOY_MARKER), DEPLOY_MARKER_CONTENT).map_err(|error| {
-        miette::miette!(
+    if let Err(error) = publish_atomic_file(
+        &stage.join(DEPLOY_MARKER),
+        DEPLOY_MARKER_CONTENT.as_bytes(),
+        AtomicFilePolicy::NoClobber,
+    ) {
+        return Err(StageFailure::Cleanup(miette::miette!(
             "Could not mark staged deployment '{}': {error}",
             stage.display()
-        )
-    })?;
-
-    if !destination.exists() {
-        fs::rename(stage, destination).map_err(|error| {
-            miette::miette!(
-                "Could not publish staged deployment '{}' to '{}': {error}",
-                stage.display(),
-                destination.display()
-            )
-        })?;
-        return Ok(());
+        )));
     }
 
-    ensure_managed_destination(destination)?;
-    let parent = destination.parent().ok_or_else(|| {
-        miette::miette!(
-            "Deployment destination '{}' has no parent.",
-            destination.display()
-        )
-    })?;
-    let backup = create_unique_path(parent, ".aros-pi-previous");
+    let destination_snapshot =
+        match measure_tree_content_cas_bounded(&plan.destination_dir, DEPLOY_TREE_LIMITS) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(StageFailure::Cleanup(miette::miette!(
+                    "Could not inspect configured deployment destination '{}': {error}",
+                    plan.destination_dir.display()
+                )));
+            }
+        };
 
-    fs::rename(destination, &backup).map_err(|error| {
-        miette::miette!(
-            "Could not move existing deployment '{}' aside: {error}",
-            destination.display()
-        )
-    })?;
-    if let Err(error) = fs::rename(stage, destination) {
-        let restore = fs::rename(&backup, destination);
-        if let Err(restore_error) = restore {
-            miette::bail!(
-                "Could not publish staged deployment '{}': {error}; additionally could not restore the previous deployment '{}': {restore_error}",
+    let Some(destination_snapshot) = destination_snapshot else {
+        return match publish_prepared_tree_noclobber(stage, &plan.destination_dir) {
+            Ok(_) => Ok(()),
+            Err(error) if must_retain_stage(&error) => Err(StageFailure::Retain(miette::miette!(
+                "Could not atomically publish staged deployment '{}' to '{}': {error}",
                 stage.display(),
-                backup.display()
-            );
-        }
-        return Err(miette::miette!(
-            "Could not publish staged deployment '{}': {error}. The previous deployment was restored.",
-            stage.display()
-        ));
-    }
+                plan.destination_dir.display()
+            ))),
+            Err(error) => Err(StageFailure::Cleanup(miette::miette!(
+                "Could not atomically publish staged deployment '{}' to '{}': {error}",
+                stage.display(),
+                plan.destination_dir.display()
+            ))),
+        };
+    };
 
-    fs::remove_dir_all(&backup).map_err(|error| {
-        miette::miette!(
-            "Published a new deployment, but could not remove its previous managed version '{}': {error}",
-            backup.display()
-        )
-    })?;
+    if let Err(error) = ensure_managed_destination(&plan.destination_dir) {
+        return Err(StageFailure::Cleanup(error));
+    }
+    if let Err(error) =
+        exchange_prepared_tree_if_unchanged(stage, &plan.destination_dir, &destination_snapshot)
+    {
+        let failure = miette::miette!(
+            "Could not atomically replace configured deployment '{}': {error}",
+            plan.destination_dir.display()
+        );
+        return if must_retain_stage(&error) {
+            Err(StageFailure::Retain(failure))
+        } else {
+            Err(StageFailure::Cleanup(failure))
+        };
+    }
+    if let Err(error) =
+        remove_tree_from_snapshot_nofollow(stage, &destination_snapshot, DEPLOY_TREE_LIMITS)
+    {
+        return Err(StageFailure::Retain(miette::miette!(
+                "Published the new deployment at '{}', but could not safely remove the retained previous deployment '{}': {error}",
+                plan.destination_dir.display(),
+                stage.display()
+        )));
+    }
     Ok(())
+}
+
+fn must_retain_stage(error: &std::io::Error) -> bool {
+    is_rollback_incomplete(error)
+        || publication_failure_class(error) == PublicationFailureClass::CommitStateUncertain
 }
 
 fn resolve_artifact_dir(
@@ -273,23 +307,18 @@ fn collect_files(source_dir: &Path) -> Result<Vec<DeployFile>> {
 }
 
 fn ensure_managed_destination(destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(destination).map_err(|error| {
-        miette::miette!(
-            "Could not inspect existing deployment '{}': {error}",
-            destination.display()
-        )
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        miette::bail!(
-            "Refusing to replace '{}': an existing deployment must be a real managed directory.",
-            destination.display()
-        );
-    }
     let marker = destination.join(DEPLOY_MARKER);
-    let content = fs::read_to_string(&marker).map_err(|error| {
+    let mut file = open_regular_file_nofollow(&marker).map_err(|error| {
         miette::miette!(
             "Refusing to replace '{}': it is not an AROS-managed deployment (missing '{}': {error}).",
             destination.display(),
+            marker.display()
+        )
+    })?;
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|error| {
+        miette::miette!(
+            "Could not read deployment marker '{}' without following links: {error}",
             marker.display()
         )
     })?;
@@ -302,42 +331,23 @@ fn ensure_managed_destination(destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn create_unique_directory(parent: &Path, prefix: &str) -> Result<PathBuf> {
-    for attempt in 0..100_u16 {
-        let path = create_unique_path_with_attempt(parent, prefix, attempt);
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(miette::miette!(
-                    "Could not create staging directory '{}': {error}",
-                    path.display()
-                ));
-            }
+fn remove_staging_tree(stage: &Path) -> Result<()> {
+    let snapshot = match measure_tree_content_cas_bounded(stage, DEPLOY_TREE_LIMITS) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(miette::miette!(
+                "Could not inspect staging directory '{}' for safe cleanup: {error}",
+                stage.display()
+            ));
         }
-    }
-    miette::bail!("Could not allocate a unique AROS deployment staging directory.");
-}
-
-fn create_unique_path(parent: &Path, prefix: &str) -> PathBuf {
-    for attempt in 0..100_u16 {
-        let path = create_unique_path_with_attempt(parent, prefix, attempt);
-        if !path.exists() {
-            return path;
-        }
-    }
-    parent.join(format!("{prefix}-unavailable"))
-}
-
-fn create_unique_path_with_attempt(parent: &Path, prefix: &str, attempt: u16) -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    parent.join(format!(
-        "{prefix}-{}-{timestamp}-{attempt}",
-        std::process::id()
-    ))
+    };
+    remove_tree_from_snapshot_nofollow(stage, &snapshot, DEPLOY_TREE_LIMITS).map_err(|error| {
+        miette::miette!(
+            "Could not safely remove staging directory '{}': {error}",
+            stage.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -377,6 +387,12 @@ mod tests {
         }
     }
 
+    fn board_with_prefix(name: &str, tftp_root: &Path, prefix: &str) -> Board {
+        let mut board = board(name, tftp_root);
+        board.config.tftp_prefix = Some(prefix.into());
+        board
+    }
+
     #[test]
     fn plan_collects_a_recursive_boot_bundle() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -400,6 +416,9 @@ mod tests {
 
     #[test]
     fn publish_replaces_only_a_marked_deployment_directory() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -417,6 +436,15 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tftp.join("rpi4/kernel.img")).expect("published artifact"),
             "second"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(tftp.join("rpi4"))
+                .expect("published directory")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
         );
     }
 
@@ -437,5 +465,52 @@ mod tests {
             std::fs::read_to_string(tftp.join("rpi4/keep.txt")).expect("unmanaged file"),
             "keep"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_rejects_a_symlinked_tftp_prefix_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let artifacts = temp.path().join("artifacts");
+        let tftp = temp.path().join("tftp");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&artifacts).expect("artifact directory");
+        std::fs::create_dir_all(&tftp).expect("tftp directory");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        std::fs::write(artifacts.join("kernel.img"), "kernel").expect("artifact");
+        symlink(&outside, tftp.join("redirect")).expect("symlinked prefix");
+
+        let board = board_with_prefix("rpi4", &tftp, "redirect/current");
+        let error = DeploymentPlan::create(&board, temp.path(), Some(&artifacts)).unwrap_err();
+
+        assert!(error.to_string().contains("unsafe"));
+        assert!(!outside.join("current/kernel.img").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_rejects_a_prefix_parent_swapped_after_preview() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let artifacts = temp.path().join("artifacts");
+        let tftp = temp.path().join("tftp");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&artifacts).expect("artifact directory");
+        std::fs::create_dir_all(tftp.join("stable")).expect("tftp prefix parent");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        std::fs::write(artifacts.join("kernel.img"), "kernel").expect("artifact");
+
+        let board = board_with_prefix("rpi4", &tftp, "stable/current");
+        let plan = DeploymentPlan::create(&board, temp.path(), Some(&artifacts)).expect("plan");
+
+        std::fs::rename(tftp.join("stable"), tftp.join("stable-before-swap"))
+            .expect("move original parent");
+        symlink(&outside, tftp.join("stable")).expect("swapped prefix parent");
+
+        assert!(publish(&plan).is_err());
+        assert!(!outside.join("current/kernel.img").exists());
     }
 }

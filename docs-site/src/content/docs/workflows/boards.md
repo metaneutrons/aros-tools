@@ -75,9 +75,11 @@ aros board serve --profile rpi4-usb
 ```
 
 Deploy previews by default; `--apply` stages the bundle to the configured
-TFTP destination. Serve binds restricted DHCP and read-only TFTP to the
-validated interface and board identity. The host address must already be
-configured. These network commands are not the Milk-V UEFI-ESP boot path.
+TFTP destination. The configured `tftp_prefix` must resolve through real
+directories below `tftp_root`; symbolic links in that path are rejected.
+Serve binds restricted DHCP and read-only TFTP to the validated interface and
+board identity. The host address must already be configured. These network
+commands are not the Milk-V UEFI-ESP boot path.
 
 Open a serial console separately:
 
