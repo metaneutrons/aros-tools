@@ -22,6 +22,8 @@ mod boot;
 mod build;
 mod build_tools;
 mod cli_contract;
+#[cfg(test)]
+mod cli_contract_sections;
 mod commands;
 mod completion_model;
 mod golden;
@@ -1232,8 +1234,9 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        cli_contract::RepositoryRequirement, command_boundary, BoardCommand, BoardInitModel,
-        BoardInitTransport, BoardModel, Cli, Commands, Parser,
+        cli_contract::RepositoryRequirement, cli_contract_sections::CLI_CONTRACT_SECTIONS,
+        command_boundary, BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli,
+        Commands, Parser,
     };
     use clap::{error::ErrorKind, Arg, Command, CommandFactory};
     use std::fmt::Write;
@@ -1242,100 +1245,6 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs-site/src/content/docs/reference/cli-contract.md"
     ));
-    const CLI_CONTRACT_SECTIONS: &[(&str, &str)] = &[
-        (
-            "board",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/board.md"
-            )),
-        ),
-        (
-            "build",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/build.md"
-            )),
-        ),
-        (
-            "build-tools",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/build-tools.md"
-            )),
-        ),
-        (
-            "ccache",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/ccache.md"
-            )),
-        ),
-        (
-            "clean",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/clean.md"
-            )),
-        ),
-        (
-            "golden",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/golden.md"
-            )),
-        ),
-        (
-            "host-compiler",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/host-compiler.md"
-            )),
-        ),
-        (
-            "info",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/info.md"
-            )),
-        ),
-        (
-            "install",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/install.md"
-            )),
-        ),
-        (
-            "setup",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/setup.md"
-            )),
-        ),
-        (
-            "source",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/source.md"
-            )),
-        ),
-        (
-            "test",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/test.md"
-            )),
-        ),
-        (
-            "toolchain",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs-site/src/content/docs/reference/cli-contract/toolchain.md"
-            )),
-        ),
-    ];
-
     fn is_public_contract_argument(argument: &Arg) -> bool {
         !argument.is_hide_set() && !matches!(argument.get_id().as_str(), "help" | "version")
     }
