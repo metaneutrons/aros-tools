@@ -786,7 +786,7 @@ fn records_a_failed_genmf_expansion_instead_of_dropping_it() {
     let mmakefile = dir.join("mmakefile");
     fs::write(&mmakefile, "").unwrap();
 
-    let result = expand_all(&dir, &cache, &[mmakefile], true, Duration::from_secs(30));
+    let result = expand_all(&dir, &cache, true, Duration::from_secs(30));
     assert!(result.expanded.is_empty());
     assert_eq!(result.failures.len(), 1);
     assert_eq!(result.failures[0].file, "mmakefile");
@@ -954,13 +954,7 @@ fn genmf_expansion_has_a_hard_process_group_deadline() {
     .unwrap();
     fs::write(&mmake, "%build_prog mmake=test files=test\n").unwrap();
 
-    let result = expand_all(
-        &root,
-        &cache,
-        std::slice::from_ref(&mmake),
-        true,
-        Duration::from_millis(100),
-    );
+    let result = expand_all(&root, &cache, true, Duration::from_millis(100));
 
     assert!(result.expanded.is_empty());
     assert_eq!(result.failures.len(), 1);

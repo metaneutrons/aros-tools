@@ -42,7 +42,12 @@ aros-verify --source /path/to/AROS \
 
 Replace the illustrative paths with matching files from one build.
 `--build-dir` additionally checks configured CMake target realization.
-`--refresh` reruns GenMF instead of using cached expansions.
+The verifier stores only its content-addressed GenMF namespace below
+`--work/genmf/v1/`; reports and legacy flat mtime entries remain outside that
+namespace. `--refresh` reruns GenMF in a private interpreter environment and
+requires any existing immutable expansion to match byte-for-byte instead of
+replacing it. The matching `aros cache genmf` commands expose status, list, and
+verification without running the verifier's coverage comparison.
 `--genmf-timeout-seconds` accepts 1–3600 seconds and defaults to 30.
 
 The only supported coverage profile is **`architecture`**. Core/distribution

@@ -52,8 +52,8 @@ mod toolchain_selection;
 use build_cache::BuildCompilerCache;
 use cache_command::{
     CacheArchiveSelector, CacheArchivesCommand, CacheCargoCommand, CacheCargoSelector,
-    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheSourceSelector,
-    CacheSourcesCommand,
+    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, CacheGenmfCommand,
+    CacheGenmfSelector, CacheSourceSelector, CacheSourcesCommand,
 };
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
@@ -1095,6 +1095,36 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     "cache.cargo.verify",
                     None,
                     "restore the exact producer pin, tools lock and Cargo executable; verify hashes vendor content but never resolves, downloads or rewrites it",
+                ),
+            },
+            CacheCommand::Genmf { command } => match command {
+                CacheGenmfCommand::Status { .. } => (
+                    DiagnosticCode::CliConfiguration,
+                    DiagnosticStage::Configuration,
+                    "cache.genmf.status",
+                    None,
+                    "pass an absolute cache --dir; status observes only root metadata and never selects source inputs or creates a generation",
+                ),
+                CacheGenmfCommand::List { .. } => (
+                    DiagnosticCode::CliSourceInput,
+                    DiagnosticStage::Configuration,
+                    "cache.genmf.list",
+                    None,
+                    "pass existing no-follow --source-dir and --dir roots plus an absolute Python interpreter when PATH does not select the intended one; list reads no expansion payload and starts no generator",
+                ),
+                CacheGenmfCommand::Verify { .. } => (
+                    DiagnosticCode::CliSourceLock,
+                    DiagnosticStage::Configuration,
+                    "cache.genmf.verify",
+                    None,
+                    "restore the exact source/template/generator/interpreter selection and its immutable generation; verify makes only its bounded Python version probe and never invokes GenMF or repairs cache state",
+                ),
+                CacheGenmfCommand::Refresh { .. } => (
+                    DiagnosticCode::CliBuild,
+                    DiagnosticStage::BuildExecution,
+                    "cache.genmf.refresh",
+                    None,
+                    "inspect the selected upstream GenMF inputs and Python interpreter; refresh publishes only missing complete generations and rejects any existing byte mismatch without replacement",
                 ),
             },
         },

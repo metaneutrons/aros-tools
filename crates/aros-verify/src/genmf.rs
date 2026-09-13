@@ -1,13 +1,16 @@
-//! Bounded GenMF expansion, dependency discovery, and cache freshness.
+//! Compatibility adapter from verifier reference expansions to the GenMF cache.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::SystemTime;
 
+use crate::genmf_cache::{materialize, GenmfCacheRequest};
+#[cfg(test)]
 use aros_common::read_source;
-use rayon::prelude::*;
+use aros_common::CancellationToken;
 
 #[derive(Debug)]
 pub struct ExpansionResult {
@@ -23,100 +26,68 @@ pub struct ExpansionFailure {
     pub timeout_ms: Option<u64>,
 }
 
-/// Runs genmf over each mmakefile, caching the result.
+/// Materialize exact immutable GenMF expansions for verifier comparison.
 ///
-/// genmf is quick (about 20 ms per file) but there are over a thousand files,
-/// so the expansions are kept and only redone on request.
-pub fn expand_all(
-    root: &Path,
-    cache: &Path,
-    files: &[PathBuf],
-    refresh: bool,
-    timeout: Duration,
-) -> ExpansionResult {
-    let tmpl = root.join("config/make.tmpl");
-    let genmf = root.join("tools/genmf/genmf.py");
-    let genmf_dependencies = genmf_dependency_files(root);
-
-    let outcomes: Vec<std::result::Result<(String, PathBuf), ExpansionFailure>> = files
-        .par_iter()
-        .map(|f| {
-            let rel = f
-                .strip_prefix(root)
-                .unwrap_or(f)
-                .to_string_lossy()
-                .to_string();
-            let out = cache.join(format!("{}.mk", rel.replace('/', "%")));
-            let failure = |detail: String| ExpansionFailure {
-                file: rel.clone(),
-                message: format!("{rel}: {detail}"),
-                timed_out: false,
-                timeout_ms: None,
-            };
-            let mut inputs = Vec::with_capacity(genmf_dependencies.len() + 1);
-            inputs.push(f.as_path());
-            inputs.extend(genmf_dependencies.iter().map(PathBuf::as_path));
-            if refresh || !cache_is_fresh(&out, &inputs) {
-                // Never let a failed regeneration make a stale or partial
-                // output look fresh on the next run.
-                let _ = fs::remove_file(&out);
-                let mut command = Command::new("python3");
-                command.arg(&genmf).arg(&tmpl).arg(f).arg(&out);
-                let result = aros_common::run_output_with_timeout(
-                    &mut command,
-                    aros_common::DEFAULT_CAPTURE_LIMIT,
-                    timeout,
-                );
-
-                let command_output =
-                    result.map_err(|error| failure(format!("could not start genmf: {error}")))?;
-                if command_output.timed_out {
-                    let _ = fs::remove_file(&out);
-                    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-                    return Err(ExpansionFailure {
-                        file: rel.clone(),
-                        message: format!(
-                            "{rel}: genmf timed out after {timeout_ms} ms and its process group was terminated"
-                        ),
-                        timed_out: true,
-                        timeout_ms: Some(timeout_ms),
-                    });
-                }
-                if !command_output.status.success() {
-                    let _ = fs::remove_file(&out);
-                    let detail = aros_common::bounded_output_detail(
-                        &command_output.stdout,
-                        &command_output.stderr,
-                    )
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                    let detail = if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {detail}")
-                    };
-                    return Err(failure(format!(
-                        "genmf exited with {}{detail}",
-                        command_output.status
-                    )));
-                }
-                if !out.is_file() {
-                    return Err(failure(
-                        "genmf succeeded without producing cache output".to_owned(),
-                    ));
-                }
+/// The legacy flat mtime cache is deliberately neither read nor repaired. The
+/// cache root owns only the versioned content-addressed `genmf/v1` namespace.
+pub fn expand_all(root: &Path, cache: &Path, refresh: bool, timeout: Duration) -> ExpansionResult {
+    let python = match which::which("python3") {
+        Ok(path) => path,
+        Err(error) => {
+            return ExpansionResult {
+                expanded: Vec::new(),
+                failures: vec![ExpansionFailure {
+                    file: "<python3>".to_owned(),
+                    message: format!("cannot resolve the required python3 interpreter: {error}"),
+                    timed_out: false,
+                    timeout_ms: None,
+                }],
             }
-            Ok((rel, out))
-        })
-        .collect();
-
+        }
+    };
+    let request = GenmfCacheRequest {
+        source_dir: root.to_path_buf(),
+        cache_dir: cache.to_path_buf(),
+        python,
+        timeout,
+    };
+    let result = match materialize(&request, refresh, &CancellationToken::default()) {
+        Ok(result) => result,
+        Err(error) => {
+            return ExpansionResult {
+                expanded: Vec::new(),
+                failures: vec![ExpansionFailure {
+                    file: "<genmf-cache>".to_owned(),
+                    message: error.to_string(),
+                    timed_out: error.timed_out(),
+                    timeout_ms: error
+                        .timed_out()
+                        .then(|| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+                }],
+            }
+        }
+    };
     let mut expanded = Vec::new();
     let mut failures = Vec::new();
-    for outcome in outcomes {
-        match outcome {
-            Ok(expansion) => expanded.push(expansion),
-            Err(failure) => failures.push(failure),
+    for entry in result.entries {
+        match entry.result {
+            Ok(generation) => expanded.push((
+                entry.selection.source_relative_path,
+                generation.generation_dir.join("expansion.mk"),
+            )),
+            Err(error) => failures.push(ExpansionFailure {
+                file: entry.selection.source_relative_path.clone(),
+                message: materialization_failure_message(
+                    &entry.selection.source_relative_path,
+                    &error.message,
+                    error.timed_out,
+                    timeout,
+                ),
+                timed_out: error.timed_out,
+                timeout_ms: error
+                    .timed_out
+                    .then(|| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+            }),
         }
     }
     expanded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -125,11 +96,27 @@ pub fn expand_all(
     ExpansionResult { expanded, failures }
 }
 
+fn materialization_failure_message(
+    relative_path: &str,
+    detail: &str,
+    timed_out: bool,
+    timeout: Duration,
+) -> String {
+    if timed_out {
+        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        return format!(
+            "{relative_path}: genmf timed out after {timeout_ms} ms and its process group was terminated: {detail}"
+        );
+    }
+    format!("{relative_path}: {detail}")
+}
+
 /// Files whose contents affect every genmf expansion.
 ///
 /// MetaMake's `genmakefiledeps` names the main template and its three current
 /// includes. Discover the includes from the template itself so adding another
 /// one cannot leave a previously cached reference expansion looking fresh.
+#[cfg(test)]
 pub fn genmf_dependency_files(root: &Path) -> Vec<PathBuf> {
     let mut dependencies = BTreeSet::from([root.join("tools/genmf/genmf.py")]);
     let mut pending = vec![root.join("config/make.tmpl")];
@@ -167,20 +154,7 @@ pub fn genmf_dependency_files(root: &Path) -> Vec<PathBuf> {
     dependencies.into_iter().collect()
 }
 
-fn cache_is_fresh(output: &Path, inputs: &[&Path]) -> bool {
-    let Ok(output_modified) = fs::metadata(output).and_then(|metadata| metadata.modified()) else {
-        return false;
-    };
-    let mut input_modified = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let Ok(modified) = fs::metadata(input).and_then(|metadata| metadata.modified()) else {
-            return false;
-        };
-        input_modified.push(modified);
-    }
-    timestamps_are_fresh(output_modified, &input_modified)
-}
-
+#[cfg(test)]
 pub fn timestamps_are_fresh(output: SystemTime, inputs: &[SystemTime]) -> bool {
     inputs.iter().all(|input| output > *input)
 }

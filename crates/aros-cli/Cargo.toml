@@ -49,6 +49,7 @@ aros-cmake-engine.workspace = true
 aros-common.workspace = true
 aros-toolchain.workspace = true
 aros-release.workspace = true
+aros-verify.workspace = true
 clap.workspace = true
 console.workspace = true
 indicatif.workspace = true

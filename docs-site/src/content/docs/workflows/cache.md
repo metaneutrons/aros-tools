@@ -30,6 +30,11 @@ aros cache cargo fetch --producer-dir /work/aros-toolchains \
 aros cache cargo verify --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
 
+aros cache genmf status --dir /work/aros-genmf-cache
+aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache --format json
+aros cache genmf verify --source-dir /work/AROS --dir /work/aros-genmf-cache
+aros cache genmf refresh --source-dir /work/AROS --dir /work/aros-genmf-cache
+
 aros cache sources status --dir /work/aros-source-cache
 aros cache sources list --source-lock toolchains/llvm.sources.json \
   --dir /work/aros-source-cache --format json
@@ -53,7 +58,7 @@ contents:
 | `archives` | Inspects, verifies, and explicitly populates selected host/cross-compiler archive bytes. Installed host compilers and cross-toolchains are outside this cache family. |
 | `sources` | `status` never guesses a root. `list`, `fetch`, and `verify` require an explicit reviewed selector and root. |
 | `cargo` | `status` observes an explicit parent root. `list`, `fetch`, and `verify` require explicit producer, tools, Cargo, and cache inputs. Global Cargo state is excluded. |
-| `genmf` | Requires a future explicit expansion root and source selection. Verification reports and build trees are excluded. |
+| `genmf` | `status` observes an explicit parent root. `list`, `verify`, and `refresh` require explicit source, interpreter, and cache inputs. Verification reports and build trees are excluded. |
 
 Archive-root resolution is deterministic: `AROS_CACHE_DIR` wins when set;
 otherwise AROS uses `AROS_HOME/cache`, and `AROS_HOME` defaults to
@@ -206,6 +211,60 @@ environment and always passes Cargo `--locked --offline`. `cache cargo list`
 does not hash a vendor tree, but it runs bounded Git and `cargo --version`
 probes before it reads the selected generation receipt.
 
+## GenMF reference expansions
+
+`aros cache genmf` owns only immutable reference expansions used to compare
+transpiled CMake output with upstream MetaMake. It is not a build-output cache,
+does not own verifier reports, and does not inspect or delete legacy flat
+mtime entries from older unreleased tooling.
+
+Every `list`, `verify`, and `refresh` command needs three explicit inputs:
+
+- `--source-dir DIR`: an existing no-follow AROS checkout containing
+  `config/make.tmpl`, its complete `%include` closure, `tools/genmf/genmf.py`,
+  and MMake files;
+- `--dir DIR`: an existing no-follow parent root, under which only
+  `genmf/v1/` belongs to this cache family; and
+- optionally `--python FILE`: an exact absolute interpreter. Without it,
+  `aros` resolves `python3` once from `PATH` and records that absolute path.
+
+The selection identity hashes the source MMake bytes, recursive template
+closure, GenMF script, resolved Python executable and normalized version, plus
+the fixed generator format/options. Checkout absolute paths and mtimes do not
+select an object. Each completed object lives at
+`genmf/v1/<selection-sha256>/` and contains exactly `expansion.mk` and a
+receipt binding those identities and the measured output. This prevents both
+stale preserved-mtime results and historical slash-to-percent filename
+collisions.
+
+```sh
+# Observe only root metadata. No source selection, payload reads, locks, or
+# Python process are involved.
+aros cache genmf status --dir /work/aros-genmf-cache --format json
+
+# Hash current selection inputs, make a bounded `python --version` probe, and
+# inspect direct final-path metadata only.
+aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache
+
+# Rehash every selected immutable generation without invoking GenMF. Selection
+# still makes the bounded `python --version` probe needed for interpreter identity.
+aros cache genmf verify --source-dir /work/AROS --dir /work/aros-genmf-cache
+
+# The explicit refresh boundary. Ctrl-C is cooperative; each per-generation
+# lock wait and GenMF process use the selected bounded timeout.
+aros cache genmf refresh --source-dir /work/AROS --dir /work/aros-genmf-cache \
+  --timeout-seconds 60
+```
+
+`refresh` runs only the selected resolved interpreter and upstream GenMF in a
+private environment. It stages output before publication. A missing generation
+is published atomically only after source stability and receipt measurement;
+an existing generation is reverified and must match the fresh bytes exactly.
+It is never repaired or replaced. Missing includes, symlinked inputs, source
+mutation, cancellation, timeout, unsafe final state, and a byte mismatch fail
+closed. `verify` never invokes GenMF and never repairs cache state; it makes
+only the bounded Python version probe needed to reconstruct the selection.
+
 ## Reviewed source-cache operations
 
 Source-cache commands always require an explicit absolute `--dir` that already
@@ -306,7 +365,7 @@ replace every removed producer-cache invocation before upgrading aros-tools.
 
 ## Current limits
 
-The following operations are not yet public cache commands: GenMF refresh, retention, removal, prune,
+The following operations are not yet public cache commands: retention, removal, prune,
 compiler statistics reset, and compiler cache clearing. Do not replace them
 with ad-hoc directory deletion. Their interfaces require verified ownership,
 cooperating reader/writer leases, preview/apply protection, and explicit scope

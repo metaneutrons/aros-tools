@@ -263,8 +263,14 @@ pub(super) fn open_parent(path: &Path, create: bool) -> std::io::Result<ParentHa
                 ) {
                     Ok(next) => next,
                     Err(rustix::io::Errno::NOENT) if create => {
-                        rfs::mkdirat(&fd, Path::new(name), Mode::from_raw_mode(0o755))?;
-                        rfs::fsync(&fd)?;
+                        match rfs::mkdirat(&fd, Path::new(name), Mode::from_raw_mode(0o755)) {
+                            Ok(()) => rfs::fsync(&fd)?,
+                            // A cooperating creator won the race. The
+                            // descriptor-relative re-open below still rejects
+                            // a symlink or non-directory replacement.
+                            Err(rustix::io::Errno::EXIST) => {}
+                            Err(error) => return Err(error.into()),
+                        }
                         rfs::openat(
                             &fd,
                             Path::new(name),

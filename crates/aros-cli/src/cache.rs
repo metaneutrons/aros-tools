@@ -7,7 +7,7 @@ use crate::artifact::{archive_cache_path, obtain_archive, require_sha256, verify
 use crate::host_compiler;
 use crate::toolchain;
 use crate::toolchain_management::ResultFormat;
-use crate::{CacheArchiveSelector, CacheCargoSelector, CacheSourceSelector};
+use crate::{CacheArchiveSelector, CacheCargoSelector, CacheGenmfSelector, CacheSourceSelector};
 use aros_cache::{
     cache_status, compiler_cache_status, CacheCapability, CacheFamily, CacheFamilyStatus,
     CacheSideEffects, CacheStatus, CompilerBackendChoice, CompilerCacheStatus, RootObservation,
@@ -25,6 +25,11 @@ use aros_toolchain::{
     },
     source_cache_request::{read_selector, SourceCacheRequest},
     ContractError,
+};
+use aros_verify::genmf_cache::{
+    list as list_genmf_cache, refresh as refresh_genmf_cache, status as genmf_cache_status,
+    verify as verify_genmf_cache, GenmfCacheError, GenmfCacheList, GenmfCacheRequest,
+    GenmfCacheStatus, GenmfCacheVerification,
 };
 use miette::Result;
 use serde::Serialize;
@@ -333,6 +338,87 @@ pub fn cargo_verify(selector: CacheCargoSelector, format: ResultFormat) -> Resul
     match format {
         ResultFormat::Human => print_cargo_generation_human(&report, false),
         ResultFormat::Json => print_json(&report, "cargo cache verify")?,
+    }
+    Ok(())
+}
+
+/// Render a passive observation of one explicit GenMF cache root.
+///
+/// # Errors
+///
+/// Returns a configuration diagnostic only for an invalid absolute root or
+/// output serialization failure. It never selects source inputs, invokes
+/// Python, scans generations, or creates cache state.
+pub fn genmf_status(dir: &Path, format: ResultFormat) -> Result<()> {
+    let report = genmf_cache_status(dir).map_err(|error| genmf_error(&error))?;
+    match format {
+        ResultFormat::Human => print_genmf_status_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache status")?,
+    }
+    Ok(())
+}
+
+/// Render metadata-only state for all current GenMF source selections.
+///
+/// # Errors
+///
+/// Returns a source/interpreter/cache configuration diagnostic. This operation
+/// hashes selected inputs and performs a bounded interpreter-version probe, but
+/// never reads an expansion payload, invokes GenMF, locks, or creates cache state.
+pub fn genmf_list(selector: CacheGenmfSelector, format: ResultFormat) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let report = list_genmf_cache(&request).map_err(|error| genmf_error(&error))?;
+    match format {
+        ResultFormat::Human => print_genmf_list_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache list")?,
+    }
+    Ok(())
+}
+
+/// Fully verify every immutable GenMF generation selected by current inputs.
+///
+/// # Errors
+///
+/// Returns a source/interpreter/cache-integrity diagnostic. It hashes the
+/// selected source and final expansion generations. Selection performs only a
+/// bounded Python-version probe; this command never invokes GenMF, takes a
+/// generation lock, repairs, or replaces state.
+pub fn genmf_verify(selector: CacheGenmfSelector, format: ResultFormat) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let report = verify_genmf_cache(&request).map_err(|error| genmf_error(&error))?;
+    match format {
+        ResultFormat::Human => print_genmf_verification_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache verify")?,
+    }
+    Ok(())
+}
+
+/// Regenerate every selected GenMF reference with cooperative Ctrl-C handling.
+///
+/// # Errors
+///
+/// Returns a source/interpreter/cache or upstream-GenMF diagnostic. Refresh
+/// runs only the selected resolved Python and immutable inputs; it publishes a
+/// missing complete generation or proves an existing generation is identical.
+pub async fn genmf_refresh(selector: CacheGenmfSelector, format: ResultFormat) -> Result<()> {
+    let request = genmf_request(selector)?;
+    let cancellation = aros_common::CancellationToken::default();
+    let worker_token = cancellation.clone();
+    let mut worker =
+        tokio::task::spawn_blocking(move || refresh_genmf_cache(&request, &worker_token));
+    let report = tokio::select! {
+        result = &mut worker => result.map_err(|_| miette::miette!("GenMF cache refresh worker terminated unexpectedly"))?,
+        signal = tokio::signal::ctrl_c() => {
+            if signal.is_ok() {
+                cancellation.cancel();
+            }
+            (&mut worker).await.map_err(|_| miette::miette!("GenMF cache refresh worker terminated unexpectedly"))?
+        }
+    }
+    .map_err(|error| genmf_error(&error))?;
+    match format {
+        ResultFormat::Human => print_genmf_verification_human(&report),
+        ResultFormat::Json => print_json(&report, "GenMF cache refresh")?,
     }
     Ok(())
 }
@@ -702,8 +788,27 @@ fn cargo_request(selector: CacheCargoSelector) -> Result<CargoVendorRequest> {
     })
 }
 
+fn genmf_request(selector: CacheGenmfSelector) -> Result<GenmfCacheRequest> {
+    let python = match selector.python {
+        Some(path) => path,
+        None => which::which("python3").map_err(|_| {
+            miette::miette!("could not resolve Python from PATH; pass --python FILE")
+        })?,
+    };
+    Ok(GenmfCacheRequest {
+        source_dir: selector.source_dir,
+        cache_dir: selector.dir,
+        python,
+        timeout: std::time::Duration::from_secs(selector.timeout_seconds),
+    })
+}
+
 fn contract_error(error: &ContractError) -> miette::Report {
     crate::observability::native_diagnostic(error.diagnostics().diagnostics[0].clone())
+}
+
+fn genmf_error(error: &GenmfCacheError) -> miette::Report {
+    miette::miette!(error.to_string())
 }
 
 fn print_status_human(report: &CacheStatus) {
@@ -904,6 +1009,51 @@ fn print_cargo_generation_human(report: &CargoVendorGeneration, offline: bool) {
     if report.operation == "cargo.fetch" {
         aros_common::outputln!("  offline: {offline}");
     }
+}
+
+fn print_genmf_status_human(report: &GenmfCacheStatus) {
+    aros_common::outputln!(
+        "GenMF cache status (passive): {} ({}, {})",
+        report.root.root.path.display(),
+        report.root.root.origin.as_str(),
+        report.root.state.as_str()
+    );
+    aros_common::outputln!("  object layout: {}", report.object_layout);
+    aros_common::outputln!("  operations: status, list, verify, refresh");
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_list_human(report: &GenmfCacheList) {
+    aros_common::outputln!(
+        "GenMF cache list: {} selected expansion(s)",
+        report.entries.len()
+    );
+    for entry in &report.entries {
+        aros_common::outputln!(
+            "  {}: {:?} ({})",
+            entry.selection.source_relative_path,
+            entry.state,
+            entry.selection.generation
+        );
+    }
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_genmf_verification_human(report: &GenmfCacheVerification) {
+    aros_common::outputln!(
+        "GenMF cache {}: {} verified immutable expansion(s)",
+        report.operation,
+        report.entries.len()
+    );
+    for entry in &report.entries {
+        aros_common::outputln!(
+            "  {}: {} bytes, SHA-256 {}",
+            entry.selection.source_relative_path,
+            entry.output_size,
+            entry.output_sha256
+        );
+    }
+    aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_cargo_selection_human(selection: &aros_toolchain::cargo_vendor::CargoVendorSelection) {

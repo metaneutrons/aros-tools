@@ -46,7 +46,10 @@ use coverage_io::{
     CoverageReadResult,
 };
 mod genmf;
+pub mod genmf_cache;
 use genmf::{expand_all, ExpansionFailure};
+#[cfg(test)]
+mod genmf_cache_tests;
 #[cfg(test)]
 use genmf::{genmf_dependency_files, timestamps_are_fresh};
 
@@ -814,15 +817,6 @@ fn run(args: &Args) -> std::result::Result<(), VerifyFailure> {
             &args.work,
         )
     })?;
-    let cache = args.work.join("genmf");
-    fs::create_dir_all(&cache).map_err(|error| {
-        VerifyFailure::at_path(
-            DiagnosticCode::VerifyPublication,
-            DiagnosticStage::OutputPublication,
-            format!("cannot create verifier expansion cache: {error}"),
-            &cache,
-        )
-    })?;
     let report_dir = architecture
         .as_ref()
         .map_or_else(|| args.work.clone(), |scope| args.work.join(scope.key()));
@@ -889,8 +883,7 @@ fn run(args: &Args) -> std::result::Result<(), VerifyFailure> {
     // 2. What the historic build makes of it.
     let expansion = expand_all(
         &root,
-        &cache,
-        &mmakefiles,
+        &args.work,
         args.refresh,
         Duration::from_secs(args.genmf_timeout_seconds),
     );

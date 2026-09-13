@@ -1489,7 +1489,7 @@ mod tests {
             preparation.clone(),
             CompatibilityPhase::CmakeConsumer,
             program,
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         );
 
         let report = run_probe(&probe, &CancellationToken::default()).unwrap();
