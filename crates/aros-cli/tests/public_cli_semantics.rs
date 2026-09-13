@@ -1608,6 +1608,27 @@ esac
     ]);
     assert_success(&prepared, "managed ccache preparation");
 
+    let overlong_sccache_root = temporary.path().join("x".repeat(128));
+    let overlong_sccache_root = overlong_sccache_root
+        .to_str()
+        .expect("overlong sccache fixture root is UTF-8");
+    let overlong_sccache = run_with_fixture(&[
+        "cache",
+        "compiler",
+        "prepare",
+        "--backend",
+        "sccache",
+        "--dir",
+        overlong_sccache_root,
+        "--format",
+        "json",
+    ]);
+    let diagnostic = assert_failure(
+        &overlong_sccache,
+        "managed sccache preparation with an overlong socket path",
+    );
+    assert!(diagnostic.contains("cross-host limit is 103 bytes"));
+
     let statistics = run_with_fixture(&[
         "cache",
         "compiler",

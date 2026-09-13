@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,10 @@ const MAX_COMPILER_CACHE_ENTRIES: usize = 200_000;
 const MAX_COMPILER_CACHE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 const SCCACHE_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const SCCACHE_SERVER_STOP_POLL_INTERVAL: Duration = Duration::from_millis(25);
+// Darwin's sockaddr_un reserves only 104 bytes for sun_path, including the
+// trailing NUL. Linux permits a few more, but one cross-host managed layout
+// must reject paths that cannot work on the stricter supported host.
+const MAX_SCCACHE_SOCKET_PATH_BYTES: usize = 103;
 
 /// Failure while preparing, validating, or leasing a managed compiler cache.
 #[derive(Debug, Error)]
@@ -609,6 +614,7 @@ pub fn prepare_managed_compiler_cache(
     cache_root: PathBuf,
 ) -> Result<CompilerCachePreparation, CompilerCacheLifecycleError> {
     let root = resolve_explicit_root(cache_root)?.path;
+    validate_backend_path_constraints(backend, &root)?;
     match load_managed_compiler_cache(backend, root.clone()) {
         Ok(managed) => {
             return Ok(CompilerCachePreparation {
@@ -751,6 +757,7 @@ pub fn load_managed_compiler_cache(
     cache_root: PathBuf,
 ) -> Result<CompilerCacheManagedRoot, CompilerCacheLifecycleError> {
     let root = resolve_explicit_root(cache_root)?.path;
+    validate_backend_path_constraints(backend, &root)?;
     let metadata = match std::fs::symlink_metadata(&root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -864,6 +871,28 @@ fn validate_managed_root_layout(
     Ok(())
 }
 
+fn validate_backend_path_constraints(
+    backend: CompilerBackend,
+    root: &Path,
+) -> Result<(), CompilerCacheLifecycleError> {
+    if backend != CompilerBackend::Sccache {
+        return Ok(());
+    }
+    let socket = root.join("server.sock");
+    let length = socket.as_os_str().as_bytes().len();
+    if length > MAX_SCCACHE_SOCKET_PATH_BYTES {
+        return Err(CompilerCacheLifecycleError::ownership(
+            backend,
+            root,
+            format!(
+                "private sccache Unix-domain socket path '{}' is {length} bytes; the cross-host limit is {MAX_SCCACHE_SOCKET_PATH_BYTES} bytes, so choose a shorter AROS_HOME or --dir",
+                socket.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Return the controlled local-only environment for a verified managed root.
 ///
 /// # Errors
@@ -873,6 +902,7 @@ fn validate_managed_root_layout(
 pub fn compiler_cache_environment(
     root: &CompilerCacheManagedRoot,
 ) -> Result<CompilerCacheEnvironment, CompilerCacheLifecycleError> {
+    validate_backend_path_constraints(root.backend, root.root())?;
     let display = |path: &Path| {
         path.to_str().map(str::to_owned).ok_or_else(|| {
             CompilerCacheLifecycleError::ownership(
@@ -1487,6 +1517,17 @@ mod tests {
         assert!(matches!(
             prepare_managed_compiler_cache(CompilerBackend::Ccache, root),
             Err(CompilerCacheLifecycleError::NonEmptyUnownedRoot { .. })
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sccache_preparation_rejects_a_socket_path_beyond_the_cross_host_limit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("x".repeat(128));
+        assert!(matches!(
+            prepare_managed_compiler_cache(CompilerBackend::Sccache, root),
+            Err(CompilerCacheLifecycleError::InvalidOwnership { .. })
         ));
     }
 

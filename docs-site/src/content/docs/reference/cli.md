@@ -429,7 +429,9 @@ the backend's `AROS_HOME/cache/compiler/v1/` candidate. An explicit `DIR` must
 be absolute, private, and empty (or absent); existing cache bytes are never
 adopted. It generates a local-only configuration, data directory and ownership
 marker. The same invocation later revalidates that marker instead of
-overwriting it.
+overwriting it. For sccache, the resulting `<namespace>/server.sock` path must
+be at most 103 bytes, the cross-host Unix-domain-socket limit. Use a shorter
+`AROS_HOME` or explicit `--dir` when the CLI reports that constraint.
 
 `aros cache compiler stats --backend sccache|ccache [--dir DIR]` queries only
 that prepared namespace and holds a shared lifecycle lease. Backend statistics

@@ -761,12 +761,16 @@ data-tree snapshot. Apply holds an exclusive lease. ccache clear uses its
 controlled backend command; sccache clear stops only its generated private
 Unix-domain server, proves its exact socket no longer accepts connections,
 descriptor-unlinks that stale leaf, descriptor-removes only the unchanged owned
-data tree, and recreates that directory. Backend invocation requires ccache
+data tree, and recreates that directory. The sccache namespace is rejected when
+its generated socket path exceeds the 103-byte cross-host Unix-domain-socket
+limit. Backend invocation requires ccache
 4.14.0 or sccache 0.17.0, matching the repeatable native qualification floor.
-Live isolated ccache and sccache proof remains an
-acceptance input, together with the required adversarial and documentation
-gates; generic root-wide prune and compiler-cache retention remain out of
-scope.
+`scripts/verify-managed-compiler-cache-lifecycle.sh` supplies the isolated
+real-CLI proof for both backends: reset preserves entries, clear is contained,
+and sccache removes only its private socket while an independent server remains
+available. This remains an acceptance input together with the required
+adversarial and documentation gates; generic root-wide prune and
+compiler-cache retention remain out of scope.
 
 2026-09-13: Defined the reviewable CACHE-M1 passive-status contract: versioned
 status schemas, absolute archive-root precedence, no-follow single-root
