@@ -6,7 +6,7 @@ plan. Planning baseline: 2026-09-13, aros-tools
 Owner: Fabian Schmieder. Tracking prefix: `CACHE`, independent of the completed
 `TCP` producer milestones.
 
-Epic: tracking links pending creation.
+Epic: [Unified and safe cache management / #139](https://github.com/metaneutrons/aros-tools/issues/139).
 
 This document owns requirements and design decisions. Linked milestone issues
 own execution state and evidence. Proposed commands below are **not shipped
@@ -306,7 +306,7 @@ installed tree's validity or provenance; those remain separate checks.
 ### CACHE-M1
 
 Contracts, shared foundations and truthful compiler-cache behavior.
-Execution: tracking link pending creation. Dependencies: none.
+Execution: [#140](https://github.com/metaneutrons/aros-tools/issues/140). Dependencies: none.
 
 - CACHE-M1-A1: Approve parser examples, family root/selection precedence,
   capability and JSON/error contracts through a reviewed plan/contract PR.
@@ -325,7 +325,7 @@ Execution: tracking link pending creation. Dependencies: none.
 ### CACHE-M2
 
 Source and patch cache operations.
-Execution: tracking link pending creation. Dependencies: CACHE-M1.
+Execution: [#141](https://github.com/metaneutrons/aros-tools/issues/141). Dependencies: CACHE-M1.
 
 - CACHE-M2-A1: Implement sources status/list/fetch/verify for producer source,
   compatibility-port and product source-fetch declarations through typed
@@ -346,7 +346,7 @@ Execution: tracking link pending creation. Dependencies: CACHE-M1.
 ### CACHE-M3
 
 Standalone host/cross-compiler archive management.
-Execution: tracking link pending creation. Dependencies: CACHE-M1.
+Execution: [#142](https://github.com/metaneutrons/aros-tools/issues/142). Dependencies: CACHE-M1.
 
 - CACHE-M3-A1: Implement archives status/list/fetch/verify without installing
   compilers. Both consumer types reuse the same verified acquisition API and
@@ -364,7 +364,7 @@ Execution: tracking link pending creation. Dependencies: CACHE-M1.
 ### CACHE-M4
 
 Rust-driven Cargo vendor cache preparation.
-Execution: tracking link pending creation. Dependencies: CACHE-M1.
+Execution: [#143](https://github.com/metaneutrons/aros-tools/issues/143). Dependencies: CACHE-M1.
 
 - CACHE-M4-A1: Implement cargo status/list/fetch/verify for the exact selected
   tools source/lock and pinned Cargo tool, including registry and Git inputs.
@@ -383,7 +383,7 @@ Execution: tracking link pending creation. Dependencies: CACHE-M1.
 ### CACHE-M5
 
 Content-aware GenMF reference cache.
-Execution: tracking link pending creation. Dependencies: CACHE-M1.
+Execution: [#144](https://github.com/metaneutrons/aros-tools/issues/144). Dependencies: CACHE-M1.
 
 - CACHE-M5-A1: Implement genmf status/list/verify/refresh in its explicit
   expansion namespace; keep reports and source/build trees outside authority.
@@ -403,7 +403,7 @@ Execution: tracking link pending creation. Dependencies: CACHE-M1.
 ### CACHE-M6
 
 Safe removal, retention and concurrent lifecycle.
-Execution: tracking link pending creation.
+Execution: [#145](https://github.com/metaneutrons/aros-tools/issues/145).
 Dependencies: CACHE-M1 through CACHE-M5 for each affected adapter; no generic
 pruning of an adapter whose consumers have not migrated.
 
@@ -425,7 +425,7 @@ pruning of an adapter whose consumers have not migrated.
 ### CACHE-M7
 
 CLI/workflow migration, documentation and qualification.
-Execution: tracking link pending creation.
+Execution: [#146](https://github.com/metaneutrons/aros-tools/issues/146).
 Dependencies: CACHE-M1 through CACHE-M6.
 
 - CACHE-M7-A1: Migrate CLI, CMake, producer consumers, tests, completions and
