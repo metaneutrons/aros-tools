@@ -683,7 +683,11 @@ pub fn report_diagnostic(
         return diagnostic;
     }
     if let Some(classified) = error.downcast_ref::<ClassifiedFailure>() {
-        boundary = classified.boundary;
+        // Library classifications own the stable code and lifecycle stage.
+        // The invocation boundary owns user-facing recovery for the exact
+        // public leaf, so it is deliberately retained below.
+        boundary.code = classified.boundary.code;
+        boundary.stage = classified.boundary.stage;
     }
     if let Some(process) = error.downcast_ref::<ProcessFailure>() {
         process.apply_context(&mut context);
