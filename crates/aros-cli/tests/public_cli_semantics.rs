@@ -265,7 +265,27 @@ fn cargo_cache_lifecycle_is_exact_retained_and_preview_applied() {
         "--format",
         "json",
     ]);
-    assert_success(&released, "Cargo vendor retention release");
+    assert_success(&released, "Cargo vendor retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-cargo-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("Cargo release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "cargo",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "Cargo vendor retention release apply");
     let released: Value = serde_json::from_slice(&released.stdout).unwrap();
     assert_eq!(released["schema"], "aros-cache-cargo-release-v1");
 
@@ -415,7 +435,27 @@ fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
         "--format",
         "json",
     ]);
-    assert_success(&released, "GenMF cache retention release");
+    assert_success(&released, "GenMF cache retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-genmf-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("GenMF release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "genmf",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "reference-set",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "GenMF cache retention release apply");
     let released: Value = serde_json::from_slice(&released.stdout).unwrap();
     assert_eq!(released["schema"], "aros-cache-genmf-release-v1");
 
@@ -724,7 +764,27 @@ fn source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role()
         "--format",
         "json",
     ]);
-    assert_success(&released, "source cache release");
+    assert_success(&released, "source cache release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-sources-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("source release preview returns a token")
+        .to_owned();
+    let released = run(&[
+        "cache",
+        "sources",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--apply",
+        &release_token,
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "source cache release apply");
     let released: Value = serde_json::from_slice(&released.stdout).unwrap();
     assert_eq!(released["schema"], "aros-cache-sources-release-v1");
 
@@ -771,6 +831,47 @@ fn source_cache_lifecycle_retains_a_closed_selection_and_removes_only_one_role()
         !Path::new(cache).join("grub-2.12.tar.xz").exists(),
         "source lifecycle removal must delete only the previewed direct object"
     );
+}
+
+fn release_archive_retention(cache_root: &Path) {
+    let released = Command::new(aros())
+        .env("AROS_CACHE_DIR", cache_root)
+        .args([
+            "cache",
+            "archives",
+            "release",
+            "--name",
+            "release-candidate",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive release preview executes");
+    assert_success(&released, "archive retention release preview");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-archives-release-preview-v1");
+    let release_token = released["preview"]["apply_token"]
+        .as_str()
+        .expect("archive release preview returns a token")
+        .to_owned();
+    let released = Command::new(aros())
+        .env("AROS_CACHE_DIR", cache_root)
+        .args([
+            "cache",
+            "archives",
+            "release",
+            "--name",
+            "release-candidate",
+            "--apply",
+            &release_token,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("archive release apply executes");
+    assert_success(&released, "archive retention release apply");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-archives-release-v1");
 }
 
 #[test]
@@ -989,24 +1090,7 @@ fn archive_cache_uses_one_explicit_cross_host_selection_without_installing() {
         blocked["preview"]["blockers"][0]["name"],
         "release-candidate"
     );
-
-    let released = Command::new(aros())
-        .env("AROS_CACHE_DIR", &cache_root)
-        .args([
-            "cache",
-            "archives",
-            "release",
-            "--name",
-            "release-candidate",
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("archive release executes");
-    assert_success(&released, "archive retention release");
-    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
-    assert_eq!(released["schema"], "aros-cache-archives-release-v1");
-
+    release_archive_retention(&cache_root);
     let preview = Command::new(aros())
         .env("AROS_CACHE_DIR", &cache_root)
         .args([

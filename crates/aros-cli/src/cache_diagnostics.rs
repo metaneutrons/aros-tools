@@ -214,12 +214,16 @@ pub fn archive_lifecycle_boundary(command: &CacheArchivesCommand) -> CacheLifecy
             None,
             "select one declared archive and an unused portable --name; keep creates a named retention receipt but never transfers or removes bytes",
         ),
-        CacheArchivesCommand::Release { .. } => (
-            DiagnosticCode::CliPublication,
+        CacheArchivesCommand::Release { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliToolResolution
+            },
             DiagnosticStage::Publication,
             "cache.archives.release",
             None,
-            "pass an existing portable --name below the current archive root; release removes only that retention receipt",
+            "run the receipt preview first and pass its exact unexpired --apply token only after confirming that releasing this named reference is intended; release never deletes archive bytes",
         ),
         CacheArchivesCommand::Remove { apply, .. } => (
             if apply.is_some() {
@@ -251,12 +255,16 @@ pub fn source_lifecycle_boundary(command: &CacheSourcesCommand) -> CacheLifecycl
             None,
             "select one verified reviewed source closure, an existing private cache root, and a fresh portable --name; keep never downloads, replaces, or deletes source bytes",
         ),
-        CacheSourcesCommand::Release { .. } => (
-            DiagnosticCode::CliConfiguration,
+        CacheSourcesCommand::Release { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliConfiguration
+            },
             DiagnosticStage::Configuration,
             "cache.sources.release",
             None,
-            "pass the exact source-cache root and existing retention --name; release deletes only that named reference, never cache payload bytes",
+            "run the receipt preview first and pass its exact unexpired --apply token only after confirming that releasing the named reference is intended; release never deletes source-cache payload bytes",
         ),
         CacheSourcesCommand::Remove { .. } => (
             DiagnosticCode::CliSourceLock,
@@ -284,12 +292,16 @@ pub fn cargo_lifecycle_boundary(command: &CacheCargoCommand) -> CacheLifecycleBo
             None,
             "select one fully verified Cargo vendor generation and an unused portable --name; keep retains it but never invokes Cargo, rewrites inputs, or removes data",
         ),
-        CacheCargoCommand::Release { .. } => (
-            DiagnosticCode::CliPublication,
+        CacheCargoCommand::Release { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliToolResolution
+            },
             DiagnosticStage::Publication,
             "cache.cargo.release",
             None,
-            "pass the exact managed cache --dir and existing portable --name; release removes only that retention receipt",
+            "run the receipt preview first and pass its exact unexpired --apply token only after confirming that releasing the named reference is intended; release never deletes Cargo vendor data",
         ),
         CacheCargoCommand::Remove { apply, .. } => (
             if apply.is_some() {
@@ -321,12 +333,16 @@ pub fn genmf_lifecycle_boundary(command: &CacheGenmfCommand) -> CacheLifecycleBo
             None,
             "select all current fully verified GenMF generations and an unused portable --name; keep retains the closed selection but never invokes GenMF, replaces bytes, or removes data",
         ),
-        CacheGenmfCommand::Release { .. } => (
-            DiagnosticCode::CliPublication,
+        CacheGenmfCommand::Release { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliSourceInput
+            },
             DiagnosticStage::Publication,
             "cache.genmf.release",
             None,
-            "pass the exact managed cache --dir and existing portable --name; release removes only that retention receipt",
+            "run the receipt preview first and pass its exact unexpired --apply token only after confirming that releasing the named reference is intended; release never deletes GenMF expansion data",
         ),
         CacheGenmfCommand::Remove { apply, .. } => (
             if apply.is_some() {

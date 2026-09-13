@@ -57,28 +57,28 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache archives fetch` | Acquire and verify one selected archive without extracting or installing it |
 | `aros cache archives verify` | Verify one selected archive's declared byte identity only |
 | `aros cache archives keep` | Retain one selected archive under a named no-clobber reference |
-| `aros cache archives release` | Release one named archive retention reference without deleting bytes |
+| `aros cache archives release` | Preview or token-confirm release of one named archive retention reference |
 | `aros cache archives remove` | Preview or token-confirm removal of one exact selected archive |
 | `aros cache cargo status` | Passively observe one explicit Cargo vendor-cache parent root |
 | `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
 | `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
 | `aros cache cargo verify` | Fully validate one selected Cargo vendor generation against its lockfile and receipt |
 | `aros cache cargo keep` | Retain one selected verified Cargo vendor generation under a named no-clobber reference |
-| `aros cache cargo release` | Release one named Cargo retention reference without deleting a generation |
+| `aros cache cargo release` | Preview or token-confirm release of one named Cargo retention reference |
 | `aros cache cargo remove` | Preview or token-confirm removal of one exact Cargo vendor generation |
 | `aros cache genmf status` | Passively observe one explicit GenMF cache parent root |
 | `aros cache genmf list` | Select current GenMF inputs and list immutable-generation metadata without reading expansions |
 | `aros cache genmf verify` | Fully validate immutable GenMF expansions selected by current source inputs |
 | `aros cache genmf refresh` | Regenerate current references and prove every existing immutable generation matches |
 | `aros cache genmf keep` | Retain every verified generation in the exact current GenMF selection |
-| `aros cache genmf release` | Release one named GenMF retention reference without deleting generations |
+| `aros cache genmf release` | Preview or token-confirm release of one named GenMF retention reference |
 | `aros cache genmf remove` | Preview or token-confirm removal of one current input-selected immutable generation |
 | `aros cache sources status` | Passively observe one explicitly selected source-cache root |
 | `aros cache sources list` | List selector-declared source entries without hashing payload bytes |
 | `aros cache sources fetch` | Populate missing reviewed source objects without replacing existing ones |
 | `aros cache sources verify` | Measure selected source objects and verify every declared lock identity |
 | `aros cache sources keep` | Retain one fully verified reviewed source closure under a named reference |
-| `aros cache sources release` | Release one named source retention reference without deleting bytes |
+| `aros cache sources release` | Preview or token-confirm release of one named source retention reference |
 | `aros cache sources remove` | Preview or token-confirm removal of one role-selected source object |
 | `aros ccache` | Query statistics through the legacy compiler-cache frontend |
 | `aros golden capture` | Capture a reviewed transpiler-output baseline |
@@ -354,28 +354,28 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache archives fetch` | No | Acquire one project-selected archive; it does not extract or install it |
 | `cache archives verify` | No | Hash one project-selected archive and check only declared size/SHA-256 identity |
 | `cache archives keep` | No | Hash and retain one project-selected archive under a named reference; no download or deletion |
-| `cache archives release` | No | Remove one named retention receipt only; no archive bytes are deleted |
+| `cache archives release` | No | Preview one named retention receipt; `--apply TOKEN` releases it without deleting archive bytes |
 | `cache archives remove` | No | Hash and preview one exact project-selected archive, then require its short-lived token before deletion |
 | `cache cargo status` | No | Passively observe one explicit Cargo cache root without selecting a generation |
 | `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
 | `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
 | `cache cargo verify` | No | Rehash a selected vendor tree and verify its lockfile/template/receipt binding |
 | `cache cargo keep` | No | Revalidate and retain one selected vendor generation under a named reference; no Cargo invocation or deletion |
-| `cache cargo release` | No | Remove one named Cargo retention receipt only; no generation data is deleted |
+| `cache cargo release` | No | Preview one named Cargo retention receipt; `--apply TOKEN` releases it without deleting generation data |
 | `cache cargo remove` | No | Preview one exact immutable vendor generation, then require its short-lived token before deletion |
 | `cache genmf status` | No | Passively observe one explicit GenMF cache parent root without selecting source inputs |
 | `cache genmf list` | No | Hash selected current source inputs and probe the selected Python version, then list final-generation metadata without reading expansion payloads |
 | `cache genmf verify` | No | Hash selected inputs, probe the selected Python version, and hash immutable expansion generations without invoking GenMF or changing cache state |
 | `cache genmf refresh` | No | Run upstream GenMF in a private Python environment, publish only missing complete generations, and reject byte mismatches |
 | `cache genmf keep` | No | Revalidate and retain every exact current GenMF expansion under one named reference; no generation or deletion occurs |
-| `cache genmf release` | No | Remove one named GenMF retention receipt only; no expansion data is deleted |
+| `cache genmf release` | No | Preview one named GenMF retention receipt; `--apply TOKEN` releases it without deleting expansion data |
 | `cache genmf remove` | No | Preview one exact source-input-selected immutable generation, then require its short-lived token before deletion |
 | `cache sources status` | No | Passively observe one explicit source-cache root without selecting or hashing an object |
 | `cache sources list` | No | List one reviewed source selector's direct entries without hashing or downloading payloads |
 | `cache sources fetch` | No | Acquire missing selected objects, then measure the closed request; this is the explicit network boundary |
 | `cache sources verify` | No | Measure every selected cached object; strict declarations must match their lock |
 | `cache sources keep` | No | Revalidate and retain every exact object in one reviewed source closure under a named reference; no download or deletion |
-| `cache sources release` | No | Remove one named source retention receipt only; no source bytes are deleted |
+| `cache sources release` | No | Preview one named source retention receipt; `--apply TOKEN` releases it without deleting source bytes |
 | `cache sources remove` | No | Preview one direct object selected by a reviewed semantic role, then require its short-lived token before deletion |
 | `ccache` | No | Query statistics through the discovered sccache/ccache backend; this legacy command may start an sccache server |
 | `golden capture` | Required | Run recorded transpiler invocations twice and capture baselines |
@@ -424,8 +424,10 @@ cross-host prefetch explicit without executing a foreign binary. Archive
 verification is intentionally limited to declared size and SHA-256; extraction,
 payload-tree, receipt, provenance, and attestation checks remain installation
 responsibilities. `keep --name NAME` creates an immutable retention reference;
-`release --name NAME` removes that reference only. `remove` is preview-first
-and accepts `--apply TOKEN` only after a short-lived exact-object preview.
+`release --name NAME` is preview-first and accepts `--apply TOKEN` only after
+a short-lived exact-receipt preview; applying it removes that reference only.
+`remove` is likewise preview-first and accepts `--apply TOKEN` only after a
+short-lived exact-object preview.
 See [cache inspection](/aros-tools/workflows/cache/) for offline, refresh, and
 lifecycle semantics.
 
@@ -439,9 +441,10 @@ only its receipt; `fetch` is the bounded Cargo-resolution boundary and
 publishes only a complete, checksum-validated object; `verify` hashes the
 vendor tree and checks the receipt. `keep --name NAME` repeats that
 verification while holding the exclusive lifecycle lock, then publishes an
-immutable named reference. `release --dir DIR --name NAME` removes only that
-reference. `remove` is preview-first and accepts `--apply TOKEN` only after a
-short-lived exact-generation preview. The native producer holds a shared lease
+immutable named reference. `release --dir DIR --name NAME` is preview-first
+and accepts `--apply TOKEN`; applying it removes only that reference. `remove`
+is preview-first and accepts `--apply TOKEN` only after a short-lived
+exact-generation preview. The native producer holds a shared lease
 while copying the revalidated object into its private runtime before invoking
 Cargo with `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
 for exact layout, isolation, and offline semantics.
@@ -458,7 +461,8 @@ refreshes, replaces or repairs a cache entry.
 
 `keep` verifies the whole selected closure while holding deterministic
 exclusive lifecycle leases, then records every object beneath one immutable
-named reference. `release` deletes that reference only. `remove` requires the
+named reference. `release` first shows an exact short-lived receipt preview
+and deletes that reference only with its `--apply TOKEN`. `remove` requires the
 same selector plus one semantic `--role`; it shows an exact short-lived preview
 first and accepts `--apply TOKEN` only if retention, content identity, and
 active reader/writer leases still permit removal. A native producer holds a

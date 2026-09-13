@@ -151,7 +151,7 @@ pub enum CacheSourcesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
-    /// Release one named source-cache retention reference without deleting bytes.
+    /// Preview or token-confirm release of one named source-cache retention reference.
     Release {
         /// Existing real absolute source-cache root.
         #[arg(long, value_name = "DIR")]
@@ -160,6 +160,10 @@ pub enum CacheSourcesCommand {
         /// Existing portable retention-reference name.
         #[arg(long, value_name = "NAME")]
         name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -250,11 +254,15 @@ pub enum CacheArchivesCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
-    /// Release one named archive retention reference without deleting bytes.
+    /// Preview or token-confirm release of one named archive retention reference.
     Release {
         /// Existing portable retention-reference name.
         #[arg(long, value_name = "NAME")]
         name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -337,7 +345,7 @@ pub enum CacheCargoCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
-    /// Release one named Cargo retention reference without deleting a generation.
+    /// Preview or token-confirm release of one named Cargo retention reference.
     Release {
         /// Existing AROS-managed parent cache root holding the reference.
         #[arg(long, value_name = "DIR")]
@@ -346,6 +354,10 @@ pub enum CacheCargoCommand {
         /// Existing portable retention-reference name.
         #[arg(long, value_name = "NAME")]
         name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]
@@ -424,7 +436,7 @@ pub enum CacheGenmfCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
-    /// Release one named GenMF retention reference without deleting generations.
+    /// Preview or token-confirm release of one named GenMF retention reference.
     Release {
         /// Existing no-follow parent cache root holding the reference.
         #[arg(long, value_name = "DIR")]
@@ -433,6 +445,10 @@ pub enum CacheGenmfCommand {
         /// Existing portable retention-reference name.
         #[arg(long, value_name = "NAME")]
         name: String,
+
+        /// Exact token from a prior release preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
 
         /// Result representation on stdout, independent of diagnostic format.
         #[arg(long, value_enum, default_value = "human")]

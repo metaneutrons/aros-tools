@@ -203,8 +203,14 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                 },
         } => cache::source_keep(selector, &dir, &name, format),
         CacheCommand::Sources {
-            command: CacheSourcesCommand::Release { dir, name, format },
-        } => cache::source_release(&dir, &name, format),
+            command:
+                CacheSourcesCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::source_release(&dir, &name, apply.as_deref(), format),
         CacheCommand::Sources {
             command:
                 CacheSourcesCommand::Remove {
@@ -242,8 +248,13 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                 },
         } => cache::archive_keep(selector, &name, format),
         CacheCommand::Archives {
-            command: CacheArchivesCommand::Release { name, format },
-        } => cache::archive_release(&name, format),
+            command:
+                CacheArchivesCommand::Release {
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::archive_release(&name, apply.as_deref(), format),
         CacheCommand::Archives {
             command:
                 CacheArchivesCommand::Remove {
@@ -278,8 +289,14 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                 },
         } => cache::cargo_keep(selector, &name, format),
         CacheCommand::Cargo {
-            command: CacheCargoCommand::Release { dir, name, format },
-        } => cache::cargo_release(&dir, &name, format),
+            command:
+                CacheCargoCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::cargo_release(&dir, &name, apply.as_deref(), format),
         CacheCommand::Cargo {
             command:
                 CacheCargoCommand::Remove {
@@ -309,8 +326,14 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
                 },
         } => cache::genmf_keep(selector, &name, format),
         CacheCommand::Genmf {
-            command: CacheGenmfCommand::Release { dir, name, format },
-        } => cache::genmf_release(&dir, &name, format),
+            command:
+                CacheGenmfCommand::Release {
+                    dir,
+                    name,
+                    apply,
+                    format,
+                },
+        } => cache::genmf_release(&dir, &name, apply.as_deref(), format),
         CacheCommand::Genmf {
             command:
                 CacheGenmfCommand::Remove {

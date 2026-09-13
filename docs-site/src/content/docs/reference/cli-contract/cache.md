@@ -29,6 +29,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache archives list` | host | --host | — | optional | 1 |  |  | — |  |
 | `aros cache archives list` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache archives release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache archives release` | apply | --apply | — | optional | 1 |  |  | — |  |
 | `aros cache archives release` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache archives remove` | project | --project | — | required | 1 |  |  | — |  |
 | `aros cache archives remove` | host_compiler | --host-compiler | — | exactly one of archive_selector | 0 | false |  | — |  |
@@ -63,6 +64,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache cargo list` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache cargo release` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache cargo release` | apply | --apply | — | optional | 1 |  |  | — |  |
 | `aros cache cargo release` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache cargo remove` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo remove` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
@@ -98,6 +100,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache genmf refresh` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache genmf release` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache genmf release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache genmf release` | apply | --apply | — | optional | 1 |  |  | — |  |
 | `aros cache genmf release` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache genmf remove` | source_dir | --source-dir | — | required | 1 |  |  | — |  |
 | `aros cache genmf remove` | dir | --dir | — | required | 1 |  |  | — |  |
@@ -133,6 +136,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache sources list` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache sources release` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache sources release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache sources release` | apply | --apply | — | optional | 1 |  |  | — |  |
 | `aros cache sources release` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache sources remove` | source_lock | --source-lock | — | exactly one of source_selector | 1 |  |  | — |  |
 | `aros cache sources remove` | compatibility_ports_lock | --compatibility-ports-lock | — | exactly one of source_selector | 1 |  |  | — |  |

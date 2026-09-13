@@ -27,6 +27,7 @@ use crate::{resolve_explicit_root, CacheFamily, RootResolutionError};
 const LIFECYCLE_SCHEMA: &str = "aros-cache-lifecycle-v1";
 const RETENTION_SCHEMA: &str = "aros-cache-retention-v1";
 const TOKEN_SCHEMA: &str = "aros-cache-remove-token-v1";
+const RETENTION_RELEASE_TOKEN_SCHEMA: &str = "aros-cache-release-token-v1";
 const CONTROL_DIRECTORY: &str = ".aros-cache-lifecycle";
 const CONTROL_VERSION: &str = "v1";
 const RETENTION_DIRECTORY: &str = "retention";
@@ -111,6 +112,37 @@ pub struct CacheRetentionRelease {
     pub cache_root: PathBuf,
     /// Existing portable retention-reference name.
     pub name: String,
+}
+
+/// Non-mutating, short-lived plan to release one named retention reference.
+///
+/// Releasing a reference never removes cached bytes directly, but it can make
+/// them eligible for a later destructive operation. It therefore has the same
+/// snapshot-bound preview/apply boundary as object removal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheRetentionReleasePreview {
+    /// Result document schema.
+    pub schema: &'static str,
+    /// Planned operation.
+    pub operation: &'static str,
+    /// Exact family selected by the caller.
+    pub family: CacheFamily,
+    /// Absolute cache root bound into the token.
+    pub cache_root: PathBuf,
+    /// Named retention reference selected by the caller.
+    pub name: String,
+    /// Portable path of the receipt that would be removed.
+    pub relative_path: String,
+    /// Exact descriptor- and content-measured receipt proof.
+    pub receipt: CacheObjectProof,
+    /// Number of cache objects that the receipt currently protects.
+    pub retained_object_count: usize,
+    /// Unix timestamp after which this preview is rejected.
+    pub expires_unix_seconds: u64,
+    /// Exact token required by [`apply_retention_release`].
+    pub apply_token: String,
+    /// Explicit recovery boundary for this single-reference primitive.
+    pub recovery: &'static str,
 }
 
 /// An OS-held lifecycle lease for one selected cache object.
@@ -551,40 +583,78 @@ where
     Ok(record)
 }
 
-/// Remove exactly one named retention receipt, without touching cache data.
+/// Preview release of exactly one named retention receipt.
+///
+/// Releasing a receipt does not remove cache bytes, but it removes the
+/// reference that prevents a later cache-object removal. This command is
+/// therefore deliberately non-mutating and emits the short-lived token needed
+/// by [`apply_retention_release`].
 ///
 /// # Errors
 ///
-/// Returns an error if the receipt is missing, malformed, bound to a different
-/// root/family/name, or changes before descriptor-relative removal.
-pub fn release(request: &CacheRetentionRelease) -> Result<CacheRemovalResult, CacheLifecycleError> {
-    let root = selected_root(&request.cache_root)?;
-    validate_private_directory_nofollow(&root)
-        .map_err(|error| CacheLifecycleError::io("validate private root", &root, error))?;
-    let name = retention_name(&request.name)?;
-    let directory = retention_directory(&root, request.family);
-    let path = retention_receipt_path(&directory, &name);
-    let (identity, bytes) = measure_regular_file_bounded(&path, MAX_RETENTION_RECEIPT_BYTES)
-        .map_err(|error| CacheLifecycleError::io("read retention receipt", &path, error))?
-        .ok_or_else(|| CacheLifecycleError::Missing(path.clone()))?;
-    let record = decode_retention_record(&bytes, &path)?;
-    validate_retention_binding(&record, request.family, &root, &name)?;
-    let digest = sha256_bytes(&bytes);
-    remove_regular_file_from_snapshot_nofollow(
-        &path,
-        identity,
-        &digest,
-        u64::try_from(bytes.len())
-            .map_err(|error| CacheLifecycleError::invalid(error.to_string()))?,
-        MAX_RETENTION_RECEIPT_BYTES,
-    )
-    .map_err(|error| CacheLifecycleError::io("remove retention receipt", &path, error))?;
+/// Returns an error when the selected root or receipt is unsafe, absent,
+/// malformed, bound to a different root/family/name, or cannot be measured
+/// inside the bounded receipt policy.
+pub fn preview_retention_release(
+    request: &CacheRetentionRelease,
+) -> Result<CacheRetentionReleasePreview, CacheLifecycleError> {
+    let now = current_unix_seconds()?;
+    preview_retention_release_until(request, now.saturating_add(PREVIEW_LIFETIME_SECONDS))
+}
+
+/// Apply one previously previewed named-retention release.
+///
+/// The token is bound to the exact receipt contents, its no-follow descriptor
+/// identity, selected cache root, family and reference name. The receipt is
+/// measured and validated again while an exclusive lifecycle lock is held, so
+/// a substituted, changed or expired preview can never release a reference.
+///
+/// # Errors
+///
+/// Returns an error for a malformed, expired or stale token; unsafe root or
+/// receipt state; lock contention; or failed descriptor-relative removal.
+pub fn apply_retention_release(
+    request: &CacheRetentionRelease,
+    apply_token: &str,
+) -> Result<CacheRemovalResult, CacheLifecycleError> {
+    apply_retention_release_at(request, apply_token, current_unix_seconds()?)
+}
+
+fn apply_retention_release_at(
+    request: &CacheRetentionRelease,
+    apply_token: &str,
+    now: u64,
+) -> Result<CacheRemovalResult, CacheLifecycleError> {
+    let expires = parse_token_expiry_for(apply_token, RETENTION_RELEASE_TOKEN_SCHEMA)?;
+    if now > expires {
+        return Err(CacheLifecycleError::Token(
+            "the release preview expired; run the preview command again".to_owned(),
+        ));
+    }
+    if expires.saturating_sub(now) > PREVIEW_LIFETIME_SECONDS {
+        return Err(CacheLifecycleError::Token(
+            "the release preview expiry is outside the permitted lifetime".to_owned(),
+        ));
+    }
+
+    let (root, _name, relative_path) = retention_receipt_location(request)?;
+    let (lock_path, lock) = acquire_object_lock(&root, request.family, &relative_path)?;
+    let prepared = prepare_retention_release(request, expires)?;
+    if prepared.preview.apply_token != apply_token {
+        return Err(CacheLifecycleError::Token(
+            "the selected retention receipt, root, family or reference name changed; run the preview command again"
+                .to_owned(),
+        ));
+    }
+    lock.revalidate()
+        .map_err(|error| CacheLifecycleError::io("revalidate lifecycle lock", &lock_path, error))?;
+    prepared.receipt.remove()?;
     Ok(CacheRemovalResult {
         schema: LIFECYCLE_SCHEMA,
         operation: "release",
         family: request.family,
         cache_root: root,
-        relative_path: format!("{RETENTION_DIRECTORY}/{}/{}", request.family.as_str(), name),
+        relative_path,
         outcome: "retention_reference_released",
     })
 }
@@ -694,6 +764,19 @@ struct TokenBinding<'a> {
     expires_unix_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RetentionReleaseTokenBinding<'a> {
+    schema: &'static str,
+    operation: &'static str,
+    family: CacheFamily,
+    cache_root: &'a Path,
+    name: &'a str,
+    relative_path: &'a str,
+    receipt: &'a CacheObjectProof,
+    retained_object_count: usize,
+    expires_unix_seconds: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TokenObjectPolicy {
@@ -732,6 +815,12 @@ struct SelectedObject {
     path: PathBuf,
     proof: CacheObjectProof,
     snapshot: ObjectSnapshot,
+}
+
+#[derive(Debug)]
+struct PreparedRetentionRelease {
+    preview: CacheRetentionReleasePreview,
+    receipt: SelectedObject,
 }
 
 #[derive(Debug)]
@@ -827,6 +916,88 @@ impl SelectedObject {
             }
         }
     }
+}
+
+fn preview_retention_release_until(
+    request: &CacheRetentionRelease,
+    expires_unix_seconds: u64,
+) -> Result<CacheRetentionReleasePreview, CacheLifecycleError> {
+    Ok(prepare_retention_release(request, expires_unix_seconds)?.preview)
+}
+
+fn prepare_retention_release(
+    request: &CacheRetentionRelease,
+    expires_unix_seconds: u64,
+) -> Result<PreparedRetentionRelease, CacheLifecycleError> {
+    let (root, name, relative_path) = retention_receipt_location(request)?;
+    let path = root.join(&relative_path);
+    let (identity, bytes) = measure_regular_file_bounded(&path, MAX_RETENTION_RECEIPT_BYTES)
+        .map_err(|error| CacheLifecycleError::io("read retention receipt", &path, error))?
+        .ok_or_else(|| CacheLifecycleError::Missing(path.clone()))?;
+    let record = decode_retention_record(&bytes, &path)?;
+    validate_retention_binding(&record, request.family, &root, &name)?;
+    let size = u64::try_from(bytes.len())
+        .map_err(|error| CacheLifecycleError::invalid(error.to_string()))?;
+    let sha256 = sha256_bytes(&bytes);
+    let proof = CacheObjectProof::RegularFile {
+        identity,
+        sha256: sha256.clone(),
+        size,
+    };
+    let receipt = SelectedObject {
+        root: root.clone(),
+        relative_path: relative_path.clone(),
+        path,
+        proof: proof.clone(),
+        snapshot: ObjectSnapshot::RegularFile {
+            identity,
+            sha256,
+            size,
+            max_bytes: MAX_RETENTION_RECEIPT_BYTES,
+        },
+    };
+    let apply_token = retention_release_token(
+        request.family,
+        &root,
+        &name,
+        &relative_path,
+        &proof,
+        record.objects.len(),
+        expires_unix_seconds,
+    )?;
+    Ok(PreparedRetentionRelease {
+        preview: CacheRetentionReleasePreview {
+            schema: LIFECYCLE_SCHEMA,
+            operation: "release_preview",
+            family: request.family,
+            cache_root: root,
+            name,
+            relative_path,
+            receipt: proof,
+            retained_object_count: record.objects.len(),
+            expires_unix_seconds,
+            apply_token,
+            recovery: "releasing this receipt removes no cache bytes, but can make its retained objects eligible for a later token-confirmed removal",
+        },
+        receipt,
+    })
+}
+
+fn retention_receipt_location(
+    request: &CacheRetentionRelease,
+) -> Result<(PathBuf, String, String), CacheLifecycleError> {
+    let root = selected_root(&request.cache_root)?;
+    validate_private_directory_nofollow(&root)
+        .map_err(|error| CacheLifecycleError::io("validate private root", &root, error))?;
+    let name = retention_name(&request.name)?;
+    let relative_path = relative_path(
+        &PathBuf::from(CONTROL_DIRECTORY)
+            .join(CONTROL_VERSION)
+            .join(RETENTION_DIRECTORY)
+            .join(request.family.as_str())
+            .join(format!("{name}{RETENTION_SUFFIX}")),
+    )?;
+    Ok((root, name, relative_path))
 }
 
 fn preview_removal_until(
@@ -1278,12 +1449,47 @@ fn removal_token(
     ))
 }
 
+fn retention_release_token(
+    family: CacheFamily,
+    cache_root: &Path,
+    name: &str,
+    relative_path: &str,
+    receipt: &CacheObjectProof,
+    retained_object_count: usize,
+    expires_unix_seconds: u64,
+) -> Result<String, CacheLifecycleError> {
+    let binding = RetentionReleaseTokenBinding {
+        schema: RETENTION_RELEASE_TOKEN_SCHEMA,
+        operation: "release",
+        family,
+        cache_root,
+        name,
+        relative_path,
+        receipt,
+        retained_object_count,
+        expires_unix_seconds,
+    };
+    let bytes = serde_json::to_vec(&binding).map_err(|error| {
+        CacheLifecycleError::Control(format!(
+            "cannot encode retention-release token binding: {error}"
+        ))
+    })?;
+    Ok(format!(
+        "{RETENTION_RELEASE_TOKEN_SCHEMA}:{expires_unix_seconds}:{}",
+        sha256_bytes(&bytes)
+    ))
+}
+
 fn parse_token_expiry(token: &str) -> Result<u64, CacheLifecycleError> {
+    parse_token_expiry_for(token, TOKEN_SCHEMA)
+}
+
+fn parse_token_expiry_for(token: &str, schema: &str) -> Result<u64, CacheLifecycleError> {
     let mut parts = token.split(':');
-    let schema = parts.next();
+    let token_schema = parts.next();
     let expiry = parts.next();
     let digest = parts.next();
-    if schema != Some(TOKEN_SCHEMA) || parts.next().is_some() {
+    if token_schema != Some(schema) || parts.next().is_some() {
         return Err(CacheLifecycleError::Token(
             "expected a versioned token emitted by the corresponding preview command".to_owned(),
         ));
@@ -1312,9 +1518,10 @@ fn current_unix_seconds() -> Result<u64, CacheLifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_read_lease, acquire_read_leases, acquire_write_lease, acquire_write_leases, keep,
-        keep_many, keep_validated, preview_removal_until, release, CacheLifecycleError,
-        CacheObjectKind, CacheObjectRequest, CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
+        acquire_read_lease, acquire_read_leases, acquire_write_lease, acquire_write_leases,
+        apply_retention_release_at, keep, keep_many, keep_validated, preview_removal_until,
+        preview_retention_release_until, CacheLifecycleError, CacheObjectKind, CacheObjectRequest,
+        CacheRetentionRelease, PREVIEW_LIFETIME_SECONDS,
     };
     use crate::CacheFamily;
     use std::path::PathBuf;
@@ -1399,15 +1606,49 @@ mod tests {
             Err(CacheLifecycleError::Retained(_))
         ));
 
-        release(&CacheRetentionRelease {
+        let release = CacheRetentionRelease {
             family: CacheFamily::Archives,
             cache_root: root,
             name: "release-candidate".to_owned(),
-        })
-        .unwrap();
+        };
+        let preview = preview_retention_release_until(&release, 4_000).unwrap();
+        apply_retention_release_at(&release, &preview.apply_token, 3_900).unwrap();
         let preview = preview_removal_until(&request, 4_000).unwrap();
         apply_removal_with_now(&request, &preview.apply_token, 3_900).unwrap();
         assert!(!entry.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn retention_release_requires_an_unchanged_preview_token() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("archive"), b"approved").unwrap();
+        let request = file_request(&root, "archive");
+        keep(&request, "release-candidate").unwrap();
+        let release = CacheRetentionRelease {
+            family: CacheFamily::Archives,
+            cache_root: root.clone(),
+            name: "release-candidate".to_owned(),
+        };
+        let preview = preview_retention_release_until(&release, 4_000).unwrap();
+        assert!(
+            !preview_removal_until(&request, 4_000).unwrap().eligible,
+            "a retention-release preview must not weaken the live reference"
+        );
+        let receipt =
+            root.join(".aros-cache-lifecycle/v1/retention/archives/release-candidate.json");
+        let bytes = std::fs::read(&receipt).unwrap();
+        std::fs::remove_file(&receipt).unwrap();
+        std::fs::write(&receipt, bytes).unwrap();
+
+        assert!(matches!(
+            apply_retention_release_at(&release, &preview.apply_token, 3_900),
+            Err(CacheLifecycleError::Token(_))
+        ));
+        assert!(receipt.is_file());
+        assert!(!preview_removal_until(&request, 4_000).unwrap().eligible);
     }
 
     #[test]
@@ -1480,12 +1721,13 @@ mod tests {
             assert_eq!(preview.blockers[0].name, "release-candidate");
         }
 
-        release(&CacheRetentionRelease {
+        let release = CacheRetentionRelease {
             family: CacheFamily::Archives,
             cache_root: root,
             name: "release-candidate".to_owned(),
-        })
-        .unwrap();
+        };
+        let preview = preview_retention_release_until(&release, 4_000).unwrap();
+        apply_retention_release_at(&release, &preview.apply_token, 3_900).unwrap();
         assert!(preview_removal_until(&alpha, 4_000).unwrap().eligible);
         assert!(preview_removal_until(&beta, 4_000).unwrap().eligible);
     }

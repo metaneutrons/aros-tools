@@ -1,7 +1,10 @@
 use std::fs;
 use std::time::Duration;
 
-use aros_cache::{apply_removal, preview_removal, release, CacheFamily, CacheRetentionRelease};
+use aros_cache::{
+    apply_removal, apply_retention_release, preview_removal, preview_retention_release,
+    CacheFamily, CacheRetentionRelease,
+};
 use aros_common::CancellationToken;
 
 use crate::genmf_cache::{
@@ -95,12 +98,13 @@ fn lifecycle_retention_is_closed_and_removal_is_exact_and_lease_safe() {
     assert!(!retained.eligible);
     assert_eq!(retained.blockers[0].name, "reference-set");
 
-    let released = release(&CacheRetentionRelease {
+    let release = CacheRetentionRelease {
         family: CacheFamily::Genmf,
         cache_root: request.cache_dir.clone(),
         name: "reference-set".to_owned(),
-    })
-    .unwrap();
+    };
+    let release_preview = preview_retention_release(&release).unwrap();
+    let released = apply_retention_release(&release, &release_preview.apply_token).unwrap();
     assert_eq!(released.outcome, "retention_reference_released");
 
     let preview = preview_removal(&object).unwrap();

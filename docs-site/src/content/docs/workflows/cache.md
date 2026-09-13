@@ -6,9 +6,10 @@ description: Inspect, populate, retain, and safely remove exact reviewed AROS ca
 `aros cache` is the resource-oriented cache interface. Passive status commands
 do not create a directory, acquire a lock, hash a tree, access a network, start
 a compiler-cache daemon, or change a backend. Source-cache and compiler-archive
-`fetch` are separate, explicit population boundaries. Lifecycle removal is always
-limited to one selected immutable object, begins with a preview, and requires
-the matching short-lived apply token.
+`fetch` are separate, explicit population boundaries. Every lifecycle mutation
+begins with a preview and requires the matching short-lived apply token:
+`release` removes one named protection receipt, while `remove` deletes one
+selected immutable object.
 
 ```sh
 aros cache status
@@ -26,7 +27,7 @@ aros cache archives verify --project /work/AROS --toolchain --preset pc-x86_64
 aros cache archives keep --project /work/AROS --toolchain --preset pc-x86_64 \
   --name release-candidate
 aros cache archives remove --project /work/AROS --toolchain --preset pc-x86_64 --format json
-aros cache archives release --name release-candidate
+aros cache archives release --name release-candidate --format json
 
 aros cache cargo status --dir /work/aros-source-cache
 aros cache cargo list --producer-dir /work/aros-toolchains \
@@ -39,7 +40,7 @@ aros cache cargo keep --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --name release-candidate
 aros cache cargo remove --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
-aros cache cargo release --dir /work/aros-source-cache --name release-candidate
+aros cache cargo release --dir /work/aros-source-cache --name release-candidate --format json
 
 aros cache genmf status --dir /work/aros-genmf-cache
 aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache --format json
@@ -49,7 +50,7 @@ aros cache genmf keep --source-dir /work/AROS --dir /work/aros-genmf-cache \
   --name release-candidate
 aros cache genmf remove --source-dir /work/AROS --dir /work/aros-genmf-cache \
   --source rom/mmakefile --format json
-aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate
+aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate --format json
 
 aros cache sources status --dir /work/aros-source-cache
 aros cache sources list --source-lock toolchains/llvm.sources.json \
@@ -63,7 +64,7 @@ aros cache sources keep --source-lock toolchains/llvm.sources.json \
 aros cache sources remove --source-lock toolchains/llvm.sources.json \
   --dir /work/aros-source-cache --role producer:toolchain_component:llvm-project@20.1.7 \
   --format json
-aros cache sources release --dir /work/aros-source-cache --name release-candidate
+aros cache sources release --dir /work/aros-source-cache --name release-candidate --format json
 ```
 
 Use the JSON documents for scripts. `--format json` changes normal stdout only;
@@ -177,7 +178,14 @@ Archive cleanup is deliberately selector-based. `keep` creates one durable,
 no-clobber named reference for the archive selected by the same reviewed
 `--project` / `--host-compiler` or `--toolchain --preset` inputs used by
 `fetch` and `verify`. A retained object cannot be removed. `release --name`
-removes only that reference; it never removes archive bytes.
+first previews only that reference; its exact token is required to remove the
+reference. It never removes archive bytes.
+
+```sh
+release_preview="$(aros cache archives release --name release-candidate --format json)"
+release_token="$(printf '%s' "$release_preview" | jq -r '.preview.apply_token')"
+aros cache archives release --name release-candidate --apply "$release_token"
+```
 
 `remove` without `--apply` is a non-mutating preview. It hashes exactly the
 selected archive, records every retention blocker, and emits a short-lived
@@ -242,13 +250,13 @@ aros cache cargo verify --producer-dir /work/aros-toolchains \
 aros cache cargo fetch --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --offline
 
-# Retain a fully revalidated generation, then obtain a token-bound deletion
-# preview. `release` removes only the named receipt, never vendor bytes.
+# Retain a fully revalidated generation. Release first returns a token-bound
+# receipt preview; applying it removes only the named receipt, never vendor bytes.
 aros cache cargo keep --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --name release-candidate
 aros cache cargo remove --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
-aros cache cargo release --dir /work/aros-source-cache --name release-candidate
+aros cache cargo release --dir /work/aros-source-cache --name release-candidate --format json
 ```
 
 `fetch` invokes Cargo's own `vendor --locked --versioned-dirs` through bounded
@@ -331,8 +339,9 @@ aros cache genmf keep --source-dir /work/AROS --dir /work/aros-genmf-cache \
 aros cache genmf remove --source-dir /work/AROS --dir /work/aros-genmf-cache \
   --source rom/mmakefile --format json
 
-# Release only the named retention receipt. It does not delete a generation.
-aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate
+# Preview release of only the named retention receipt. Applying its returned
+# token does not delete a generation.
+aros cache genmf release --dir /work/aros-genmf-cache --name release-candidate --format json
 ```
 
 `refresh` runs only the selected resolved interpreter and upstream GenMF in a
@@ -349,7 +358,9 @@ generation after it was verified but before its contents are consumed.
 
 `keep` reselects and fully verifies every current immutable generation while
 exclusive lifecycle locks are held, then writes one no-clobber named receipt
-for the complete selection. `remove` accepts only an exact current
+for the complete selection. `release` first returns a five-minute preview for
+one named receipt; its exact token is required before the receipt is removed.
+`remove` accepts only an exact current
 source-root-relative MMake path via `--source`; it cannot infer or search an
 object from a cache filename. Without `--apply` it returns a five-minute
 preview with retention blockers and an apply token. With that exact token,
@@ -454,7 +465,8 @@ The native producer and compatibility executor independently reverify the
 same typed request before consuming its cache objects. The native producer
 holds a shared lifecycle lease across its source-lock closure while upstream
 Configure and MetaMake may read it. `keep` retains a whole closure under one
-named reference; `remove` is deliberately role-selected, preview-first, and
+named reference; `release` is preview-first and removes only that receipt with
+its exact token; `remove` is deliberately role-selected, preview-first, and
 blocked until every reference is released. A pinned workflow must replace every
 removed producer-cache invocation before upgrading aros-tools.
 
