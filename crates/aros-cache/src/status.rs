@@ -1,6 +1,6 @@
 //! Bounded, non-creating cache status documents.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     observe_compiler_backends, observe_root, resolve_archive_cache_root,
@@ -69,7 +69,7 @@ const PASSIVE_SIDE_EFFECTS: CacheSideEffects = CacheSideEffects {
 };
 
 /// One cache family in the public resource-oriented interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheFamily {
     /// Compiler-result acceleration backends.

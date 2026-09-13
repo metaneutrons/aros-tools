@@ -320,6 +320,18 @@ pub(super) fn validate_private_ancestor_chain(target: &Path) -> std::io::Result<
     Ok(())
 }
 
+pub(in crate::publication) fn validate_private_directory_nofollow(
+    path: &Path,
+) -> std::io::Result<()> {
+    validate_private_ancestor_chain(path)?;
+    let directory = rfs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    validate_private_directory(&rfs::fstat(&directory)?, path)
+}
+
 fn validate_private_tree(
     directory: &OwnedFd,
     display_path: &Path,

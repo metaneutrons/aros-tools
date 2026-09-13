@@ -202,6 +202,7 @@ pub use tree_ops::{
     directory_entry_names_nofollow_bounded, ensure_directory_nofollow,
     measure_tree_content_cas_bounded, remove_regular_file_from_snapshot_nofollow,
     remove_tree_from_snapshot_nofollow, validate_existing_directory_prefix_nofollow,
+    validate_private_directory_nofollow,
 };
 
 /// Existing-target policy for one-file publication.

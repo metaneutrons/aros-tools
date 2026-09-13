@@ -60,6 +60,30 @@ pub fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Prove that an existing directory is a private, no-follow mutation
+/// namespace.
+///
+/// The directory and every non-sticky ancestor must not be group- or
+/// world-writable. This is the same ownership boundary required before a
+/// snapshot-bound destructive operation can create locks, receipts, or
+/// journals below the directory.
+///
+/// # Errors
+///
+/// Returns an error when the directory is missing, unsafe, a symlink, not a
+/// directory, or descriptor-relative durability is unavailable.
+pub fn validate_private_directory_nofollow(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::validate_private_directory_nofollow_impl(&absolute_path(path)?)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(unsupported_durability())
+    }
+}
+
 /// Inspect the existing portion of a directory path without following links.
 ///
 /// Missing trailing components are accepted so callers can use this during a

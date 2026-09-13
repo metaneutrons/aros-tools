@@ -1181,6 +1181,12 @@ pub(in crate::publication) fn remove_regular_file_from_snapshot_impl(
     )
 }
 
+pub(in crate::publication) fn validate_private_directory_nofollow_impl(
+    path: &Path,
+) -> std::io::Result<()> {
+    tree::validate_private_directory_nofollow(path)
+}
+
 pub(in crate::publication) fn directory_entry_names_nofollow_bounded_impl(
     path: &Path,
     max_entries: usize,

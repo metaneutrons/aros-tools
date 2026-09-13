@@ -1,23 +1,42 @@
 //! No-follow advisory locks and directory creation.
 
 use super::{
-    identity_from_stat, open_parent, rfs, AdvisoryLockObservation, AdvisoryLockState, Component,
-    ErrorKind, FileIdentity, FlockOperation, Mode, OFlags, Ordering, Path, PathBuf,
-    TRANSACTION_SEQUENCE,
+    absolute_path, identity_from_stat, open_parent, rfs, AdvisoryLockObservation,
+    AdvisoryLockState, Component, ErrorKind, FileIdentity, FlockOperation, Mode, OFlags, Ordering,
+    Path, PathBuf, TRANSACTION_SEQUENCE,
 };
 use std::ffi::OsString;
 
 pub(in crate::publication) fn acquire_advisory_file_lock(
     path: &Path,
 ) -> std::io::Result<std::fs::File> {
-    let parent = open_parent(path, true)?;
-    let fd = rfs::openat(
+    let parent = open_parent(path, true).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "cannot prepare advisory-lock parent for '{}': {error}",
+                path.display()
+            ),
+        )
+    })?;
+    let lock_flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = match rfs::openat(
         &parent.fd,
         Path::new(&parent.leaf),
-        OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        lock_flags | OFlags::CREATE | OFlags::EXCL,
         Mode::from_raw_mode(0o600),
-    )?;
-    if !rfs::FileType::from_raw_mode(rfs::fstat(&fd)?.st_mode).is_file() {
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::EXIST) => rfs::openat(
+            &parent.fd,
+            Path::new(&parent.leaf),
+            lock_flags,
+            Mode::empty(),
+        )?,
+        Err(error) => return Err(error.into()),
+    };
+    let stat = rfs::fstat(&fd)?;
+    if !rfs::FileType::from_raw_mode(stat.st_mode).is_file() {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("advisory lock '{}' is not a regular file", path.display()),
@@ -123,7 +142,7 @@ pub(in crate::publication) fn probe_advisory_file_lock(
 }
 
 pub(in crate::publication) fn ensure_directory_nofollow(path: &Path) -> std::io::Result<()> {
-    let absolute = path.to_path_buf();
+    let absolute = absolute_path(path)?;
     let mut directory = rfs::open(
         "/",
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,

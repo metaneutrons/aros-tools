@@ -927,10 +927,11 @@ fn acquire_generation_lock(
                 }
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(_) => {
-                return Err(GenmfCacheError::state(
-                    "cannot acquire GenMF cache generation lock",
-                ))
+            Err(error) => {
+                return Err(GenmfCacheError::state(format!(
+                    "cannot acquire GenMF cache generation lock '{}': {error}",
+                    lock_path.display()
+                )))
             }
         }
     }

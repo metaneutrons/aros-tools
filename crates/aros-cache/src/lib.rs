@@ -1,10 +1,11 @@
-//! Typed, passive cache discovery and compiler-cache selection for AROS tools.
+//! Typed cache discovery, lifecycle and compiler-cache selection for AROS tools.
 //!
 //! This crate deliberately owns no cache mutation, downloader, producer, or
 //! backend-process behaviour. It provides the stable observations and
 //! selection vocabulary that cache-owning crates and the CLI share.
 
 mod compiler;
+mod lifecycle;
 mod roots;
 mod status;
 
@@ -13,6 +14,11 @@ pub use compiler::{
     resolve_compiler_cache_for_build, CompilerBackend, CompilerBackendChoice,
     CompilerBackendObservation, CompilerBackendState, CompilerCacheResolutionError,
     CompilerCacheSelection, CompilerConfigurationScope,
+};
+pub use lifecycle::{
+    apply_removal, keep, preview_removal, release, CacheLifecycleError, CacheObjectKind,
+    CacheObjectProof, CacheObjectRequest, CacheRemovalBlocker, CacheRemovalPreview,
+    CacheRemovalResult, CacheRetentionRecord, CacheRetentionRelease,
 };
 pub use roots::{
     archive_cache_root, aros_home, observe_root, resolve_archive_cache_root, resolve_aros_home,

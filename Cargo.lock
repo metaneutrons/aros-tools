@@ -118,6 +118,7 @@ dependencies = [
 name = "aros-cache"
 version = "0.1.0"
 dependencies = [
+ "aros-common",
  "serde",
  "serde_json",
  "tempfile",

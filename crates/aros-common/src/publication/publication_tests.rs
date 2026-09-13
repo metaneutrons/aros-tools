@@ -63,6 +63,49 @@ fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
 
 #[cfg(unix)]
 #[test]
+fn concurrent_initial_advisory_lock_acquisition_has_one_holder() {
+    use std::sync::{Arc, Barrier};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("management/initial.lock");
+    let start = Arc::new(Barrier::new(3));
+    let attempted = Arc::new(Barrier::new(3));
+    let workers = (0..2)
+        .map(|_| {
+            let path = lock_path.clone();
+            let start = Arc::clone(&start);
+            let attempted = Arc::clone(&attempted);
+            std::thread::spawn(move || {
+                start.wait();
+                let result = AdvisoryFileLock::acquire(&path);
+                attempted.wait();
+                result.map(|guard| {
+                    guard.revalidate().unwrap();
+                    ()
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    attempted.wait();
+
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap().map_err(|error| error.kind()))
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![std::io::ErrorKind::WouldBlock]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn advisory_lock_probe_is_read_only_and_distinguishes_live_ownership() {
     let temporary = tempfile::tempdir().unwrap();
     let lock_path = temporary.path().join("management/store.lock");
@@ -243,6 +286,22 @@ fn snapshot_bound_tree_removal_permits_a_sticky_writable_ancestor() {
     std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(mode)).unwrap();
     result.unwrap();
     assert!(!owned.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn private_directory_validation_refuses_a_group_writable_root() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("managed-root");
+    std::fs::create_dir(&root).unwrap();
+    let mode = std::fs::metadata(&root).unwrap().mode() & 0o7777;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode | 0o020)).unwrap();
+
+    let error = validate_private_directory_nofollow(&root).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
 #[cfg(unix)]
