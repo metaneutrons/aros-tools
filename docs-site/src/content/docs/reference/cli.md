@@ -291,20 +291,20 @@ one preset.
 
 ## Boards
 
-`--board NAME` selects a local profile; it is not a hardware-model argument.
+`--profile NAME` selects a local profile; it is not a hardware-model argument.
 `board init` additionally requires `--model rpi3|rpi4|rpi5|milk-v-titan` and
 accepts an optional reviewed `--transport`. Commands using existing profiles
 also accept `--config PATH`.
 
 | Command | Checkout | Behavior |
 | --- | --- | --- |
-| `board init --board NAME --model MODEL` | No | Print a model-specific template; `--transport` selects a reviewed non-default transport and `--apply` creates a new config file |
+| `board init --profile NAME --model MODEL` | No | Print a model-specific template; `--transport` selects a reviewed non-default transport and `--apply` creates a new config file |
 | `board scan` | No | Discover USB CDC-ECM adapters |
-| `board doctor --board NAME` | Required | Inspect profile, host prerequisites and artifacts |
-| `board build --board NAME` | Required | Build the profile's target with its toolchain |
-| `board deploy --board NAME` | Required | Preview TFTP staging; `--apply` publishes; optional `--artifact-dir DIR` |
-| `board serve --board NAME` | No | Serve restricted DHCP/TFTP; `--dry-run` inspects without opening sockets |
-| `board console --board NAME` | No | Launch external serial terminal; `--program`, `--device`, `--baud`, `--dry-run` |
+| `board doctor --profile NAME` | Required | Inspect profile, host prerequisites and artifacts |
+| `board build --profile NAME` | Required | Build the profile's target with its toolchain |
+| `board deploy --profile NAME` | Required | Preview TFTP staging; `--apply` publishes; optional `--artifact-dir DIR` |
+| `board serve --profile NAME` | No | Serve restricted DHCP/TFTP; `--dry-run` inspects without opening sockets |
+| `board console --profile NAME` | No | Launch external serial terminal; `--program`, `--device`, `--baud`, `--dry-run` |
 
 `board build` shares build options except `--preset`, which comes from the
 profile. It additionally accepts `--dtb-path PATH` and `--core-kobj-dir DIR`;
@@ -315,10 +315,10 @@ for automated JTAG/SWD sessions or power control.
 
 | Command | Behavior |
 | --- | --- |
-| `board sd image` | Requires `--board`, `--boot-bundle DIR`, `--output DIR`; validates first, creates only with `--apply` |
+| `board sd image` | Requires `--profile`, `--boot-bundle DIR`, `--output DIR`; validates first, creates only with `--apply` |
 | `board sd scan` | List safe unmounted removable disks; `--artifact DIR` also produces write tokens |
 | `board sd unmount` | List/preview mounted candidates; `--device SCAN_ID --apply` unmounts one |
-| `board sd write` | Requires `--board`, `--artifact DIR`, `--device SCAN_ID`; writes only with exact `--confirm TOKEN` |
+| `board sd write` | Requires `--profile`, `--artifact DIR`, `--device SCAN_ID`; writes only with exact `--confirm TOKEN` |
 
 All four media commands work without an AROS checkout.
 `image`, `unmount` and `write` support `--dry-run`.

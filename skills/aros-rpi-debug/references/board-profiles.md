@@ -55,7 +55,7 @@ serial = "aros-rpi4-lab-01"
 expected_target_mac = "02:aa:00:00:00:01"
 ```
 
-`aros board serve --board <local-name>` repeats the USB lookup and requires
+`aros board serve --profile <local-name>` repeats the USB lookup and requires
 exactly one VID:PID+serial match. It verifies `host_address` is currently
 assigned to that matched interface before binding. The expected target MAC is
 checked at DHCP packet time: the service gives the one `target_address` lease
@@ -79,12 +79,12 @@ expected_target_mac = "02:aa:00:00:00:02"
 `serve` verifies that `server_address` is on exactly that named interface; it
 never guesses an RJ45 port. In both transport modes the CLI owns no host
 network configuration, has no `--bind` escape hatch, and rejects wildcard or
-wrong-interface addresses. Use `aros board serve --board <name> --dry-run` to
+wrong-interface addresses. Use `aros board serve --profile <name> --dry-run` to
 validate the complete plan before opening any sockets.
 
 ## SD boot-bundle boundary
 
-`aros board sd image --board <name> --boot-bundle <dir> --output <new-dir>`
+`aros board sd image --profile <name> --boot-bundle <dir> --output <new-dir>`
 requires a versioned external `boot-bundle.toml` whose board/model/transport
 and, for USB-ECM, complete identity match the selected profile. The Pi 4
 `uboot-usb-ecm` format additionally needs hash-pinned `config.txt`,
@@ -96,7 +96,7 @@ inputs; their absence must stop image creation rather than be guessed.
 
 `aros board sd scan --artifact <dir>` is the only way to obtain a candidate's
 current opaque `scan-id` and artifact-bound confirmation token. A later
-`aros board sd write --board <name> --artifact <dir> --device <scan-id>` is only
+`aros board sd write --profile <name> --artifact <dir> --device <scan-id>` is only
 a preview until that exact token is passed with `--confirm`. The actual writer
 revalidates the artifact and local board identity, re-scans the same whole,
 physical, removable, non-internal and writable disk with stable identity, and

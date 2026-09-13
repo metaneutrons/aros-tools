@@ -81,7 +81,7 @@ Board profiles default to `~/.config/aros/boards.toml`. Override the file with
 serial and physical-device identity, so it should not be committed to an AROS
 source repository.
 
-Use `aros board init --board NAME --model MODEL` to print a schema-correct
+Use `aros board init --profile NAME --model MODEL` to print a schema-correct
 template and add `--apply` only when you intend to create the file. Existing
 profiles are never silently overwritten.
 

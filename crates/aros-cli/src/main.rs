@@ -460,7 +460,7 @@ enum BoardCommand {
     Init {
         /// Local profile name to create; this does not select hardware
         #[arg(long)]
-        board: String,
+        profile: String,
 
         /// Required physical hardware model for the generated profile
         #[arg(long, value_enum)]
@@ -483,12 +483,12 @@ enum BoardCommand {
     Scan,
 
     /// Check a local board profile and its non-mutating prerequisites
-    Doctor(BoardSelection),
+    Doctor(BoardProfileSelection),
 
     /// Build using the board profile's CMake preset and locked toolchain profile
     Build {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Optional specific CMake target to build
         #[arg(short, long)]
@@ -541,7 +541,7 @@ enum BoardCommand {
     /// Stage the built boot bundle into a local TFTP root (dry-run by default)
     Deploy {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Override the artifact directory for this deployment
         #[arg(long, value_name = "DIR")]
@@ -559,7 +559,7 @@ enum BoardCommand {
     /// Run restricted DHCP and read-only TFTP for one verified board profile
     Serve {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Resolve identity, address and deployment without opening sockets
         #[arg(long)]
@@ -575,7 +575,7 @@ enum BoardCommand {
     /// Open an external serial terminal for the board; no UART driver is embedded
     Console {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Serial terminal implementation to invoke
         #[arg(long, value_enum, default_value_t = board::console::ConsoleProgram::Auto)]
@@ -600,7 +600,7 @@ enum SdCommand {
     /// Validate an external boot bundle and create a raw MBR/FAT32 image
     Image {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Directory containing boot-bundle.toml and all hash-pinned inputs
         #[arg(long, value_name = "DIR")]
@@ -644,7 +644,7 @@ enum SdCommand {
     /// Write one verified SD image after an explicit disk/token confirmation
     Write {
         #[command(flatten)]
-        board: BoardSelection,
+        board: BoardProfileSelection,
 
         /// Directory created by `aros board sd image --apply`
         #[arg(long, value_name = "DIR")]
@@ -675,10 +675,10 @@ fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
 }
 
 #[derive(Args, Clone)]
-struct BoardSelection {
+struct BoardProfileSelection {
     /// Local board profile name from ~/.config/aros/boards.toml
     #[arg(long)]
-    board: String,
+    profile: String,
 
     /// Board configuration file; overrides AROS_BOARDS_FILE and the default path
     #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
@@ -812,20 +812,20 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 DiagnosticCode::CliBuild,
                 DiagnosticStage::BuildExecution,
                 "board.build",
-                Some(board.board.clone()),
+                Some(board.profile.clone()),
                 "inspect the board profile and the reported configure or build failure",
             ),
             BoardCommand::Deploy { board, .. } => (
                 DiagnosticCode::CliPublication,
                 DiagnosticStage::Publication,
                 "board.deploy",
-                Some(board.board.clone()),
+                Some(board.profile.clone()),
                 "validate the board profile, build artifact, and deployment destination before retrying",
             ),
             BoardCommand::Sd { command } => {
                 let target = match command {
                     SdCommand::Image { board, .. } | SdCommand::Write { board, .. } => {
-                        Some(board.board.clone())
+                        Some(board.profile.clone())
                     }
                     SdCommand::Scan { .. } | SdCommand::Unmount { .. } => None,
                 };
@@ -837,12 +837,12 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     "re-run the non-mutating scan or dry run and satisfy every reported media-safety check",
                 )
             }
-            BoardCommand::Init { board, .. } => (
+            BoardCommand::Init { profile, .. } => (
                 DiagnosticCode::CliBoard,
                 DiagnosticStage::BoardOperation,
                 "board.init",
-                Some(board.clone()),
-                "check the board name, configuration destination, and explicit apply mode",
+                Some(profile.clone()),
+                "check the profile name, configuration destination, and explicit apply mode",
             ),
             BoardCommand::Doctor(selection)
             | BoardCommand::Serve {
@@ -854,7 +854,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 DiagnosticCode::CliBoard,
                 DiagnosticStage::BoardOperation,
                 "board",
-                Some(selection.board.clone()),
+                Some(selection.profile.clone()),
                 "inspect the board profile and the failed local prerequisite reported above",
             ),
             BoardCommand::Scan => (
@@ -1232,17 +1232,21 @@ mod tests {
     }
 
     #[test]
-    fn board_init_requires_a_typed_model_and_never_inferrs_one_from_the_label() {
+    fn board_init_requires_a_typed_model_and_never_inferrs_one_from_the_profile_label() {
         assert_eq!(
-            parse_error(&["aros", "board", "init", "--board", "pi5-usb"]),
+            parse_error(&["aros", "board", "init", "--profile", "pi5-usb"]),
             ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&["aros", "board", "init", "--board", "pi5-usb", "--model", "rpi5",]),
+            ErrorKind::UnknownArgument
         );
 
         let parsed = Cli::try_parse_from([
             "aros",
             "board",
             "init",
-            "--board",
+            "--profile",
             "pi5-usb",
             "--model",
             "rpi3",
@@ -1253,7 +1257,7 @@ mod tests {
         let Commands::Board {
             command:
                 BoardCommand::Init {
-                    board,
+                    profile,
                     model,
                     transport,
                     ..
@@ -1262,19 +1266,20 @@ mod tests {
         else {
             panic!("expected board init command");
         };
-        assert_eq!(board, "pi5-usb");
+        assert_eq!(profile, "pi5-usb");
         assert_eq!(model, BoardInitModel::Rpi3);
         assert_eq!(transport, Some(BoardInitTransport::NativeTftp));
         assert!(Cli::try_parse_from([
             "aros",
             "board",
             "init",
-            "--board",
+            "--profile",
             "titan",
             "--model",
             "milk-v-titan",
         ])
         .is_ok());
+        assert!(Cli::try_parse_from(["aros", "board", "doctor", "--profile", "pi5-usb"]).is_ok());
     }
 
     #[test]

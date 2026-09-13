@@ -27,18 +27,18 @@ Source: [board schema and validation](https://github.com/metaneutrons/aros-tools
 For a **Pi 4 USB-ECM** profile, preview the generated template:
 
 ```sh
-aros board init --board rpi4-usb --model rpi4 --transport uboot-usb-ecm
+aros board init --profile rpi4-usb --model rpi4 --transport uboot-usb-ecm
 ```
 
 Then create a new config file explicitly:
 
 ```sh
-aros board init --board rpi4-usb --model rpi4 --transport uboot-usb-ecm --apply
+aros board init --profile rpi4-usb --model rpi4 --transport uboot-usb-ecm --apply
 aros board scan
 ```
 
 :::note[Model and transport are explicit]
-`--board` is only your local label. `--model` is required and selects the
+`--profile` is only your local label. `--model` is required and selects the
 hardware contract; it is never inferred from the label. `--transport` is
 optional only where the model has one conservative default: Pi 3, Pi 4 and Pi
 5 default to `native-tftp`; Milk-V Titan defaults to `uefi-esp`. Pi 4 USB-ECM
@@ -59,7 +59,7 @@ For Pi 4 USB-ECM, copy the stable USB descriptor values from `board scan`;
 do not persist a guessed dynamic interface name. Then, inside the AROS tree:
 
 ```sh
-aros board doctor --board rpi4-usb
+aros board doctor --profile rpi4-usb
 ```
 
 ## Build, deploy and serve
@@ -67,11 +67,11 @@ aros board doctor --board rpi4-usb
 With the profile's exact DTB and legacy core objects present:
 
 ```sh
-aros board build --board rpi4-usb
-aros board deploy --board rpi4-usb
-aros board deploy --board rpi4-usb --apply
-aros board serve --board rpi4-usb --dry-run
-aros board serve --board rpi4-usb
+aros board build --profile rpi4-usb
+aros board deploy --profile rpi4-usb
+aros board deploy --profile rpi4-usb --apply
+aros board serve --profile rpi4-usb --dry-run
+aros board serve --profile rpi4-usb
 ```
 
 Deploy previews by default; `--apply` stages the bundle to the configured
@@ -82,8 +82,8 @@ configured. These network commands are not the Milk-V UEFI-ESP boot path.
 Open a serial console separately:
 
 ```sh
-aros board console --board rpi4-usb --dry-run
-aros board console --board rpi4-usb --program picocom
+aros board console --profile rpi4-usb --dry-run
+aros board console --profile rpi4-usb --program picocom
 ```
 
 Supported terminal programs are `picocom`, `screen` and `minicom`.
@@ -97,8 +97,8 @@ firmware and artifact inputs. A build directory alone is not a boot bundle.
 Use the prepared bundle for the exact board/transport.
 
 ```sh
-aros board sd image --board rpi4-usb --boot-bundle /verified/bundle --output /new/artifact
-aros board sd image --board rpi4-usb --boot-bundle /verified/bundle --output /new/artifact --apply
+aros board sd image --profile rpi4-usb --boot-bundle /verified/bundle --output /new/artifact
+aros board sd image --profile rpi4-usb --boot-bundle /verified/bundle --output /new/artifact --apply
 aros board sd scan --artifact /new/artifact
 ```
 
@@ -113,8 +113,8 @@ Run `sd scan --artifact` again after unmounting. Substitute its exact scan
 ID and confirmation token in the write sequence:
 
 ```sh
-aros board sd write --board rpi4-usb --artifact /new/artifact --device SCAN_ID --dry-run
-aros board sd write --board rpi4-usb --artifact /new/artifact --device SCAN_ID --confirm TOKEN
+aros board sd write --profile rpi4-usb --artifact /new/artifact --device SCAN_ID --dry-run
+aros board sd write --profile rpi4-usb --artifact /new/artifact --device SCAN_ID --confirm TOKEN
 ```
 
 The final command writes the selected medium. Candidates must be whole,

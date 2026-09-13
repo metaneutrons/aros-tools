@@ -21,7 +21,7 @@ FAT boot partition
 from a pinned U-Boot revision plus a reviewed patch series.  The SD card is
 not rewritten for normal AROS development builds.
 
-The external input directory passed to `aros board sd image --board <name>
+The external input directory passed to `aros board sd image --profile <name>
 --boot-bundle <dir> --output <new-artifact-dir>` is versioned by
 `boot-bundle.toml`. Start with `boot-bundle.toml.in`, replace every
 board/USB identity value and every file checksum, and put the six regular
@@ -52,8 +52,8 @@ aros board sd unmount
 aros board sd unmount --device <scan-id>
 aros board sd unmount --device <scan-id> --apply
 aros board sd scan --artifact <artifact-dir>
-aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id>
-aros board sd write --board <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
+aros board sd write --profile <name> --artifact <artifact-dir> --device <scan-id>
+aros board sd write --profile <name> --artifact <artifact-dir> --device <scan-id> --confirm <token>
 ```
 
 The three optional `unmount` forms list, preview, and then explicitly unmount
