@@ -153,19 +153,18 @@ pub enum RootResolutionError {
 ///
 /// Returns an error when no absolute state root can be derived.
 pub fn resolve_aros_home(environment: &CacheEnvironment) -> Result<CacheRoot, RootResolutionError> {
-    match &environment.aros_home {
-        Some(path) => require_absolute("AROS_HOME", PathBuf::from(path), RootOrigin::Environment),
-        None => {
-            let home = environment
-                .home
-                .as_ref()
-                .ok_or(RootResolutionError::MissingHome)?;
-            require_absolute(
-                "HOME",
-                PathBuf::from(home).join(".aros"),
-                RootOrigin::Default,
-            )
-        }
+    if let Some(path) = &environment.aros_home {
+        require_absolute("AROS_HOME", PathBuf::from(path), RootOrigin::Environment)
+    } else {
+        let home = environment
+            .home
+            .as_ref()
+            .ok_or(RootResolutionError::MissingHome)?;
+        require_absolute(
+            "HOME",
+            PathBuf::from(home).join(".aros"),
+            RootOrigin::Default,
+        )
     }
 }
 
@@ -178,20 +177,19 @@ pub fn resolve_aros_home(environment: &CacheEnvironment) -> Result<CacheRoot, Ro
 pub fn resolve_archive_cache_root(
     environment: &CacheEnvironment,
 ) -> Result<CacheRoot, RootResolutionError> {
-    match &environment.archive_cache_dir {
-        Some(path) => require_absolute(
+    if let Some(path) = &environment.archive_cache_dir {
+        require_absolute(
             "AROS_CACHE_DIR",
             PathBuf::from(path),
             RootOrigin::Environment,
-        ),
-        None => {
-            let home = resolve_aros_home(environment)?;
-            Ok(CacheRoot {
-                path: home.path.join("cache"),
-                origin: home.origin,
-                variable: home.variable,
-            })
-        }
+        )
+    } else {
+        let home = resolve_aros_home(environment)?;
+        Ok(CacheRoot {
+            path: home.path.join("cache"),
+            origin: home.origin,
+            variable: home.variable,
+        })
     }
 }
 

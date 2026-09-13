@@ -32,6 +32,10 @@ pub enum CacheCapability {
 /// A `false` value is a hard boundary of the current status implementation,
 /// not an estimate based on a backend's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "the versioned JSON schema exposes independent, auditable side-effect guarantees"
+)]
 pub struct CacheSideEffects {
     /// Whether the command creates directories or files.
     pub creates_state: bool,
@@ -192,7 +196,11 @@ pub fn cache_status() -> Result<CacheStatus, RootResolutionError> {
 /// The request affects only which available backend is selected in the result;
 /// an unavailable explicit backend is reported as missing, not converted to a
 /// fallback or an error. No backend process or configuration file is queried.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error only when an explicit root is relative or a selected
+/// default AROS state root cannot be derived safely.
 pub fn compiler_cache_status(
     requested_backend: CompilerBackendChoice,
     explicit_root: Option<PathBuf>,
@@ -245,9 +253,7 @@ pub fn compiler_cache_status(
     })
 }
 
-pub(crate) fn cache_status_with(
-    environment: &CacheEnvironment,
-) -> Result<CacheStatus, RootResolutionError> {
+fn cache_status_with(environment: &CacheEnvironment) -> Result<CacheStatus, RootResolutionError> {
     let archives = observe_root(resolve_archive_cache_root(environment)?);
     Ok(CacheStatus {
         schema: CACHE_STATUS_SCHEMA,

@@ -4,7 +4,7 @@ use clap::ValueEnum;
 
 /// Explicit compiler-cache launcher policy shared by all CMake build commands.
 #[derive(Clone, Copy, ValueEnum)]
-pub(crate) enum BuildCompilerCache {
+pub enum BuildCompilerCache {
     /// Use sccache first, then ccache; offline builds disable automatic caching.
     Auto,
     /// Do not configure a compiler-cache launcher.
