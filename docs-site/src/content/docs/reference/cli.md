@@ -361,6 +361,27 @@ explicit absolute candidate root; it never configures the backend to use that
 directory. See [cache inspection](/aros-tools/workflows/cache/)
 for the complete safety boundary and current capability limits.
 
+Product and board builds accept the same explicit launcher policy:
+
+```sh
+aros build --compiler-cache auto
+aros build --compiler-cache off
+aros board build --profile rpi4-usb --compiler-cache ccache
+```
+
+`auto` selects `sccache` first, then `ccache`, when the build is not offline;
+an explicitly requested missing backend fails instead of falling back. Offline
+`auto` deliberately configures no launcher because passive discovery cannot
+prove an external backend's effective storage local-only. Offline explicit
+`sccache` or `ccache` fails with `--compiler-cache off` as the safe remedy. The
+frontend passes the exact absolute selected executable to CMake for C and C++;
+CMake never performs a second `PATH` search. CMake has no supported
+language-specific compiler-launcher interface for ASM, so assembly remains a
+direct deterministic invocation rather than a falsely claimed cache hit. A
+later cache-lifecycle milestone will add owned compiler namespaces and
+controlled clearing. No build option currently assigns `CCACHE_DIR` or
+`SCCACHE_DIR`.
+
 `build` options:
 
 | Option | Meaning |
@@ -370,6 +391,7 @@ for the complete safety boundary and current capability limits.
 | `--jobs N`, `-j` | Positive parallel job count |
 | `--clean` | Delete this preset's build directory before configuring |
 | `--verbose`, `-v` | Verbose CMake configure messages |
+| `--compiler-cache MODE` | `auto` (default), `off`, `sccache`, or `ccache`; offline `auto` disables the launcher and explicit backends fail until local storage can be verified |
 | `--debug` | Unoptimized build with debug information; default is Release |
 | `--offline` | Require local toolchain/source inputs |
 | `--require-fetch-checksums` | Require source-authored SHA-256 coverage for fetched inputs |
@@ -410,8 +432,9 @@ also accept `--config PATH`.
 | `board serve --profile NAME` | No | Serve restricted DHCP/TFTP; `--dry-run` inspects without opening sockets |
 | `board console --profile NAME` | No | Launch external serial terminal; `--program`, `--device`, `--baud`, `--dry-run` |
 
-`board build` shares build options except `--preset`, which comes from the
-profile. It additionally accepts `--dtb-path PATH` and `--core-kobj-dir DIR`;
+`board build` shares build options, including `--compiler-cache`, except
+`--preset`, which comes from the profile. It additionally accepts
+`--dtb-path PATH` and `--core-kobj-dir DIR`;
 these overrides apply to Raspberry Pi profiles. There are no CLI commands
 for automated JTAG/SWD sessions or power control.
 

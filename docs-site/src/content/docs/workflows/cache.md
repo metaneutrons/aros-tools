@@ -79,6 +79,28 @@ shared ownership boundary nor preview/apply protection, and `sccache -z`
 resets counters rather than deleting entries. Managed clearing, reset and
 retention arrive only with their dedicated lifecycle contract.
 
+## Build launcher policy
+
+`aros build` and `aros board build` share
+`--compiler-cache auto|off|sccache|ccache`. The frontend resolves the exact
+absolute executable once and passes that selection to CMake for C and C++;
+CMake never independently chooses a backend. CMake does not expose a supported
+language-specific compiler launcher for ASM, so assembly stays a direct
+deterministic invocation. `off` also removes stale launcher settings from an
+existing CMake build tree on the next configure.
+
+In an offline build, `auto` selects `off` without probing a backend. Explicit
+`sccache` and `ccache` fail because a passive command cannot prove that their
+effective configuration is local-only: configuration files may select remote,
+multi-level or shared storage. This is deliberate, not a fallback defect. Use
+`--compiler-cache off` for an offline build until the managed local namespace
+and server-isolation lifecycle is available.
+
+The current build option selects a launcher only. It does not set `CCACHE_DIR`,
+`SCCACHE_DIR`, a daemon endpoint or a compiler-cache directory. A `--dir` value
+on `cache compiler status` remains a status-only observation; a build-level
+directory option will be introduced only with owned-root and lifecycle proof.
+
 For every other state path and precedence rule, see
 [configuration](/aros-tools/reference/configuration/). For a toolchain install
 or an offline build, use the current documented

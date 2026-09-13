@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use thiserror::Error;
 
 /// One supported compiler-cache backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -58,6 +59,27 @@ pub enum CompilerCacheSelection {
         backend: CompilerBackend,
         /// Absolute executable selected for this operation.
         executable: PathBuf,
+    },
+}
+
+/// A refused compiler-cache selection.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CompilerCacheResolutionError {
+    /// An explicitly requested executable was not available on `PATH`.
+    #[error(
+        "requested compiler cache '{backend}' is unavailable on PATH; install it or use --compiler-cache off"
+    )]
+    Unavailable {
+        /// Backend requested by the caller.
+        backend: &'static str,
+    },
+    /// Offline mode cannot prove an externally configured backend local-only.
+    #[error(
+        "offline build cannot enable compiler cache '{backend}': passive discovery cannot prove its effective storage is local-only; use --compiler-cache off"
+    )]
+    OfflineStorageUnverified {
+        /// Backend explicitly requested by the caller.
+        backend: &'static str,
     },
 }
 
@@ -230,25 +252,43 @@ pub fn observe_compiler_backend(backend: CompilerBackend) -> CompilerBackendObse
 /// unavailable.
 pub fn resolve_compiler_cache(
     choice: CompilerBackendChoice,
-) -> Result<CompilerCacheSelection, String> {
+) -> Result<CompilerCacheSelection, CompilerCacheResolutionError> {
     resolve_compiler_cache_with(choice, &locate_current)
+}
+
+/// Resolve the exact compiler-cache selection for one build transaction.
+///
+/// Offline mode never starts an automatically selected backend because passive
+/// discovery cannot prove its effective storage local-only. An explicit
+/// backend request fails rather than silently substituting `off`; `auto`
+/// resolves to `off` so the normal no-option build remains usable offline.
+///
+/// # Errors
+///
+/// Returns an error when an explicit backend is unavailable or cannot meet the
+/// offline storage policy.
+pub fn resolve_compiler_cache_for_build(
+    choice: CompilerBackendChoice,
+    offline: bool,
+) -> Result<CompilerCacheSelection, CompilerCacheResolutionError> {
+    resolve_compiler_cache_for_build_with(choice, offline, &locate_current)
 }
 
 fn resolve_compiler_cache_with<F>(
     choice: CompilerBackendChoice,
     locate: &F,
-) -> Result<CompilerCacheSelection, String>
+) -> Result<CompilerCacheSelection, CompilerCacheResolutionError>
 where
     F: Fn(&'static str) -> Result<PathBuf, which::Error>,
 {
     let select = |backend: CompilerBackend| {
         locate(backend.program())
-            .map(|executable| CompilerCacheSelection::Backend { backend, executable })
-            .map_err(|_| {
-                format!(
-                    "requested compiler cache '{}' is unavailable on PATH; install it or use --compiler-cache off",
-                    backend.program()
-                )
+            .map(|executable| CompilerCacheSelection::Backend {
+                backend,
+                executable,
+            })
+            .map_err(|_| CompilerCacheResolutionError::Unavailable {
+                backend: backend.program(),
             })
     };
     match choice {
@@ -267,6 +307,34 @@ where
             Ok(CompilerCacheSelection::Off)
         }
     }
+}
+
+fn resolve_compiler_cache_for_build_with<F>(
+    choice: CompilerBackendChoice,
+    offline: bool,
+    locate: &F,
+) -> Result<CompilerCacheSelection, CompilerCacheResolutionError>
+where
+    F: Fn(&'static str) -> Result<PathBuf, which::Error>,
+{
+    if offline {
+        return match choice {
+            CompilerBackendChoice::Off | CompilerBackendChoice::Auto => {
+                Ok(CompilerCacheSelection::Off)
+            }
+            CompilerBackendChoice::Sccache => {
+                Err(CompilerCacheResolutionError::OfflineStorageUnverified {
+                    backend: CompilerBackend::Sccache.program(),
+                })
+            }
+            CompilerBackendChoice::Ccache => {
+                Err(CompilerCacheResolutionError::OfflineStorageUnverified {
+                    backend: CompilerBackend::Ccache.program(),
+                })
+            }
+        };
+    }
+    resolve_compiler_cache_with(choice, locate)
 }
 
 fn observe_compiler_backend_with<F>(
@@ -311,10 +379,12 @@ fn locate_current(program: &'static str) -> Result<PathBuf, which::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        observe_compiler_backend_with, resolve_compiler_cache_with, CompilerBackend,
-        CompilerBackendChoice, CompilerBackendState, CompilerCacheSelection,
-        CompilerConfigurationScope, CompilerEnvironment,
+        observe_compiler_backend_with, resolve_compiler_cache_for_build_with,
+        resolve_compiler_cache_with, CompilerBackend, CompilerBackendChoice, CompilerBackendState,
+        CompilerCacheResolutionError, CompilerCacheSelection, CompilerConfigurationScope,
+        CompilerEnvironment,
     };
+    use std::cell::Cell;
     use std::path::PathBuf;
 
     fn unavailable(_: &str) -> Result<PathBuf, which::Error> {
@@ -324,9 +394,10 @@ mod tests {
     #[test]
     fn explicit_backend_never_falls_back_to_another_backend() {
         let result = resolve_compiler_cache_with(CompilerBackendChoice::Sccache, &unavailable);
-        assert!(result
-            .unwrap_err()
-            .contains("requested compiler cache 'sccache'"));
+        assert_eq!(
+            result.unwrap_err(),
+            CompilerCacheResolutionError::Unavailable { backend: "sccache" }
+        );
     }
 
     #[test]
@@ -374,5 +445,30 @@ mod tests {
             vec!["SCCACHE_DIR", "SCCACHE_ENDPOINT"]
         );
         assert_eq!(observation.observation, "passive");
+    }
+
+    #[test]
+    fn offline_auto_disables_without_probing_and_explicit_selection_fails_closed() {
+        let calls = Cell::new(0);
+        let locate = |program| {
+            calls.set(calls.get() + 1);
+            Ok(PathBuf::from(format!("/tools/{program}")))
+        };
+        assert_eq!(
+            resolve_compiler_cache_for_build_with(CompilerBackendChoice::Auto, true, &locate)
+                .unwrap(),
+            CompilerCacheSelection::Off
+        );
+        assert_eq!(calls.get(), 0, "offline auto must not inspect a backend");
+        assert_eq!(
+            resolve_compiler_cache_for_build_with(CompilerBackendChoice::Sccache, true, &locate)
+                .unwrap_err(),
+            CompilerCacheResolutionError::OfflineStorageUnverified { backend: "sccache" }
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "offline explicit failure must not probe a backend"
+        );
     }
 }

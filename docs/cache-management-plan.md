@@ -37,9 +37,12 @@ CMake configuration, reports, installed/source-publication receipts and
 resumable execution state are not
 disposable caches. Their owning commands retain lifecycle authority.
 
-## Source-backed baseline
+## Pre-M1 source-backed baseline
 
-The table records code inspection, not successful end-to-end qualification.
+The table records the code inspection made before CACHE-M1 implementation, not
+successful end-to-end qualification. It remains historical context for the
+acceptance criteria below; implemented changes are recorded as M1 evidence and
+must not be read as current behavior.
 Only local backend help/version commands were run; no user cache was cleared,
 backend daemon started, or payload downloaded for this analysis.
 
@@ -47,7 +50,7 @@ backend daemon started, or payload downloaded for this analysis.
 | --- | --- |
 | Compiler frontend | [Parser](../crates/aros-cli/src/main.rs) exposes `aros ccache --stats --clear`; stats defaults to true. [Dispatch](../crates/aros-cli/src/commands.rs#L506) prints a successful clear after the backend command. |
 | Incorrect sccache clear | [Backend mapping](../crates/aros-cli/src/build.rs#L386) maps clear to `sccache -z`, which resets counters, not entries. ccache uses `-C`, which really clears entries. No distinct reset-statistics operation exists. |
-| Compiler selection | Rust detection prefers sccache. [CMake](../crates/aros-cmake-engine/engine/CompilerCache.cmake) independently rediscovers launchers and writes cached C/C++/ASM settings. There is no single resolved selection passed from frontend to engine. |
+| Compiler selection | Rust detection prefers sccache. [CMake](../crates/aros-cmake-engine/engine/CompilerCache.cmake) independently rediscovers launchers and writes cached launcher settings, including an ineffective ASM variable. There is no single resolved selection passed from frontend to engine. |
 | Consumer archives | [artifact.rs](../crates/aros-cli/src/artifact.rs) shares a raw-SHA-256 download cache between host and cross compilers: `AROS_CACHE_DIR` or `AROS_HOME/cache`, then `downloads/sha256/<digest>.tar.xz`. Acquisition is coupled to consumers, with no standalone cache inventory/population interface. |
 | Archive selection | [host_compiler.rs](../crates/aros-cli/src/host_compiler.rs) selects host inputs from effective `aros-targets.toml`; [toolchain.rs](../crates/aros-cli/src/toolchain.rs) uses the cross-toolchain lock. Installed prefixes and their receipts are separate. `force` bypasses a valid cached archive and then fails offline; it does not replace an installed tree. |
 | Locked producer sources | [source_cache.rs](../crates/aros-toolchain/src/source_cache.rs), [compatibility_ports.rs](../crates/aros-toolchain/src/compatibility_ports.rs) and [aros-fetch cache API](../crates/aros-fetch/src/engine/cache.rs) already acquire/verify declared inputs. Exact-byte and canonical-tar-gzip identities differ. Producer CLI combines acquisition with `--verify-only`. |
@@ -220,14 +223,17 @@ fetching, not as an OS-level network sandbox.
   Auto retains sccache-first preference when usable and policy-compatible;
   explicit missing/incompatible selection fails with a remedy. Never silently
   substitute another backend after an explicit choice.
-- With no explicit backend storage/server configuration, new builds use an
-  AROS-owned local namespace under `AROS_HOME/cache/compiler/v1/<backend>`.
-  Existing backend configuration selects an external scope and is reported,
-  not silently adopted or rewritten. An explicit build
-  `--compiler-cache-dir PATH` (compiler commands: `--dir PATH`) selects a
-  managed namespace, rejects conflicting external configuration and requires
-  a fresh/recognized owned root. Its dedicated server identity is derived
-  from that root. Do not expand `AROS_CACHE_DIR`'s existing archive-only meaning.
+- CACHE-M1 establishes exact launcher selection, not a false claim of storage
+  ownership. Status may show the candidate
+  `AROS_HOME/cache/compiler/v1/<backend>` namespace, but no build assigns it
+  until its backend/server lifecycle is proven. Existing backend configuration
+  is observed as external/uninspected, never silently adopted or rewritten.
+  A build-level `--compiler-cache-dir PATH` is deliberately deferred to
+  CACHE-M6: it requires a fresh/recognized owned root, rejection of conflicting
+  external configuration and a dedicated sccache server identity derived from
+  that root. Exposing the flag earlier would make `DIR` look isolated while it
+  could still connect to an unrelated daemon. `AROS_CACHE_DIR` remains
+  archive-only.
 - `stats` is an explicit backend query and documents potential daemon startup.
   `reset-stats` resets counters only. `clear` removes entries only when that
   operation's exact storage scope is proven and supported.
@@ -244,8 +250,11 @@ fetching, not as an OS-level network sandbox.
 - Offline builds must not silently use a remote compiler cache. Select a
   demonstrably local-only configuration or disable caching with a clear
   reason; an explicitly requested incompatible configuration fails.
-- Do not wrap unsupported language/compiler invocations by default. Test C,
-  C++ and the AROS assembly invocation paths independently; record bypasses.
+- Do not wrap unsupported language/compiler invocations by default. CMake's
+  supported compiler-launcher interface covers C and C++, not ASM. Test C and
+  C++ launcher invocation and the unwrapped AROS assembly path independently;
+  record the ASM bypass rather than setting an ineffective variable or using
+  CMake's internal-only `RULE_LAUNCH_COMPILE` escape hatch.
   New cache use must not alter native producer release identities or defaults
   implicitly. Non-cacheable work is a supported result, not fabricated hits.
 
@@ -389,9 +398,10 @@ Execution: [#140](https://github.com/metaneutrons/aros-tools/issues/140). Depend
   operation. Record breaking-change notes and updated callers. This supplies
   the CLI audit F05/F06 repair evidence without waiting for CACHE-M7.
 - CACHE-M1-A4: Build/CMake share exact backend selection, explicit off removes
-  stale launchers, offline policy handles remote backends, and C/C++/ASM
-  eligibility has focused integration evidence. No real user daemon/cache is
-  mutated by tests. Shared compiler deletion remains disabled until CACHE-M6.
+  stale launchers, offline policy handles remote backends, and focused
+  integration evidence proves C/C++ launcher coverage plus the explicit ASM
+  bypass required by CMake's public API. No real user daemon/cache is mutated
+  by tests. Shared compiler deletion remains disabled until CACHE-M6.
 - CACHE-M1-A5: Update Astro compiler-cache usage, options, side effects and
   unsupported cases with the shipped changes; prove copied examples and run
   the canonical docs gate before accepting this milestone.

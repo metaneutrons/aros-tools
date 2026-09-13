@@ -20,6 +20,9 @@ mod artifact;
 mod board;
 mod boot;
 mod build;
+mod build_cache;
+#[cfg(test)]
+mod build_cache_tests;
 mod build_tools;
 mod cache;
 mod cli_contract;
@@ -41,6 +44,7 @@ mod toolchain_plan;
 mod toolchain_producer;
 mod toolchain_selection;
 
+use build_cache::BuildCompilerCache;
 use cli_contract::{
     parse_opaque_scan_id, parse_positive_usize, resolve_repository, BoardProfileSelection,
     GoldenAction,
@@ -172,6 +176,10 @@ enum Commands {
         /// Enable verbose build logs
         #[arg(short, long)]
         verbose: bool,
+
+        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        #[arg(long, value_enum, default_value = "auto")]
+        compiler_cache: BuildCompilerCache,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]
@@ -548,6 +556,10 @@ enum BoardCommand {
         /// Enable verbose CMake configure logs
         #[arg(short, long)]
         verbose: bool,
+
+        /// Compiler-cache policy; offline auto disables caching unless a later verified local policy is available
+        #[arg(long, value_enum, default_value = "auto")]
+        compiler_cache: BuildCompilerCache,
 
         /// Never access the network; use only verified installed/cached inputs
         #[arg(long, env = "AROS_OFFLINE")]

@@ -5,9 +5,9 @@
 
 use super::{
     artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
-    toolchain, BoardCommand, BoardProfileSelection, BuildToolsCommand, CacheCommand,
-    CacheCompilerBackend, CacheCompilerCommand, Commands, GoldenAction, HostCompilerCommands,
-    SdCommand, SourceCommand, ToolchainCommands,
+    toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
+    CacheCommand, CacheCompilerBackend, CacheCompilerCommand, Commands, GoldenAction,
+    HostCompilerCommands, SdCommand, SourceCommand, ToolchainCommands,
 };
 use console::{style, Emoji};
 use miette::Result;
@@ -81,6 +81,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             jobs,
             clean,
             verbose,
+            compiler_cache,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -96,6 +97,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
                     jobs,
                     clean,
                     verbose,
+                    compiler_cache: build_compiler_cache(compiler_cache),
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,
@@ -138,6 +140,15 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
         Commands::Golden { action } => golden_command(action, required_repo(repo_root)?),
         Commands::Completions { shell } => crate::completion_model::write(shell),
         Commands::Info { format } => info(repo_root, format),
+    }
+}
+
+const fn build_compiler_cache(backend: BuildCompilerCache) -> aros_cache::CompilerBackendChoice {
+    match backend {
+        BuildCompilerCache::Auto => aros_cache::CompilerBackendChoice::Auto,
+        BuildCompilerCache::Off => aros_cache::CompilerBackendChoice::Off,
+        BuildCompilerCache::Sccache => aros_cache::CompilerBackendChoice::Sccache,
+        BuildCompilerCache::Ccache => aros_cache::CompilerBackendChoice::Ccache,
     }
 }
 
@@ -317,6 +328,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
             jobs,
             clean,
             verbose,
+            compiler_cache,
             offline,
             require_fetch_checksums,
             toolchain_dir,
@@ -336,6 +348,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
                     jobs,
                     clean,
                     verbose,
+                    compiler_cache: build_compiler_cache(compiler_cache),
                     input_policy: build::BuildInputPolicy {
                         offline,
                         require_fetch_checksums,

@@ -9,8 +9,9 @@ mod roots;
 mod status;
 
 pub use compiler::{
-    observe_compiler_backend, observe_compiler_backends, resolve_compiler_cache, CompilerBackend,
-    CompilerBackendChoice, CompilerBackendObservation, CompilerBackendState,
+    observe_compiler_backend, observe_compiler_backends, resolve_compiler_cache,
+    resolve_compiler_cache_for_build, CompilerBackend, CompilerBackendChoice,
+    CompilerBackendObservation, CompilerBackendState, CompilerCacheResolutionError,
     CompilerCacheSelection, CompilerConfigurationScope,
 };
 pub use roots::{

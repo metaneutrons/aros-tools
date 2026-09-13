@@ -28,6 +28,8 @@ pub struct BuildOptions {
     pub clean: bool,
     /// Request verbose CMake configuration diagnostics.
     pub verbose: bool,
+    /// Explicit compiler-cache policy shared with the CMake engine.
+    pub compiler_cache: aros_cache::CompilerBackendChoice,
     /// Network and integrity policy applied to every build input.
     pub input_policy: BuildInputPolicy,
     /// Explicit local cross-toolchain override.
@@ -176,6 +178,11 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         miette::bail!("parallel job count must be greater than zero");
     }
     let build_dir = build_dir(repo_root, &options.preset)?;
+    let compiler_cache = aros_cache::resolve_compiler_cache_for_build(
+        options.compiler_cache,
+        options.input_policy.offline,
+    )
+    .map_err(|error| miette::miette!(error))?;
     let profile = toolchain::target_profile(repo_root, &options.toolchain_preset)?;
     let resolved = toolchain::resolve_for_build(
         repo_root,
@@ -215,11 +222,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         }
     }
 
-    let launcher = detected_compiler_cache().map_or("none", CompilerCache::program);
-    aros_common::outputln!(
-        "⚡ Compiler cache launcher: {}",
-        style(launcher).green().bold()
-    );
+    print_compiler_cache_selection(&compiler_cache, options.input_policy.offline);
 
     aros_common::outputln!("{HAMMER} Configuring CMake build tree...");
     let engine = place_engine(&build_dir, options.engine_dir.as_deref())?;
@@ -283,6 +286,9 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
     }
     for definition in &options.cmake_definitions {
         validate_cmake_definition(definition)?;
+        configure.arg(format!("-D{}={}", definition.key, definition.value));
+    }
+    for definition in compiler_cache_cmake_definitions(&compiler_cache)? {
         configure.arg(format!("-D{}={}", definition.key, definition.value));
     }
     if options.verbose {
@@ -383,6 +389,71 @@ pub fn validate_cmake_definition(definition: &CmakeDefinition) -> Result<()> {
     Ok(())
 }
 
+fn print_compiler_cache_selection(selection: &aros_cache::CompilerCacheSelection, offline: bool) {
+    match selection {
+        aros_cache::CompilerCacheSelection::Off if offline => aros_common::outputln!(
+            "⚡ Compiler cache launcher: {} (offline policy cannot prove an external backend local-only)",
+            style("none").green().bold()
+        ),
+        aros_cache::CompilerCacheSelection::Off => {
+            aros_common::outputln!("⚡ Compiler cache launcher: {}", style("none").green().bold());
+        }
+        aros_cache::CompilerCacheSelection::Backend { backend, executable } => aros_common::outputln!(
+            "⚡ Compiler cache launcher: {} ({})",
+            style(backend.program()).green().bold(),
+            executable.display()
+        ),
+    }
+}
+
+/// Translate the single Rust-side selection into non-overridable CMake input.
+///
+/// These definitions are appended after all general CMake definitions. That
+/// preserves the frontend's resolved selection as the sole source of truth and
+/// prevents stale CMake cache values or generic definitions from re-enabling a
+/// launcher after `off`.
+fn compiler_cache_cmake_definitions(
+    selection: &aros_cache::CompilerCacheSelection,
+) -> Result<Vec<CmakeDefinition>> {
+    match selection {
+        aros_cache::CompilerCacheSelection::Off => Ok(vec![CmakeDefinition {
+            key: "AROS_COMPILER_CACHE_MODE".to_owned(),
+            value: "off".to_owned(),
+        }]),
+        aros_cache::CompilerCacheSelection::Backend {
+            backend,
+            executable,
+        } => {
+            if !executable.is_absolute() {
+                miette::bail!(
+                    "selected compiler-cache executable '{}' is not absolute",
+                    executable.display()
+                );
+            }
+            let executable = executable.to_str().ok_or_else(|| {
+                miette::miette!(
+                    "selected compiler-cache executable path is not valid UTF-8 and cannot be passed safely to CMake"
+                )
+            })?;
+            if executable.contains(';') {
+                miette::bail!(
+                    "selected compiler-cache executable path contains ';', which CMake treats as a list separator"
+                );
+            }
+            Ok(vec![
+                CmakeDefinition {
+                    key: "AROS_COMPILER_CACHE_MODE".to_owned(),
+                    value: backend.program().to_owned(),
+                },
+                CmakeDefinition {
+                    key: "AROS_COMPILER_CACHE_EXECUTABLE".to_owned(),
+                    value: executable.to_owned(),
+                },
+            ])
+        }
+    }
+}
+
 /// Backwards-compatible local name for the shared compiler-cache backend
 /// contract. New callers should resolve it through `aros-cache` so frontend
 /// and future CMake integration share one selection vocabulary.
@@ -401,8 +472,8 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dir, run, validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions,
-        CmakeDefinition,
+        build_dir, compiler_cache_cmake_definitions, run, validate_cmake_definition,
+        validate_preset, BuildInputPolicy, BuildOptions, CmakeDefinition,
     };
 
     #[test]
@@ -430,6 +501,34 @@ mod tests {
         assert!(validate_cmake_definition(&definition).is_err());
     }
 
+    #[test]
+    fn compiler_cache_cmake_definitions_carry_one_resolved_selection() {
+        let selected = aros_cache::CompilerCacheSelection::Backend {
+            backend: aros_cache::CompilerBackend::Sccache,
+            executable: std::path::PathBuf::from("/tools/sccache"),
+        };
+        assert_eq!(
+            compiler_cache_cmake_definitions(&selected).unwrap(),
+            vec![
+                CmakeDefinition {
+                    key: "AROS_COMPILER_CACHE_MODE".to_owned(),
+                    value: "sccache".to_owned(),
+                },
+                CmakeDefinition {
+                    key: "AROS_COMPILER_CACHE_EXECUTABLE".to_owned(),
+                    value: "/tools/sccache".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            compiler_cache_cmake_definitions(&aros_cache::CompilerCacheSelection::Off).unwrap(),
+            vec![CmakeDefinition {
+                key: "AROS_COMPILER_CACHE_MODE".to_owned(),
+                value: "off".to_owned(),
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn runtime_contract_rejects_zero_jobs_before_repository_access() {
         let options = BuildOptions {
@@ -439,6 +538,7 @@ mod tests {
             jobs: Some(0),
             clean: false,
             verbose: false,
+            compiler_cache: aros_cache::CompilerBackendChoice::Auto,
             input_policy: BuildInputPolicy {
                 offline: true,
                 require_fetch_checksums: true,

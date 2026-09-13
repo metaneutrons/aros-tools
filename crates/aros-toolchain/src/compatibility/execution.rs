@@ -862,6 +862,10 @@ fn cmake_command(
             format!("-DGCC_CONFIG_FLOAT_ABI={}", request.profile.float_abi()),
             format!("-DAROS_RUST_TOOLS_DIR={helpers}"),
             format!("-DAROS_HOST_CC={host_cc}"),
+            // Compatibility qualification must not inherit a host compiler-cache
+            // launcher. The embedded engine requires a frontend-selected policy,
+            // and this deterministic producer phase deliberately selects off.
+            "-DAROS_COMPILER_CACHE_MODE=off".into(),
             "-DAROS_ENABLE_MMU=ON".into(),
             "-DCMAKE_BUILD_TYPE=Release".into(),
         ],
@@ -1216,6 +1220,7 @@ mod tests {
             "-DAROS_HOST_CC={}",
             request.host_tools.root.join("cc").display()
         )));
+        assert!(cmake_arguments.contains("-DAROS_COMPILER_CACHE_MODE=off"));
         let make_arguments = fs::read_to_string(make_log).unwrap();
         assert!(make_arguments.contains("includes"));
         assert!(make_arguments.contains("linklibs"));
