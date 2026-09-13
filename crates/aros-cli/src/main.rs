@@ -1099,6 +1099,9 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                     None,
                     "restore the exact producer pin, tools lock and Cargo executable; verify hashes vendor content but never resolves, downloads or rewrites it",
                 ),
+                lifecycle @ (CacheCargoCommand::Keep { .. }
+                | CacheCargoCommand::Release { .. }
+                | CacheCargoCommand::Remove { .. }) => cargo_lifecycle_boundary(lifecycle),
             },
             CacheCommand::Genmf { command } => match command {
                 CacheGenmfCommand::Status { .. } => (
@@ -1219,6 +1222,50 @@ fn archive_lifecycle_boundary(
         | CacheArchivesCommand::Fetch { .. }
         | CacheArchivesCommand::Verify { .. } => {
             unreachable!("only archive lifecycle commands call archive_lifecycle_boundary")
+        }
+    }
+}
+
+fn cargo_lifecycle_boundary(
+    command: &CacheCargoCommand,
+) -> (
+    DiagnosticCode,
+    DiagnosticStage,
+    &'static str,
+    Option<String>,
+    &'static str,
+) {
+    match command {
+        CacheCargoCommand::Keep { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.cargo.keep",
+            None,
+            "select one fully verified Cargo vendor generation and an unused portable --name; keep retains it but never invokes Cargo, rewrites inputs, or removes data",
+        ),
+        CacheCargoCommand::Release { .. } => (
+            DiagnosticCode::CliPublication,
+            DiagnosticStage::Publication,
+            "cache.cargo.release",
+            None,
+            "pass the exact managed cache --dir and existing portable --name; release removes only that retention receipt",
+        ),
+        CacheCargoCommand::Remove { apply, .. } => (
+            if apply.is_some() {
+                DiagnosticCode::CliPublication
+            } else {
+                DiagnosticCode::CliToolResolution
+            },
+            DiagnosticStage::Publication,
+            "cache.cargo.remove",
+            None,
+            "run the preview first and pass its exact unexpired --apply token only after checking blockers; removal never clears a Cargo cache root or global CARGO_HOME",
+        ),
+        CacheCargoCommand::Status { .. }
+        | CacheCargoCommand::List { .. }
+        | CacheCargoCommand::Fetch { .. }
+        | CacheCargoCommand::Verify { .. } => {
+            unreachable!("only Cargo lifecycle commands call cargo_lifecycle_boundary")
         }
     }
 }

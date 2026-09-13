@@ -20,8 +20,9 @@ use aros_cache::{
 use aros_toolchain::{
     cargo_vendor::{
         cargo_vendor_status, fetch_vendor_generation, list_vendor_generation,
-        select_vendor_generation, verify_vendor_generation, CargoVendorGeneration,
-        CargoVendorRequest, CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
+        retain_vendor_generation, select_vendor_generation, select_vendor_lifecycle_object,
+        verify_vendor_generation, CargoVendorGeneration, CargoVendorRequest, CargoVendorSelection,
+        CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
         CARGO_VENDOR_VERIFY_SCHEMA,
     },
     source_cache::{
@@ -46,6 +47,13 @@ const ARCHIVE_VERIFY_SCHEMA: &str = "aros-cache-archives-verify-v1";
 const ARCHIVE_KEEP_SCHEMA: &str = "aros-cache-archives-keep-v1";
 const ARCHIVE_RELEASE_SCHEMA: &str = "aros-cache-archives-release-v1";
 const ARCHIVE_REMOVE_SCHEMA: &str = "aros-cache-archives-remove-v1";
+const CARGO_KEEP_SCHEMA: &str = "aros-cache-cargo-keep-v1";
+const CARGO_RELEASE_SCHEMA: &str = "aros-cache-cargo-release-v1";
+const CARGO_REMOVE_SCHEMA: &str = "aros-cache-cargo-remove-v1";
+const ARCHIVE_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit cache archives fetch for the same declared host or toolchain identity; the command never redownloads or reconstructs archive bytes";
+const ARCHIVE_REMOVAL_OFFLINE_IMPACT: &str = "offline archive fetch and any consumer requiring these exact bytes will fail until the declared archive is restored and verified";
+const CARGO_REMOVAL_RECOVERABILITY: &str = "restore only through an explicit online cache cargo fetch with the same producer, tools, Cargo and cache selection; the command never uses global Cargo state";
+const CARGO_REMOVAL_OFFLINE_IMPACT: &str = "offline cache cargo fetch and native producer execution requiring this generation will fail until an exact verified generation is restored";
 
 #[derive(Serialize)]
 struct ArchiveCacheStatus {
@@ -172,6 +180,8 @@ struct ArchiveCacheRemovalPreview {
     side_effects: CacheSideEffects,
     selection: ArchiveSelection,
     preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
     boundary: &'static str,
 }
 
@@ -182,6 +192,8 @@ struct ArchiveCacheRemovalApplied {
     side_effects: CacheSideEffects,
     selection: ArchiveSelection,
     removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
     boundary: &'static str,
 }
 
@@ -193,6 +205,49 @@ struct CargoVendorList {
     selection: aros_toolchain::cargo_vendor::CargoVendorSelection,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<CargoVendorGeneration>,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CargoVendorRetention {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    retention: CacheRetentionRecord,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CargoVendorRelease {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    release: CacheRemovalResult,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CargoVendorRemovalPreview {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    preview: CacheRemovalPreview,
+    recoverability: &'static str,
+    offline_impact: &'static str,
+    boundary: &'static str,
+}
+
+#[derive(Serialize)]
+struct CargoVendorRemovalApplied {
+    schema: &'static str,
+    operation: &'static str,
+    side_effects: CacheSideEffects,
+    selection: CargoVendorSelection,
+    removal: CacheRemovalResult,
+    recoverability: &'static str,
+    offline_impact: &'static str,
     boundary: &'static str,
 }
 
@@ -385,6 +440,112 @@ pub fn cargo_verify(selector: CacheCargoSelector, format: ResultFormat) -> Resul
     match format {
         ResultFormat::Human => print_cargo_generation_human(&report, false),
         ResultFormat::Json => print_json(&report, "cargo cache verify")?,
+    }
+    Ok(())
+}
+
+/// Retain one verified Cargo vendor generation under a named no-clobber
+/// reference.
+///
+/// # Errors
+///
+/// Returns a structured selection, vendor-integrity or lifecycle diagnostic.
+/// The selected generation is revalidated while its exclusive lifecycle lock
+/// is held; this command neither resolves dependencies nor changes bytes.
+pub fn cargo_keep(selector: CacheCargoSelector, name: &str, format: ResultFormat) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let (selection, retention) =
+        retain_vendor_generation(&request, name).map_err(|error| contract_error(&error))?;
+    let report = CargoVendorRetention {
+        schema: CARGO_KEEP_SCHEMA,
+        operation: "cargo.keep",
+        side_effects: lifecycle_keep_side_effects(),
+        selection,
+        retention,
+        boundary: "keep retains one fully verified immutable Cargo vendor generation under a named reference; it never resolves dependencies, rewrites Cargo inputs, replaces data, or deletes bytes",
+    };
+    match format {
+        ResultFormat::Human => print_cargo_retention_human(&report),
+        ResultFormat::Json => print_json(&report, "cargo cache keep")?,
+    }
+    Ok(())
+}
+
+/// Release one named Cargo vendor retention reference without deleting data.
+///
+/// # Errors
+///
+/// Returns a structured lifecycle diagnostic for an invalid root, name or
+/// receipt. It cannot enumerate or remove Cargo generations.
+pub fn cargo_release(dir: &Path, name: &str, format: ResultFormat) -> Result<()> {
+    let release = release(&CacheRetentionRelease {
+        family: CacheFamily::Cargo,
+        cache_root: dir.to_owned(),
+        name: name.to_owned(),
+    })
+    .map_err(|error| miette::miette!(error))?;
+    let report = CargoVendorRelease {
+        schema: CARGO_RELEASE_SCHEMA,
+        operation: "cargo.release",
+        side_effects: lifecycle_release_side_effects(),
+        release,
+        boundary: "release removes one named retention receipt only; it neither inspects nor deletes Cargo vendor generations",
+    };
+    match format {
+        ResultFormat::Human => print_cargo_release_human(&report),
+        ResultFormat::Json => print_json(&report, "cargo cache release")?,
+    }
+    Ok(())
+}
+
+/// Preview or token-confirm removal of one exact Cargo vendor generation.
+///
+/// # Errors
+///
+/// Returns a structured selection or lifecycle diagnostic. Without `apply`,
+/// it only emits a five-minute preview. With the exact token, removal
+/// remeasures the selected tree under an exclusive lifecycle lock.
+pub fn cargo_remove(
+    selector: CacheCargoSelector,
+    apply_token: Option<&str>,
+    format: ResultFormat,
+) -> Result<()> {
+    let request = cargo_request(selector)?;
+    let (selection, object) =
+        select_vendor_lifecycle_object(&request).map_err(|error| contract_error(&error))?;
+    if let Some(apply_token) = apply_token {
+        let removal =
+            apply_removal(&object, apply_token).map_err(|error| miette::miette!(error))?;
+        let report = CargoVendorRemovalApplied {
+            schema: CARGO_REMOVE_SCHEMA,
+            operation: "cargo.remove.apply",
+            side_effects: lifecycle_remove_apply_side_effects(),
+            selection,
+            removal,
+            recoverability: CARGO_REMOVAL_RECOVERABILITY,
+            offline_impact: CARGO_REMOVAL_OFFLINE_IMPACT,
+            boundary: "apply removes only the preview-bound immutable Cargo generation; it never clears a parent root, global CARGO_HOME, user Cargo credentials, or an unselected generation",
+        };
+        match format {
+            ResultFormat::Human => print_cargo_removal_applied_human(&report),
+            ResultFormat::Json => print_json(&report, "cargo cache remove apply")?,
+        }
+    } else {
+        let preview = preview_removal(&object).map_err(|error| miette::miette!(error))?;
+        let report = CargoVendorRemovalPreview {
+            schema: CARGO_REMOVE_SCHEMA,
+            operation: "cargo.remove.preview",
+            side_effects: lifecycle_remove_preview_side_effects(),
+            selection,
+            preview,
+            recoverability: CARGO_REMOVAL_RECOVERABILITY,
+            offline_impact: CARGO_REMOVAL_OFFLINE_IMPACT,
+            boundary: "preview measures one exact immutable Cargo generation and reports retained or active-use blockers; it never removes data or scans a cache root",
+        };
+        match format {
+            ResultFormat::Human => print_cargo_removal_preview_human(&report),
+            ResultFormat::Json => print_json(&report, "cargo cache remove preview")?,
+        }
     }
     Ok(())
 }
@@ -694,6 +855,8 @@ pub fn archive_remove(
             side_effects: lifecycle_remove_apply_side_effects(),
             selection,
             removal,
+            recoverability: ARCHIVE_REMOVAL_RECOVERABILITY,
+            offline_impact: ARCHIVE_REMOVAL_OFFLINE_IMPACT,
             boundary: "apply removes only the exact previewed archive after token, retention, reader/writer lease, identity and SHA-256 bindings still match; no root-wide scan occurs",
         };
         match format {
@@ -708,6 +871,8 @@ pub fn archive_remove(
             side_effects: lifecycle_remove_preview_side_effects(),
             selection,
             preview,
+            recoverability: ARCHIVE_REMOVAL_RECOVERABILITY,
+            offline_impact: ARCHIVE_REMOVAL_OFFLINE_IMPACT,
             boundary: "preview hashes one exact selected archive and reports retention blockers without creating state, taking a lease, or deleting data; pass its apply_token back with --apply to request removal",
         };
         match format {
@@ -1190,7 +1355,7 @@ fn print_cargo_status_human(report: &CargoVendorStatus) {
         report.root.state.as_str()
     );
     aros_common::outputln!("  object layout: {}", report.object_layout);
-    aros_common::outputln!("  operations: status, list, fetch, verify");
+    aros_common::outputln!("  operations: status, list, fetch, verify, keep, release, remove");
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
@@ -1221,6 +1386,52 @@ fn print_cargo_generation_human(report: &CargoVendorGeneration, offline: bool) {
     if report.operation == "cargo.fetch" {
         aros_common::outputln!("  offline: {offline}");
     }
+}
+
+fn print_cargo_retention_human(report: &CargoVendorRetention) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  retention reference: {}", report.retention.name);
+    aros_common::outputln!("  retained objects: {}", report.retention.objects.len());
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_release_human(report: &CargoVendorRelease) {
+    aros_common::outputln!("Cargo vendor retention reference released:");
+    aros_common::outputln!("  root: {}", report.release.cache_root.display());
+    aros_common::outputln!("  reference: {}", report.release.relative_path);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_removal_preview_human(report: &CargoVendorRemovalPreview) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  removal eligible: {}", report.preview.eligible);
+    if report.preview.blockers.is_empty() {
+        aros_common::outputln!("  blockers: none");
+    } else {
+        aros_common::outputln!(
+            "  blockers: {}",
+            report
+                .preview
+                .blockers
+                .iter()
+                .map(|blocker| blocker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recovery: {}", report.preview.recovery);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
+}
+
+fn print_cargo_removal_applied_human(report: &CargoVendorRemovalApplied) {
+    print_cargo_selection_human(&report.selection);
+    aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
+    aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_genmf_status_human(report: &GenmfCacheStatus) {
@@ -1346,12 +1557,16 @@ fn print_archive_removal_preview_human(report: &ArchiveCacheRemovalPreview) {
     }
     aros_common::outputln!("  expires: {}", report.preview.expires_unix_seconds);
     aros_common::outputln!("  apply token: {}", report.preview.apply_token);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 
 fn print_archive_removal_applied_human(report: &ArchiveCacheRemovalApplied) {
     print_archive_selection_human(&report.selection);
     aros_common::outputln!("  removal: {}", report.removal.outcome);
+    aros_common::outputln!("  recoverability: {}", report.recoverability);
+    aros_common::outputln!("  offline impact: {}", report.offline_impact);
     aros_common::outputln!("  boundary: {}", report.boundary);
 }
 

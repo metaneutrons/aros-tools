@@ -63,6 +63,9 @@ update. The hidden `__metamake-fetch` lifecycle bridge is deliberately excluded.
 | `aros cache cargo list` | Resolve one exact Cargo generation selection, then read its receipt without hashing its vendor tree |
 | `aros cache cargo fetch` | Populate or strictly reuse one selected immutable Cargo vendor generation |
 | `aros cache cargo verify` | Fully validate one selected Cargo vendor generation against its lockfile and receipt |
+| `aros cache cargo keep` | Retain one selected verified Cargo vendor generation under a named no-clobber reference |
+| `aros cache cargo release` | Release one named Cargo retention reference without deleting a generation |
+| `aros cache cargo remove` | Preview or token-confirm removal of one exact Cargo vendor generation |
 | `aros cache genmf status` | Passively observe one explicit GenMF cache parent root |
 | `aros cache genmf list` | Select current GenMF inputs and list immutable-generation metadata without reading expansions |
 | `aros cache genmf verify` | Fully validate immutable GenMF expansions selected by current source inputs |
@@ -351,6 +354,9 @@ It is intentionally separate from the released-toolchain consumer guide.
 | `cache cargo list` | No | Prove one selected generation through bounded Git and Cargo-version probes, then read its receipt without hashing vendor payloads |
 | `cache cargo fetch` | No | Create or revalidate one immutable Cargo vendor generation through the selected pinned Cargo executable |
 | `cache cargo verify` | No | Rehash a selected vendor tree and verify its lockfile/template/receipt binding |
+| `cache cargo keep` | No | Revalidate and retain one selected vendor generation under a named reference; no Cargo invocation or deletion |
+| `cache cargo release` | No | Remove one named Cargo retention receipt only; no generation data is deleted |
+| `cache cargo remove` | No | Preview one exact immutable vendor generation, then require its short-lived token before deletion |
 | `cache genmf status` | No | Passively observe one explicit GenMF cache parent root without selecting source inputs |
 | `cache genmf list` | No | Hash selected current source inputs and probe the selected Python version, then list final-generation metadata without reading expansion payloads |
 | `cache genmf verify` | No | Hash selected inputs, probe the selected Python version, and hash immutable expansion generations without invoking GenMF or changing cache state |
@@ -419,8 +425,13 @@ the absolute Cargo resolved from `PATH`. The selection binds the producer Rust
 pin, clean tools Git tree, manifest, lockfile and Cargo identity. `list` reads
 only its receipt; `fetch` is the bounded Cargo-resolution boundary and
 publishes only a complete, checksum-validated object; `verify` hashes the
-vendor tree and checks the receipt. The native producer consumes only that
-revalidated object through `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
+vendor tree and checks the receipt. `keep --name NAME` repeats that
+verification while holding the exclusive lifecycle lock, then publishes an
+immutable named reference. `release --dir DIR --name NAME` removes only that
+reference. `remove` is preview-first and accepts `--apply TOKEN` only after a
+short-lived exact-generation preview. The native producer holds a shared lease
+while copying the revalidated object into its private runtime before invoking
+Cargo with `--locked --offline`. See [cache inspection](/aros-tools/workflows/cache/)
 for exact layout, isolation, and offline semantics.
 
 `aros cache sources` never guesses a cache root or a source closure. Every

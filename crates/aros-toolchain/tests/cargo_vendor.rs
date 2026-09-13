@@ -9,9 +9,11 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aros_cache::{acquire_write_lease, CacheLifecycleError};
 use aros_common::{sha256_bytes, CancellationToken};
 use aros_toolchain::cargo_vendor::{
-    fetch_vendor_generation, select_vendor_generation, verify_vendor_generation,
+    fetch_vendor_generation, open_verified_vendor_generation, retain_vendor_generation,
+    select_vendor_generation, select_vendor_lifecycle_object, verify_vendor_generation,
     CargoVendorEnvironment, CargoVendorRequest,
 };
 use serde_json::json;
@@ -504,6 +506,33 @@ fn cooperating_fetchers_publish_one_complete_vendor_generation() {
             .unwrap()
             .vendor_tree_sha256,
         first.vendor_tree_sha256
+    );
+}
+
+#[test]
+fn verified_vendor_consumption_blocks_lifecycle_mutation_until_the_reader_releases() {
+    let fixture = VendorGenerationFixture::new();
+    let request = fixture.request();
+    fetch_vendor_generation(&request, false, &CancellationToken::default()).unwrap();
+    let (_, object) = select_vendor_lifecycle_object(&request).unwrap();
+
+    let leased = open_verified_vendor_generation(&request).unwrap();
+    assert_eq!(leased.generation().generation_dir, fixture.generation());
+    assert!(matches!(
+        acquire_write_lease(&object),
+        Err(CacheLifecycleError::Io {
+            action: "acquire lifecycle lease",
+            ..
+        })
+    ));
+    assert!(retain_vendor_generation(&request, "release-candidate").is_err());
+    drop(leased);
+
+    let (selection, retention) = retain_vendor_generation(&request, "release-candidate").unwrap();
+    assert_eq!(retention.objects.len(), 1);
+    assert_eq!(
+        retention.objects[0].relative_path,
+        "cargo/v1/".to_owned() + &selection.generation
     );
 }
 

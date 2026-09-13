@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::cargo_vendor::{
-    verify_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration, CargoVendorRequest,
+    open_verified_vendor_generation, CargoVendorEnvironment, CargoVendorGeneration,
+    CargoVendorGenerationLease, CargoVendorRequest,
 };
 use crate::executor::{BuildRequest, BuildResult, Evidence, Output, ResumePhase, ToolObservation};
 use crate::metamake_fetch::SourceUseLedger;
@@ -185,7 +186,7 @@ fn run_owned(
         &lifecycle.python,
         &interpreter,
     )?;
-    let cargo_generation = required_cargo_generation(
+    let cargo_generation = open_required_cargo_generation(
         &request.cache_dir,
         producer.root(),
         tools.root(),
@@ -193,10 +194,11 @@ fn run_owned(
         &host,
     )?;
     let cargo = CargoVendorEnvironment::prepare(
-        &cargo_generation.generation_dir,
+        &cargo_generation.generation().generation_dir,
         &tools.root().join("Cargo.lock"),
         &lifecycle.cargo,
     )?;
+    let cargo_generation = cargo_generation.into_generation();
     let execution_context = PhaseInputContext {
         environment: Some(&environment),
         cargo: Some(&cargo_generation),
@@ -954,6 +956,19 @@ fn required_cargo_generation(
     tools_tree: &str,
     host: &HostPreflight,
 ) -> Result<CargoVendorGeneration, ContractError> {
+    Ok(
+        open_required_cargo_generation(cache_dir, producer_dir, tools_dir, tools_tree, host)?
+            .into_generation(),
+    )
+}
+
+fn open_required_cargo_generation(
+    cache_dir: &Path,
+    producer_dir: &Path,
+    tools_dir: &Path,
+    tools_tree: &str,
+    host: &HostPreflight,
+) -> Result<CargoVendorGenerationLease, ContractError> {
     let request = CargoVendorRequest {
         producer_dir: producer_dir.to_owned(),
         tools_dir: tools_dir.to_owned(),
@@ -961,7 +976,7 @@ fn required_cargo_generation(
         cargo: host_tool(host, "cargo")?,
         cache_dir: cache_dir.to_owned(),
     };
-    verify_vendor_generation(&request).map_err(|error| {
+    open_verified_vendor_generation(&request).map_err(|error| {
         ContractError::environment(format!(
             "required immutable Cargo vendor generation is unavailable or invalid: {error}"
         ))

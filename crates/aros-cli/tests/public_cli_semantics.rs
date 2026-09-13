@@ -81,6 +81,212 @@ fn genmf_cache_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::P
     (temporary, source, cache)
 }
 
+#[cfg(unix)]
+fn cargo_lifecycle_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = source_cache_tempdir();
+    let producer = temporary.path().join("producer");
+    let tools = temporary.path().join("tools");
+    let cache = temporary.path().join("cache");
+    let bin = temporary.path().join("bin");
+    fs::create_dir_all(producer.join("toolchains")).expect("create producer fixture");
+    fs::create_dir(&tools).expect("create tools fixture");
+    fs::create_dir(&cache).expect("create Cargo cache root");
+    fs::create_dir(&bin).expect("create fixture executable root");
+    fs::write(
+        producer.join("toolchains/rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.96.1\"\nprofile = \"minimal\"\n",
+    )
+    .expect("write producer Rust pin");
+    fs::write(
+        tools.join("Cargo.toml"),
+        "[package]\nname = \"fixture-tools\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write tools manifest");
+    let package_checksum = "a".repeat(64);
+    fs::write(
+        tools.join("Cargo.lock"),
+        format!(
+            "version = 4\n\n[[package]]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{package_checksum}\"\n"
+        ),
+    )
+    .expect("write tools lock");
+    let git_init = Command::new("git")
+        .current_dir(&tools)
+        .args(["init", "-q", "--template="])
+        .output()
+        .expect("initialize tools fixture repository");
+    assert_success(&git_init, "initialize tools fixture repository");
+    let git_add = Command::new("git")
+        .current_dir(&tools)
+        .args(["add", "."])
+        .output()
+        .expect("stage tools fixture repository");
+    assert_success(&git_add, "stage tools fixture repository");
+    let git_commit = Command::new("git")
+        .current_dir(&tools)
+        .args([
+            "-c",
+            "user.name=AROS cache fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "test: fixture Cargo workspace",
+        ])
+        .output()
+        .expect("commit tools fixture repository");
+    assert_success(&git_commit, "commit tools fixture repository");
+
+    let manifest = b"[package]\nname = \"fixture-dependency\"\nversion = \"1.0.0\"\n";
+    let source = b"pub fn value() {}\n";
+    let cargo = bin.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  --version)
+    printf '%s\n' 'cargo 1.96.1 (fixture)'
+    ;;
+  vendor)
+    vendor=
+    for argument in "$@"; do vendor="$argument"; done
+    /bin/mkdir -p "$vendor/fixture-dependency-1.0.0/src"
+    printf '%s' '[package]
+name = "fixture-dependency"
+version = "1.0.0"
+' > "$vendor/fixture-dependency-1.0.0/Cargo.toml"
+    printf '%s' 'pub fn value() {{}}
+' > "$vendor/fixture-dependency-1.0.0/src/lib.rs"
+    printf '%s' '{{"files":{{"Cargo.toml":"{}","src/lib.rs":"{}"}},"package":"{}"}}' > "$vendor/fixture-dependency-1.0.0/.cargo-checksum.json"
+    printf '%s\n' '[source.crates-io]' 'replace-with = "vendored-sources"' '[source.vendored-sources]' "directory = \"$vendor\""
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+            aros_common::sha256_bytes(manifest),
+            aros_common::sha256_bytes(source),
+            package_checksum,
+        ),
+    )
+    .expect("write fixture Cargo executable");
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make fixture Cargo executable");
+    (temporary, producer, tools, cache, cargo)
+}
+
+#[test]
+#[cfg(unix)]
+fn cargo_cache_lifecycle_is_exact_retained_and_preview_applied() {
+    let (_temporary, producer, tools, cache, cargo) = cargo_lifecycle_fixture();
+    let producer = producer.to_str().expect("producer path is UTF-8");
+    let tools = tools.to_str().expect("tools path is UTF-8");
+    let cache = cache.to_str().expect("cache path is UTF-8");
+    let cargo = cargo.to_str().expect("Cargo path is UTF-8");
+    let selection = [
+        "--producer-dir",
+        producer,
+        "--tools-dir",
+        tools,
+        "--dir",
+        cache,
+        "--cargo",
+        cargo,
+    ];
+
+    let status = run(&[
+        "cache", "cargo", "status", "--dir", cache, "--format", "json",
+    ]);
+    assert_success(&status, "Cargo cache passive status");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema"], "aros-cache-cargo-status-v1");
+    assert_eq!(
+        status["capabilities"],
+        serde_json::json!(["status", "list", "fetch", "verify", "keep", "release", "remove"])
+    );
+
+    let mut fetch_arguments = vec!["cache", "cargo", "fetch"];
+    fetch_arguments.extend(selection);
+    fetch_arguments.extend(["--format", "json"]);
+    let fetched = run(&fetch_arguments);
+    assert_success(&fetched, "Cargo vendor fetch");
+    let fetched: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    assert_eq!(fetched["schema"], "aros-cache-cargo-fetch-v1");
+
+    let mut keep_arguments = vec!["cache", "cargo", "keep"];
+    keep_arguments.extend(selection);
+    keep_arguments.extend(["--name", "release-candidate", "--format", "json"]);
+    let kept = run(&keep_arguments);
+    assert_success(&kept, "Cargo vendor retention creation");
+    let kept: Value = serde_json::from_slice(&kept.stdout).unwrap();
+    assert_eq!(kept["schema"], "aros-cache-cargo-keep-v1");
+    assert_eq!(kept["retention"]["objects"].as_array().unwrap().len(), 1);
+
+    let mut remove_arguments = vec!["cache", "cargo", "remove"];
+    remove_arguments.extend(selection);
+    remove_arguments.extend(["--format", "json"]);
+    let blocked = run(&remove_arguments);
+    assert_success(&blocked, "retained Cargo removal preview");
+    let blocked: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["schema"], "aros-cache-cargo-remove-v1");
+    assert_eq!(blocked["preview"]["eligible"], false);
+    assert_eq!(
+        blocked["preview"]["blockers"][0]["name"],
+        "release-candidate"
+    );
+    assert!(blocked["recoverability"]
+        .as_str()
+        .expect("Cargo preview reports recovery")
+        .contains("cache cargo fetch"));
+    assert!(blocked["offline_impact"]
+        .as_str()
+        .expect("Cargo preview reports offline impact")
+        .contains("offline"));
+
+    let released = run(&[
+        "cache",
+        "cargo",
+        "release",
+        "--dir",
+        cache,
+        "--name",
+        "release-candidate",
+        "--format",
+        "json",
+    ]);
+    assert_success(&released, "Cargo vendor retention release");
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["schema"], "aros-cache-cargo-release-v1");
+
+    let preview = run(&remove_arguments);
+    assert_success(&preview, "eligible Cargo removal preview");
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["preview"]["eligible"], true);
+    let token = preview["preview"]["apply_token"]
+        .as_str()
+        .expect("Cargo removal preview returns a token")
+        .to_owned();
+    let mut apply_arguments = vec!["cache", "cargo", "remove"];
+    apply_arguments.extend(selection);
+    apply_arguments.extend(["--apply", &token, "--format", "json"]);
+    let removed = run(&apply_arguments);
+    assert_success(&removed, "Cargo removal apply");
+    let removed: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(removed["operation"], "cargo.remove.apply");
+    assert_eq!(removed["removal"]["outcome"], "object_removed");
+}
+
 #[test]
 fn genmf_cache_commands_keep_content_addressed_generations_explicit() {
     let (_temporary, source, cache) = genmf_cache_fixture();

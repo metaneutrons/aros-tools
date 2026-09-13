@@ -25,8 +25,13 @@ const PRIVATE_VENDOR_DIRECTORY: &str = "vendor";
 const CARGO_HOME_DIRECTORY: &str = "cargo-home";
 const CARGO_CONFIG: &str = "config.toml";
 const CHECKSUM_FILE: &str = ".cargo-checksum.json";
-const MAX_ENTRIES: usize = 200_000;
-const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Maximum entries accepted in one AROS-owned immutable vendor generation.
+///
+/// The lifecycle adapter uses the same bound for retention and removal, so a
+/// cleanup operation cannot inspect a tree broader than producer consumption.
+pub const CARGO_VENDOR_MAX_ENTRIES: usize = 200_000;
+/// Maximum regular-file bytes accepted in one AROS-owned vendor generation.
+pub const CARGO_VENDOR_MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_TEMPLATE_BYTES: u64 = 64 * 1024;
 const MAX_CHECKSUM_BYTES: u64 = 8 * 1024 * 1024;
@@ -34,9 +39,11 @@ const MAX_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_LOCK_PACKAGES: usize = 100_000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 pub use crate::cargo_vendor_generation::{
-    cargo_vendor_status, fetch_vendor_generation, list_vendor_generation, select_vendor_generation,
-    verify_vendor_generation, CargoVendorGeneration, CargoVendorIdentity, CargoVendorRequest,
-    CargoVendorSelection, CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
+    cargo_vendor_status, fetch_vendor_generation, list_vendor_generation,
+    open_verified_vendor_generation, retain_vendor_generation, select_vendor_generation,
+    select_vendor_lifecycle_object, verify_vendor_generation, CargoVendorGeneration,
+    CargoVendorGenerationLease, CargoVendorIdentity, CargoVendorRequest, CargoVendorSelection,
+    CargoVendorStatus, CARGO_VENDOR_FETCH_SCHEMA, CARGO_VENDOR_LIST_SCHEMA,
     CARGO_VENDOR_RECEIPT_SCHEMA, CARGO_VENDOR_STATUS_SCHEMA, CARGO_VENDOR_VERIFY_SCHEMA,
 };
 
@@ -257,7 +264,7 @@ impl CopyBudget {
             .entries
             .checked_add(1)
             .ok_or_else(|| ContractError::environment("Cargo vendor entry accounting overflow"))?;
-        if self.entries > MAX_ENTRIES {
+        if self.entries > CARGO_VENDOR_MAX_ENTRIES {
             return Err(ContractError::environment(
                 "Cargo vendor tree exceeds the 200000-entry safety limit",
             ));
@@ -275,7 +282,7 @@ impl CopyBudget {
             .bytes
             .checked_add(size)
             .ok_or_else(|| ContractError::environment("Cargo vendor byte accounting overflow"))?;
-        if self.bytes > MAX_TOTAL_BYTES {
+        if self.bytes > CARGO_VENDOR_MAX_TOTAL_BYTES {
             return Err(ContractError::environment(
                 "Cargo vendor tree exceeds the 8 GiB safety limit",
             ));

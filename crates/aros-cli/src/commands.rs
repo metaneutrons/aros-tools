@@ -247,6 +247,25 @@ async fn cache_command(command: CacheCommand) -> Result<()> {
         CacheCommand::Cargo {
             command: CacheCargoCommand::Verify { selector, format },
         } => cache::cargo_verify(selector, format),
+        CacheCommand::Cargo {
+            command:
+                CacheCargoCommand::Keep {
+                    selector,
+                    name,
+                    format,
+                },
+        } => cache::cargo_keep(selector, &name, format),
+        CacheCommand::Cargo {
+            command: CacheCargoCommand::Release { dir, name, format },
+        } => cache::cargo_release(&dir, &name, format),
+        CacheCommand::Cargo {
+            command:
+                CacheCargoCommand::Remove {
+                    selector,
+                    apply,
+                    format,
+                },
+        } => cache::cargo_remove(selector, apply.as_deref(), format),
         CacheCommand::Genmf {
             command: CacheGenmfCommand::Status { dir, format },
         } => cache::genmf_status(&dir, format),

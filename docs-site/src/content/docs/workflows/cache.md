@@ -33,6 +33,11 @@ aros cache cargo fetch --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache
 aros cache cargo verify --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+aros cache cargo keep --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --name release-candidate
+aros cache cargo remove --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+aros cache cargo release --dir /work/aros-source-cache --name release-candidate
 
 aros cache genmf status --dir /work/aros-genmf-cache
 aros cache genmf list --source-dir /work/AROS --dir /work/aros-genmf-cache --format json
@@ -223,6 +228,14 @@ aros cache cargo verify --producer-dir /work/aros-toolchains \
 # Require the existing verified object and prohibit Cargo resolution.
 aros cache cargo fetch --producer-dir /work/aros-toolchains \
   --tools-dir /work/aros-tools --dir /work/aros-source-cache --offline
+
+# Retain a fully revalidated generation, then obtain a token-bound deletion
+# preview. `release` removes only the named receipt, never vendor bytes.
+aros cache cargo keep --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --name release-candidate
+aros cache cargo remove --producer-dir /work/aros-toolchains \
+  --tools-dir /work/aros-tools --dir /work/aros-source-cache --format json
+aros cache cargo release --dir /work/aros-source-cache --name release-candidate
 ```
 
 `fetch` invokes Cargo's own `vendor --locked --versioned-dirs` through bounded
@@ -240,11 +253,16 @@ existing generation is never repaired or replaced.
 Neither global `CARGO_HOME` nor user Cargo configuration, credentials, or
 temporary data enters the published generation. `--cargo FILE` selects a
 specific executable when `PATH` is not the intended one; otherwise `aros`
-records the absolute Cargo path it resolved. The native lifecycle revalidates
-the selected generation before copying it into a fresh private collector
-environment and always passes Cargo `--locked --offline`. `cache cargo list`
-does not hash a vendor tree, but it runs bounded Git and `cargo --version`
-probes before it reads the selected generation receipt.
+records the absolute Cargo path it resolved. The native lifecycle holds a
+shared lifecycle lease while it revalidates and copies the selected generation
+into a fresh private collector environment, then always passes Cargo
+`--locked --offline`. `keep` revalidates the same exact generation while an
+exclusive lifecycle lease is held and writes a no-clobber named receipt.
+`remove` never scans or clears the cache root: it first returns an exact,
+five-minute preview and only removes that generation when its token, retained
+references, object snapshot, and reader/writer lease state still match.
+`cache cargo list` does not hash a vendor tree, but it runs bounded Git and
+`cargo --version` probes before it reads the selected generation receipt.
 
 ## GenMF reference expansions
 

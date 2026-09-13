@@ -269,6 +269,48 @@ pub enum CacheCargoCommand {
         #[arg(long, value_enum, default_value = "human")]
         format: ResultFormat,
     },
+    /// Retain one verified Cargo vendor generation under a named no-clobber reference.
+    Keep {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// New portable name for the retention reference.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Release one named Cargo retention reference without deleting a generation.
+    Release {
+        /// Existing AROS-managed parent cache root holding the reference.
+        #[arg(long, value_name = "DIR")]
+        dir: PathBuf,
+
+        /// Existing portable retention-reference name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
+    /// Preview or apply removal of one exact verified Cargo vendor generation.
+    Remove {
+        /// One exact producer/tools/Cargo/cache selection.
+        #[command(flatten)]
+        selector: CacheCargoSelector,
+
+        /// Exact token from a prior removal preview; without it, print a new preview.
+        #[arg(long, value_name = "TOKEN")]
+        apply: Option<String>,
+
+        /// Result representation on stdout, independent of diagnostic format.
+        #[arg(long, value_enum, default_value = "human")]
+        format: ResultFormat,
+    },
 }
 
 /// GenMF reference-cache resource operations.

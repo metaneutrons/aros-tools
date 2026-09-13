@@ -50,11 +50,26 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros cache cargo fetch` | cargo | --cargo | — | optional | 1 |  |  | — |  |
 | `aros cache cargo fetch` | offline | --offline | — | optional | 0 | false |  | AROS_OFFLINE |  |
 | `aros cache cargo fetch` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo keep` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo keep` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo keep` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo keep` | cargo | --cargo | — | optional | 1 |  |  | — |  |
+| `aros cache cargo keep` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache cargo keep` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache cargo list` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo list` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo list` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo list` | cargo | --cargo | — | optional | 1 |  |  | — |  |
 | `aros cache cargo list` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo release` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo release` | name | --name | — | required | 1 |  |  | — |  |
+| `aros cache cargo release` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros cache cargo remove` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo remove` | tools_dir | --tools-dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo remove` | dir | --dir | — | required | 1 |  |  | — |  |
+| `aros cache cargo remove` | cargo | --cargo | — | optional | 1 |  |  | — |  |
+| `aros cache cargo remove` | apply | --apply | — | optional | 1 |  |  | — |  |
+| `aros cache cargo remove` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache cargo status` | dir | --dir | — | required | 1 |  |  | — |  |
 | `aros cache cargo status` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros cache cargo verify` | producer_dir | --producer-dir | — | required | 1 |  |  | — |  |
