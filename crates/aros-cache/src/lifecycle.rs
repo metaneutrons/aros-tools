@@ -1620,7 +1620,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn retention_release_requires_an_unchanged_preview_token() {
+    fn retention_release_rejects_a_changed_receipt_binding() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("cache");
         std::fs::create_dir(&root).unwrap();
@@ -1639,9 +1639,15 @@ mod tests {
         );
         let receipt =
             root.join(".aros-cache-lifecycle/v1/retention/archives/release-candidate.json");
-        let bytes = std::fs::read(&receipt).unwrap();
-        std::fs::remove_file(&receipt).unwrap();
-        std::fs::write(&receipt, bytes).unwrap();
+        // Filesystems may immediately reuse an inode after unlinking an
+        // identical receipt, making that sequence semantically equivalent to
+        // the original snapshot. Change a still-valid receipt field instead:
+        // the content-bound preview must then be rejected on every host.
+        let mut document =
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&receipt).unwrap()).unwrap();
+        let created = document["created_unix_seconds"].as_u64().unwrap();
+        document["created_unix_seconds"] = serde_json::Value::from(created + 1);
+        std::fs::write(&receipt, serde_json::to_vec(&document).unwrap()).unwrap();
 
         assert!(matches!(
             apply_retention_release_at(&release, &preview.apply_token, 3_900),
