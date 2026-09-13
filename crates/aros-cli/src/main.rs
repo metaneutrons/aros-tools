@@ -1434,34 +1434,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "developer aid for regenerating the reviewed CLI contract"]
-    fn print_generated_public_cli_contract() {
-        let mut command = Cli::command();
-        command.build();
-        match std::env::var("AROS_CLI_CONTRACT_SECTION").as_deref() {
-            Ok("index") => print!("{}", rendered_cli_contract_index(&command)),
-            Ok(name) => {
-                let section = command
-                    .find_subcommand(name)
-                    .expect("requested public contract section must exist");
-                print!("{}", rendered_cli_contract_section(section));
-            }
-            Err(error) => {
-                panic!(
-                    "set AROS_CLI_CONTRACT_SECTION to index or a visible top-level command: {error}"
-                )
-            }
-        }
-    }
-
-    #[test]
     #[ignore = "developer aid for regenerating the reviewed CLI contract snapshots"]
     fn regenerate_public_cli_contract_snapshots() {
-        assert_eq!(
-            std::env::var("AROS_CLI_CONTRACT_REGENERATE").as_deref(),
-            Ok("1"),
-            "set AROS_CLI_CONTRACT_REGENERATE=1 to rewrite the reviewed snapshots"
-        );
         let mut command = Cli::command();
         command.build();
         let documentation_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
