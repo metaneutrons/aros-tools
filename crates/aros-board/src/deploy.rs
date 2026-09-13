@@ -7,10 +7,10 @@ use aros_common::{
     exchange_prepared_tree_if_unchanged, is_rollback_incomplete, measure_tree_content_cas_bounded,
     open_regular_file_nofollow, publication_failure_class, publish_atomic_file,
     publish_prepared_tree_noclobber, remove_tree_from_snapshot_nofollow,
-    validate_existing_directory_prefix_nofollow, AtomicFilePolicy, PublicationFailureClass,
-    TreeContentCas, TreeTraversalLimits,
+    validate_existing_directory_prefix_nofollow, AtomicFilePolicy, CommitState,
+    PublicationFailureClass, TreeContentCas, TreeTraversalLimits,
 };
-use miette::Result;
+use miette::{Result, WrapErr};
 use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -24,8 +24,45 @@ const DEPLOY_TREE_LIMITS: TreeTraversalLimits = TreeTraversalLimits {
 
 #[derive(Debug)]
 enum StageFailure {
-    Cleanup(miette::Report),
-    Retain(miette::Report),
+    Cleanup {
+        error: miette::Report,
+        state: CommitState,
+    },
+    Retain {
+        error: miette::Report,
+        state: CommitState,
+    },
+}
+
+/// Durable deployment state attached to an error that reached the board CLI.
+///
+/// This marker is intentionally derived by the owner of the atomic deployment
+/// primitive, never by the frontend from the command spelling or `--apply`.
+#[derive(Debug)]
+struct DeploymentPublicationState {
+    state: CommitState,
+}
+
+impl std::fmt::Display for DeploymentPublicationState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("board deployment publication state")
+    }
+}
+
+impl std::error::Error for DeploymentPublicationState {}
+
+/// Read the deployment state established by [`publish`] on an error path.
+#[must_use]
+pub fn publication_state(error: &miette::Report) -> Option<CommitState> {
+    error
+        .downcast_ref::<DeploymentPublicationState>()
+        .map(|marker| marker.state)
+}
+
+fn with_publication_state(error: miette::Report, state: CommitState) -> miette::Report {
+    Err::<(), _>(error)
+        .wrap_err(DeploymentPublicationState { state })
+        .expect_err("wrapping an existing deployment failure must fail")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,26 +158,32 @@ impl DeploymentPlan {
 /// publication fails.
 pub fn publish(plan: &DeploymentPlan) -> Result<()> {
     let parent = plan.destination_dir.parent().ok_or_else(|| {
-        miette::miette!(
-            "Deployment destination '{}' has no parent directory.",
-            plan.destination_dir.display()
+        with_publication_state(
+            miette::miette!(
+                "Deployment destination '{}' has no parent directory.",
+                plan.destination_dir.display()
+            ),
+            CommitState::RolledBack,
         )
     })?;
     let stage = create_unique_directory_nofollow(parent, ".aros-board-stage").map_err(|error| {
-        miette::miette!(
-            "Could not create a contained staging directory below '{}': {error}",
-            parent.display()
+        with_publication_state(
+            miette::miette!(
+                "Could not create a contained staging directory below '{}': {error}",
+                parent.display()
+            ),
+            CommitState::RolledBack,
         )
     })?;
     match stage_and_publish(plan, &stage) {
         Ok(()) => Ok(()),
-        Err(StageFailure::Retain(error)) => Err(error),
-        Err(StageFailure::Cleanup(error)) => match remove_staging_tree(&stage) {
-            Ok(()) => Err(error),
-            Err(cleanup_error) => Err(miette::miette!(
+        Err(StageFailure::Retain { error, state }) => Err(with_publication_state(error, state)),
+        Err(StageFailure::Cleanup { error, state }) => match remove_staging_tree(&stage) {
+            Ok(()) => Err(with_publication_state(error, state)),
+            Err(cleanup_error) => Err(with_publication_state(miette::miette!(
                 "{error}; additionally could not remove the contained staging directory '{}': {cleanup_error}",
                 stage.display()
-            )),
+            ), state)),
         },
     }
 }
@@ -152,20 +195,26 @@ fn stage_and_publish(plan: &DeploymentPlan, stage: &Path) -> std::result::Result
         &plan.source_snapshot,
         DEPLOY_TREE_LIMITS,
     ) {
-        return Err(StageFailure::Cleanup(miette::miette!(
-            "Could not copy the verified boot bundle into contained staging '{}': {error}",
-            stage.display()
-        )));
+        return Err(StageFailure::Cleanup {
+            error: miette::miette!(
+                "Could not copy the verified boot bundle into contained staging '{}': {error}",
+                stage.display()
+            ),
+            state: CommitState::RolledBack,
+        });
     }
     if let Err(error) = publish_atomic_file(
         &stage.join(DEPLOY_MARKER),
         DEPLOY_MARKER_CONTENT.as_bytes(),
         AtomicFilePolicy::NoClobber,
     ) {
-        return Err(StageFailure::Cleanup(miette::miette!(
-            "Could not mark staged deployment '{}': {error}",
-            stage.display()
-        )));
+        return Err(StageFailure::Cleanup {
+            error: miette::miette!(
+                "Could not mark staged deployment '{}': {error}",
+                stage.display()
+            ),
+            state: CommitState::RolledBack,
+        });
     }
 
     let destination_snapshot =
@@ -173,31 +222,43 @@ fn stage_and_publish(plan: &DeploymentPlan, stage: &Path) -> std::result::Result
             Ok(snapshot) => Some(snapshot),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(error) => {
-                return Err(StageFailure::Cleanup(miette::miette!(
-                    "Could not inspect configured deployment destination '{}': {error}",
-                    plan.destination_dir.display()
-                )));
+                return Err(StageFailure::Cleanup {
+                    error: miette::miette!(
+                        "Could not inspect configured deployment destination '{}': {error}",
+                        plan.destination_dir.display()
+                    ),
+                    state: CommitState::RolledBack,
+                });
             }
         };
 
     let Some(destination_snapshot) = destination_snapshot else {
         return match publish_prepared_tree_noclobber(stage, &plan.destination_dir) {
             Ok(_) => Ok(()),
-            Err(error) if must_retain_stage(&error) => Err(StageFailure::Retain(miette::miette!(
-                "Could not atomically publish staged deployment '{}' to '{}': {error}",
-                stage.display(),
-                plan.destination_dir.display()
-            ))),
-            Err(error) => Err(StageFailure::Cleanup(miette::miette!(
-                "Could not atomically publish staged deployment '{}' to '{}': {error}",
-                stage.display(),
-                plan.destination_dir.display()
-            ))),
+            Err(error) if must_retain_stage(&error) => Err(StageFailure::Retain {
+                error: miette::miette!(
+                    "Could not atomically publish staged deployment '{}' to '{}': {error}",
+                    stage.display(),
+                    plan.destination_dir.display()
+                ),
+                state: CommitState::Indeterminate,
+            }),
+            Err(error) => Err(StageFailure::Cleanup {
+                error: miette::miette!(
+                    "Could not atomically publish staged deployment '{}' to '{}': {error}",
+                    stage.display(),
+                    plan.destination_dir.display()
+                ),
+                state: CommitState::RolledBack,
+            }),
         };
     };
 
     if let Err(error) = ensure_managed_destination(&plan.destination_dir) {
-        return Err(StageFailure::Cleanup(error));
+        return Err(StageFailure::Cleanup {
+            error,
+            state: CommitState::RolledBack,
+        });
     }
     if let Err(error) =
         exchange_prepared_tree_if_unchanged(stage, &plan.destination_dir, &destination_snapshot)
@@ -207,19 +268,28 @@ fn stage_and_publish(plan: &DeploymentPlan, stage: &Path) -> std::result::Result
             plan.destination_dir.display()
         );
         return if must_retain_stage(&error) {
-            Err(StageFailure::Retain(failure))
+            Err(StageFailure::Retain {
+                error: failure,
+                state: CommitState::Indeterminate,
+            })
         } else {
-            Err(StageFailure::Cleanup(failure))
+            Err(StageFailure::Cleanup {
+                error: failure,
+                state: CommitState::RolledBack,
+            })
         };
     }
     if let Err(error) =
         remove_tree_from_snapshot_nofollow(stage, &destination_snapshot, DEPLOY_TREE_LIMITS)
     {
-        return Err(StageFailure::Retain(miette::miette!(
+        return Err(StageFailure::Retain {
+            error: miette::miette!(
                 "Published the new deployment at '{}', but could not safely remove the retained previous deployment '{}': {error}",
                 plan.destination_dir.display(),
                 stage.display()
-        )));
+            ),
+            state: CommitState::Committed,
+        });
     }
     Ok(())
 }
@@ -352,11 +422,54 @@ fn remove_staging_tree(stage: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{publish, DeploymentPlan};
+    use super::{publication_state, publish, DeploymentPlan};
     use crate::config::{
         Board, BoardBackend, BoardConfig, BoardModel, RaspberryPiConfig, Transport,
     };
+    use aros_common::CommitState;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock};
+
+    #[cfg(unix)]
+    static PUBLICATION_FAULT_ENV: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// Serialize deployment-publication tests with the process-global
+    /// fault-injection environment. The publication primitive reads that
+    /// variable at its real durability boundary, so every concurrent publisher
+    /// must participate in the same guard.
+    #[cfg(unix)]
+    fn publication_fault_guard() -> std::sync::MutexGuard<'static, ()> {
+        PUBLICATION_FAULT_ENV
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(unix)]
+    struct ScopedPublicationFault {
+        original: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl ScopedPublicationFault {
+        fn set(value: &str) -> Self {
+            let original = std::env::var_os("AROS_PUBLICATION_TEST_FAIL_AT");
+            std::env::set_var("AROS_PUBLICATION_TEST_FAIL_AT", value);
+            Self { original }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ScopedPublicationFault {
+        fn drop(&mut self) {
+            if let Some(original) = &self.original {
+                std::env::set_var("AROS_PUBLICATION_TEST_FAIL_AT", original);
+            } else {
+                std::env::remove_var("AROS_PUBLICATION_TEST_FAIL_AT");
+            }
+        }
+    }
 
     fn board(name: &str, tftp_root: &Path) -> Board {
         Board {
@@ -419,6 +532,9 @@ mod tests {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt as _;
 
+        #[cfg(unix)]
+        let _guard = publication_fault_guard();
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -450,6 +566,9 @@ mod tests {
 
     #[test]
     fn publish_refuses_to_clobber_an_unmanaged_directory() {
+        #[cfg(unix)]
+        let _guard = publication_fault_guard();
+
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");
         let tftp = temp.path().join("tftp");
@@ -460,10 +579,51 @@ mod tests {
         let board = board("rpi4", &tftp);
         let plan = DeploymentPlan::create(&board, temp.path(), Some(&artifacts)).expect("plan");
 
-        assert!(publish(&plan).is_err());
+        let error = publish(&plan).expect_err("unmanaged deployment must be refused");
+        assert_eq!(publication_state(&error), Some(CommitState::RolledBack));
         assert_eq!(
             std::fs::read_to_string(tftp.join("rpi4/keep.txt")).expect("unmanaged file"),
             "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn injected_pre_and_post_boundary_failures_preserve_the_actual_deployment_state() {
+        let _guard = publication_fault_guard();
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let artifacts = temp.path().join("artifacts");
+        let tftp = temp.path().join("tftp");
+        std::fs::create_dir_all(&artifacts).expect("artifact directory");
+        std::fs::create_dir_all(&tftp).expect("tftp directory");
+        std::fs::write(artifacts.join("kernel.img"), "kernel").expect("artifact");
+        let board = board("rpi4", &tftp);
+        let plan = DeploymentPlan::create(&board, temp.path(), Some(&artifacts)).expect("plan");
+
+        let rolled_back = {
+            let _fault = ScopedPublicationFault::set("stage-before-write");
+            publish(&plan).expect_err("pre-boundary failure must be injected")
+        };
+        assert_eq!(
+            publication_state(&rolled_back),
+            Some(CommitState::RolledBack)
+        );
+        assert!(
+            !tftp.join("rpi4").exists(),
+            "the pre-boundary injection must not publish a deployment"
+        );
+
+        let indeterminate = {
+            let _fault = ScopedPublicationFault::set("prepared-tree-after-rename-before-sync");
+            publish(&plan).expect_err("post-rename failure must be injected")
+        };
+        assert_eq!(
+            publication_state(&indeterminate),
+            Some(CommitState::Indeterminate)
+        );
+        assert!(
+            tftp.join("rpi4/kernel.img").is_file(),
+            "the uncertain path keeps the observed destination for inspection instead of retrying"
         );
     }
 
@@ -493,6 +653,8 @@ mod tests {
     #[test]
     fn publish_rejects_a_prefix_parent_swapped_after_preview() {
         use std::os::unix::fs::symlink;
+
+        let _guard = publication_fault_guard();
 
         let temp = tempfile::tempdir().expect("temporary directory");
         let artifacts = temp.path().join("artifacts");

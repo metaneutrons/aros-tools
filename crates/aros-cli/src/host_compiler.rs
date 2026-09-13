@@ -55,6 +55,38 @@ pub struct HostCompilerPaths {
     pub llvm_ar: PathBuf,
 }
 
+/// The durable effect observed while resolving the host compiler.
+///
+/// This private frontend result lets the command boundary preserve an actual
+/// publication fact through a later reporting failure without treating reuse,
+/// cache refresh, or an option spelling as a commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostCompilerInstallDisposition {
+    /// An existing verified installation was reused.
+    Reused,
+    /// Only the verified archive cache was refreshed.
+    ArchiveRefreshed,
+    /// A new verified host compiler was durably published.
+    Published,
+}
+
+/// Exact effect observed by the host-compiler installer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCompilerInstallOutcome {
+    disposition: HostCompilerInstallDisposition,
+}
+
+impl HostCompilerInstallOutcome {
+    const fn new(disposition: HostCompilerInstallDisposition) -> Self {
+        Self { disposition }
+    }
+
+    /// Whether this invocation itself durably published the host compiler.
+    pub const fn publication_committed(self) -> bool {
+        matches!(self.disposition, HostCompilerInstallDisposition::Published)
+    }
+}
+
 /// Host-specific release asset selected from `aros-targets.toml`.
 pub struct HostCompilerSelection {
     /// Stable host matrix key.
@@ -347,11 +379,14 @@ pub fn verify_host_compiler_install(
 ///
 /// Returns an error for invalid configuration, cache/download/verification
 /// failures, unsafe existing destinations, or incomplete extracted layouts.
-pub async fn install(repo_root: &Path, force: bool, offline: bool) -> Result<HostCompilerPaths> {
+pub async fn install(
+    repo_root: &Path,
+    force: bool,
+    offline: bool,
+) -> Result<HostCompilerInstallOutcome> {
     let config = load_host_compiler_config(repo_root)?;
     let selection = select_host_compiler(&config)?;
     let destination = default_host_compiler_dir()?;
-    let paths = host_compiler_paths(&destination);
     let expected_sha256 = require_sha256(
         selection.sha256.as_deref(),
         &format!("host compiler asset for {}", selection.host_key),
@@ -378,14 +413,18 @@ pub async fn install(repo_root: &Path, force: bool, offline: bool) -> Result<Hos
                 aros_common::outputln!(
                     "{CHECK} Host compiler already matches the declared archive"
                 );
-                return Ok(paths);
+                return Ok(HostCompilerInstallOutcome::new(
+                    HostCompilerInstallDisposition::Reused,
+                ));
             }
             aros_common::outputln!("{DOWNLOAD} {}", style(&selection.url).dim());
             obtain_archive(&selection.url, &expected_sha256, None, offline, true).await?;
             aros_common::outputln!(
                 "{CHECK} Refreshed the verified archive cache; installed tools were unchanged"
             );
-            return Ok(paths);
+            return Ok(HostCompilerInstallOutcome::new(
+                HostCompilerInstallDisposition::ArchiveRefreshed,
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -409,7 +448,9 @@ pub async fn install(repo_root: &Path, force: bool, offline: bool) -> Result<Hos
         "{CHECK} Installed host compiler at {}",
         destination.display()
     );
-    Ok(paths)
+    Ok(HostCompilerInstallOutcome::new(
+        HostCompilerInstallDisposition::Published,
+    ))
 }
 
 #[cfg(test)]

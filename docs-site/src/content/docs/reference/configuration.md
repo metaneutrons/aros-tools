@@ -148,10 +148,11 @@ and `LOG_FILE` suffix contract. The exact public names are:
 - `AROS_TRANSPILER_DIAGNOSTIC_FORMAT`, `AROS_TRANSPILER_LOG_LEVEL`, `AROS_TRANSPILER_LOG_FORMAT`, `AROS_TRANSPILER_LOG_FILE`
 - `AROS_VERIFY_DIAGNOSTIC_FORMAT`, `AROS_VERIFY_LOG_LEVEL`, `AROS_VERIFY_LOG_FORMAT`, `AROS_VERIFY_LOG_FILE`
 
-Logging is off by default and requires an explicit local file. Pass both a
-non-off level and a file for portable behavior: the frontend and collector
-have documented [file-only defaults](/aros-tools/reference/diagnostics/#collect-a-local-log)
-that differ from other tools. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
+Logging is off by default and requires an explicit local file. Across the
+frontend and every companion, a selected file without a selected level uses
+`info`, while an explicit command-line or environment `off` disables logging
+and creates no sink. Command-line values override their environment
+equivalents. `COLLECT_AROS_DEBUG` is the collector's public debugging switch for
 retaining its temporary directory; it can disclose intermediate object and
 link state and should not be set in routine or release builds.
 
@@ -175,11 +176,13 @@ configuration, and may be compiled out or inert in release builds:
 - `AROS_TEST_SOURCE_ROOT`, `AROS_TEST_TOOLS_DIR`
 - `AROS_PUBLICATION_TEST_FAIL_AT`, `AROS_PUBLICATION_TEST_FAIL_PATH`, `AROS_PUBLICATION_TEST_PAUSE_AT`, `AROS_PUBLICATION_TEST_PAUSE_MS`, `AROS_PUBLICATION_TEST_CRASH_AT`
 - `AROS_FETCH_TEST_LOG_FAIL_AT`, `AROS_FETCH_TEST_PAUSE_AT`, `AROS_FETCH_TEST_PAUSE_MS`
+- `AROS_TEST_LOG_FAIL_EVENT`
 - `AROS_GUARD_TEST_BUSY`, `AROS_GUARD_TEST_PATH`
 - `AROS_PROCESS_TEST_ESCAPE_PID`, `AROS_PROCESS_TEST_ESCAPE_STYLE`
 
-The guard and process-escape names are used only by integration-test executables
-to coordinate isolated filesystem/process fixtures; no shipped command reads them.
+The guard, process-escape and final-log-failure names are used only by
+integration-test executables to coordinate isolated filesystem/process
+fixtures; no supported released command configuration reads them.
 
 The host LLVM version comes exclusively from the effective `[host_compiler]`
 contract (checkout override or embedded pristine-upstream default); no ambient

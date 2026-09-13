@@ -82,6 +82,46 @@ fn legacy_contract_fetches_verifies_and_extracts_local_archive() {
 }
 
 #[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let root = tempfile::tempdir().unwrap();
+    let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aros-fetch"));
+        command
+            .current_dir(root.path())
+            .args([
+                "--archive",
+                "fixture",
+                "--location",
+                "cache",
+                "--destination",
+                "ports",
+                "--offline",
+                "--log-file",
+            ])
+            .arg(log)
+            .arg("--log-format=jsonl");
+        if let Some(level) = level {
+            command.arg(format!("--log-level={level}"));
+        }
+        if environment_off {
+            command.env("AROS_FETCH_LOG_LEVEL", "off");
+        }
+        command.output().unwrap()
+    };
+    let file_only = root.path().join("file-only.jsonl");
+    assert!(!run(&file_only, None, false).status.success());
+    assert!(file_only.is_file());
+
+    let explicit_off = root.path().join("explicit-off.jsonl");
+    assert!(!run(&explicit_off, Some("off"), false).status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = root.path().join("environment-off.jsonl");
+    assert!(!run(&environment_off, None, true).status.success());
+    assert!(!environment_off.exists());
+}
+
+#[test]
 fn tampered_cache_is_rejected_with_stable_json_diagnostic() {
     let (root, digest) = fixture();
     let cache = root.path().join("cache");

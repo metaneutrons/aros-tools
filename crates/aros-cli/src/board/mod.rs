@@ -4,7 +4,10 @@ pub mod console;
 pub mod doctor;
 pub use aros_board::{config, deploy, scan, sd, sd_disk, sd_unmount};
 
-use crate::build::{self, BuildOptions};
+use crate::{
+    build::{self, BuildOptions},
+    observability,
+};
 use config::{Board, BoardModel, Transport};
 use console::ConsoleProgram;
 use miette::Result;
@@ -34,6 +37,7 @@ pub fn initialize_template(
     }
 
     config::create_template(&template)?;
+    observability::record_committed_mutation();
     aros_common::outputln!(
         "✅ Created '{}'. Replace every REPLACE_ME value before serving a board.",
         template.path().display()
@@ -111,6 +115,7 @@ pub fn create_sd_image(
     }
 
     let artifact = sd::stage_boot_bundle(&bundle, output_dir)?;
+    observability::record_committed_mutation();
     aros_common::outputln!(
         "✅ Created verified SD artifact '{}'.",
         artifact.artifact_dir().display()
@@ -229,6 +234,7 @@ pub fn unmount_sd_disk(selected_scan_id: Option<&str>, apply: bool, dry_run: boo
     }
 
     let report = sd_unmount::unmount(selected_scan_id)?;
+    observability::record_committed_mutation();
     aros_common::outputln!("✅ Removable whole disk was unmounted.");
     aros_common::outputln!("  • Disk:       {}", report.scan_id);
     for mount_point in &report.unmounted_mount_points {
@@ -298,6 +304,7 @@ pub fn write_sd_image(
     })?;
     let report =
         sd_disk::write_verified_image_for_board(artifact, board, selected_scan_id, confirmation)?;
+    observability::record_committed_mutation();
     aros_common::outputln!("✅ Verified SD image write completed.");
     aros_common::outputln!("  • Disk:       {}", report.scan_id);
     aros_common::outputln!("  • Bytes:      {}", report.bytes_written);
@@ -461,7 +468,17 @@ pub fn deploy(
         return Ok(());
     }
 
-    deploy::publish(&plan)?;
+    if let Err(error) = deploy::publish(&plan) {
+        if let Some(state) = deploy::publication_state(&error) {
+            return observability::commit_state(
+                Err(error),
+                state,
+                "board deployment publication state was established by the deployment owner",
+            );
+        }
+        return Err(error);
+    }
+    observability::record_committed_mutation();
     aros_common::outputln!(
         "✅ Published '{}' into the local TFTP tree at {}.",
         board.name,

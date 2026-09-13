@@ -115,6 +115,9 @@ pub fn select(repo_root: &Path, args: SelectArgs) -> Result<()> {
             "validated a complete released lock; no project selection was changed",
         )
     };
+    if result.state == "committed" {
+        observability::record_committed_mutation();
+    }
     print_selection_result(&result, args.format);
     Ok(())
 }

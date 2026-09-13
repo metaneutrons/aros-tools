@@ -91,3 +91,54 @@ fn local_jsonl_log_is_separate_from_json_diagnostics() {
     assert_eq!(records[1]["event"], "diagnostic");
     assert_eq!(records[1]["diagnostic_code"], "AH0101");
 }
+
+#[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let contract = directory.path().join("contract.cmake");
+    fs::write(&contract, "message(FATAL_ERROR injected)\n").unwrap();
+    let file_only = directory.path().join("file-only.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-ahi-runner"))
+        .args([
+            "--contract",
+            contract.to_str().unwrap(),
+            "--validate-only",
+            "--log-file",
+            file_only.to_str().unwrap(),
+            "--log-format=jsonl",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(file_only.is_file());
+
+    let explicit_off = directory.path().join("explicit-off.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-ahi-runner"))
+        .args([
+            "--contract",
+            contract.to_str().unwrap(),
+            "--validate-only",
+            "--log-level=off",
+            "--log-file",
+            explicit_off.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = directory.path().join("environment-off.jsonl");
+    let output = Command::new(env!("CARGO_BIN_EXE_aros-ahi-runner"))
+        .env("AROS_AHI_LOG_LEVEL", "off")
+        .args([
+            "--contract",
+            contract.to_str().unwrap(),
+            "--validate-only",
+            "--log-file",
+            environment_off.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!environment_off.exists());
+}

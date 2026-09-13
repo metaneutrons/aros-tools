@@ -91,3 +91,41 @@ fn successful_invocation_writes_shared_jsonl_logs() {
     assert_eq!(parsed.first().unwrap()["event"], "invocation.start");
     assert_eq!(parsed.last().unwrap()["event"], "invocation.complete");
 }
+
+#[test]
+fn logging_precedence_distinguishes_file_only_from_explicit_off() {
+    let source = tempfile::tempdir().unwrap();
+    let run = |log: &std::path::Path, level: Option<&str>, environment_off: bool| {
+        let output = source.path().join(format!(
+            "{}.cmake",
+            log.file_name().unwrap().to_string_lossy()
+        ));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aros-transpiler"));
+        command
+            .args(["--source-dir"])
+            .arg(source.path())
+            .args(["--output"])
+            .arg(output)
+            .args(["--log-file"])
+            .arg(log)
+            .arg("--log-format=jsonl");
+        if let Some(level) = level {
+            command.arg(format!("--log-level={level}"));
+        }
+        if environment_off {
+            command.env("AROS_TRANSPILER_LOG_LEVEL", "off");
+        }
+        command.output().unwrap()
+    };
+    let file_only = source.path().join("file-only.jsonl");
+    assert!(run(&file_only, None, false).status.success());
+    assert!(file_only.is_file());
+
+    let explicit_off = source.path().join("explicit-off.jsonl");
+    assert!(run(&explicit_off, Some("off"), false).status.success());
+    assert!(!explicit_off.exists());
+
+    let environment_off = source.path().join("environment-off.jsonl");
+    assert!(run(&environment_off, None, true).status.success());
+    assert!(!environment_off.exists());
+}

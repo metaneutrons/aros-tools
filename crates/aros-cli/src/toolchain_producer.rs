@@ -43,6 +43,38 @@ pub struct ProducerArgs {
     command: ProducerCommand,
 }
 
+impl ProducerArgs {
+    /// Return the exact public producer leaf for diagnostic context.
+    ///
+    /// The frontend owns the final diagnostic envelope, while this module owns
+    /// the nested producer model. Keeping this mapping beside that model avoids
+    /// a second parser-shaped list in the frontend.
+    pub const fn diagnostic_mode(&self) -> &'static str {
+        match &self.command {
+            ProducerCommand::Recipe(_) => "toolchain.producer.recipe",
+            ProducerCommand::Cache(_) => "toolchain.producer.cache",
+            ProducerCommand::CompatibilityPorts(_) => "toolchain.producer.compatibility-ports",
+            ProducerCommand::Environment(_) => "toolchain.producer.environment",
+            ProducerCommand::Profile(_) => "toolchain.producer.profile",
+            ProducerCommand::MaterializeEngineFreeSource(_) => {
+                "toolchain.producer.materialize-engine-free-source"
+            }
+            ProducerCommand::Package(_) => "toolchain.producer.package",
+            ProducerCommand::VerifyPackage(_) => "toolchain.producer.verify-package",
+            ProducerCommand::Compare(_) => "toolchain.producer.compare",
+            ProducerCommand::Repackage(_) => "toolchain.producer.repackage",
+            ProducerCommand::ValidateRecovery(_) => "toolchain.producer.validate-recovery",
+            ProducerCommand::RecordQualification(_) => "toolchain.producer.record-qualification",
+            ProducerCommand::PrepareRecovery(_) => "toolchain.producer.prepare-recovery",
+            ProducerCommand::Index(_) => "toolchain.producer.index",
+            ProducerCommand::CompatibilityHostTools { .. } => {
+                "toolchain.producer.compatibility-host-tools"
+            }
+            ProducerCommand::Compatibility(_) => "toolchain.producer.compatibility",
+        }
+    }
+}
+
 /// One producer operation with no implicit backend selection.
 #[derive(Subcommand)]
 enum ProducerCommand {

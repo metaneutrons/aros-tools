@@ -295,6 +295,27 @@ pub struct Logger {
     policy: ObservabilityPolicy,
 }
 
+/// Resolve the effective local logging level from a parsed public command
+/// line.
+///
+/// A selected file without an explicit level is an intentional request for an
+/// `info` log. An explicit `off` from either the command line or environment
+/// remains off, so automation can nominate a reusable path without creating a
+/// sink. `Logger::open` remains responsible for rejecting a non-off level
+/// without a destination.
+#[must_use]
+pub fn effective_log_level(
+    selected: LogLevel,
+    level_was_explicit: bool,
+    has_log_file: bool,
+) -> LogLevel {
+    if has_log_file && selected == LogLevel::Off && !level_was_explicit {
+        LogLevel::Info
+    } else {
+        selected
+    }
+}
+
 impl Logger {
     /// Open the configured local log sink.
     ///
@@ -393,6 +414,24 @@ impl Logger {
     ) -> Result<(), DiagnosticFailure> {
         if self.level == LogLevel::Off || level > self.level {
             return Ok(());
+        }
+        // The public logger intentionally accepts only regular files, which
+        // rules out using a FIFO to make a real post-mutation write fail in a
+        // process test. Keep a narrowly named, debug-only fault boundary so
+        // executable tests can exercise the actual final event without
+        // weakening the released logger's destination policy.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("AROS_TEST_LOG_FAIL_EVENT")
+            .is_some_and(|configured| configured == std::ffi::OsStr::new(event))
+        {
+            return Err(observability_failure(
+                self.policy,
+                self.path.as_deref(),
+                format!(
+                    "test injection rejected {} log event '{event}'",
+                    self.policy.component
+                ),
+            ));
         }
         let Some(file) = &self.file else {
             return Ok(());
@@ -575,6 +614,26 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.diagnostic().code, DiagnosticCode::CliObservability);
+    }
+
+    #[test]
+    fn effective_log_level_distinguishes_file_only_from_explicit_off() {
+        assert_eq!(
+            effective_log_level(LogLevel::Off, false, false),
+            LogLevel::Off
+        );
+        assert_eq!(
+            effective_log_level(LogLevel::Off, false, true),
+            LogLevel::Info
+        );
+        assert_eq!(
+            effective_log_level(LogLevel::Off, true, true),
+            LogLevel::Off
+        );
+        assert_eq!(
+            effective_log_level(LogLevel::Debug, true, true),
+            LogLevel::Debug
+        );
     }
 
     #[test]

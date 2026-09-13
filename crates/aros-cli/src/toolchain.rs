@@ -81,6 +81,51 @@ pub struct ResolvedToolchain {
     pub source: ToolchainSource,
 }
 
+/// The durable effect observed while resolving a requested toolchain.
+///
+/// This is intentionally internal to the frontend. Command reporting uses it
+/// to preserve actual mutation state if a later stdout or logger operation
+/// fails; it never infers state from the command name or `--force` spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolchainInstallDisposition {
+    /// An explicit local tree was verified without copying it.
+    LocalOverride,
+    /// An existing managed installation was verified and reused.
+    Reused,
+    /// Only the verified archive cache was refreshed.
+    ArchiveRefreshed,
+    /// A new verified managed installation was durably published.
+    Published,
+}
+
+/// Resolved toolchain plus the exact installation effect observed by its
+/// owner.
+#[derive(Debug, Clone)]
+pub struct ToolchainInstallOutcome {
+    /// Verified toolchain selected for the caller.
+    resolved: ResolvedToolchain,
+    disposition: ToolchainInstallDisposition,
+}
+
+impl ToolchainInstallOutcome {
+    const fn new(resolved: ResolvedToolchain, disposition: ToolchainInstallDisposition) -> Self {
+        Self {
+            resolved,
+            disposition,
+        }
+    }
+
+    /// Whether this invocation itself durably published a new installation.
+    pub const fn publication_committed(&self) -> bool {
+        matches!(self.disposition, ToolchainInstallDisposition::Published)
+    }
+
+    /// Consume the outcome after any frontend reporting observation is made.
+    pub fn into_resolved(self) -> ResolvedToolchain {
+        self.resolved
+    }
+}
+
 /// Resolve the versioned toolchain lock-file path inside the selected checkout.
 pub fn lock_file_path(repo_root: &Path) -> PathBuf {
     repo_root.join("aros-toolchains.lock.toml")
@@ -174,14 +219,17 @@ pub async fn install(
     offline: bool,
     force: bool,
     local: Option<&Path>,
-) -> Result<ResolvedToolchain> {
+) -> Result<ToolchainInstallOutcome> {
     if let Some(local) = explicit_local_override(local) {
         let resolved = resolve_local(repo_root, &local, preset)?;
         aros_common::outputln!(
             "{CHECK} Using local AROS toolchain without copying it: {}",
             local.display()
         );
-        return Ok(resolved);
+        return Ok(ToolchainInstallOutcome::new(
+            resolved,
+            ToolchainInstallDisposition::LocalOverride,
+        ));
     }
 
     let host = host_platform_key()?;
@@ -220,7 +268,10 @@ pub async fn install(
                 )
             })?;
             if !force {
-                return Ok(resolved_locked(&payload, &lock, artifact));
+                return Ok(ToolchainInstallOutcome::new(
+                    resolved_locked(&payload, &lock, artifact),
+                    ToolchainInstallDisposition::Reused,
+                ));
             }
             aros_common::outputln!(
                 "{DOWNLOAD} Refreshing cached AROS toolchain archive {} for {} / {}",
@@ -241,7 +292,10 @@ pub async fn install(
             aros_common::outputln!(
                 "{CHECK} Refreshed the verified archive cache; installed toolchain was unchanged"
             );
-            return Ok(resolved_locked(&payload, &lock, artifact));
+            return Ok(ToolchainInstallOutcome::new(
+                resolved_locked(&payload, &lock, artifact),
+                ToolchainInstallDisposition::ArchiveRefreshed,
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -276,7 +330,10 @@ pub async fn install(
                     envelope.display()
                 )
             })?;
-            return Ok(resolved_locked(&payload, &lock, artifact));
+            return Ok(ToolchainInstallOutcome::new(
+                resolved_locked(&payload, &lock, artifact),
+                ToolchainInstallDisposition::Reused,
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -311,7 +368,10 @@ pub async fn install(
     commit_staging(&envelope_staging, &envelope)?;
     verify_locked_install(&payload, &lock, artifact, true)?;
     aros_common::outputln!("{CHECK} Installed at {}", payload.display());
-    Ok(resolved_locked(&payload, &lock, artifact))
+    Ok(ToolchainInstallOutcome::new(
+        resolved_locked(&payload, &lock, artifact),
+        ToolchainInstallDisposition::Published,
+    ))
 }
 
 /// Resolve the verified toolchain required for a build, installing if needed.
@@ -331,7 +391,9 @@ pub async fn resolve_for_build(
     if let Some(local) = explicit_local_override(local) {
         return resolve_local(repo_root, &local, preset);
     }
-    install(repo_root, preset, offline, false, None).await
+    install(repo_root, preset, offline, false, None)
+        .await
+        .map(ToolchainInstallOutcome::into_resolved)
 }
 
 /// Resolve an already installed target toolchain without downloading.

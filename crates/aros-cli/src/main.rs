@@ -4,10 +4,14 @@
 
 use aros_board::config::{BoardModel, Transport};
 use aros_common::{
-    render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode, DiagnosticContext,
-    DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel, Logger,
+    effective_log_level, render_diagnostics, requested_diagnostic_format, Diagnostic,
+    DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat,
+    LogLevel, Logger,
 };
-use clap::{error::ErrorKind, Args, Parser, Subcommand, ValueEnum};
+use clap::{
+    error::ErrorKind, parser::ValueSource, Args, CommandFactory, FromArgMatches, Parser,
+    Subcommand, ValueEnum,
+};
 use console::{style, Emoji};
 use miette::Result;
 use std::ffi::OsString;
@@ -19,6 +23,7 @@ mod board;
 mod boot;
 mod build;
 mod build_tools;
+mod cli_contract;
 mod commands;
 mod golden;
 mod host_compiler;
@@ -34,6 +39,11 @@ mod toolchain_plan;
 mod toolchain_producer;
 mod toolchain_selection;
 
+use cli_contract::{
+    parse_opaque_scan_id, parse_positive_usize, BoardProfileSelection, GoldenAction,
+    RepositoryRequirement,
+};
+
 static CHECK: Emoji<'_, '_> = Emoji("✅ ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 
@@ -44,7 +54,7 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
     version,
     about = "Build, verify, and deploy AROS with explicit source and toolchain inputs",
     long_about = "Upstream-compatible host tooling for reproducible AROS and AROS-NX development workflows.",
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default and is written\nonly to an explicitly selected local file."
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_DIAGNOSTIC_FORMAT, AROS_LOG_LEVEL,\nAROS_LOG_FORMAT, and AROS_LOG_FILE. Logging is off by default. A selected file\nwithout a selected level uses info; explicit off creates no sink, and a non-off\nlevel requires a local file."
 )]
 struct Cli {
     #[command(flatten)]
@@ -71,16 +81,6 @@ struct ObservabilityArgs {
     /// Explicit local log destination
     #[arg(long, global = true, value_name = "PATH", env = "AROS_LOG_FILE")]
     log_file: Option<PathBuf>,
-}
-
-impl ObservabilityArgs {
-    fn effective_log_level(&self) -> LogLevel {
-        if self.log_file.is_some() && self.log_level == LogLevel::Off {
-            LogLevel::Info
-        } else {
-            self.log_level
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -308,27 +308,6 @@ enum SourceCommand {
         /// Skip standalone-candidate target-graph validation
         #[arg(long = "no-transpile", action = clap::ArgAction::SetFalse)]
         transpile: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum GoldenAction {
-    /// Run the transpiler twice and store its output as the baseline
-    Capture {
-        /// Preset to capture; repeatable. Default: every configured preset
-        #[arg(long = "preset")]
-        presets: Vec<String>,
-    },
-
-    /// Run the transpiler and compare its output against the baseline
-    Verify {
-        /// Preset to check; repeatable. Default: every configured preset
-        #[arg(long = "preset")]
-        presets: Vec<String>,
-
-        /// Replace the baseline with this run instead of reporting differences
-        #[arg(long)]
-        update: bool,
     },
 }
 
@@ -672,99 +651,6 @@ enum SdCommand {
     },
 }
 
-fn parse_opaque_scan_id(value: &str) -> std::result::Result<String, String> {
-    if value.is_empty() || value.trim() != value || value.contains('/') || value.contains('\\') {
-        return Err(
-            "expected an opaque scan ID printed by the corresponding `aros board sd` scan command, not a device path"
-                .to_string(),
-        );
-    }
-    Ok(value.to_string())
-}
-
-#[derive(Args, Clone)]
-struct BoardProfileSelection {
-    /// Local board profile name from ~/.config/aros/boards.toml
-    #[arg(long)]
-    profile: String,
-
-    /// Board configuration file; overrides AROS_BOARDS_FILE and the default path
-    #[arg(long, value_name = "PATH", env = "AROS_BOARDS_FILE")]
-    config: Option<PathBuf>,
-}
-
-/// Repository context needed before a command may run.
-///
-/// Keeping this policy beside the command model prevents a new global command
-/// from accidentally inheriting checkout discovery merely because most build
-/// commands need it.
-fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| format!("'{value}' is not a valid positive integer"))?;
-    if parsed == 0 {
-        return Err("parallel job count must be greater than zero".to_owned());
-    }
-    Ok(parsed)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RepositoryRequirement {
-    /// The command is independent of an AROS source checkout.
-    Global,
-    /// Use a checkout when one is discoverable, but remain useful without one.
-    Optional,
-    /// Refuse to run until an AROS source checkout has been discovered.
-    Required,
-}
-
-impl Commands {
-    const fn repository_requirement(&self) -> RepositoryRequirement {
-        match self {
-            Self::Source { command } => match command {
-                SourceCommand::Init { .. } => RepositoryRequirement::Global,
-                SourceCommand::Sync { .. } => RepositoryRequirement::Required,
-            },
-            Self::Ccache { .. }
-            | Self::Install { .. }
-            | Self::Toolchain {
-                command:
-                    ToolchainCommands::Plan(_)
-                    | ToolchainCommands::Build(_)
-                    | ToolchainCommands::Producer(_)
-                    | ToolchainCommands::MetaMakeFetch(_)
-                    | ToolchainCommands::Inventory(_)
-                    | ToolchainCommands::Import(_)
-                    | ToolchainCommands::Register(_)
-                    | ToolchainCommands::Remove(_)
-                    | ToolchainCommands::Gc(_),
-            } => RepositoryRequirement::Global,
-            Self::Info | Self::BuildTools { .. } => RepositoryRequirement::Optional,
-            Self::Board { command } => match command {
-                BoardCommand::Init { .. }
-                | BoardCommand::Scan
-                | BoardCommand::Serve { .. }
-                | BoardCommand::Sd { .. }
-                | BoardCommand::Console { .. } => RepositoryRequirement::Global,
-                BoardCommand::Doctor(_)
-                | BoardCommand::Build { .. }
-                | BoardCommand::Deploy { .. } => RepositoryRequirement::Required,
-            },
-            Self::Setup { .. }
-            | Self::HostCompiler { .. }
-            | Self::Toolchain { .. }
-            | Self::Build { .. }
-            | Self::Clean { .. }
-            | Self::Test { .. }
-            | Self::Golden { .. } => RepositoryRequirement::Required,
-        }
-    }
-
-    const fn commits_on_success(&self) -> bool {
-        matches!(self, Self::Install { .. })
-    }
-}
-
 fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, DiagnosticContext) {
     let (code, stage, mode, target, hint) = match command {
         Commands::Setup { preset, .. } => (
@@ -774,46 +660,132 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             preset.clone(),
             "verify the selected profile, toolchain lock, network policy, and local cache",
         ),
-        Commands::HostCompiler { .. } => (
-            DiagnosticCode::CliToolResolution,
-            DiagnosticStage::ToolResolution,
-            "host-compiler",
-            None,
-            "install the declared host compiler or verify the configured offline cache",
-        ),
-        Commands::BuildTools { .. } => (
-            DiagnosticCode::CliToolResolution,
-            DiagnosticStage::ToolResolution,
-            "build-tools",
-            None,
-            "inspect the reported helper and Cargo failure, then rebuild the required build tools",
-        ),
-        Commands::Toolchain { command } => {
-            let target = match command {
-                ToolchainCommands::Install { preset, .. }
-                | ToolchainCommands::Verify { preset, .. }
-                | ToolchainCommands::Path { preset, .. }
-                | ToolchainCommands::Build(toolchain_build::BuildArgs { preset, .. }) => {
-                    Some(preset.clone())
-                }
-                ToolchainCommands::List
-                | ToolchainCommands::Inventory(_)
-                | ToolchainCommands::Import(_)
-                | ToolchainCommands::Register(_)
-                | ToolchainCommands::Remove(_)
-                | ToolchainCommands::Gc(_)
-                | ToolchainCommands::Select(_)
-                | ToolchainCommands::Producer(_)
-                | ToolchainCommands::MetaMakeFetch(_) => None,
-                ToolchainCommands::Plan(args) => Some(args.preset().to_owned()),
-            };
-            (
-                DiagnosticCode::CliToolchain,
+        Commands::HostCompiler { command } => match command {
+            HostCompilerCommands::Install { .. } => (
+                DiagnosticCode::CliToolResolution,
                 DiagnosticStage::ToolResolution,
-                "toolchain",
-                target,
-                "verify the toolchain lock, selected host/profile artifact, cache, and installation prefix",
-            )
+                "host-compiler.install",
+                None,
+                "install the declared host compiler or verify the configured offline cache",
+            ),
+        },
+        Commands::BuildTools { command } => match command {
+            BuildToolsCommand::Build => (
+                DiagnosticCode::CliToolResolution,
+                DiagnosticStage::ToolResolution,
+                "build-tools.build",
+                None,
+                "inspect the reported helper and Cargo failure, then rebuild the required build tools",
+            ),
+            BuildToolsCommand::Check => (
+                DiagnosticCode::CliToolResolution,
+                DiagnosticStage::ToolResolution,
+                "build-tools.check",
+                None,
+                "inspect the named missing or unhealthy helper, then rebuild the required build tools",
+            ),
+        },
+        Commands::Toolchain { command } => {
+            match command {
+                ToolchainCommands::Plan(args) => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.plan",
+                    Some(args.preset().to_owned()),
+                    "inspect the selected producer inputs and resolve the named readiness failure before building",
+                ),
+                ToolchainCommands::Build(toolchain_build::BuildArgs { preset, .. }) => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.build",
+                    Some(preset.clone()),
+                    "prepare the exact producer cache closure, then inspect the named build or compatibility failure",
+                ),
+                ToolchainCommands::Producer(args) => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    args.diagnostic_mode(),
+                    None,
+                    "inspect the named producer input, receipt, or retained output before retrying the exact stage",
+                ),
+                ToolchainCommands::MetaMakeFetch(_) => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.__metamake-fetch",
+                    None,
+                    "run the owning native MetaMake lifecycle; this bridge is not a user-facing recovery command",
+                ),
+                ToolchainCommands::Install { preset, .. } => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.install",
+                    Some(preset.clone()),
+                    "verify the selected lock artifact, local prefix, cache policy, and installation destination",
+                ),
+                ToolchainCommands::List => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.list",
+                    None,
+                    "verify the release lock and current-host artifact matrix",
+                ),
+                ToolchainCommands::Inventory(_) => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.inventory",
+                    None,
+                    "inspect the managed-store root and correct the named receipt or containment failure",
+                ),
+                ToolchainCommands::Import(_) => (
+                    DiagnosticCode::CliPublication,
+                    DiagnosticStage::Publication,
+                    "toolchain.import",
+                    None,
+                    "re-run the preview, preserve any indeterminate receipt, and apply only its current token",
+                ),
+                ToolchainCommands::Register(_) => (
+                    DiagnosticCode::CliPublication,
+                    DiagnosticStage::Publication,
+                    "toolchain.register",
+                    None,
+                    "re-run the preview and apply only the current registration token after fixing the named verification failure",
+                ),
+                ToolchainCommands::Select(_) => (
+                    DiagnosticCode::CliPublication,
+                    DiagnosticStage::Publication,
+                    "toolchain.select",
+                    None,
+                    "re-run the preview and apply only the current selection token after checking the candidate lock",
+                ),
+                ToolchainCommands::Remove(_) => (
+                    DiagnosticCode::CliPublication,
+                    DiagnosticStage::Publication,
+                    "toolchain.remove",
+                    None,
+                    "preserve an indeterminate removal journal; otherwise re-run the preview before applying its current token",
+                ),
+                ToolchainCommands::Gc(_) => (
+                    DiagnosticCode::CliPublication,
+                    DiagnosticStage::Publication,
+                    "toolchain.gc",
+                    None,
+                    "inspect the listed blockers, then re-run the preview before applying its current token",
+                ),
+                ToolchainCommands::Verify { preset, .. } => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.verify",
+                    Some(preset.clone()),
+                    "repair or reinstall the exact named toolchain artifact, then verify it again",
+                ),
+                ToolchainCommands::Path { preset, .. } => (
+                    DiagnosticCode::CliToolchain,
+                    DiagnosticStage::ToolResolution,
+                    "toolchain.path",
+                    Some(preset.clone()),
+                    "install or repair the exact named toolchain before requesting its verified path",
+                ),
+            }
         }
         Commands::Board { command } => match command {
             BoardCommand::Build { board, .. } => (
@@ -831,19 +803,36 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 "validate the board profile, build artifact, and deployment destination before retrying",
             ),
             BoardCommand::Sd { command } => {
-                let target = match command {
-                    SdCommand::Image { board, .. } | SdCommand::Write { board, .. } => {
-                        Some(board.profile.clone())
-                    }
-                    SdCommand::Scan { .. } | SdCommand::Unmount { .. } => None,
-                };
-                (
-                    DiagnosticCode::CliMediaSafety,
-                    DiagnosticStage::MediaSafety,
-                    "board.sd",
-                    target,
-                    "re-run the non-mutating scan or dry run and satisfy every reported media-safety check",
-                )
+                match command {
+                    SdCommand::Image { board, .. } => (
+                        DiagnosticCode::CliMediaSafety,
+                        DiagnosticStage::MediaSafety,
+                        "board.sd.image",
+                        Some(board.profile.clone()),
+                        "re-run the dry run and satisfy every boot-bundle or media-safety check before creating an image",
+                    ),
+                    SdCommand::Scan { .. } => (
+                        DiagnosticCode::CliMediaSafety,
+                        DiagnosticStage::MediaSafety,
+                        "board.sd.scan",
+                        None,
+                        "verify removable-media discovery prerequisites, then re-run the non-mutating scan",
+                    ),
+                    SdCommand::Unmount { .. } => (
+                        DiagnosticCode::CliMediaSafety,
+                        DiagnosticStage::MediaSafety,
+                        "board.sd.unmount",
+                        None,
+                        "re-run the scan and use only its current opaque disk identifier",
+                    ),
+                    SdCommand::Write { board, .. } => (
+                        DiagnosticCode::CliMediaSafety,
+                        DiagnosticStage::MediaSafety,
+                        "board.sd.write",
+                        Some(board.profile.clone()),
+                        "re-run the scan and dry run; use only the current opaque disk identifier and write token",
+                    ),
+                }
             }
             BoardCommand::Init { profile, .. } => (
                 DiagnosticCode::CliBoard,
@@ -852,18 +841,30 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 Some(profile.clone()),
                 "check the profile name, configuration destination, and explicit apply mode",
             ),
-            BoardCommand::Doctor(selection)
-            | BoardCommand::Serve {
-                board: selection, ..
-            }
-            | BoardCommand::Console {
+            BoardCommand::Doctor(selection) => (
+                DiagnosticCode::CliBoard,
+                DiagnosticStage::BoardOperation,
+                "board.doctor",
+                Some(selection.profile.clone()),
+                "inspect the board profile and the failed local prerequisite reported above",
+            ),
+            BoardCommand::Serve {
                 board: selection, ..
             } => (
                 DiagnosticCode::CliBoard,
                 DiagnosticStage::BoardOperation,
-                "board",
+                "board.serve",
                 Some(selection.profile.clone()),
-                "inspect the board profile and the failed local prerequisite reported above",
+                "inspect the board profile, resolved deployment, and named local network prerequisite",
+            ),
+            BoardCommand::Console {
+                board: selection, ..
+            } => (
+                DiagnosticCode::CliBoard,
+                DiagnosticStage::BoardOperation,
+                "board.console",
+                Some(selection.profile.clone()),
+                "inspect the board profile, serial device, and selected external terminal program",
             ),
             BoardCommand::Scan => (
                 DiagnosticCode::CliBoard,
@@ -930,13 +931,22 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             None,
             "install ccache or sccache and verify that the selected executable can be started",
         ),
-        Commands::Golden { .. } => (
-            DiagnosticCode::CliPublication,
-            DiagnosticStage::Publication,
-            "golden",
-            None,
-            "inspect the named profile and generated product; update only after reviewing an intentional change",
-        ),
+        Commands::Golden { action } => match action {
+            GoldenAction::Capture { .. } => (
+                DiagnosticCode::CliPublication,
+                DiagnosticStage::Publication,
+                "golden.capture",
+                None,
+                "inspect the named profile and generated product; capture only after reviewing an intentional change",
+            ),
+            GoldenAction::Verify { .. } => (
+                DiagnosticCode::CliPublication,
+                DiagnosticStage::Publication,
+                "golden.verify",
+                None,
+                "inspect the named profile and generated product; update only after reviewing an intentional change",
+            ),
+        },
         Commands::Info => (
             DiagnosticCode::CliConfiguration,
             DiagnosticStage::Configuration,
@@ -959,8 +969,8 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
 async fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&arguments, "AROS_DIAGNOSTIC_FORMAT");
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -995,6 +1005,20 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(observability::clap_diagnostic(&error)),
+                requested_format,
+                observability::POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let format = cli.observability.diagnostic_format;
     let invocation_directory = match std::env::current_dir() {
         Ok(directory) => directory,
@@ -1015,7 +1039,11 @@ async fn main() -> ExitCode {
         }
     };
     let logger = match Logger::open(
-        cli.observability.effective_log_level(),
+        effective_log_level(
+            cli.observability.log_level,
+            log_level_was_explicit,
+            cli.observability.log_file.is_some(),
+        ),
         cli.observability.log_format,
         cli.observability.log_file.clone(),
         "aros",
@@ -1051,6 +1079,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    observability::reset_recorded_mutation_state();
     let (boundary, context) = command_boundary(&cli.command);
     if let Err(error) = logger.event(
         LogLevel::Info,
@@ -1075,9 +1104,12 @@ async fn main() -> ExitCode {
                     observability::ErrorBoundary::REPOSITORY,
                     context,
                 );
-                let mut diagnostics = vec![diagnostic.clone()];
-                if let Err(log_error) = logger.diagnostic(&diagnostic) {
-                    diagnostics.push(log_error.into_diagnostic());
+                let mut diagnostics = observability::take_machine_subprocess_warnings();
+                diagnostics.push(diagnostic);
+                for diagnostic in diagnostics.clone() {
+                    if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                        diagnostics.push(log_error.into_diagnostic());
+                    }
                 }
                 render_diagnostics(
                     &observability::set(diagnostics),
@@ -1088,7 +1120,6 @@ async fn main() -> ExitCode {
             }
         };
 
-    let commits_on_success = cli.command.commits_on_success();
     let result = run(cli, repo_root).await;
     match result {
         Ok(()) => {
@@ -1096,7 +1127,13 @@ async fn main() -> ExitCode {
                 DiagnosticCode::CliObservability,
                 DiagnosticStage::Observability,
             ) {
-                let mut diagnostics = vec![diagnostic];
+                let mut diagnostics = vec![diagnostic.with_context(context.clone())];
+                observability::attach_recorded_mutation_state(
+                    diagnostics[0]
+                        .context
+                        .as_mut()
+                        .expect("deferred stdout diagnostic received command context"),
+                );
                 if let Err(log_error) = logger.diagnostic(&diagnostics[0]) {
                     diagnostics.push(log_error.into_diagnostic());
                 }
@@ -1107,6 +1144,23 @@ async fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
+            for warning in observability::take_machine_subprocess_warnings() {
+                if let Err(error) = logger.diagnostic(&warning) {
+                    let mut diagnostic = error.into_diagnostic();
+                    let mut reporting_context = context.clone();
+                    if let Some(error_context) = diagnostic.context.take() {
+                        reporting_context.log_path = error_context.log_path;
+                    }
+                    observability::attach_recorded_mutation_state(&mut reporting_context);
+                    diagnostic.context = Some(reporting_context);
+                    render_diagnostics(
+                        &DiagnosticSet::single(diagnostic),
+                        format,
+                        observability::POLICY,
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
             match logger.event(
                 LogLevel::Info,
                 "invocation.complete",
@@ -1116,14 +1170,12 @@ async fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     let mut diagnostic = error.into_diagnostic();
-                    if commits_on_success {
-                        let mut committed = context.clone();
-                        committed.commit_state = Some(aros_common::CommitState::Committed);
-                        if let Some(error_context) = diagnostic.context.take() {
-                            committed.log_path = error_context.log_path;
-                        }
-                        diagnostic.context = Some(committed);
+                    let mut reporting_context = context.clone();
+                    if let Some(error_context) = diagnostic.context.take() {
+                        reporting_context.log_path = error_context.log_path;
                     }
+                    observability::attach_recorded_mutation_state(&mut reporting_context);
+                    diagnostic.context = Some(reporting_context);
                     render_diagnostics(
                         &DiagnosticSet::single(diagnostic),
                         format,
@@ -1134,10 +1186,16 @@ async fn main() -> ExitCode {
             }
         }
         Err(error) => {
-            let diagnostic = observability::report_diagnostic(&error, boundary, context);
-            let mut diagnostics = vec![diagnostic.clone()];
-            if let Err(log_error) = logger.diagnostic(&diagnostic) {
-                diagnostics.push(log_error.into_diagnostic());
+            let mut diagnostic = observability::report_diagnostic(&error, boundary, context);
+            if let Some(context) = diagnostic.context.as_mut() {
+                observability::attach_recorded_mutation_state(context);
+            }
+            let mut diagnostics = observability::take_machine_subprocess_warnings();
+            diagnostics.push(diagnostic);
+            for diagnostic in diagnostics.clone() {
+                if let Err(log_error) = logger.diagnostic(&diagnostic) {
+                    diagnostics.push(log_error.into_diagnostic());
+                }
             }
             render_diagnostics(
                 &observability::set(diagnostics),
@@ -1167,8 +1225,8 @@ async fn run(cli: Cli, repo_root: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli, Commands, Parser,
-        RepositoryRequirement,
+        command_boundary, BoardCommand, BoardInitModel, BoardInitTransport, BoardModel, Cli,
+        Commands, Parser, RepositoryRequirement,
     };
     use clap::{error::ErrorKind, Arg, Command, CommandFactory};
     use std::fmt::Write;
@@ -1454,6 +1512,48 @@ mod tests {
                 *expected,
                 rendered_cli_contract_section(section),
                 "a public CLI-model change requires an intentional reviewed update to docs-site/src/content/docs/reference/cli-contract/{name}.md"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_context_identifies_the_exact_command_leaf() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["aros", "host-compiler", "install"],
+                "host-compiler.install",
+            ),
+            (&["aros", "build-tools", "check"], "build-tools.check"),
+            (&["aros", "toolchain", "list"], "toolchain.list"),
+            (
+                &["aros", "toolchain", "path", "--preset", "pc-x86_64"],
+                "toolchain.path",
+            ),
+            (
+                &[
+                    "aros",
+                    "toolchain",
+                    "producer",
+                    "compatibility-host-tools",
+                    "--host",
+                    "linux-x86_64",
+                ],
+                "toolchain.producer.compatibility-host-tools",
+            ),
+            (&["aros", "board", "scan"], "board.scan"),
+            (&["aros", "board", "sd", "scan"], "board.sd.scan"),
+            (&["aros", "golden", "capture"], "golden.capture"),
+            (&["aros", "source", "init", "/tmp/AROS"], "source.init"),
+        ];
+        for (arguments, expected_mode) in cases {
+            let command = Cli::try_parse_from(*arguments)
+                .expect("leaf diagnostic case must parse")
+                .command;
+            let (boundary, context) = command_boundary(&command);
+            assert_eq!(context.mode.as_deref(), Some(*expected_mode));
+            assert!(
+                !boundary.hint.is_empty(),
+                "every exact command leaf must retain actionable recovery guidance"
             );
         }
     }

@@ -120,7 +120,13 @@ impl CapturedStream {
         destination.write_all(&self.bytes[self.head_len..])
     }
 
-    fn render_lossy(&self) -> String {
+    /// Render the retained stream as lossy text with an explicit truncation
+    /// marker when bytes were omitted.
+    ///
+    /// This is appropriate for bounded diagnostics and local logs. It is not
+    /// a lossless transport for child-process output.
+    #[must_use]
+    pub fn rendered_lossy(&self) -> String {
         if !self.is_truncated() {
             return String::from_utf8_lossy(&self.bytes).into_owned();
         }
@@ -996,7 +1002,7 @@ fn combine_process_errors(primary: io::Error, cleanup: &[String]) -> io::Error {
 #[must_use]
 pub fn bounded_output_detail(stdout: &CapturedStream, stderr: &CapturedStream) -> String {
     fn part(stream: &CapturedStream, label: &str) -> String {
-        let text = stream.render_lossy().trim().to_owned();
+        let text = stream.rendered_lossy().trim().to_owned();
         if text.is_empty() {
             String::new()
         } else {

@@ -20,6 +20,15 @@ and any optional source/context fields. Do not parse human wording.
 A failed invocation exits nonzero. A diagnostic document can contain multiple
 findings, including warnings; the envelope is not a single error object.
 
+When JSON diagnostics are selected, `aros` reserves stderr for that one
+document. A successful child process that writes to stderr is captured with the
+same 64 KiB bound as a failed child; it is never replayed as raw stderr. If a
+later step fails, the captured observation appears as a warning in the final
+diagnostic envelope alongside the error. If the invocation succeeds, it is
+available through an opted-in local log that accepts `warn` records. Normal
+child stdout remains command output, and the deliberately interactive `aros
+board console` retains its terminal streams.
+
 ## Collect a local log
 
 ```sh
@@ -32,9 +41,11 @@ Supported levels are `off`, `error`, `warn`, `info`, `debug`,
 Logging is off by default and requires an explicit local file.
 
 Use both `--log-level` and `--log-file` in portable examples.
-The frontend promotes an effective `off` level to `info` when a file is
-supplied. The collector promotes file-only logging when no level was explicitly
-selected. Other companions keep an explicit/default `off` unchanged.
+Every shipped tool uses the same precedence: a file without an explicitly
+selected level uses `info`; an explicit `--log-level off` or matching
+`AROS_*_LOG_LEVEL=off` always disables logging and does not create the selected
+file. A command-line level overrides the environment; a non-`off` level
+without a file fails with an actionable diagnostic.
 
 Logs are local observations and are not uploaded automatically. Standard
 records omit ambient timestamps and host identity, but explicit paths,
@@ -67,7 +78,9 @@ source graph transpilation has a 10-minute deadline. Producer-plan Git queries
 instead use 1 MiB per stream, at most 10 seconds each within a 60-second Git
 inspection budget; they never replay untrusted Git stderr.
 Git failures preserve `tool`, `exit_code`, `signal`, `timed_out` and
-`timeout_ms` in the shared context when available; the command identity is retained.
+`timeout_ms` in the shared context when available. `context.mode` names the
+exact public command leaf (for example `toolchain.plan` or `board.sd.write`),
+so automation can retain command identity without parsing the message.
 
 Producer inspection uses `AX0101` for contracts, `AX0102` for identities,
 `AX0201` for Git prerequisites and `AX0202` for input roots/resources.
@@ -91,13 +104,20 @@ normal failure envelope on stderr. Do not interpret exit 0 as build permission.
 An `AR0113` owner-record file persists by design. Its presence is not proof
 of an active or stale lock; the operating system owns the actual lock.
 
-An `AR0116` diagnostic may carry `context.commit_state`:
+Publication and final-reporting diagnostics may carry `context.commit_state`.
+The value comes from the owner that crossed (or could not prove) its durable
+boundary; the frontend never infers it from a command name or from the presence
+of `--apply`:
 
 | Value | Meaning |
 | --- | --- |
-| `rolled_back` | The original branch/index/submodule snapshot was restored |
-| `committed` | The mutation succeeded but a later reporting operation failed |
-| `indeterminate` | Neither final state could be proved |
+| `rolled_back` | The relevant publication boundary was not crossed, or its rollback was proven complete |
+| `committed` | The owner proved a mutation succeeded before a later output or log operation failed |
+| `indeterminate` | The owner could prove neither final state |
+
+An absent value after a final reporting failure means no owner reported a
+durable mutation; this includes ordinary previews. It is not a claim that a
+requested `--apply` would have succeeded.
 
 Preserve the reported state and inspect it before retrying an indeterminate
 operation. Do not infer success or rollback from message wording.

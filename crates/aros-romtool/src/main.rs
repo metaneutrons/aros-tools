@@ -8,12 +8,14 @@ mod publication;
 
 use anyhow::Context;
 use aros_common::{
-    render_diagnostics, requested_diagnostic_format, write_stdout, Diagnostic, DiagnosticCode,
-    DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel,
-    Logger, ObservabilityPolicy, PublicationFailureClass, RecoveryOutcome, Sha256Digest,
+    effective_log_level, render_diagnostics, requested_diagnostic_format, write_stdout, Diagnostic,
+    DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat,
+    LogLevel, Logger, ObservabilityPolicy, PublicationFailureClass, RecoveryOutcome, Sha256Digest,
     SourceLocation,
 };
-use clap::{error::ErrorKind, Parser, Subcommand};
+use clap::{
+    error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, Parser, Subcommand,
+};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -184,8 +186,8 @@ fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let requested_format =
         requested_diagnostic_format(&arguments, "AROS_ROMTOOL_DIAGNOSTIC_FORMAT");
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -225,8 +227,32 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::RomtoolInvocation,
+                        DiagnosticStage::Invocation,
+                        error.to_string().trim().to_owned(),
+                    )
+                    .with_hint("run `aros-romtool --help` for the complete invocation contract"),
+                ),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let logger = match Logger::open(
-        cli.log_level,
+        effective_log_level(
+            cli.log_level,
+            log_level_was_explicit,
+            cli.log_file.is_some(),
+        ),
         cli.log_format,
         cli.log_file.clone(),
         "aros-romtool",

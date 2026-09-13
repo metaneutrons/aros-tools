@@ -2,7 +2,8 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use aros_common::{
-    CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet, DiagnosticStage,
+    effective_log_level, CommitState, Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticSet,
+    DiagnosticStage,
 };
 use aros_fetch::contract::{normalize_legacy_arguments, Cli, FetchRequest};
 use aros_fetch::engine;
@@ -10,15 +11,15 @@ use aros_fetch::observability::{
     render, requested_diagnostic_format, DiagnosticFormat, LogLevel, Logger,
 };
 use aros_fetch::FetchFailure;
-use clap::{error::ErrorKind, Parser};
+use clap::{error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let original: Vec<OsString> = std::env::args_os().collect();
     let requested_format = requested_diagnostic_format(&original);
     let arguments = normalize_legacy_arguments(original);
-    let cli = match Cli::try_parse_from(arguments) {
-        Ok(cli) => cli,
+    let matches = match Cli::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -60,7 +61,37 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut logger = match Logger::open(cli.log_level, cli.log_format, cli.log_file.clone()) {
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => {
+            render(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::FetchInvocation,
+                        DiagnosticStage::FetchInvocation,
+                        error.to_string().trim().to_owned(),
+                    )
+                    .with_hint(
+                        "run 'aros-fetch --help' and supply the required --archive contract",
+                    ),
+                ),
+                requested_format,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut logger = match Logger::open(
+        effective_log_level(
+            cli.log_level,
+            log_level_was_explicit,
+            cli.log_file.is_some(),
+        ),
+        cli.log_format,
+        cli.log_file.clone(),
+    ) {
         Ok(logger) => logger,
         Err(error) => {
             return render_failure(error.into_diagnostic(), cli.diagnostic_format);

@@ -8,11 +8,13 @@ use aros_common::{
 };
 use std::io::Write;
 use std::process::{Command, ExitStatus};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static DIAGNOSTIC_FORMAT: OnceLock<DiagnosticFormat> = OnceLock::new();
+static MACHINE_SUBPROCESS_WARNINGS: OnceLock<Mutex<Vec<Diagnostic>>> = OnceLock::new();
+static RECORDED_MUTATION_STATE: OnceLock<Mutex<Option<CommitState>>> = OnceLock::new();
 
 /// Whether human-only progress rendering may write to the diagnostic stream.
 ///
@@ -21,6 +23,63 @@ static DIAGNOSTIC_FORMAT: OnceLock<DiagnosticFormat> = OnceLock::new();
 #[must_use]
 pub fn human_progress_enabled() -> bool {
     DIAGNOSTIC_FORMAT.get() != Some(&DiagnosticFormat::Json)
+}
+
+/// Start one command invocation without an inherited mutation observation.
+///
+/// The CLI performs one command per process today, but explicit reset keeps
+/// direct entry-point tests honest and makes this boundary robust if that
+/// implementation detail changes. Only owner code that has already crossed a
+/// durable mutation boundary may record a state below.
+pub fn reset_recorded_mutation_state() {
+    let state = RECORDED_MUTATION_STATE.get_or_init(|| Mutex::new(None));
+    match state.lock() {
+        Ok(mut state) => *state = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}
+
+/// Record that an owner has proved a durable mutation succeeded.
+///
+/// This deliberately has no command, `--apply`, or output-based variant:
+/// callers invoke it only after their owning publication primitive returns
+/// success. Existing error chains retain their more precise rolled-back or
+/// indeterminate states instead of being guessed here.
+pub fn record_committed_mutation() {
+    let state = RECORDED_MUTATION_STATE.get_or_init(|| Mutex::new(None));
+    match state.lock() {
+        Ok(mut state) => *state = Some(CommitState::Committed),
+        // A poisoned process-local observation cannot establish that no
+        // mutation happened. Preserve the safe, explicit uncertainty.
+        Err(poisoned) => *poisoned.into_inner() = Some(CommitState::Indeterminate),
+    }
+}
+
+/// Merge a successful owner's observed state into a later reporting context.
+///
+/// A reporting failure after an earlier successful publication must not make
+/// that publication look like a preview. Conversely, an owner-provided
+/// indeterminate error remains indeterminate; a later rolled-back operation
+/// does not erase a prior committed mutation in the same invocation.
+pub fn attach_recorded_mutation_state(context: &mut DiagnosticContext) {
+    let state = RECORDED_MUTATION_STATE.get_or_init(|| Mutex::new(None));
+    let recorded = match state.lock() {
+        Ok(mut state) => state.take(),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .take()
+            .or(Some(CommitState::Indeterminate)),
+    };
+    context.commit_state = match (context.commit_state, recorded) {
+        (Some(CommitState::Indeterminate), _) | (_, Some(CommitState::Indeterminate)) => {
+            Some(CommitState::Indeterminate)
+        }
+        (Some(CommitState::Committed), _) | (_, Some(CommitState::Committed)) => {
+            Some(CommitState::Committed)
+        }
+        (current, None) => current,
+        (current, Some(CommitState::RolledBack)) => current.or(Some(CommitState::RolledBack)),
+    };
 }
 
 /// Stable logging and diagnostic policy for the `aros` frontend.
@@ -499,6 +558,7 @@ fn run_captured_command(
         ));
     }
     if status.success() {
+        record_machine_subprocess_warning(description, &tool, &observed.stderr);
         if replay_success {
             replay(
                 &observed.stdout,
@@ -507,18 +567,52 @@ fn run_captured_command(
                 &tool,
                 true,
             )?;
-            replay(
-                &observed.stderr,
-                &mut std::io::stderr(),
-                description,
-                &tool,
-                false,
-            )?;
         }
         return Ok(());
     }
     let detail = bounded_output_detail(&observed.stdout, &observed.stderr);
     Err(ProcessFailure::exit(description, tool, status, &detail))
+}
+
+fn record_machine_subprocess_warning(description: &str, tool: &str, stderr: &CapturedStream) {
+    if stderr.total_bytes() == 0 {
+        return;
+    }
+    let warning = Diagnostic::warning(
+        DiagnosticCode::CliObservability,
+        DiagnosticStage::Observability,
+        format!(
+            "{description} succeeded but emitted bounded standard-error output:\n{}",
+            stderr.rendered_lossy().trim_end()
+        ),
+    )
+    .with_context(DiagnosticContext {
+        tool: Some(tool.to_owned()),
+        ..DiagnosticContext::default()
+    });
+    let warnings = MACHINE_SUBPROCESS_WARNINGS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut warnings = match warnings.lock() {
+        Ok(warnings) => warnings,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    warnings.push(warning);
+}
+
+/// Take warnings captured from successful subprocesses in JSON-diagnostic
+/// mode.
+///
+/// The frontend emits them in the final diagnostic envelope if a later command
+/// fails, or writes them to the opted-in local log when the invocation
+/// succeeds. They are never replayed as raw stderr, because that would corrupt
+/// the one-document JSON diagnostic contract.
+#[must_use]
+pub fn take_machine_subprocess_warnings() -> Vec<Diagnostic> {
+    let warnings = MACHINE_SUBPROCESS_WARNINGS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut warnings = match warnings.lock() {
+        Ok(warnings) => warnings,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    std::mem::take(&mut *warnings)
 }
 
 fn replay(
@@ -589,12 +683,21 @@ pub fn report_diagnostic(
         return diagnostic;
     }
     if let Some(classified) = error.downcast_ref::<ClassifiedFailure>() {
-        boundary = classified.boundary;
+        // Library classifications own the stable code and lifecycle stage.
+        // The invocation boundary owns user-facing recovery for the exact
+        // public leaf, so it is deliberately retained below.
+        boundary.code = classified.boundary.code;
+        boundary.stage = classified.boundary.stage;
     }
     if let Some(process) = error.downcast_ref::<ProcessFailure>() {
         process.apply_context(&mut context);
         if let Some(process_boundary) = process.boundary {
-            boundary = process_boundary;
+            // A child owns its stable code and lifecycle stage, but the
+            // frontend owns the exact public command leaf and its recovery
+            // guidance. Replacing the whole boundary here used to turn a
+            // `toolchain.plan` failure into a generic process hint.
+            boundary.code = process_boundary.code;
+            boundary.stage = process_boundary.stage;
         }
     }
     if let Some(commit) = error.downcast_ref::<CommitStateFailure>() {
@@ -658,6 +761,45 @@ mod tests {
         assert_eq!(
             diagnostic.context.unwrap().commit_state,
             Some(CommitState::Indeterminate)
+        );
+    }
+
+    #[test]
+    fn recorded_commit_only_refines_later_reporting_failures() {
+        reset_recorded_mutation_state();
+        let mut preview = DiagnosticContext::default();
+        attach_recorded_mutation_state(&mut preview);
+        assert_eq!(preview.commit_state, None);
+
+        record_committed_mutation();
+        let mut committed = DiagnosticContext::default();
+        attach_recorded_mutation_state(&mut committed);
+        assert_eq!(committed.commit_state, Some(CommitState::Committed));
+
+        reset_recorded_mutation_state();
+        record_committed_mutation();
+        let mut indeterminate = DiagnosticContext {
+            commit_state: Some(CommitState::Indeterminate),
+            ..DiagnosticContext::default()
+        };
+        attach_recorded_mutation_state(&mut indeterminate);
+        assert_eq!(
+            indeterminate.commit_state,
+            Some(CommitState::Indeterminate),
+            "a later uncertain owner state is never overwritten by an earlier commit"
+        );
+
+        reset_recorded_mutation_state();
+        record_committed_mutation();
+        let mut rolled_back = DiagnosticContext {
+            commit_state: Some(CommitState::RolledBack),
+            ..DiagnosticContext::default()
+        };
+        attach_recorded_mutation_state(&mut rolled_back);
+        assert_eq!(
+            rolled_back.commit_state,
+            Some(CommitState::Committed),
+            "a later rollback does not erase an earlier durable mutation"
         );
     }
 

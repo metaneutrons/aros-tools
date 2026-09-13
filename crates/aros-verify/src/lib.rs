@@ -28,11 +28,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use aros_common::{
-    read_source, render_diagnostics, requested_diagnostic_format, Diagnostic, DiagnosticCode,
-    DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat, LogLevel,
-    Logger, ObservabilityPolicy, SourceLocation,
+    effective_log_level, read_source, render_diagnostics, requested_diagnostic_format, Diagnostic,
+    DiagnosticCode, DiagnosticContext, DiagnosticFormat, DiagnosticSet, DiagnosticStage, LogFormat,
+    LogLevel, Logger, ObservabilityPolicy, SourceLocation,
 };
-use clap::{error::ErrorKind, Parser, ValueEnum};
+use clap::{
+    error::ErrorKind, parser::ValueSource, CommandFactory, FromArgMatches, Parser, ValueEnum,
+};
 use rayon::prelude::*;
 use regex::Regex;
 
@@ -53,7 +55,7 @@ use genmf::{genmf_dependency_files, timestamps_are_fresh};
     name = "aros-verify",
     version,
     about = "Compare transpiled CMake targets against the genmf reference expansion",
-    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_VERIFY_DIAGNOSTIC_FORMAT,\nAROS_VERIFY_LOG_LEVEL, AROS_VERIFY_LOG_FORMAT, and AROS_VERIFY_LOG_FILE.\nLogging is off by default and is written only to an explicitly selected local file."
+    after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_VERIFY_DIAGNOSTIC_FORMAT,\nAROS_VERIFY_LOG_LEVEL, AROS_VERIFY_LOG_FORMAT, and AROS_VERIFY_LOG_FILE.\nLogging is off by default. A selected file without a selected level uses info;\nexplicit off creates no sink, and a non-off level requires a local file."
 )]
 struct Args {
     /// Source tree root.
@@ -640,8 +642,8 @@ struct RefShape {
 #[must_use]
 pub fn entry(arguments: Vec<OsString>) -> ExitCode {
     let requested_format = requested_diagnostic_format(&arguments, "AROS_VERIFY_DIAGNOSTIC_FORMAT");
-    let args = match Args::try_parse_from(arguments) {
-        Ok(args) => args,
+    let matches = match Args::command().try_get_matches_from(arguments) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -683,8 +685,33 @@ pub fn entry(arguments: Vec<OsString>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let log_level_was_explicit = matches
+        .value_source("log_level")
+        .is_some_and(|source| source != ValueSource::DefaultValue);
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(args) => args,
+        Err(error) => {
+            render_diagnostics(
+                &DiagnosticSet::single(
+                    Diagnostic::error(
+                        DiagnosticCode::VerifyInvocation,
+                        DiagnosticStage::Invocation,
+                        error.to_string().trim().to_owned(),
+                    )
+                    .with_hint("run 'aros-verify --help' and provide --generated and --work paths"),
+                ),
+                requested_format,
+                OBSERVABILITY_POLICY,
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let logger = match Logger::open(
-        args.log_level,
+        effective_log_level(
+            args.log_level,
+            log_level_was_explicit,
+            args.log_file.is_some(),
+        ),
         args.log_format,
         args.log_file.clone(),
         "aros-verify",

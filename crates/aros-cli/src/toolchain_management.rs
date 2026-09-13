@@ -955,6 +955,9 @@ pub fn import(args: ImportArgs) -> Result<()> {
             "validated candidate; no managed envelope or receipt was published",
         )
     };
+    if result.state == "committed" {
+        crate::observability::record_committed_mutation();
+    }
     print_management_result(&result, args.format);
     Ok(())
 }
@@ -983,6 +986,9 @@ pub fn register(args: RegisterArgs) -> Result<()> {
             "validated external candidate; no registration receipt was published",
         )
     };
+    if result.state == "committed" {
+        crate::observability::record_committed_mutation();
+    }
     print_management_result(&result, args.format);
     Ok(())
 }

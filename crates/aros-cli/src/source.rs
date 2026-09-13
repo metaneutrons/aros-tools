@@ -66,31 +66,43 @@ pub struct InitOptions {
     pub source_ref: Option<String>,
 }
 
-/// A source mutation that has crossed its publication boundary. Rendering an
-/// outcome must never make the already committed operation look uncommitted.
+/// A completed source operation whose caller supplies whether it crossed a
+/// publication boundary. Rendering must never make an already committed
+/// operation look uncommitted, and must not make a no-op synchronization look
+/// committed.
 #[derive(Debug)]
-struct CommittedOutcome {
+struct SourceOutcome {
     lines: Vec<String>,
     warnings: Vec<String>,
 }
 
-impl CommittedOutcome {
-    fn emit(self) -> Result<()> {
+impl SourceOutcome {
+    fn emit(self, mutation_committed: bool) -> Result<()> {
         let mut rendered = self.lines.join("\n");
         for warning in self.warnings {
             rendered.push_str("\n  ⚠ ");
             rendered.push_str(&warning);
         }
         rendered.push('\n');
-        observability::classify(
+        let write = aros_common::write_stdout(&rendered).into_diagnostic();
+        let write = if mutation_committed {
             observability::commit_state(
-                aros_common::write_stdout(&rendered).into_diagnostic(),
+                write,
                 CommitState::Committed,
                 "source operation committed successfully, but its final status could not be written",
-            ),
+            )
+        } else {
+            write
+        };
+        observability::classify(
+            write,
             SOURCE_PUBLICATION,
-            "committed source operation reporting failed",
-        )
+            "source operation reporting failed",
+        )?;
+        if mutation_committed {
+            observability::record_committed_mutation();
+        }
+        Ok(())
     }
 }
 
@@ -300,11 +312,11 @@ pub fn initialize(options: &InitOptions) -> Result<()> {
     if options.source_ref.is_some() {
         lines.push("  • State:    detached at the exact commit resolved for --ref".to_owned());
     }
-    CommittedOutcome {
+    SourceOutcome {
         lines,
         warnings: cleanup_warning.into_iter().collect(),
     }
-    .emit()
+    .emit(true)
 }
 
 /// Synchronize a clean attached branch from one reviewed upstream branch.
@@ -445,7 +457,7 @@ fn sync_locked(
     } else {
         "skipped explicitly with --no-transpile".to_owned()
     };
-    CommittedOutcome {
+    SourceOutcome {
         lines: vec![
             "✅ AROS source synchronization complete".to_owned(),
             format!("  • Branch:   {}", snapshot.branch),
@@ -459,7 +471,7 @@ fn sync_locked(
             .chain(run_ref_cleanup_warning)
             .collect(),
     }
-    .emit()
+    .emit(relation == Relation::Behind)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
