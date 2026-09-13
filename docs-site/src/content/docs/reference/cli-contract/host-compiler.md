@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: host-compiler
+title: "Generated CLI contract: host-compiler"
 description: Source-derived structural facts for the public aros host-compiler command family.
 ---
 

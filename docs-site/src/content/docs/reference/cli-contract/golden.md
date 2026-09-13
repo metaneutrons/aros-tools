@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: golden
+title: "Generated CLI contract: golden"
 description: Source-derived structural facts for the public aros golden command family.
 ---
 

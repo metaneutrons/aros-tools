@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: install
+title: "Generated CLI contract: install"
 description: Source-derived structural facts for the public aros install command family.
 ---
 

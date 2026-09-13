@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: test
+title: "Generated CLI contract: test"
 description: Source-derived structural facts for the public aros test command family.
 ---
 

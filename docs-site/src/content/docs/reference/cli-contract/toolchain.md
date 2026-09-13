@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: toolchain
+title: "Generated CLI contract: toolchain"
 description: Source-derived structural facts for the public aros toolchain command family.
 ---
 

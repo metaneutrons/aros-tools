@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: board
+title: "Generated CLI contract: board"
 description: Source-derived structural facts for the public aros board command family.
 ---
 

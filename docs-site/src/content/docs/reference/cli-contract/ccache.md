@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: ccache
+title: "Generated CLI contract: ccache"
 description: Source-derived structural facts for the public aros ccache command family.
 ---
 

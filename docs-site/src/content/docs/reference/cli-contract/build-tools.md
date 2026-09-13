@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: build-tools
+title: "Generated CLI contract: build-tools"
 description: Source-derived structural facts for the public aros build-tools command family.
 ---
 

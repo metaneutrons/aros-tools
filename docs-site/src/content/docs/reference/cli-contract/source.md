@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: source
+title: "Generated CLI contract: source"
 description: Source-derived structural facts for the public aros source command family.
 ---
 

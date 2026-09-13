@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     fn rendered_cli_contract_section(command: &Command) -> String {
-        let mut document = format!("---\ntitle: Generated CLI contract: {}\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the `aros` Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/).\n\n| Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", command.get_name(), command.get_name());
+        let mut document = format!("---\ntitle: \"Generated CLI contract: {}\"\ndescription: Source-derived structural facts for the public aros {} command family.\n---\n\nThis page is generated from the `aros` Clap command model. Global arguments are listed on the [contract index](/aros-tools/reference/cli-contract/).\n\n| Command | ID | Spelling | Position | Required | Arity | Default | Values | Environment | Conflicts |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n", command.get_name(), command.get_name());
         collect_command_contract(
             command,
             &["aros".to_owned(), command.get_name().to_owned()],

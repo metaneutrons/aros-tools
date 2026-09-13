@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: clean
+title: "Generated CLI contract: clean"
 description: Source-derived structural facts for the public aros clean command family.
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: Generated CLI contract: setup
+title: "Generated CLI contract: setup"
 description: Source-derived structural facts for the public aros setup command family.
 ---
 
