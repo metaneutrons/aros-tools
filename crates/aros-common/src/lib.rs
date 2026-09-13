@@ -67,10 +67,10 @@ pub use publication::{
     publish_atomic_file, publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
     publish_prepared_tree_noclobber, remove_regular_file_from_snapshot_nofollow,
     remove_tree_from_snapshot_nofollow, validate_existing_directory_prefix_nofollow,
-    validate_private_directory_nofollow, AdvisoryFileLock, AdvisoryLockObservation,
-    AdvisoryLockState, AtomicFilePolicy, DurableFileSet, FileIdentity, PortableOutputName,
-    PublicationError, PublicationFailureClass, PublicationReceipt, RecoveryOutcome, TreeContentCas,
-    TreeTraversalLimits,
+    validate_private_directory_nofollow, AdvisoryFileLock, AdvisoryLockMode,
+    AdvisoryLockObservation, AdvisoryLockState, AtomicFilePolicy, DurableFileSet, FileIdentity,
+    PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
+    RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
 };
 pub use target::{TargetProfile, TranspilerProfile};
 pub use text::read_source;

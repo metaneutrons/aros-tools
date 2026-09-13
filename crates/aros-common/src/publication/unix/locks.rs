@@ -1,7 +1,7 @@
 //! No-follow advisory locks and directory creation.
 
 use super::{
-    absolute_path, identity_from_stat, open_parent, rfs, AdvisoryLockObservation,
+    absolute_path, identity_from_stat, open_parent, rfs, AdvisoryLockMode, AdvisoryLockObservation,
     AdvisoryLockState, Component, ErrorKind, FileIdentity, FlockOperation, Mode, OFlags, Ordering,
     Path, PathBuf, TRANSACTION_SEQUENCE,
 };
@@ -9,6 +9,7 @@ use std::ffi::OsString;
 
 pub(in crate::publication) fn acquire_advisory_file_lock(
     path: &Path,
+    mode: AdvisoryLockMode,
 ) -> std::io::Result<std::fs::File> {
     let parent = open_parent(path, true).map_err(|error| {
         std::io::Error::new(
@@ -42,7 +43,7 @@ pub(in crate::publication) fn acquire_advisory_file_lock(
             format!("advisory lock '{}' is not a regular file", path.display()),
         ));
     }
-    rfs::flock(&fd, FlockOperation::NonBlockingLockExclusive)?;
+    rfs::flock(&fd, nonblocking_operation(mode))?;
     Ok(std::fs::File::from(fd))
 }
 
@@ -50,6 +51,7 @@ pub(in crate::publication) fn revalidate_advisory_file_lock(
     file: &std::fs::File,
     path: &Path,
     expected_identity: FileIdentity,
+    mode: AdvisoryLockMode,
 ) -> std::io::Result<()> {
     if advisory_file_lock_identity(file)? != expected_identity {
         return Err(std::io::Error::other(
@@ -70,7 +72,14 @@ pub(in crate::publication) fn revalidate_advisory_file_lock(
             path.display()
         )));
     }
-    rfs::flock(file, FlockOperation::NonBlockingLockExclusive).map_err(Into::into)
+    rfs::flock(file, nonblocking_operation(mode)).map_err(Into::into)
+}
+
+const fn nonblocking_operation(mode: AdvisoryLockMode) -> FlockOperation {
+    match mode {
+        AdvisoryLockMode::Shared => FlockOperation::NonBlockingLockShared,
+        AdvisoryLockMode::Exclusive => FlockOperation::NonBlockingLockExclusive,
+    }
 }
 
 pub(in crate::publication) fn advisory_file_lock_identity(

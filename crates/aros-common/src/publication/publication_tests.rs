@@ -63,6 +63,32 @@ fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
 
 #[cfg(unix)]
 #[test]
+fn shared_advisory_readers_exclude_lifecycle_writers_until_the_last_reader_releases() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lock_path = temporary.path().join("cache/object.lock");
+
+    let first = AdvisoryFileLock::acquire_shared(&lock_path).unwrap();
+    let second = AdvisoryFileLock::acquire_shared(&lock_path).unwrap();
+    first.revalidate().unwrap();
+    second.revalidate().unwrap();
+    assert!(matches!(
+        AdvisoryFileLock::acquire(&lock_path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    drop(first);
+    assert!(matches!(
+        AdvisoryFileLock::acquire(&lock_path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    drop(second);
+
+    let writer = AdvisoryFileLock::acquire(&lock_path).unwrap();
+    writer.revalidate().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn concurrent_initial_advisory_lock_acquisition_has_one_holder() {
     use std::sync::{Arc, Barrier};
 
@@ -70,22 +96,18 @@ fn concurrent_initial_advisory_lock_acquisition_has_one_holder() {
     let lock_path = temporary.path().join("management/initial.lock");
     let start = Arc::new(Barrier::new(3));
     let attempted = Arc::new(Barrier::new(3));
-    let workers = (0..2)
-        .map(|_| {
-            let path = lock_path.clone();
-            let start = Arc::clone(&start);
-            let attempted = Arc::clone(&attempted);
-            std::thread::spawn(move || {
-                start.wait();
-                let result = AdvisoryFileLock::acquire(&path);
-                attempted.wait();
-                result.map(|guard| {
-                    guard.revalidate().unwrap();
-                    ()
-                })
-            })
+    let spawn_worker = || {
+        let path = lock_path.clone();
+        let start = Arc::clone(&start);
+        let attempted = Arc::clone(&attempted);
+        std::thread::spawn(move || {
+            start.wait();
+            let result = AdvisoryFileLock::acquire(&path);
+            attempted.wait();
+            result.and_then(|guard| guard.revalidate())
         })
-        .collect::<Vec<_>>();
+    };
+    let workers = [spawn_worker(), spawn_worker()];
     start.wait();
     attempted.wait();
 

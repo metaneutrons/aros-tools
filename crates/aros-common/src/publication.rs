@@ -187,8 +187,8 @@ impl FileIdentity {
 
 mod limits;
 pub use limits::{
-    probe_advisory_file_lock, AdvisoryFileLock, AdvisoryLockObservation, AdvisoryLockState,
-    TreeTraversalLimits,
+    probe_advisory_file_lock, AdvisoryFileLock, AdvisoryLockMode, AdvisoryLockObservation,
+    AdvisoryLockState, TreeTraversalLimits,
 };
 
 mod tree_cas;
