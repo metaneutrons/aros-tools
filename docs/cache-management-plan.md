@@ -706,8 +706,8 @@ turning inventory into implicit generator execution.
 
 Use fixture/unit/CLI tests during iteration. Run focused native integration at
 CACHE-M1/M6 and combined consumer proof at CACHE-M7; reuse unchanged evidence
-with exact input identity. Follow the current Intel-macOS suspension and
-repository CI policy, not the historical four-host release matrix. This
+with exact input identity. Follow the maintained three-host release policy,
+not the historical four-host release matrix. This
 planning change does not authorize new scheduled monitors or expensive builds.
 No completion-time estimate is asserted before fixture and native timings
 exist.

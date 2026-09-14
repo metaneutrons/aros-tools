@@ -116,8 +116,8 @@ Do not add an ambient sidecar that secretly overrides the authoritative lock.
 
 ## Tests and decisions before implementation
 
-Use tiny verified envelopes on the three active native hosts; Intel macOS is
-explicitly suspended under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27). Management changes do
+Use tiny verified envelopes on the three maintained native hosts; Intel macOS
+is not an `aros-tools` native release target. Management changes do
 not warrant another compiler A/B matrix. Required tests include positive
 inventory/import/registration/selection/removal, plus corrupt markers and
 manifests, stale indexes, active and uncertain references, symlink substitution,

@@ -219,7 +219,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
             '--github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"',
         ):
             if required not in metadata:
-                errors.append(f'{path}: dated Homebrew matrix policy omits {required}')
+                errors.append(f'{path}: Homebrew release matrix policy omits {required}')
         matrix_lines = re.findall(r'^      matrix:.*$', homebrew_install, re.MULTILINE)
         if matrix_lines != ['      matrix: ${{ fromJSON(needs.metadata.outputs.homebrew_matrix) }}']:
             errors.append(f'{path}: Homebrew must consume only the validated dynamic matrix')
@@ -229,7 +229,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
             errors.append(f'{path}: Homebrew installation must require successful matrix planning')
         for job_name in ('release-config-preflight', 'channel-preflight', 'publish'):
             condition = jobs.get(job_name, '').split('    needs:', 1)[0]
-            for required in ("needs.metadata.outputs.homebrew_coverage == 'four-hosts'",
+            for required in ("needs.metadata.outputs.homebrew_coverage == 'release-hosts'",
                              "needs.homebrew.result == 'success'"):
                 if required not in condition:
                     errors.append(f'{path}: {job_name} must require full successful Homebrew coverage: {required}')
@@ -242,10 +242,9 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
         if measured_hosts != [
             ('linux-x86_64', 'ubuntu-24.04', 'x86_64-unknown-linux-gnu'),
             ('linux-aarch64', 'ubuntu-24.04-arm', 'aarch64-unknown-linux-gnu'),
-            ('macos-x86_64', 'macos-15-intel', 'x86_64-apple-darwin'),
             ('macos-aarch64', 'macos-15', 'aarch64-apple-darwin'),
         ]:
-            errors.append(f'{policy_path}: Homebrew install matrix must bind four genuine native hosts')
+            errors.append(f'{policy_path}: Homebrew install matrix must bind three genuine native release hosts')
         for required in (
             'verify-homebrew-install.py host', 'verify-homebrew-install.py installed',
             "brew ruby -e 'puts Hardware::CPU.arch'", '--brew-prefix "$(brew --prefix)"',

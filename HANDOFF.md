@@ -47,14 +47,14 @@ preserves earlier checkpoints.
   and the documentation gate passed against the same tree.
 - The accepted [M8 evidence ledger](docs/tcp-m8-lifecycle-evidence.md) records
   the lifecycle contract, black-box preview/confirmation tests, adversarial
-  filesystem cases and explicit boundaries. Intel macOS remains deferred under
-  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+  filesystem cases and explicit boundaries. macOS Intel is not an `aros-tools`
+  native release target.
 
 ## Current bounded action
 
 TCP-M7 and TCP-M8 are complete. There is no pending cache-driven release,
-compilation or real-store cleanup action. Intel macOS and RISC-V are explicit
-subsequent qualifications, not reasons to change or retarget RC8.
+compilation or real-store cleanup action. RISC-V remains a separate
+qualification; macOS Intel is not an `aros-tools` native release target.
 
 ## Resume safely
 

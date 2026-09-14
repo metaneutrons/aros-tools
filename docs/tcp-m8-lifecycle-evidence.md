@@ -35,9 +35,8 @@ architecture, Clippy, dependency/security checks and the active native matrix.
 
 The [Rust CodeQL run 34722909232](https://github.com/metaneutrons/aros-tools/actions/runs/34722909232)
 and [documentation run 34722909384](https://github.com/metaneutrons/aros-tools/actions/runs/34722909384)
-also passed for the same tree. Intel macOS remains schema-supported but its
-native runner is explicitly suspended under
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+also passed for the same tree. Intel macOS remains schema-readable for
+historical records but is not an `aros-tools` native release target.
 It is neither represented as a passing result nor silently omitted.
 
 ## Safety and user-facing demonstrations

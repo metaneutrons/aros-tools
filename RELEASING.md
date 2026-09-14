@@ -57,7 +57,7 @@ credential becomes available:
    the exact signer workflow, tag ref and source commit, while self-hosted
    provenance is rejected;
 6. Debian, Homebrew and AUR candidates derive from the same native payloads;
-7. the complete candidate is sealed as the immutable, run-scoped
+7. the complete three-host candidate is sealed as the immutable, run-scoped
    `qualified-release-staging` Actions artifact; and
 8. package installations pass on every claimed platform.
 
@@ -140,7 +140,8 @@ credential files before another step can run.
 
 The deliberate creation and push of the immutable annotated release tag is the
 single human promotion gate. Homebrew adds no redundant self-review ceremony:
-the protected `Formula qualification` check must pass on all four hosts, the
+the protected `Formula qualification` check must pass on every maintained
+release host (Linux x86-64, Linux ARM64 and macOS Apple silicon), the
 publication job remeasures the exact final head and revalidates both repositories,
 then merges only that recorded SHA through GitHub's `match-head-commit`
 precondition. Do not push a follow-up commit or merge the PR manually. If the

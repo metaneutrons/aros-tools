@@ -35,10 +35,9 @@ That includes Rust crates, Cargo inputs, scripts, workflow definitions,
 contracts, package metadata and unknown paths. Linux x86-64 uses the exact
 qualified AROS-NX source; the other hosts run the closed portable suite.
 
-Intel macOS is intentionally absent from the **active** matrix while its
-qualification lane is suspended. It remains a distinct archive compatibility
-target, not evidence supplied by a three-host run. Its restoration is tracked
-in [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+macOS Intel is intentionally absent because it is not an `aros-tools` native
+release target. A three-host run establishes coverage only for the maintained
+Linux and Apple-silicon macOS matrix.
 
 After integration into `main`, the Linux lane also runs the compatible CMake
 fixtures. This is the integrated product checkpoint, not a substitute for the

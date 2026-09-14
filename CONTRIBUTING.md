@@ -68,9 +68,7 @@ On a push to `main`, the Linux source lane also runs all compatible CMake
 fixtures. **Workspace CI → Run workflow** defaults to the active Linux
 x86-64/Linux ARM64/macOS ARM64 matrix and makes the cheaper Linux-only scope an
 explicit operator choice. A weekly three-host sweep detects runner and
-toolchain drift. Intel macOS qualification is suspended until the initial M7
-release is published; restoration is tracked in
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+toolchain drift. macOS Intel is not an `aros-tools` native release target.
 Thus repeated documentation edits do not consume macOS capacity, while
 executable changes retain native coverage. The separate tools
 release/package qualification runs only for immutable tags or an explicit

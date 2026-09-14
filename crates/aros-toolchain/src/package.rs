@@ -44,7 +44,8 @@ pub struct PackageRequest {
     pub output_dir: PathBuf,
     /// Immutable release identifier recorded in the manifest.
     pub release_id: String,
-    /// Explicit four-host v1 selector.
+    /// Explicit v1 host selector; `macos-x86_64` is retained for local and
+    /// historical compatibility, not for a new release.
     pub host: String,
     /// Validated source recipe.
     pub recipe: Recipe,

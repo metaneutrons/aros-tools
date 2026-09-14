@@ -12,7 +12,7 @@ qualification evidence.
 | Native producer control plane | `crates/aros-cli/src/toolchain_producer.rs` | All 16 public producer stages are named with their authority boundary in the CLI reference |
 | Toolchain lifecycle | `toolchain_management.rs`, `toolchain_lifecycle/` and `toolchain_selection.rs` | Inventory, import, register, selection, removal and garbage collection distinguish preview from token-confirmed mutation |
 | Board profiles | `aros-board` schema, template generator and CLI parser | Init requires an explicit model; defaults and optional transports are restricted to reviewed model/transport pairs |
-| CI matrix | `scripts/plan_ci_platform_matrix.py` and `.github/workflows/ci.yml` | Linux x86-64, Linux AArch64 and macOS AArch64 are active; Intel macOS is temporarily suspended |
+| CI matrix | `scripts/plan_ci_platform_matrix.py` and `.github/workflows/ci.yml` | Linux x86-64, Linux AArch64 and macOS AArch64 are the complete maintained release hosts; Intel macOS is not a release target |
 | Release targets and channels | Release policy plus native archive/package contracts | Archive targets are distinct from active CI coverage and from published availability |
 | Public-service boundary | Documentation workflow and site content | Endpoint and verification instructions are public; credentials, account setup and service-operation procedures are not |
 
@@ -41,5 +41,5 @@ qualification evidence.
 ## Deliberate limits
 
 This audit does not assert a tools release, toolchain release, full product
-build, four-host artifact matrix, A/B determinism, external attestation or
+build, three-host artifact matrix, A/B determinism, external attestation or
 physical hardware boot. Those claims require their own immutable evidence.

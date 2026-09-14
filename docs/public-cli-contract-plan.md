@@ -375,7 +375,8 @@ the F05/F06 repair evidence under CACHE-M1-A3.
   inferred from template or fixture success.
 - CLI-M6-A4: Run the canonical integration gate at affected source/CMake/
   runner boundaries once on the final relevant candidate, as required by
-  CONTRIBUTING. Retain existing supported-host policy, Intel-macOS suspension
+  CONTRIBUTING. Retain the existing supported-host policy, which excludes
+  Intel macOS from native releases,
   and identity-affecting producer qualification gates. No unconditional full
   compiler A/B matrix is added for help/parser/documentation changes.
 - CLI-M6-A5: Record exact plan/code/input revisions, durable evidence per

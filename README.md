@@ -178,9 +178,8 @@ The real GRUB fixture runs only on Darwin/arm64; Linux reports that omission
 rather than claiming full host coverage. PRs always receive the stable Linux
 gate; only a narrow, tested documentation-only path avoids the additional three
 native hosts. Executable, workflow, contract and unclassified changes use the
-active three-host matrix. Intel macOS qualification is suspended until the
-initial M7 release is complete; see
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+active three-host matrix. macOS Intel is not an `aros-tools` native release
+target.
 See the [test stages and acceptance policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints)
 for when full Linux and macOS evidence is mandatory.
 

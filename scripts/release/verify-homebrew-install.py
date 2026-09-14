@@ -16,7 +16,6 @@ import subprocess
 import sys
 
 HOSTS = {
-    "x86_64-apple-darwin": ("Darwin", "x86_64", "x86_64", "/usr/local"),
     "aarch64-apple-darwin": ("Darwin", "arm64", "arm64", "/opt/homebrew"),
     "x86_64-unknown-linux-gnu": ("Linux", "x86_64", "x86_64", "/home/linuxbrew/.linuxbrew"),
     "aarch64-unknown-linux-gnu": ("Linux", "aarch64", "arm64", "/home/linuxbrew/.linuxbrew"),
