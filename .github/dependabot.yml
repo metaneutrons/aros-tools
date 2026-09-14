@@ -9,6 +9,25 @@ version: 2
 # Minor and patch stay grouped, because reviewing them one by one buys nothing.
 # Majors are left ungrouped on purpose, so each arrives alone and can be judged,
 # adapted or held on its own.
+#
+# #22 never took effect. It carried `cooldown.semver-major-days` on the
+# `github-actions` ecosystem, which Dependabot rejects there, and a single
+# rejected property invalidates the entire file. Dependabot then kept running
+# the last configuration that parsed, the one from before #22, for twelve days:
+# the runs of 09-07 (#56, #57, #58) and 09-14 (#178, #179, #180) opened branches
+# named after the old groups `rust-dependencies`, `github-actions` and
+# `documentation-dependencies`, no `rust-toolchain` job was ever scheduled, and
+# the job definitions carried `"ignore-conditions":[]` and no cooldown at all.
+# That empty ignore list is how #180 raised typescript to a major against the
+# bound below and broke the docs build.
+#
+# Two lessons. A property valid for one ecosystem is not valid for all of them,
+# and the failure mode is silent: pull requests keep arriving, they are simply
+# generated from stale rules. The check named `.github/dependabot.yml` on a pull
+# request that touches this file reports the parse result; a green run there is
+# the only evidence that an edit here is live. The job definitions themselves
+# are readable under Actions, workflow `Dependabot Updates`, line
+# `Job definition:`.
 
 updates:
   - package-ecosystem: cargo
@@ -55,9 +74,11 @@ updates:
       time: '05:15'
       timezone: Europe/Berlin
     open-pull-requests-limit: 5
+    # Only `default-days` is accepted here. The semver-specific cooldown keys
+    # are rejected for `github-actions`, and one rejected key invalidates the
+    # whole file, which is what kept #22 from ever taking effect.
     cooldown:
       default-days: 3
-      semver-major-days: 7
     groups:
       github-actions-minor-patch:
         patterns:
@@ -86,8 +107,10 @@ updates:
           - patch
     ignore:
       # @astrojs/check 0.9.10 declares `typescript: ^5.0.0 || ^6.0.0`. With 7.x
-      # `npm ci` aborts with ERESOLVE, which is how #10 was broken. Version 6
-      # stays allowed; the bound lifts once the peer range names 7.
+      # `npm ci` aborts with ERESOLVE, which is how #10 and #180 were broken.
+      # 0.9.10 is still the newest published version, so there is no upgrade
+      # that widens the peer range. Version 6 stays allowed; the bound lifts
+      # once the peer range names 7.
       - dependency-name: typescript
         versions:
           - '>=7'
