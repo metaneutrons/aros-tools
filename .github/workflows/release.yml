@@ -269,7 +269,7 @@ jobs:
               contract.get('schema_version') != 1
               or contract.get('version') != os.environ['VERSION']
               or not isinstance(expected, dict)
-              or len(expected) != 48
+              or len(expected) != 40
               or not isinstance(total_limit, int)
               or total_limit <= 0
               or not isinstance(assets, list)
@@ -374,11 +374,6 @@ jobs:
             container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
             target: aarch64-unknown-linux-gnu
             deb_arch: arm64
-          - name: macos-x86_64
-            runner: macos-15-intel
-            container: ''
-            target: x86_64-apple-darwin
-            deb_arch: ''
           - name: macos-aarch64
             runner: macos-15
             container: ''
@@ -657,10 +652,6 @@ jobs:
             runner: ubuntu-24.04-arm
             container: rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922
             target: aarch64-unknown-linux-gnu
-          - name: macos-x86_64
-            runner: macos-15-intel
-            container: ''
-            target: x86_64-apple-darwin
           - name: macos-aarch64
             runner: macos-15
             container: ''
@@ -737,7 +728,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64]
+        name: [linux-x86_64, linux-aarch64, macos-aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -809,7 +800,7 @@ jobs:
           retention-days: 14
 
   aggregate:
-    name: Verify complete four-host inventory
+    name: Verify complete native release inventory
     if: >-
       always() &&
       needs.native.result == 'success' &&
@@ -851,9 +842,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --locked -p aros-release
-          expected_subjects=20
+          expected_subjects=16
           if [[ "$IS_RELEASE" == true ]]; then
-            expected_subjects=40
+            expected_subjects=32
           fi
           measured=$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')
           if [[ "$measured" != "$expected_subjects" ]]; then
@@ -863,7 +854,7 @@ jobs:
           fi
           for target in \
             x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-            x86_64-apple-darwin aarch64-apple-darwin; do
+            aarch64-apple-darwin; do
             archive="release/aros-tools-v${VERSION}-${target}.tar.gz"
             manifest="${archive}.manifest.json"
             target/release/aros-release verify --archive "$archive" --manifest "$manifest"
@@ -1175,8 +1166,8 @@ jobs:
           sed -E \
             "s#https://github.com/${GITHUB_REPOSITORY}/releases/download/[^/\"]+#http://127.0.0.1:${port}#g" \
             candidate/aros-tools.rb > "$formula"
-          if [[ $(grep -c "url \"http://127.0.0.1:${port}/" "$formula") != 4 ]]; then
-            echo "::error::formula must retain exactly four host URLs"
+          if [[ $(grep -c "url \"http://127.0.0.1:${port}/" "$formula") != 3 ]]; then
+            echo "::error::formula must retain exactly three release-host URLs"
             exit 1
           fi
           ruby -c "$formula"
@@ -1293,7 +1284,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
+      needs.metadata.outputs.homebrew_coverage == 'release-hosts' &&
       needs.sign-aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success'
@@ -1336,7 +1327,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
+      needs.metadata.outputs.homebrew_coverage == 'release-hosts' &&
       needs.metadata.outputs.is_stable == 'true' &&
       needs.sign-aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
@@ -1512,7 +1503,7 @@ jobs:
     if: >-
       always() &&
       needs.metadata.outputs.is_release == 'true' &&
-      needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&
+      needs.metadata.outputs.homebrew_coverage == 'release-hosts' &&
       needs.aggregate.result == 'success' &&
       needs.homebrew.result == 'success' &&
       needs.aur.result == 'success' &&
@@ -1961,7 +1952,7 @@ jobs:
           (cd "$final" && sha256sum -c SHA256SUMS)
           for target in \
             x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-            x86_64-apple-darwin aarch64-apple-darwin; do
+            aarch64-apple-darwin; do
             archive="$final/aros-tools-v${VERSION}-${target}.tar.gz"
             scripts/release/verify-spdx-sbom.sh \
               --artifact "$archive" \

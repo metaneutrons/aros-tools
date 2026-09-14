@@ -48,7 +48,6 @@ def contract(version: str) -> dict[str, Any]:
     for target in (
         "aarch64-apple-darwin",
         "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
         "x86_64-unknown-linux-gnu",
     ):
         archive = f"aros-tools-v{version}-{target}.tar.gz"
@@ -73,8 +72,8 @@ def contract(version: str) -> dict[str, Any]:
         add_asset(assets, f"{name}.sigstore.json", 4 * MIB)
     add_asset(assets, "SHA256SUMS", MIB)
     add_asset(assets, "SHA256SUMS.sigstore.json", 4 * MIB)
-    if len(assets) != 48:
-        fail(f"internal signed asset contract has {len(assets)} entries instead of 48")
+    if len(assets) != 40:
+        fail(f"internal signed asset contract has {len(assets)} entries instead of 40")
     return {
         "schema_version": 1,
         "version": version,

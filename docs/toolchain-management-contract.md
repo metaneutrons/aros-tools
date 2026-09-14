@@ -275,10 +275,8 @@ still blocks cleanup.
 4. Store/project locks, participating build leases, safe remove/GC and crash
    recovery tests. **Implemented and accepted with three-host evidence.**
 5. Positive and adversarial lifecycle evidence on the three active native
-   hosts: Linux x86-64, Linux AArch64, and macOS ARM64. Intel macOS is
-   explicitly suspended under
-   [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27),
-   not silently dropped.
+   hosts: Linux x86-64, Linux AArch64, and macOS ARM64. Intel macOS is not an
+   `aros-tools` native release target; it is not silently dropped.
 
 M8 management changes do not warrant a compiler A/B release matrix. They do
 require the normal relevant CLI, package and fixture gates. The

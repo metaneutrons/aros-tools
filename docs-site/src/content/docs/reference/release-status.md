@@ -42,8 +42,8 @@ release must identify its exact tag and measured artifacts.
 The candidate must pass every native archive host it declares, binary
 compatibility checks, archive and SBOM verification, signatures and provenance,
 isolated-download checks, and applicable package-channel qualification. The
-active workspace matrix currently has three hosts; an Intel macOS archive needs
-its own restored native qualification before publication.
+native release matrix is Linux x86-64, Linux ARM64 and macOS Apple silicon.
+macOS Intel is not a release target.
 
 A further claim of full product support from pristine upstream requires its
 own source/build acceptance evidence. Physical boot support requires the

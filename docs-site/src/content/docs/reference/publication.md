@@ -14,15 +14,14 @@ records which channels are actually available.
 | Channel | Platforms | Package or location |
 | --- | --- | --- |
 | GitHub native archive | The host triples declared by that immutable release | [aros-tools releases](https://github.com/metaneutrons/aros-tools/releases) |
-| Homebrew | The matching published archive set; Intel macOS is Homebrew Tier 3 | `metaneutrons/tap/aros-tools` |
+| Homebrew | The matching published Linux or Apple-silicon macOS archive | `metaneutrons/tap/aros-tools` |
 | Signed APT | Debian/Ubuntu on `amd64` or `arm64`, within the binary compatibility floor | `https://deb.metaneutrons.cc` |
 | AUR | Arch Linux on `x86_64` or `aarch64` | `aros-tools-bin` |
 
 [Installation](/aros-tools/getting-started/installation/) contains the commands
 and verification procedure. [Platform support](/aros-tools/reference/platform-support/)
-lists the operating-system compatibility floors and the temporarily suspended
-Intel macOS qualification lane. Do not infer an Intel archive from a green
-three-host workspace run.
+lists the operating-system compatibility floors and the complete maintained
+native release matrix. macOS Intel is not a package-manager or archive target.
 
 ## One native payload per host
 

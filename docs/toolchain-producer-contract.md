@@ -414,7 +414,7 @@ are rejected before any link is created. Failures retain evidence. Each role is
 independent, not a three-root transaction, phase receipt or execution permission.
 See the [snapshot limits](../crates/aros-toolchain/README.md#isolated-source-material-primitive).
 
-Remaining implementation gates include: trusted executor evidence, actual four-host process
+Remaining implementation gates include: trusted executor evidence, actual declared-host process
 and filesystem behavior, xz-library byte parity, archive resource limits, exact
 native source-lock/parser fixtures, tools-owned compatibility engine and
 measured CPU/RAM/storage/time defaults. None is waived by a specification test.

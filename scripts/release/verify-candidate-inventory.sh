@@ -33,7 +33,7 @@ expected="$work/expected"
 : > "$expected"
 for target in \
     aarch64-apple-darwin aarch64-unknown-linux-gnu \
-    x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+    x86_64-unknown-linux-gnu; do
     archive="aros-tools-v${version}-${target}.tar.gz"
     for name in "$archive" "${archive}.manifest.json" \
         "${archive}.sha256" "aros-tools-v${version}-${target}.spdx.json"; do

@@ -5,9 +5,9 @@ Status: accepted implementation evidence, recorded 2026-09-08.
 This ledger qualifies the M5 implementation boundary only. It is not a
 toolchain release, a publication record, or a substitution for TCP-M7's live
 three-host, three-profile qualification. Intel macOS remains schema-supported
-and historical four-host evidence remains readable, but new Intel macOS
-qualification is suspended until the initial release under
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+and historical four-host evidence remains readable, but it is not a new
+toolchain release target under the permanent native release policy adopted on
+2026-09-14.
 
 ## Immutable identities
 
@@ -112,5 +112,5 @@ boundary. They do **not** establish a distributable toolchain. TCP-M7 still
 requires one fresh live run of all nine active compatibility and relocation
 lanes, 18 independent builds, 9 byte comparisons, isolated complete-draft
 download verification, and unchanged publication plus consumer-promotion
-checks. Intel macOS is deferred under
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+checks. Intel macOS remains outside the maintained release matrix; the
+historical v1 parser contract is intentionally unchanged.

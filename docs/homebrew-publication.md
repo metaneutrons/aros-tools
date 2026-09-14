@@ -67,26 +67,18 @@ run may be resumed only through the existing exact-byte roll-forward rules.
 
 ## Diagnostics and verification
 
-Native package qualification uses explicit `macos-15-intel` for Intel and
-`macos-15` for Apple silicon; bare macOS labels are not architecture-neutral.
-The gate measures the OS, process architecture, Homebrew CPU and default prefix,
-rejects Rosetta, then compares all eight installed executables to the selected
-host's already-verified staging manifest. Native Mach-O/ELF headers, regular
-executable files, the exact bin inventory, sizes and SHA-256 must agree before
-the formula test and version checks run. Dependency or post-install failure
-remains a failed install, even if the aros-tools files already exist.
+Native package qualification uses `macos-15` for Apple silicon and native Linux
+runners for the two Linux payloads. The gate measures the OS, process
+architecture, Homebrew CPU and default prefix, rejects translated execution,
+then compares all eight installed executables to the selected host's
+already-verified staging manifest. Native Mach-O/ELF headers, regular executable
+files, the exact bin inventory, sizes and SHA-256 must agree before the formula
+test and version checks run. Dependency or post-install failure remains a failed
+install, even if the aros-tools files already exist.
 
-[Homebrew classifies Intel macOS as Tier 3](https://docs.brew.sh/Support-Tiers).
-Dependency bottles may be unavailable and source builds may fail. Our explicit
-Intel gate is measured package qualification, not a promise of upstream Homebrew
-support; never replace it with an ARM job or ignore its installation failures.
-
-**Temporary PR-only exception:** [HB-2026-09-05](homebrew-intel-exception.md)
-pauses this Intel installation lane until 2026-10-05, 00:00 UTC. Native Intel
-builds/tests continue. Every affected PR explicitly reports incomplete
-Homebrew qualification; tag and manual runs still require all four hosts.
-The exception does not change tap CI or authorize a release. Its expiry is
-enforced, with the removal checklist in the linked decision record.
+macOS Intel is not an `aros-tools` Homebrew or native archive target. It is
+therefore absent from the permanent three-host matrix rather than covered by a
+temporary exception. See the [release-target policy](macos-intel-release-policy.md).
 
 | Code | Failed guarantee |
 | --- | --- |
@@ -105,8 +97,7 @@ enforced, with the removal checklist in the linked decision record.
 | AP7320 | Actual host, Homebrew architecture/prefix or translation state differs |
 | AP7321 | Installed native files do not match the selected staging manifest |
 | AP7322 | Homebrew installation or dependency post-install failed |
-| AP7330 | Invalid/unsafe matrix or an unapproved exception scope/duration |
-| AP7331 | PR exception is outside its recorded UTC validity window |
+| AP7330 | Invalid or unsafe release-host matrix |
 | AP7332 | Unknown or contradictory qualification event/ref |
 | AP7333 | Policy read/parse or diagnostic-output I/O failed |
 

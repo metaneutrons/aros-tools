@@ -94,9 +94,7 @@ complete application SDK or evidence that a physical board boots.
   and macOS x86-64/AArch64. Build for the running host; do not introduce host
   cross-compilation, remote execution or emulation. The initial M7 release
   actively qualifies Linux x86-64/AArch64 and macOS ARM64 only; Intel macOS is
-  fully suspended under
-  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)
-  until the initial release has completed.
+  not an `aros-tools` native release target.
 - Preserve the three release profiles: `pc-x86_64`, `arm-raspi` and
   `rpi-aarch64`. The PC profile includes its existing i386 runtime/collector
   contract. RISC-V and new LLVM versions require separate qualification work.
@@ -619,7 +617,7 @@ local-preview boundary; no native or release claim is implied.
   mutated checkouts, wrong executor, unsupported source contracts and offline
   cache misses. Verify that none reaches compiler execution.
 
-Exit evidence: native preflight/source tests on all four hosts; locked offline
+Exit evidence: native preflight/source tests on every declared release host; locked offline
 fixtures prove controlled network paths cannot be used. Do not claim an OS
 sandbox unless it has independent platform evidence.
 
@@ -691,8 +689,7 @@ explicit absence of a new compiler matrix for this packaging-only gate.
 
 Exit evidence: [TCP-M5 native compatibility, replay and recovery evidence]
 (tcp-m5-native-evidence.md). All nine active real compatibility lanes are
-mandatory at M7; Intel macOS remains explicitly deferred under
-[aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+mandatory at M7; Intel macOS is not an `aros-tools` native release target.
 
 ### TCP-M6 — Workflow cutover, retirement and usability
 
@@ -731,10 +728,8 @@ Full release evidence is still pending M7.
   authorized by this planning document.
 - [ ] Run the active three-host/three-profile matrix once: 18 independent
   builds, 9 byte comparisons and all 9 compatibility/relocation lanes must
-  succeed. Intel macOS is explicitly deferred to
-  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)
-  after the initial release; it is neither silently omitted nor evidence for
-  this initial qualification.
+  succeed. Intel macOS is not an `aros-tools` native release target and is
+  neither silently omitted nor evidence for this initial qualification.
 - [ ] Verify the full inventory, every hash/size, manifests, SBOMs, recipe and
   cryptographic provenance from an isolated complete draft download. Fail on
   any missing, mixed or altered subject.
@@ -810,8 +805,7 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   a read-only plan, committed change and uncertain durability in machine
   results. Run CLI/parser, package/store and failure fixtures on the three
   active native hosts using isolated envelopes and existing qualified vectors.
-  Intel macOS remains explicitly deferred under
-  [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27).
+  Intel macOS is not an `aros-tools` native release target.
   Include valid imports/selections/removals and counter-probes for wrong
   provenance, unsupported profiles, mixed releases, active references and
   foreign ownership. No full compiler A/B matrix is added for management-only
@@ -824,8 +818,7 @@ start earlier. M8 is not a dependency of M5–M7 or the initial tools release.
   model review; assigning this issue does not invent a deadline.
 
 Exit evidence: merged implementation and source-verified docs; three-active-host
-positive/adversarial lifecycle results (with Intel macOS explicitly deferred
-under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27)); safe project selection and cleanup
+positive/adversarial lifecycle results on the maintained hosts; safe project selection and cleanup
 demonstrations; and a reviewed state-format migration/rollback contract.
 The accepted implementation still does not authorize real installation
 cleanup, compiler builds or releases outside their respective contracts.
@@ -835,9 +828,9 @@ cleanup, compiler builds or releases outside their respective contracts.
 | Tier | Scope | Trigger | What it proves |
 | --- | --- | --- | --- |
 | T0 | Unit, parser/schema, golden and fault-injection fixtures | Every affected PR | Contracts and failure behavior; no compiler qualification claim |
-| T1 | Native CLI/mock lifecycle, package vectors, install fixtures on three active hosts | Normal relevant CI | Active host support of orchestration and formats; Intel macOS is deferred under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27) |
+| T1 | Native CLI/mock lifecycle, package vectors, install fixtures on three active hosts | Normal relevant CI | Active host support of orchestration and formats; Intel macOS is not an `aros-tools` native release target |
 | T2 | One real host/profile build by default; broader Linux diagnostics explicitly selected | Local development or explicit diagnostic dispatch | A measured native lane, no publication |
-| T3 | 3 active hosts x 3 profiles x 2 independent builds, all compatibility checks | New immutable toolchain release tag | Initial-release reproducibility/compatibility; Intel macOS remains deferred under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27) |
+| T3 | 3 active hosts x 3 profiles x 2 independent builds, all compatibility checks | New immutable toolchain release tag | Initial-release reproducibility/compatibility; Intel macOS is not an `aros-tools` native release target |
 
 Keep the existing restriction on manual full-matrix dispatch. Do not run a
 full prequalification and then repeat it for the tag. Source-cache acceleration

@@ -295,11 +295,34 @@ for invalid_protection in non-strict admin-bypass nonlinear force-push deletion;
         "${verify_fixture_ref[@]}"
 done
 
-# Published release assets are accepted only as the exact 48-file signed
-# inventory with API-bound IDs, states, type caps, sizes and streaming SHA-256.
+# Published release assets are accepted only as the exact three-host, 40-file
+# signed inventory with API-bound IDs, states, type caps, sizes and streaming
+# SHA-256.  Keep this assertion independent of the metadata helper's internal
+# length guard so a future host addition cannot silently broaden the release
+# contract.
 mkdir "$work/assets"
 python3 "$root/scripts/release/release-asset-metadata.py" contract \
     --version 1.2.3 > "$work/asset-contract.json"
+python3 - "$work/asset-contract.json" <<'PY'
+import json
+import pathlib
+import sys
+
+contract = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+assets = contract['assets']
+if len(assets) != 40:
+    raise SystemExit(f'expected exactly 40 public release assets, got {len(assets)}')
+if any('x86_64-apple-darwin' in name for name in assets):
+    raise SystemExit('macOS Intel artifact leaked into the public release contract')
+for target in (
+    'aarch64-apple-darwin',
+    'aarch64-unknown-linux-gnu',
+    'x86_64-unknown-linux-gnu',
+):
+    archive = f'aros-tools-v1.2.3-{target}.tar.gz'
+    if archive not in assets:
+        raise SystemExit(f'missing required native release archive: {archive}')
+PY
 python3 - "$work/asset-contract.json" "$work/assets" \
     "$work/asset-metadata.json" <<'PY'
 import hashlib
@@ -542,7 +565,7 @@ inventory_names="$work/inventory-names"
 : > "$inventory_names"
 for target in \
     aarch64-apple-darwin aarch64-unknown-linux-gnu \
-    x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+    x86_64-unknown-linux-gnu; do
     archive="aros-tools-v1.2.3-${target}.tar.gz"
     for name in "$archive" "${archive}.manifest.json" \
         "${archive}.sha256" "aros-tools-v1.2.3-${target}.spdx.json"; do

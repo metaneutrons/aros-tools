@@ -52,10 +52,8 @@ pub const V1_HOSTS: &[&str] = &[
 ];
 /// Hosts actively qualified for newly produced v1 releases.
 ///
-/// Intel macOS qualification is intentionally suspended until
-/// metaneutrons/aros-toolchains#27 is completed. The release producer emits
-/// exactly this matrix, while the parser continues to accept the historical
-/// four-host matrix above.
+/// This is the permanent native release matrix. Intel macOS remains readable
+/// in historical v1 indexes, but is not a producer, package or release target.
 pub const ACTIVE_V1_HOSTS: &[&str] = &["linux-aarch64", "linux-x86_64", "macos-aarch64"];
 /// Closed target-profile selectors of the v1 release matrix.
 pub const V1_PROFILES: &[&str] = &["arm-raspi", "pc-x86_64", "rpi-aarch64"];
@@ -1364,6 +1362,16 @@ mod tests {
             source_lock_filename: "llvm-11.sources.json".into(),
             stage: IndexStage::PreAttestation,
         }
+    }
+
+    #[test]
+    fn active_release_matrix_is_the_three_host_distribution_contract() {
+        assert_eq!(
+            ACTIVE_V1_HOSTS,
+            ["linux-aarch64", "linux-x86_64", "macos-aarch64"]
+        );
+        assert!(V1_HOSTS.contains(&"macos-x86_64"));
+        assert!(!ACTIVE_V1_HOSTS.contains(&"macos-x86_64"));
     }
 
     #[test]

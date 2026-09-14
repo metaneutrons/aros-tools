@@ -200,9 +200,9 @@ class WorkflowPolicy(unittest.TestCase):
         self.replace(self.publish, "environment: homebrew-publication", "environment: release")
         self.check("must stay inside homebrew-publication")
 
-    def test_arm_runner_cannot_qualify_intel(self):
-        self.replace(self.matrix_policy, '"runner": "macos-15-intel"', '"runner": "macos-14"')
-        self.check("four genuine native hosts")
+    def test_apple_silicon_runner_identity_cannot_drift(self):
+        self.replace(self.matrix_policy, '"runner": "macos-15"', '"runner": "macos-14"')
+        self.check("three genuine native release hosts")
 
     def test_dynamic_matrix_cannot_be_bypassed(self):
         release = self.work / ".github/workflows/release.yml"
@@ -212,7 +212,7 @@ class WorkflowPolicy(unittest.TestCase):
     def test_missing_coverage_output_is_rejected(self):
         release = self.work / ".github/workflows/release.yml"
         self.replace(release, "steps.homebrew-policy.outputs.coverage", "steps.metadata.outputs.coverage")
-        self.check("dated Homebrew matrix policy")
+        self.check("Homebrew release matrix policy")
 
     def test_no_release_gate_may_accept_partial_coverage(self):
         release = self.work / ".github/workflows/release.yml"
@@ -221,14 +221,14 @@ class WorkflowPolicy(unittest.TestCase):
             with self.subTest(job=job):
                 prefix, block = original.split(f"  {job}:\n", 1)
                 release.write_text(prefix + f"  {job}:\n" + block.replace(
-                    "needs.metadata.outputs.homebrew_coverage == 'four-hosts' &&", "true &&", 1))
+                    "needs.metadata.outputs.homebrew_coverage == 'release-hosts' &&", "true &&", 1))
                 self.check("must require full successful Homebrew coverage")
         release.write_text(original)
 
     def test_policy_cannot_use_a_forged_pr_event(self):
         release = self.work / ".github/workflows/release.yml"
         self.replace(release, '--event "$GITHUB_EVENT_NAME"', '--event pull_request')
-        self.check("dated Homebrew matrix policy")
+        self.check("Homebrew release matrix policy")
 
     def test_homebrew_cannot_continue_on_error(self):
         release = self.work / ".github/workflows/release.yml"
@@ -326,7 +326,7 @@ class NativeInstallation(unittest.TestCase):
         self.prefix = self.work / "installed"
         (self.prefix / "bin").mkdir(parents=True)
         self.manifest_path = self.work / "manifest.json"
-        self.target = "x86_64-apple-darwin"
+        self.target = "aarch64-apple-darwin"
         self.prepare(self.target)
 
     def prepare(self, target):
@@ -357,7 +357,7 @@ class NativeInstallation(unittest.TestCase):
         else:
             self.module.check_install(self.manifest_path, self.prefix, target or self.target, "0.1.0")
 
-    def test_four_native_hosts_and_wrong_mappings(self):
+    def test_three_native_release_hosts_and_wrong_mappings(self):
         for target, host in self.module.HOSTS.items():
             with self.subTest(target=target):
                 self.module.check_host(target, *host)
@@ -373,14 +373,14 @@ class NativeInstallation(unittest.TestCase):
         names = re.search(r'pub const BINARIES:.*?= &\[(.*?)\];', source, re.S).group(1)
         self.assertEqual(set(re.findall(r'"([^"]+)"', names)), self.module.BINARY_NAMES)
 
-    def test_four_payload_formats(self):
+    def test_three_release_payload_formats(self):
         for target in self.module.HOSTS:
             with self.subTest(target=target):
                 self.prepare(target)
                 self.check(target=target)
 
     def test_wrong_manifest_identity(self):
-        for field, value in (("schema", 2), ("target", "aarch64-apple-darwin"),
+        for field, value in (("schema", 2), ("target", "aarch64-unknown-linux-gnu"),
                              ("version", "0.1.1"), ("archive", "other.tar.gz")):
             with self.subTest(field=field):
                 previous = self.manifest[field]
@@ -388,8 +388,8 @@ class NativeInstallation(unittest.TestCase):
                 self.check("AP7321")
                 self.manifest[field] = previous
 
-    def test_arm_payload_even_with_matching_digest_is_not_intel(self):
-        self.prepare("aarch64-apple-darwin")
+    def test_linux_payload_even_with_matching_digest_is_not_macos_arm(self):
+        self.prepare("aarch64-unknown-linux-gnu")
         self.manifest.update(target=self.target, archive=f"aros-tools-v0.1.0-{self.target}.tar.gz")
         self.check("not native")
 

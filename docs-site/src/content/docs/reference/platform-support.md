@@ -5,19 +5,17 @@ description: Distinguish native host support, implemented target profiles, avail
 
 ## Native release-target contracts
 
-| Archive target | Native qualification host when enabled | Binary compatibility contract |
+| Archive target | Native qualification host | Binary compatibility contract |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | Native Linux x86-64 | glibc 2.36 or newer |
 | `aarch64-unknown-linux-gnu` | Native Linux ARM64 | glibc 2.36 or newer |
-| `x86_64-apple-darwin` | Native macOS Intel | macOS 13 or newer |
 | `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 13 or newer |
 
 These are native tools archive contracts, not a claim that stable archives are
-already published or that every lane currently runs in ordinary CI. The active
-workspace matrix is Linux x86-64, Linux AArch64 and macOS Apple silicon. Intel
-macOS qualification is temporarily suspended; it must be requalified before
-an Intel archive can be claimed. Check
-[release status](/aros-tools/reference/release-status/) for published evidence.
+already published. Linux x86-64, Linux AArch64 and macOS Apple silicon are the
+complete maintained release matrix. macOS Intel is not a native archive or
+package-manager target. Check [release status](/aros-tools/reference/release-status/)
+for published evidence.
 
 The host mapping is implemented in
 [`host_compiler.rs`](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/host_compiler.rs).
@@ -40,7 +38,7 @@ Compiler selection is separately validated by the
 
 An implemented profile does not mean that a matching released toolchain entry
 or all source/legacy inputs are available. In particular, RISC-V profile support
-must not be read as a complete four-host RISC-V release or boot claim.
+must not be read as a complete native-host RISC-V release or boot claim.
 
 ## Physical boards
 
@@ -70,6 +68,7 @@ claims to their implementations.
 ## Not currently supported
 
 - Windows as a native release host.
+- macOS Intel (`x86_64-apple-darwin`) as a native archive or package-manager host.
 - Published Linux binaries on hosts below glibc 2.36, or macOS below 13.
 - A general claim of complete translated products from entirely pristine
   upstream AROS.

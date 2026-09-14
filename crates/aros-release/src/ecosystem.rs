@@ -11,10 +11,13 @@ use crate::archive::{write_new_atomic, ReleaseManifest, MANIFEST_SCHEMA};
 use crate::contract::{valid_version, EcosystemFormat, GenerateArgs};
 use crate::{ReleaseFailure, ReleaseResult};
 
-const TARGETS: [&str; 4] = [
+/// Native archives distributed by aros-tools.
+///
+/// macOS Intel remains usable for source builds where the host toolchain
+/// permits it, but it is deliberately not a release or package-channel target.
+const TARGETS: [&str; 3] = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
 ];
 
@@ -70,7 +73,7 @@ fn load_release(args: &GenerateArgs) -> ReleaseResult<NativeRelease> {
         return Err(contract_failure(
             &args.output,
             format!(
-                "package-manager metadata needs exactly four manifests; received {}",
+                "package-manager metadata needs exactly three release manifests; received {}",
                 args.manifests.len()
             ),
         ));
@@ -171,11 +174,9 @@ fn validate_manifest(path: &Path, manifest: &ReleaseManifest) -> ReleaseResult<(
 
 fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
     let mac_arm = release.artifact("aarch64-apple-darwin")?;
-    let mac_x86 = release.artifact("x86_64-apple-darwin")?;
     let linux_arm = release.artifact("aarch64-unknown-linux-gnu")?;
     let linux_x86 = release.artifact("x86_64-unknown-linux-gnu")?;
     let mac_arm_url = release.url("aarch64-apple-darwin")?;
-    let mac_x86_url = release.url("x86_64-apple-darwin")?;
     let linux_arm_url = release.url("aarch64-unknown-linux-gnu")?;
     let linux_x86_url = release.url("x86_64-unknown-linux-gnu")?;
     let mut output = String::new();
@@ -195,18 +196,10 @@ fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
             writeln!(output, "  depends_on \"{dependency}\"")?;
         }
         writeln!(output)?;
-        write_homebrew_os(
-            &mut output,
-            "macos",
-            &mac_arm_url,
-            &mac_arm.archive_sha256,
-            &mac_x86_url,
-            &mac_x86.archive_sha256,
-        )?;
+        write_homebrew_macos_arm(&mut output, &mac_arm_url, &mac_arm.archive_sha256)?;
         writeln!(output)?;
-        write_homebrew_os(
+        write_homebrew_linux(
             &mut output,
-            "linux",
             &linux_arm_url,
             &linux_arm.archive_sha256,
             &linux_x86_url,
@@ -232,15 +225,23 @@ fn render_homebrew(release: &NativeRelease) -> ReleaseResult<String> {
     Ok(output)
 }
 
-fn write_homebrew_os(
+fn write_homebrew_macos_arm(output: &mut String, arm_url: &str, arm_sha: &str) -> std::fmt::Result {
+    writeln!(output, "  on_macos do")?;
+    writeln!(output, "    on_arm do")?;
+    writeln!(output, "      url \"{arm_url}\"")?;
+    writeln!(output, "      sha256 \"{arm_sha}\"")?;
+    writeln!(output, "    end")?;
+    writeln!(output, "  end")
+}
+
+fn write_homebrew_linux(
     output: &mut String,
-    os: &str,
     arm_url: &str,
     arm_sha: &str,
     x86_url: &str,
     x86_sha: &str,
 ) -> std::fmt::Result {
-    writeln!(output, "  on_{os} do")?;
+    writeln!(output, "  on_linux do")?;
     writeln!(output, "    if Hardware::CPU.arm?")?;
     writeln!(output, "      url \"{arm_url}\"")?;
     writeln!(output, "      sha256 \"{arm_sha}\"")?;
@@ -328,7 +329,7 @@ fn contract_failure(path: &Path, message: impl Into<String>) -> ReleaseFailure {
             target: Some(path.display().to_string()),
             ..DiagnosticContext::default()
         })
-        .with_hint("use the complete verified four-host manifest set from one immutable release"),
+        .with_hint("use the complete verified three-host manifest set from one immutable release"),
     )
 }
 
@@ -406,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_uses_all_four_measured_hashes() {
+    fn homebrew_uses_all_three_measured_hashes() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("aros-tools.rb");
         generate(&GenerateArgs {
@@ -417,11 +418,13 @@ mod tests {
         })
         .unwrap();
         let rendered = fs::read_to_string(output).unwrap();
-        for byte in ['a', 'b', 'c', 'd'] {
+        for byte in ['a', 'b', 'c'] {
             assert!(rendered.contains(&byte.to_string().repeat(64)));
         }
         assert!(rendered.contains("on_macos"));
         assert!(rendered.contains("on_linux"));
+        assert!(rendered.contains("on_arm do"));
+        assert!(!rendered.contains("x86_64-apple-darwin"));
         for dependency in ["cmake", "curl", "git", "ninja", "python@3.14"] {
             assert!(rendered.contains(&format!("depends_on \"{dependency}\"")));
         }

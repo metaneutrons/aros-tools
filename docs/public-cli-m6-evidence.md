@@ -86,9 +86,8 @@ cache owner; neither is a statement that superseded syntax is still shipped.
 
 This acceptance does not run a compiler release A/B matrix, publish a package,
 produce a toolchain archive, change a release lock, deploy a board, or infer a
-hardware boot result from a template or fixture. Intel macOS remains suspended
-under [aros-toolchains#27](https://github.com/metaneutrons/aros-toolchains/issues/27);
-it is not represented as a passing host. Cache epic
+hardware boot result from a template or fixture. Intel macOS is not an
+`aros-tools` native release target and is not represented as a passing host. Cache epic
 [#139](https://github.com/metaneutrons/aros-tools/issues/139) and CACHE-M1
 [#140](https://github.com/metaneutrons/aros-tools/issues/140) remain open.
 Only the narrow F05/F06 repair evidence is reused here.
