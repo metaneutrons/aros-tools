@@ -117,9 +117,37 @@ if name == "cmake" and (root / "fail-engine").exists():
     def test_source_stage_keeps_exact_rust_suite_without_cmake(self):
         result = self.run_gate("source-test", source=True)
         self.assert_ok(result)
-        self.assertEqual(self.calls("cargo"), [["test", "--workspace", "--all-features", "--locked"]])
+        # The aros-common lib binary is excluded from the workspace run and
+        # replayed serially, because a spawned child inherits the advisory-lock
+        # descriptors of its publication tests. Its integration target stays
+        # parallel. See run_common_lib_serially in check-workspace.sh.
+        self.assertEqual(
+            self.calls("cargo"),
+            [
+                ["test", "--workspace", "--all-features", "--locked", "--exclude", "aros-common"],
+                ["test", "--locked", "-p", "aros-common", "--all-features", "--lib",
+                 "--", "--test-threads=1"],
+                ["test", "--locked", "-p", "aros-common", "--all-features",
+                 "--test", "process_control"],
+            ],
+        )
         self.assertFalse(self.calls("cmake"))
         self.assertIn("explicit test/all", result.stdout)
+
+    def test_portable_stage_contains_the_common_lib_binary_serially(self):
+        result = self.run_gate("portable-test")
+        self.assert_ok(result)
+        calls = self.calls("cargo")
+        self.assertIn(
+            ["test", "--locked", "-p", "aros-common", "--all-features", "--lib",
+             "--", "--test-threads=1"],
+            calls,
+        )
+        # The workspace pass must not run that binary a second time in parallel.
+        workspace = [args for args in calls if "--workspace" in args]
+        self.assertTrue(workspace)
+        for args in workspace:
+            self.assertIn("aros-common", args)
 
     def test_explicit_integration_discovers_all_fixtures_including_grub(self):
         result = self.run_gate("test", source=True)
