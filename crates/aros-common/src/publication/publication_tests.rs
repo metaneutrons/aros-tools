@@ -46,6 +46,15 @@ fn bounded_regular_reader_rejects_an_oversized_control_document() {
     );
 }
 
+// The advisory-lock tests below must not run beside a test that spawns a
+// child. A spawned child inherits this process's descriptors for the window
+// between fork and exec, and an inherited flock descriptor keeps the lock alive
+// past the guard that owns it, so the next probe still reports Held. The lib
+// binary of this crate is therefore executed with `--test-threads=1` by
+// `run_common_lib_serially` in scripts/check-workspace.sh, which records the
+// measurements behind that decision. Running these tests in parallel with the
+// process tests fails roughly four times in five under load.
+
 #[cfg(unix)]
 #[test]
 fn advisory_lock_has_one_live_holder_and_can_be_reacquired_after_release() {
