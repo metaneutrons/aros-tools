@@ -75,7 +75,7 @@ struct RuleGroup {
     contexts: Vec<usize>,
 }
 
-const TARGET_CONTEXTS: &[IconTargetScenario] = &[
+const ICON_TARGET_SCENARIOS: &[IconTargetScenario] = &[
     IconTargetScenario {
         arch: "pc",
         cpu: "x86_64",
@@ -149,7 +149,7 @@ pub fn collect_icons_all(joined: &str, dirs: &DirVars, rel_dir: &Path) -> IconSc
     }
 
     let mut groups: Vec<RuleGroup> = Vec::new();
-    for (context_index, context) in TARGET_CONTEXTS.iter().enumerate() {
+    for (context_index, context) in ICON_TARGET_SCENARIOS.iter().enumerate() {
         let filtered = match filter_conditionals(joined, context) {
             Ok(filtered) => filtered,
             Err(reason) => {
@@ -187,13 +187,13 @@ pub fn collect_icons_all(joined: &str, dirs: &DirVars, rel_dir: &Path) -> IconSc
     scan.sets = groups
         .into_iter()
         .map(|mut group| {
-            group.set.condition = if group.contexts.len() == TARGET_CONTEXTS.len() {
+            group.set.condition = if group.contexts.len() == ICON_TARGET_SCENARIOS.len() {
                 None
             } else {
                 let expressions: Vec<&str> = group
                     .contexts
                     .iter()
-                    .map(|index| TARGET_CONTEXTS[*index].cmake)
+                    .map(|index| ICON_TARGET_SCENARIOS[*index].cmake)
                     .collect();
                 Some(if expressions.len() == 1 {
                     expressions[0].to_owned()
