@@ -31,8 +31,9 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = [
-    # Exact interface-bound TFTP server revision; rationale and immutable
-    # commit live beside the dependency in crates/aros-board/Cargo.toml.
-    "https://github.com/metaneutrons/tftp-rs.git",
-]
+# Empty on purpose. The workspace takes every dependency from crates.io, so
+# `unknown-git = "deny"` refuses any git source outright. The only entry this
+# list ever held was a fork of tftp-rs, carried until upstream released the
+# interface-bound server in 0.4.0. Add a source here only with the rationale
+# beside the dependency, and remove it again once upstream catches up.
+allow-git = []

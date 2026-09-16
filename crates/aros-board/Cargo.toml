@@ -28,11 +28,11 @@ if-addrs.workspace = true
 socket2.workspace = true
 fatfs.workspace = true
 rustix.workspace = true
-# crates.io 0.3.2 cannot bind its server socket to one named interface.  The
-# board service must fail closed on that network boundary, so this reviewed
-# fork commit is intentionally immutable until the capability is released
-# upstream.  See metaneutrons/tftp-rs commit f29959b6.
-tftp-rs = { version = "0.3.2", git = "https://github.com/metaneutrons/tftp-rs.git", rev = "f29959b671c6de6654a19955c5f74803b60afe1b", default-features = false }
+# 0.4 is the first release whose server binds to one named interface. The board
+# service must fail closed on that network boundary, so the floor is a
+# requirement and not a preference. Wildcard listeners are refused by
+# tftp::serve_read_only through server::validate_bind_addr, not by the library.
+tftp-rs = { version = "0.4", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 aros-macos-disk-claim.workspace = true
