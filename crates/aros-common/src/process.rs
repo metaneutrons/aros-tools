@@ -364,7 +364,7 @@ fn run_output_inner(
             return Err(combine_process_errors(primary, &cleanup));
         }
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     if completion == Completion::Exited {
         if let Err(primary) = kill_remaining_process_group(&mut child) {
             finished.store(true, Ordering::Release);
@@ -438,7 +438,7 @@ pub fn run_status_with_timeout(
         }
     };
     let timed_out = completion == Completion::TimedOut;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     if !timed_out {
         kill_remaining_process_group(&mut child)?;
     }
@@ -476,12 +476,12 @@ fn wait_for_child(
     deadline: Option<Instant>,
     cancellation: Option<&CancellationToken>,
 ) -> io::Result<(ExitStatus, Completion)> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        wait_until_linux(child, deadline, cancellation)
+        wait_until_unix(child, deadline, cancellation)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let Some(deadline) = deadline else {
             return child.wait().map(|status| (status, Completion::Exited));
@@ -490,7 +490,7 @@ fn wait_for_child(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn wait_until(
     child: &mut Child,
     deadline: Instant,
@@ -557,18 +557,19 @@ fn wait_until(
 ///
 /// A separate process group is identified by the child's PID. If that PID is
 /// reaped before the process group is terminated, a busy host can reuse it for
-/// an unrelated group. Linux cleanup must therefore signal the original group
-/// while its leader is still waitable.
-#[cfg(target_os = "linux")]
+/// an unrelated group: the signal then reaches strangers, or the kernel refuses
+/// it with EPERM. Unix cleanup must therefore signal the original group while
+/// its leader is still waitable.
+#[cfg(unix)]
 #[derive(Clone)]
-enum LinuxExitObservation {
+enum UnixExitObservation {
     Running,
     ExitedUnreaped,
     ExitedReaped(ExitStatus),
 }
 
-#[cfg(target_os = "linux")]
-fn observe_linux_exit(child: &mut Child, nonblocking: bool) -> io::Result<LinuxExitObservation> {
+#[cfg(unix)]
+fn observe_unix_exit(child: &mut Child, nonblocking: bool) -> io::Result<UnixExitObservation> {
     use rustix::process::{waitid, Pid, WaitId, WaitIdOptions};
 
     let mut options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
@@ -576,37 +577,37 @@ fn observe_linux_exit(child: &mut Child, nonblocking: bool) -> io::Result<LinuxE
         options |= WaitIdOptions::NOHANG;
     }
     match waitid(WaitId::Pid(Pid::from_child(child)), options) {
-        Ok(Some(_)) => Ok(LinuxExitObservation::ExitedUnreaped),
-        Ok(None) => Ok(LinuxExitObservation::Running),
+        Ok(Some(_)) => Ok(UnixExitObservation::ExitedUnreaped),
+        Ok(None) => Ok(UnixExitObservation::Running),
         Err(rustix::io::Errno::CHILD) => child
             .try_wait()?
-            .map(LinuxExitObservation::ExitedReaped)
+            .map(UnixExitObservation::ExitedReaped)
             .ok_or_else(|| io::Error::other("child exit state is unavailable after waitid")),
         Err(error) => Err(error.into()),
     }
 }
 
-#[cfg(target_os = "linux")]
-fn finish_linux_exit(
+#[cfg(unix)]
+fn finish_unix_exit(
     child: &mut Child,
-    observation: &LinuxExitObservation,
+    observation: &UnixExitObservation,
 ) -> io::Result<ExitStatus> {
     match observation {
-        LinuxExitObservation::Running => Err(io::Error::other(
-            "cannot finalize a Linux process group before its child exits",
+        UnixExitObservation::Running => Err(io::Error::other(
+            "cannot finalize a Unix process group before its child exits",
         )),
-        LinuxExitObservation::ExitedUnreaped => {
+        UnixExitObservation::ExitedUnreaped => {
             // The unreaped leader keeps its PID and process-group identity
             // reserved until all original descendants are terminated.
-            kill_process_group(child)?;
+            sweep_exited_process_group(child)?;
             child.wait()
         }
-        LinuxExitObservation::ExitedReaped(status) => Ok(*status),
+        UnixExitObservation::ExitedReaped(status) => Ok(*status),
     }
 }
 
-#[cfg(target_os = "linux")]
-fn wait_until_linux(
+#[cfg(unix)]
+fn wait_until_unix(
     child: &mut Child,
     deadline: Option<Instant>,
     cancellation: Option<&CancellationToken>,
@@ -617,9 +618,9 @@ fn wait_until_linux(
     // cancellation source, so a blocking waitid is both safe and efficient.
     let nonblocking = deadline.is_some() || cancellation.is_some();
     loop {
-        let observation = observe_linux_exit(child, nonblocking)?;
-        if !matches!(observation, LinuxExitObservation::Running) {
-            return finish_linux_exit(child, &observation)
+        let observation = observe_unix_exit(child, nonblocking)?;
+        if !matches!(observation, UnixExitObservation::Running) {
+            return finish_unix_exit(child, &observation)
                 .map(|status| (status, Completion::Exited));
         }
 
@@ -636,15 +637,15 @@ fn wait_until_linux(
         }
         if let Some(deadline) = deadline {
             if now >= deadline {
-                let observed = observe_linux_exit(child, true)?;
-                if !matches!(observed, LinuxExitObservation::Running) {
-                    return finish_linux_exit(child, &observed)
+                let observed = observe_unix_exit(child, true)?;
+                if !matches!(observed, UnixExitObservation::Running) {
+                    return finish_unix_exit(child, &observed)
                         .map(|status| (status, Completion::Exited));
                 }
                 if let Err(kill_error) = kill_process_group(child) {
-                    let observed = observe_linux_exit(child, true)?;
-                    if !matches!(observed, LinuxExitObservation::Running) {
-                        return finish_linux_exit(child, &observed)
+                    let observed = observe_unix_exit(child, true)?;
+                    if !matches!(observed, UnixExitObservation::Running) {
+                        return finish_unix_exit(child, &observed)
                             .map(|status| (status, Completion::Exited));
                     }
                     return Err(io::Error::new(
@@ -677,6 +678,24 @@ fn configure_process_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn configure_process_group(_command: &mut Command) {}
+
+/// Terminates what is left of an exited leader's process group.
+///
+/// The leader is a zombie at this point, held unreaped so that its PID cannot
+/// be recycled. Two refusals are therefore not failures. ESRCH means the group
+/// is empty. EPERM is how Darwin and the BSDs answer when the only remaining
+/// member is that zombie, which carries no credentials to check against;
+/// Linux reports ESRCH for the same state. Neither can mean a stranger's group,
+/// because the PID stays pinned until `child.wait()` below releases it.
+#[cfg(unix)]
+fn sweep_exited_process_group(child: &Child) -> io::Result<()> {
+    use rustix::process::{kill_process_group, Pid, Signal};
+
+    match kill_process_group(Pid::from_child(child), Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH | rustix::io::Errno::PERM) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 
 #[cfg(unix)]
 fn kill_process_group(child: &Child) -> io::Result<()> {
@@ -711,7 +730,7 @@ fn kill_process_group(child: &mut Child) -> io::Result<()> {
         reason = "the cross-platform contract needs mutable Child for Child::kill on non-Unix"
     )
 )]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn kill_remaining_process_group(child: &mut Child) -> io::Result<()> {
     kill_process_group(child).map_err(|error| {
         io::Error::new(
@@ -1106,6 +1125,70 @@ mod tests {
         let error = run_output_with_limit(&mut Command::new("definitely-not-a-command"), 0)
             .expect_err("zero limit must fail first");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Regression guard for the cleanup race behind issue #183.
+    ///
+    /// Cleanup used to reap the child and only then signal its process group,
+    /// which is identified by the child's own PID. Once reaped that PID is
+    /// free, so a host that recycles it inside the window makes the kernel
+    /// answer the signal with EPERM; the run then failed with "permission
+    /// denied", surfacing on the toolchain frontend as a spurious AX0201.
+    ///
+    /// The invariant that closes the window is asserted directly instead of by
+    /// trying to lose the race on purpose: the leader must still be waitable
+    /// when its group is swept. A probabilistic reproduction was deliberately
+    /// left out, because it passed against the unfixed code and would have
+    /// claimed a protection it does not give.
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_leader_is_observed_before_it_is_reaped() {
+        let mut command = Command::new("sh");
+        configure_process_group(&mut command);
+        let mut child = command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn fixture");
+        let observation = loop {
+            let observation = observe_unix_exit(&mut child, true).expect("observe child");
+            if !matches!(observation, UnixExitObservation::Running) {
+                break observation;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            matches!(observation, UnixExitObservation::ExitedUnreaped),
+            "the leader must stay waitable so its PID cannot be recycled before the sweep"
+        );
+        let status = finish_unix_exit(&mut child, &observation).expect("sweep and reap");
+        assert!(status.success());
+    }
+
+    /// The same ordering must hold when the child leaves a descendant behind,
+    /// which is the case the group sweep exists for.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_children_with_descendants_are_swept_without_error() {
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            workers.push(thread::spawn(|| {
+                for _ in 0..4 {
+                    let observed = run_output_with_limit(
+                        Command::new("sh").args(["-c", "sleep 10 & printf done"]),
+                        1024,
+                    )
+                    .expect("descendant fixture must not fail cleanup");
+                    assert!(observed.status.success());
+                    assert_eq!(observed.stdout.exact_bytes(), Some(b"done".as_slice()));
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("worker thread");
+        }
     }
 
     #[cfg(unix)]
