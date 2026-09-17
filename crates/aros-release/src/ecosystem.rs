@@ -15,7 +15,7 @@ use crate::{ReleaseFailure, ReleaseResult};
 ///
 /// macOS Intel remains usable for source builds where the host toolchain
 /// permits it, but it is deliberately not a release or package-channel target.
-const TARGETS: [&str; 3] = [
+pub(crate) const TARGETS: [&str; 3] = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnu",
