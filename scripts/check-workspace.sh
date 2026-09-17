@@ -124,21 +124,36 @@ run_quality() {
     cargo machete
 }
 
-# The aros-common lib binary holds both the process tests, which spawn
-# children, and the publication tests, which take advisory file locks. A
-# spawned child inherits the lock descriptor for the window between fork and
-# exec, so the flock outlives the guard that owns it and the next probe still
-# reports Held. That is a property of Unix descriptor inheritance, not a defect
-# in either test, and it is confined to this one binary because inheritance
-# cannot cross a process boundary.
+# Three unit-test binaries hold both tests that spawn children and tests that
+# take advisory file locks. A spawned child inherits the lock descriptor for the
+# window between fork and exec, so a non-blocking flock taken in that window
+# fails, or a released lock still reads as held. That is Unix descriptor
+# inheritance working as specified, and it is confined to a single binary
+# because inheritance cannot cross a process boundary. Every integration target
+# therefore stays parallel: those spawn too, each in its own process.
 #
-# Measured on an M-series host, six concurrent copies of the binary, four
-# rounds: 20 of 24 runs failed in parallel and 0 of 24 serially. The suite costs
-# 3.45s serially against 3.33s in parallel, so the containment is close to free.
-# Its integration target stays parallel; it spawns, but in its own process.
-run_common_lib_serially() {
+# aros-common is measured. Six concurrent copies over four rounds on an M-series
+# host: 20 of 24 runs failed in parallel, 0 of 24 serially, at a cost of 3.45s
+# against 3.33s.
+#
+# aros-toolchain and aros-cli are structural, not measured. Both failed on
+# linux-aarch64 with EAGAIN from a non-blocking flock, in source_cache and in
+# toolchain_management, and both binaries mix spawning with locking exactly as
+# aros-common did. There is no local before/after here: `os error 11` is Linux
+# EAGAIN, macOS answers 35, so the failure cannot be reproduced on an Apple
+# host. Their cost is real and was measured: 34.66s against 14.03s for
+# aros-toolchain, 10.89s against 6.45s for aros-cli, about 25s per gate run.
+# If CI keeps failing on those two after this, the containment is wrong and
+# should be reverted rather than widened.
+run_lock_binaries_serially() {
     cargo test --locked -p aros-common --all-features --lib -- --test-threads=1
-    cargo test --locked -p aros-common --all-features --test process_control
+    cargo test --locked -p aros-toolchain --all-features --lib -- --test-threads=1
+    cargo test --locked -p aros-cli --all-features --bin aros -- --test-threads=1
+    # `--test '*'` selects every integration target and no unit binary. Naming
+    # them individually would silently drop a newly added one, because these
+    # three packages are excluded from the workspace pass above.
+    cargo test --locked -p aros-common -p aros-toolchain -p aros-cli \
+        --all-features --test '*'
 }
 
 run_docs() {
@@ -213,8 +228,9 @@ PY
         printf '%s\n' "$submodule_status" | grep -E '^[-+U]' | head -n 8 >&2
         return 1
     fi
-    cargo test --workspace --all-features --locked --exclude aros-common
-    run_common_lib_serially
+    cargo test --workspace --all-features --locked \
+        --exclude aros-common --exclude aros-toolchain --exclude aros-cli
+    run_lock_binaries_serially
     printf '%s\n' 'source Rust tests passed; CMake engine fixtures require the explicit test/all gate'
 }
 
@@ -272,8 +288,9 @@ run_portable_tests() {
     # of their test targets on each host, execute their source-independent bin
     # tests, and leave the complete Rust runtime suite to run_source_tests.
     cargo test --workspace --all-features --locked \
-        --exclude aros-transpiler --exclude aros-verify --exclude aros-common
-    run_common_lib_serially
+        --exclude aros-transpiler --exclude aros-verify \
+        --exclude aros-common --exclude aros-toolchain --exclude aros-cli
+    run_lock_binaries_serially
     cargo test --locked -p aros-transpiler -p aros-verify \
         --all-features --no-run
     cargo test --locked -p aros-transpiler --bin aros-transpiler \
