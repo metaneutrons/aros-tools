@@ -84,8 +84,13 @@ pub struct GenerateArgs {
     /// Canonical release download directory, ending in the immutable tag
     #[arg(long)]
     pub base_url: String,
-    /// Four verified native archive manifests
-    #[arg(long, required = true, num_args = 4)]
+    /// One verified native archive manifest per maintained target
+    ///
+    /// The arity is bound to `ecosystem::TARGETS` so a change to the maintained
+    /// matrix cannot leave this argument behind. It was `4` after the macOS
+    /// Intel retirement reduced the matrix to three, and clap refused the call
+    /// before `generate` could apply its own equality check.
+    #[arg(long, required = true, num_args = crate::ecosystem::TARGETS.len())]
     pub manifests: Vec<PathBuf>,
     #[arg(long)]
     pub output: PathBuf,
@@ -230,6 +235,39 @@ fn contract_failure(message: impl Into<String>) -> ReleaseFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the macOS Intel retirement.
+    ///
+    /// #182 reduced the maintained matrix to three hosts and updated both
+    /// `TARGETS` and the equality check in `generate`, but left this argument
+    /// declared as `num_args = 4`. clap refused the three-manifest call before
+    /// `generate` could apply its own check, and the release qualification
+    /// stopped at "Verify complete native release inventory". Only a rehearsal
+    /// dispatch found it; ordinary CI never reaches that workflow.
+    #[test]
+    fn manifest_arity_follows_the_maintained_target_matrix() {
+        use clap::CommandFactory as _;
+
+        let command = Cli::command();
+        let generate = command
+            .get_subcommands()
+            .find(|candidate| candidate.get_name() == "generate")
+            .expect("generate subcommand");
+        let manifests = generate
+            .get_arguments()
+            .find(|argument| argument.get_id() == "manifests")
+            .expect("manifests argument");
+        let expected = u64::try_from(crate::ecosystem::TARGETS.len()).expect("target count");
+        let range = manifests.get_num_args().expect("declared arity");
+        assert_eq!(
+            (range.min_values(), range.max_values()),
+            (
+                usize::try_from(expected).expect("min"),
+                usize::try_from(expected).expect("max")
+            ),
+            "--manifests must take exactly one manifest per maintained target"
+        );
+    }
 
     fn valid() -> PackageArgs {
         PackageArgs {
