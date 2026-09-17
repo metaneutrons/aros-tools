@@ -12,6 +12,7 @@ tag=
 tag_object=
 source_commit=
 tag_date_epoch=
+mode=
 governance_contract=
 
 while (($#)); do
@@ -21,6 +22,7 @@ while (($#)); do
         --tag-object) tag_object=${2:-}; shift 2 ;;
         --source-commit) source_commit=${2:-}; shift 2 ;;
         --tag-date-epoch) tag_date_epoch=${2:-}; shift 2 ;;
+        --mode) mode=${2:-}; shift 2 ;;
         --governance-contract) governance_contract=${2:-}; shift 2 ;;
         *) fail "unknown release-reference verifier argument: $1" ;;
     esac
@@ -38,6 +40,16 @@ done
     fail 'source commit must be a full Git SHA-1'
 [[ "$tag_date_epoch" =~ ^[1-9][0-9]*$ ]] || \
     fail 'tag timestamp must be a positive epoch'
+# The mode is mandatory and has no default. Governance needs Administration
+# read, which the workflow token cannot hold, so a caller that omitted the flag
+# would either fail late with HTTP 403 or, worse, silently verify less than the
+# release contract promises. Refusing an unset mode makes the choice visible at
+# every call site.
+case "$mode" in
+    identity | governance) ;;
+    '') fail 'a verification mode is required: --mode identity or --mode governance' ;;
+    *) fail "unknown verification mode: $mode" ;;
+esac
 [[ -n "${GH_TOKEN:-}" ]] || fail 'GH_TOKEN is required for remote identity checks'
 if [[ -n "$governance_contract" ]]; then
     [[ "${AROS_RELEASE_POLICY_FIXTURE:-}" == 1 ]] || \
@@ -103,6 +115,15 @@ for ruleset_id in "${ruleset_ids[@]}"; do
 done
 [[ "$immutable_ruleset" == true ]] || \
     fail 'no active v* tag ruleset forbids both update and deletion'
+
+# Identity is a property of the tag and is therefore re-proved at every stage.
+# Governance is a property of the repository: one authenticated read before any
+# signing is what the contract needs, and repeating it would force the
+# Administration-scoped token into checkout, build, signing and publication.
+if [[ "$mode" == identity ]]; then
+    printf '%s\n' "$source_commit"
+    exit 0
+fi
 
 protection_arguments=(--repository "$repository")
 [[ -z "$governance_contract" ]] || \
