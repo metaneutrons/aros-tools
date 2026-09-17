@@ -155,9 +155,15 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                 errors.append(
                     f'{path}: release body retrieval bypasses bounded API metadata: {forbidden}'
                 )
-        if whole.count('RELEASE_ADMIN_READ_TOKEN') != 2:
+        # Two readers, each one env binding plus its own missing-secret check:
+        # the governance job that proves protected main once before any signing,
+        # and the immutable-release policy preflight. The count is pinned so the
+        # Administration-scoped token cannot spread into checkout, build,
+        # signing or publication, which is the isolation the release contract
+        # promises.
+        if whole.count('RELEASE_ADMIN_READ_TOKEN') != 4:
             errors.append(
-                f'{path}: administration-read credential must occur only in one env binding and one check'
+                f'{path}: administration-read credential must occur only in two env bindings and two checks'
             )
 
         secret_domains = {
@@ -471,6 +477,34 @@ if homebrew_users:
                 'uses: ./.github/actions/homebrew-token' not in step or '\n        run:' in step
             ):
                 errors.append('Homebrew private key must only reach the verified token factory')
+
+# Every release-reference verification states its mode. Identity is re-proved at
+# each stage with the workflow token; governance reads the Administration-scoped
+# contract and must happen exactly once, before anything is signed. An
+# invocation without a mode is refused by the script itself, but catching it
+# here fails at review time rather than on an immutable tag.
+governance_modes = 0
+verifies_release_ref = False
+for path in (*root.glob('*.yml'), *root.glob('*.yaml')):
+    text = path.read_text()
+    for invocation in re.finditer(r'verify-release-ref\.sh"?(?P<rest>[^\n]*)', text):
+        verifies_release_ref = True
+        rest = invocation.group('rest')
+        if '--mode identity' in rest:
+            continue
+        if '--mode governance' in rest:
+            governance_modes += 1
+            continue
+        errors.append(
+            f'{path}: release-reference verification states no mode: '
+            'use --mode identity, or --mode governance exactly once'
+        )
+# Only assert the single reader where release-reference verification exists at
+# all; policy fixtures scan workflow sets that contain none of it.
+if verifies_release_ref and governance_modes != 1:
+    errors.append(
+        f'{root}: governance verification must occur exactly once, found {governance_modes}'
+    )
 
 for path in (*root.glob('*.yml'), *root.glob('*.yaml')):
     for legacy in ('HOMEBREW_TAP_TOKEN', 'PACKAGE_PUBLISH_TOKEN'):

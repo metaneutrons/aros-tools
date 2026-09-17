@@ -278,8 +278,33 @@ verify_fixture_ref=(
     --tag-object aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     --source-commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     --tag-date-epoch 1704067200
+    --mode governance
     --governance-contract "$work/governance.toml"
 )
+verify_fixture_identity=("${verify_fixture_ref[@]:0:11}" --mode identity)
+
+# The mode is mandatory. A caller that omits it must be refused rather than
+# silently verifying only part of the contract.
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture \
+    PATH="$work/mock-bin:$PATH" "${verify_fixture_ref[@]:0:11}"
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture \
+    PATH="$work/mock-bin:$PATH" "${verify_fixture_ref[@]:0:11}" --mode sideways
+
+# Identity mode proves the tag without reading the governance contract, so a
+# broken protection state cannot fail it. That is what lets the signing and
+# publication stages verify identity without an Administration-scoped token.
+AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
+    "${verify_fixture_identity[@]}" >/dev/null
+MOCK_BAD_MAIN_PROTECTION=non-strict AROS_RELEASE_POLICY_FIXTURE=1 \
+    GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
+    "${verify_fixture_identity[@]}" >/dev/null
+
+# Identity mode still proves the immutable tag ruleset.
+for invalid_ruleset in missing-deletion bypass wrong-pattern; do
+    expect_failure env MOCK_BAD_RULESET="$invalid_ruleset" \
+        AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture \
+        PATH="$work/mock-bin:$PATH" "${verify_fixture_identity[@]}"
+done
 expect_failure env GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \
     "${verify_fixture_ref[@]}"
 AROS_RELEASE_POLICY_FIXTURE=1 GH_TOKEN=fixture PATH="$work/mock-bin:$PATH" \

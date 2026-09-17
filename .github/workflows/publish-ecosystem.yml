@@ -46,7 +46,7 @@ jobs:
           TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
         run: |
           set -euo pipefail
-          scripts/release/verify-release-ref.sh \
+          scripts/release/verify-release-ref.sh --mode identity \
             --repository "$GITHUB_REPOSITORY" --tag "$TAG" \
             --tag-object "$TAG_OBJECT" --source-commit "$SOURCE_COMMIT" \
             --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
@@ -205,7 +205,7 @@ jobs:
           TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
         run: |
           set -euo pipefail
-          scripts/release/verify-release-ref.sh \
+          scripts/release/verify-release-ref.sh --mode identity \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
             --tag-object "$TAG_OBJECT" \
@@ -319,7 +319,7 @@ jobs:
             fi
             if ((pr_count == 0)); then
               GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
-                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" --mode identity \
                 --repository "$GITHUB_REPOSITORY" \
                 --tag "$TAG" --tag-object "$TAG_OBJECT" \
                 --source-commit "$SOURCE_COMMIT" \
@@ -370,7 +370,7 @@ jobs:
           git add Formula/aros-tools.rb README.md
           git commit -m "aros-tools ${VERSION}"
           GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
-            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" --mode identity \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" --tag-object "$TAG_OBJECT" \
             --source-commit "$SOURCE_COMMIT" \
@@ -383,7 +383,7 @@ jobs:
           gh auth setup-git
           git push -u origin "$branch"
           GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
-            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+            "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" --mode identity \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" --tag-object "$TAG_OBJECT" \
             --source-commit "$SOURCE_COMMIT" \
@@ -443,7 +443,7 @@ jobs:
             echo '::error::AP7310 Homebrew PR head changed after qualification'
             exit 1
           fi
-          GH_TOKEN="${{ github.token }}" scripts/release/verify-release-ref.sh \
+          GH_TOKEN="${{ github.token }}" scripts/release/verify-release-ref.sh --mode identity \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" --tag-object "$TAG_OBJECT" \
             --source-commit "$SOURCE_COMMIT" \
@@ -494,7 +494,7 @@ jobs:
           TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
         run: |
           set -euo pipefail
-          scripts/release/verify-release-ref.sh \
+          scripts/release/verify-release-ref.sh --mode identity \
             --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" \
             --tag-object "$TAG_OBJECT" \
@@ -574,7 +574,7 @@ jobs:
               git add PKGBUILD .SRCINFO
               git commit -m "aros-tools-bin ${VERSION}-1"
               GH_TOKEN="$SOURCE_REPOSITORY_TOKEN" \
-                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" \
+                "$GITHUB_WORKSPACE/scripts/release/verify-release-ref.sh" --mode identity \
                   --repository "$GITHUB_REPOSITORY" \
                   --tag "$TAG" --tag-object "$TAG_OBJECT" \
                   --source-commit "$SOURCE_COMMIT" \
