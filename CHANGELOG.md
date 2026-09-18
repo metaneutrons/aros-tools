@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.1](https://github.com/metaneutrons/aros-tools/compare/v0.3.0...v0.3.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **release:** separate tag identity from the governance read ([#197](https://github.com/metaneutrons/aros-tools/issues/197)) ([1c19b99](https://github.com/metaneutrons/aros-tools/commit/1c19b99e3fb2908fe69de73d50a23d5934d2410e))
+
 ## [0.3.0](https://github.com/metaneutrons/aros-tools/compare/v0.2.0...v0.3.0) (2026-09-17)
 
 
