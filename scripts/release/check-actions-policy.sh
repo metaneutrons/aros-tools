@@ -131,6 +131,9 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
         whole = '\n'.join(lines)
         for required in (
             '--notes-file candidate/RELEASE_NOTES.md',
+            'resolve_created_draft()',
+            'for delay in 0 1 2 4 8',
+            'newly created draft did not become tag-addressable',
             'missing-upload-order',
             'https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets',
             'verify-publication-channels.sh',
