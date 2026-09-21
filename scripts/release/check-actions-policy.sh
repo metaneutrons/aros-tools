@@ -398,6 +398,26 @@ for workflow_name in ('publish-ecosystem.yml',):
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
 release_jobs = workflow_jobs(root / 'release.yml')
+release_finalizer = release_jobs.get('finalize-release-please', '')
+if (root / 'release.yml').exists() and release_finalizer:
+    required_finalizer = (
+        "needs.metadata.outputs.is_release == 'true'",
+        "needs.metadata.outputs.is_stable == 'true'",
+        "needs.final-audit.result == 'success'",
+        'needs: [metadata, final-audit]',
+        'contents: read',
+        'issues: write',
+        'scripts/release/finalize-release-please.sh',
+        'TAG: ${{ needs.metadata.outputs.tag }}',
+        'SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}',
+    )
+    for required in required_finalizer:
+        if required not in release_finalizer:
+            errors.append(
+                f'{root / "release.yml"}: Release Please finalizer omits contract marker: {required}'
+            )
+elif (root / 'release.yml').exists():
+    errors.append(f'{root / "release.yml"}: Release Please finalizer is missing')
 rp_path = root / 'release-please.yml'
 if rp_path.exists():
     rp_job = workflow_jobs(rp_path).get('release-pr', '')
