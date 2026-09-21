@@ -181,11 +181,13 @@ else
 fi
 aur_count=$(jq -r '.resultcount' "$work/aur-rpc.json")
 [[ "$aur_count" =~ ^[01]$ ]] || fail 'AUR RPC result is ambiguous'
-if [[ -n "$fixture_root" ]]; then
-    cp -R "$fixture_root/aur" "$work/aur"
-else
-    git -c http.followRedirects=false clone --quiet --depth 1 --branch master --single-branch \
-        https://aur.archlinux.org/aros-tools-bin.git "$work/aur"
+if [[ "$aur_count" == 1 ]]; then
+    if [[ -n "$fixture_root" ]]; then
+        cp -R "$fixture_root/aur" "$work/aur"
+    else
+        git -c http.followRedirects=false clone --quiet --depth 1 --branch master --single-branch \
+            https://aur.archlinux.org/aros-tools-bin.git "$work/aur"
+    fi
 fi
 if [[ -e "$work/aur/PKGBUILD" && \
       ( ! -f "$work/aur/PKGBUILD" || -L "$work/aur/PKGBUILD" ) ]]; then
