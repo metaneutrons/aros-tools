@@ -4,6 +4,15 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.2](https://github.com/metaneutrons/aros-tools/compare/v0.3.1...v0.3.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** accept absent AUR package during preflight ([4773f54](https://github.com/metaneutrons/aros-tools/commit/4773f54c3b6dc7c11509cc4a0279e0ee0df102d7))
+* **release:** finalize Release Please after final audit ([5d047da](https://github.com/metaneutrons/aros-tools/commit/5d047da9865ed01615f8f913fa990ac26e0a3d2c))
+* **release:** retry transient cosign bootstrap failures ([6c20493](https://github.com/metaneutrons/aros-tools/commit/6c204939edf8c0e4defa89125d931475a571b4a4))
+
 ## [0.3.1](https://github.com/metaneutrons/aros-tools/compare/v0.3.0...v0.3.1) (2026-09-18)
 
 
