@@ -78,6 +78,39 @@ for script in release_scripts.glob('*.sh'):
             )
 PY
 
+# Cosign delivery can be transiently unavailable, but a retry must never
+# weaken the pinned installer or let signing continue without a verified client.
+python3 - "$root/.github/actions/install-verified-cosign/action.yml" \
+    "$root/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+installer = Path(sys.argv[1]).read_text(encoding='utf-8')
+workflow = Path(sys.argv[2]).read_text(encoding='utf-8')
+required_installer_markers = (
+    'name: Install verified Cosign',
+    'description: Installs the pinned Cosign release with one bounded retry',
+    'id: initial',
+    'id: retry',
+    "steps.initial.outcome == 'failure'",
+    "steps.retry.outcome != 'success'",
+    'sleep 20',
+    'no signing or publication may continue',
+)
+missing = [marker for marker in required_installer_markers if marker not in installer]
+if missing:
+    raise SystemExit(f'Cosign retry action omits contract markers: {missing}')
+installer_pin = 'sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6'
+if installer.count(installer_pin) != 2:
+    raise SystemExit('Cosign retry action must use exactly two pinned installer attempts')
+if installer.count('continue-on-error: true') != 2:
+    raise SystemExit('Cosign retry action must handle each installer attempt explicitly')
+if workflow.count('uses: ./.github/actions/install-verified-cosign') != 5:
+    raise SystemExit('release workflow does not centralize every Cosign installation')
+if 'uses: sigstore/cosign-installer@' in workflow:
+    raise SystemExit('release workflow bypasses the bounded Cosign retry action')
+PY
+
 # Every public-output helper delegates parent creation to one no-follow policy.
 # Existing caller-owned modes are preserved exactly and a symlink parent is
 # rejected before any output is created.
@@ -978,6 +1011,7 @@ cp "$root/.github/workflows/release.yml" \
     "$work/policy/.github/workflows/release.yml"
 mkdir -p "$work/policy/.github/actions"
 cp -R "$root/.github/actions/homebrew-token" "$work/policy/.github/actions/"
+cp -R "$root/.github/actions/install-verified-cosign" "$work/policy/.github/actions/"
 mkdir -p "$work/policy/scripts/release"
 cp "$root/scripts/release/homebrew-qualification.json" "$work/policy/scripts/release/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null

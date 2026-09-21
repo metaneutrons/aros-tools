@@ -1,0 +1,38 @@
+name: Install verified Cosign
+description: Installs the pinned Cosign release with one bounded retry for transient delivery failures.
+
+inputs:
+  cosign-release:
+    description: Exact Cosign release to install and verify.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: initial
+      name: Install verified Cosign
+      continue-on-error: true
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: ${{ inputs.cosign-release }}
+    - name: Wait before one bounded Cosign retry
+      if: ${{ steps.initial.outcome == 'failure' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo '::warning::Cosign installation failed; retrying once after a 20-second backoff.'
+        sleep 20
+    - id: retry
+      name: Retry verified Cosign installation
+      if: ${{ steps.initial.outcome == 'failure' }}
+      continue-on-error: true
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: ${{ inputs.cosign-release }}
+    - name: Require verified Cosign installation
+      if: ${{ steps.initial.outcome != 'success' && steps.retry.outcome != 'success' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo '::error::Cosign installation failed twice; no signing or publication may continue.'
+        exit 1
