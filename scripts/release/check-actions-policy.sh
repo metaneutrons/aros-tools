@@ -92,7 +92,11 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                         f'{path}:{line_number}: attestation verification omits {flag}'
                     )
 
-    if path.name == 'release.yml' and 'gh release create' in '\n'.join(lines):
+    # The release contract is independent from a particular GitHub CLI
+    # invocation.  Guarding these checks on a legacy command would allow a
+    # workflow edit to silently remove the contract together with that
+    # command, exactly when a transport migration needs the most scrutiny.
+    if path.name == 'release.yml':
         jobs: dict[str, str] = {}
         in_jobs = False
         current_name: str | None = None
@@ -130,7 +134,10 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
 
         whole = '\n'.join(lines)
         for required in (
-            '--notes-file candidate/RELEASE_NOTES.md',
+            'create=(gh api --method POST',
+            '--input "$RUNNER_TEMP/draft-create-request.json"',
+            'draft creation succeeded without an exact bound response',
+            "jq -c '[.]' \"$RUNNER_TEMP/draft-create.out\"",
             'resolve_created_draft()',
             'for delay in 0 1 2 4 8 16 32 64 128',
             'create_exact_draft()',
@@ -151,7 +158,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                 errors.append(f'{path}: hardened release workflow omits {required}')
         if '--generate-notes' in whole:
             errors.append(f'{path}: generated release notes bypass the signed deterministic body')
-        for forbidden in ('gh release upload', 'gh release edit'):
+        for forbidden in ('gh release create', 'gh release upload', 'gh release edit'):
             if forbidden in whole:
                 errors.append(
                     f'{path}: tag-addressed release mutation is forbidden: {forbidden}'
