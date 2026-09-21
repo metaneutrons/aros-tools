@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.6](https://github.com/metaneutrons/aros-tools/compare/v0.3.5...v0.3.6) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** retry draft discovery and keyless signing ([#212](https://github.com/metaneutrons/aros-tools/issues/212)) ([ae23e5b](https://github.com/metaneutrons/aros-tools/commit/ae23e5b362eefd0b992f2ff6f2a58be19cf41acd))
+
 ## [0.3.5](https://github.com/metaneutrons/aros-tools/compare/v0.3.4...v0.3.5) (2026-09-21)
 
 
