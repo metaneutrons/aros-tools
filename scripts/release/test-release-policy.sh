@@ -856,6 +856,18 @@ expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=17040672
 printf '%s\n' \
     '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"1.2.3-1"}]}' \
     > "$work/channels/aur-rpc.json"
+printf '%s\n' '{"resultcount":0,"results":[]}' > "$work/channels/aur-rpc.json"
+AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
+  MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
+  PATH="$work/mock-bin:$PATH" \
+  "${channel_verify[@]}" --mode preflight >/dev/null
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
+    MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
+    PATH="$work/mock-bin:$PATH" \
+    "${channel_verify[@]}" --mode exact
+printf '%s\n' \
+    '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"1.2.3-1"}]}' \
+    > "$work/channels/aur-rpc.json"
 printf '%s\n' '# divergent same-version bytes' \
     >> "$work/channels/homebrew/Formula/aros-tools.rb"
 expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
