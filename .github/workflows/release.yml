@@ -1607,13 +1607,25 @@ jobs:
           [[ "$IS_STABLE" == true ]] && expected_prerelease=false
 
           resolve_by_tag() {
-            gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"
-            jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
-              "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/release-matches.json"
-            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") -le 1 ]] || {
-              echo '::error::AP7500 release tag resolves to multiple release IDs'; exit 1;
-            }
+            if ! gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"; then
+              echo '::error::AP7500 release tag lookup failed while resolving the draft'
+              return 1
+            fi
+            if ! jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+              "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/release-matches.json"; then
+              echo '::error::AP7500 release tag lookup produced an invalid response'
+              return 1
+            fi
+            local match_count
+            if ! match_count=$(jq -er 'length | numbers' "$RUNNER_TEMP/release-matches.json"); then
+              echo '::error::AP7500 release tag lookup has no valid match count'
+              return 1
+            fi
+            if ((match_count > 1)); then
+              echo '::error::AP7500 release tag resolves to multiple release IDs'
+              return 1
+            fi
           }
           resolve_created_draft() {
             local delay
@@ -1621,18 +1633,35 @@ jobs:
             # temporary untagged URL before its tag lookup is consistent.
             # Re-read only the tag-addressed release; never create it twice
             # and never accept an unbound numeric release ID.
-            for delay in 0 1 2 4 8 16 32; do
-              ((delay == 0)) || sleep "$delay"
-              resolve_by_tag
-              # Do not use `[[ ... ]] && return` here: with `set -e`, the
-              # expected first miss would terminate this shell before its
-              # bounded retry policy could run.
+            for delay in 0 1 2 4 8 16 32 64 128; do
+              if ((delay > 0)); then
+                sleep "$delay"
+              fi
+              if ! resolve_by_tag; then
+                return 1
+              fi
               if [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then
                 return 0
               fi
             done
             echo '::error::AP7500 newly created draft did not become tag-addressable'
             return 1
+          }
+          create_exact_draft() {
+            local create_status=0
+            # GitHub can create a private draft but return a non-zero CLI
+            # status before its tag index is consistent. Treat that outcome
+            # as ambiguous, never as success: the tag-only resolver below
+            # must still discover and validate the exact draft.
+            "${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2>&1 || create_status=$?
+            if ! resolve_created_draft; then
+              cat "$RUNNER_TEMP/draft-create.out" >&2 || true
+              echo '::error::AP7500 draft creation did not yield a tag-addressable draft'
+              return 1
+            fi
+            if ((create_status != 0)); then
+              echo '::warning::AP7500 draft creation returned non-zero after the exact draft was recovered'
+            fi
           }
           download_by_id() {
             local release_id=$1 destination=$2 mode=$3
@@ -1691,8 +1720,7 @@ jobs:
               --verify-tag --draft --notes-file candidate/RELEASE_NOTES.md
               --title "aros-tools $TAG")
             [[ "$IS_STABLE" == true ]] || create+=(--prerelease)
-            "${create[@]}"
-            resolve_created_draft
+            create_exact_draft
           elif [[ "$RECOVERED_KIND" == absent ]]; then
             echo '::error::AP7500 release state appeared after recovery; rerun for verified recovery'
             exit 1
