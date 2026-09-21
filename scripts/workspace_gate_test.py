@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -254,13 +255,49 @@ if name == "cmake" and (root / "fail-engine").exists():
     def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("resolve_created_draft()", workflow)
-        self.assertIn("for delay in 0 1 2 4 8", workflow)
+        self.assertIn("for delay in 0 1 2 4 8 16 32", workflow)
+        self.assertIn(
+            'if [[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then',
+            workflow,
+        )
+        self.assertNotIn(
+            '[[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]] && return 0',
+            workflow,
+        )
         self.assertIn("newly created draft did not become tag-addressable", workflow)
         create_block = workflow.split('create=(gh release create', 1)[1].split(
             'elif [[ "$RECOVERED_KIND" == absent ]]', 1
         )[0]
         self.assertEqual(create_block.count('gh release create'), 0)
         self.assertIn("resolve_created_draft", create_block)
+
+        function = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls == 1 )); then",
+                "    printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                function,
+                "resolve_created_draft",
+                "[[ $calls == 2 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

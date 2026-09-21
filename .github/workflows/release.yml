@@ -1621,10 +1621,15 @@ jobs:
             # temporary untagged URL before its tag lookup is consistent.
             # Re-read only the tag-addressed release; never create it twice
             # and never accept an unbound numeric release ID.
-            for delay in 0 1 2 4 8; do
+            for delay in 0 1 2 4 8 16 32; do
               ((delay == 0)) || sleep "$delay"
               resolve_by_tag
-              [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]] && return 0
+              # Do not use `[[ ... ]] && return` here: with `set -e`, the
+              # expected first miss would terminate this shell before its
+              # bounded retry policy could run.
+              if [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then
+                return 0
+              fi
             done
             echo '::error::AP7500 newly created draft did not become tag-addressable'
             return 1
