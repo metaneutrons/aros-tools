@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.3](https://github.com/metaneutrons/aros-tools/compare/v0.3.2...v0.3.3) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** wait for newly created draft tag consistency ([efed2ae](https://github.com/metaneutrons/aros-tools/commit/efed2ae33e88d54a0981055f9af2dde2805e7d51))
+
 ## [0.3.2](https://github.com/metaneutrons/aros-tools/compare/v0.3.1...v0.3.2) (2026-09-21)
 
 
