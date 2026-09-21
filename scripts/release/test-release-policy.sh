@@ -111,6 +111,28 @@ if 'uses: sigstore/cosign-installer@' in workflow:
     raise SystemExit('release workflow bypasses the bounded Cosign retry action')
 PY
 
+# Keyless signing itself also gets precisely one bounded retry. A transient
+# failure may not produce a release without a bundle, and a second failure is
+# terminal rather than an unbounded retry loop.
+python3 - "$root/scripts/release/reuse-sigstore-bundles.sh" <<'PY'
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1]).read_text(encoding='utf-8')
+required = (
+    'sign_new_bundle() {',
+    'for attempt in 1 2; do',
+    'cosign sign-blob --yes --bundle "$candidate_bundle" "$subject" || sign_status=$?',
+    'sleep 20',
+    'cosign failed twice while signing release subject',
+)
+missing = [marker for marker in required if marker not in script]
+if missing:
+    raise SystemExit(f'Cosign signing retry omits contract markers: {missing}')
+if script.count('cosign sign-blob --yes --bundle') != 1:
+    raise SystemExit('Cosign signing must have one centralized retry path')
+PY
+
 # Every public-output helper delegates parent creation to one no-follow policy.
 # Existing caller-owned modes are preserved exactly and a symlink parent is
 # rejected before any output is created.
@@ -531,6 +553,57 @@ expect_failure env PATH="$work/mock-bin:$PATH" \
         'https://github.com/example/project/.github/workflows/release.yml@refs/tags/v1.2.3' \
       --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
         --allow-new false
+
+# A newly signed subject gets one retry only. The first failure leaves a
+# partial bundle, which the retry must replace before accepting its success.
+mkdir "$work/sign-retry-bin" "$work/sign-retry-candidate" "$work/sign-retry-existing"
+printf '%s\n' fresh > "$work/sign-retry-candidate/fresh-subject"
+cat > "$work/sign-retry-bin/cosign" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+    sign-blob)
+        count_file=${MOCK_COSIGN_SIGN_COUNT:?}
+        count=0
+        [[ -f "$count_file" ]] && count=$(cat "$count_file")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$count_file"
+        bundle=
+        while (($#)); do
+            [[ "$1" == --bundle ]] && { bundle=$2; shift 2; continue; }
+            shift
+        done
+        if ((count == 1)); then
+            printf '%s\n' partial > "$bundle"
+            exit 1
+        fi
+        printf '%s\n' signed > "$bundle"
+        ;;
+    verify-blob) exit 0 ;;
+    *) exit 89 ;;
+esac
+MOCK
+cat > "$work/sign-retry-bin/sleep" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod 0755 "$work/sign-retry-bin/cosign" "$work/sign-retry-bin/sleep"
+MOCK_COSIGN_SIGN_COUNT="$work/sign-retry-count" PATH="$work/sign-retry-bin:$PATH" \
+    "$root/scripts/release/reuse-sigstore-bundles.sh" \
+      --candidate-dir "$work/sign-retry-candidate" \
+      --existing-dir "$work/sign-retry-existing" \
+      --certificate-identity \
+        'https://github.com/example/project/.github/workflows/release.yml@refs/tags/v1.2.3' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      --allow-new true >/dev/null
+[[ $(cat "$work/sign-retry-count") == 2 ]] || {
+    printf '%s\n' 'cosign signing retry did not make exactly two attempts' >&2
+    exit 1
+}
+[[ $(cat "$work/sign-retry-candidate/fresh-subject.sigstore.json") == signed ]] || {
+    printf '%s\n' 'cosign signing retry retained a partial bundle' >&2
+    exit 1
+}
 
 # A/B classification uses only immutable published stable releases and a
 # closed low-risk path policy. Source-only patches may use one producer;

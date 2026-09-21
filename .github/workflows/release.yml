@@ -243,15 +243,53 @@ jobs:
           set -euo pipefail
           handoff="$RUNNER_TEMP/recovered-release-state"
           install -d "$handoff"
-          gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$handoff/pages.json"
-          jq -e 'type == "array" and all(.[]; type == "array")' \
-            "$handoff/pages.json" >/dev/null || {
-              echo '::error::AP7060 paginated release response is malformed'; exit 1;
-            }
-          jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
-            "$handoff/pages.json" > "$handoff/matches.json"
-          count=$(jq 'length' "$handoff/matches.json")
+          resolve_release_list() {
+            if ! gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$handoff/pages.json"; then
+              echo '::error::AP7060 private release lookup failed'
+              return 1
+            fi
+            if ! jq -e 'type == "array" and all(.[]; type == "array")' \
+              "$handoff/pages.json" >/dev/null; then
+              echo '::error::AP7060 paginated release response is malformed'
+              return 1
+            fi
+            if ! jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+              "$handoff/pages.json" > "$handoff/matches.json"; then
+              echo '::error::AP7060 release lookup could not filter the requested tag'
+              return 1
+            fi
+            return 0
+          }
+          settle_private_draft_discovery() {
+            local delay match_count
+            # Release Please may create its private draft immediately before
+            # this tag workflow begins. GitHub's release-list index is
+            # eventually consistent, so wait briefly before declaring absence.
+            # The loop is read-only and cannot create or alter a release.
+            for delay in 0 3 6 12 24; do
+              if ((delay > 0)); then
+                echo "::notice::waiting ${delay}s for private draft discovery to settle"
+                sleep "$delay"
+              fi
+              if ! resolve_release_list; then
+                return 1
+              fi
+              if ! match_count=$(jq -er 'length | numbers' "$handoff/matches.json"); then
+                echo '::error::AP7060 settled release lookup has no valid match count'
+                return 1
+              fi
+              if ((match_count == 1)); then
+                return 0
+              fi
+            done
+            return 0
+          }
+          if ! settle_private_draft_discovery; then
+            echo '::error::AP7060 private draft discovery could not be settled'
+            exit 1
+          fi
+          count=$(jq -er 'length | numbers' "$handoff/matches.json")
           if ((count > 1)); then
             echo '::error::AP7060 release tag resolves to multiple release IDs'
             exit 1
@@ -1626,6 +1664,7 @@ jobs:
               echo '::error::AP7500 release tag resolves to multiple release IDs'
               return 1
             fi
+            return 0
           }
           resolve_created_draft() {
             local delay
@@ -1702,7 +1741,10 @@ jobs:
               }
           }
 
-          resolve_by_tag
+          if ! resolve_by_tag; then
+            echo '::error::AP7500 release tag lookup failed before draft creation or recovery'
+            exit 1
+          fi
           count=$(jq 'length' "$RUNNER_TEMP/release-matches.json")
           # RECOVERED_KIND is injected by the step-level env contract.
           # shellcheck disable=SC2153
