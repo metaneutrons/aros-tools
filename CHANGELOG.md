@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.7](https://github.com/metaneutrons/aros-tools/compare/v0.3.6...v0.3.7) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** bind draft creation to API response ([b993aa4](https://github.com/metaneutrons/aros-tools/commit/b993aa490db8835e82cef0501316dd3a94279101))
+
 ## [0.3.6](https://github.com/metaneutrons/aros-tools/compare/v0.3.5...v0.3.6) (2026-09-21)
 
 
