@@ -303,6 +303,39 @@ if name == "cmake" and (root / "fail-engine").exists():
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_release_draft_discovery_settles_before_classifying_the_tag_as_absent(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("settle_private_draft_discovery()", workflow)
+        self.assertIn("for delay in 0 3 6 12 24", workflow)
+        self.assertIn("The loop is read-only and cannot create or alter a release", workflow)
+        settlement = "settle_private_draft_discovery() {\n" + textwrap.dedent(
+            workflow.split("          settle_private_draft_discovery() {\n", 1)[1].split(
+                "          if ! settle_private_draft_discovery; then", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"handoff={temporary!r}",
+                "calls=0",
+                "resolve_release_list() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls < 3 )); then",
+                "    printf '[]' > \"$handoff/matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$handoff/matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                settlement,
+                "settle_private_draft_discovery",
+                "[[ $calls == 3 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_release_draft_recovery_handles_nonzero_create_after_side_effect(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         resolver = "resolve_created_draft() {\n" + textwrap.dedent(
