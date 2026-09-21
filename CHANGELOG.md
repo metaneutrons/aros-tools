@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.5](https://github.com/metaneutrons/aros-tools/compare/v0.3.4...v0.3.5) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** recover draft create exit status ([#210](https://github.com/metaneutrons/aros-tools/issues/210)) ([1bdad9d](https://github.com/metaneutrons/aros-tools/commit/1bdad9dc129925eec804a3dbc641525a0833d2ac))
+
 ## [0.3.4](https://github.com/metaneutrons/aros-tools/compare/v0.3.3...v0.3.4) (2026-09-21)
 
 
