@@ -268,11 +268,13 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("newly created draft did not become tag-addressable", workflow)
         self.assertIn("create_exact_draft()", workflow)
         self.assertIn('"${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2>&1 || create_status=$?', workflow)
+        self.assertIn("draft creation succeeded without an exact bound response", workflow)
+        self.assertIn("jq -c '[.]' \"$RUNNER_TEMP/draft-create.out\"", workflow)
         self.assertIn("draft creation did not yield a tag-addressable draft", workflow)
-        create_block = workflow.split('create=(gh release create', 1)[1].split(
+        self.assertNotIn("gh release create", workflow)
+        create_block = workflow.split('create=(gh api --method POST', 1)[1].split(
             'elif [[ "$RECOVERED_KIND" == absent ]]', 1
         )[0]
-        self.assertEqual(create_block.count('gh release create'), 0)
         self.assertIn("create_exact_draft", create_block)
 
         function = "resolve_created_draft() {\n" + textwrap.dedent(
@@ -284,6 +286,7 @@ if name == "cmake" and (root / "fail-engine").exists():
             script = "\n".join((
                 "set -euo pipefail",
                 f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
                 "calls=0",
                 "resolve_by_tag() {",
                 "  calls=$((calls + 1))",
@@ -352,6 +355,7 @@ if name == "cmake" and (root / "fail-engine").exists():
             script = "\n".join((
                 "set -euo pipefail",
                 f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
                 "calls=0",
                 "resolve_by_tag() {",
                 "  calls=$((calls + 1))",
@@ -364,13 +368,16 @@ if name == "cmake" and (root / "fail-engine").exists():
                 "sleep() { :; }",
                 "create_after_side_effect() { printf created; return 1; }",
                 "create=(create_after_side_effect)",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
                 resolver,
                 creator,
                 "create_exact_draft",
                 "[[ $calls == 2 ]]",
             ))
             result = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -390,6 +397,7 @@ if name == "cmake" and (root / "fail-engine").exists():
             script = "\n".join((
                 "set -euo pipefail",
                 f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
                 "calls=0",
                 "resolve_by_tag() {",
                 "  calls=$((calls + 1))",
@@ -398,16 +406,48 @@ if name == "cmake" and (root / "fail-engine").exists():
                 "sleep() { :; }",
                 "create_without_side_effect() { return 1; }",
                 "create=(create_without_side_effect)",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
                 resolver,
                 creator,
                 "if create_exact_draft; then exit 1; fi",
                 "[[ $calls == 9 ]]",
             ))
             result = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("draft creation did not yield a tag-addressable draft", result.stdout)
+
+    def test_release_draft_recovery_accepts_the_exact_create_response_without_lookup(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
+                "resolve_created_draft() { exit 91; }",
+                "create_exact_response() {",
+                "  printf '%s' '{\"id\":1,\"tag_name\":\"v1.2.3\",\"name\":\"aros-tools v1.2.3\",\"body\":\"notes\",\"draft\":true,\"prerelease\":false,\"immutable\":false}'",
+                "}",
+                "create=(create_exact_response)",
+                creator,
+                "create_exact_draft",
+                "jq -e 'length == 1 and .[0].id == 1' \"$RUNNER_TEMP/release-matches.json\" >/dev/null",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
