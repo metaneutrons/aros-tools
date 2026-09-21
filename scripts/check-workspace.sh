@@ -109,6 +109,7 @@ run_quality() {
     scripts/release/test-homebrew-app.py
     python3 scripts/release/test-homebrew-matrix.py
     python3 scripts/release/test-release-please-app.py
+    scripts/release/test-finalize-release-please.sh
     scripts/release/test-release-policy.sh
     actionlint
     # All checked-in shell programs form one lint boundary. The NUL-delimited

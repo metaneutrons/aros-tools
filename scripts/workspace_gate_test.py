@@ -44,7 +44,7 @@ class WorkspaceGateTests(unittest.TestCase):
         self.write("scripts/inert_test.py", "import unittest\nclass Fixture(unittest.TestCase):\n    def test_inert(self):\n        self.assertTrue(True)\n")
         for name in ("check-architecture.sh", "release/check-actions-policy.sh",
                      "release/verify-apt-workflow-contract.sh", "release/test-governance-policy.sh",
-                     "release/test-release-policy.sh"):
+                     "release/test-finalize-release-please.sh", "release/test-release-policy.sh"):
             self.write("scripts/" + name, "#!/bin/sh\nexit 0\n", executable=True)
         for name in ("test-homebrew-app.py", "test-homebrew-matrix.py", "test-release-please-app.py"):
             self.write("scripts/release/" + name,

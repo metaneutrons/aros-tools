@@ -2032,3 +2032,42 @@ jobs:
             --mode exact --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" --candidate-dir candidate
           echo 'immutable stable release and every converged channel remain verified'
+
+  finalize-release-please:
+    name: Finalize the exact Release Please lifecycle
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.final-audit.result == 'success'
+    needs: [metadata, final-audit]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh --mode identity \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - name: Clear only the exact completed Release Please pending label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          scripts/release/finalize-release-please.sh
