@@ -255,7 +255,8 @@ if name == "cmake" and (root / "fail-engine").exists():
     def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("resolve_created_draft()", workflow)
-        self.assertIn("for delay in 0 1 2 4 8 16 32", workflow)
+        self.assertIn("for delay in 0 1 2 4 8 16 32 64 128", workflow)
+        self.assertIn("if ((delay > 0)); then", workflow)
         self.assertIn(
             'if [[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then',
             workflow,
@@ -265,11 +266,14 @@ if name == "cmake" and (root / "fail-engine").exists():
             workflow,
         )
         self.assertIn("newly created draft did not become tag-addressable", workflow)
+        self.assertIn("create_exact_draft()", workflow)
+        self.assertIn('"${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2>&1 || create_status=$?', workflow)
+        self.assertIn("draft creation did not yield a tag-addressable draft", workflow)
         create_block = workflow.split('create=(gh release create', 1)[1].split(
             'elif [[ "$RECOVERED_KIND" == absent ]]', 1
         )[0]
         self.assertEqual(create_block.count('gh release create'), 0)
-        self.assertIn("resolve_created_draft", create_block)
+        self.assertIn("create_exact_draft", create_block)
 
         function = "resolve_created_draft() {\n" + textwrap.dedent(
             workflow.split("          resolve_created_draft() {\n", 1)[1].split(
@@ -298,6 +302,79 @@ if name == "cmake" and (root / "fail-engine").exists():
                 ["bash", "-c", script], capture_output=True, text=True, timeout=30
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_draft_recovery_handles_nonzero_create_after_side_effect(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        resolver = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          create_exact_draft()", 1
+            )[0]
+        )
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls == 1 )); then",
+                "    printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                "create_after_side_effect() { printf created; return 1; }",
+                "create=(create_after_side_effect)",
+                resolver,
+                creator,
+                "create_exact_draft",
+                "[[ $calls == 2 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_draft_recovery_refuses_nonzero_create_without_exact_draft(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        resolver = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          create_exact_draft()", 1
+            )[0]
+        )
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "}",
+                "sleep() { :; }",
+                "create_without_side_effect() { return 1; }",
+                "create=(create_without_side_effect)",
+                resolver,
+                creator,
+                "if create_exact_draft; then exit 1; fi",
+                "[[ $calls == 9 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("draft creation did not yield a tag-addressable draft", result.stdout)
 
 
 if __name__ == "__main__":
