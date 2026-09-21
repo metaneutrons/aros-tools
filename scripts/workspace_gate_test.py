@@ -251,6 +251,17 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("workflow_dispatch:", trigger)
         self.assertIn("tags:", trigger)
 
+    def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("resolve_created_draft()", workflow)
+        self.assertIn("for delay in 0 1 2 4 8", workflow)
+        self.assertIn("newly created draft did not become tag-addressable", workflow)
+        create_block = workflow.split('create=(gh release create', 1)[1].split(
+            'elif [[ "$RECOVERED_KIND" == absent ]]', 1
+        )[0]
+        self.assertEqual(create_block.count('gh release create'), 0)
+        self.assertIn("resolve_created_draft", create_block)
+
 
 if __name__ == "__main__":
     unittest.main()

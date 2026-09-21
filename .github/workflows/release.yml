@@ -1615,6 +1615,20 @@ jobs:
               echo '::error::AP7500 release tag resolves to multiple release IDs'; exit 1;
             }
           }
+          resolve_created_draft() {
+            local delay
+            # GitHub may briefly expose a newly-created draft through its
+            # temporary untagged URL before its tag lookup is consistent.
+            # Re-read only the tag-addressed release; never create it twice
+            # and never accept an unbound numeric release ID.
+            for delay in 0 1 2 4 8; do
+              ((delay == 0)) || sleep "$delay"
+              resolve_by_tag
+              [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]] && return 0
+            done
+            echo '::error::AP7500 newly created draft did not become tag-addressable'
+            return 1
+          }
           download_by_id() {
             local release_id=$1 destination=$2 mode=$3
             scripts/release/download-release-assets.sh \
@@ -1673,10 +1687,7 @@ jobs:
               --title "aros-tools $TAG")
             [[ "$IS_STABLE" == true ]] || create+=(--prerelease)
             "${create[@]}"
-            resolve_by_tag
-            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]] || {
-              echo '::error::AP7500 newly created draft cannot be resolved'; exit 1;
-            }
+            resolve_created_draft
           elif [[ "$RECOVERED_KIND" == absent ]]; then
             echo '::error::AP7500 release state appeared after recovery; rerun for verified recovery'
             exit 1
