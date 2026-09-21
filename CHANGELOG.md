@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.4](https://github.com/metaneutrons/aros-tools/compare/v0.3.3...v0.3.4) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** preserve draft retry under errexit ([3b19bb9](https://github.com/metaneutrons/aros-tools/commit/3b19bb942c4435b047c851a311ae36c4b31fe4f4))
+
 ## [0.3.3](https://github.com/metaneutrons/aros-tools/compare/v0.3.2...v0.3.3) (2026-09-21)
 
 
