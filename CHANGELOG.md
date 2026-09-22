@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.9](https://github.com/metaneutrons/aros-tools/compare/v0.3.8...v0.3.9) (2026-09-22)
+
+
+### Bug Fixes
+
+* **release:** accept stable release booleans ([#218](https://github.com/metaneutrons/aros-tools/issues/218)) ([a77eea5](https://github.com/metaneutrons/aros-tools/commit/a77eea59760635875a9dee5ed5b4d4b1941d59a1))
+
 ## [0.3.8](https://github.com/metaneutrons/aros-tools/compare/v0.3.7...v0.3.8) (2026-09-22)
 
 
