@@ -295,6 +295,21 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("name: qualified-release-staging", ecosystem)
         self.assertIn("needs: recovery", ecosystem)
 
+    def test_public_apt_install_keeps_system_dependencies_without_host_state_mutation(self):
+        ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        install = ecosystem.split("  apt-install:\n", 1)[1].split("\n  homebrew:\n", 1)[0]
+        self.assertIn('sourceparts="$apt_root/system-sources"', install)
+        self.assertIn('/etc/apt/sources.list.d/ubuntu.sources', install)
+        self.assertIn('AP7233 no Ubuntu dependency source is available on this runner', install)
+        self.assertIn('Dir::Etc::sourcelist="$archive_source"', install)
+        self.assertIn('Dir::Etc::sourceparts="$sourceparts"', install)
+        self.assertIn('Dir::State::lists="$lists"', install)
+        self.assertIn('Dir::Cache::archives="$archives"', install)
+        self.assertIn('Signed-By: %s', install)
+        self.assertNotIn('Dir::Etc::sourceparts=-', install)
+        self.assertNotIn('/etc/apt/sources.list.d/aros-tools.sources', install)
+        self.assertNotIn('/usr/share/keyrings/$keyring', install)
+
     def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("resolve_created_draft()", workflow)
