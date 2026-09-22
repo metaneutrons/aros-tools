@@ -304,10 +304,15 @@ jobs:
             jq -c '.[0]' "$handoff/matches.json" > "$handoff/release.json"
             release_id=$(jq -er '.id | select(type == "number" and . > 0)' \
               "$handoff/release.json")
-            draft=$(jq -er '.draft | select(type == "boolean")' "$handoff/release.json")
-            prerelease=$(jq -er '.prerelease | select(type == "boolean")' \
+            # Do not use jq --exit-status for Boolean values: a valid `false`
+            # has exit status 1 under -e. Stable releases necessarily carry
+            # `prerelease: false`, so validate the type in the filter while
+            # retaining jq's normal successful exit for both Boolean values.
+            draft=$(jq -r '.draft | if type == "boolean" then . else error("draft must be Boolean") end' \
               "$handoff/release.json")
-            immutable=$(jq -er '.immutable // false | select(type == "boolean")' \
+            prerelease=$(jq -r '.prerelease | if type == "boolean" then . else error("prerelease must be Boolean") end' \
+              "$handoff/release.json")
+            immutable=$(jq -r '(.immutable // false) | if type == "boolean" then . else error("immutable must be Boolean") end' \
               "$handoff/release.json")
             expected_prerelease=true
             [[ "$IS_STABLE" == true ]] && expected_prerelease=false
@@ -1807,9 +1812,12 @@ jobs:
             echo '::error::AP7500 release ID changed after recovery'
             exit 1
           fi
-          is_draft=$(jq -er '.draft | select(type == "boolean")' <<<"$state")
-          is_prerelease=$(jq -er '.prerelease | select(type == "boolean")' <<<"$state")
-          immutable=$(jq -er '.immutable // false | select(type == "boolean")' <<<"$state")
+          # A valid JSON `false` is an unsuccessful result under jq -e. Read
+          # Boolean fields without -e and enforce their type inside jq so
+          # stable drafts and immutable releases remain distinguishable.
+          is_draft=$(jq -r '.draft | if type == "boolean" then . else error("draft must be Boolean") end' <<<"$state")
+          is_prerelease=$(jq -r '.prerelease | if type == "boolean" then . else error("prerelease must be Boolean") end' <<<"$state")
+          immutable=$(jq -r '(.immutable // false) | if type == "boolean" then . else error("immutable must be Boolean") end' <<<"$state")
           jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
             --rawfile body candidate/RELEASE_NOTES.md \
             '.tag_name == $tag and .name == $title and .body == $body' \

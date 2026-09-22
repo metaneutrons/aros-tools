@@ -252,6 +252,33 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("workflow_dispatch:", trigger)
         self.assertIn("tags:", trigger)
 
+    def test_release_boolean_fields_accept_the_valid_false_value(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn('select(type == "boolean")', workflow)
+        self.assertGreaterEqual(
+            workflow.count('if type == "boolean" then . else error('), 6
+        )
+        extractor = (
+            'jq -r --arg field "$field" '
+            '\'.[$field] | if type == "boolean" then . '
+            'else error("release field must be Boolean") end\''
+        )
+        script = "\n".join((
+            "set -euo pipefail",
+            "state='{\"draft\":true,\"prerelease\":false,\"immutable\":false}'",
+            "for field in draft prerelease immutable; do",
+            f"  value=$({extractor} <<<\"$state\")",
+            "  [[ $value == true || $value == false ]]",
+            "done",
+            "state='{\"draft\":true,\"prerelease\":\"false\",\"immutable\":false}'",
+            "field=prerelease",
+            f"if {extractor} <<<\"$state\" >/dev/null; then exit 1; fi",
+        ))
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("resolve_created_draft()", workflow)
