@@ -267,9 +267,10 @@ if name == "cmake" and (root / "fail-engine").exists():
         )
         self.assertIn("newly created draft did not become tag-addressable", workflow)
         self.assertIn("create_exact_draft()", workflow)
-        self.assertIn('"${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2>&1 || create_status=$?', workflow)
+        self.assertIn('"${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2> "$create_error" || create_status=$?', workflow)
+        self.assertIn('--slurp --compact-output --exit-status', workflow)
         self.assertIn("draft creation succeeded without an exact bound response", workflow)
-        self.assertIn("jq -c '[.]' \"$RUNNER_TEMP/draft-create.out\"", workflow)
+        self.assertIn('draft create response is not one exact object', workflow)
         self.assertIn("draft creation did not yield a tag-addressable draft", workflow)
         self.assertNotIn("gh release create", workflow)
         create_block = workflow.split('create=(gh api --method POST', 1)[1].split(
@@ -437,11 +438,13 @@ if name == "cmake" and (root / "fail-engine").exists():
                 "resolve_created_draft() { exit 91; }",
                 "create_exact_response() {",
                 "  printf '%s' '{\"id\":1,\"tag_name\":\"v1.2.3\",\"name\":\"aros-tools v1.2.3\",\"body\":\"notes\",\"draft\":true,\"prerelease\":false,\"immutable\":false}'",
+                "  printf 'transport diagnostic' >&2",
                 "}",
                 "create=(create_exact_response)",
                 creator,
                 "create_exact_draft",
                 "jq -e 'length == 1 and .[0].id == 1' \"$RUNNER_TEMP/release-matches.json\" >/dev/null",
+                "[[ $(cat \"$RUNNER_TEMP/draft-create.err\") == 'transport diagnostic' ]]",
             ))
             result = subprocess.run(
                 ["bash", "-c", script], capture_output=True, text=True,

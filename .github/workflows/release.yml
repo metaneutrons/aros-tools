@@ -1688,36 +1688,40 @@ jobs:
           }
           create_exact_draft() {
             local create_status=0
+            local create_error="$RUNNER_TEMP/draft-create.err"
             # The releases endpoint returns the complete bound draft object on
             # success. Prefer that response over the eventually-consistent
             # release-list index; a non-zero transport outcome still falls
             # back to the tag-only resolver below and is never accepted alone.
-            "${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2>&1 || create_status=$?
-            if [[ -s "$RUNNER_TEMP/draft-create.out" ]] && \
-              jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
+            # Keep diagnostics out of the response: gh may write a successful
+            # transport notice on stderr, but only one JSON response can bind
+            # the release ID used by every later mutation.
+            "${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2> "$create_error" || create_status=$?
+            if jq --slurp --compact-output --exit-status \
+                --arg tag "$TAG" --arg title "aros-tools $TAG" \
                 --argjson prerelease "$expected_prerelease" \
                 --rawfile body candidate/RELEASE_NOTES.md \
-                '.id | type == "number" and . > 0' \
-                "$RUNNER_TEMP/draft-create.out" >/dev/null && \
-              jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
-                --argjson prerelease "$expected_prerelease" \
-                --rawfile body candidate/RELEASE_NOTES.md \
-                '.tag_name == $tag and .name == $title and .body == $body and
-                 .draft == true and .prerelease == $prerelease and
-                 (.immutable // false) == false' \
-                "$RUNNER_TEMP/draft-create.out" >/dev/null; then
-              jq -c '[.]' "$RUNNER_TEMP/draft-create.out" > "$RUNNER_TEMP/release-matches.json"
+                'if length == 1 and
+                    ((.[0].id | type == "number" and . > 0)) and
+                    .[0].tag_name == $tag and .[0].name == $title and
+                    .[0].body == $body and .[0].draft == true and
+                    .[0].prerelease == $prerelease and
+                    (.[0].immutable // false) == false
+                  then . else error("draft create response is not one exact object") end' \
+                "$RUNNER_TEMP/draft-create.out" > "$RUNNER_TEMP/release-matches.json"; then
               if ((create_status != 0)); then
                 echo '::warning::AP7500 draft creation returned non-zero after the exact response was recovered'
               fi
               return 0
             fi
             if ((create_status == 0)); then
+              cat "$create_error" >&2 || true
               cat "$RUNNER_TEMP/draft-create.out" >&2 || true
               echo '::error::AP7500 draft creation succeeded without an exact bound response'
               return 1
             fi
             if ! resolve_created_draft; then
+              cat "$create_error" >&2 || true
               cat "$RUNNER_TEMP/draft-create.out" >&2 || true
               echo '::error::AP7500 draft creation did not yield a tag-addressable draft'
               return 1
