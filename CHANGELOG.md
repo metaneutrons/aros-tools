@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.8](https://github.com/metaneutrons/aros-tools/compare/v0.3.7...v0.3.8) (2026-09-22)
+
+
+### Bug Fixes
+
+* **release:** isolate draft API diagnostics ([526cf84](https://github.com/metaneutrons/aros-tools/commit/526cf845814f25c135a53cfb45d82cd40e0bcf2b))
+
 ## [0.3.7](https://github.com/metaneutrons/aros-tools/compare/v0.3.6...v0.3.7) (2026-09-21)
 
 
