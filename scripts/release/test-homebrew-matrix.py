@@ -123,6 +123,14 @@ class MatrixPolicy(unittest.TestCase):
         ci_planner = (ROOT / "scripts/plan_ci_platform_matrix.py").read_text()
         self.assertNotIn('"runner": "macos-15-intel"', ci_planner)
 
+    def test_channel_publisher_requires_exactly_the_three_release_payload_urls(self):
+        ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        homebrew = ecosystem.split("  homebrew:\n", 1)[1].split("\n  aur-publish:\n", 1)[0]
+        self.assertIn('grep -Fc "/releases/download/${TAG}/" "$source_formula") != 3', homebrew)
+        self.assertIn('formula does not reference three exact staged-release URLs', homebrew)
+        self.assertNotIn('grep -Fc "/releases/download/${TAG}/" "$source_formula") != 4', homebrew)
+        self.assertNotIn('formula does not reference four exact staged-release URLs', homebrew)
+
 
 class CommandLine(unittest.TestCase):
     def setUp(self):

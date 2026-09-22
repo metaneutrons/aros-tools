@@ -381,8 +381,8 @@ jobs:
           trap 'exit 130' HUP INT TERM
           source_formula="$GITHUB_WORKSPACE/candidate/aros-tools.rb"
           ruby -c "$source_formula"
-          if [[ $(grep -Fc "/releases/download/${TAG}/" "$source_formula") != 4 ]]; then
-            echo "::error::AP7301 formula does not reference four exact staged-release URLs"
+          if [[ $(grep -Fc "/releases/download/${TAG}/" "$source_formula") != 3 ]]; then
+            echo "::error::AP7301 formula does not reference three exact staged-release URLs"
             exit 1
           fi
           git -c http.followRedirects=false clone --no-tags --single-branch --branch main \
