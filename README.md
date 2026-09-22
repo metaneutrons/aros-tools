@@ -207,10 +207,10 @@ Commits. It opens a reviewable release pull request but never creates a tag or
 GitHub Release. Only a separately protected annotated tag on qualified `main`
 starts release production and promotion.
 
-Before the first stable tag, every supported native archive and downstream
-package path must pass its own gate:
+The first stable tag required every supported native archive and downstream
+package path to pass its own gate:
 
-1. four native archive builds, deterministic production and clean-room smoke
+1. three native archive builds, deterministic production and clean-room smoke
    tests;
 2. archive manifests, checksums, SPDX SBOMs, Sigstore evidence and GitHub
    provenance;
