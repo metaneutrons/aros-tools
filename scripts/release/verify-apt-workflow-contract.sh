@@ -64,6 +64,26 @@ for name, dependency in (('apt-verify', 'apt'), ('apt-install', 'apt-verify')):
             errors.append(f'{name}: missing public consumer gate: {marker}')
     if 'secrets.' in text or re.search(r'^    environment:', text, re.M):
         errors.append(f'{name}: public verification must remain credential-free')
+install = block(publication, 'apt-install')
+for marker in (
+    'sourceparts="$apt_root/system-sources"',
+    '/etc/apt/sources.list.d/ubuntu.sources',
+    'AP7233 no Ubuntu dependency source is available on this runner',
+    'Dir::Etc::sourcelist="$archive_source"',
+    'Dir::Etc::sourceparts="$sourceparts"',
+    'Dir::State::lists="$lists"',
+    'Dir::Cache::archives="$archives"',
+    'Signed-By: %s',
+):
+    if marker not in install:
+        errors.append(f'apt-install: missing isolated dependency-resolution contract: {marker}')
+for forbidden in (
+    'Dir::Etc::sourceparts=-',
+    '/etc/apt/sources.list.d/aros-tools.sources',
+    '/usr/share/keyrings/$keyring',
+):
+    if forbidden in install:
+        errors.append(f'apt-install: host APT state mutation or dependency isolation failure: {forbidden}')
 if 'verify-release-ref.sh' not in block(publication, 'apt') or '.immutable == true' not in block(publication, 'apt'):
     errors.append('central dispatch must follow immutable source-release validation')
 if errors:
