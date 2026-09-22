@@ -857,7 +857,6 @@ class ArosTools < Formula
   url "https://example.invalid/releases/download/v1.2.3/a"
   url "https://example.invalid/releases/download/v1.2.3/b"
   url "https://example.invalid/releases/download/v1.2.3/c"
-  url "https://example.invalid/releases/download/v1.2.3/d"
 end
 RUBY
 cat > "$work/channel-candidate/PKGBUILD" <<'PKGBUILD'
