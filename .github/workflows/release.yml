@@ -2045,6 +2045,10 @@ jobs:
       version: ${{ needs.metadata.outputs.version }}
       source_commit: ${{ needs.metadata.outputs.source_commit }}
       tag_date_epoch: ${{ needs.metadata.outputs.tag_date_epoch }}
+    # The called channel workflow owns environment-gated App credentials.
+    # Explicit inheritance preserves that context across the reusable-workflow
+    # boundary; without it GitHub evaluates the private-key input as empty.
+    secrets: inherit
 
   final-audit:
     name: Reverify immutable stable release after channel convergence

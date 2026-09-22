@@ -18,6 +18,32 @@ on:
       tag_date_epoch:
         required: true
         type: string
+  # A completed immutable GitHub release is recoverable without retagging:
+  # this entry point reconstructs its closed staging inventory and then runs
+  # the same environment-gated channel pipeline. Every supplied identity is
+  # re-derived from the annotated tag before a channel can be changed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable final release tag to recover
+        required: true
+        type: string
+      tag_object:
+        description: Expected annotated tag object ID
+        required: true
+        type: string
+      version:
+        description: Expected canonical SemVer without the v prefix
+        required: true
+        type: string
+      source_commit:
+        description: Expected commit peeled from the annotated tag
+        required: true
+        type: string
+      tag_date_epoch:
+        description: Expected annotated tagger timestamp in Unix seconds
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -28,8 +54,102 @@ concurrency:
 
 jobs:
 
+  recovery:
+    name: Reconstruct and verify immutable release staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/install-verified-cosign
+        with:
+          cosign-release: v3.1.1
+      - name: Reconstruct only the exact immutable final release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          TAG_OBJECT: ${{ inputs.tag_object }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ inputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == workflow_dispatch && \
+                "$GITHUB_REF" != refs/heads/main ]]; then
+            echo '::error::AP7200 manual channel recovery must run from protected main'
+            exit 1
+          fi
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo '::error::AP7200 recovery tag is not canonical stable SemVer'; exit 1;
+          }
+          [[ "$VERSION" == "${TAG#v}" ]] || {
+            echo '::error::AP7200 supplied version does not match the tag'; exit 1;
+          }
+          git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          [[ $(git cat-file -t "refs/tags/${TAG}") == tag ]] || {
+            echo '::error::AP7200 recovery requires an annotated tag'; exit 1;
+          }
+          measured_tag_object=$(git rev-parse "refs/tags/${TAG}")
+          measured_source_commit=$(git rev-parse "refs/tags/${TAG}^{}")
+          measured_tag_date_epoch=$(git for-each-ref \
+            --format='%(taggerdate:unix)' "refs/tags/${TAG}")
+          [[ "$TAG_OBJECT" == "$measured_tag_object" && \
+             "$SOURCE_COMMIT" == "$measured_source_commit" && \
+             "$TAG_DATE_EPOCH" == "$measured_tag_date_epoch" ]] || {
+            echo '::error::AP7200 supplied release identity differs from the immutable tag'
+            exit 1
+          }
+          scripts/release/verify-release-ref.sh --mode identity \
+            --repository "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --tag-object "$TAG_OBJECT" --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")
+          release_id=$(jq -er '.id | select(type == "number" and . > 0)' <<<"$release")
+          jq -e --arg tag "$TAG" \
+            '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' \
+            <<<"$release" >/dev/null || {
+              echo '::error::AP7200 recovery requires an immutable stable GitHub release'
+              exit 1
+            }
+          staging="$RUNNER_TEMP/recovered-release"
+          scripts/release/download-release-assets.sh \
+            --repository "$GITHUB_REPOSITORY" --release-id "$release_id" \
+            --version "$VERSION" --directory "$staging" --mode exact
+          scripts/release/verify-candidate-inventory.sh \
+            --directory "$staging" --version "$VERSION" --signed true
+          (cd "$staging" && sha256sum -c SHA256SUMS)
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          issuer=https://token.actions.githubusercontent.com
+          for bundle in "$staging"/*.sigstore.json; do
+            subject=${bundle%.sigstore.json}
+            cosign verify-blob --bundle "$bundle" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "$issuer" "$subject"
+          done
+          signer_workflow="${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+          for subject in "$staging"/*; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-ref "refs/tags/${TAG}" \
+              --source-digest "$SOURCE_COMMIT" --deny-self-hosted-runners
+          done
+      - if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: qualified-release-staging
+          path: ${{ runner.temp }}/recovered-release
+          if-no-files-found: error
+          include-hidden-files: true
+
   apt:
     name: Request publication by the central APT archive
+    needs: recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: apt-archive-publication

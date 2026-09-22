@@ -279,6 +279,22 @@ if name == "cmake" and (root / "fail-engine").exists():
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_channel_recovery_reconstructs_only_an_immutable_release(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        caller = release.split("  ecosystem:\n", 1)[1].split("\n  final-audit:", 1)[0]
+        self.assertIn("secrets: inherit", caller)
+        self.assertIn("workflow_dispatch:", ecosystem)
+        self.assertIn("Reconstruct and verify immutable release staging", ecosystem)
+        self.assertIn("manual channel recovery must run from protected main", ecosystem)
+        self.assertIn("recovery requires an annotated tag", ecosystem)
+        self.assertIn("supplied release identity differs from the immutable tag", ecosystem)
+        self.assertIn("recovery requires an immutable stable GitHub release", ecosystem)
+        self.assertIn("--mode exact", ecosystem)
+        self.assertIn("gh attestation verify", ecosystem)
+        self.assertIn("name: qualified-release-staging", ecosystem)
+        self.assertIn("needs: recovery", ecosystem)
+
     def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("resolve_created_draft()", workflow)
