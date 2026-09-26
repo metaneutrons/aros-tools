@@ -97,7 +97,7 @@ impl BuildType {
 /// is what lets a tree without one be built from built-in profiles.
 fn profile_cache_variables(
     profile: &aros_common::TargetProfile,
-    options: &BuildOptions,
+    build_type: BuildType,
 ) -> Vec<(String, String)> {
     vec![
         ("CMAKE_SYSTEM_NAME".to_owned(), "Generic".to_owned()),
@@ -115,7 +115,7 @@ fn profile_cache_variables(
         ),
         (
             "CMAKE_BUILD_TYPE".to_owned(),
-            options.build_type.cmake_value().to_owned(),
+            build_type.cmake_value().to_owned(),
         ),
         ("CMAKE_EXPORT_COMPILE_COMMANDS".to_owned(), "ON".to_owned()),
     ]
@@ -250,7 +250,7 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         .args(["-G", "Ninja"]);
     compiler_cache.apply_to(&mut configure);
     configure.arg(format!("-DAROS_SOURCE_DIR={}", repo_root.display()));
-    for (key, value) in profile_cache_variables(&profile, options) {
+    for (key, value) in profile_cache_variables(&profile, options.build_type) {
         configure.arg(format!("-D{key}={value}"));
     }
     configure.arg(format!(
@@ -483,9 +483,53 @@ pub fn detected_compiler_cache() -> Option<CompilerCache> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dir, compiler_cache_cmake_definitions, run, validate_cmake_definition,
-        validate_preset, BuildInputPolicy, BuildOptions, CmakeDefinition,
+        build_dir, compiler_cache_cmake_definitions, profile_cache_variables, run,
+        validate_cmake_definition, validate_preset, BuildInputPolicy, BuildOptions, BuildType,
+        CmakeDefinition,
     };
+
+    #[test]
+    fn built_in_profiles_pin_clang_llvm_and_platform_bootloader() {
+        let absent_override = tempfile::tempdir().unwrap();
+        let profiles = aros_common::TargetProfile::load_config_or_builtin(
+            &absent_override.path().join("aros-targets.toml"),
+        )
+        .unwrap()
+        .targets;
+        assert!(!profiles.is_empty());
+
+        for profile in profiles {
+            let values: std::collections::HashMap<_, _> =
+                profile_cache_variables(&profile, BuildType::Release)
+                    .into_iter()
+                    .collect();
+            for (key, expected) in [
+                ("CMAKE_C_COMPILER", "clang"),
+                ("CMAKE_CXX_COMPILER", "clang++"),
+                ("CMAKE_ASM_COMPILER", "clang"),
+                ("AROS_TOOLCHAIN", "llvm"),
+                ("CMAKE_SYSTEM_NAME", "Generic"),
+            ] {
+                assert_eq!(
+                    values.get(key).map(String::as_str),
+                    Some(expected),
+                    "{}: {key}",
+                    profile.name
+                );
+            }
+            let expected_bootloader = if profile.platform == "pc" {
+                "grub2gfx"
+            } else {
+                ""
+            };
+            assert_eq!(
+                values.get("AROS_TARGET_BOOTLOADER").map(String::as_str),
+                Some(expected_bootloader),
+                "{}: bootloader",
+                profile.name
+            );
+        }
+    }
 
     #[test]
     fn build_directory_stays_inside_the_checkout() {
