@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 aros-common.workspace = true
 aros-cache.workspace = true
+aros-cmake-engine.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 regex.workspace = true

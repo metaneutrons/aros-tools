@@ -451,17 +451,17 @@ fn llvm_provisioning_context_is_structural_not_pinned() {
     let root = source_root();
     let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
     let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
-    let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
+    let cmake_lists = aros_cmake_engine::file("CMakeLists.txt").unwrap();
 
     assert!(llvm_provisioning_context_matches_sources(
         &mmake,
         &make_config,
-        &cmake_lists,
+        cmake_lists,
     ));
     assert!(llvm_provisioning_context_matches_sources(
         &format!("{mmake}\nUNRELATED_RELEASE_SETTING := changed\n"),
         &make_config,
-        &cmake_lists,
+        cmake_lists,
     ));
     let alternate_product_name = if cmake_lists.contains("project(AROS-NX") {
         cmake_lists.replace("project(AROS-NX", "project(AROS-NG")
@@ -480,11 +480,11 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
     let root = source_root();
     let mmake = read_source(&root.join(LLVM_PROVISIONING_FILE)).unwrap();
     let make_config = read_source(&root.join("config/make.cfg.in")).unwrap();
-    let cmake_lists = read_source(&root.join("CMakeLists.txt")).unwrap();
+    let cmake_lists = aros_cmake_engine::file("CMakeLists.txt").unwrap();
     assert!(llvm_provisioning_context_matches_sources(
         &mmake,
         &make_config,
-        &cmake_lists,
+        cmake_lists,
     ));
 
     let assert_context_rejected = |mmake: &str, make_config: &str, cmake_lists: &str| {
@@ -500,7 +500,7 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
             "LLVM_BUILD_BINDIR:=$(HOSTDIR)/bin",
         ),
         &make_config,
-        &cmake_lists,
+        cmake_lists,
     );
     assert_context_rejected(
         &mmake.replace(
@@ -508,12 +508,12 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
             "AROS_TOOLCHAIN_DEFAULT_SYSROOT := /fixed/non-relocatable/sysroot",
         ),
         &make_config,
-        &cmake_lists,
+        cmake_lists,
     );
     assert_context_rejected(
         &mmake,
         &make_config.replace("@AROS_CROSSTOOLSDIR@", "${AROS_BUILD_DIR}/toolchain"),
-        &cmake_lists,
+        cmake_lists,
     );
     assert_context_rejected(
         &mmake,
