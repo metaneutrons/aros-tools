@@ -21,10 +21,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_BOOTSTRAP_SHA = "fb6ba7807c859c6ca20f0f019f1100c94df1375a"
-# Temporary recovery boundary: the 0.3.10 release PR merged, but its exact
-# main commit failed CI and was deliberately never tagged. Remove this override
-# after the next fully qualified release has established a real tag boundary.
-EXPECTED_RECOVERY_SHA = "7a75f4e32f07162648f24b4df4bf466828a3b376"
+# Temporary recovery boundary: 0.3.10 was untagged after failed main CI, and
+# the immutable 0.3.11 tag failed before any workflow job or publication.
+# Remove this override after the next fully qualified release has established
+# a real tag and public release boundary.
+EXPECTED_RECOVERY_SHA = "60fe9a173a17dea608a8b734a237a2d7738813fb"
 EXPECTED_INITIAL_VERSION = "0.1.0"
 EXPECTED_SCHEMA = (
     "https://raw.githubusercontent.com/googleapis/release-please/"
