@@ -366,6 +366,26 @@ def job_steps(job: str) -> list[str]:
         for position, index in enumerate(starts)
     ]
 
+def declared_permissions(source: str, indent: int) -> dict[str, str] | None:
+    """Read a workflow or job permissions block at its fixed YAML indentation."""
+    lines = source.splitlines()
+    marker = ' ' * indent + 'permissions:'
+    for index, line in enumerate(lines):
+        if line != marker:
+            continue
+        result: dict[str, str] = {}
+        for following in lines[index + 1:]:
+            if not following.strip() or following.lstrip().startswith('#'):
+                continue
+            leading = len(following) - len(following.lstrip())
+            if leading <= indent:
+                break
+            match = re.fullmatch(r' ' * (indent + 2) + r'([a-z-]+): (none|read|write)', following)
+            if match:
+                result[match.group(1)] = match.group(2)
+        return result
+    return None
+
 for workflow_name in ('publish-ecosystem.yml',):
     path = root / workflow_name
     if not path.exists():
@@ -413,6 +433,33 @@ for workflow_name in ('publish-ecosystem.yml',):
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
 release_jobs = workflow_jobs(root / 'release.yml')
+if (root / 'release.yml').exists() and (root / 'publish-ecosystem.yml').exists():
+    caller = release_jobs.get('ecosystem', '')
+    if 'uses: ./.github/workflows/publish-ecosystem.yml' not in caller:
+        errors.append(f'{root / "release.yml"}: ecosystem reusable-workflow call is missing')
+    else:
+        called_source = (root / 'publish-ecosystem.yml').read_text()
+        called_default = declared_permissions(called_source, 0) or {}
+        caller_permissions = declared_permissions(caller, 4) or {}
+        rank = {'none': 0, 'read': 1, 'write': 2}
+        required: dict[str, str] = {}
+        for called_job in publish_jobs.values():
+            for scope, level in (declared_permissions(called_job, 4) or called_default).items():
+                if rank[level] > rank.get(required.get(scope, 'none'), 0):
+                    required[scope] = level
+        for scope, level in sorted(required.items()):
+            actual = caller_permissions.get(scope, 'none')
+            if rank[actual] < rank[level]:
+                errors.append(
+                    f'{root / "release.yml"}: ecosystem reusable-workflow token ceiling '
+                    f'lacks {scope}: {level} (has {actual})'
+                )
+        for scope, actual in sorted(caller_permissions.items()):
+            if rank[actual] > rank.get(required.get(scope, 'none'), 0):
+                errors.append(
+                    f'{root / "release.yml"}: ecosystem reusable-workflow token ceiling '
+                    f'grants unneeded {scope}: {actual}'
+                )
 release_finalizer = release_jobs.get('finalize-release-please', '')
 if (root / 'release.yml').exists() and release_finalizer:
     required_finalizer = (
