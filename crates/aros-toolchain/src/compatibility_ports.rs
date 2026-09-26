@@ -462,12 +462,7 @@ impl CmakeSourceCache {
             let parent = path.parent().ok_or_else(|| {
                 ContractError::compatibility("CMake cache payload has no parent directory")
             })?;
-            if !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir()) {
-                return Err(ContractError::compatibility(
-                    "CMake source cache payload parent is missing or unsafe",
-                ));
-            }
-            create_private_parents(&root, parent)?;
+            checked_cmake_cache_parents(&root, parent)?;
             let metadata = fs::symlink_metadata(&path).map_err(|_| {
                 ContractError::compatibility("CMake source cache payload is missing")
             })?;
@@ -800,6 +795,35 @@ fn create_private_parents(root: &Path, parent: &Path) -> Result<(), ContractErro
     Ok(())
 }
 
+fn checked_cmake_cache_parents(root: &Path, parent: &Path) -> Result<(), ContractError> {
+    let relative = parent.strip_prefix(root).map_err(|_| {
+        ContractError::compatibility("CMake source cache payload parent escapes its private root")
+    })?;
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(ContractError::compatibility(
+                "CMake source cache payload parent has an unsafe path component",
+            ));
+        };
+        current.push(component);
+        let metadata = fs::symlink_metadata(&current).map_err(|_| {
+            ContractError::compatibility("CMake source cache payload parent is missing")
+        })?;
+        // CMake may normalize an extracted port directory to 0755. The root
+        // stays 0700; reject replacement links and writable parent paths.
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(ContractError::compatibility(
+                "CMake source cache payload parent is unsafe",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn collect_materialized_paths(root: &Path) -> Result<BTreeSet<PathBuf>, ContractError> {
     let mut paths = BTreeSet::new();
     collect_materialized_paths_at(root, Path::new(""), &mut paths)?;
@@ -1050,6 +1074,14 @@ mod tests {
         let cmake_archive = cmake_build.join("portssources/bzip2-1.0.8.tar.gz");
         assert_eq!(fs::read(&cmake_archive).unwrap(), bzip2);
         assert!(!cmake_build.join("portssources/UnicodeData.txt").exists());
+        cmake_cache.revalidate().unwrap();
+        fs::set_permissions(
+            cmake_archive.parent().unwrap(),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // Upstream CMake may normalize a port directory to 0755 while the
+        // private root and sealed archive remain unchanged.
         cmake_cache.revalidate().unwrap();
         fs::set_permissions(&cmake_archive, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&cmake_archive, b"changed input").unwrap();
