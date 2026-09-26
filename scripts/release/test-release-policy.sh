@@ -881,7 +881,9 @@ cat > "$work/channels/aur-rpc.json" <<'JSON'
 JSON
 jq -n --rawfile body "$work/channel-candidate/RELEASE_NOTES.md" \
     '[[{tag_name:"v1.2.3",draft:false,prerelease:false,immutable:true,
-        name:"aros-tools v1.2.3",body:$body}]]' \
+        name:"aros-tools v1.2.3",body:$body},
+       {tag_name:"v1.2.2",draft:false,prerelease:false,immutable:true,
+        name:"aros-tools v1.2.2",body:"earlier stable release"}]]' \
     > "$work/channels/github-releases.json"
 cp "$work/channel-candidate"/* "$work/channels/github-assets/"
 cat > "$work/mock-bin/docker" <<'MOCK'
@@ -902,6 +904,22 @@ for verify_mode in preflight exact; do
       PATH="$work/mock-bin:$PATH" \
       "${channel_verify[@]}" --mode "$verify_mode" >/dev/null
 done
+# Historical stable releases must not block exact verification, but a newer
+# published version must fail both the preflight and the final check.
+jq '.[0] += [{tag_name:"v1.2.4",draft:false,prerelease:false,
+    immutable:true,name:"aros-tools v1.2.4",body:"newer stable release"}]' \
+    "$work/channels/github-releases.json" > "$work/github-releases-newer.json"
+cp "$work/github-releases-newer.json" "$work/channels/github-releases.json"
+for verify_mode in preflight exact; do
+    expect_failure_matching 'GitHub already exposes newer version 1.2.4' \
+        env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
+        MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
+        PATH="$work/mock-bin:$PATH" \
+        "${channel_verify[@]}" --mode "$verify_mode"
+done
+jq '.[0] |= map(select(.tag_name != "v1.2.4"))' \
+    "$work/channels/github-releases.json" > "$work/github-releases-restored.json"
+cp "$work/github-releases-restored.json" "$work/channels/github-releases.json"
 cp "$work/channels/apt/dists/rolling/main/binary-amd64/Packages" \
     "$work/Packages.amd64.saved"
 printf '\n' >> "$work/channels/apt/dists/rolling/main/binary-amd64/Packages"

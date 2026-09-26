@@ -66,12 +66,12 @@ PY
 }
 
 require_acceptable_version() {
-    local channel=$1 current=$2 relation
+    local channel=$1 current=$2 allow_older=${3:-false} relation
     relation=$(version_relation "$current" "$version") || fail "$channel version is malformed"
     case "$relation" in
         newer) fail "$channel already exposes newer version $current; refusing downgrade to $version" ;;
         older)
-            [[ "$mode" == preflight ]] || \
+            [[ "$mode" == preflight || "$allow_older" == true ]] || \
                 fail "$channel has not converged: $current instead of $version"
             ;;
         same) ;;
@@ -117,7 +117,9 @@ github_versions=$(jq -r '.[].tag_name // empty' "$work/stable-releases.json" | \
     sed -n -E 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
 if [[ -n "$github_versions" ]]; then
     while IFS= read -r published_version; do
-        require_acceptable_version GitHub "$published_version" >/dev/null
+        # Exact verification permits older immutable releases in GitHub's
+        # history. The candidate itself is required separately below.
+        require_acceptable_version GitHub "$published_version" true >/dev/null
     done <<< "$github_versions"
 fi
 if [[ $(jq 'length' <<<"$github_same") == 1 ]]; then
