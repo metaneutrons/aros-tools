@@ -21,6 +21,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_BOOTSTRAP_SHA = "fb6ba7807c859c6ca20f0f019f1100c94df1375a"
+# Temporary recovery boundary: the 0.3.10 release PR merged, but its exact
+# main commit failed CI and was deliberately never tagged. Remove this override
+# after the next fully qualified release has established a real tag boundary.
+EXPECTED_RECOVERY_SHA = "7a75f4e32f07162648f24b4df4bf466828a3b376"
 EXPECTED_INITIAL_VERSION = "0.1.0"
 EXPECTED_SCHEMA = (
     "https://raw.githubusercontent.com/googleapis/release-please/"
@@ -29,6 +33,7 @@ EXPECTED_SCHEMA = (
 EXPECTED_CONFIG_KEYS = {
     "$schema",
     "bootstrap-sha",
+    "last-release-sha",
     "bump-minor-pre-major",
     "bump-patch-for-minor-pre-major",
     "include-component-in-tag",
@@ -316,6 +321,10 @@ def main() -> None:
     errors.require(
         bootstrap_sha == EXPECTED_BOOTSTRAP_SHA,
         f"Release Please bootstrap-sha must remain {EXPECTED_BOOTSTRAP_SHA}",
+    )
+    errors.require(
+        config.get("last-release-sha") == EXPECTED_RECOVERY_SHA,
+        f"Release Please recovery boundary must be {EXPECTED_RECOVERY_SHA}",
     )
     packages = config.get("packages")
     root_package = packages.get(".") if isinstance(packages, dict) else None
