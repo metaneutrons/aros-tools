@@ -188,6 +188,9 @@ pub fn execute_native_compatibility(
     }
     let inputs = validate_inputs(request)?;
     let outputs = create_output_roots(request, &inputs)?;
+    let cmake_source_cache = request
+        .ports_sources
+        .materialize_cmake_cache(&outputs.cmake_build)?;
     let mut upstream_environment = request.host_python.compatibility_environment()?;
     // Autoconf 2.73 can otherwise append a C23 dialect marker before the
     // pinned upstream snapshot captures its compiler base name. That produces
@@ -274,6 +277,7 @@ pub fn execute_native_compatibility(
         ],
     };
     let probes = run_probe_set(&probes, cancellation)?;
+    cmake_source_cache.revalidate()?;
     request.ports_sources.clear_upstream_fetch_markers()?;
     request.ports_sources.revalidate()?;
     let standalone = verify_standalone_outputs(&StandaloneOutputRequest {
@@ -866,6 +870,10 @@ fn cmake_command(
             // launcher. The embedded engine requires a frontend-selected policy,
             // and this deterministic producer phase deliberately selects off.
             "-DAROS_COMPILER_CACHE_MODE=off".into(),
+            // Every configure-time source inventory comes from the private,
+            // lock-verified cache materialized above. A missing input is a
+            // closed qualification failure, never an implicit download.
+            "-DAROS_FETCH_OFFLINE=ON".into(),
             "-DAROS_ENABLE_MMU=ON".into(),
             "-DCMAKE_BUILD_TYPE=Release".into(),
         ],
@@ -1221,6 +1229,7 @@ mod tests {
             request.host_tools.root.join("cc").display()
         )));
         assert!(cmake_arguments.contains("-DAROS_COMPILER_CACHE_MODE=off"));
+        assert!(cmake_arguments.contains("-DAROS_FETCH_OFFLINE=ON"));
         let make_arguments = fs::read_to_string(make_log).unwrap();
         assert!(make_arguments.contains("includes"));
         assert!(make_arguments.contains("linklibs"));
@@ -1596,6 +1605,7 @@ mod tests {
                 "id": id,
                 "cache_filename": filename,
                 "relative_path": filename,
+                "cmake_cache_path": if filename == "bzip2-1.0.8.tar.gz" { Some("portssources/bzip2-1.0.8.tar.gz") } else { None },
                 "fetch_marker": if filename == "bzip2-1.0.8.tar.gz" { ".bzip2-1.0.8-fetched" } else { "" },
                 "url": url,
                 "sha256": measured.digest,
@@ -1604,7 +1614,7 @@ mod tests {
         };
         let lock = CompatibilityPortsLock::parse(
             serde_json::to_vec(&json!({
-                "schema": "aros-toolchain-compatibility-ports-v2",
+                "schema": "aros-toolchain-compatibility-ports-v3",
                 "upstream_commit": "a".repeat(40),
                 "inputs": [
                     measured("unicode-data", "UnicodeData.txt"),

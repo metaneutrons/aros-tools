@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -44,7 +45,7 @@ class WorkspaceGateTests(unittest.TestCase):
         self.write("scripts/inert_test.py", "import unittest\nclass Fixture(unittest.TestCase):\n    def test_inert(self):\n        self.assertTrue(True)\n")
         for name in ("check-architecture.sh", "release/check-actions-policy.sh",
                      "release/verify-apt-workflow-contract.sh", "release/test-governance-policy.sh",
-                     "release/test-release-policy.sh"):
+                     "release/test-finalize-release-please.sh", "release/test-release-policy.sh"):
             self.write("scripts/" + name, "#!/bin/sh\nexit 0\n", executable=True)
         for name in ("test-homebrew-app.py", "test-homebrew-matrix.py", "test-release-please-app.py"):
             self.write("scripts/release/" + name,
@@ -250,6 +251,264 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertNotIn("pull_request:", trigger)
         self.assertIn("workflow_dispatch:", trigger)
         self.assertIn("tags:", trigger)
+
+    def test_release_boolean_fields_accept_the_valid_false_value(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn('select(type == "boolean")', workflow)
+        self.assertGreaterEqual(
+            workflow.count('if type == "boolean" then . else error('), 6
+        )
+        extractor = (
+            'jq -r --arg field "$field" '
+            '\'.[$field] | if type == "boolean" then . '
+            'else error("release field must be Boolean") end\''
+        )
+        script = "\n".join((
+            "set -euo pipefail",
+            "state='{\"draft\":true,\"prerelease\":false,\"immutable\":false}'",
+            "for field in draft prerelease immutable; do",
+            f"  value=$({extractor} <<<\"$state\")",
+            "  [[ $value == true || $value == false ]]",
+            "done",
+            "state='{\"draft\":true,\"prerelease\":\"false\",\"immutable\":false}'",
+            "field=prerelease",
+            f"if {extractor} <<<\"$state\" >/dev/null; then exit 1; fi",
+        ))
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_channel_recovery_reconstructs_only_an_immutable_release(self):
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        caller = release.split("  ecosystem:\n", 1)[1].split("\n  final-audit:", 1)[0]
+        self.assertIn("secrets: inherit", caller)
+        self.assertIn("workflow_dispatch:", ecosystem)
+        self.assertIn("Reconstruct and verify immutable release staging", ecosystem)
+        self.assertIn("manual channel recovery must run from protected main", ecosystem)
+        self.assertIn("recovery requires an annotated tag", ecosystem)
+        self.assertIn("supplied release identity differs from the immutable tag", ecosystem)
+        self.assertIn("recovery requires an immutable stable GitHub release", ecosystem)
+        self.assertIn("--mode exact", ecosystem)
+        self.assertIn("gh attestation verify", ecosystem)
+        self.assertIn("name: qualified-release-staging", ecosystem)
+        self.assertIn("needs: recovery", ecosystem)
+
+    def test_public_apt_install_keeps_system_dependencies_without_host_state_mutation(self):
+        ecosystem = (ROOT / ".github/workflows/publish-ecosystem.yml").read_text()
+        install = ecosystem.split("  apt-install:\n", 1)[1].split("\n  homebrew:\n", 1)[0]
+        self.assertIn('sourceparts="$apt_root/system-sources"', install)
+        self.assertIn('/etc/apt/sources.list.d/ubuntu.sources', install)
+        self.assertIn('AP7233 no Ubuntu dependency source is available on this runner', install)
+        self.assertIn('Dir::Etc::sourcelist="$archive_source"', install)
+        self.assertIn('Dir::Etc::sourceparts="$sourceparts"', install)
+        self.assertIn('Dir::State::lists="$lists"', install)
+        self.assertIn('Dir::Cache::archives="$archives"', install)
+        self.assertIn('Signed-By: %s', install)
+        self.assertNotIn('Dir::Etc::sourceparts=-', install)
+        self.assertNotIn('/etc/apt/sources.list.d/aros-tools.sources', install)
+        self.assertNotIn('/usr/share/keyrings/$keyring', install)
+
+    def test_release_draft_resolution_waits_for_tag_consistency_without_a_second_create(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("resolve_created_draft()", workflow)
+        self.assertIn("for delay in 0 1 2 4 8 16 32 64 128", workflow)
+        self.assertIn("if ((delay > 0)); then", workflow)
+        self.assertIn(
+            'if [[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then',
+            workflow,
+        )
+        self.assertNotIn(
+            '[[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]] && return 0',
+            workflow,
+        )
+        self.assertIn("newly created draft did not become tag-addressable", workflow)
+        self.assertIn("create_exact_draft()", workflow)
+        self.assertIn('"${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2> "$create_error" || create_status=$?', workflow)
+        self.assertIn('--slurp --compact-output --exit-status', workflow)
+        self.assertIn("draft creation succeeded without an exact bound response", workflow)
+        self.assertIn('draft create response is not one exact object', workflow)
+        self.assertIn("draft creation did not yield a tag-addressable draft", workflow)
+        self.assertNotIn("gh release create", workflow)
+        create_block = workflow.split('create=(gh api --method POST', 1)[1].split(
+            'elif [[ "$RECOVERED_KIND" == absent ]]', 1
+        )[0]
+        self.assertIn("create_exact_draft", create_block)
+
+        function = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls == 1 )); then",
+                "    printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                function,
+                "resolve_created_draft",
+                "[[ $calls == 2 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_draft_discovery_settles_before_classifying_the_tag_as_absent(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("settle_private_draft_discovery()", workflow)
+        self.assertIn("for delay in 0 3 6 12 24", workflow)
+        self.assertIn("The loop is read-only and cannot create or alter a release", workflow)
+        settlement = "settle_private_draft_discovery() {\n" + textwrap.dedent(
+            workflow.split("          settle_private_draft_discovery() {\n", 1)[1].split(
+                "          if ! settle_private_draft_discovery; then", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"handoff={temporary!r}",
+                "calls=0",
+                "resolve_release_list() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls < 3 )); then",
+                "    printf '[]' > \"$handoff/matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$handoff/matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                settlement,
+                "settle_private_draft_discovery",
+                "[[ $calls == 3 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=30
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_draft_recovery_handles_nonzero_create_after_side_effect(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        resolver = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          create_exact_draft()", 1
+            )[0]
+        )
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  if (( calls == 1 )); then",
+                "    printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  else",
+                "    printf '[{\\\"id\\\":1}]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "  fi",
+                "}",
+                "sleep() { :; }",
+                "create_after_side_effect() { printf created; return 1; }",
+                "create=(create_after_side_effect)",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
+                resolver,
+                creator,
+                "create_exact_draft",
+                "[[ $calls == 2 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_draft_recovery_refuses_nonzero_create_without_exact_draft(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        resolver = "resolve_created_draft() {\n" + textwrap.dedent(
+            workflow.split("          resolve_created_draft() {\n", 1)[1].split(
+                "          create_exact_draft()", 1
+            )[0]
+        )
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
+                "calls=0",
+                "resolve_by_tag() {",
+                "  calls=$((calls + 1))",
+                "  printf '[]' > \"$RUNNER_TEMP/release-matches.json\"",
+                "}",
+                "sleep() { :; }",
+                "create_without_side_effect() { return 1; }",
+                "create=(create_without_side_effect)",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
+                resolver,
+                creator,
+                "if create_exact_draft; then exit 1; fi",
+                "[[ $calls == 9 ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("draft creation did not yield a tag-addressable draft", result.stdout)
+
+    def test_release_draft_recovery_accepts_the_exact_create_response_without_lookup(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        creator = "create_exact_draft() {\n" + textwrap.dedent(
+            workflow.split("          create_exact_draft() {\n", 1)[1].split(
+                "          download_by_id()", 1
+            )[0]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            script = "\n".join((
+                "set -euo pipefail",
+                f"export RUNNER_TEMP={temporary!r}",
+                "export TAG=v1.2.3 expected_prerelease=false",
+                "mkdir candidate",
+                "printf notes > candidate/RELEASE_NOTES.md",
+                "resolve_created_draft() { exit 91; }",
+                "create_exact_response() {",
+                "  printf '%s' '{\"id\":1,\"tag_name\":\"v1.2.3\",\"name\":\"aros-tools v1.2.3\",\"body\":\"notes\",\"draft\":true,\"prerelease\":false,\"immutable\":false}'",
+                "  printf 'transport diagnostic' >&2",
+                "}",
+                "create=(create_exact_response)",
+                creator,
+                "create_exact_draft",
+                "jq -e 'length == 1 and .[0].id == 1' \"$RUNNER_TEMP/release-matches.json\" >/dev/null",
+                "[[ $(cat \"$RUNNER_TEMP/draft-create.err\") == 'transport diagnostic' ]]",
+            ))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+                timeout=30, cwd=temporary,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

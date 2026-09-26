@@ -1,6 +1,6 @@
 # Initial release closure
 
-Status: in progress, 2026-09-14. This document records the remaining gates for
+Status: complete, 2026-09-22. This document records the measured closure of
 the first public `aros-tools` release. It does not establish a toolchain or
 hardware-boot claim.
 
@@ -32,30 +32,46 @@ hardware-boot claim.
   their isolated GitHub environments. Repository policy tests verify that the
   workflows do not mix those trust domains.
 - The central APT archive contract, signed-key verification and dual Linux
-  architecture installation tests are implemented. No production package has
-  been published.
+  architecture installation tests are implemented.
 
-## Remaining gates
+## Closure evidence
 
-1. **Repair the Release Please state.** PR #38 merged the `0.2.0` version
-   record without a tag. It now blocks a fresh Release Please PR, while the
-   later breaking CACHE-M7 change is absent from the `0.2.0` changelog section.
-   Do not tag the current tree as `v0.2.0`. Create a reviewed, complete release
-   record and a new canonical SemVer candidate through Release Please policy.
-2. **Freeze the reviewed candidate.** Merge only the candidate release PR and
-   select its exact protected-main commit. Do not merge unrelated work between
-   that review and the tag.
-3. **Run the three-host release qualification.** The first trusted stable
-   baseline requires independent A/B archive reproduction, exact inventory,
-   SBOMs, Sigstore bundles, GitHub attestations, isolated-download checks and
-   all package-candidate checks for the maintained matrix.
-4. **Publish only after the gates pass.** The workflow creates and verifies an
-   exact private draft before exposing an immutable GitHub release. It then
-   dispatches the central APT archive, qualifies the App-authored Homebrew
-   formula and AUR package, and re-verifies public bytes without credentials.
-5. **Record measured evidence.** Add the tag object, source commit, run IDs,
-   artifact hashes, channel versions and isolated verification result to the
-   handoff and public release status.
+- [`v0.3.9`](https://github.com/metaneutrons/aros-tools/releases/tag/v0.3.9)
+  is public, stable and immutable. REST release ID `393428283` has exactly 40
+  assets. Its tag object
+  `9f1e79b36207ef82a18be6e6a9ebaf0891680f92` peels to the release source commit
+  `a940dc435cc9d3710764263905651bd88dfa6449`.
+- The initial qualification
+  [35680796294](https://github.com/metaneutrons/aros-tools/actions/runs/35680796294)
+  passed all three native producers, three independent A/B comparisons,
+  signature, inventory and package-preflight gates. It published the sealed
+  GitHub release, then stopped before any package-channel write at the
+  reusable-workflow secret boundary.
+- The source-free final recovery
+  [35698720659](https://github.com/metaneutrons/aros-tools/actions/runs/35698720659)
+  re-derived the immutable identity and passed every remaining channel gate:
+  central APT publication and public verification, isolated APT installation
+  on `amd64` and `arm64`, Homebrew publication/qualification, and AUR
+  publication/verification.
+- A fresh isolated download by numeric release ID verified the closed 40-file
+  inventory and all checksums. It verified 20 Sigstore subjects and 40 GitHub
+  provenance attestations against the release workflow, `refs/tags/v0.3.9`
+  and the exact source commit. The exact signed APT channel exposes
+  `aros-tools_0.3.9-1_{amd64,arm64}.deb`; the protected Homebrew main formula
+  at [`258bc977`](https://github.com/metaneutrons/homebrew-tap/commit/258bc9776d3e983e139df8e133308a685fe468c6)
+  and AUR `aros-tools-bin` at
+  [`9006a1a3`](https://aur.archlinux.org/cgit/aur.git/commit/?h=aros-tools-bin&id=9006a1a3fefefbfc39e8a687f7502b573d2c04ba)
+  are byte-identical to their v0.3.9 assets. AUR RPC reports `0.3.9-1`.
+- The three canonical native archive hashes are recorded in
+  [HANDOFF.md](../HANDOFF.md#v039-first-stable-release); the signed
+  [`SHA256SUMS`](https://github.com/metaneutrons/aros-tools/releases/download/v0.3.9/SHA256SUMS)
+  is the complete public asset record.
+
+## Historical terminal states
+
+`v0.3.5` through `v0.3.8` are immutable terminal non-releases. They remain
+unpublished and must never be deleted, retargeted, replaced or promoted. The
+release that closes this plan is only `v0.3.9`.
 
 ## Explicit boundaries
 

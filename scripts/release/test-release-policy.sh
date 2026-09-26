@@ -78,6 +78,61 @@ for script in release_scripts.glob('*.sh'):
             )
 PY
 
+# Cosign delivery can be transiently unavailable, but a retry must never
+# weaken the pinned installer or let signing continue without a verified client.
+python3 - "$root/.github/actions/install-verified-cosign/action.yml" \
+    "$root/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+installer = Path(sys.argv[1]).read_text(encoding='utf-8')
+workflow = Path(sys.argv[2]).read_text(encoding='utf-8')
+required_installer_markers = (
+    'name: Install verified Cosign',
+    'description: Installs the pinned Cosign release with one bounded retry',
+    'id: initial',
+    'id: retry',
+    "steps.initial.outcome == 'failure'",
+    "steps.retry.outcome != 'success'",
+    'sleep 20',
+    'no signing or publication may continue',
+)
+missing = [marker for marker in required_installer_markers if marker not in installer]
+if missing:
+    raise SystemExit(f'Cosign retry action omits contract markers: {missing}')
+installer_pin = 'sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6'
+if installer.count(installer_pin) != 2:
+    raise SystemExit('Cosign retry action must use exactly two pinned installer attempts')
+if installer.count('continue-on-error: true') != 2:
+    raise SystemExit('Cosign retry action must handle each installer attempt explicitly')
+if workflow.count('uses: ./.github/actions/install-verified-cosign') != 5:
+    raise SystemExit('release workflow does not centralize every Cosign installation')
+if 'uses: sigstore/cosign-installer@' in workflow:
+    raise SystemExit('release workflow bypasses the bounded Cosign retry action')
+PY
+
+# Keyless signing itself also gets precisely one bounded retry. A transient
+# failure may not produce a release without a bundle, and a second failure is
+# terminal rather than an unbounded retry loop.
+python3 - "$root/scripts/release/reuse-sigstore-bundles.sh" <<'PY'
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1]).read_text(encoding='utf-8')
+required = (
+    'sign_new_bundle() {',
+    'for attempt in 1 2; do',
+    'cosign sign-blob --yes --bundle "$candidate_bundle" "$subject" || sign_status=$?',
+    'sleep 20',
+    'cosign failed twice while signing release subject',
+)
+missing = [marker for marker in required if marker not in script]
+if missing:
+    raise SystemExit(f'Cosign signing retry omits contract markers: {missing}')
+if script.count('cosign sign-blob --yes --bundle') != 1:
+    raise SystemExit('Cosign signing must have one centralized retry path')
+PY
+
 # Every public-output helper delegates parent creation to one no-follow policy.
 # Existing caller-owned modes are preserved exactly and a symlink parent is
 # rejected before any output is created.
@@ -499,6 +554,57 @@ expect_failure env PATH="$work/mock-bin:$PATH" \
       --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
         --allow-new false
 
+# A newly signed subject gets one retry only. The first failure leaves a
+# partial bundle, which the retry must replace before accepting its success.
+mkdir "$work/sign-retry-bin" "$work/sign-retry-candidate" "$work/sign-retry-existing"
+printf '%s\n' fresh > "$work/sign-retry-candidate/fresh-subject"
+cat > "$work/sign-retry-bin/cosign" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+    sign-blob)
+        count_file=${MOCK_COSIGN_SIGN_COUNT:?}
+        count=0
+        [[ -f "$count_file" ]] && count=$(cat "$count_file")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$count_file"
+        bundle=
+        while (($#)); do
+            [[ "$1" == --bundle ]] && { bundle=$2; shift 2; continue; }
+            shift
+        done
+        if ((count == 1)); then
+            printf '%s\n' partial > "$bundle"
+            exit 1
+        fi
+        printf '%s\n' signed > "$bundle"
+        ;;
+    verify-blob) exit 0 ;;
+    *) exit 89 ;;
+esac
+MOCK
+cat > "$work/sign-retry-bin/sleep" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod 0755 "$work/sign-retry-bin/cosign" "$work/sign-retry-bin/sleep"
+MOCK_COSIGN_SIGN_COUNT="$work/sign-retry-count" PATH="$work/sign-retry-bin:$PATH" \
+    "$root/scripts/release/reuse-sigstore-bundles.sh" \
+      --candidate-dir "$work/sign-retry-candidate" \
+      --existing-dir "$work/sign-retry-existing" \
+      --certificate-identity \
+        'https://github.com/example/project/.github/workflows/release.yml@refs/tags/v1.2.3' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      --allow-new true >/dev/null
+[[ $(cat "$work/sign-retry-count") == 2 ]] || {
+    printf '%s\n' 'cosign signing retry did not make exactly two attempts' >&2
+    exit 1
+}
+[[ $(cat "$work/sign-retry-candidate/fresh-subject.sigstore.json") == signed ]] || {
+    printf '%s\n' 'cosign signing retry retained a partial bundle' >&2
+    exit 1
+}
+
 # A/B classification uses only immutable published stable releases and a
 # closed low-risk path policy. Source-only patches may use one producer;
 # release/build-graph changes and unavailable history require full A/B.
@@ -751,7 +857,6 @@ class ArosTools < Formula
   url "https://example.invalid/releases/download/v1.2.3/a"
   url "https://example.invalid/releases/download/v1.2.3/b"
   url "https://example.invalid/releases/download/v1.2.3/c"
-  url "https://example.invalid/releases/download/v1.2.3/d"
 end
 RUBY
 cat > "$work/channel-candidate/PKGBUILD" <<'PKGBUILD'
@@ -820,6 +925,18 @@ expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=17040672
     MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
     PATH="$work/mock-bin:$PATH" \
     "${channel_verify[@]}" --mode preflight
+printf '%s\n' \
+    '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"1.2.3-1"}]}' \
+    > "$work/channels/aur-rpc.json"
+printf '%s\n' '{"resultcount":0,"results":[]}' > "$work/channels/aur-rpc.json"
+AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
+  MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
+  PATH="$work/mock-bin:$PATH" \
+  "${channel_verify[@]}" --mode preflight >/dev/null
+expect_failure env AROS_RELEASE_POLICY_FIXTURE=1 AROS_RELEASE_NOW_EPOCH=1704067200 \
+    MOCK_SRCINFO="$work/channels/aur/.SRCINFO" GH_TOKEN=fixture \
+    PATH="$work/mock-bin:$PATH" \
+    "${channel_verify[@]}" --mode exact
 printf '%s\n' \
     '{"resultcount":1,"results":[{"Name":"aros-tools-bin","Version":"1.2.3-1"}]}' \
     > "$work/channels/aur-rpc.json"
@@ -978,6 +1095,7 @@ cp "$root/.github/workflows/release.yml" \
     "$work/policy/.github/workflows/release.yml"
 mkdir -p "$work/policy/.github/actions"
 cp -R "$root/.github/actions/homebrew-token" "$work/policy/.github/actions/"
+cp -R "$root/.github/actions/install-verified-cosign" "$work/policy/.github/actions/"
 mkdir -p "$work/policy/scripts/release"
 cp "$root/scripts/release/homebrew-qualification.json" "$work/policy/scripts/release/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null

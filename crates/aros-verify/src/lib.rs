@@ -523,9 +523,9 @@ fn detect_toolchain_provisioning_context(
     };
     let llvm = read(LLVM_PROVISIONING_FILE)?
         .zip(read("config/make.cfg.in")?)
-        .zip(read("CMakeLists.txt")?)
+        .zip(aros_cmake_engine::file("CMakeLists.txt"))
         .is_some_and(|((mmake, make_config), cmake_lists)| {
-            llvm_provisioning_context_matches_sources(&mmake, &make_config, &cmake_lists)
+            llvm_provisioning_context_matches_sources(&mmake, &make_config, cmake_lists)
         });
     let gcc_libatomic = read(GCC_PROVISIONING_FILE)?.is_some_and(|gnu_mmake| {
         let semantics = canonical_make_semantics(&gnu_mmake);

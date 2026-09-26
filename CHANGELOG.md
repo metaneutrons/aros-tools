@@ -4,6 +4,64 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.9](https://github.com/metaneutrons/aros-tools/compare/v0.3.8...v0.3.9) (2026-09-22)
+
+
+### Bug Fixes
+
+* **release:** accept stable release booleans ([#218](https://github.com/metaneutrons/aros-tools/issues/218)) ([a77eea5](https://github.com/metaneutrons/aros-tools/commit/a77eea59760635875a9dee5ed5b4d4b1941d59a1))
+
+## [0.3.8](https://github.com/metaneutrons/aros-tools/compare/v0.3.7...v0.3.8) (2026-09-22)
+
+
+### Bug Fixes
+
+* **release:** isolate draft API diagnostics ([526cf84](https://github.com/metaneutrons/aros-tools/commit/526cf845814f25c135a53cfb45d82cd40e0bcf2b))
+
+## [0.3.7](https://github.com/metaneutrons/aros-tools/compare/v0.3.6...v0.3.7) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** bind draft creation to API response ([b993aa4](https://github.com/metaneutrons/aros-tools/commit/b993aa490db8835e82cef0501316dd3a94279101))
+
+## [0.3.6](https://github.com/metaneutrons/aros-tools/compare/v0.3.5...v0.3.6) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** retry draft discovery and keyless signing ([#212](https://github.com/metaneutrons/aros-tools/issues/212)) ([ae23e5b](https://github.com/metaneutrons/aros-tools/commit/ae23e5b362eefd0b992f2ff6f2a58be19cf41acd))
+
+## [0.3.5](https://github.com/metaneutrons/aros-tools/compare/v0.3.4...v0.3.5) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** recover draft create exit status ([#210](https://github.com/metaneutrons/aros-tools/issues/210)) ([1bdad9d](https://github.com/metaneutrons/aros-tools/commit/1bdad9dc129925eec804a3dbc641525a0833d2ac))
+
+## [0.3.4](https://github.com/metaneutrons/aros-tools/compare/v0.3.3...v0.3.4) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** preserve draft retry under errexit ([3b19bb9](https://github.com/metaneutrons/aros-tools/commit/3b19bb942c4435b047c851a311ae36c4b31fe4f4))
+
+## [0.3.3](https://github.com/metaneutrons/aros-tools/compare/v0.3.2...v0.3.3) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** wait for newly created draft tag consistency ([efed2ae](https://github.com/metaneutrons/aros-tools/commit/efed2ae33e88d54a0981055f9af2dde2805e7d51))
+
+## [0.3.2](https://github.com/metaneutrons/aros-tools/compare/v0.3.1...v0.3.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release:** accept absent AUR package during preflight ([4773f54](https://github.com/metaneutrons/aros-tools/commit/4773f54c3b6dc7c11509cc4a0279e0ee0df102d7))
+* **release:** finalize Release Please after final audit ([5d047da](https://github.com/metaneutrons/aros-tools/commit/5d047da9865ed01615f8f913fa990ac26e0a3d2c))
+* **release:** retry transient cosign bootstrap failures ([6c20493](https://github.com/metaneutrons/aros-tools/commit/6c204939edf8c0e4defa89125d931475a571b4a4))
+
 ## [0.3.1](https://github.com/metaneutrons/aros-tools/compare/v0.3.0...v0.3.1) (2026-09-18)
 
 

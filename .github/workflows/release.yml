@@ -243,15 +243,53 @@ jobs:
           set -euo pipefail
           handoff="$RUNNER_TEMP/recovered-release-state"
           install -d "$handoff"
-          gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$handoff/pages.json"
-          jq -e 'type == "array" and all(.[]; type == "array")' \
-            "$handoff/pages.json" >/dev/null || {
-              echo '::error::AP7060 paginated release response is malformed'; exit 1;
-            }
-          jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
-            "$handoff/pages.json" > "$handoff/matches.json"
-          count=$(jq 'length' "$handoff/matches.json")
+          resolve_release_list() {
+            if ! gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$handoff/pages.json"; then
+              echo '::error::AP7060 private release lookup failed'
+              return 1
+            fi
+            if ! jq -e 'type == "array" and all(.[]; type == "array")' \
+              "$handoff/pages.json" >/dev/null; then
+              echo '::error::AP7060 paginated release response is malformed'
+              return 1
+            fi
+            if ! jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+              "$handoff/pages.json" > "$handoff/matches.json"; then
+              echo '::error::AP7060 release lookup could not filter the requested tag'
+              return 1
+            fi
+            return 0
+          }
+          settle_private_draft_discovery() {
+            local delay match_count
+            # Release Please may create its private draft immediately before
+            # this tag workflow begins. GitHub's release-list index is
+            # eventually consistent, so wait briefly before declaring absence.
+            # The loop is read-only and cannot create or alter a release.
+            for delay in 0 3 6 12 24; do
+              if ((delay > 0)); then
+                echo "::notice::waiting ${delay}s for private draft discovery to settle"
+                sleep "$delay"
+              fi
+              if ! resolve_release_list; then
+                return 1
+              fi
+              if ! match_count=$(jq -er 'length | numbers' "$handoff/matches.json"); then
+                echo '::error::AP7060 settled release lookup has no valid match count'
+                return 1
+              fi
+              if ((match_count == 1)); then
+                return 0
+              fi
+            done
+            return 0
+          }
+          if ! settle_private_draft_discovery; then
+            echo '::error::AP7060 private draft discovery could not be settled'
+            exit 1
+          fi
+          count=$(jq -er 'length | numbers' "$handoff/matches.json")
           if ((count > 1)); then
             echo '::error::AP7060 release tag resolves to multiple release IDs'
             exit 1
@@ -266,10 +304,15 @@ jobs:
             jq -c '.[0]' "$handoff/matches.json" > "$handoff/release.json"
             release_id=$(jq -er '.id | select(type == "number" and . > 0)' \
               "$handoff/release.json")
-            draft=$(jq -er '.draft | select(type == "boolean")' "$handoff/release.json")
-            prerelease=$(jq -er '.prerelease | select(type == "boolean")' \
+            # Do not use jq --exit-status for Boolean values: a valid `false`
+            # has exit status 1 under -e. Stable releases necessarily carry
+            # `prerelease: false`, so validate the type in the filter while
+            # retaining jq's normal successful exit for both Boolean values.
+            draft=$(jq -r '.draft | if type == "boolean" then . else error("draft must be Boolean") end' \
               "$handoff/release.json")
-            immutable=$(jq -er '.immutable // false | select(type == "boolean")' \
+            prerelease=$(jq -r '.prerelease | if type == "boolean" then . else error("prerelease must be Boolean") end' \
+              "$handoff/release.json")
+            immutable=$(jq -r '(.immutable // false) | if type == "boolean" then . else error("immutable must be Boolean") end' \
               "$handoff/release.json")
             expected_prerelease=true
             [[ "$IS_STABLE" == true ]] && expected_prerelease=false
@@ -798,7 +841,7 @@ jobs:
           name: recovered-release-state
           path: recovered
       - name: Install keyless signing client
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: ./.github/actions/install-verified-cosign
         with:
           cosign-release: v3.1.1
       - name: Recover verified bundles or sign previously unseen subjects
@@ -917,7 +960,7 @@ jobs:
           done
       - name: Install keyless verification client
         if: needs.metadata.outputs.is_release == 'true'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: ./.github/actions/install-verified-cosign
         with:
           cosign-release: v3.1.1
       - name: Verify signed native subjects
@@ -1046,7 +1089,7 @@ jobs:
           name: recovered-release-state
           path: recovered
       - name: Install keyless signing client
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: ./.github/actions/install-verified-cosign
         with:
           cosign-release: v3.1.1
       - name: Recover verified bundles or sign package-manager metadata
@@ -1568,7 +1611,7 @@ jobs:
           name: qualified-release-staging
           path: candidate
       - name: Install keyless verification client
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: ./.github/actions/install-verified-cosign
         with:
           cosign-release: v3.1.1
       - name: Revalidate immutable tag and protected source branch
@@ -1607,13 +1650,89 @@ jobs:
           [[ "$IS_STABLE" == true ]] && expected_prerelease=false
 
           resolve_by_tag() {
-            gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"
-            jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
-              "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/release-matches.json"
-            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") -le 1 ]] || {
-              echo '::error::AP7500 release tag resolves to multiple release IDs'; exit 1;
-            }
+            if ! gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > "$RUNNER_TEMP/release-pages.json"; then
+              echo '::error::AP7500 release tag lookup failed while resolving the draft'
+              return 1
+            fi
+            if ! jq -c --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' \
+              "$RUNNER_TEMP/release-pages.json" > "$RUNNER_TEMP/release-matches.json"; then
+              echo '::error::AP7500 release tag lookup produced an invalid response'
+              return 1
+            fi
+            local match_count
+            if ! match_count=$(jq -er 'length | numbers' "$RUNNER_TEMP/release-matches.json"); then
+              echo '::error::AP7500 release tag lookup has no valid match count'
+              return 1
+            fi
+            if ((match_count > 1)); then
+              echo '::error::AP7500 release tag resolves to multiple release IDs'
+              return 1
+            fi
+            return 0
+          }
+          resolve_created_draft() {
+            local delay
+            # GitHub may briefly expose a newly-created draft through its
+            # temporary untagged URL before its tag lookup is consistent.
+            # Re-read only the tag-addressed release; never create it twice
+            # and never accept an unbound numeric release ID.
+            for delay in 0 1 2 4 8 16 32 64 128; do
+              if ((delay > 0)); then
+                sleep "$delay"
+              fi
+              if ! resolve_by_tag; then
+                return 1
+              fi
+              if [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then
+                return 0
+              fi
+            done
+            echo '::error::AP7500 newly created draft did not become tag-addressable'
+            return 1
+          }
+          create_exact_draft() {
+            local create_status=0
+            local create_error="$RUNNER_TEMP/draft-create.err"
+            # The releases endpoint returns the complete bound draft object on
+            # success. Prefer that response over the eventually-consistent
+            # release-list index; a non-zero transport outcome still falls
+            # back to the tag-only resolver below and is never accepted alone.
+            # Keep diagnostics out of the response: gh may write a successful
+            # transport notice on stderr, but only one JSON response can bind
+            # the release ID used by every later mutation.
+            "${create[@]}" > "$RUNNER_TEMP/draft-create.out" 2> "$create_error" || create_status=$?
+            if jq --slurp --compact-output --exit-status \
+                --arg tag "$TAG" --arg title "aros-tools $TAG" \
+                --argjson prerelease "$expected_prerelease" \
+                --rawfile body candidate/RELEASE_NOTES.md \
+                'if length == 1 and
+                    ((.[0].id | type == "number" and . > 0)) and
+                    .[0].tag_name == $tag and .[0].name == $title and
+                    .[0].body == $body and .[0].draft == true and
+                    .[0].prerelease == $prerelease and
+                    (.[0].immutable // false) == false
+                  then . else error("draft create response is not one exact object") end' \
+                "$RUNNER_TEMP/draft-create.out" > "$RUNNER_TEMP/release-matches.json"; then
+              if ((create_status != 0)); then
+                echo '::warning::AP7500 draft creation returned non-zero after the exact response was recovered'
+              fi
+              return 0
+            fi
+            if ((create_status == 0)); then
+              cat "$create_error" >&2 || true
+              cat "$RUNNER_TEMP/draft-create.out" >&2 || true
+              echo '::error::AP7500 draft creation succeeded without an exact bound response'
+              return 1
+            fi
+            if ! resolve_created_draft; then
+              cat "$create_error" >&2 || true
+              cat "$RUNNER_TEMP/draft-create.out" >&2 || true
+              echo '::error::AP7500 draft creation did not yield a tag-addressable draft'
+              return 1
+            fi
+            echo '::warning::AP7500 draft creation returned non-zero; recovered by the exact tag resolver'
+            return 0
           }
           download_by_id() {
             local release_id=$1 destination=$2 mode=$3
@@ -1654,7 +1773,10 @@ jobs:
               }
           }
 
-          resolve_by_tag
+          if ! resolve_by_tag; then
+            echo '::error::AP7500 release tag lookup failed before draft creation or recovery'
+            exit 1
+          fi
           count=$(jq 'length' "$RUNNER_TEMP/release-matches.json")
           # RECOVERED_KIND is injected by the step-level env contract.
           # shellcheck disable=SC2153
@@ -1668,15 +1790,17 @@ jobs:
             # Create metadata only. Subjects and keyless bundles are uploaded
             # before the checksum inventory, so an interrupted draft can
             # regenerate only evidence not yet covered by an uploaded checksum.
-            create=(gh release create "$TAG" --repo "$GITHUB_REPOSITORY"
-              --verify-tag --draft --notes-file candidate/RELEASE_NOTES.md
-              --title "aros-tools $TAG")
-            [[ "$IS_STABLE" == true ]] || create+=(--prerelease)
-            "${create[@]}"
-            resolve_by_tag
-            [[ $(jq 'length' "$RUNNER_TEMP/release-matches.json") == 1 ]] || {
-              echo '::error::AP7500 newly created draft cannot be resolved'; exit 1;
-            }
+            jq -n --arg tag "$TAG" --arg title "aros-tools $TAG" \
+              --argjson prerelease "$expected_prerelease" \
+              --rawfile body candidate/RELEASE_NOTES.md \
+              '{tag_name:$tag,name:$title,body:$body,draft:true,
+                prerelease:$prerelease,generate_release_notes:false}' \
+              > "$RUNNER_TEMP/draft-create-request.json"
+            create=(gh api --method POST \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              --input "$RUNNER_TEMP/draft-create-request.json" \
+              "repos/${GITHUB_REPOSITORY}/releases")
+            create_exact_draft
           elif [[ "$RECOVERED_KIND" == absent ]]; then
             echo '::error::AP7500 release state appeared after recovery; rerun for verified recovery'
             exit 1
@@ -1688,9 +1812,12 @@ jobs:
             echo '::error::AP7500 release ID changed after recovery'
             exit 1
           fi
-          is_draft=$(jq -er '.draft | select(type == "boolean")' <<<"$state")
-          is_prerelease=$(jq -er '.prerelease | select(type == "boolean")' <<<"$state")
-          immutable=$(jq -er '.immutable // false | select(type == "boolean")' <<<"$state")
+          # A valid JSON `false` is an unsuccessful result under jq -e. Read
+          # Boolean fields without -e and enforce their type inside jq so
+          # stable drafts and immutable releases remain distinguishable.
+          is_draft=$(jq -r '.draft | if type == "boolean" then . else error("draft must be Boolean") end' <<<"$state")
+          is_prerelease=$(jq -r '.prerelease | if type == "boolean" then . else error("prerelease must be Boolean") end' <<<"$state")
+          immutable=$(jq -r '(.immutable // false) | if type == "boolean" then . else error("immutable must be Boolean") end' <<<"$state")
           jq -e --arg tag "$TAG" --arg title "aros-tools $TAG" \
             --rawfile body candidate/RELEASE_NOTES.md \
             '.tag_name == $tag and .name == $title and .body == $body' \
@@ -1918,6 +2045,10 @@ jobs:
       version: ${{ needs.metadata.outputs.version }}
       source_commit: ${{ needs.metadata.outputs.source_commit }}
       tag_date_epoch: ${{ needs.metadata.outputs.tag_date_epoch }}
+    # The called channel workflow owns environment-gated App credentials.
+    # Explicit inheritance preserves that context across the reusable-workflow
+    # boundary; without it GitHub evaluates the private-key input as empty.
+    secrets: inherit
 
   final-audit:
     name: Reverify immutable stable release after channel convergence
@@ -1939,7 +2070,7 @@ jobs:
           name: qualified-release-staging
           path: candidate
       - name: Install keyless verification client
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: ./.github/actions/install-verified-cosign
         with:
           cosign-release: v3.1.1
       - name: Reverify every immutable final asset without mutation
@@ -2032,3 +2163,42 @@ jobs:
             --mode exact --repository "$GITHUB_REPOSITORY" \
             --tag "$TAG" --candidate-dir candidate
           echo 'immutable stable release and every converged channel remain verified'
+
+  finalize-release-please:
+    name: Finalize the exact Release Please lifecycle
+    if: >-
+      needs.metadata.outputs.is_release == 'true' &&
+      needs.metadata.outputs.is_stable == 'true' &&
+      needs.final-audit.result == 'success'
+    needs: [metadata, final-audit]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Revalidate immutable tag and protected source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG_OBJECT: ${{ needs.metadata.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+          TAG_DATE_EPOCH: ${{ needs.metadata.outputs.tag_date_epoch }}
+        run: |
+          set -euo pipefail
+          scripts/release/verify-release-ref.sh --mode identity \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" --tag-object "$TAG_OBJECT" \
+            --source-commit "$SOURCE_COMMIT" \
+            --tag-date-epoch "$TAG_DATE_EPOCH" >/dev/null
+      - name: Clear only the exact completed Release Please pending label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          scripts/release/finalize-release-please.sh

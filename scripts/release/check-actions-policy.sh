@@ -92,7 +92,11 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                         f'{path}:{line_number}: attestation verification omits {flag}'
                     )
 
-    if path.name == 'release.yml' and 'gh release create' in '\n'.join(lines):
+    # The release contract is independent from a particular GitHub CLI
+    # invocation.  Guarding these checks on a legacy command would allow a
+    # workflow edit to silently remove the contract together with that
+    # command, exactly when a transport migration needs the most scrutiny.
+    if path.name == 'release.yml':
         jobs: dict[str, str] = {}
         in_jobs = False
         current_name: str | None = None
@@ -130,7 +134,18 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
 
         whole = '\n'.join(lines)
         for required in (
-            '--notes-file candidate/RELEASE_NOTES.md',
+            'create=(gh api --method POST',
+            '--input "$RUNNER_TEMP/draft-create-request.json"',
+            '2> "$create_error"',
+            '--slurp --compact-output --exit-status',
+            'draft creation succeeded without an exact bound response',
+            'draft create response is not one exact object',
+            'resolve_created_draft()',
+            'for delay in 0 1 2 4 8 16 32 64 128',
+            'create_exact_draft()',
+            'draft creation did not yield a tag-addressable draft',
+            'if [[ $(jq \'length\' "$RUNNER_TEMP/release-matches.json") == 1 ]]; then',
+            'newly created draft did not become tag-addressable',
             'missing-upload-order',
             'https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets',
             'verify-publication-channels.sh',
@@ -145,7 +160,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
                 errors.append(f'{path}: hardened release workflow omits {required}')
         if '--generate-notes' in whole:
             errors.append(f'{path}: generated release notes bypass the signed deterministic body')
-        for forbidden in ('gh release upload', 'gh release edit'):
+        for forbidden in ('gh release create', 'gh release upload', 'gh release edit'):
             if forbidden in whole:
                 errors.append(
                     f'{path}: tag-addressed release mutation is forbidden: {forbidden}'
@@ -398,6 +413,26 @@ for workflow_name in ('publish-ecosystem.yml',):
 
 publish_jobs = workflow_jobs(root / 'publish-ecosystem.yml')
 release_jobs = workflow_jobs(root / 'release.yml')
+release_finalizer = release_jobs.get('finalize-release-please', '')
+if (root / 'release.yml').exists() and release_finalizer:
+    required_finalizer = (
+        "needs.metadata.outputs.is_release == 'true'",
+        "needs.metadata.outputs.is_stable == 'true'",
+        "needs.final-audit.result == 'success'",
+        'needs: [metadata, final-audit]',
+        'contents: read',
+        'issues: write',
+        'scripts/release/finalize-release-please.sh',
+        'TAG: ${{ needs.metadata.outputs.tag }}',
+        'SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}',
+    )
+    for required in required_finalizer:
+        if required not in release_finalizer:
+            errors.append(
+                f'{root / "release.yml"}: Release Please finalizer omits contract marker: {required}'
+            )
+elif (root / 'release.yml').exists():
+    errors.append(f'{root / "release.yml"}: Release Please finalizer is missing')
 rp_path = root / 'release-please.yml'
 if rp_path.exists():
     rp_job = workflow_jobs(rp_path).get('release-pr', '')
