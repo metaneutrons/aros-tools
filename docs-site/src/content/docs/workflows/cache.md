@@ -457,7 +457,7 @@ exists and has no symlink components. A selector is exactly one of:
 
 - `--source-lock FILE` for `aros-toolchain-source-lock-v2` producer inputs;
 - `--compatibility-ports-lock FILE` for
-  `aros-toolchain-compatibility-ports-v2` inputs; or
+  `aros-toolchain-compatibility-ports-v3` inputs; or
 - `--source-fetch-plan FILE` for one product
   `aros-cache-source-fetch-plan-v1` closure.
 
@@ -465,6 +465,14 @@ Selectors are bounded regular files read without following their final
 symlink. The command records the SHA-256 of the exact selector bytes as
 `request_sha256`; filenames and checkout state never select a closure
 implicitly.
+
+The v3 compatibility-ports lock also declares exact `cmake_cache_path`
+destinations for archives needed by the CMake source-inventory probe. The
+native qualification copies those verified archives into its private CMake
+build root and runs the probe with network fetching disabled. A missing
+mapping or archive fails qualification; CMake does not download an undeclared
+replacement. The separate upstream source directory remains measured and
+unchanged by the CMake probe.
 
 `status` observes root metadata only. `list` reports direct-child metadata
 states (`missing`, `present_unverified`, `unsafe`, or `inaccessible`) and never

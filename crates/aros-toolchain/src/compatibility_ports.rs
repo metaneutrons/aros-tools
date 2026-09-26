@@ -29,7 +29,7 @@ use crate::filesystem::open_directory;
 use crate::recipe::GitObjectId;
 use crate::ContractError;
 
-const SCHEMA: &str = "aros-toolchain-compatibility-ports-v2";
+const SCHEMA: &str = "aros-toolchain-compatibility-ports-v3";
 const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_INPUTS: usize = 128;
@@ -48,6 +48,9 @@ pub struct CompatibilityPortsPayload {
     pub cache_filename: String,
     /// Safe relative path below the private upstream source directory.
     pub relative_path: String,
+    /// Optional exact path below the private CMake build root where its
+    /// configure-time fetch expects this already verified archive.
+    pub cmake_cache_path: Option<String>,
     /// Exact safe relative path of the empty marker which upstream records
     /// after unpacking, if any.
     pub fetch_marker: String,
@@ -70,6 +73,13 @@ pub struct CompatibilityPortsSources {
     fetch_markers: BTreeSet<String>,
 }
 
+/// Private, measured archive copies consumed by the offline CMake probe.
+#[derive(Debug, Clone)]
+pub struct CmakeSourceCache {
+    root: PathBuf,
+    payloads: BTreeMap<String, CompatibilityPortsPayload>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -85,6 +95,8 @@ struct Input {
     id: String,
     cache_filename: String,
     relative_path: String,
+    #[serde(default)]
+    cmake_cache_path: Option<String>,
     fetch_marker: String,
     #[serde(default)]
     normalization: CachePayloadNormalization,
@@ -142,6 +154,7 @@ impl CompatibilityPortsLock {
                 id: input.id.clone(),
                 cache_filename: input.cache_filename.clone(),
                 relative_path: input.relative_path.clone(),
+                cmake_cache_path: input.cmake_cache_path.clone(),
                 fetch_marker: input.fetch_marker.clone(),
                 normalization: input.normalization,
                 url: input.url.clone(),
@@ -199,6 +212,7 @@ impl CompatibilityPortsLock {
                     id: input.id.clone(),
                     cache_filename: input.cache_filename.clone(),
                     relative_path: input.relative_path.clone(),
+                    cmake_cache_path: input.cmake_cache_path.clone(),
                     fetch_marker: input.fetch_marker.clone(),
                     normalization: input.normalization,
                     url: input.url.clone(),
@@ -266,6 +280,45 @@ pub fn materialize(
 }
 
 impl CompatibilityPortsSources {
+    /// Copy only explicitly mapped locked inputs into a fresh CMake build tree.
+    /// CMake may create its own lock files beside these copies; the upstream
+    /// source closure is never handed to the CMake fetcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0703 if a path is unsafe, an input changes, or a private
+    /// measured copy cannot be created and revalidated.
+    pub fn materialize_cmake_cache(
+        &self,
+        build_root: &Path,
+    ) -> Result<CmakeSourceCache, ContractError> {
+        self.revalidate()?;
+        let root = checked_private_cmake_root(build_root)?;
+        let mut payloads = BTreeMap::new();
+        for payload in self.payloads.values() {
+            let Some(path) = &payload.cmake_cache_path else {
+                continue;
+            };
+            let destination = root.join(path);
+            let parent = destination.parent().ok_or_else(|| {
+                ContractError::compatibility("CMake cache payload has no parent directory")
+            })?;
+            create_private_parents(&root, parent)?;
+            let source = self.root.join(&payload.relative_path);
+            copy_verified_payload(&source, &destination, payload)?;
+            payloads.insert(path.clone(), payload.clone());
+        }
+        if payloads.is_empty() {
+            return Err(ContractError::compatibility(
+                "compatibility ports lock declares no offline CMake cache inputs",
+            ));
+        }
+        let cache = CmakeSourceCache { root, payloads };
+        cache.revalidate()?;
+        self.revalidate()?;
+        Ok(cache)
+    }
+
     /// Materialized inputs in stable relative-path order, suitable for durable
     /// compatibility evidence without exposing a runner-local directory.
     #[must_use]
@@ -391,6 +444,57 @@ impl CompatibilityPortsSources {
     }
 }
 
+impl CmakeSourceCache {
+    /// Confirm the CMake probe did not replace any verified archive copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns AX0703 if a declared cache payload or its private path changes.
+    pub fn revalidate(&self) -> Result<(), ContractError> {
+        let root = checked_private_cmake_root(&self.root)?;
+        if root != self.root {
+            return Err(ContractError::compatibility(
+                "CMake compatibility build root changed after cache materialization",
+            ));
+        }
+        for (relative, payload) in &self.payloads {
+            let path = root.join(relative);
+            let parent = path.parent().ok_or_else(|| {
+                ContractError::compatibility("CMake cache payload has no parent directory")
+            })?;
+            if !fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir()) {
+                return Err(ContractError::compatibility(
+                    "CMake source cache payload parent is missing or unsafe",
+                ));
+            }
+            create_private_parents(&root, parent)?;
+            let metadata = fs::symlink_metadata(&path).map_err(|_| {
+                ContractError::compatibility("CMake source cache payload is missing")
+            })?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.permissions().mode() & 0o777 != 0o400
+            {
+                return Err(ContractError::compatibility(
+                    "CMake source cache payload is not a sealed regular file",
+                ));
+            }
+            let mut source = open_regular_file_nofollow(&path).map_err(|_| {
+                ContractError::compatibility("CMake source cache payload is unsafe or missing")
+            })?;
+            let measured = sha256_reader(&mut source).map_err(|_| {
+                ContractError::compatibility("cannot measure a CMake source cache payload")
+            })?;
+            if !matches_payload(&measured, payload) {
+                return Err(ContractError::compatibility(
+                    "CMake source cache payload differs from its lock",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn snapshots(
     cache: &Path,
     payloads: &[CompatibilityPortsPayload],
@@ -424,7 +528,21 @@ fn copy_snapshot(
     destination: &Path,
     payload: &CompatibilityPortsPayload,
 ) -> Result<(), ContractError> {
-    let mut source = open_regular_file_nofollow(snapshot.path()).map_err(|_| {
+    copy_verified_payload(snapshot.path(), destination, payload)?;
+    snapshot.revalidate().map_err(|_| {
+        ContractError::compatibility(
+            "compatibility ports cache input changed during materialization",
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_verified_payload(
+    source_path: &Path,
+    destination: &Path,
+    payload: &CompatibilityPortsPayload,
+) -> Result<(), ContractError> {
+    let mut source = open_regular_file_nofollow(source_path).map_err(|_| {
         ContractError::compatibility("cannot safely open a verified compatibility ports snapshot")
     })?;
     let mut destination_file = OpenOptions::new()
@@ -471,11 +589,6 @@ fn copy_snapshot(
     fs::set_permissions(destination, fs::Permissions::from_mode(0o400)).map_err(|_| {
         ContractError::compatibility("cannot seal a compatibility ports source payload")
     })?;
-    snapshot.revalidate().map_err(|_| {
-        ContractError::compatibility(
-            "compatibility ports cache input changed during materialization",
-        )
-    })?;
     let mut copied = open_regular_file_nofollow(destination).map_err(|_| {
         ContractError::compatibility("cannot reopen a compatibility ports source payload")
     })?;
@@ -504,11 +617,17 @@ fn validate(record: &Record) -> Result<(), ContractError> {
     let mut identifiers = BTreeSet::new();
     let mut cache_filenames = BTreeSet::new();
     let mut relative_paths = BTreeSet::new();
+    let mut cmake_cache_paths = BTreeSet::new();
     let mut fetch_markers = BTreeSet::new();
     for input in &record.inputs {
         if !identifier(&input.id)
             || !portable_filename(&input.cache_filename)
             || !safe_relative_path(&input.relative_path)
+            || input.cmake_cache_path.as_ref().is_some_and(|path| {
+                !safe_relative_path(path)
+                    || !(path.starts_with("portssources/") || path.starts_with("Ports/"))
+                    || !cmake_cache_paths.insert(path.as_str())
+            })
             || (input.normalization == CachePayloadNormalization::CanonicalTarGzipV1
                 && !canonical_tar_gzip_filename(&input.cache_filename))
             || (!input.fetch_marker.is_empty()
@@ -782,6 +901,22 @@ fn checked_directory(path: &Path, label: &str) -> Result<PathBuf, ContractError>
     Ok(canonical)
 }
 
+fn checked_private_cmake_root(path: &Path) -> Result<PathBuf, ContractError> {
+    let root = checked_directory(path, "CMake compatibility build root")?;
+    if fs::symlink_metadata(&root)
+        .map_err(|_| ContractError::compatibility("cannot inspect CMake compatibility build root"))?
+        .permissions()
+        .mode()
+        & 0o777
+        != 0o700
+    {
+        return Err(ContractError::compatibility(
+            "CMake compatibility build root is not owner-private",
+        ));
+    }
+    Ok(root)
+}
+
 fn digest<'de, D>(deserializer: D) -> Result<Sha256Digest, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -809,6 +944,7 @@ mod tests {
                     "id": id,
                     "cache_filename": cache_filename,
                     "relative_path": relative_path,
+                    "cmake_cache_path": if *id == "bzip2" { Some("portssources/bzip2-1.0.8.tar.gz") } else { None },
                     "fetch_marker": fetch_marker,
                     "url": format!("https://example.invalid/{cache_filename}"),
                     "sha256": sha256_bytes(bytes),
@@ -827,7 +963,7 @@ mod tests {
             .collect::<Vec<_>>();
         CompatibilityPortsLock::parse(
             serde_json::to_vec(&json!({
-                "schema": "aros-toolchain-compatibility-ports-v2",
+                "schema": "aros-toolchain-compatibility-ports-v3",
                 "upstream_commit": "a".repeat(40),
                 "inputs": inputs,
                 "profiles": selections,
@@ -907,6 +1043,18 @@ mod tests {
             0o400
         );
         sources.revalidate().unwrap();
+        let cmake_build = temporary.path().join("cmake-build");
+        fs::create_dir(&cmake_build).unwrap();
+        fs::set_permissions(&cmake_build, fs::Permissions::from_mode(0o700)).unwrap();
+        let cmake_cache = sources.materialize_cmake_cache(&cmake_build).unwrap();
+        let cmake_archive = cmake_build.join("portssources/bzip2-1.0.8.tar.gz");
+        assert_eq!(fs::read(&cmake_archive).unwrap(), bzip2);
+        assert!(!cmake_build.join("portssources/UnicodeData.txt").exists());
+        cmake_cache.revalidate().unwrap();
+        fs::set_permissions(&cmake_archive, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&cmake_archive, b"changed input").unwrap();
+        assert!(cmake_cache.revalidate().is_err());
+        sources.revalidate().unwrap();
         fs::write(
             sources.root.join("ports/bzip2-1.0.8.tar.gz.fetch"),
             b"transient lock",
@@ -924,7 +1072,7 @@ mod tests {
     #[test]
     fn rejects_unsafe_urls_paths_and_unselected_profiles() {
         let document = json!({
-            "schema": "aros-toolchain-compatibility-ports-v2",
+            "schema": "aros-toolchain-compatibility-ports-v3",
             "upstream_commit": "a".repeat(40),
             "inputs": [
                 {
@@ -942,9 +1090,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsafe_cmake_cache_paths() {
+        let document = json!({
+            "schema": "aros-toolchain-compatibility-ports-v3",
+            "upstream_commit": "a".repeat(40),
+            "inputs": [{
+                "id": "bzip2", "cache_filename": "bzip2.tar.gz",
+                "relative_path": "bzip2.tar.gz", "cmake_cache_path": "../escape.tar.gz",
+                "fetch_marker": "", "url": "https://example.invalid/bzip2.tar.gz",
+                "sha256": sha256_bytes(b"archive"), "size": 7
+            }],
+            "profiles": [{"name": "pc-x86_64", "inputs": ["bzip2"]}]
+        });
+        assert!(CompatibilityPortsLock::parse(&serde_json::to_vec(&document).unwrap()).is_err());
+    }
+
+    #[test]
     fn canonical_normalization_requires_a_gzip_tar_cache_filename() {
         let document = json!({
-            "schema": "aros-toolchain-compatibility-ports-v2",
+            "schema": "aros-toolchain-compatibility-ports-v3",
             "upstream_commit": "a".repeat(40),
             "inputs": [
                 {
@@ -965,7 +1129,7 @@ mod tests {
     #[test]
     fn rejects_a_profile_that_selects_an_undeclared_input() {
         let document = json!({
-            "schema": "aros-toolchain-compatibility-ports-v2",
+            "schema": "aros-toolchain-compatibility-ports-v3",
             "upstream_commit": "a".repeat(40),
             "inputs": [
                 {
