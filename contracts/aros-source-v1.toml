@@ -2,9 +2,9 @@ schema_version = 1
 
 [source]
 repository = "metaneutrons/AROS-NX"
-commit = "f3cfc243a84065166a46da28b0a5b22bbd0f8869"
+commit = "cb6974f1c3de43c6f1168d69039af7c32e56153c"
 
 [producer]
 repository = "metaneutrons/aros-toolchains"
-commit = "c8039cf2b7291097ad62c6750bd7367e91a068f4"
+commit = "e43c2d111600c405dc1d7f37bcf5eb3d8e59faf2"
 workflow = ".github/workflows/toolchain-release.yml"

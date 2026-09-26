@@ -690,7 +690,7 @@ mod tests {
     fn compatibility_lock_keeps_its_normalization_and_role() {
         let payload = b"compatibility payload";
         let bytes = serde_json::to_vec(&json!({
-            "schema": "aros-toolchain-compatibility-ports-v2",
+            "schema": "aros-toolchain-compatibility-ports-v3",
             "upstream_commit": "a".repeat(40),
             "inputs": [{
                 "id": "mesa-glu",
