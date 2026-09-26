@@ -8,6 +8,7 @@
   "bump-patch-for-minor-pre-major": true,
   "skip-github-release": true,
   "bootstrap-sha": "fb6ba7807c859c6ca20f0f019f1100c94df1375a",
+  "last-release-sha": "7a75f4e32f07162648f24b4df4bf466828a3b376",
   "group-pull-request-title-pattern": "chore${scope}: release${component} ${version}",
   "packages": {
     ".": {
