@@ -4,9 +4,15 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
-## [0.3.11](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.11) (2026-09-26)
+## [0.3.12](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.12) (2026-09-26)
 
-Version 0.3.10 was never published; its changes are included in 0.3.11.
+Versions 0.3.10 and 0.3.11 were not published; their changes are included in 0.3.12.
+
+### Bug Fixes
+
+* restore reusable release workflow token ceiling ([#230](https://github.com/metaneutrons/aros-tools/issues/230)) ([06a85af](https://github.com/metaneutrons/aros-tools/commit/06a85af995ee323640b49fe6bf6477215500993f))
+
+## [0.3.11](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.11) (2026-09-26; not published)
 
 ### Bug Fixes
 
