@@ -626,7 +626,7 @@ pub struct CacheSourceSelector {
     #[arg(long, value_name = "FILE")]
     pub(crate) source_lock: Option<PathBuf>,
 
-    /// Reviewed native compatibility ports-lock-v2 document.
+    /// Reviewed native compatibility ports-lock-v3 document.
     #[arg(long, value_name = "FILE")]
     pub(crate) compatibility_ports_lock: Option<PathBuf>,
 
