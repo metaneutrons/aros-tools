@@ -2038,6 +2038,11 @@ jobs:
       needs.metadata.outputs.is_release == 'true' &&
       needs.metadata.outputs.is_stable == 'true'
     needs: [metadata, publish]
+    # A reusable workflow cannot raise the calling job's GITHUB_TOKEN ceiling.
+    # Its recovery job verifies attestations before any channel mutation.
+    permissions:
+      contents: read
+      attestations: read
     uses: ./.github/workflows/publish-ecosystem.yml
     with:
       tag: ${{ needs.metadata.outputs.tag }}

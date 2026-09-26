@@ -1093,12 +1093,30 @@ unlink "$work/policy/.github/workflows/publish-ecosystem.yml"
 rm -f "$work/policy/.github/workflows"/*
 cp "$root/.github/workflows/release.yml" \
     "$work/policy/.github/workflows/release.yml"
+cp "$root/.github/workflows/publish-ecosystem.yml" \
+    "$work/policy/.github/workflows/publish-ecosystem.yml"
 mkdir -p "$work/policy/.github/actions"
 cp -R "$root/.github/actions/homebrew-token" "$work/policy/.github/actions/"
 cp -R "$root/.github/actions/install-verified-cosign" "$work/policy/.github/actions/"
 mkdir -p "$work/policy/scripts/release"
 cp "$root/scripts/release/homebrew-qualification.json" "$work/policy/scripts/release/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null
+sed -i.bak \
+    '/^  ecosystem:/,/^  final-audit:/ s/^      attestations: read$/      attestations: none/' \
+    "$work/policy/.github/workflows/release.yml"
+rm "$work/policy/.github/workflows/release.yml.bak"
+expect_failure_matching 'ecosystem reusable-workflow token ceiling lacks attestations: read' \
+    "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+cp "$root/.github/workflows/release.yml" \
+    "$work/policy/.github/workflows/release.yml"
+sed -i.bak \
+    '/^  recovery:/,/^  apt:/ s/^      attestations: read$/      attestations: write/' \
+    "$work/policy/.github/workflows/publish-ecosystem.yml"
+rm "$work/policy/.github/workflows/publish-ecosystem.yml.bak"
+expect_failure_matching 'ecosystem reusable-workflow token ceiling lacks attestations: write' \
+    "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+cp "$root/.github/workflows/publish-ecosystem.yml" \
+    "$work/policy/.github/workflows/publish-ecosystem.yml"
 sed -i.bak \
     '/^  homebrew-credential-preflight:/,/^  r2-credential-preflight:/ s/environment: homebrew-publication/environment: release/' \
     "$work/policy/.github/workflows/release.yml"
