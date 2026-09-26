@@ -4,6 +4,16 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.10](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.10) (2026-09-26)
+
+
+### Bug Fixes
+
+* **release:** align Homebrew publication with release targets ([d634fa7](https://github.com/metaneutrons/aros-tools/commit/d634fa7d594552160dcb7c3fcbd178ec4ff89d84))
+* **release:** recover immutable channel publication ([2bf72d5](https://github.com/metaneutrons/aros-tools/commit/2bf72d5326c16a80c1fb8834aaed63e76f65031f))
+* **release:** resolve APT package dependencies in isolation ([7823f30](https://github.com/metaneutrons/aros-tools/commit/7823f3087e097531421673fc7307e8faac1d8dcf))
+* **toolchain:** qualify CMake consumers from verified offline sources ([#225](https://github.com/metaneutrons/aros-tools/issues/225)) ([9ce99e8](https://github.com/metaneutrons/aros-tools/commit/9ce99e84590d16d67068209fbc8bde810bb46f1d))
+
 ## [0.3.9](https://github.com/metaneutrons/aros-tools/compare/v0.3.8...v0.3.9) (2026-09-22)
 
 
