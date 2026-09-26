@@ -4,15 +4,16 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
-## [0.3.11](https://github.com/metaneutrons/aros-tools/compare/v0.3.10...v0.3.11) (2026-09-26)
+## [0.3.11](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.11) (2026-09-26)
 
+Version 0.3.10 was never published; its changes are included in 0.3.11.
 
 ### Bug Fixes
 
 * bound Release Please after untagged 0.3.10 ([#228](https://github.com/metaneutrons/aros-tools/issues/228)) ([a1caea1](https://github.com/metaneutrons/aros-tools/commit/a1caea1e4614010096c9fdf28c03502781d4936e))
 * test derived build profiles after preset removal ([#226](https://github.com/metaneutrons/aros-tools/issues/226)) ([3d628be](https://github.com/metaneutrons/aros-tools/commit/3d628bedabb90af1810d12cce0405263a8926dcc))
 
-## [0.3.10](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.10) (2026-09-26)
+## [0.3.10](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...7a75f4e32f07162648f24b4df4bf466828a3b376) (2026-09-26; not published)
 
 
 ### Bug Fixes
