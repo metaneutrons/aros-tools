@@ -1,12 +1,12 @@
 ---
 title: Installation
-description: Build the complete tools suite from source and make it available to your AROS checkouts.
+description: Install the verified native tools release or build the suite from source.
 ---
 
-:::caution[Beta availability]
-Build from source today. The first stable native archives and package channels
-are still pending qualification. Check [release status](/aros-tools/reference/release-status/)
-before using any package command below.
+:::note[Beta availability]
+The verified v0.3.12 native archives and APT, Homebrew and AUR packages are
+public. You can also build from source. Check
+[release status](/aros-tools/reference/release-status/) before upgrading.
 :::
 
 ## Requirements
@@ -71,10 +71,9 @@ Next: [create your first checkout and build](/aros-tools/getting-started/quick-s
 
 ## Native release archive
 
-After a release is qualified, use its target-matched archive. The following
+Use a target-matched published archive. The following
 procedure verifies the checksum and signing identity before extracting and
-installing. Select the actual published version; `0.1.0` below illustrates
-the version format.
+installing. The example uses the published `0.3.12` version.
 
 <details>
 <summary>Verified archive installation procedure (for a published release)</summary>
@@ -84,7 +83,7 @@ checksum, manifest, SPDX SBOM, Sigstore bundle and GitHub attestation:
 
 ```sh
 set -eu
-VERSION=0.1.0
+VERSION=0.3.12
 TARGET=aarch64-apple-darwin # choose one supported target
 BASE="https://github.com/metaneutrons/aros-tools/releases/download/v${VERSION}"
 ARCHIVE="aros-tools-v${VERSION}-${TARGET}.tar.gz"
@@ -147,11 +146,11 @@ of overwriting individual files.
 
 ## Debian and Ubuntu
 
-The package channel is `https://deb.metaneutrons.cc`.
-After it is marked available, verify the archive key before adding the source.
+The published package channel is `https://deb.metaneutrons.cc`.
+Verify the archive key before adding the source.
 
 <details>
-<summary>Signed APT installation procedure (after channel qualification)</summary>
+<summary>Signed APT installation procedure</summary>
 
 The central metaneutrons archive signs the repository, not the tools project.
 Its primary fingerprint is

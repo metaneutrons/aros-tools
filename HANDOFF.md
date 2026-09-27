@@ -1,11 +1,35 @@
 # Development handoff
 
-Checkpoint verified on 2026-09-22. This is a compact entry point, not a second
+Checkpoint updated on 2026-09-27. This is a compact entry point, not a second
 backlog, live CI dashboard, or authorization to build, merge, or publish.
 Recheck linked issues, runs, and release objects before acting. Git history
 preserves earlier checkpoints.
 
-## v0.3.9 first stable release
+## Current public release boundary
+
+- [`aros-tools v0.3.12`](https://github.com/metaneutrons/aros-tools/releases/tag/v0.3.12)
+  is an independently audited stable release (release ID `397412413`) with
+  exactly 40 assets. Its native archives, checksums, signed inventory, 20
+  Sigstore bundles, 40 GitHub attestations and final public URLs were checked
+  in isolation. Signed APT packages at `0.3.12-1` for amd64/arm64, Homebrew
+  and AUR were independently checked against the published release.
+- [`aros-toolchains v0.1.4`](https://github.com/metaneutrons/aros-toolchains/releases/tag/v0.1.4)
+  is the first stable release in the fresh repository (release ID `397470054`).
+  Producer run
+  [36281479931](https://github.com/metaneutrons/aros-toolchains/actions/runs/36281479931)
+  passed 18 native builds, nine byte-identical comparisons and nine
+  compatibility/relocation lanes. All 44 assets, nine package trees, 18
+  publish receipts, 42 signed provenance subjects, GitHub attestations and
+  final public URLs passed independent verification. A macOS ARM64 consumer
+  installed and verified all three profiles from the public release in an
+  isolated store. This does not establish a complete AROS distribution build
+  or a hardware boot.
+- Historical toolchain revisions before the repository reset remain at
+  [`aros-toolchains-legacy`](https://github.com/metaneutrons/aros-toolchains-legacy).
+  The fresh repository's v0.1.0 through v0.1.3 are terminal non-releases and
+  must not be published or retargeted.
+
+## Historical v0.3.9 first stable release
 
 - [`v0.3.9`](https://github.com/metaneutrons/aros-tools/releases/tag/v0.3.9)
   is the first stable, public and immutable GitHub Release. REST release ID
@@ -44,25 +68,25 @@ preserves earlier checkpoints.
   The public package metadata and source files were byte-identical to the
   immutable release assets.
 
-## Last verified implementation checkpoint
+## Historical implementation checkpoint
 
 - TCP-M0 through TCP-M6 remain accepted. Their durable implementation and
   evidence boundaries are recorded in the M3, M4, M5, and M6 evidence ledgers.
 - The active `aros-toolchains` executor contract pins aros-tools
-  [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4), the integrated CACHE-M7 command migration. [aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains/pull/53), merged as
-  [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2), passed both its PR and main producer-contract gates. The migration neither creates nor changes a release artifact.
+  [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4), the integrated CACHE-M7 command migration. [legacy aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains-legacy/pull/53), merged as
+  [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains-legacy/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2), passed both its PR and main producer-contract gates. The migration neither creates nor changes a release artifact.
 - CACHE-M1 through CACHE-M7 and CLI-M1 through CLI-M6 have complete evidence in
   their linked issues and evidence ledgers. The cache evidence records the
   supported owned compiler namespace and excludes ambient, remote and
   external cache storage from cleanup authority.
 - The immutable
-  [`toolchain-v1-20260912-rc8`](https://github.com/metaneutrons/aros-toolchains/releases/tag/toolchain-v1-20260912-rc8)
+  [`toolchain-v1-20260912-rc8`](https://github.com/metaneutrons/aros-toolchains-legacy/releases/tag/toolchain-v1-20260912-rc8)
   prerelease was built from producer commit
   `d018d11dd6f995fc1f37d0b2b431f94a6ec78fd5` and AROS-NX
   `9369cc8f8ba4f7d320945c78788c6e2a6d0d1eab`. Its tag object is
   `6b904632d5fda7fea8f9259de27b34e77c1556db`.
 - Producer run
-  [`34699919725`](https://github.com/metaneutrons/aros-toolchains/actions/runs/34699919725)
+  [`34699919725`](https://github.com/metaneutrons/aros-toolchains-legacy/actions/runs/34699919725)
   passed 18 independent builds, nine byte-identical A/B comparisons, nine
   compatibility/relocation lanes, and draft creation for the active 3×3 matrix:
   Linux x86-64, Linux AArch64, and macOS AArch64 across `pc-x86_64`,
@@ -91,19 +115,19 @@ preserves earlier checkpoints.
 
 ## Current bounded action
 
-TCP-M7 and TCP-M8 are complete, and v0.3.9 completes the first stable release
-closure. There is no pending release or package-channel recovery. RISC-V
-remains a separate qualification; macOS Intel is not an `aros-tools` native
-release target.
+AROS-NX must switch its consumer lock directly from the legacy toolchain
+release to the measured v0.1.4 assets and pass its three-host product matrix.
+After a checked merge, verify the public consumer paths. RISC-V remains a
+separate qualification; macOS Intel is not a native release target.
 
 ## Resume safely
 
-1. Inspect the current tag object, release state and working trees before
-   taking action. Historical `v0.3.5` through `v0.3.8` are terminal,
-   unpublished non-releases; never retarget, delete, publish or replace them.
-2. Use the immutable v0.3.9 release assets, `SHA256SUMS`, manifests and SBOMs
-   as the sole source of consumer lock values. Never recover hashes, sizes or
-   tree digests from retained output.
+1. Inspect current tag objects, release states and working trees before
+   taking action. Historical unpublished versions must not be retargeted,
+   deleted, published or replaced.
+2. Use the immutable v0.1.4 toolchain release index and checked assets as the
+   sole source of consumer lock values. Never recover hashes, sizes or tree
+   digests from retained output.
 3. Follow [the test-stage policy](CONTRIBUTING.md#test-stages-and-integration-checkpoints).
    Do not repeat expensive compiler or A/B work for documentation-only changes.
 4. Keep raw logs, machine-specific paths, private operational notes, and
