@@ -5,7 +5,7 @@
   "scripts": {
     "predev": "node scripts/prepare-release-status.mjs",
     "dev": "astro dev",
-    "prebuild": "node scripts/prepare-release-status.mjs && node scripts/clean-worker-output.mjs",
+    "prebuild": "node scripts/clean-worker-output.mjs && node scripts/prepare-release-status.mjs",
     "build": "astro check && astro build",
     "test:release-status": "node --test scripts/release-data.test.mjs",
     "preview": "astro preview",
