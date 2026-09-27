@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.22)
+
 # Check the linked product, not merely the intermediate rewritten archive.
 foreach(_required IN ITEMS GCA_PRODUCT GCA_KIND GCA_NM GCA_NM_SHA256
         GCA_MAP GCA_MAP_SHA256)
