@@ -49,10 +49,10 @@ The previous full default remains available only through explicit `all`.
 | --- | --- | --- |
 | Editing a focused crate | `cargo test -p <crate> --locked` | Fast regression feedback; not the workspace gate. |
 | Ordinary local iteration / before pushing | `scripts/check-workspace.sh` | Quality + portable Rust; no source checkout or product build. |
-| Source/transpiler behavior changes and PR source lane | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh source-test` | Full locked Rust suite against the exact clean recursive source; no CMake fixtures. |
+| Source/transpiler behavior changes and PR source lane | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh source-test` | Full locked Rust suite; the current source and historical Mesa 20 regression trees are validated separately. No CMake fixtures. |
 | Documentation changes | `scripts/check-workspace.sh docs` | Locked npm/Astro build, generated links and deployment dry-run. |
-| Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible CMake fixture. |
-| Feature/milestone acceptance or release candidate | `AROS_TEST_SOURCE_ROOT=... scripts/check-workspace.sh all` | Quality + docs + integration; requires the host coverage below. |
+| Integrated `main` or explicit integration run | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh test` | Full Rust suite + every host-compatible CMake fixture. |
+| Feature/milestone acceptance or release candidate | `AROS_TEST_SOURCE_ROOT=... AROS_TEST_MESA20_SOURCE_ROOT=... AROS_TEST_MESA26_SOURCE_ROOT=... scripts/check-workspace.sh all` | Quality + docs + integration; requires the host coverage below. |
 
 Every pull request retains commit hygiene, the stable Linux x86-64 check,
 quality gate and documentation build. A deliberately narrow documentation-only
@@ -97,7 +97,9 @@ cannot silently fall out of the integration inventory. `clang`, `cmake` and
 `ninja` are required. The local invocation is:
 
 ```sh
-AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+AROS_TEST_SOURCE_ROOT=/absolute/path/to/current/AROS-NX \
+AROS_TEST_MESA20_SOURCE_ROOT=/absolute/path/to/AROS-NX-at-cb6974f \
+AROS_TEST_MESA26_SOURCE_ROOT=/absolute/path/to/current/AROS-NX \
   scripts/check-workspace.sh all
 ```
 
@@ -113,6 +115,15 @@ own temporary checkout. Workspace tests normally find all six required real
 build-tool executables in the Cargo target directory; set
 `AROS_TEST_TOOLS_DIR` explicitly when testing prebuilt binaries from another
 directory.
+The current source must match `contracts/aros-source-v1.toml`.
+`AROS_TEST_MESA26_SOURCE_ROOT` selects that same current tree for Mesa 26
+capability probes. The separate `AROS_TEST_MESA20_SOURCE_ROOT` must be the
+clean, recursively initialized AROS-NX checkout at
+`cb6974f1c3de43c6f1168d69039af7c32e56153c`. The source-coupled Rust
+suite uses that historical baseline for its Mesa 20 and other version-bound
+regressions; the dedicated Mesa 26 probes use the current source. CI checks
+out and validates both trees. The current source's complete product graph is
+qualified separately by the AROS-NX product matrix.
 
 Build the documentation with the checked-in JavaScript lockfile:
 

@@ -334,24 +334,24 @@ jobs:
             echo '::error::qualified source checkout does not match its contract commit'
             exit 1
           fi
-      # Mesa 26 is qualified separately while its source PR is stacked on the
-      # upstream synchronization. The ordinary source/producer contract still
-      # selects the released Mesa 20 tree for regression testing.
-      - name: Checkout exact Mesa 26 capability source
+      # Keep Mesa 20 regression probes bound to the last qualified source
+      # tree while the current source/producer contract selects Mesa 26.
+      - name: Checkout exact Mesa 20 regression source
         if: matrix.source_qualification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: metaneutrons/AROS-NX
-          ref: f1709999a7a79f25a7345f88ec850a7b1daa89ea
-          path: aros-mesa26-source
+          ref: cb6974f1c3de43c6f1168d69039af7c32e56153c
+          path: aros-mesa20-source
+          submodules: recursive
           persist-credentials: false
-      - name: Require exact Mesa 26 source identity
+      - name: Require exact Mesa 20 regression source identity
         if: matrix.source_qualification
         shell: bash
         run: |
           set -euo pipefail
-          if [[ $(git -C aros-mesa26-source rev-parse HEAD) != f1709999a7a79f25a7345f88ec850a7b1daa89ea ]]; then
-            echo '::error::Mesa 26 source checkout does not match its pinned commit'
+          if [[ $(git -C aros-mesa20-source rev-parse HEAD) != cb6974f1c3de43c6f1168d69039af7c32e56153c ]]; then
+            echo '::error::Mesa 20 regression source checkout does not match its pinned commit'
             exit 1
           fi
       - name: Activate pinned Rust toolchain
@@ -366,7 +366,8 @@ jobs:
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
-          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source
+          AROS_TEST_MESA20_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa20-source
+          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-source
         run: scripts/check-workspace.sh source-test
       # Product-build fixtures run once on the integrated main commit, not on
       # every PR edit/push. workflow_dispatch is the explicit pre-integration
@@ -377,7 +378,8 @@ jobs:
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
-          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source
+          AROS_TEST_MESA20_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa20-source
+          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-source
         run: scripts/check-workspace.sh test
       - name: Run portable workspace tests
         if: ${{ !matrix.source_qualification }}
