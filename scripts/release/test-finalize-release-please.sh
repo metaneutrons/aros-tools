@@ -25,8 +25,9 @@ MOCK
 chmod 0755 "$work/gh"
 
 release='{"tag_name":"v1.2.3","name":"aros-tools v1.2.3","draft":false,"prerelease":false,"immutable":true}'
-pending_pr='[[{"number":42,"state":"closed","merged_at":"2026-09-21T00:00:00Z","merge_commit_sha":"0123456789abcdef0123456789abcdef01234567","base":{"ref":"main"},"head":{"ref":"release-please--branches--main--components--aros-tools"},"title":"chore(main): release 1.2.3","user":{"login":"app/metaneutrons-release-please"},"labels":[{"name":"autorelease: pending"}]}]]'
+pending_pr='[[{"number":42,"state":"closed","merged_at":"2026-09-21T00:00:00Z","merge_commit_sha":"0123456789abcdef0123456789abcdef01234567","base":{"ref":"main"},"head":{"ref":"release-please--branches--main--components--aros-tools"},"title":"chore(main): release 1.2.3","user":{"login":"metaneutrons-release-please[bot]"},"labels":[{"name":"autorelease: pending"}]}]]'
 complete_pr='[[{"number":42,"state":"closed","merged_at":"2026-09-21T00:00:00Z","merge_commit_sha":"0123456789abcdef0123456789abcdef01234567","base":{"ref":"main"},"head":{"ref":"release-please--branches--main--components--aros-tools"},"title":"chore(main): release 1.2.3","user":{"login":"app/metaneutrons-release-please"},"labels":[]}]]'
+wrong_bot_pr=${pending_pr/metaneutrons-release-please\[bot\]/unrelated-app\[bot\]}
 
 run() {
     MOCK_LOG="$work/log" MOCK_RELEASE="$release" MOCK_PULLS="$1" MOCK_ISSUE="$2" \
@@ -61,6 +62,20 @@ grep -F 'AP7520 exact Release Please PR cannot be resolved' "$work/stderr" >/dev
 }
 if grep -Fq -- '--method DELETE' "$work/log"; then
     printf '%s\n' 'unrelated pull request fixture mutated labels' >&2
+    exit 1
+fi
+
+: > "$work/log"
+if run "$wrong_bot_pr" '{"number":42,"labels":[]}' >"$work/stdout" 2>"$work/stderr"; then
+    printf '%s\n' 'unrelated bot fixture unexpectedly finalized' >&2
+    exit 1
+fi
+grep -F 'AP7520 exact Release Please PR cannot be resolved' "$work/stderr" >/dev/null || {
+    cat "$work/stderr" >&2
+    exit 1
+}
+if grep -Fq -- '--method DELETE' "$work/log"; then
+    printf '%s\n' 'unrelated bot fixture mutated labels' >&2
     exit 1
 fi
 
