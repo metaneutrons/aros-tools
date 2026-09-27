@@ -90,6 +90,9 @@ pub struct TranspilerProfile {
     pub toolchain: String,
     pub cpu32: String,
     pub use_mmu: bool,
+    /// Explicit MetaMake OPT_MESAGL selector; absence preserves older profiles.
+    #[serde(default)]
+    pub mesa_version: Option<String>,
 }
 
 impl TargetProfile {
@@ -227,6 +230,16 @@ fn validate_config(label: &str, config: &ArosConfig) -> Result<()> {
                     )));
                 }
             }
+            if transpiler
+                .mesa_version
+                .as_deref()
+                .is_some_and(|value| !safe_token(value))
+            {
+                return Err(invalid(format!(
+                    "target {:?} has an invalid transpiler.mesa_version token",
+                    target.name
+                )));
+            }
         }
     }
     if let Some(host) = &config.host_compiler {
@@ -359,7 +372,7 @@ mod tests {
         fs::write(
             &path,
             "[[targets]]\nname='pc-x86_64'\narch='x86_64'\nplatform='pc'\nbsp='generic'\n\
-             [targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='i386'\nuse_mmu=true\n",
+             [targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='i386'\nuse_mmu=true\nmesa_version='26.0.0'\n",
         )
         .unwrap();
         let profile = TargetProfile::load_from_file(&path).unwrap().remove(0);
@@ -367,6 +380,19 @@ mod tests {
         assert_eq!(context.toolchain, "llvm");
         assert_eq!(context.cpu32, "i386");
         assert!(context.use_mmu);
+        assert_eq!(context.mesa_version.as_deref(), Some("26.0.0"));
+
+        let unsafe_version = directory.path().join("unsafe-version.toml");
+        fs::write(
+            &unsafe_version,
+            "[[targets]]\nname='pc'\narch='x86_64'\nplatform='pc'\nbsp='generic'\n\
+             [targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='llvm'\ncpu32='i386'\nuse_mmu=true\nmesa_version='26.0.0;bad'\n",
+        )
+        .unwrap();
+        assert!(TargetProfile::load_from_file(&unsafe_version)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid transpiler.mesa_version"));
 
         let unknown = directory.path().join("unknown.toml");
         fs::write(

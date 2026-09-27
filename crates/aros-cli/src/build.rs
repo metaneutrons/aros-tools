@@ -99,7 +99,7 @@ fn profile_cache_variables(
     profile: &aros_common::TargetProfile,
     build_type: BuildType,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut variables = vec![
         ("CMAKE_SYSTEM_NAME".to_owned(), "Generic".to_owned()),
         (
             "CMAKE_SYSTEM_PROCESSOR".to_owned(),
@@ -118,7 +118,15 @@ fn profile_cache_variables(
             build_type.cmake_value().to_owned(),
         ),
         ("CMAKE_EXPORT_COMPILE_COMMANDS".to_owned(), "ON".to_owned()),
-    ]
+    ];
+    if let Some(version) = profile
+        .transpiler
+        .as_ref()
+        .and_then(|context| context.mesa_version.as_ref())
+    {
+        variables.push(("AROS_MESA_VERSION".to_owned(), version.clone()));
+    }
+    variables
 }
 
 /// Puts the CMake engine where this build will read it from.
@@ -528,7 +536,28 @@ mod tests {
                 "{}: bootloader",
                 profile.name
             );
+            assert!(!values.contains_key("AROS_MESA_VERSION"));
         }
+    }
+
+    #[test]
+    fn explicit_mesa_selector_reaches_cmake_without_changing_legacy_profiles() {
+        let absent_override = tempfile::tempdir().unwrap();
+        let mut profile = aros_common::TargetProfile::load_config_or_builtin(
+            &absent_override.path().join("aros-targets.toml"),
+        )
+        .unwrap()
+        .targets
+        .remove(0);
+        profile.transpiler.as_mut().unwrap().mesa_version = Some("26.0.0".into());
+        let values: std::collections::HashMap<_, _> =
+            profile_cache_variables(&profile, BuildType::Release)
+                .into_iter()
+                .collect();
+        assert_eq!(
+            values.get("AROS_MESA_VERSION").map(String::as_str),
+            Some("26.0.0")
+        );
     }
 
     #[test]

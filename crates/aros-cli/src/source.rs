@@ -992,6 +992,9 @@ fn validate_target_graphs(repo_root: &Path, checkout: &Path, output_root: &Path)
             .args(["--cpu32", &context.cpu32])
             .args(["--use-mmu", &context.use_mmu])
             .args(["--float-abi", &context.float_abi]);
+        if let Some(version) = &context.mesa_version {
+            command.args(["--mesa-version", version]);
+        }
         observability::capture_exit_code_with_timeout(
             &mut command,
             &format!("target-graph validation for profile '{}'", profile.name),
