@@ -581,7 +581,6 @@ pub(super) fn parse_mmakefile_impl(
                 continue;
             }
         };
-
         // An ABI skeleton has no implementation sources, and the one explicit
         // genmodule-only library is implemented entirely by generated start/end
         // files. Every other empty result keeps the existing strict source-list
@@ -589,17 +588,7 @@ pub(super) fn parse_mmakefile_impl(
         let sources = if is_abi || genmodule_only {
             EvaluatedSources::default()
         } else {
-            // The same source-list rules as every other build macro: the union
-            // of all four lanes, with the reference's *.c default only when no
-            // lane was declared (make.tmpl:2802).
-            let mesa26_module_sources = if rel_dir == Path::new("workbench/libs/egl")
-                && mmake_name == "workbench-libs-egl"
-            {
-                mesa26::archive_sources(root, &rel_dir, &mmake_name, target)
-            } else {
-                Ok(None)
-            };
-            let mut sources = match mesa26_module_sources {
+            let mut sources = match mesa26::module_sources(root, &rel_dir, &mmake_name, target) {
                 Ok(Some(sources)) => sources,
                 Ok(None) => match evaluate_macro_sources(rest, &vars, &expression_context) {
                     Ok(sources) => sources,
