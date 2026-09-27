@@ -1,6 +1,6 @@
 # Upstream AROS capability migration
 
-Status: M1-M4 completed on 2026-09-27; M5 release qualification remains open.
+Status: M1-M5 completed on 2026-09-27.
 Tracking: [epic #241](https://github.com/metaneutrons/aros-tools/issues/241).
 
 ## Outcome and boundaries
@@ -22,9 +22,9 @@ the merge tree matches the qualified PR tree. The same tree passed the
 The implementation belongs primarily to `aros-tools`: `aros-transpiler` owns
 recipe acceptance and the embedded `aros-cmake-engine` owns execution. AROS-NX
 owns the upstream merge and the exact aros-tools input selected for product
-qualification. The already published aros-tools v0.3.12 and aros-toolchains
-v0.1.4 remain immutable. No toolchain release, AROS-NX consumer toolchain lock
-switch, or weakening of existing capability checks is implied by this plan.
+qualification. The previously published aros-tools v0.3.12 and aros-toolchains
+v0.1.4 remain immutable. This work did not require a new toolchain release, an
+AROS-NX consumer toolchain lock switch, or weaker capability checks.
 
 ## Design and decisions
 
@@ -142,6 +142,28 @@ Release Please flow.
 - M5-A2: Public CLI/Astro documentation states the measured source and host
   support. Failed candidates remain immutable non-releases.
 
+M5 completed with the immutable public
+[aros-tools v0.3.13 release](https://github.com/metaneutrons/aros-tools/releases/tag/v0.3.13)
+(release ID `397777268`, source commit
+`b5a2e9ea54bdaf50712b16f5c64dc89fd8c87e62`). The
+[tag qualification](https://github.com/metaneutrons/aros-tools/actions/runs/36342801020)
+passed all three native host builds and byte comparisons, signing, the exact
+40-asset inventory, isolated download, 20 Sigstore bundles and 40 GitHub
+attestations. Public package gates passed for signed APT `0.3.13-1` on amd64
+and arm64, Homebrew on macOS ARM64 and both Linux hosts, and AUR `0.3.13-1`.
+Independent checks confirmed all 40 public asset URLs, archive checksums,
+signatures, attestations and exact public package bytes. The final read-only
+channel audit passed. The workflow conclusion is nevertheless red because its
+subsequent Release Please label finalizer accepted only GitHub's GraphQL actor
+name, not the REST bot login. The narrow correction merged as
+[PR #262](https://github.com/metaneutrons/aros-tools/pull/262) at
+`62e2ec408f7a1b80b55f82361699ad48cfe0693d`; the corrected finalizer
+resolved the exact merged PR and cleared only its pending label. No tag,
+release or package was rerun or changed. The public
+[release-status page](https://aros.metaneutrons.cc/aros-tools/reference/release-status/)
+was rebuilt from GitHub release data and now lists v0.3.13 alongside the
+unchanged toolchains v0.1.4.
+
 ## Migration, risks and verification cost
 
 Use focused parser and engine tests during M2/M3 development. The full
@@ -151,7 +173,8 @@ compiler or generated-file failures after configure; a green transpiler alone
 is insufficient. M4 is complete: protected AROS-NX main contains the qualified
 source tree, the permanent `master` mirror fast-forwarded to exact upstream
 commit `282a0454356dc2b9554ab023997d7f7ca24fc03e`, and both
-source/producer contracts select their reviewed commits. Public aros-tools
-v0.3.12 and aros-toolchains v0.1.4 remain unchanged. M5 requires a fresh
-Release Please version and the repository's full release gates; the M4 product
-matrix is not a substitute for native release or package-channel qualification.
+source/producer contracts select their reviewed commits. M5 independently
+qualified and published aros-tools v0.3.13 through its native and package
+release gates. AROS-NX continues to consume the separately qualified
+aros-toolchains v0.1.4; the M4 product matrix was not substituted for native
+release or package-channel qualification.
