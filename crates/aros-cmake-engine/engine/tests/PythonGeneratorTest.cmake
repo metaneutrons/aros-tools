@@ -22,7 +22,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--input", required=True)
 parser.add_argument("--name", required=True)
 parser.add_argument("--suffix", required=True)
+parser.add_argument("--dependency")
 arguments = parser.parse_args()
+if arguments.dependency and not pathlib.Path(arguments.dependency).is_file():
+    sys.stderr.write("declared earlier output is missing\n")
+    raise SystemExit(9)
 value = pathlib.Path(arguments.input).read_text(encoding="utf-8").strip()
 if value == "FAIL":
     sys.stdout.write("#define PARTIAL_OUTPUT 1\n")
@@ -86,6 +90,7 @@ set(_build_root "${CMAKE_BINARY_DIR}/gen/python-fixture")
 set(_script "generator.py")
 set(_source_inputs "input.txt" "fixture_helper.py")
 set(_first_output "generated/first.h")
+set(_second_dependency "generated/first.h")
 if(PYTHON_GENERATOR_CASE STREQUAL "script-escape")
     set(_script "../generator.py")
 elseif(PYTHON_GENERATOR_CASE STREQUAL "source-input-escape")
@@ -96,6 +101,14 @@ elseif(PYTHON_GENERATOR_CASE STREQUAL "build-root-escape")
     set(_build_root "${CMAKE_BINARY_DIR}/outside")
 elseif(PYTHON_GENERATOR_CASE STREQUAL "missing-input")
     set(_source_inputs "missing.txt")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-escape")
+    set(_second_dependency "../outside.h")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-missing")
+    set(_second_dependency "generated/missing.h")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-self")
+    set(_second_dependency "generated/second.h")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-absolute")
+    set(_second_dependency "${_build_root}/generated/first.h")
 endif()
 
 aros_generate_python_outputs(
@@ -114,10 +127,12 @@ aros_generate_python_outputs(
     JOB
         SCRIPT "generator.py"
         OUTPUT "generated/second.h"
+        DEPENDS_ON_OUTPUTS "${_second_dependency}"
         ARGUMENTS
             --input "${_source_root}/input.txt"
             --name SECOND_VALUE
-            --suffix two)
+            --suffix two
+            --dependency "${_build_root}/generated/first.h")
 
 if(PYTHON_GENERATOR_CASE STREQUAL "collision")
     aros_generate_python_outputs(
@@ -286,6 +301,10 @@ _configure(collision FALSE "owned by fixture-generate")
 _configure(script-escape FALSE "SCRIPT escapes SOURCE_ROOT")
 _configure(source-input-escape FALSE "SOURCE_INPUT escapes SOURCE_ROOT")
 _configure(output-escape FALSE "OUTPUT escapes BUILD_ROOT")
+_configure(dependency-escape FALSE "DEPENDS_ON_OUTPUTS escapes BUILD_ROOT")
+_configure(dependency-missing FALSE "DEPENDS_ON_OUTPUTS must name an earlier output")
+_configure(dependency-self FALSE "DEPENDS_ON_OUTPUTS must name an earlier output")
+_configure(dependency-absolute FALSE "DEPENDS_ON_OUTPUTS must be build-root relative")
 _configure(build-root-escape FALSE "BUILD_ROOT must be a private child")
 _configure(utility-consumer FALSE
     "Python-generator consumer noncompiling-consumer")

@@ -417,6 +417,9 @@ pub struct PythonGeneratorJob {
     pub script: String,
     pub output: String,
     pub arguments: Vec<String>,
+    /// Earlier outputs of this owner needed before this job can run.
+    #[serde(default)]
+    pub depends_on_outputs: Vec<String>,
 }
 
 /// One fetched pure-Python package made available to a generator group.

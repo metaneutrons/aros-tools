@@ -1,5 +1,5 @@
 use super::{generate_cmake, generated_header};
-use crate::ast::{CopyDirectoryDecl, MetaTargetRule};
+use crate::ast::{CopyDirectoryDecl, MetaTargetRule, PythonGeneratorJob, PythonOutputsDecl};
 use crate::catalogs::CatalogDecl;
 use crate::copy_includes::CopyIncludesDecl;
 use crate::dirs::DirVars;
@@ -18,6 +18,42 @@ fn icon(name: &str) -> IconTarget {
         mmake: name.to_owned(),
         directory: "images/icons".to_owned(),
     }
+}
+
+#[test]
+fn python_generator_emits_ordered_output_dependencies() {
+    let mut graph = DependencyGraph::new();
+    graph.python_outputs.push(PythonOutputsDecl {
+        owner: "fixture-generate".to_owned(),
+        source_root: "${AROS_PORTS_DIR}/fixture/archive".to_owned(),
+        build_root: "${AROS_BUILD_DIR}/gen/fixture".to_owned(),
+        fetch_target: "fixture-fetch".to_owned(),
+        source_inputs: Vec::new(),
+        jobs: vec![
+            PythonGeneratorJob {
+                script: "first.py".to_owned(),
+                output: "generated/first.h".to_owned(),
+                arguments: Vec::new(),
+                depends_on_outputs: Vec::new(),
+            },
+            PythonGeneratorJob {
+                script: "second.py".to_owned(),
+                output: "generated/second.c".to_owned(),
+                arguments: Vec::new(),
+                depends_on_outputs: vec!["generated/first.h".to_owned()],
+            },
+        ],
+        driver_script: None,
+        python_packages: Vec::new(),
+        audited_source_dir: "${AROS_PORTS_DIR}/fixture/archive".to_owned(),
+        local_patch_files: Vec::new(),
+        consumers: Vec::new(),
+        dir_path: std::path::PathBuf::from("fixture"),
+    });
+
+    let cmake = generate_cmake(&graph);
+    assert!(cmake.contains("        DEPENDS_ON_OUTPUTS \"generated/first.h\""));
+    assert_eq!(cmake.matches("DEPENDS_ON_OUTPUTS").count(), 1);
 }
 
 #[test]

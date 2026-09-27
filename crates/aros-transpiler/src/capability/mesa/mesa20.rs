@@ -36,6 +36,7 @@ pub(crate) fn generator_job(script: &str, output: &str, arguments: &[&str]) -> P
             .iter()
             .map(|argument| (*argument).to_owned())
             .collect(),
+        depends_on_outputs: Vec::new(),
     }
 }
 
