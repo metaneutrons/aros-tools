@@ -25,6 +25,7 @@ pub struct ResolvedContext {
     pub cpu32: String,
     pub use_mmu: String,
     pub float_abi: String,
+    pub mesa_version: Option<String>,
 }
 
 pub fn resolve(checkout: &Path, profile: &TargetProfile) -> Result<ResolvedContext> {
@@ -36,6 +37,7 @@ pub fn resolve(checkout: &Path, profile: &TargetProfile) -> Result<ResolvedConte
             cpu32: context.cpu32.clone(),
             use_mmu: if context.use_mmu { "1" } else { "0" }.to_owned(),
             float_abi: profile.float_abi.clone().unwrap_or_default(),
+            mesa_version: context.mesa_version.clone(),
         };
         if checkout.join("CMakePresets.json").is_file() {
             let configured =
@@ -149,6 +151,17 @@ fn resolve_legacy_cmake_bridge(
             profile.name
         );
     }
+    let mesa_version =
+        optional_string(cache, "AROS_MESA_VERSION")?.filter(|value| !value.is_empty());
+    if mesa_version
+        .as_deref()
+        .is_some_and(|value| !portable_token(value))
+    {
+        bail!(
+            "configure preset '{}' has an unsafe AROS_MESA_VERSION value",
+            profile.name
+        );
+    }
     for (name, value) in [
         ("AROS_TARGET_CPU32", &cpu32),
         ("AROS_TARGET_FAMILY", &family),
@@ -169,6 +182,7 @@ fn resolve_legacy_cmake_bridge(
         cpu32,
         use_mmu: if use_mmu { "1" } else { "0" }.to_owned(),
         float_abi,
+        mesa_version,
     })
 }
 
@@ -250,12 +264,14 @@ mod tests {
                 toolchain: "llvm".into(),
                 cpu32: "i386".into(),
                 use_mmu: true,
+                mesa_version: Some("26.0.0".into()),
             })),
         )
         .unwrap();
         assert_eq!(context.toolchain, "llvm");
         assert_eq!(context.cpu32, "i386");
         assert_eq!(context.use_mmu, "1");
+        assert_eq!(context.mesa_version.as_deref(), Some("26.0.0"));
     }
 
     #[test]
@@ -275,6 +291,7 @@ mod tests {
         assert_eq!(context.cpu32, "i386");
         assert_eq!(context.toolchain, "llvm");
         assert_eq!(context.use_mmu, "1");
+        assert_eq!(context.mesa_version, None);
 
         let drift = resolve(
             directory.path(),
@@ -284,6 +301,7 @@ mod tests {
                 toolchain: "gnu".into(),
                 cpu32: "i386".into(),
                 use_mmu: true,
+                mesa_version: None,
             })),
         )
         .unwrap_err();
@@ -296,6 +314,45 @@ mod tests {
         assert!(error
             .to_string()
             .contains("legacy CMake context could not be proven"));
+    }
+
+    #[test]
+    fn explicit_mesa_selector_must_match_a_legacy_preset() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("CMakePresets.json"),
+            r#"{"configurePresets":[{"name":"pc-x86_64","cacheVariables":{"AROS_TARGET_CPU":"x86_64","AROS_TARGET_PLATFORM":"pc","AROS_TOOLCHAIN":"llvm","AROS_MESA_VERSION":"26.0.0"}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.path().join("CMakeLists.txt"),
+            "if(AROS_TARGET_CPU STREQUAL \"x86_64\")\nset(AROS_TARGET_CPU32 \"i386\")\nelse()\nset(AROS_TARGET_CPU32 \"\")\nendif()\nset(AROS_TARGET_FAMILY \"\" CACHE STRING \"family\")\nset(AROS_TARGET_VARIANT \"\" CACHE STRING \"variant\")\noption(AROS_ENABLE_MMU \"Include the MetaMake MMU kernel sources\" ON)\n",
+        )
+        .unwrap();
+        let explicit = profile(Some(TranspilerProfile {
+            family: String::new(),
+            variant: String::new(),
+            toolchain: "llvm".into(),
+            cpu32: "i386".into(),
+            use_mmu: true,
+            mesa_version: Some("26.0.0".into()),
+        }));
+        assert_eq!(
+            resolve(directory.path(), &explicit)
+                .unwrap()
+                .mesa_version
+                .as_deref(),
+            Some("26.0.0")
+        );
+        fs::write(
+            directory.path().join("CMakePresets.json"),
+            r#"{"configurePresets":[{"name":"pc-x86_64","cacheVariables":{"AROS_TARGET_CPU":"x86_64","AROS_TARGET_PLATFORM":"pc","AROS_TOOLCHAIN":"llvm","AROS_MESA_VERSION":"20.0.8"}}]}"#,
+        )
+        .unwrap();
+        assert!(resolve(directory.path(), &explicit)
+            .unwrap_err()
+            .to_string()
+            .contains("differs from its same-named CMake preset"));
     }
 
     #[test]
