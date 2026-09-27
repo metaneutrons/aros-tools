@@ -592,7 +592,14 @@ pub(super) fn parse_mmakefile_impl(
             // The same source-list rules as every other build macro: the union
             // of all four lanes, with the reference's *.c default only when no
             // lane was declared (make.tmpl:2802).
-            let mut sources = match mesa26::archive_sources(root, &rel_dir, &mmake_name, target) {
+            let mesa26_module_sources = if rel_dir == Path::new("workbench/libs/egl")
+                && mmake_name == "workbench-libs-egl"
+            {
+                mesa26::archive_sources(root, &rel_dir, &mmake_name, target)
+            } else {
+                Ok(None)
+            };
+            let mut sources = match mesa26_module_sources {
                 Ok(Some(sources)) => sources,
                 Ok(None) => match evaluate_macro_sources(rest, &vars, &expression_context) {
                     Ok(sources) => sources,
