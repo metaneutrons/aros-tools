@@ -3,8 +3,9 @@ title: Installation
 description: Install the verified native tools release or build the suite from source.
 ---
 
-AROS tools v0.3.12 is available as a native archive, through APT, Homebrew or
-AUR, or from source. Choose the method for your host below.
+AROS tools is available as a native archive, through APT, Homebrew or
+AUR, or from source. Check the [current release](/aros-tools/reference/release-status/)
+and the package channel's version before choosing a method.
 
 ## Requirements
 
@@ -70,7 +71,7 @@ Next: [create your first checkout and build](/aros-tools/getting-started/quick-s
 
 Use a target-matched published archive. The following
 procedure verifies the checksum and signing identity before extracting and
-installing. The example uses the published `0.3.12` version.
+installing. The procedure reads the current stable version from GitHub.
 
 <details>
 <summary>Verified archive installation procedure (for a published release)</summary>
@@ -80,7 +81,9 @@ checksum, manifest, SPDX SBOM, Sigstore bundle and GitHub attestation:
 
 ```sh
 set -eu
-VERSION=0.3.12
+VERSION=$(gh api repos/metaneutrons/aros-tools/releases/latest \
+  --jq 'select(.immutable and (.draft | not) and (.prerelease | not)) | .tag_name | ltrimstr("v")')
+test -n "$VERSION"
 TARGET=aarch64-apple-darwin # choose one supported target
 BASE="https://github.com/metaneutrons/aros-tools/releases/download/v${VERSION}"
 ARCHIVE="aros-tools-v${VERSION}-${TARGET}.tar.gz"

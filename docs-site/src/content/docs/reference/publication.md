@@ -3,7 +3,8 @@ title: Package channels
 description: Choose a distribution channel and understand how its packages relate to the native release.
 ---
 
-The current stable tools version is `v0.3.12`. For install commands, see
+For the current stable tools version, see
+[release status](/aros-tools/reference/release-status/). For install commands, see
 [installation](/aros-tools/getting-started/installation/).
 
 ## Choose a channel

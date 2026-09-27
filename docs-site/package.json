@@ -3,9 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-release-status.mjs",
     "dev": "astro dev",
-    "prebuild": "node scripts/clean-worker-output.mjs",
+    "prebuild": "node scripts/prepare-release-status.mjs && node scripts/clean-worker-output.mjs",
     "build": "astro check && astro build",
+    "test:release-status": "node --test scripts/release-data.test.mjs",
     "preview": "astro preview",
     "worker:prepare": "node scripts/prepare-worker-assets.mjs",
     "worker:check": "npm run worker:prepare && python3 ../scripts/check-docs-publication.py --configuration wrangler.jsonc --assets worker-dist && wrangler deploy --dry-run --outdir .wrangler-output",
