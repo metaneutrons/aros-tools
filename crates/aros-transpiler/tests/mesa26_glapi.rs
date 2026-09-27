@@ -24,6 +24,46 @@ fn context(cpu: &str, platform: &str, cpu32: &str, float_abi: &str) -> TargetCon
 }
 
 #[test]
+fn mesa26_egl_target_retains_the_full_upstream_core_and_local_backend() {
+    let root = mesa26_source_root();
+    for (cpu, platform, cpu32, float_abi) in [
+        ("x86_64", "pc", "i386", ""),
+        ("arm", "raspi", "", "hard"),
+        ("aarch64", "raspi", "", ""),
+    ] {
+        let profile = context(cpu, platform, cpu32, float_abi);
+        let fetches = collect_mmakefile_fetches_with_context(
+            &root.join("workbench/libs/mesa/mmakefile.src"),
+            &root,
+            &profile,
+        )
+        .unwrap();
+        let parsed = parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join("workbench/libs/egl/mmakefile.src"),
+            &root,
+            &DirVars::load(&root),
+            &profile,
+            &fetches,
+        )
+        .unwrap();
+        assert!(parsed.capability_errors.is_empty(), "{cpu}: {parsed:#?}");
+        let target = parsed
+            .targets
+            .iter()
+            .find(|candidate| candidate.mmake_name == "workbench-libs-egl")
+            .expect("Mesa 26 EGL library");
+        assert_eq!(target.source_files.len(), 16, "{cpu}");
+        assert!(target
+            .source_files
+            .iter()
+            .any(|source| source.ends_with("/src/egl/main/eglsurface")));
+        assert!(target
+            .include_dirs
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main".to_owned()));
+    }
+}
+
+#[test]
 fn mesa26_gallivm_remains_retired_without_target_llvm() {
     let root = mesa26_source_root();
     let source =

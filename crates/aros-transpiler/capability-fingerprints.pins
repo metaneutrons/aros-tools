@@ -26,6 +26,7 @@ mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed2
 # Mesa 26 glapi is a separate two-stage generated archive. The full source
 # recipe is pinned because the cold-tree evaluator cannot import mesa.cfg.
 mesa26-glapi-recipe = cbedcf70cfb2a3c5df6f638791e8e90a5a616ebfcf6fe1345c94449951357a26 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
+mesa26-egl-recipe = 7f2e4c2241f305bca95ad0080736c61a06f63c295a2d0fa9ec7f5c2c272a20a4 # gitleaks:allow -- public SHA-256 of the audited Mesa 26 EGL recipe
 mesa26-config = a93996e9e9bd71fe54d7be9edca1e06de06d04edd15b50570888d5c95bb9ea80
 
 # Remaining Mesa generator lanes. Each recipe fingerprint is paired with the

@@ -144,6 +144,46 @@ pub(crate) fn archive_sources(
     let Some(profile) = profile(target)? else {
         return Ok(None);
     };
+    if relative_dir == Path::new("workbench/libs/egl") && mmake == "workbench-libs-egl" {
+        require_file_fingerprint(
+            root,
+            "workbench/libs/egl/mmakefile.src",
+            fingerprint("mesa26-egl-recipe")?,
+            "Mesa 26 EGL source closure",
+        )?;
+        require_file_fingerprint(
+            root,
+            "workbench/libs/mesa/mesa.cfg",
+            fingerprint("mesa26-config")?,
+            "Mesa 26 EGL configuration",
+        )?;
+        let mut sources = [
+            "eglapi",
+            "eglarray",
+            "eglconfig",
+            "eglconfigdebug",
+            "eglcontext",
+            "eglcurrent",
+            "egldevice",
+            "egldisplay",
+            "eglglobals",
+            "eglimage",
+            "egllog",
+            "eglsurface",
+            "eglsync",
+        ]
+        .map(|stem| format!("{SOURCE_ROOT}/src/egl/main/{stem}"))
+        .to_vec();
+        sources.extend(
+            ["egl_arosmesa", "emul_arosc", "tls"]
+                .map(|stem| format!("${{AROS_SOURCE_DIR}}/workbench/libs/egl/{stem}")),
+        );
+        return Ok(Some(EvaluatedSources {
+            c: sources,
+            declared: true,
+            ..EvaluatedSources::default()
+        }));
+    }
     if relative_dir == Path::new(super::V3D_RELATIVE_DIR) && profile != "aarch64" {
         return Ok(None);
     }
@@ -512,6 +552,27 @@ pub(crate) fn compile_contract(
         }
         (Some("workbench/libs/gallium"), "workbench-libs-gallium") => {
             includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned());
+        }
+        (Some("workbench/libs/egl"), "workbench-libs-egl") => {
+            defines.extend(
+                [
+                    "FEATURE_GL=1",
+                    "_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_AROS",
+                    "_EGL_OS_AROS=1",
+                    "HAVE_AROS_BACKEND",
+                    "HAVE_SURFACELESS_PLATFORM",
+                ]
+                .map(str::to_owned),
+            );
+            includes.extend(
+                [
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi",
+                    "${AROS_SOURCE_DIR}/workbench/libs/egl",
+                ]
+                .map(str::to_owned),
+            );
         }
         (Some(super::V3D_RELATIVE_DIR), "hidd-v3d") if profile == "aarch64" => {
             defines.extend(["GCA_CONSUMER_MODULE", "AROS_MESA26_V3D=1"].map(str::to_owned));
@@ -1848,6 +1909,63 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn egl_archive_is_versioned_and_rejects_recipe_drift() {
+        let root = mesa26_source_root();
+        let profile = TargetContext {
+            cpu: Some("aarch64".to_owned()),
+            platform: Some("raspi".to_owned()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some(String::new()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+            mesa_version: Some("26.0.0".to_owned()),
+            ..TargetContext::default()
+        };
+        let relative = Path::new("workbench/libs/egl");
+        let sources = super::archive_sources(&root, relative, "workbench-libs-egl", Some(&profile))
+            .unwrap()
+            .unwrap();
+        assert_eq!(sources.c.len(), 16);
+        assert!(sources
+            .c
+            .contains(&format!("{}/src/egl/main/eglsurface", super::SOURCE_ROOT)));
+        assert!(sources
+            .c
+            .contains(&"${AROS_SOURCE_DIR}/workbench/libs/egl/egl_arosmesa".to_owned()));
+        let compile = compile_contract(relative, "workbench-libs-egl", Some(&profile))
+            .unwrap()
+            .unwrap();
+        assert!(compile
+            .includes
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main".to_owned()));
+        assert!(compile.defines.contains(&"HAVE_AROS_BACKEND".to_owned()));
+
+        let temporary = tempfile::tempdir().unwrap();
+        for path in [
+            "workbench/libs/egl/mmakefile.src",
+            "workbench/libs/mesa/mesa.cfg",
+        ] {
+            let destination = temporary.path().join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(root.join(path), &destination).unwrap();
+        }
+        let recipe = temporary.path().join("workbench/libs/egl/mmakefile.src");
+        let changed = fs::read_to_string(&recipe).unwrap().replace(
+            "$(EGL_PATH)/main/eglsurface",
+            "$(EGL_PATH)/main/removed_surface",
+        );
+        assert!(changed.contains("removed_surface"));
+        fs::write(&recipe, changed).unwrap();
+        assert!(super::archive_sources(
+            temporary.path(),
+            relative,
+            "workbench-libs-egl",
+            Some(&profile)
+        )
+        .is_err());
     }
 
     #[test]
