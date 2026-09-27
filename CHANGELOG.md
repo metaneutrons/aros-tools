@@ -4,6 +4,30 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.13](https://github.com/metaneutrons/aros-tools/compare/v0.3.12...v0.3.13) (2026-09-27)
+
+
+### Features
+
+* **grub:** qualify closed GRUB 2.16 host and ISO lanes ([#249](https://github.com/metaneutrons/aros-tools/issues/249)) ([6fc86e1](https://github.com/metaneutrons/aros-tools/commit/6fc86e195c5ba53f0d9d6ad3e46b94940f0878c6))
+* **mesa:** close GalliumCoreAPI ARM product graph ([#255](https://github.com/metaneutrons/aros-tools/issues/255)) ([8dc6eb4](https://github.com/metaneutrons/aros-tools/commit/8dc6eb4a23060d70aa1c3066f4a555965fb88156))
+* **mesa:** model Mesa 26 source and generator capability ([#253](https://github.com/metaneutrons/aros-tools/issues/253)) ([87963ad](https://github.com/metaneutrons/aros-tools/commit/87963adcdd33ed33a6877151fadabced6a1c69fa))
+* **transpiler:** carry explicit upstream target selectors ([ce5e02f](https://github.com/metaneutrons/aros-tools/commit/ce5e02f4cf5ce9c1a921adb20be969ae376dbb27))
+* **transpiler:** order dependent Python generator outputs ([#252](https://github.com/metaneutrons/aros-tools/issues/252)) ([0aa2eac](https://github.com/metaneutrons/aros-tools/commit/0aa2eacc4f1b44e71897f0994afe4bb9e0712205))
+
+
+### Bug Fixes
+
+* accept historical stable releases in final verification ([#232](https://github.com/metaneutrons/aros-tools/issues/232)) ([25524ad](https://github.com/metaneutrons/aros-tools/commit/25524ad193ef50caa1eeccb06ef56c5ac340a437))
+* close Mesa 26 EGL module source graph ([df8f7ea](https://github.com/metaneutrons/aros-tools/commit/df8f7ea0d9bbdf3a062eb49a6de0df27a8bd13cb))
+* close Mesa 26 format generator and Gallium inputs ([#258](https://github.com/metaneutrons/aros-tools/issues/258)) ([4a5b61e](https://github.com/metaneutrons/aros-tools/commit/4a5b61e84d24d81ed06ca987ff4ab29a1893f1b8))
+* establish policy baseline for Mesa 26 script entry points ([d5d8efa](https://github.com/metaneutrons/aros-tools/commit/d5d8efa17ebe642eb62016c8f44fbbff8cea006e))
+* pass explicit Mesa selector from target profiles ([02b10d4](https://github.com/metaneutrons/aros-tools/commit/02b10d415c520a2c3bf84bcf0e4023b77d9e0aeb))
+* qualify Mesa 26 source and producer contracts ([#260](https://github.com/metaneutrons/aros-tools/issues/260)) ([c204695](https://github.com/metaneutrons/aros-tools/commit/c204695815e176b016b82cb0bafbfe436b76d84b))
+* restore automatic Release Please history discovery ([fc135b4](https://github.com/metaneutrons/aros-tools/commit/fc135b4ac1b6691f9243adcdcb70ecb1bbc380b4))
+* **transpiler:** accept exact upstream wireless flags ([5ef1417](https://github.com/metaneutrons/aros-tools/commit/5ef14173deaf88f3a55db6c6ec0e25236068668a))
+* **transpiler:** resolve explicit selectors in fetch recipes ([#251](https://github.com/metaneutrons/aros-tools/issues/251)) ([d28c136](https://github.com/metaneutrons/aros-tools/commit/d28c136b3a39e448f56c9232ca5f39c5f7de1dee))
+
 ## [0.3.12](https://github.com/metaneutrons/aros-tools/compare/v0.3.9...v0.3.12) (2026-09-26)
 
 Versions 0.3.10 and 0.3.11 were not published; their changes are included in 0.3.12.
