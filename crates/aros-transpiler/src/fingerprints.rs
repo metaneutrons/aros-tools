@@ -65,18 +65,32 @@ pub const NAMES: &[&str] = &[
     "mesa20-vc4-manifest",
     "mesa20-vc4-recipe",
     "mesa20-v3d-recipe",
+    "mesa26-glapi-recipe",
+    "mesa26-config",
+    "mesa26-compiler-recipe",
+    "mesa26-compiler-manifest",
+    "mesa26-core-recipe",
+    "mesa26-core-manifest",
+    "mesa26-galliumaux-recipe",
+    "mesa26-galliumaux-manifest",
+    "mesa26-util-recipe",
+    "mesa26-util-manifest",
+    "mesa26-v3d-recipe",
+    "mesa26-v3d-manifest",
+    "mesa26-vc4-recipe",
+    "mesa26-vc4-manifest",
     "mesautil-generator-capability",
 ];
 
 #[cfg(test)]
 mod tests {
-    use super::{FILE, FINGERPRINTS};
+    use super::{FILE, FINGERPRINTS, NAMES};
     use std::collections::BTreeSet;
 
     #[test]
     fn every_entry_is_a_unique_named_digest() {
         let entries = aros_common::pins::entries(FINGERPRINTS, FILE);
-        assert_eq!(entries.len(), 15, "{} entries", entries.len());
+        assert_eq!(entries.len(), NAMES.len(), "{} entries", entries.len());
         let mut seen = BTreeSet::new();
         for (name, value) in entries {
             assert!(

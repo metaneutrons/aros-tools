@@ -48,6 +48,30 @@ file(WRITE "${_source}/consumer.c" [=[
 
 const char *python_generator_fixture_values = FIRST_VALUE SECOND_VALUE;
 ]=])
+file(WRITE "${_source}/local-input.txt" "first\n")
+file(WRITE "${_root}/outside.txt" "outside\n")
+file(WRITE "${_root}/outside.sh" "#!/bin/sh\nexit 0\n")
+file(WRITE "${_source}/local-generator.sh" [=[
+#!/bin/sh
+set -eu
+value=$(sed -n '1p' "$1")
+printf '#define SECOND_VALUE "%s-two"\n' "$value"
+]=])
+file(WRITE "${_source}/local-driver.py" [=[
+from pathlib import Path
+import subprocess
+import sys
+
+source_root, _build_root, script, _output, *arguments = sys.argv[1:]
+if Path(script).name == "local-generator.sh":
+    command = ["/bin/sh", script, str(Path(source_root) / "input.txt")]
+else:
+    command = [sys.executable, "-s", "-B", script, *arguments]
+result = subprocess.run(command, capture_output=True, check=False)
+sys.stderr.buffer.write(result.stderr)
+sys.stdout.buffer.write(result.stdout)
+raise SystemExit(result.returncode)
+]=])
 
 get_filename_component(_cmake_dir "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(_fixture_cmake [=[
@@ -89,8 +113,12 @@ set(_build_root "${CMAKE_BINARY_DIR}/gen/python-fixture")
 
 set(_script "generator.py")
 set(_source_inputs "input.txt" "fixture_helper.py")
+set(_local_inputs "${CMAKE_CURRENT_SOURCE_DIR}/local-input.txt")
 set(_first_output "generated/first.h")
 set(_second_dependency "generated/first.h")
+set(_second_script "generator.py")
+set(_second_local_marker "")
+set(_driver_arguments "")
 if(PYTHON_GENERATOR_CASE STREQUAL "script-escape")
     set(_script "../generator.py")
 elseif(PYTHON_GENERATOR_CASE STREQUAL "source-input-escape")
@@ -101,6 +129,25 @@ elseif(PYTHON_GENERATOR_CASE STREQUAL "build-root-escape")
     set(_build_root "${CMAKE_BINARY_DIR}/outside")
 elseif(PYTHON_GENERATOR_CASE STREQUAL "missing-input")
     set(_source_inputs "missing.txt")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "local-input-escape")
+    set(_local_inputs "${CMAKE_CURRENT_SOURCE_DIR}/../outside.txt")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "local-input-missing")
+    set(_local_inputs "${CMAKE_CURRENT_SOURCE_DIR}/missing-local.txt")
+elseif(PYTHON_GENERATOR_CASE STREQUAL "local-script" OR
+       PYTHON_GENERATOR_CASE STREQUAL "local-script-escape" OR
+       PYTHON_GENERATOR_CASE STREQUAL "local-script-missing" OR
+       PYTHON_GENERATOR_CASE STREQUAL "local-script-without-driver")
+    set(_second_script "${CMAKE_CURRENT_SOURCE_DIR}/local-generator.sh")
+    set(_second_local_marker LOCAL_SCRIPT)
+    if(NOT PYTHON_GENERATOR_CASE STREQUAL "local-script-without-driver")
+        set(_driver_arguments
+            DRIVER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/local-driver.py")
+    endif()
+    if(PYTHON_GENERATOR_CASE STREQUAL "local-script-escape")
+        set(_second_script "${CMAKE_CURRENT_SOURCE_DIR}/../outside.sh")
+    elseif(PYTHON_GENERATOR_CASE STREQUAL "local-script-missing")
+        set(_second_script "${CMAKE_CURRENT_SOURCE_DIR}/missing-local.sh")
+    endif()
 elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-escape")
     set(_second_dependency "../outside.h")
 elseif(PYTHON_GENERATOR_CASE STREQUAL "dependency-missing")
@@ -116,7 +163,9 @@ aros_generate_python_outputs(
     SOURCE_ROOT "${_source_root}"
     BUILD_ROOT "${_build_root}"
     FETCH_TARGET fixture-fetch
+    ${_driver_arguments}
     SOURCE_INPUTS ${_source_inputs}
+    LOCAL_INPUTS ${_local_inputs}
     JOB
         SCRIPT "${_script}"
         OUTPUT "${_first_output}"
@@ -125,7 +174,8 @@ aros_generate_python_outputs(
             --name FIRST_VALUE
             --suffix one
     JOB
-        SCRIPT "generator.py"
+        ${_second_local_marker}
+        SCRIPT "${_second_script}"
         OUTPUT "generated/second.h"
         DEPENDS_ON_OUTPUTS "${_second_dependency}"
         ARGUMENTS
@@ -171,7 +221,7 @@ function(_configure case expect_success expected_message)
     set(_build "${_root}/${case}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
-        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_SOURCE_DIR=${_source}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS}
             "-DPYTHON_GENERATOR_CASE=${case}" ${ARGN}
@@ -251,6 +301,17 @@ if(_noop_found LESS 0)
         "second Python-generator build was not a Ninja no-op:\n${noop_LOG}")
 endif()
 
+# Repository-owned inputs are direct Ninja dependencies, independent of the
+# fetched-source completion stamp.
+execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1)
+file(WRITE "${_source}/local-input.txt" "second\n")
+_build("${_success_build}" fixture-consumer TRUE local_refreshed)
+string(FIND "${local_refreshed_LOG}" "Generating" _local_rebuilt)
+if(_local_rebuilt LESS 0)
+    message(FATAL_ERROR
+        "changed repository input did not regenerate Python outputs:\n${local_refreshed_LOG}")
+endif()
+
 # The fetched inputs are real dependencies of the simulated fetch. Once its
 # completion stamp advances, all Python jobs must regenerate.
 execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1)
@@ -300,6 +361,15 @@ _assert_contents("${_second_output}"
 _configure(collision FALSE "owned by fixture-generate")
 _configure(script-escape FALSE "SCRIPT escapes SOURCE_ROOT")
 _configure(source-input-escape FALSE "SOURCE_INPUT escapes SOURCE_ROOT")
+_configure(local-input-escape FALSE "LOCAL_INPUT is missing, unsafe or outside")
+_configure(local-input-missing FALSE "LOCAL_INPUT is missing, unsafe or outside")
+_configure(local-script-escape FALSE "LOCAL_SCRIPT is missing, unsafe or outside")
+_configure(local-script-missing FALSE "LOCAL_SCRIPT is missing, unsafe or outside")
+_configure(local-script-without-driver FALSE "LOCAL_SCRIPT requires DRIVER_SCRIPT")
+_configure(local-script TRUE "")
+_build("${_root}/local-script" fixture-consumer TRUE local_script)
+_assert_contents("${_root}/local-script/gen/python-fixture/generated/second.h"
+    "#define SECOND_VALUE \"recovered-two\"\n" "repository-owned script output")
 _configure(output-escape FALSE "OUTPUT escapes BUILD_ROOT")
 _configure(dependency-escape FALSE "DEPENDS_ON_OUTPUTS escapes BUILD_ROOT")
 _configure(dependency-missing FALSE "DEPENDS_ON_OUTPUTS must name an earlier output")

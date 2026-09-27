@@ -408,13 +408,16 @@ pub struct AhiBuildDecl {
 /// One output-producing invocation inside a strictly admitted Python
 /// generator group.
 ///
-/// The script and source inputs are relative to the group's fetched source
-/// root, while the output is relative to its private build root.  Keeping
-/// these roots separate lets the CMake helper reject source-tree writes and
-/// build-tree escapes before it ever starts the interpreter.
+/// Fetched scripts are relative to the group's fetched source root. A
+/// capability may instead name an exact repository-owned adapter. Outputs
+/// remain relative to the private build root, and both source roots are
+/// checked before execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonGeneratorJob {
     pub script: String,
+    /// Admit a repository-owned script only through an audited capability.
+    #[serde(default)]
+    pub local_script: bool,
     pub output: String,
     pub arguments: Vec<String>,
     /// Earlier outputs of this owner needed before this job can run.
@@ -453,12 +456,19 @@ pub struct PythonOutputsDecl {
     pub fetch_target: String,
     /// Fetched, source-root-relative inputs shared by the jobs.
     pub source_inputs: Vec<String>,
+    /// Repository-owned regular files read by the jobs, tracked as direct
+    /// build dependencies in addition to the fetched source stamp.
+    #[serde(default)]
+    pub local_inputs: Vec<String>,
     pub jobs: Vec<PythonGeneratorJob>,
     /// Optional repository-owned adapter for generators which
     /// write named files or need host Flex/Bison rather than stdout-only
     /// Python.  Absence retains the original direct-Python contract.
     #[serde(default)]
     pub driver_script: Option<String>,
+    /// Host parser tools required by selected repository-owned adapters.
+    #[serde(default)]
+    pub requires_flex_bison: bool,
     /// Pure-Python packages exposed only to this owner.
     #[serde(default)]
     pub python_packages: Vec<PythonPackageDecl>,

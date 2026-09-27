@@ -34,6 +34,10 @@ pub(crate) fn parse_glapi(
     const BUILD_ROOT: &str = "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/20.0.8";
     const XML: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/mapi/glapi/gen/gl_and_es_API.xml";
 
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+        return super::mesa26::parse_glapi(relative_dir, target, targets, fetches);
+    }
+
     if relative_dir != Path::new(GLAPI_DIR) {
         return Ok(None);
     }
@@ -196,18 +200,21 @@ pub(crate) fn parse_glapi(
     let mut jobs = vec![
         PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_apitemp.py".to_owned(),
+            local_script: false,
             output: "src/mapi/glapi/glapitemp.h".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
             depends_on_outputs: Vec::new(),
         },
         PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_table.py".to_owned(),
+            local_script: false,
             output: "src/mapi/glapi/glapitable.h".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
             depends_on_outputs: Vec::new(),
         },
         PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_procs.py".to_owned(),
+            local_script: false,
             output: "src/mapi/glapi/glprocs.h".to_owned(),
             arguments: vec!["-c".to_owned(), "-f".to_owned(), XML.to_owned()],
             depends_on_outputs: Vec::new(),
@@ -216,6 +223,7 @@ pub(crate) fn parse_glapi(
     if x86_64 {
         jobs.push(PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_x86-64_asm.py".to_owned(),
+            local_script: false,
             output: "src/mapi/glapi/glapi_x86-64.s".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
             depends_on_outputs: Vec::new(),
@@ -228,8 +236,10 @@ pub(crate) fn parse_glapi(
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: GLAPI_FETCH.to_owned(),
         source_inputs: vec!["src/mapi/glapi/gen/gl_and_es_API.xml".to_owned()],
+        local_inputs: Vec::new(),
         jobs,
         driver_script: None,
+        requires_flex_bison: false,
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
@@ -245,6 +255,7 @@ pub(crate) fn parse_glapi(
 /// supported block: it is absent from `MESA_UTIL_GENERATED_FILES` and is not a
 /// prerequisite of either archive.
 pub(crate) fn parse_mesautil(
+    root: &Path,
     relative_dir: &Path,
     target: Option<&TargetContext>,
     make_source: &str,
@@ -309,6 +320,10 @@ pub(crate) fn parse_mesautil(
         "u_mm",
         "vma",
     ];
+
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+        return super::mesa26::parse_mesautil(root, relative_dir, target, targets, fetches);
+    }
 
     if relative_dir != Path::new(MESAUTIL_DIR) {
         return Ok(None);
@@ -491,21 +506,25 @@ pub(crate) fn parse_mesautil(
             "src/util/format/u_format_pack.py".to_owned(),
             "src/util/format/u_format_parse.py".to_owned(),
         ],
+        local_inputs: Vec::new(),
         jobs: vec![
             PythonGeneratorJob {
                 script: "src/util/format_srgb.py".to_owned(),
+                local_script: false,
                 output: "src/util/format_srgb.c".to_owned(),
                 arguments: vec![CSV.to_owned()],
                 depends_on_outputs: Vec::new(),
             },
             PythonGeneratorJob {
                 script: "src/util/format/u_format_table.py".to_owned(),
+                local_script: false,
                 output: "src/util/format/u_format_table.c".to_owned(),
                 arguments: vec![CSV.to_owned()],
                 depends_on_outputs: Vec::new(),
             },
         ],
         driver_script: None,
+        requires_flex_bison: false,
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
@@ -623,7 +642,15 @@ mod tests {
                      targets: &[crate::ast::TargetDefinition],
                      fetches: &[crate::fetch::FetchDecl],
                      profile: &TargetContext| {
-            parse_mesautil(relative_dir, Some(profile), content, targets, fetches).unwrap_err()
+            parse_mesautil(
+                &root,
+                relative_dir,
+                Some(profile),
+                content,
+                targets,
+                fetches,
+            )
+            .unwrap_err()
         };
 
         let changed_content =

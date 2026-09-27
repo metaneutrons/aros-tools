@@ -51,13 +51,16 @@ endfunction()
 #     BUILD_ROOT <private-generated-root>
 #     FETCH_TARGET <fetch-owner>
 #     [DRIVER_SCRIPT <repository-owned-adapter>]
+#     [REQUIRE_FLEX_BISON]
 #     [PACKAGE_FETCH_TARGETS <fetch-owners...>
 #      PACKAGE_SOURCE_ROOTS <unpacked-roots...>
 #      PACKAGE_PYTHON_PATHS <root-relative-import-paths...>]
 #     [SOURCE_INPUTS <source-relative-files...>]
+#     [LOCAL_INPUTS <repository-owned-regular-files...>]
 #     [CONSUMERS <compile-targets...>]
 #     JOB
-#       SCRIPT <source-relative-python-file>
+#       SCRIPT <source-relative-python-file-or-local-script>
+#       [LOCAL_SCRIPT]
 #       OUTPUT <build-relative-product>
 #       [DEPENDS_ON_OUTPUTS <earlier-build-relative-products...>]
 #       [ARGUMENTS <generator-arguments...>]
@@ -79,9 +82,9 @@ function(aros_generate_python_outputs)
 
     list(SUBLIST _raw_arguments 0 ${_first_job} _common_arguments)
     set(oneValueArgs OWNER SOURCE_ROOT BUILD_ROOT FETCH_TARGET DRIVER_SCRIPT)
-    set(multiValueArgs SOURCE_INPUTS CONSUMERS PACKAGE_FETCH_TARGETS
+    set(multiValueArgs SOURCE_INPUTS LOCAL_INPUTS CONSUMERS PACKAGE_FETCH_TARGETS
         PACKAGE_SOURCE_ROOTS PACKAGE_PYTHON_PATHS)
-    cmake_parse_arguments(PG "" "${oneValueArgs}" "${multiValueArgs}"
+    cmake_parse_arguments(PG "REQUIRE_FLEX_BISON" "${oneValueArgs}" "${multiValueArgs}"
         ${_common_arguments})
     if(PG_UNPARSED_ARGUMENTS OR PG_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR
@@ -108,13 +111,14 @@ function(aros_generate_python_outputs)
             "${PG_OWNER}: missing Python-generator fetch target ${PG_FETCH_TARGET}")
     endif()
 
+    cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE
+        OUTPUT_VARIABLE _repository_root)
+    file(REAL_PATH "${_repository_root}" _repository_real_root)
     if(PG_DRIVER_SCRIPT)
         if("${PG_DRIVER_SCRIPT}" MATCHES "[;\"$\\\r\n]")
             message(FATAL_ERROR
                 "${PG_OWNER}: unsafe Python-generator driver path '${PG_DRIVER_SCRIPT}'")
         endif()
-        cmake_path(ABSOLUTE_PATH AROS_SOURCE_DIR NORMALIZE
-            OUTPUT_VARIABLE _repository_root)
         cmake_path(ABSOLUTE_PATH PG_DRIVER_SCRIPT
             BASE_DIRECTORY "${_repository_root}" NORMALIZE
             OUTPUT_VARIABLE _driver)
@@ -273,10 +277,14 @@ function(aros_generate_python_outputs)
         endforeach()
     endif()
 
-    # The repository-owned Mesa adapter needs working host Flex and Bison
-    # executables. Their versions are deliberately not package-pinned here;
-    # the upstream recipe does not carry such a constraint.
-    if(_driver)
+    # Only adapters that actually invoke these parser tools require them.
+    # Their versions are not pinned here; the reviewed recipe does not set a
+    # version constraint.
+    if(PG_REQUIRE_FLEX_BISON)
+        if(NOT _driver)
+            message(FATAL_ERROR
+                "${PG_OWNER}: REQUIRE_FLEX_BISON needs DRIVER_SCRIPT")
+        endif()
         find_program(_python_generator_flex NAMES flex
             PATHS /opt/homebrew/opt/flex/bin /usr/local/opt/flex/bin
             NO_DEFAULT_PATH)
@@ -339,6 +347,34 @@ function(aros_generate_python_outputs)
     endforeach()
     list(REMOVE_DUPLICATES _source_inputs)
 
+    set(_local_inputs "")
+    foreach(_raw_input IN LISTS PG_LOCAL_INPUTS)
+        if("${_raw_input}" MATCHES "[;\"$\\\r\n]")
+            message(FATAL_ERROR
+                "${PG_OWNER}: unsafe Python-generator local input '${_raw_input}'")
+        endif()
+        cmake_path(ABSOLUTE_PATH _raw_input
+            BASE_DIRECTORY "${_repository_root}" NORMALIZE
+            OUTPUT_VARIABLE _local_input)
+        cmake_path(IS_PREFIX _repository_root "${_local_input}" NORMALIZE
+            _input_is_owned)
+        if(NOT _input_is_owned OR _local_input STREQUAL _repository_root OR
+           NOT EXISTS "${_local_input}" OR IS_DIRECTORY "${_local_input}" OR
+           IS_SYMLINK "${_local_input}")
+            message(FATAL_ERROR
+                "${PG_OWNER}: LOCAL_INPUT is missing, unsafe or outside the source tree: ${_local_input}")
+        endif()
+        file(REAL_PATH "${_local_input}" _local_input_real)
+        cmake_path(IS_PREFIX _repository_real_root "${_local_input_real}" NORMALIZE
+            _input_is_really_owned)
+        if(NOT _input_is_really_owned)
+            message(FATAL_ERROR
+                "${PG_OWNER}: LOCAL_INPUT resolves outside the source tree: ${_local_input}")
+        endif()
+        list(APPEND _local_inputs "${_local_input}")
+    endforeach()
+    list(REMOVE_DUPLICATES _local_inputs)
+
     set(_runner "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RunPythonGenerator.cmake")
     list(LENGTH _source_inputs _source_input_count)
     set(_source_input_definitions
@@ -349,6 +385,16 @@ function(aros_generate_python_outputs)
             list(GET _source_inputs ${_index} _source_input)
             list(APPEND _source_input_definitions
                 "-DSOURCE_INPUT_${_index}=${_source_input}")
+        endforeach()
+    endif()
+    list(LENGTH _local_inputs _local_input_count)
+    set(_local_input_definitions "-DLOCAL_INPUT_COUNT=${_local_input_count}")
+    if(_local_input_count GREATER 0)
+        math(EXPR _last_local_input "${_local_input_count} - 1")
+        foreach(_index RANGE 0 ${_last_local_input})
+            list(GET _local_inputs ${_index} _local_input)
+            list(APPEND _local_input_definitions
+                "-DLOCAL_INPUT_${_index}=${_local_input}")
         endforeach()
     endif()
     set(_package_definitions "-DPACKAGE_COUNT=${_package_count}")
@@ -387,7 +433,7 @@ function(aros_generate_python_outputs)
         endif()
         list(SUBLIST _raw_arguments ${_job_start} ${_job_length}
             _job_arguments)
-        cmake_parse_arguments(PJ "" "SCRIPT;OUTPUT"
+        cmake_parse_arguments(PJ "LOCAL_SCRIPT" "SCRIPT;OUTPUT"
             "ARGUMENTS;DEPENDS_ON_OUTPUTS"
             ${_job_arguments})
         if(PJ_UNPARSED_ARGUMENTS OR PJ_KEYWORDS_MISSING_VALUES OR
@@ -403,14 +449,41 @@ function(aros_generate_python_outputs)
             endif()
         endforeach()
         set(_script "${PJ_SCRIPT}")
-        cmake_path(ABSOLUTE_PATH _script
-            BASE_DIRECTORY "${_source_root}" NORMALIZE
-            OUTPUT_VARIABLE _script)
-        cmake_path(IS_PREFIX _source_root "${_script}" NORMALIZE
-            _script_is_owned)
-        if(NOT _script_is_owned OR _script STREQUAL _source_root)
-            message(FATAL_ERROR
-                "${PG_OWNER}: generator SCRIPT escapes SOURCE_ROOT: ${_script}")
+        if(PJ_LOCAL_SCRIPT)
+            if(NOT _driver)
+                message(FATAL_ERROR
+                    "${PG_OWNER}: LOCAL_SCRIPT requires DRIVER_SCRIPT")
+            endif()
+            cmake_path(ABSOLUTE_PATH _script
+                BASE_DIRECTORY "${_repository_root}" NORMALIZE
+                OUTPUT_VARIABLE _script)
+            cmake_path(IS_PREFIX _repository_root "${_script}" NORMALIZE
+                _script_is_owned)
+            if(NOT _script_is_owned OR _script STREQUAL _repository_root OR
+               NOT EXISTS "${_script}" OR IS_DIRECTORY "${_script}" OR
+               IS_SYMLINK "${_script}")
+                message(FATAL_ERROR
+                    "${PG_OWNER}: LOCAL_SCRIPT is missing, unsafe or outside the source tree: ${_script}")
+            endif()
+            file(REAL_PATH "${_script}" _script_real)
+            cmake_path(IS_PREFIX _repository_real_root "${_script_real}" NORMALIZE
+                _script_is_really_owned)
+            if(NOT _script_is_really_owned)
+                message(FATAL_ERROR
+                    "${PG_OWNER}: LOCAL_SCRIPT resolves outside the source tree: ${_script}")
+            endif()
+            set(_job_local_script_dependency "${_script}")
+        else()
+            set(_job_local_script_dependency "")
+            cmake_path(ABSOLUTE_PATH _script
+                BASE_DIRECTORY "${_source_root}" NORMALIZE
+                OUTPUT_VARIABLE _script)
+            cmake_path(IS_PREFIX _source_root "${_script}" NORMALIZE
+                _script_is_owned)
+            if(NOT _script_is_owned OR _script STREQUAL _source_root)
+                message(FATAL_ERROR
+                    "${PG_OWNER}: generator SCRIPT escapes SOURCE_ROOT: ${_script}")
+            endif()
         endif()
 
         set(_output "${PJ_OUTPUT}")
@@ -491,17 +564,22 @@ function(aros_generate_python_outputs)
                 "-DSOURCE_ROOT=${_source_root}"
                 "-DBUILD_ROOT=${_build_root}"
                 "-DDRIVER_SCRIPT=${_driver}"
+                "-DREQUIRE_FLEX_BISON=${PG_REQUIRE_FLEX_BISON}"
                 "-DFLEX_EXECUTABLE=${_python_generator_flex}"
                 "-DBISON_EXECUTABLE=${_python_generator_bison}"
                 "-DGENERATOR_SCRIPT=${_script}"
+                "-DLOCAL_SCRIPT=${PJ_LOCAL_SCRIPT}"
+                "-DREPOSITORY_ROOT=${_repository_root}"
                 "-DOUTPUT=${_output}"
                 ${_source_input_definitions}
+                ${_local_input_definitions}
                 ${_package_definitions}
                 ${_generator_argument_definitions}
                 -P "${_runner}"
             DEPENDS "${_fetch_stamp}" ${_package_fetch_stamps}
+                ${_local_inputs}
                 ${_job_dependencies}
-                "${_runner}" ${_driver}
+                "${_runner}" ${_driver} ${_job_local_script_dependency}
             COMMENT "Generating ${_output} with a capability-checked host generator"
             VERBATIM)
 

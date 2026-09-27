@@ -2,6 +2,30 @@ use super::*;
 use std::path::PathBuf;
 
 #[test]
+fn fetched_header_source_uses_selected_mesa_version() {
+    let source = "top_mesa3dgldir := $(PORTSDIR)/mesa/mesa-$(OPT_MESAGL)\n\
+top_srcdir := $(top_mesa3dgldir)\n\
+%copy_includes mmake=mesa-includes path=GL dir=$(top_srcdir)/include/GL includes=gl.h\n";
+    let target = crate::parser::TargetContext {
+        mesa_version: Some("26.0.0".to_owned()),
+        ..Default::default()
+    };
+    let scope = crate::make_vars::collect_vars_with_context(source, &target);
+    let scan = collect_copy_includes_with_scope(
+        source,
+        &PathBuf::from("workbench/libs/mesa"),
+        &scope,
+        Some(&target),
+    );
+    assert!(scan.skipped.is_empty());
+    assert_eq!(scan.decls.len(), 1);
+    assert_eq!(
+        scan.decls[0].source_dir,
+        "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/GL"
+    );
+}
+
+#[test]
 fn wildcard_with_dir_flattens_to_basenames() {
     // rom/hidds/kbd/mmakefile.src
     let src =

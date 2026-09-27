@@ -2,26 +2,77 @@ cmake_minimum_required(VERSION 3.22)
 
 foreach(_required IN ITEMS OWNER PYTHON_EXECUTABLE SOURCE_ROOT BUILD_ROOT
         GENERATOR_SCRIPT OUTPUT SOURCE_INPUT_COUNT
-        PACKAGE_COUNT GENERATOR_ARGUMENT_COUNT)
+        LOCAL_INPUT_COUNT PACKAGE_COUNT GENERATOR_ARGUMENT_COUNT)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
         message(FATAL_ERROR
             "RunPythonGenerator.cmake requires ${_required}")
     endif()
 endforeach()
 if(NOT SOURCE_INPUT_COUNT MATCHES "^[0-9]+$" OR
+   NOT LOCAL_INPUT_COUNT MATCHES "^[0-9]+$" OR
    NOT PACKAGE_COUNT MATCHES "^[0-9]+$" OR
    NOT GENERATOR_ARGUMENT_COUNT MATCHES "^[0-9]+$")
     message(FATAL_ERROR
         "${OWNER}: invalid Python-generator input/argument count")
 endif()
+
+if(LOCAL_INPUT_COUNT GREATER 0 OR LOCAL_SCRIPT)
+    if(NOT DEFINED REPOSITORY_ROOT OR "${REPOSITORY_ROOT}" STREQUAL "")
+        message(FATAL_ERROR
+            "${OWNER}: repository-owned generator inputs require REPOSITORY_ROOT")
+    endif()
+    cmake_path(ABSOLUTE_PATH REPOSITORY_ROOT NORMALIZE
+        OUTPUT_VARIABLE _repository_root)
+    file(REAL_PATH "${_repository_root}" _repository_real_root)
+endif()
+
+if(LOCAL_INPUT_COUNT GREATER 0)
+    math(EXPR _last_local_input "${LOCAL_INPUT_COUNT} - 1")
+    foreach(_index RANGE 0 ${_last_local_input})
+        set(_input_name "LOCAL_INPUT_${_index}")
+        if(NOT DEFINED ${_input_name} OR "${${_input_name}}" STREQUAL "" OR
+           NOT EXISTS "${${_input_name}}" OR
+           IS_DIRECTORY "${${_input_name}}" OR
+           IS_SYMLINK "${${_input_name}}")
+            message(FATAL_ERROR
+                "${OWNER}: required repository-owned generator input is missing or unsafe: ${_input_name}")
+        endif()
+        cmake_path(ABSOLUTE_PATH ${_input_name} NORMALIZE
+            OUTPUT_VARIABLE _local_input)
+        file(REAL_PATH "${_local_input}" _local_input_real)
+        cmake_path(IS_PREFIX _repository_real_root "${_local_input_real}" NORMALIZE
+            _local_input_owned)
+        if(NOT _local_input_owned OR _local_input_real STREQUAL _repository_real_root)
+            message(FATAL_ERROR
+                "${OWNER}: required repository-owned generator input escapes the source tree: ${_input_name}")
+        endif()
+    endforeach()
+endif()
 cmake_path(ABSOLUTE_PATH SOURCE_ROOT NORMALIZE OUTPUT_VARIABLE _source_root)
 cmake_path(ABSOLUTE_PATH BUILD_ROOT NORMALIZE OUTPUT_VARIABLE _build_root)
 cmake_path(ABSOLUTE_PATH GENERATOR_SCRIPT NORMALIZE OUTPUT_VARIABLE _script)
 cmake_path(ABSOLUTE_PATH OUTPUT NORMALIZE OUTPUT_VARIABLE _output)
-cmake_path(IS_PREFIX _source_root "${_script}" NORMALIZE _script_is_owned)
-if(NOT _script_is_owned OR _script STREQUAL _source_root)
-    message(FATAL_ERROR
-        "${OWNER}: generator script escapes the declared source root: ${_script}")
+if(LOCAL_SCRIPT)
+    cmake_path(IS_PREFIX _repository_root "${_script}" NORMALIZE
+        _script_is_owned)
+    if(NOT _script_is_owned OR _script STREQUAL _repository_root OR
+       IS_SYMLINK "${_script}")
+        message(FATAL_ERROR
+            "${OWNER}: local generator script escapes the declared repository root: ${_script}")
+    endif()
+    file(REAL_PATH "${_script}" _script_real)
+    cmake_path(IS_PREFIX _repository_real_root "${_script_real}" NORMALIZE
+        _script_really_owned)
+    if(NOT _script_really_owned OR _script_real STREQUAL _repository_real_root)
+        message(FATAL_ERROR
+            "${OWNER}: local generator script resolves outside the source tree: ${_script}")
+    endif()
+else()
+    cmake_path(IS_PREFIX _source_root "${_script}" NORMALIZE _script_is_owned)
+    if(NOT _script_is_owned OR _script STREQUAL _source_root)
+        message(FATAL_ERROR
+            "${OWNER}: generator script escapes the declared source root: ${_script}")
+    endif()
 endif()
 cmake_path(IS_PREFIX _build_root "${_output}" NORMALIZE _output_is_owned)
 if(NOT _output_is_owned OR _output STREQUAL _build_root)
@@ -45,13 +96,15 @@ if(DEFINED DRIVER_SCRIPT AND NOT "${DRIVER_SCRIPT}" STREQUAL "")
         message(FATAL_ERROR
             "${OWNER}: repository generator driver is missing: ${_driver}")
     endif()
-    foreach(_tool IN ITEMS FLEX_EXECUTABLE BISON_EXECUTABLE)
-        if(NOT DEFINED ${_tool} OR "${${_tool}}" STREQUAL "" OR
-           NOT EXISTS "${${_tool}}" OR IS_DIRECTORY "${${_tool}}")
-            message(FATAL_ERROR
-                "${OWNER}: required host tool ${_tool} is missing")
-        endif()
-    endforeach()
+    if(REQUIRE_FLEX_BISON)
+        foreach(_tool IN ITEMS FLEX_EXECUTABLE BISON_EXECUTABLE)
+            if(NOT DEFINED ${_tool} OR "${${_tool}}" STREQUAL "" OR
+               NOT EXISTS "${${_tool}}" OR IS_DIRECTORY "${${_tool}}")
+                message(FATAL_ERROR
+                    "${OWNER}: required host tool ${_tool} is missing")
+            endif()
+        endforeach()
+    endif()
 endif()
 
 set(_package_python_paths "")
@@ -137,9 +190,11 @@ set(_generator_environment
     "PYTHONNOUSERSITE=1"
     "PYTHONPATH=${_native_python_path}")
 if(_driver)
-    list(APPEND _generator_environment
-        "AROS_FLEX_EXECUTABLE=${FLEX_EXECUTABLE}"
-        "AROS_BISON_EXECUTABLE=${BISON_EXECUTABLE}")
+    if(REQUIRE_FLEX_BISON)
+        list(APPEND _generator_environment
+            "AROS_FLEX_EXECUTABLE=${FLEX_EXECUTABLE}"
+            "AROS_BISON_EXECUTABLE=${BISON_EXECUTABLE}")
+    endif()
     set(_generator_command
         "${PYTHON_EXECUTABLE}" -s -B "${_driver}"
         "${_source_root}" "${_build_root}" "${_script}" "${_output}"

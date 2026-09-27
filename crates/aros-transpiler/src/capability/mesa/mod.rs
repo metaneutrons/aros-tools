@@ -15,6 +15,7 @@ use super::manifest_inventory;
 
 pub mod generators;
 pub mod mesa20;
+pub mod mesa26;
 pub mod sse41;
 use crate::parser::TargetContext;
 use crate::sources::EvaluatedSources;
@@ -145,6 +146,12 @@ pub(crate) fn compile_contract(
     mmake: &str,
     target: Option<&TargetContext>,
 ) -> std::result::Result<Option<CompileContract>, String> {
+    if let Some(contract) = mesa26::compile_contract(relative_dir, mmake, target)? {
+        return Ok(Some(contract));
+    }
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+        return Ok(None);
+    }
     let supported = matches!(
         (relative_dir.to_str(), mmake),
         (
@@ -363,6 +370,9 @@ pub(crate) fn remaining_linklib_sources(
     mmake: &str,
     target: Option<&TargetContext>,
 ) -> std::result::Result<Option<EvaluatedSources>, String> {
+    if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+        return Ok(None);
+    }
     let supported_declaration = matches!(
         (relative_dir.to_str(), mmake),
         (

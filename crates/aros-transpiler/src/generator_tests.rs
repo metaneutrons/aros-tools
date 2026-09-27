@@ -29,21 +29,25 @@ fn python_generator_emits_ordered_output_dependencies() {
         build_root: "${AROS_BUILD_DIR}/gen/fixture".to_owned(),
         fetch_target: "fixture-fetch".to_owned(),
         source_inputs: Vec::new(),
+        local_inputs: vec!["${AROS_SOURCE_DIR}/fixture/local.txt".to_owned()],
         jobs: vec![
             PythonGeneratorJob {
                 script: "first.py".to_owned(),
+                local_script: false,
                 output: "generated/first.h".to_owned(),
                 arguments: Vec::new(),
                 depends_on_outputs: Vec::new(),
             },
             PythonGeneratorJob {
                 script: "second.py".to_owned(),
+                local_script: false,
                 output: "generated/second.c".to_owned(),
                 arguments: Vec::new(),
                 depends_on_outputs: vec!["generated/first.h".to_owned()],
             },
         ],
         driver_script: None,
+        requires_flex_bison: false,
         python_packages: Vec::new(),
         audited_source_dir: "${AROS_PORTS_DIR}/fixture/archive".to_owned(),
         local_patch_files: Vec::new(),
@@ -53,6 +57,7 @@ fn python_generator_emits_ordered_output_dependencies() {
 
     let cmake = generate_cmake(&graph);
     assert!(cmake.contains("        DEPENDS_ON_OUTPUTS \"generated/first.h\""));
+    assert!(cmake.contains("    LOCAL_INPUTS \"${AROS_SOURCE_DIR}/fixture/local.txt\""));
     assert_eq!(cmake.matches("DEPENDS_ON_OUTPUTS").count(), 1);
 }
 

@@ -23,6 +23,11 @@ mesa-sse41-manifest = 4cf786a7beef96b541213b992adf4df84e866afb8f8b2ef855b119f097
 glapi-generator-capability = c42d77ef950bf439e04c36df203309c24a3a931b0c294edce875ae969d8143e5
 mesautil-generator-capability = 9ff6ca66c503c1671c6bbd2a2d0b8a9a449a3368a8fcbed29425eb7d7d3fd908
 
+# Mesa 26 glapi is a separate two-stage generated archive. The full source
+# recipe is pinned because the cold-tree evaluator cannot import mesa.cfg.
+mesa26-glapi-recipe = cbedcf70cfb2a3c5df6f638791e8e90a5a616ebfcf6fe1345c94449951357a26 # gitleaks:allow -- public SHA-256 of the audited source recipe, not a credential
+mesa26-config = a93996e9e9bd71fe54d7be9edca1e06de06d04edd15b50570888d5c95bb9ea80
+
 # Remaining Mesa generator lanes. Each recipe fingerprint is paired with the
 # versioned inventory from which its hard-coded generator output closure was
 # reviewed.
@@ -35,3 +40,18 @@ mesa20-core-manifest = 61c034fdbd34bf963c73cf1d89765dbc10ad45865c0d42f4d6f8c60dd
 mesa20-vc4-recipe = 04f2d449ef30ebb4b9dc9fa1fea55865303d9335c4873c7845cfb16eadf1484c
 mesa20-vc4-manifest = 27067482f43902b58872ae0c2e92a9e4f6bc51328b6b035e79d75357ec002a72
 mesa20-v3d-recipe = 471bb1ad3fa9020f23015bed29634d2812527cb8b415e4c9771202627bc9385e
+
+# Mesa 26.0.0 archive recipes and explicit source inventories. The capability
+# expands these exact inputs into target source lists and generated products.
+mesa26-compiler-recipe = 4a2e0ce91877996fa764a977e908d932a88017a9e79b1794426a2c667213a68c
+mesa26-compiler-manifest = f5452181979700a6bfa941f0a7cc3fae6e9b420f93c013bb5967e21a5bed2fa6
+mesa26-core-recipe = cb9a53da44e93cd58bda21783d55fcea4adedef262c3fdda983ec1c9a68b984e
+mesa26-core-manifest = 0fe9d122a56ed4f98e85edcecb3d5f36bc94510e40e82683ad3f7687495864f5
+mesa26-galliumaux-recipe = 291b33bdbd5b4db1cbccd2a933bfdd6a0795066dc33b99d2e8e3ba0432f062de
+mesa26-galliumaux-manifest = b24fcbebbbb2b1c32eb505e5d42b91d9e15470b04b5f57af4ac3238c3a0f180d
+mesa26-util-recipe = e8ce470d8eb25536171d69d988c6cc3f13a378a652a648a22ff33de0d483cabe
+mesa26-util-manifest = e31d9aa580180ebac45f41a4364b60dce03595b35a457ae517affc78c0ae7471
+mesa26-v3d-recipe = 1d4ee5e8fc4a17d67c0652a932bed4e0c1913c6044fdc4bf981533db0dab744b
+mesa26-v3d-manifest = 70d630491d5504f450633e9cc31532a9e54e524fb7ca4286377b5f711f2e821a
+mesa26-vc4-recipe = 0be62fd0125ffd144ede01d53b0c611cd5185ff8b866b2d77c13829f6aae1f54
+mesa26-vc4-manifest = e90bf4e7f7ffc73ab6aa1bfc464c6b8bdd47ace229146a6dd77870c381c17dec

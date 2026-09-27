@@ -764,6 +764,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             if let Some(driver) = declaration.driver_script.as_ref() {
                 writeln!(out, "    DRIVER_SCRIPT {}", cmake_arg(driver)).unwrap();
             }
+            if declaration.requires_flex_bison {
+                writeln!(out, "    REQUIRE_FLEX_BISON").unwrap();
+            }
             if !declaration.python_packages.is_empty() {
                 let fetch_targets = declaration
                     .python_packages
@@ -792,8 +795,19 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .collect::<Vec<_>>();
                 writeln!(out, "    SOURCE_INPUTS {}", inputs.join(" ")).unwrap();
             }
+            if !declaration.local_inputs.is_empty() {
+                let inputs = declaration
+                    .local_inputs
+                    .iter()
+                    .map(|input| cmake_arg(input))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    LOCAL_INPUTS {}", inputs.join(" ")).unwrap();
+            }
             for job in &declaration.jobs {
                 writeln!(out, "    JOB").unwrap();
+                if job.local_script {
+                    writeln!(out, "        LOCAL_SCRIPT").unwrap();
+                }
                 writeln!(out, "        SCRIPT {}", cmake_arg(&job.script)).unwrap();
                 writeln!(out, "        OUTPUT {}", cmake_arg(&job.output)).unwrap();
                 if !job.depends_on_outputs.is_empty() {
