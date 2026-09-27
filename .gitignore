@@ -18,3 +18,4 @@ worker-dist/
 !.env.example
 *.log
 *.profraw
+HANDOFF.md

@@ -71,7 +71,7 @@ their own temporary work where needed. CMake-engine fixtures require clang,
 CMake and Ninja; platform-specific omissions are reported explicitly.
 
 Every PR has a stable Linux x86-64 check. A narrow documentation-only set
-(`README.md`, `CONTRIBUTING.md`, `HANDOFF.md`, `docs/**` and `docs-site/**`)
+(`README.md`, `CONTRIBUTING.md`, `docs/**` and `docs-site/**`)
 uses that lane's portable test; all other changes are fail-closed to the three
 active native hosts: Linux x86-64, Linux AArch64 and macOS AArch64. Intel macOS
 is not an `aros-tools` release target. The full Linux CMake sweep runs after integration into

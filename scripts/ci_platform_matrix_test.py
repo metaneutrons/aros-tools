@@ -22,7 +22,6 @@ class PlatformMatrixTests(unittest.TestCase):
             event="pull_request",
             changed_paths=(
                 "README.md",
-                "HANDOFF.md",
                 "docs-site/src/content/docs/index.mdx",
                 "docs/notes.md",
             ),
