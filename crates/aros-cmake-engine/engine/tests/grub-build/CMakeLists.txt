@@ -10,6 +10,8 @@ if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR
 endif()
 
 set(AROS_GRUB_SOURCE_ROOT "${AROS_REPO_ROOT}")
+file(READ "${AROS_REPO_ROOT}/arch/all-pc/boot/grub2_def" _grub_version)
+string(STRIP "${_grub_version}" _grub_version)
 set(AROS_GRUB2_XZ_PREFIX "/opt/homebrew/opt/xz")
 set(AROS_GRUB2_LLVM_PREFIX "/opt/homebrew/opt/llvm")
 
@@ -31,6 +33,7 @@ endif()
 aros_build_grub2(
     MMAKE_ID "${_pc_id}"
     MODE pc
+    VERSION "${_grub_version}"
     BINARY_DIR "${_binary_root}/pc"
     INSTALL_PREFIX "${_install_root}/pc")
 
@@ -43,10 +46,12 @@ endif()
 aros_build_grub2(
     MMAKE_ID grub2-efi-host
     MODE efi64
+    VERSION "${_grub_version}"
     BINARY_DIR "${_binary_root}/efi-x86_64"
     INSTALL_PREFIX "${_install_root}/efi-x86_64")
 aros_build_grub2(
     MMAKE_ID grub2-efi32-host
     MODE efi32
+    VERSION "${_grub_version}"
     BINARY_DIR "${_binary_root}/efi-i386"
     INSTALL_PREFIX "${_install_root}/efi-i386")

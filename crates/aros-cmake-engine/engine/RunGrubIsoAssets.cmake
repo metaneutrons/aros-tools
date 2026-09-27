@@ -14,7 +14,7 @@ _aros_grub_iso_assets_real_path("${CONTRACT}" _contract)
 include("${_contract}")
 
 foreach(_required IN ITEMS
-        GIA_MODE GIA_SOURCE_ROOT GIA_BUILD_ROOT GIA_BINARY_DIR GIA_SYS_DIR
+        GIA_MODE GIA_VERSION GIA_SOURCE_ROOT GIA_BUILD_ROOT GIA_BINARY_DIR GIA_SYS_DIR
         GIA_HOST_PC GIA_HOST_EFI64 GIA_HOST_EFI32 GIA_STAMP)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
         message(FATAL_ERROR "GRUB2 ISO asset contract omits ${_required}")
@@ -24,7 +24,8 @@ if(NOT DEFINED GIA_PRODUCTS OR "${GIA_PRODUCTS}" STREQUAL "")
     message(FATAL_ERROR "GRUB2 ISO asset contract omits its products")
 endif()
 foreach(_value IN ITEMS
-        "mode|${GIA_MODE}" "source root|${GIA_SOURCE_ROOT}" "build root|${GIA_BUILD_ROOT}"
+        "mode|${GIA_MODE}" "version|${GIA_VERSION}"
+        "source root|${GIA_SOURCE_ROOT}" "build root|${GIA_BUILD_ROOT}"
         "binary dir|${GIA_BINARY_DIR}" "SYS dir|${GIA_SYS_DIR}"
         "host PC|${GIA_HOST_PC}" "host EFI64|${GIA_HOST_EFI64}"
         "host EFI32|${GIA_HOST_EFI32}" "stamp|${GIA_STAMP}")
@@ -87,6 +88,16 @@ if(NOT EXISTS "${GIA_SOURCE_ROOT}" OR NOT IS_DIRECTORY "${GIA_SOURCE_ROOT}" OR
    NOT IS_DIRECTORY "${GIA_BUILD_ROOT}" OR IS_SYMLINK "${GIA_BUILD_ROOT}")
     message(FATAL_ERROR "GRUB2 ISO source or build root is unavailable")
 endif()
+set(_version_file "${GIA_SOURCE_ROOT}/arch/all-pc/boot/grub2_def")
+_aros_grub_iso_assets_require_regular("${_version_file}" "GRUB2 ISO source version")
+_aros_grub_iso_assets_reject_symlink_components(
+    "${GIA_SOURCE_ROOT}" "${_version_file}" "GRUB2 ISO source version")
+file(READ "${_version_file}" _declared_version)
+string(STRIP "${_declared_version}" _declared_version)
+if(NOT _declared_version STREQUAL GIA_VERSION)
+    message(FATAL_ERROR "GRUB2 ISO source version changed after configuration")
+endif()
+_aros_grub_iso_assets_lock("${GIA_VERSION}")
 foreach(_pair IN ITEMS
         "binary|${GIA_BINARY_DIR}" "sys|${GIA_SYS_DIR}" "pc|${GIA_HOST_PC}"
         "efi64|${GIA_HOST_EFI64}" "efi32|${GIA_HOST_EFI32}" "stamp|${GIA_STAMP}")
@@ -120,19 +131,20 @@ foreach(_manifest IN ITEMS "${_pc_manifest}" "${_efi64_manifest}" "${_efi32_mani
         "${_engine_root}" "${_manifest}" "GRUB2 ISO engine input")
 endforeach()
 file(SHA256 "${_host_mmake}" _host_mmake_before)
+file(SHA256 "${_version_file}" _version_before)
 file(SHA256 "${_pc_manifest}" _pc_manifest_before)
 file(SHA256 "${_efi64_manifest}" _efi64_manifest_before)
 file(SHA256 "${_efi32_manifest}" _efi32_manifest_before)
 
 _aros_grub_iso_assets_collect_manifest(
     "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
-    "i386-pc" 273 8 _pc_products)
+    "i386-pc" "${_AROS_GRUB_ISO_ASSETS_PC_MODS}" 8 _pc_products)
 _aros_grub_iso_assets_collect_manifest(
     "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
-    "x86_64-efi" 268 0 _efi64_products)
+    "x86_64-efi" "${_AROS_GRUB_ISO_ASSETS_EFI64_MODS}" 0 _efi64_products)
 _aros_grub_iso_assets_collect_manifest(
     "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
-    "i386-efi" 269 0 _efi32_products)
+    "i386-efi" "${_AROS_GRUB_ISO_ASSETS_EFI32_MODS}" 0 _efi32_products)
 
 function(_gia_require_executable path label)
     _aros_grub_iso_assets_require_regular("${path}" "${label}")
@@ -204,7 +216,8 @@ list(APPEND _expected_products
     "${GIA_BINARY_DIR}/grub2.mods")
 list(REMOVE_DUPLICATES _expected_products)
 list(LENGTH _expected_products _expected_count)
-if(NOT _expected_count EQUAL 832 OR NOT GIA_PRODUCTS STREQUAL _expected_products)
+if(NOT _expected_count EQUAL _AROS_GRUB_ISO_ASSETS_PRODUCT_COUNT OR
+   NOT GIA_PRODUCTS STREQUAL _expected_products)
     message(FATAL_ERROR "GRUB2 ISO asset contract product inventory differs from the audited set")
 endif()
 foreach(_product IN LISTS GIA_PRODUCTS)
@@ -332,13 +345,15 @@ foreach(_product IN LISTS GIA_PRODUCTS)
     _aros_grub_iso_assets_require_regular("${_product}" "declared GRUB2 ISO asset")
 endforeach()
 file(SHA256 "${_host_mmake}" _host_mmake_after)
+file(SHA256 "${_version_file}" _version_after)
 file(SHA256 "${_pc_manifest}" _pc_manifest_after)
 file(SHA256 "${_efi64_manifest}" _efi64_manifest_after)
 file(SHA256 "${_efi32_manifest}" _efi32_manifest_after)
 if(NOT _host_mmake_before STREQUAL _host_mmake_after OR
+   NOT _version_before STREQUAL _version_after OR
    NOT _pc_manifest_before STREQUAL _pc_manifest_after OR
    NOT _efi64_manifest_before STREQUAL _efi64_manifest_after OR
    NOT _efi32_manifest_before STREQUAL _efi32_manifest_after)
     message(FATAL_ERROR "GRUB2 ISO staging modified its source inputs")
 endif()
-file(WRITE "${GIA_STAMP}" "GRUB2 ISO assets: x86_64\n")
+file(WRITE "${GIA_STAMP}" "GRUB2 ISO assets: ${GIA_VERSION} x86_64\n")

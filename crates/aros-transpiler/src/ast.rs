@@ -357,7 +357,7 @@ pub struct ConfigureBuildDecl {
     pub dir_path: PathBuf,
 }
 
-/// One strictly capability-checked GRUB 2.12 host-tool lane.
+/// One strictly capability-checked, versioned GRUB host-tool lane.
 ///
 /// The legacy `%build_with_configure` declarations are intentionally not
 /// generalised: the CMake helper owns the fixed upstream archive, local patch,
@@ -367,6 +367,8 @@ pub struct ConfigureBuildDecl {
 pub struct GrubBuildDecl {
     /// MetaMake workflow identity used by `#MM` dependencies.
     pub mmake_name: String,
+    /// Exact audited upstream GRUB source version.
+    pub version: String,
     /// Closed runner capability (`pc`, `efi64`, or `efi32`).
     pub mode: String,
     /// Private build root below `${AROS_BUILD_DIR}/gen/configure`.
@@ -479,7 +481,7 @@ pub struct ParsedMmakefile {
     pub external_cmake: Vec<ExternalCMakeDecl>,
     /// Strictly modelled local `%build_with_configure` declarations.
     pub configure_builds: Vec<ConfigureBuildDecl>,
-    /// Strictly modelled GRUB 2.12 host-tool lanes.
+    /// Strictly modelled GRUB host-tool lanes for explicitly audited versions.
     pub grub_builds: Vec<GrubBuildDecl>,
     /// Strictly modelled AHI subsystem configure-style build.
     pub ahi_builds: Vec<AhiBuildDecl>,

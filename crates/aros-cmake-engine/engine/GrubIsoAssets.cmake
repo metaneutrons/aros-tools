@@ -2,15 +2,38 @@ include_guard(GLOBAL)
 
 include(CMakeParseArguments)
 
-# Closed GRUB 2.12 BIOS/EFI asset staging.  This deliberately stops at the
+# Closed, versioned GRUB BIOS/EFI asset staging. This deliberately stops at the
 # files a PC ISO needs below SYS/: it does not create grub.cfg, invoke an ISO
 # composer, or claim to build the native AROS GRUB utilities.
 set(_AROS_GRUB_ISO_ASSETS_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(_AROS_GRUB_ISO_ASSETS_HOST_MMAKE_RELATIVE
     "arch/all-pc/boot/grub2-host/mmakefile.src")
-set(_AROS_GRUB_ISO_ASSETS_PC_MANIFEST "manifests/grub-2.12-pc.install")
-set(_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST "manifests/grub-2.12-efi64.install")
-set(_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST "manifests/grub-2.12-efi32.install")
+
+function(_aros_grub_iso_assets_lock version)
+    if(version STREQUAL "2.12")
+        set(_pc_mods 273)
+        set(_efi64_mods 268)
+        set(_efi32_mods 269)
+        set(_products 832)
+    elseif(version STREQUAL "2.16")
+        set(_pc_mods 301)
+        set(_efi64_mods 305)
+        set(_efi32_mods 304)
+        set(_products 932)
+    else()
+        message(FATAL_ERROR "unsupported GRUB2 ISO source version ${version}")
+    endif()
+    set(_AROS_GRUB_ISO_ASSETS_PC_MANIFEST
+        "manifests/grub-${version}-pc.install" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST
+        "manifests/grub-${version}-efi64.install" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST
+        "manifests/grub-${version}-efi32.install" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_PC_MODS "${_pc_mods}" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_EFI64_MODS "${_efi64_mods}" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_EFI32_MODS "${_efi32_mods}" PARENT_SCOPE)
+    set(_AROS_GRUB_ISO_ASSETS_PRODUCT_COUNT "${_products}" PARENT_SCOPE)
+endfunction()
 
 function(_aros_grub_iso_assets_safe_value label value)
     foreach(_needle IN ITEMS ";" "\"" "\n" "\r" "$" "[" "]")
@@ -214,6 +237,13 @@ function(aros_stage_grub2_iso_assets)
     if(NOT _host_mmake_owned OR NOT _host_mmake STREQUAL _expected_host_mmake)
         message(FATAL_ERROR "GRUB2 ISO source recipe has an unsupported location")
     endif()
+    set(_version_file "${_source_root}/arch/all-pc/boot/grub2_def")
+    _aros_grub_iso_assets_require_regular("${_version_file}" "GRUB2 ISO source version")
+    _aros_grub_iso_assets_reject_symlink_components(
+        "${_source_root}" "${_version_file}" "GRUB2 ISO source version")
+    file(READ "${_version_file}" _version)
+    string(STRIP "${_version}" _version)
+    _aros_grub_iso_assets_lock("${_version}")
 
     set(_binary_input "${GIA_BINARY_DIR}")
     set(_sys_input "${GIA_SYS_DIR}")
@@ -285,13 +315,13 @@ function(aros_stage_grub2_iso_assets)
 
     _aros_grub_iso_assets_collect_manifest(
         "${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
-        "i386-pc" 273 8 _pc_products)
+        "i386-pc" "${_AROS_GRUB_ISO_ASSETS_PC_MODS}" 8 _pc_products)
     _aros_grub_iso_assets_collect_manifest(
         "${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
-        "x86_64-efi" 268 0 _efi64_products)
+        "x86_64-efi" "${_AROS_GRUB_ISO_ASSETS_EFI64_MODS}" 0 _efi64_products)
     _aros_grub_iso_assets_collect_manifest(
         "${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"
-        "i386-efi" 269 0 _efi32_products)
+        "i386-efi" "${_AROS_GRUB_ISO_ASSETS_EFI32_MODS}" 0 _efi32_products)
 
     set(_inputs_logical
         "${_host_pc_logical}/grub-mkimage"
@@ -333,8 +363,9 @@ function(aros_stage_grub2_iso_assets)
     list(REMOVE_DUPLICATES _products_logical)
     list(REMOVE_DUPLICATES _products_physical)
     list(LENGTH _products_logical _product_count)
-    if(NOT _product_count EQUAL 832)
-        message(FATAL_ERROR "GRUB2 ISO asset inventory has ${_product_count} products, expected 832")
+    if(NOT _product_count EQUAL _AROS_GRUB_ISO_ASSETS_PRODUCT_COUNT)
+        message(FATAL_ERROR
+            "GRUB2 ISO asset inventory has ${_product_count} products, expected ${_AROS_GRUB_ISO_ASSETS_PRODUCT_COUNT}")
     endif()
 
     set(_registered_outputs "")
@@ -356,6 +387,7 @@ function(aros_stage_grub2_iso_assets)
     string(CONCAT _contract_content
         "# Generated closed GRUB2 ISO asset contract.  Do not edit.\n"
         "set(GIA_MODE [==[${GIA_MODE}]==])\n"
+        "set(GIA_VERSION [==[${_version}]==])\n"
         "set(GIA_SOURCE_ROOT [==[${_source_root}]==])\n"
         "set(GIA_BUILD_ROOT [==[${_build_root}]==])\n"
         "set(GIA_BINARY_DIR [==[${_binary_dir}]==])\n"
@@ -377,6 +409,7 @@ function(aros_stage_grub2_iso_assets)
             -P "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/RunGrubIsoAssets.cmake"
         DEPENDS ${_inputs_logical}
             "${_host_mmake_logical}"
+            "${_version_file}"
             "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_PC_MANIFEST}"
             "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_EFI64_MANIFEST}"
             "${_AROS_GRUB_ISO_ASSETS_MODULE_DIR}/${_AROS_GRUB_ISO_ASSETS_EFI32_MANIFEST}"

@@ -29,6 +29,8 @@ coverage reports. A successful translation alone is not 100% product coverage.
 
 Ordinary source fetch declarations retain upstream's version, origin and
 optional checksums. The transpiler does not calculate new pins.
+The GRUB host-tool capability accepts only audited 2.12 and 2.16 recipes for
+the x86-64 PC target; it rejects other versions.
 See [the transpiler contract](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-transpiler/README.md).
 
 ## aros-verify

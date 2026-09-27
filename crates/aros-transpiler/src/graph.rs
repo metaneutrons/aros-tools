@@ -67,7 +67,7 @@ pub struct DependencyGraph {
     pub external_cmake: Vec<ExternalCMakeDecl>,
     /// Strictly capability-checked local configure-style builds.
     pub configure_builds: Vec<ConfigureBuildDecl>,
-    /// Strictly capability-checked GRUB 2.12 host-tool lanes.
+    /// Strictly capability-checked GRUB host-tool lanes.
     pub grub_builds: Vec<GrubBuildDecl>,
     /// Strictly capability-checked AHI subsystem build.
     pub ahi_builds: Vec<AhiBuildDecl>,

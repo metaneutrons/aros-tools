@@ -13,7 +13,25 @@ file(REMOVE_RECURSE "${_root}")
 file(MAKE_DIRECTORY "${_root}")
 set(_repo "${_root}/source")
 aros_test_copy_source("${_repo}"
+    "arch/all-pc/boot/grub2_def"
     "arch/all-pc/boot/grub2-aros" "arch/all-pc/boot/grub2-host")
+file(READ "${_repo}/arch/all-pc/boot/grub2_def" _grub_version)
+string(STRIP "${_grub_version}" _grub_version)
+if(_grub_version STREQUAL "2.12")
+    set(_pc_count 615)
+    set(_efi64_count 591)
+    set(_efi32_count 593)
+    set(_primary_url "https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz")
+    set(_fallback_url "https://ftpmirror.gnu.org/grub/grub-2.12.tar.xz")
+elseif(_grub_version STREQUAL "2.16")
+    set(_pc_count 686)
+    set(_efi64_count 681)
+    set(_efi32_count 679)
+    set(_primary_url "https://gitlab.freedesktop.org/api/v4/projects/26558/packages/generic/source-assets/grub-2.16/grub-2.16.tar.xz")
+    set(_fallback_url "")
+else()
+    message(FATAL_ERROR "GRUB build fixture has unsupported source version ${_grub_version}")
+endif()
 
 function(_grub_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
@@ -22,7 +40,7 @@ function(_grub_configure name expect_success expected_message)
         set(_defect "${CMAKE_MATCH_1}")
         set(_selected_engine "${_root}/${name}-engine")
         aros_test_copy_engine_defect("${_selected_engine}"
-            "manifests/grub-2.12-pc.install" "${_defect}")
+            "manifests/grub-${_grub_version}-pc.install" "${_defect}")
     endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${_fixture}" -B "${_build}" -G Ninja
@@ -50,7 +68,7 @@ function(_grub_configure name expect_success expected_message)
     set(CONFIGURED_BUILD "${_build}" PARENT_SCOPE)
 endfunction()
 
-file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-2.12-aros.diff" _patch_before)
+file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-${_grub_version}-aros.diff" _patch_before)
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/mmakefile.src" _aros_mmake_before)
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _host_mmake_before)
 
@@ -59,9 +77,9 @@ set(_build "${CONFIGURED_BUILD}")
 set(_closed_host_path
     "/opt/homebrew/opt/gettext/bin:/opt/homebrew/opt/texinfo/bin:/opt/homebrew/opt/gawk/bin:/opt/homebrew/opt/pkgconf/bin:/opt/homebrew/opt/python@3.14/bin:/opt/homebrew/opt/gnu-sed/bin:/opt/homebrew/opt/coreutils/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 foreach(_contract_spec IN ITEMS
-        "grub2-host|615"
-        "grub2-efi-host|591"
-        "grub2-efi32-host|593")
+        "grub2-host|${_pc_count}"
+        "grub2-efi-host|${_efi64_count}"
+        "grub2-efi32-host|${_efi32_count}")
     string(REPLACE "|" ";" _contract_parts "${_contract_spec}")
     list(GET _contract_parts 0 _contract_target)
     list(GET _contract_parts 1 _contract_count)
@@ -73,10 +91,10 @@ foreach(_contract_spec IN ITEMS
     string(FIND "${_contract_content}"
         "set(GB_HOST_PATH [==[${_closed_host_path}]==])" _host_path_position)
     string(FIND "${_contract_content}"
-        "set(GB_SOURCE_URL_PRIMARY [==[https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz]==])"
+        "set(GB_SOURCE_URL_PRIMARY [==[${_primary_url}]==])"
         _primary_source_position)
     string(FIND "${_contract_content}"
-        "set(GB_SOURCE_URL_FALLBACK [==[https://ftpmirror.gnu.org/grub/grub-2.12.tar.xz]==])"
+        "set(GB_SOURCE_URL_FALLBACK [==[${_fallback_url}]==])"
         _fallback_source_position)
     if(NOT _actual_contract_count EQUAL _contract_count OR
        _host_path_position LESS 0 OR
@@ -162,7 +180,7 @@ if(NOT _repair_result EQUAL 0 OR NOT EXISTS "${_repair}")
     message(FATAL_ERROR "GRUB2 repair check failed\n${_repair_stdout}${_repair_stderr}")
 endif()
 
-file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-2.12-aros.diff" _patch_after)
+file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/grub-${_grub_version}-aros.diff" _patch_after)
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-aros/mmakefile.src" _aros_mmake_after)
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _host_mmake_after)
 if(NOT _patch_before STREQUAL _patch_after OR

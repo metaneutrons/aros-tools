@@ -27,7 +27,8 @@ bytes.
   that the capability and transpiler must be reviewed and updated.
 - A component that CMake downloads directly without an upstream `%fetch`
   integrity mechanism must retain a supply-chain checksum. Currently this is
-  the closed GRUB 2.12 source download in `cmake/GrubSourceLock.cmake`. This is
+  the closed GRUB 2.12/2.16 source downloads in
+  `crates/aros-cmake-engine/engine/GrubSourceLock.cmake`. This is
   not an `aros-cli` package pin.
 - Released host and cross toolchains use separate, explicit release locks.
   Those locks are part of the reproducible distribution contract and are not

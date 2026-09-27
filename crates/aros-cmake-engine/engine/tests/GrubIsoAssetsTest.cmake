@@ -9,7 +9,17 @@ set(_root "/tmp/aros-grub-iso-assets-${_suffix}")
 file(REMOVE_RECURSE "${_root}")
 file(MAKE_DIRECTORY "${_root}")
 set(_repo "${_root}/source")
-aros_test_copy_source("${_repo}" "arch/all-pc/boot/grub2-host")
+aros_test_copy_source("${_repo}"
+    "arch/all-pc/boot/grub2_def" "arch/all-pc/boot/grub2-host")
+file(READ "${_repo}/arch/all-pc/boot/grub2_def" _grub_version)
+string(STRIP "${_grub_version}" _grub_version)
+if(_grub_version STREQUAL "2.12")
+    set(_expected_product_count 832)
+elseif(_grub_version STREQUAL "2.16")
+    set(_expected_product_count 932)
+else()
+    message(FATAL_ERROR "unsupported GRUB ISO fixture version ${_grub_version}")
+endif()
 
 function(_assets_configure name expect_success expected_message)
     set(_build "${_root}/${name}")
@@ -53,9 +63,9 @@ function(_append_platform_outputs manifest platform sys_root include_images outp
 endfunction()
 
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _source_before)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-pc.install" _pc_manifest_before)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi64.install" _efi64_manifest_before)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi32.install" _efi32_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-pc.install" _pc_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-efi64.install" _efi64_manifest_before)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-efi32.install" _efi32_manifest_before)
 
 _assets_configure("" TRUE "")
 set(_build "${CONFIGURED_BUILD}")
@@ -69,23 +79,24 @@ if(NOT _build_result EQUAL 0)
 endif()
 
 set(_expected "")
-_append_platform_outputs("manifests/grub-2.12-pc.install" "i386-pc"
+_append_platform_outputs("manifests/grub-${_grub_version}-pc.install" "i386-pc"
     "${_build}/SYS/boot/grub/i386-pc" TRUE _pc_outputs)
 list(APPEND _expected ${_pc_outputs}
     "${_build}/SYS/boot/grub/i386-pc/core.img"
     "${_build}/SYS/boot/grub/i386-pc/grub2_eltorito")
-_append_platform_outputs("manifests/grub-2.12-efi64.install" "x86_64-efi"
+_append_platform_outputs("manifests/grub-${_grub_version}-efi64.install" "x86_64-efi"
     "${_build}/SYS/EFI/BOOT/grub/x86_64-efi" FALSE _efi64_outputs)
 list(APPEND _expected ${_efi64_outputs} "${_build}/SYS/EFI/BOOT/BOOTX64.EFI")
-_append_platform_outputs("manifests/grub-2.12-efi32.install" "i386-efi"
+_append_platform_outputs("manifests/grub-${_grub_version}-efi32.install" "i386-efi"
     "${_build}/SYS/EFI/BOOT/grub/i386-efi" FALSE _efi32_outputs)
 list(APPEND _expected ${_efi32_outputs}
     "${_build}/SYS/EFI/BOOT/BOOTIA32.EFI"
     "${_build}/gen/grub2-iso-assets/x86_64/grub2.mods")
 list(REMOVE_DUPLICATES _expected)
 list(LENGTH _expected _expected_count)
-if(NOT _expected_count EQUAL 832)
-    message(FATAL_ERROR "test expected ${_expected_count} staged products, expected 832")
+if(NOT _expected_count EQUAL _expected_product_count)
+    message(FATAL_ERROR
+        "test expected ${_expected_count} staged products, expected ${_expected_product_count}")
 endif()
 foreach(_product IN LISTS _expected)
     if(NOT EXISTS "${_product}" OR IS_DIRECTORY "${_product}" OR IS_SYMLINK "${_product}")
@@ -144,9 +155,9 @@ _assets_configure("symlink-contract" FALSE
     "contract path contains a symlinked path component")
 
 file(SHA256 "${_repo}/arch/all-pc/boot/grub2-host/mmakefile.src" _source_after)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-pc.install" _pc_manifest_after)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi64.install" _efi64_manifest_after)
-file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-2.12-efi32.install" _efi32_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-pc.install" _pc_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-efi64.install" _efi64_manifest_after)
+file(SHA256 "${AROS_TEST_ENGINE_DIR}/manifests/grub-${_grub_version}-efi32.install" _efi32_manifest_after)
 if(NOT _source_before STREQUAL _source_after OR
    NOT _pc_manifest_before STREQUAL _pc_manifest_after OR
    NOT _efi64_manifest_before STREQUAL _efi64_manifest_after OR
