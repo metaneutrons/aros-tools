@@ -170,9 +170,10 @@ option(AROS_ENABLE_MMU "Include the MetaMake MMU kernel sources" ON)
 set(GCC_CONFIG_FLOAT_ABI "" CACHE STRING
     "MetaMake ARM floating-point ABI (for example hard or soft)")
 
-# Optional upstream selectors. Empty means that the caller did not provide the
-# selector; the transpiler must preserve that distinction and never invent a
-# Mesa, target-LLVM, or Rust version for older callers.
+# Upstream selectors. The CMake path passes an explicit empty value unless
+# configured otherwise, so MetaMake can apply its own defaults. Direct CLI
+# callers may omit a selector entirely; the transpiler never invents a Mesa,
+# target-LLVM, or Rust version for them.
 set(AROS_MESA_VERSION "" CACHE STRING
     "MetaMake OPT_MESAGL selector passed to aros-transpiler")
 set(AROS_TARGET_LLVM_VER "" CACHE STRING
