@@ -5,9 +5,9 @@ upstream AROS and keep AROS-NX-specific extensions explicit. A pull request is
 ready for review only when its behavior, failure contract, tests and user
 documentation agree.
 
-For ongoing implementation work, start with [HANDOFF.md](HANDOFF.md). It links
-the last verified checkpoint and next bounded slice; issues remain the live
-execution record, and the producer plan owns acceptance criteria.
+For ongoing implementation work, use the project issues as the live execution
+record. The producer plan owns acceptance criteria and links to verified
+milestone evidence.
 
 ## Development environment
 

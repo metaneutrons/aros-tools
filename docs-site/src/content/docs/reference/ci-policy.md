@@ -13,7 +13,6 @@ Only these paths are documentation-only:
 
 - `README.md`
 - `CONTRIBUTING.md`
-- `HANDOFF.md`
 - `docs/**`
 - `docs-site/**`
 

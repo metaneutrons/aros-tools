@@ -62,10 +62,10 @@ hardware-boot claim.
   and AUR `aros-tools-bin` at
   [`9006a1a3`](https://aur.archlinux.org/cgit/aur.git/commit/?h=aros-tools-bin&id=9006a1a3fefefbfc39e8a687f7502b573d2c04ba)
   are byte-identical to their v0.3.9 assets. AUR RPC reports `0.3.9-1`.
-- The three canonical native archive hashes are recorded in
-  [HANDOFF.md](../HANDOFF.md#v039-first-stable-release); the signed
+- The signed
   [`SHA256SUMS`](https://github.com/metaneutrons/aros-tools/releases/download/v0.3.9/SHA256SUMS)
-  is the complete public asset record.
+  is the complete public asset record, including the three canonical native
+  archive hashes.
 
 ## Historical terminal states
 
