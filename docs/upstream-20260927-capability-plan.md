@@ -1,24 +1,30 @@
 # Upstream AROS capability migration
 
-Decision state: implementation authorized on 2026-09-27; detailed Mesa 26
-design remains subject to M1 review. Tracking: [epic #241](https://github.com/metaneutrons/aros-tools/issues/241).
+Status: M1-M4 completed on 2026-09-27; M5 release qualification remains open.
+Tracking: [epic #241](https://github.com/metaneutrons/aros-tools/issues/241).
 
 ## Outcome and boundaries
 
 Qualify `metaneutrons/AROS-NX` against upstream AROS master
 `282a0454356dc2b9554ab023997d7f7ca24fc03e` without weakening the
-fail-closed `aros-transpiler` capability contract. The candidate integration is
-[AROS-NX PR #34](https://github.com/metaneutrons/AROS-NX/pull/34), currently a
-draft. Its [nine-lane product run](https://github.com/metaneutrons/AROS-NX/actions/runs/36301736137)
-failed before building because the source recipes now exceed the audited
-GRUB 2.12, Mesa 20.0.8 and WirelessManager capabilities.
+fail-closed `aros-transpiler` capability contract. The initial
+[nine-lane product run](https://github.com/metaneutrons/AROS-NX/actions/runs/36301736137)
+failed before building because the source recipes exceeded the audited
+GRUB 2.12, Mesa 20.0.8 and WirelessManager capabilities. The corrected
+[AROS-NX PR #34](https://github.com/metaneutrons/AROS-NX/pull/34) passed its
+locked-source preflight and all nine product lanes on exact head
+`790f70607ef0687bc6becd6bec4c2e0b4beede47` in
+[run 36336819657](https://github.com/metaneutrons/AROS-NX/actions/runs/36336819657).
+It merged normally at `15230bef9d23e12cd9d4cca62253c4b62276e8ff`;
+the merge tree matches the qualified PR tree. The same tree passed the
+[protected-main product run](https://github.com/metaneutrons/AROS-NX/actions/runs/36338345571).
 
 The implementation belongs primarily to `aros-tools`: `aros-transpiler` owns
 recipe acceptance and the embedded `aros-cmake-engine` owns execution. AROS-NX
 owns the upstream merge and the exact aros-tools input selected for product
 qualification. The already published aros-tools v0.3.12 and aros-toolchains
-v0.1.4 remain immutable. No toolchain release, source lock switch, or weakening
-of existing capability checks is implied by this plan.
+v0.1.4 remain immutable. No toolchain release, AROS-NX consumer toolchain lock
+switch, or weakening of existing capability checks is implied by this plan.
 
 ## Design and decisions
 
@@ -29,8 +35,8 @@ of existing capability checks is implied by this plan.
   exact source lock, patch, product inventory and real build evidence; accepting
   the version in the parser alone is not sufficient.
 - Mesa 26 is a separate capability family, not a numeric substitution in the
-  Mesa 20 implementation. It changes source inventories, generators, driver
-  layouts and the Gallivm policy. Design its closed inputs before coding it.
+  Mesa 20 implementation. Its source inventories, generators, driver layouts
+  and Gallivm policy have independently checked, versioned inputs.
 - WirelessManager's new `extracflags` value must be checked exactly. Whether
   its dependency-generation flag changes the private CMake execution is a
   measured M2 decision, not a pass-through of arbitrary Make arguments.
@@ -54,8 +60,8 @@ Execution: [issue #244](https://github.com/metaneutrons/aros-tools/issues/244). 
   contracts with positive and altered-input counterprobes. Reject a plan that
   merely refreshes fingerprints or skips unreachable recipes.
 
-The initial source audit identified these exact boundaries; M1 remains open
-until the independent capability tests are complete:
+The initial source audit identified these exact boundaries; M1 closed after
+the independent capability and product tests passed:
 
 - GRUB 2.16 uses the source digest
   `f0db0104927df0b9a48bc41b735c702936190d17eb2d73d3018fa77474a0cabe`.
@@ -65,22 +71,23 @@ until the independent capability tests are complete:
   separate from the still-supported GRUB 2.12 contract.
 - Mesa 26.0.0 uses the official 43,776,320-byte `tar.xz`, SHA-256
   `2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72`.
-  [AROS-NX draft PR #35](https://github.com/metaneutrons/AROS-NX/pull/35)
+  [AROS-NX PR #35](https://github.com/metaneutrons/AROS-NX/pull/35)
   pins that archive and its patch and selects the new `src/mesa/glapi` layout
-  before fetching. The patch passed a dry run against the official archive.
+  before fetching. The patch and closed source inventories were qualified
+  against the official archive and merged into the source used by PR #34.
 - Mesa 26 `glapi` compiles `shared-glapi/core` and a generated
   `public_glapi_wrappers.c`. Its two generated outputs depend on `mapi_abi.py`,
   `gl_and_es_API.xml`, `libgl-symbols.txt`, the public-symbol manifest and the
-  wrapper shell adapter. A version-bound runner must track all inputs and
-  products; the Mesa 20 direct-Python recipe is not equivalent. Cold-tree
-  source evaluation also requires an exact source inventory rather than
-  dropping the unresolved `top_srcdir` fragment. Inventories for the remaining
-  Mesa 26 core archives are still missing.
+  wrapper shell adapter. The version-bound runner tracks those inputs and
+  products; the Mesa 20 direct-Python recipe remains separate. Cold-tree
+  source evaluation uses an exact source inventory rather than dropping the
+  unresolved `top_srcdir` fragment. The remaining Mesa 26 core archives were
+  closed and tested in [aros-tools PR #259](https://github.com/metaneutrons/aros-tools/pull/259).
 - An explicit `OPT_MESAGL=26.0.0` initially caused the central Mesa fetch to
   be skipped. The target-aware fetch correction must accept a concrete
-  selector only when Make has not assigned the variable, and must still reject
-  unknown conditional assignments. Four-profile source probes and changed-
-  branch counterprobes are required before accepting that correction.
+  selector only when Make has not assigned the variable, while still rejecting
+  unknown conditional assignments. The correction passed profile and
+  changed-branch counterprobes before product qualification.
 
 ### M2: Support GRUB 2.16 and WirelessManager
 
@@ -118,8 +125,11 @@ Execution: [issue #243](https://github.com/metaneutrons/aros-tools/issues/243). 
 - M4-A2: Merge normally without rewriting upstream or local history. Confirm
   main contains the exact upstream commit, then fast-forward the permanent
   `master` mirror to that commit and verify both remote refs.
-- M4-A3: Update source/producer contracts only after their new exact commits
-  are known and qualified. Do not mutate the published toolchain v0.1.4.
+- M4-A3: The aros-toolchains producer source pin merged at
+  `f35ecea2918c8c8314bf6878b4401af6ae45132d` after its contracts passed.
+  The aros-tools source/producer contract merged at
+  `c204695815e176b016b82cb0bafbfe436b76d84b` after complete three-host
+  CI. The published toolchain v0.1.4 was not changed.
 
 ### M5: Release the new aros-tools capability set
 
@@ -138,8 +148,10 @@ Use focused parser and engine tests during M2/M3 development. The full
 three-host, three-profile AROS-NX matrix is the M4 integration gate, not a
 per-commit feedback loop. GRUB and Mesa source upgrades may expose additional
 compiler or generated-file failures after configure; a green transpiler alone
-is insufficient. Until M4 succeeds, protected AROS-NX main, its mirror and
-all public release assets stay unchanged. PR #34 remains draft.
-
-No completion date or runner-cost estimate is asserted: the available run
-failed before compilation, so it does not measure the new source build time.
+is insufficient. M4 is complete: protected AROS-NX main contains the qualified
+source tree, the permanent `master` mirror fast-forwarded to exact upstream
+commit `282a0454356dc2b9554ab023997d7f7ca24fc03e`, and both
+source/producer contracts select their reviewed commits. Public aros-tools
+v0.3.12 and aros-toolchains v0.1.4 remain unchanged. M5 requires a fresh
+Release Please version and the repository's full release gates; the M4 product
+matrix is not a substitute for native release or package-channel qualification.

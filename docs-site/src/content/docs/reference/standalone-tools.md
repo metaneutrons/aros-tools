@@ -31,6 +31,12 @@ Ordinary source fetch declarations retain upstream's version, origin and
 optional checksums. The transpiler does not calculate new pins.
 The GRUB host-tool capability accepts only audited 2.12 and 2.16 recipes for
 the x86-64 PC target; it rejects other versions.
+The current `aros-transpiler` source recognizes separately audited Mesa 20.0.8
+and 26.0.0 recipes for the supported AROS target profiles. It checks their source
+and generator inputs independently; selecting `--mesa-version` alone does not
+qualify an archive or guarantee that an installed release contains that
+capability. See [release status](/aros-tools/reference/release-status/) for the
+published tools version.
 See [the transpiler contract](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-transpiler/README.md).
 
 ## aros-verify
