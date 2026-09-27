@@ -35,7 +35,8 @@ pr=$(jq -cer --arg commit "$source_commit" --arg title "chore(main): release ${v
         .merge_commit_sha == $commit and
         .base.ref == "main" and
         .title == $title and
-        .user.login == "app/metaneutrons-release-please" and
+        (.user.login == "metaneutrons-release-please[bot]" or
+         .user.login == "app/metaneutrons-release-please") and
         (.head.ref | test("^release-please--[A-Za-z0-9._-]+$"))
     )] |
     if length == 1 then .[0] else error("expected exactly one matching Release Please PR") end
