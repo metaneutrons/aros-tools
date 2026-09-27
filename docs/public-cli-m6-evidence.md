@@ -17,8 +17,8 @@ initiative.
 | Qualified PR head | [`780fa5bb71db17f9653db010c61d376ccdbb1f74`](https://github.com/metaneutrons/aros-tools/commit/780fa5bb71db17f9653db010c61d376ccdbb1f74) | Exact input of the successful PR workflows and local integration gate |
 | Candidate source tree | `ab9684990c16ee6c29eef7586b320c5a06d761dc` | Measured identical Git tree for the qualified head and squash merge |
 | Source-aware AROS-NX input | [`f3cfc243a84065166a46da28b0a5b22bbd0f8869`](https://github.com/metaneutrons/AROS-NX/commit/f3cfc243a84065166a46da28b0a5b22bbd0f8869) | Clean recursive source input for source-init, source-sync and transpiler integration |
-| Native producer contract | [`c8039cf2b7291097ad62c6750bd7367e91a068f4`](https://github.com/metaneutrons/aros-toolchains-legacy/commit/c8039cf2b7291097ad62c6750bd7367e91a068f4) | Pinned producer-side contract consumed by the native lifecycle fixtures |
-| Final caller migration | [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains-legacy/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2) | Merged [legacy aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains-legacy/pull/53), pinning the active producer to `2474bc3c89c21c80d23197c28ef63cd3c18603a4` without reintroducing `--offline` or legacy `aros ccache` syntax |
+| Native producer contract | `c8039cf2b7291097ad62c6750bd7367e91a068f4` | Pinned producer-side contract consumed by the native lifecycle fixtures |
+| Final caller migration | `6266ab047058cc2b87e38d9f6018bb25d7b658a2` | Merged legacy aros-toolchains PR #53, pinning the active producer to `2474bc3c89c21c80d23197c28ef63cd3c18603a4` without reintroducing `--offline` or legacy `aros ccache` syntax |
 
 The measured tree equality means the PR workflows and local gate exercised the
 exact integrated implementation, not merely a related branch.
@@ -33,7 +33,9 @@ exact integrated implementation, not merely a related branch.
 | CLI-M6-A4 | On Darwin 25.5.0/arm64, `AROS_TEST_SOURCE_ROOT=/Volumes/Dev/Build/aros-tools-m6-aros-nx bash scripts/check-workspace.sh test` passed on the qualified tree: full locked Rust suite, the real source-init/sync/transpiler flow, and all 35 discovered host-compatible CMake fixtures, including the real GRUB host build. | passed |
 | CLI-M6-A5 | This ledger records exact source/code identities, supported hosts, commands, CI and omissions. Public Astro documentation and migration text were updated in [PR #164](https://github.com/metaneutrons/aros-tools/pull/164). | passed |
 
-The final caller migration passed its [pull-request producer contract](https://github.com/metaneutrons/aros-toolchains-legacy/actions/runs/34789852879) and the identical [main contract](https://github.com/metaneutrons/aros-toolchains-legacy/actions/runs/34789884726). That fulfills CLI-M3-A3 and removes the final dependency of CLI-M6.
+The final caller migration passed producer-contract runs `34789852879` (PR)
+and `34789884726` (main). That fulfills CLI-M3-A3 and removes the final
+dependency of CLI-M6.
 
 The Workspace CI run also passed formatting, architecture and Clippy. Its
 individual [Linux x86-64](https://github.com/metaneutrons/aros-tools/actions/runs/34760149199/job/103731457623),

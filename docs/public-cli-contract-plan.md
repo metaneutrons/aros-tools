@@ -4,7 +4,7 @@ Epic: [#148](https://github.com/metaneutrons/aros-tools/issues/148).
 Decision state: CLI-M1 through CLI-M6 have complete acceptance evidence. The
 native producer consumes exact reviewed tools revision
 `2474bc3c89c21c80d23197c28ef63cd3c18603a4` through
-[legacy aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains-legacy/pull/53).
+legacy aros-toolchains PR #53.
 A package or tag release remains a separate maintainer action. The integrated
 evidence is recorded in [the CLI-M6 ledger](public-cli-m6-evidence.md).
 
