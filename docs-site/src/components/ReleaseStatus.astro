@@ -1,0 +1,33 @@
+---
+import status from '../data/release-status.generated.json';
+
+const toolHosts: Record<string, string> = {
+  'x86_64-unknown-linux-gnu': 'Linux x86-64',
+  'aarch64-unknown-linux-gnu': 'Linux ARM64',
+  'aarch64-apple-darwin': 'macOS Apple silicon',
+};
+const toolchainHosts: Record<string, string> = {
+  'linux-x86_64': 'Linux x86-64',
+  'linux-aarch64': 'Linux ARM64',
+  'macos-aarch64': 'macOS Apple silicon',
+};
+---
+
+<table>
+  <thead><tr><th>Product</th><th>Release</th><th>Available artifacts</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>AROS tools</td>
+      <td><a href={status.tools.url}><code>{status.tools.tag}</code></a></td>
+      <td>{status.tools.hosts.map(host => toolHosts[host]).join(', ')}</td>
+    </tr>
+    <tr>
+      <td>Cross-toolchains</td>
+      <td><a href={status.toolchains.url}><code>{status.toolchains.tag}</code></a></td>
+      <td>{status.toolchains.hosts.map(host => toolchainHosts[host]).join(', ')} × {status.toolchains.profiles.join(', ')}</td>
+    </tr>
+    <tr><td>System images</td><td>None</td><td>No distribution image or board boot release</td></tr>
+  </tbody>
+</table>
+
+<p class="sl-text-sm">GitHub release data is checked when this site is built. Package-manager versions may update later; check the channel before installation.</p>

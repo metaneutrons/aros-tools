@@ -12,6 +12,9 @@ on:
       - 'docs-site/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
+  schedule:
+    # Refresh public release facts without a cross-repository write token.
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
@@ -34,6 +37,8 @@ jobs:
           cache: npm
           cache-dependency-path: docs-site/package-lock.json
       - name: Run canonical documentation gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: scripts/check-workspace.sh docs
       - name: Upload verified Worker asset handoff
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

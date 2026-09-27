@@ -6,10 +6,11 @@ next: false
 ---
 
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
+import releaseStatus from '../../data/release-status.generated.json';
 
 <div class="doc-intro">
   <strong>Beta.</strong>{' '}
-  <a href="/aros-tools/getting-started/installation/">Install AROS tools v0.3.12</a>{' '}
+  <a href="/aros-tools/getting-started/installation/">Install AROS tools {releaseStatus.tools.tag}</a>{' '}
   on Linux x86-64, Linux ARM64 or Apple silicon.
 </div>
 

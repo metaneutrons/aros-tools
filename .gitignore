@@ -19,3 +19,4 @@ worker-dist/
 *.log
 *.profraw
 HANDOFF.md
+release-status.generated.json
