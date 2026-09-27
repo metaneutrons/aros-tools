@@ -173,6 +173,16 @@ function(aros_finalize_standalone_links)
                 endif()
             endif()
         endforeach()
+        set(_post_link_check "")
+        set(_post_link_deps "")
+        if(_name STREQUAL "kernel-bootstrap-pc")
+            set(_verify_bootstrap
+                "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/scripts/VerifyPcBootstrap.cmake")
+            set(_post_link_check
+                COMMAND "${CMAKE_COMMAND}" "-DBOOTSTRAP_ELF=${_OUTPUT}"
+                    -P "${_verify_bootstrap}")
+            set(_post_link_deps "${_verify_bootstrap}")
+        endif()
         add_custom_command(
             OUTPUT "${_OUTPUT}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory ${_needed_dirs}
@@ -188,20 +198,24 @@ function(aros_finalize_standalone_links)
             # -fuse-ld=<path>. Naming the prefix-owned ld.lld explicitly is the
             # same deterministic choice the module rule makes
             # (cmake/AROS.cmake:236); it does not depend on PATH.
-            # -no-pie is the third host-toolchain addition. clang defaults to
-            # PIE for a linux triple, and a position-independent image cannot
-            # be what a linker script places at a fixed address:
+            # -static is the third host-toolchain addition. -nostdlib and
+            # -no-pie alone still make clang pass -dynamic-linker to LLD,
+            # which creates an orphan .interp ahead of .text. That shifts the
+            # Multiboot-1 header to file offset 0x2000, outside its first-8-KiB
+            # search area. A static link also disables PIE, as required by the
+            # fixed-address linker script:
             #
             #   ld.lld: error: relocation R_386_32 cannot be used against
             #   symbol 'scr_Width'; recompile with -fPIC
             #
             # The reference never states it because its driver defaults differ.
-            COMMAND "${CMAKE_C_COMPILER}" "-fuse-ld=${AROS_LLD_BIN}" -no-pie
+            COMMAND "${CMAKE_C_COMPILER}" "-fuse-ld=${AROS_LLD_BIN}" -static
                 ${_ISA_LINK_OPTIONS}
                 "$<TARGET_OBJECTS:${_OBJECTS}>" ${_external}
                 ${_DRIVER_LINK_OPTIONS} ${_LINK_OPTIONS} ${_lib_args}
                 -o "${_OUTPUT}"
-            DEPENDS "${_OBJECTS}" ${_external} ${_archives}
+            ${_post_link_check}
+            DEPENDS "${_OBJECTS}" ${_external} ${_archives} ${_post_link_deps}
             COMMENT "Standalone link ${_name}"
             COMMAND_EXPAND_LISTS
             VERBATIM)
