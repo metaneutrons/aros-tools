@@ -334,6 +334,26 @@ jobs:
             echo '::error::qualified source checkout does not match its contract commit'
             exit 1
           fi
+      # Mesa 26 is qualified separately while its source PR is stacked on the
+      # upstream synchronization. The ordinary source/producer contract still
+      # selects the released Mesa 20 tree for regression testing.
+      - name: Checkout exact Mesa 26 capability source
+        if: matrix.source_qualification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: metaneutrons/AROS-NX
+          ref: 43d131989814a1a682da8f09159d6f6bd1b5c2fe
+          path: aros-mesa26-source
+          persist-credentials: false
+      - name: Require exact Mesa 26 source identity
+        if: matrix.source_qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ $(git -C aros-mesa26-source rev-parse HEAD) != 43d131989814a1a682da8f09159d6f6bd1b5c2fe ]]; then
+            echo '::error::Mesa 26 source checkout does not match its pinned commit'
+            exit 1
+          fi
       - name: Activate pinned Rust toolchain
         working-directory: aros-tools
         run: |
@@ -346,6 +366,7 @@ jobs:
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
+          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source
         run: scripts/check-workspace.sh source-test
       # Product-build fixtures run once on the integrated main commit, not on
       # every PR edit/push. workflow_dispatch is the explicit pre-integration
@@ -356,6 +377,7 @@ jobs:
         working-directory: aros-tools
         env:
           AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source
+          AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source
         run: scripts/check-workspace.sh test
       - name: Run portable workspace tests
         if: ${{ !matrix.source_qualification }}
