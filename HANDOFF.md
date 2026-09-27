@@ -28,6 +28,15 @@ preserves earlier checkpoints.
   [`aros-toolchains-legacy`](https://github.com/metaneutrons/aros-toolchains-legacy).
   The fresh repository's v0.1.0 through v0.1.3 are terminal non-releases and
   must not be published or retargeted.
+- AROS-NX [consumer PR #33](https://github.com/metaneutrons/AROS-NX/pull/33)
+  copied all nine measured archive hashes, tree digests and sizes into its
+  lock. Its [product run 36289302682](https://github.com/metaneutrons/AROS-NX/actions/runs/36289302682)
+  passed the shared locked-source preflight and all nine Linux/macOS product
+  lanes. The reviewed two-file PR merged normally to protected main
+  [`1ed096f2355f5c01dc50ecbc6e3953ce610b2c8f`](https://github.com/metaneutrons/AROS-NX/commit/1ed096f2355f5c01dc50ecbc6e3953ce610b2c8f);
+  the merge tree equals the qualified PR tree. On that exact main commit, a
+  fresh isolated macOS ARM64 consumer store downloaded, installed and verified
+  all three profiles from the public v0.1.4 URLs.
 
 ## Historical v0.3.9 first stable release
 
@@ -72,7 +81,8 @@ preserves earlier checkpoints.
 
 - TCP-M0 through TCP-M6 remain accepted. Their durable implementation and
   evidence boundaries are recorded in the M3, M4, M5, and M6 evidence ledgers.
-- The active `aros-toolchains` executor contract pins aros-tools
+- At that historical checkpoint, the legacy `aros-toolchains` executor
+  contract pinned aros-tools
   [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4), the integrated CACHE-M7 command migration. [legacy aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains-legacy/pull/53), merged as
   [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains-legacy/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2), passed both its PR and main producer-contract gates. The migration neither creates nor changes a release artifact.
 - CACHE-M1 through CACHE-M7 and CLI-M1 through CLI-M6 have complete evidence in
@@ -115,10 +125,9 @@ preserves earlier checkpoints.
 
 ## Current bounded action
 
-AROS-NX must switch its consumer lock directly from the legacy toolchain
-release to the measured v0.1.4 assets and pass its three-host product matrix.
-After a checked merge, verify the public consumer paths. RISC-V remains a
-separate qualification; macOS Intel is not a native release target.
+The v0.1.4 producer release and AROS-NX consumer cutover are complete. There
+is no pending release or package-channel recovery. RISC-V remains a separate
+qualification; macOS Intel is not a native release target.
 
 ## Resume safely
 
