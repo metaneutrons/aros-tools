@@ -17,10 +17,10 @@ attestation, package-channel update or A/B qualification was created here.
 The native recovery boundary merged in [aros-tools PR #96](https://github.com/metaneutrons/aros-tools/pull/96).
 [PR #97](https://github.com/metaneutrons/aros-tools/pull/97) removed the
 retired adapter and its public command path. The exact producer declaration
-landed through [aros-toolchains PR #13](https://github.com/metaneutrons/aros-toolchains/pull/13),
-[PR #14](https://github.com/metaneutrons/aros-toolchains/pull/14), and
-[PR #15](https://github.com/metaneutrons/aros-toolchains/pull/15). The final
-contract run [34260382908](https://github.com/metaneutrons/aros-toolchains/actions/runs/34260382908)
+landed through [legacy aros-toolchains PR #13](https://github.com/metaneutrons/aros-toolchains-legacy/pull/13),
+[PR #14](https://github.com/metaneutrons/aros-toolchains-legacy/pull/14), and
+[PR #15](https://github.com/metaneutrons/aros-toolchains-legacy/pull/15). The final
+contract run [34260382908](https://github.com/metaneutrons/aros-toolchains-legacy/actions/runs/34260382908)
 checked out the declared source and executor commits and passed the complete
 offline producer contract suite.
 

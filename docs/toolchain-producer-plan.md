@@ -124,10 +124,10 @@ evidence, not a new runtime pinning mechanism.
 | Component | Inspected identity | Relevant implementation |
 | --- | --- | --- |
 | `aros-tools` | `39a7738d7b7d09d96fad6787afa45823629ea77c` | [CLI commands](https://github.com/metaneutrons/aros-tools/blob/39a7738d7b7d09d96fad6787afa45823629ea77c/crates/aros-cli/src/main.rs), [consumer verification](https://github.com/metaneutrons/aros-tools/blob/39a7738d7b7d09d96fad6787afa45823629ea77c/crates/aros-cli/src/toolchain.rs) |
-| `aros-toolchains` | `c8039cf2b7291097ad62c6750bd7367e91a068f4` | [build driver](https://github.com/metaneutrons/aros-toolchains/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/scripts/toolchain/build-release.sh), [package/verify engine](https://github.com/metaneutrons/aros-toolchains/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/scripts/toolchain/producer.py), [workflow](https://github.com/metaneutrons/aros-toolchains/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/.github/workflows/toolchain-release.yml) |
+| `aros-toolchains-legacy` | `c8039cf2b7291097ad62c6750bd7367e91a068f4` | [build driver](https://github.com/metaneutrons/aros-toolchains-legacy/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/scripts/toolchain/build-release.sh), [package/verify engine](https://github.com/metaneutrons/aros-toolchains-legacy/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/scripts/toolchain/producer.py), [workflow](https://github.com/metaneutrons/aros-toolchains-legacy/blob/c8039cf2b7291097ad62c6750bd7367e91a068f4/.github/workflows/toolchain-release.yml) |
 | AROS producer input | `f3cfc243a84065166a46da28b0a5b22bbd0f8869` | Selected by the producer and [consumer source contract](../contracts/aros-source-v1.toml); it is not a moving `main` |
 | Tools input of that producer | `707037be4f8ff37300a1a89166c35f661c28bafe` | Collector and compatibility helpers; distinct from current tools `main` |
-| Published standalone baseline | `toolchain-v1-20260831-rc3` | [Immutable prerelease](https://github.com/metaneutrons/aros-toolchains/releases/tag/toolchain-v1-20260831-rc3), published 2026-08-31 |
+| Published standalone baseline | `toolchain-v1-20260831-rc3` | [Immutable legacy prerelease](https://github.com/metaneutrons/aros-toolchains-legacy/releases/tag/toolchain-v1-20260831-rc3), published 2026-08-31 |
 
 Current code provides the following reusable boundaries:
 

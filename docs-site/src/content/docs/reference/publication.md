@@ -3,10 +3,11 @@ title: Package channels
 description: Choose a distribution channel and understand how its packages relate to the native release.
 ---
 
-:::caution[Availability]
-The first stable tools release is not yet public. These are the intended
-package contracts. [Release status](/aros-tools/reference/release-status/)
-records which channels are actually available.
+:::note[Current release]
+The immutable v0.3.12 tools release is public. Its native archives and APT,
+Homebrew and AUR channels passed release qualification. Check
+[release status](/aros-tools/reference/release-status/) for the exact version
+before upgrading.
 :::
 
 ## Choose a channel
