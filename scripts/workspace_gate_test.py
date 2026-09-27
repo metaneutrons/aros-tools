@@ -243,6 +243,10 @@ if name == "cmake" and (root / "fail-engine").exists():
             block = workflow.split(condition, 1)[1].split("      - name:", 1)[0]
             self.assertIn("run: scripts/check-workspace.sh " + gate + "\n", block)
             self.assertIn("AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source", block)
+            self.assertIn(
+                "AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source",
+                block,
+            )
         self.assertNotIn("continue-on-error", workflow)
 
     def test_release_qualification_is_explicit_or_tag_addressed(self):
