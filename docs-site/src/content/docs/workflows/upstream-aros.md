@@ -32,11 +32,9 @@ is authoritative and must validate; it is not silently ignored when malformed.
 
 ## Full product builds
 
-:::caution[Current qualification boundary]
-The CMake engine is owned by the tools, but engine ownership alone does not
-make every pristine upstream tree a qualified complete product.
-The integrated flow still needs compatible source recipes/patches and a
-verified cross-toolchain selection.
+:::caution[Full product builds]
+The tools can inspect pristine upstream source. Their integrated CMake build
+still needs compatible recipes and a selected cross-toolchain.
 :::
 
 Use upstream's documented configure/MetaMake path for a complete pristine
@@ -49,9 +47,8 @@ An explicit local AROS-built cross-toolchain can be inspected with:
 aros toolchain verify --preset pc-x86_64 --local /absolute/path/to/crosstools
 ```
 
-That validates the prefix; it does not supply missing source compatibility or
-establish release provenance. The embedded host LLVM defaults also lack the
-digests needed for managed host-compiler installation.
+That validates the prefix, not the source recipes. The embedded host LLVM
+defaults also lack the digests needed for managed installation.
 
 ## Keep source current
 

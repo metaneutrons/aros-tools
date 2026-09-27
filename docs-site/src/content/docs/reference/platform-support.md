@@ -11,11 +11,9 @@ description: Distinguish native host support, implemented target profiles, avail
 | `aarch64-unknown-linux-gnu` | Native Linux ARM64 | glibc 2.36 or newer |
 | `aarch64-apple-darwin` | Native macOS Apple silicon | macOS 13 or newer |
 
-These are native tools archive contracts, not a claim that stable archives are
-already published. Linux x86-64, Linux AArch64 and macOS Apple silicon are the
-complete maintained release matrix. macOS Intel is not a native archive or
-package-manager target. Check [release status](/aros-tools/reference/release-status/)
-for published evidence.
+AROS tools v0.3.12 has published archives for all three hosts. macOS Intel is
+not a native archive or package-manager target. See
+[release status](/aros-tools/reference/release-status/) for current versions.
 
 The host mapping is implemented in
 [`host_compiler.rs`](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cli/src/host_compiler.rs).
@@ -36,9 +34,8 @@ A checkout's `aros-targets.toml`, when present, replaces the
 Compiler selection is separately validated by the
 [CMake toolchain](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cmake-engine/engine/toolchains/AROS.cmake).
 
-An implemented profile does not mean that a matching released toolchain entry
-or all source/legacy inputs are available. In particular, RISC-V profile support
-must not be read as a complete native-host RISC-V release or boot claim.
+The `opensbi-riscv64` profile has no matching v0.1.4 toolchain archive.
+No RISC-V image or boot release is available.
 
 ## Physical boards
 

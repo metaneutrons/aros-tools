@@ -3,12 +3,8 @@ title: Package channels
 description: Choose a distribution channel and understand how its packages relate to the native release.
 ---
 
-:::note[Current release]
-The immutable v0.3.12 tools release is public. Its native archives and APT,
-Homebrew and AUR channels passed release qualification. Check
-[release status](/aros-tools/reference/release-status/) for the exact version
-before upgrading.
-:::
+The current stable tools version is `v0.3.12`. For install commands, see
+[installation](/aros-tools/getting-started/installation/).
 
 ## Choose a channel
 
@@ -30,9 +26,8 @@ The native archive is the canonical binary payload. Debian, Homebrew and AUR
 packages consume those same measured executables; package channels are not
 independent compiler builds. Keep the complete suite at one version.
 
-A public GitHub release does not, by itself, prove that every package channel
-has completed publication. Consult the package's version and release status
-before installing or upgrading. Prereleases do not update stable channels.
+GitHub Releases and package channels can update at different times. Check the
+channel's version before upgrading. Prereleases do not update stable channels.
 
 ## What to verify
 
