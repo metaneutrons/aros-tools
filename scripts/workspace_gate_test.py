@@ -32,8 +32,13 @@ class WorkspaceGateTests(unittest.TestCase):
                  "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "fixture")
         self.commit = self.git("rev-parse", "HEAD").stdout.strip()
         self.write("contracts/aros-source-v1.toml", f'[source]\ncommit = "{self.commit}"\n')
-        self.gate = self.write("scripts/check-workspace.sh",
-                               (ROOT / "scripts/check-workspace.sh").read_text())
+        # The inert source fixture has a fresh commit, so substitute that
+        # identity only in this copied gate. Production retains the fixed
+        # historical Mesa 20 pin and validates it before running Cargo.
+        fixture_gate = (ROOT / "scripts/check-workspace.sh").read_text().replace(
+            "cb6974f1c3de43c6f1168d69039af7c32e56153c", self.commit
+        )
+        self.gate = self.write("scripts/check-workspace.sh", fixture_gate)
         self.fixtures = self.repo / "crates/aros-cmake-engine/engine/tests"
         self.fixtures.mkdir(parents=True)
         for name in ("AhiBuildTest.cmake", "GrubBuildTest.cmake", "NewTest.cmake"):
@@ -96,6 +101,8 @@ if name == "cmake" and (root / "fail-engine").exists():
         env = {**self.env}
         if source:
             env["AROS_TEST_SOURCE_ROOT"] = str(self.source)
+            env["AROS_TEST_MESA20_SOURCE_ROOT"] = str(self.source)
+            env["AROS_TEST_MESA26_SOURCE_ROOT"] = str(self.source)
         return subprocess.run(["bash", str(self.gate), *args], cwd=self.root,
                               env=env, capture_output=True, text=True, timeout=30)
 
@@ -244,7 +251,11 @@ if name == "cmake" and (root / "fail-engine").exists():
             self.assertIn("run: scripts/check-workspace.sh " + gate + "\n", block)
             self.assertIn("AROS_TEST_SOURCE_ROOT: ${{ github.workspace }}/aros-source", block)
             self.assertIn(
-                "AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa26-source",
+                "AROS_TEST_MESA20_SOURCE_ROOT: ${{ github.workspace }}/aros-mesa20-source",
+                block,
+            )
+            self.assertIn(
+                "AROS_TEST_MESA26_SOURCE_ROOT: ${{ github.workspace }}/aros-source",
                 block,
             )
         self.assertNotIn("continue-on-error", workflow)

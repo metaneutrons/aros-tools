@@ -230,6 +230,43 @@ PY
         printf '%s\n' "$submodule_status" | grep -E '^[-+U]' | head -n 8 >&2
         return 1
     fi
+    if [[ -z "${AROS_TEST_MESA26_SOURCE_ROOT:-}" || ! -d "$AROS_TEST_MESA26_SOURCE_ROOT" ]]; then
+        printf '%s\n' 'error: AROS_TEST_MESA26_SOURCE_ROOT must name the current qualified source checkout' >&2
+        return 1
+    fi
+    local mesa26_root
+    mesa26_root=$(unset CDPATH; cd -- "$AROS_TEST_MESA26_SOURCE_ROOT" && pwd -P)
+    if [[ "$mesa26_root" != "$source_root" ]]; then
+        printf '%s\n' 'error: Mesa 26 source must be the current source-contract checkout' >&2
+        return 1
+    fi
+    # Source-coupled Mesa 20 regression probes need the last qualified Mesa
+    # 20 tree. The current source contract above remains the identity used by
+    # engine fixtures and Mesa 26 probes.
+    if [[ -z "${AROS_TEST_MESA20_SOURCE_ROOT:-}" || ! -d "$AROS_TEST_MESA20_SOURCE_ROOT" ]]; then
+        printf '%s\n' 'error: AROS_TEST_MESA20_SOURCE_ROOT must name the pinned regression checkout' >&2
+        return 1
+    fi
+    local legacy_root legacy_top legacy_commit legacy_status legacy_submodules
+    legacy_root=$(unset CDPATH; cd -- "$AROS_TEST_MESA20_SOURCE_ROOT" && pwd -P)
+    legacy_top=$(git -C "$legacy_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+    legacy_top=$(unset CDPATH; cd -- "$legacy_top" && pwd -P)
+    if [[ "$legacy_root" != "$legacy_top" ]]; then
+        printf '%s\n' 'error: Mesa 20 regression source must name the checkout root' >&2
+        return 1
+    fi
+    legacy_commit=$(git -C "$legacy_root" rev-parse --verify 'HEAD^{commit}')
+    if [[ "$legacy_commit" != cb6974f1c3de43c6f1168d69039af7c32e56153c ]]; then
+        printf 'error: Mesa 20 regression source is at %s; expected cb6974f1c3de43c6f1168d69039af7c32e56153c\n' "$legacy_commit" >&2
+        return 1
+    fi
+    legacy_status=$(git -C "$legacy_root" status --porcelain=v1 --untracked-files=all)
+    legacy_submodules=$(git -C "$legacy_root" submodule status --recursive)
+    if [[ -n "$legacy_status" ]] || printf '%s\n' "$legacy_submodules" | grep -Eq '^[-+U]'; then
+        printf '%s\n' 'error: Mesa 20 regression source must be clean with exact initialized submodules' >&2
+        return 1
+    fi
+    local -x AROS_TEST_SOURCE_ROOT="$legacy_root"
     cargo test --workspace --all-features --locked \
         --exclude aros-common --exclude aros-toolchain --exclude aros-cli
     run_lock_binaries_serially
