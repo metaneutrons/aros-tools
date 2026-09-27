@@ -615,6 +615,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         for declaration in declarations {
             writeln!(out, "aros_build_grub2(").unwrap();
             writeln!(out, "    MMAKE_ID {}", declaration.mmake_name).unwrap();
+            writeln!(out, "    VERSION {}", cmake_arg(&declaration.version)).unwrap();
             writeln!(out, "    MODE {}", cmake_arg(&declaration.mode)).unwrap();
             writeln!(out, "    BINARY_DIR {}", cmake_arg(&declaration.binary_dir)).unwrap();
             writeln!(

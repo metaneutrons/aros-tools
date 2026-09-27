@@ -5,7 +5,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/GrubSourceLock.cmake")
 
 set(_AROS_GRUB_BUILD_MODULE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
-# The current GRUB 2.12 host-tool contract is audited specifically for a
+# The GRUB host-tool contracts are audited specifically for a
 # native Apple-Silicon Homebrew host.  Keep this capability separate from the
 # x86_64-pc *target* profile: a Linux host can build that target's ordinary
 # tree, but must not be offered an unaudited GRUB/ISO lane.
@@ -15,12 +15,9 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND
     set(AROS_GRUB2_HOST_LANES_AVAILABLE TRUE)
 endif()
 
-# Closed GRUB 2.12 host-tool builder.  The legacy declarations all consume the
+# Closed GRUB host-tool builder.  The legacy declarations all consume the
 # same patched upstream source, but their PC, EFI64 and EFI32 build trees must
 # never share an install prefix: GRUB installs host programs into --bindir.
-set(_AROS_GRUB2_PATCH_RELATIVE
-    "arch/all-pc/boot/grub2-aros/grub-2.12-aros.diff")
-
 # Resolve pre-existing path components physically, then append a non-existing
 # tail.  This deliberately accepts macOS' /tmp -> /private/tmp alias while
 # making a real symlink escape visible before an output tree is removed.
@@ -161,6 +158,7 @@ endfunction()
 # aros_build_grub2(
 #     MMAKE_ID <grub2-host|grub2-efi-host|grub2-efi32-host>
 #     MODE <pc|efi64|efi32>
+#     VERSION <2.12|2.16>
 #     BINARY_DIR <private lane root>
 #     INSTALL_PREFIX <private, lane-specific host-tool prefix>)
 #
@@ -168,12 +166,12 @@ endfunction()
 # may select a lane, but cannot substitute a different source, patch, target
 # triple, install tree or product manifest.
 function(aros_build_grub2)
-    set(one_value_args MMAKE_ID MODE BINARY_DIR INSTALL_PREFIX)
+    set(one_value_args MMAKE_ID MODE VERSION BINARY_DIR INSTALL_PREFIX)
     cmake_parse_arguments(GB "" "${one_value_args}" "" ${ARGN})
     if(GB_UNPARSED_ARGUMENTS OR GB_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "aros_build_grub2 received malformed arguments")
     endif()
-    foreach(_required IN ITEMS MMAKE_ID MODE BINARY_DIR INSTALL_PREFIX)
+    foreach(_required IN ITEMS MMAKE_ID MODE VERSION BINARY_DIR INSTALL_PREFIX)
         if(NOT GB_${_required})
             message(FATAL_ERROR "aros_build_grub2 requires ${_required}")
         endif()
@@ -184,6 +182,7 @@ function(aros_build_grub2)
     if(TARGET "${GB_MMAKE_ID}")
         message(FATAL_ERROR "${GB_MMAKE_ID}: GRUB2 target was already declared")
     endif()
+    _aros_grub2_source_lock("${GB_VERSION}")
 
     if(GB_MODE STREQUAL "pc")
         set(_expected_id "grub2-host")
@@ -193,8 +192,12 @@ function(aros_build_grub2)
         set(_target_triple "i386-pc-linux-gnu")
         set(_target_isa_flags "--target=i386-pc-linux-gnu -march=i486 -m32")
         set(_link_format "-melf_i386")
-        set(_expected_file_count 615)
-        set(_install_manifest_relative "manifests/grub-2.12-pc.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_expected_file_count 686)
+        else()
+            set(_expected_file_count 615)
+        endif()
+        set(_install_manifest_relative "manifests/grub-${GB_VERSION}-pc.install")
         set(_platform_dir "i386-pc")
     elseif(GB_MODE STREQUAL "efi64")
         set(_expected_id "grub2-efi-host")
@@ -204,8 +207,12 @@ function(aros_build_grub2)
         set(_target_triple "x86_64-pc-linux-gnu")
         set(_target_isa_flags "--target=x86_64-pc-linux-gnu")
         set(_link_format "-melf_x86_64")
-        set(_expected_file_count 591)
-        set(_install_manifest_relative "manifests/grub-2.12-efi64.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_expected_file_count 681)
+        else()
+            set(_expected_file_count 591)
+        endif()
+        set(_install_manifest_relative "manifests/grub-${GB_VERSION}-efi64.install")
         set(_platform_dir "x86_64-efi")
     elseif(GB_MODE STREQUAL "efi32")
         set(_expected_id "grub2-efi32-host")
@@ -215,8 +222,12 @@ function(aros_build_grub2)
         set(_target_triple "i386-pc-linux-gnu")
         set(_target_isa_flags "--target=i386-pc-linux-gnu -march=i486 -m32")
         set(_link_format "-melf_i386")
-        set(_expected_file_count 593)
-        set(_install_manifest_relative "manifests/grub-2.12-efi32.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_expected_file_count 679)
+        else()
+            set(_expected_file_count 593)
+        endif()
+        set(_install_manifest_relative "manifests/grub-${GB_VERSION}-efi32.install")
         set(_platform_dir "i386-efi")
     else()
         message(FATAL_ERROR "${GB_MMAKE_ID}: unsupported GRUB2 mode ${GB_MODE}")
@@ -256,6 +267,19 @@ function(aros_build_grub2)
     if(IS_SYMLINK "${_source_root}" OR IS_SYMLINK "${_build_root}")
         message(FATAL_ERROR "${GB_MMAKE_ID}: source or build root may not be a symlink")
     endif()
+
+    set(_version_file "${_source_root}/arch/all-pc/boot/grub2_def")
+    if(NOT EXISTS "${_version_file}" OR IS_DIRECTORY "${_version_file}" OR
+       IS_SYMLINK "${_version_file}")
+        message(FATAL_ERROR "${GB_MMAKE_ID}: GRUB2 source version file is unavailable")
+    endif()
+    file(READ "${_version_file}" _declared_version)
+    string(STRIP "${_declared_version}" _declared_version)
+    if(NOT _declared_version STREQUAL GB_VERSION)
+        message(FATAL_ERROR "${GB_MMAKE_ID}: GRUB2 source version differs from the audited declaration")
+    endif()
+    set(_AROS_GRUB2_PATCH_RELATIVE
+        "arch/all-pc/boot/grub2-aros/grub-${GB_VERSION}-aros.diff")
 
     set(_patch_logical "${_source_root_logical}/${_AROS_GRUB2_PATCH_RELATIVE}")
     if(NOT EXISTS "${_patch_logical}" OR IS_DIRECTORY "${_patch_logical}" OR
@@ -504,6 +528,7 @@ function(aros_build_grub2)
         set(_fetch_contract "${_build_root}/.aros-grub2-fetch-contract.cmake")
         string(CONCAT _fetch_content
             "# Generated closed GRUB2 fetch contract.  Do not edit.\n"
+            "set(GB_VERSION [==[${GB_VERSION}]==])\n"
             "set(GB_BUILD_ROOT [==[${_build_root}]==])\n"
             "set(GB_ARCHIVE [==[${_archive}]==])\n"
             "set(GB_SOURCE_URL_PRIMARY [==[${_AROS_GRUB2_SOURCE_URL_PRIMARY}]==])\n"
@@ -517,7 +542,7 @@ function(aros_build_grub2)
                 -P "${_AROS_GRUB_BUILD_MODULE_DIR}/RunGrubBuild.cmake"
             DEPENDS "${_fetch_contract_logical}"
                 "${_AROS_GRUB_BUILD_MODULE_DIR}/RunGrubBuild.cmake"
-            COMMENT "Fetching audited GRUB 2.12 source"
+            COMMENT "Fetching audited GRUB ${GB_VERSION} source"
             VERBATIM)
         add_custom_target(grub2-aros--fetch DEPENDS "${_archive_logical}")
         add_custom_target(grub2-aros-fetch DEPENDS grub2-aros--fetch)
@@ -544,6 +569,7 @@ function(aros_build_grub2)
         string(APPEND _contract_content "set(${name} [==[${value}]==])\n")
     endmacro()
     _aros_grub_contract_set(GB_MODE "${GB_MODE}")
+    _aros_grub_contract_set(GB_VERSION "${GB_VERSION}")
     _aros_grub_contract_set(GB_MMAKE_ID "${GB_MMAKE_ID}")
     _aros_grub_contract_set(GB_SOURCE_ROOT "${_source_root}")
     _aros_grub_contract_set(GB_BUILD_ROOT "${_build_root}")

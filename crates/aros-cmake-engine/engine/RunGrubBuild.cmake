@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
 include("${CMAKE_CURRENT_LIST_DIR}/GrubSourceLock.cmake")
-set(_GB_ARCHIVE_SHA256 "${_AROS_GRUB2_ARCHIVE_SHA256}")
-set(_GB_SOURCE_URL_PRIMARY "${_AROS_GRUB2_SOURCE_URL_PRIMARY}")
-set(_GB_SOURCE_URL_FALLBACK "${_AROS_GRUB2_SOURCE_URL_FALLBACK}")
-set(_GB_PATCH_RELATIVE "arch/all-pc/boot/grub2-aros/grub-2.12-aros.diff")
 
 function(_gb_real_path path output)
     set(_candidate "${path}")
@@ -127,8 +123,12 @@ function(_gb_lane_contract mode)
         set(_isa_flags "--target=i386-pc-linux-gnu -march=i486 -m32")
         set(_link_format "-melf_i386")
         set(_platform_dir "i386-pc")
-        set(_file_count 615)
-        set(_manifest_relative "manifests/grub-2.12-pc.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_file_count 686)
+        else()
+            set(_file_count 615)
+        endif()
+        set(_manifest_relative "manifests/grub-${GB_VERSION}-pc.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/boot.img"
@@ -152,8 +152,12 @@ function(_gb_lane_contract mode)
         set(_isa_flags "--target=x86_64-pc-linux-gnu")
         set(_link_format "-melf_x86_64")
         set(_platform_dir "x86_64-efi")
-        set(_file_count 591)
-        set(_manifest_relative "manifests/grub-2.12-efi64.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_file_count 681)
+        else()
+            set(_file_count 591)
+        endif()
+        set(_manifest_relative "manifests/grub-${GB_VERSION}-efi64.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/kernel.img"
@@ -174,8 +178,12 @@ function(_gb_lane_contract mode)
         set(_isa_flags "--target=i386-pc-linux-gnu -march=i486 -m32")
         set(_link_format "-melf_i386")
         set(_platform_dir "i386-efi")
-        set(_file_count 593)
-        set(_manifest_relative "manifests/grub-2.12-efi32.install")
+        if(GB_VERSION STREQUAL "2.16")
+            set(_file_count 679)
+        else()
+            set(_file_count 593)
+        endif()
+        set(_manifest_relative "manifests/grub-${GB_VERSION}-efi32.install")
         set(_private_relative
             "build/grub-mkimage"
             "build/grub-core/kernel.img"
@@ -230,10 +238,18 @@ if(NOT _host_system_result EQUAL 0 OR NOT _host_machine_result EQUAL 0 OR
         "(${_host_system}/${_host_machine}; ${_host_system_error}${_host_machine_error})")
 endif()
 include("${CONTRACT}")
+if(NOT DEFINED GB_VERSION OR "${GB_VERSION}" STREQUAL "")
+    message(FATAL_ERROR "GRUB2 contract omits GB_VERSION")
+endif()
+_aros_grub2_source_lock("${GB_VERSION}")
+set(_GB_ARCHIVE_SHA256 "${_AROS_GRUB2_ARCHIVE_SHA256}")
+set(_GB_SOURCE_URL_PRIMARY "${_AROS_GRUB2_SOURCE_URL_PRIMARY}")
+set(_GB_SOURCE_URL_FALLBACK "${_AROS_GRUB2_SOURCE_URL_FALLBACK}")
+set(_GB_PATCH_RELATIVE "arch/all-pc/boot/grub2-aros/grub-${GB_VERSION}-aros.diff")
 
 if(GB_ACTION STREQUAL "fetch")
-    foreach(_required IN ITEMS GB_BUILD_ROOT GB_ARCHIVE
-            GB_SOURCE_URL_PRIMARY GB_SOURCE_URL_FALLBACK GB_ARCHIVE_SHA256)
+    foreach(_required IN ITEMS GB_VERSION GB_BUILD_ROOT GB_ARCHIVE
+            GB_SOURCE_URL_PRIMARY GB_ARCHIVE_SHA256)
         if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
             message(FATAL_ERROR "GRUB2 fetch contract omits ${_required}")
         endif()
@@ -248,7 +264,7 @@ if(GB_ACTION STREQUAL "fetch")
     endif()
     _gb_real_path("${GB_BUILD_ROOT}" _build_root)
     _gb_real_path("${GB_ARCHIVE}" _archive)
-    set(_expected_archive "${_build_root}/downloads/grub-2.12.tar.xz")
+    set(_expected_archive "${_build_root}/downloads/grub-${GB_VERSION}.tar.xz")
     _gb_real_path("${_expected_archive}" _expected_archive)
     cmake_path(IS_PREFIX _build_root "${_archive}" NORMALIZE _archive_owned)
     if(NOT _archive_owned OR NOT _archive STREQUAL _expected_archive)
@@ -279,9 +295,11 @@ if(GB_ACTION STREQUAL "fetch")
     endif()
     set(_downloaded FALSE)
     set(_download_failures "")
-    foreach(_source_url IN ITEMS
-            "${_GB_SOURCE_URL_PRIMARY}"
-            "${_GB_SOURCE_URL_FALLBACK}")
+    set(_source_urls "${_GB_SOURCE_URL_PRIMARY}")
+    if(NOT _GB_SOURCE_URL_FALLBACK STREQUAL "")
+        list(APPEND _source_urls "${_GB_SOURCE_URL_FALLBACK}")
+    endif()
+    foreach(_source_url IN LISTS _source_urls)
         file(DOWNLOAD "${_source_url}" "${_partial}"
             TLS_VERIFY ON
             TIMEOUT 120
@@ -316,9 +334,9 @@ if(GB_ACTION STREQUAL "fetch")
     return()
 endif()
 
-set(_required GB_MODE GB_MMAKE_ID GB_SOURCE_ROOT GB_BUILD_ROOT GB_BINARY_DIR
+set(_required GB_MODE GB_VERSION GB_MMAKE_ID GB_SOURCE_ROOT GB_BUILD_ROOT GB_BINARY_DIR
     GB_INSTALL_PREFIX GB_ARCHIVE GB_PATCH GB_INSTALL_MANIFEST
-    GB_SOURCE_URL_PRIMARY GB_SOURCE_URL_FALLBACK
+    GB_SOURCE_URL_PRIMARY
     GB_ARCHIVE_SHA256 GB_PATCH_SHA256 GB_XZ_PREFIX GB_HOST_PATH GB_HOST_CC
     GB_HOST_CXX GB_PATCH_TOOL GB_MAKE GB_FILE GB_OTOOL GB_INSTALL_TOOL
     GB_MKDIR_TOOL GB_AWK GB_PKG_CONFIG GB_YACC GB_LEX GB_MAKEINFO GB_PYTHON
@@ -382,9 +400,16 @@ _gb_real_path("${GB_STAMP}" _stamp)
 if(IS_SYMLINK "${_source_root}" OR IS_SYMLINK "${_build_root}")
     message(FATAL_ERROR "GRUB2 runner source or build root is a symlink")
 endif()
+set(_version_file "${_source_root}/arch/all-pc/boot/grub2_def")
+_gb_require_regular_file("${_version_file}" "GRUB2 source version")
+file(READ "${_version_file}" _declared_version)
+string(STRIP "${_declared_version}" _declared_version)
+if(NOT _declared_version STREQUAL GB_VERSION)
+    message(FATAL_ERROR "GRUB2 source version changed after configuration")
+endif()
 set(_expected_patch "${_source_root}/${_GB_PATCH_RELATIVE}")
 _gb_real_path("${_expected_patch}" _expected_patch)
-set(_expected_archive "${_build_root}/downloads/grub-2.12.tar.xz")
+set(_expected_archive "${_build_root}/downloads/grub-${GB_VERSION}.tar.xz")
 _gb_real_path("${_expected_archive}" _expected_archive)
 set(_expected_install_manifest
     "${_engine_root}/${GB_EXPECTED_manifest_relative}")
@@ -546,7 +571,7 @@ _gb_reject_symlink_components("${_build_root}" "${_install_prefix}" "GRUB2 insta
 set(_stage_root "${_binary_dir}/source")
 file(MAKE_DIRECTORY "${_stage_root}")
 file(ARCHIVE_EXTRACT INPUT "${_archive}" DESTINATION "${_stage_root}")
-set(_source_stage "${_stage_root}/grub-2.12")
+set(_source_stage "${_stage_root}/grub-${GB_VERSION}")
 if(NOT EXISTS "${_source_stage}" OR NOT IS_DIRECTORY "${_source_stage}" OR
    IS_SYMLINK "${_source_stage}")
     message(FATAL_ERROR "GRUB2 archive did not extract its audited source root")
@@ -558,6 +583,13 @@ file(MAKE_DIRECTORY "${_build_dir}")
 
 set(_target_link_flags
     "${GB_TARGET_ISA_FLAGS} -fuse-ld=lld -Wl,--image-base=0 -nostartfiles")
+if(GB_VERSION STREQUAL "2.16")
+    set(_target_cflags "${GB_TARGET_ISA_FLAGS} -Os")
+    set(_host_libs "-lpthread")
+else()
+    set(_target_cflags "${GB_TARGET_ISA_FLAGS}")
+    set(_host_libs "")
+endif()
 set(_build_environment
     "PATH=${GB_HOST_PATH}"
     "CONFIG_SHELL=/bin/sh"
@@ -576,7 +608,7 @@ set(_build_environment
     "CFLAGS="
     "CXXFLAGS="
     "OBJCFLAGS="
-    "LIBS="
+    "LIBS=${_host_libs}"
     "CPATH="
     "C_INCLUDE_PATH="
     "CPLUS_INCLUDE_PATH="
@@ -616,7 +648,7 @@ set(_build_environment
     "TARGET_NM=${GB_TARGET_NM}"
     "TARGET_STRIP=${GB_TARGET_STRIP}"
     "TARGET_CPPFLAGS=${GB_TARGET_ISA_FLAGS}"
-    "TARGET_CFLAGS=${GB_TARGET_ISA_FLAGS}"
+    "TARGET_CFLAGS=${_target_cflags}"
     "TARGET_CCASFLAGS=${GB_TARGET_ISA_FLAGS}"
     "TARGET_LDFLAGS=${_target_link_flags}"
     "grub_cv_target_cc_link_format=${GB_LINK_FORMAT}")
@@ -636,6 +668,9 @@ set(_configure_args
     "--disable-werror"
     "--program-prefix="
     "--enable-liblzma")
+if(GB_VERSION STREQUAL "2.16")
+    list(APPEND _configure_args "LIBS=-lpthread")
+endif()
 _gb_run_in("${_build_dir}" "configuring GRUB2 ${GB_MODE}"
     "${CMAKE_COMMAND}" -E env ${_build_environment}
     "${_source_stage}/configure" ${_configure_args})

@@ -81,6 +81,15 @@ fn grub2_contract_selects_the_three_exact_x86_host_lanes() {
         "${AROS_BUILD_DIR}/gen/configure/arch/all-pc/boot/grub2-host/pc"
     );
     assert_eq!(pc.install_prefix, "${AROS_BUILD_DIR}/hosttools/grub2/pc");
+
+    let version = std::fs::read_to_string(root().join("arch/all-pc/boot/grub2_def"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(matches!(version.as_str(), "2.12" | "2.16"));
+    assert!(declarations
+        .iter()
+        .all(|declaration| declaration.version == version));
 }
 
 #[test]
@@ -99,9 +108,19 @@ fn grub2_contract_emits_real_lanes_and_preserves_the_fetch_alias_edge() {
     assert_eq!(cmake.matches("aros_build_grub2(").count(), 3, "{cmake}");
     assert!(cmake.contains("if(AROS_GRUB2_HOST_LANES_AVAILABLE)"));
     assert!(cmake.contains("audited GRUB2 host-tool lanes are unavailable on this build host"));
-    assert!(cmake.contains("    MMAKE_ID grub2-host\n    MODE \"pc\""));
-    assert!(cmake.contains("    MMAKE_ID grub2-efi-host\n    MODE \"efi64\""));
-    assert!(cmake.contains("    MMAKE_ID grub2-efi32-host\n    MODE \"efi32\""));
+    let version = std::fs::read_to_string(root().join("arch/all-pc/boot/grub2_def"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    for (name, mode) in [
+        ("grub2-host", "pc"),
+        ("grub2-efi-host", "efi64"),
+        ("grub2-efi32-host", "efi32"),
+    ] {
+        assert!(cmake.contains(&format!(
+            "    MMAKE_ID {name}\n    VERSION \"{version}\"\n    MODE \"{mode}\""
+        )));
+    }
     assert!(cmake.contains(
         "BINARY_DIR \"${AROS_BUILD_DIR}/gen/configure/arch/all-pc/boot/grub2-host/efi-i386\""
     ));

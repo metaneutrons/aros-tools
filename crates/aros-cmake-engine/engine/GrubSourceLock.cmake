@@ -1,11 +1,20 @@
-# Explicit supply-chain lock for the one archive downloaded directly by the
-# AROS-NX CMake build instead of an upstream MetaMake %fetch declaration.
-# Builder and runner both include this file so the mandatory integrity value
-# has exactly one maintenance location.
-set(_AROS_GRUB2_VERSION "2.12")
-set(_AROS_GRUB2_SOURCE_URL_PRIMARY
-    "https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz")
-set(_AROS_GRUB2_SOURCE_URL_FALLBACK
-    "https://ftpmirror.gnu.org/grub/grub-2.12.tar.xz")
-set(_AROS_GRUB2_ARCHIVE_SHA256
-    "f3c97391f7c4eaa677a78e090c7e97e6dc47b16f655f04683ebd37bef7fe0faa")
+# Version-specific supply-chain locks for archives downloaded by the private
+# CMake host-tool builder. Selection is explicit and shared by the declaration
+# and runner; a source recipe cannot substitute its own URL or digest.
+function(_aros_grub2_source_lock version)
+    if(version STREQUAL "2.12")
+        set(_primary "https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz")
+        set(_fallback "https://ftpmirror.gnu.org/grub/grub-2.12.tar.xz")
+        set(_sha256 "f3c97391f7c4eaa677a78e090c7e97e6dc47b16f655f04683ebd37bef7fe0faa")
+    elseif(version STREQUAL "2.16")
+        set(_primary "https://gitlab.freedesktop.org/api/v4/projects/26558/packages/generic/source-assets/grub-2.16/grub-2.16.tar.xz")
+        set(_fallback "")
+        set(_sha256 "f0db0104927df0b9a48bc41b735c702936190d17eb2d73d3018fa77474a0cabe")
+    else()
+        message(FATAL_ERROR "unsupported GRUB2 source version ${version}")
+    endif()
+    set(_AROS_GRUB2_VERSION "${version}" PARENT_SCOPE)
+    set(_AROS_GRUB2_SOURCE_URL_PRIMARY "${_primary}" PARENT_SCOPE)
+    set(_AROS_GRUB2_SOURCE_URL_FALLBACK "${_fallback}" PARENT_SCOPE)
+    set(_AROS_GRUB2_ARCHIVE_SHA256 "${_sha256}" PARENT_SCOPE)
+endfunction()

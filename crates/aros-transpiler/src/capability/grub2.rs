@@ -1,4 +1,4 @@
-//! The three x86 GRUB 2.12 host-tool lanes.
+//! The three x86 GRUB host-tool lanes for explicitly audited source versions.
 //!
 //! The legacy macro carries an open-ended configure environment; the downstream
 //! helper owns the source URL, the patch, the cross targets, the host
@@ -13,7 +13,7 @@ use std::path::Path;
 
 const HOST_DIRECTORY: &str = "arch/all-pc/boot/grub2-host";
 
-/// Parses the three x86 GRUB 2.12 host-tool lanes without admitting the
+/// Parses the three x86 GRUB host-tool lanes without admitting the
 /// legacy macro's open-ended configure environment.  The downstream helper
 /// owns the source URL, patch, cross targets, host dependencies and complete
 /// product manifests; this parser verifies that the legacy declaration is the
@@ -71,9 +71,9 @@ pub(crate) fn parse(
     let version_path = root.join("arch/all-pc/boot/grub2_def");
     let version = read_source(&version_path)
         .map_err(|error| format!("cannot read {}: {error}", version_path.display()))?;
-    if version.trim() != "2.12" {
+    if !matches!(version.trim(), "2.12" | "2.16") {
         return Err(format!(
-            "GRUB2 host-tool capability supports version 2.12, but arch/all-pc/boot/grub2_def declares {:?}; update the transpiler and its closed GRUB build contract",
+            "GRUB2 host-tool capability supports versions 2.12 and 2.16, but arch/all-pc/boot/grub2_def declares {:?}; update the transpiler and its closed GRUB build contract",
             version.trim()
         ));
     }
@@ -137,9 +137,45 @@ pub(crate) fn parse(
 
     Ok(Some(GrubBuildDecl {
         mmake_name: mmake,
+        version: version.trim().to_owned(),
         mode: mode.to_owned(),
         binary_dir: format!("${{AROS_BUILD_DIR}}/gen/configure/arch/all-pc/boot/grub2-host/{lane}"),
         install_prefix: format!("${{AROS_BUILD_DIR}}/hosttools/grub2/{lane}"),
         dir_path: relative_dir.to_path_buf(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unaudited_grub_version() {
+        let source = tempfile::tempdir().unwrap();
+        let definition = source.path().join("arch/all-pc/boot/grub2_def");
+        std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
+        std::fs::write(&definition, "2.17\n").unwrap();
+        let invocation = Invocation {
+            name: "build_with_configure".to_owned(),
+            args: "mmake=grub2-host".to_owned(),
+            line: 1,
+        };
+        let profile = TargetContext {
+            cpu: Some("x86_64".to_owned()),
+            platform: Some("pc".to_owned()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some("i386".to_owned()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some(String::new()),
+            ..TargetContext::default()
+        };
+        let error = parse(
+            source.path(),
+            &invocation,
+            Path::new(HOST_DIRECTORY),
+            Some(&profile),
+        )
+        .unwrap_err();
+        assert!(error.contains("supports versions 2.12 and 2.16"), "{error}");
+    }
 }
