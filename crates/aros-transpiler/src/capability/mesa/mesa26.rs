@@ -510,6 +510,9 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
+        (Some("workbench/libs/gallium"), "workbench-libs-gallium") => {
+            includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned());
+        }
         (Some(super::V3D_RELATIVE_DIR), "hidd-v3d") if profile == "aarch64" => {
             defines.extend(["GCA_CONSUMER_MODULE", "AROS_MESA26_V3D=1"].map(str::to_owned));
             includes.extend(
@@ -785,6 +788,36 @@ fn verified_python_packages(fetches: &[FetchDecl]) -> Result<Vec<PythonPackageDe
     Ok(super::mesa20::python_packages())
 }
 
+fn verified_pyyaml_package(fetches: &[FetchDecl]) -> Result<PythonPackageDecl, String> {
+    let matching = fetches
+        .iter()
+        .filter(|candidate| candidate.name == "mesa3d-pyyaml-fetch")
+        .collect::<Vec<_>>();
+    let [fetch] = matching.as_slice() else {
+        return Err("Mesa 26 format generators require exactly one mesa3d-pyyaml-fetch".to_owned());
+    };
+    if fetch.archive != "pyyaml-6.0.3"
+        || fetch.suffixes != "tar.gz"
+        || fetch.origins
+            != "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2"
+        || fetch.checksums
+            != "pyyaml-6.0.3.tar.gz=sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"
+        || fetch.location != "${AROS_PORTS_SOURCE_DIR}"
+        || fetch.destination != "${AROS_PORTS_DIR}/mesa-python"
+        || !fetch.base.is_empty()
+        || fetch.patch_origins != "${AROS_SOURCE_DIR}/workbench/libs/mesa"
+        || fetch.patches != "::"
+        || fetch.dir != "workbench/libs/mesa"
+    {
+        return Err("Mesa 26 PyYAML fetch differs from its audited source contract".to_owned());
+    }
+    Ok(PythonPackageDecl {
+        fetch_target: "mesa3d-pyyaml-fetch".to_owned(),
+        source_root: "${AROS_PORTS_DIR}/mesa-python/pyyaml-6.0.3".to_owned(),
+        python_path: "lib".to_owned(),
+    })
+}
+
 pub(crate) fn parse_glapi(
     relative_dir: &Path,
     target: Option<&TargetContext>,
@@ -891,6 +924,7 @@ pub(crate) fn parse_mesautil(
         return Ok(None);
     }
     verify_mesa_fetch(fetches)?;
+    let pyyaml = verified_pyyaml_package(fetches)?;
     for mmake in CONSUMERS {
         let matches = targets
             .iter()
@@ -975,7 +1009,7 @@ pub(crate) fn parse_mesautil(
         ],
         driver_script: None,
         requires_flex_bison: false,
-        python_packages: Vec::new(),
+        python_packages: vec![pyyaml],
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
             "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
@@ -1768,7 +1802,7 @@ pub(crate) fn validate_empty_sse41(
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_sources, glapi_sources, GLAPI_DIR, GLAPI_MMAKE};
+    use super::{archive_sources, compile_contract, glapi_sources, GLAPI_DIR, GLAPI_MMAKE};
     use crate::parser::TargetContext;
     use std::fs;
     use std::path::Path;
@@ -1778,6 +1812,42 @@ mod tests {
             .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))
             .expect("AROS_TEST_MESA26_SOURCE_ROOT must name the Mesa 26 checkout");
         std::path::PathBuf::from(configured)
+    }
+
+    #[test]
+    fn public_gallium_library_uses_the_selected_mesa26_pipe_headers() {
+        let profile = TargetContext {
+            cpu: Some("arm".to_owned()),
+            platform: Some("raspi".to_owned()),
+            toolchain: Some("llvm".to_owned()),
+            cpu32: Some(String::new()),
+            use_mmu: Some("1".to_owned()),
+            float_abi: Some("hard".to_owned()),
+            mesa_version: Some("26.0.0".to_owned()),
+            ..TargetContext::default()
+        };
+        let relative = Path::new("workbench/libs/gallium");
+        let contract = compile_contract(relative, "workbench-libs-gallium", Some(&profile))
+            .unwrap()
+            .unwrap();
+        assert!(contract
+            .includes
+            .iter()
+            .any(|path| { path == "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include" }));
+        assert!(!contract
+            .includes
+            .iter()
+            .any(|path| path.contains("mesa-20.0.8")));
+
+        let older = TargetContext {
+            mesa_version: Some("20.0.8".to_owned()),
+            ..profile
+        };
+        assert!(
+            compile_contract(relative, "workbench-libs-gallium", Some(&older))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

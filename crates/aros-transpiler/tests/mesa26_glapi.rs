@@ -361,6 +361,12 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
             ]
         );
         assert!(!generated.requires_flex_bison);
+        assert_eq!(generated.python_packages.len(), 1);
+        assert_eq!(
+            generated.python_packages[0].fetch_target,
+            "mesa3d-pyyaml-fetch"
+        );
+        assert_eq!(generated.python_packages[0].python_path, "lib");
         let mut graph = DependencyGraph::new();
         for target in parsed.targets {
             graph.add_target(target);
@@ -372,7 +378,44 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
             cmake.contains("src/util/format/u_format_gen.h"),
             "{cpu}: {cmake}"
         );
+        assert!(cmake.contains("PACKAGE_FETCH_TARGETS"));
+        assert!(cmake.contains("mesa3d-pyyaml-fetch"));
     }
+}
+
+#[test]
+fn mesa26_mesautil_rejects_missing_or_changed_pyyaml_fetch() {
+    let root = mesa26_source_root();
+    let profile = context("x86_64", "pc", "i386", "");
+    let fetches = collect_mmakefile_fetches_with_context(
+        &root.join("workbench/libs/mesa/mmakefile.src"),
+        &root,
+        &profile,
+    )
+    .unwrap();
+    let parse = |fetches: &[_]| {
+        parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join("workbench/libs/mesa/libmesautil/mmakefile.src"),
+            &root,
+            &DirVars::load(&root),
+            &profile,
+            fetches,
+        )
+        .unwrap()
+    };
+    let without = fetches
+        .iter()
+        .filter(|fetch| fetch.name != "mesa3d-pyyaml-fetch")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!parse(&without).capability_errors.is_empty());
+    let mut altered = fetches;
+    let pyyaml = altered
+        .iter_mut()
+        .find(|fetch| fetch.name == "mesa3d-pyyaml-fetch")
+        .unwrap();
+    pyyaml.checksums = "pyyaml-6.0.3.tar.gz=sha256:0000".to_owned();
+    assert!(!parse(&altered).capability_errors.is_empty());
 }
 
 #[test]
