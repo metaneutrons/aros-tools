@@ -342,7 +342,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: metaneutrons/AROS-NX
-          ref: 43d131989814a1a682da8f09159d6f6bd1b5c2fe
+          ref: e18f071c76ff1929360d1ab6bed1051500cc9f02
           path: aros-mesa26-source
           persist-credentials: false
       - name: Require exact Mesa 26 source identity
@@ -350,7 +350,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ $(git -C aros-mesa26-source rev-parse HEAD) != 43d131989814a1a682da8f09159d6f6bd1b5c2fe ]]; then
+          if [[ $(git -C aros-mesa26-source rev-parse HEAD) != e18f071c76ff1929360d1ab6bed1051500cc9f02 ]]; then
             echo '::error::Mesa 26 source checkout does not match its pinned commit'
             exit 1
           fi

@@ -529,9 +529,10 @@ pub(crate) fn compile_contract(
                 .map(str::to_owned),
             );
         }
-        (Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"), "linklibs-gallium_vc4")
-            if profile == "arm" || profile == "aarch64" =>
-        {
+        (
+            Some("arch/arm-native/soc/broadcom/2708/hidd/vc4gallium"),
+            "linklibs-gallium_vc4" | "hidd-vc4gallium",
+        ) if profile == "arm" || profile == "aarch64" => {
             defines.extend(
                 [
                     "GALLIUM_VC4",
@@ -555,6 +556,7 @@ pub(crate) fn compile_contract(
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/compiler/nir",
                 "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/util",
                 "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src/util",
+                "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/galliumcoreapi",
                 "${AROS_SOURCE_DIR}/arch/arm-native/soc/broadcom/2708/include",
             ].map(str::to_owned));
         }
