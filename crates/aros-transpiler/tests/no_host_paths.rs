@@ -43,6 +43,7 @@ fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {
         cpu32: Some(if cpu == "x86_64" { "i386" } else { "" }.to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(float_abi.to_owned()),
+        ..TargetContext::default()
     }
 }
 

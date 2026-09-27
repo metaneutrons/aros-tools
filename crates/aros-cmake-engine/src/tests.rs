@@ -46,6 +46,36 @@ fn the_api_version_comes_from_the_engine() {
 }
 
 #[test]
+fn transpiler_invocations_carry_explicit_upstream_selectors() {
+    let cmake = file("CMakeLists.txt").expect("engine CMakeLists.txt");
+    for selector in [
+        "AROS_MESA_VERSION",
+        "AROS_TARGET_LLVM_VER",
+        "AROS_TARGET_LLVM_RUNTIMES_STYLE",
+        "AROS_TARGET_RUST",
+        "AROS_TARGET_RUST_VER",
+    ] {
+        assert!(
+            cmake.contains(&format!("set({selector} \"\" CACHE STRING")),
+            "missing cache selector {selector}"
+        );
+    }
+    for flag in [
+        "--mesa-version",
+        "--target-llvm-ver",
+        "--target-llvm-runtimes-style",
+        "--target-rust",
+        "--target-rust-ver",
+    ] {
+        assert_eq!(
+            cmake.matches(&format!("\"{flag}\"")).count(),
+            3,
+            "{flag} must reach both transpiler passes and invocation recording"
+        );
+    }
+}
+
+#[test]
 fn the_digest_is_a_sha256() {
     assert_eq!(digest().len(), 64);
     assert!(digest().bytes().all(|byte| byte.is_ascii_hexdigit()));

@@ -379,6 +379,7 @@ fn private_linklib_output_and_search_path_are_emitted_verbatim() {
             cpu32: Some("i386".to_owned()),
             use_mmu: Some("1".to_owned()),
             float_abi: Some(String::new()),
+            ..crate::TargetContext::default()
         },
     )
     .unwrap();
@@ -446,6 +447,7 @@ fn zlib_emits_positional_flags_outputs_provider_and_header_transform() {
             cpu32: Some(String::new()),
             use_mmu: Some("1".to_owned()),
             float_abi: Some(String::new()),
+            ..crate::TargetContext::default()
         },
     )
     .unwrap();
@@ -483,6 +485,7 @@ fn zlib_emits_positional_flags_outputs_provider_and_header_transform() {
                 cpu32: Some(String::new()),
                 use_mmu: Some("1".to_owned()),
                 float_abi: Some(String::new()),
+                ..crate::TargetContext::default()
             },
         )
         .unwrap();
@@ -574,6 +577,7 @@ fn atheros_define_header_is_a_real_owner_after_both_compile_consumers() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..crate::TargetContext::default()
     };
     let mut graph = DependencyGraph::new();
     for relative in [
@@ -649,6 +653,7 @@ fn sourceful_and_sourceless_full_modules_keep_their_exact_cmake_contracts() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..crate::TargetContext::default()
     };
     let zstd = crate::parse_mmakefile_with_dirs_and_context(
         &root.join("workbench/libs/zstd/mmakefile.src"),
@@ -834,6 +839,7 @@ fn the_banner_warns_names_its_version_and_states_the_target() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: None,
+        ..crate::TargetContext::default()
     }));
 
     assert!(header.contains("GENERATED FILE - DO NOT EDIT"), "{header}");
@@ -871,4 +877,51 @@ fn the_banner_warns_names_its_version_and_states_the_target() {
     let bare = generated_header(None);
     assert!(bare.contains("no target selected"), "{bare}");
     assert!(bare.contains("DO NOT EDIT"), "{bare}");
+}
+
+#[test]
+fn the_banner_records_changed_upstream_selectors_without_inventing_omitted_ones() {
+    let mut target = crate::TargetContext {
+        mesa_version: Some("26.0.0".to_owned()),
+        target_llvm_ver: Some("23.0.0".to_owned()),
+        target_llvm_runtimes_style: Some("umbrella".to_owned()),
+        target_rust: Some("yes".to_owned()),
+        target_rust_ver: Some("1.98.1".to_owned()),
+        ..crate::TargetContext::default()
+    };
+    let selected = generated_header(Some(&target));
+    for (flag, value) in [
+        ("--mesa-version", "26.0.0"),
+        ("--target-llvm-ver", "23.0.0"),
+        ("--target-llvm-runtimes-style", "umbrella"),
+        ("--target-rust", "yes"),
+        ("--target-rust-ver", "1.98.1"),
+    ] {
+        assert!(
+            selected.contains(&format!("#     {flag:<12} {value}")),
+            "{selected}"
+        );
+    }
+
+    target.target_llvm_ver = Some("24.0.0".to_owned());
+    let altered = generated_header(Some(&target));
+    assert!(
+        altered.contains("#     --target-llvm-ver 24.0.0"),
+        "{altered}"
+    );
+    assert!(
+        !altered.contains("#     --target-llvm-ver 23.0.0"),
+        "{altered}"
+    );
+
+    let omitted = generated_header(Some(&crate::TargetContext::default()));
+    for flag in [
+        "--mesa-version",
+        "--target-llvm-ver",
+        "--target-llvm-runtimes-style",
+        "--target-rust",
+        "--target-rust-ver",
+    ] {
+        assert!(!omitted.contains(flag), "{omitted}");
+    }
 }

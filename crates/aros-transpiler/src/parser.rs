@@ -430,6 +430,16 @@ pub struct TargetContext {
     pub cpu32: Option<String>,
     pub use_mmu: Option<String>,
     pub float_abi: Option<String>,
+    /// Explicit Mesa selector (`OPT_MESAGL`) from the configured target.
+    pub mesa_version: Option<String>,
+    /// Explicit target LLVM release (`TARGET_LLVM_VER`) from the configured target.
+    pub target_llvm_ver: Option<String>,
+    /// Explicit target LLVM runtimes layout (`TARGET_LLVM_RUNTIMES_STYLE`).
+    pub target_llvm_runtimes_style: Option<String>,
+    /// Explicit target Rust selector (`TARGET_RUST`) from the configured target.
+    pub target_rust: Option<String>,
+    /// Explicit target Rust release (`TARGET_RUST_VER`) from the configured target.
+    pub target_rust_ver: Option<String>,
 }
 
 impl TargetContext {
@@ -457,6 +467,11 @@ impl TargetContext {
             "AROS_TARGET_CPU32" => self.cpu32.clone(),
             "USE_MMU" => self.use_mmu.clone(),
             "GCC_CONFIG_FLOAT_ABI" => self.float_abi.clone(),
+            "OPT_MESAGL" => self.mesa_version.clone(),
+            "TARGET_LLVM_VER" => self.target_llvm_ver.clone(),
+            "TARGET_LLVM_RUNTIMES_STYLE" => self.target_llvm_runtimes_style.clone(),
+            "TARGET_RUST" => self.target_rust.clone(),
+            "TARGET_RUST_VER" => self.target_rust_ver.clone(),
             _ => None,
         }
     }

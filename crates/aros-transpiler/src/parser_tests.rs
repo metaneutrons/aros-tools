@@ -281,6 +281,46 @@ fn target_context_selects_build_invocations_and_reports_unknown_guards() {
 }
 
 #[test]
+fn target_context_preserves_upstream_toolchain_selectors_and_omissions() {
+    let mut target = target_context("x86_64", "pc", "");
+    target.mesa_version = Some("26.0.0".to_owned());
+    target.target_llvm_ver = Some("23.0.0".to_owned());
+    target.target_llvm_runtimes_style = Some("umbrella".to_owned());
+    target.target_rust = Some("yes".to_owned());
+    target.target_rust_ver = Some("1.98.1".to_owned());
+
+    for (name, expected) in [
+        ("OPT_MESAGL", "26.0.0"),
+        ("TARGET_LLVM_VER", "23.0.0"),
+        ("TARGET_LLVM_RUNTIMES_STYLE", "umbrella"),
+        ("TARGET_RUST", "yes"),
+        ("TARGET_RUST_VER", "1.98.1"),
+    ] {
+        assert_eq!(target.value_of(name).as_deref(), Some(expected));
+    }
+
+    // An altered selector must be observable as the altered value, rather
+    // than silently falling back to a built-in Mesa/LLVM/Rust choice.
+    target.target_llvm_ver = Some("24.0.0".to_owned());
+    assert_eq!(
+        target.value_of("TARGET_LLVM_VER").as_deref(),
+        Some("24.0.0")
+    );
+
+    // Older callers omit all new selectors. No value is invented for them.
+    let legacy = target_context("x86_64", "pc", "");
+    for name in [
+        "OPT_MESAGL",
+        "TARGET_LLVM_VER",
+        "TARGET_LLVM_RUNTIMES_STYLE",
+        "TARGET_RUST",
+        "TARGET_RUST_VER",
+    ] {
+        assert_eq!(legacy.value_of(name), None, "unexpected default for {name}");
+    }
+}
+
+#[test]
 fn target_context_selects_external_cmake_invocations() {
     let joined = join_continuations(
         "ifeq ($(AROS_TARGET_CPU),x86_64)\n\
