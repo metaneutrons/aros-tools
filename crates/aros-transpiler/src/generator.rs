@@ -96,6 +96,14 @@ pub fn generated_header(target: Option<&TargetContext>) -> String {
             ("--cpu32", target.cpu32.as_deref()),
             ("--use-mmu", target.use_mmu.as_deref()),
             ("--float-abi", target.float_abi.as_deref()),
+            ("--mesa-version", target.mesa_version.as_deref()),
+            ("--target-llvm-ver", target.target_llvm_ver.as_deref()),
+            (
+                "--target-llvm-runtimes-style",
+                target.target_llvm_runtimes_style.as_deref(),
+            ),
+            ("--target-rust", target.target_rust.as_deref()),
+            ("--target-rust-ver", target.target_rust_ver.as_deref()),
         ]
         .into_iter()
         .filter_map(|(flag, value)| value.map(|value| (flag, value)))

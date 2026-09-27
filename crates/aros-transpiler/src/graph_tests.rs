@@ -81,6 +81,7 @@ fn catalog_source_consumers_follow_resolved_sibling_sources() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..TargetContext::default()
     };
     let mut graph = DependencyGraph::new();
     for relative in [
@@ -262,6 +263,7 @@ fn a_library_provides_its_module_and_explicit_linklib_names() {
             cpu32: Some("i386".to_owned()),
             use_mmu: Some("1".to_owned()),
             float_abi: Some(String::new()),
+            ..TargetContext::default()
         },
     )
     .unwrap();
@@ -305,6 +307,7 @@ fn a_library_provides_its_module_and_explicit_linklib_names() {
                 cpu32: Some("i386".to_owned()),
                 use_mmu: Some("1".to_owned()),
                 float_abi: Some(String::new()),
+                ..TargetContext::default()
             },
         )
         .unwrap();
@@ -386,6 +389,7 @@ fn the_default_link_set_binds_archives_and_promotes_canonical_names() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some("hard".to_owned()),
+        ..TargetContext::default()
     };
     let mut graph = DependencyGraph::new();
     for relative in ["compiler/alib/mmakefile.src", "rom/dos/mmakefile.src"] {
@@ -455,6 +459,7 @@ fn private_linklib_requires_the_exact_consumer_search_directory() {
             cpu32: Some("i386".to_owned()),
             use_mmu: Some("1".to_owned()),
             float_abi: Some(String::new()),
+            ..TargetContext::default()
         },
     )
     .unwrap();
@@ -549,6 +554,7 @@ fn zlib_sources_and_transformed_header_have_direct_fetch_edges() {
             cpu32: Some("i386".to_owned()),
             use_mmu: Some("1".to_owned()),
             float_abi: Some(String::new()),
+            ..TargetContext::default()
         },
     )
     .unwrap();
@@ -614,6 +620,7 @@ fn atheros_hal_header_has_direct_provider_and_device_edges() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..TargetContext::default()
     };
     let mut graph = DependencyGraph::new();
     for relative in [
@@ -671,6 +678,7 @@ fn define_header_program_group_consumers_expand_to_compile_members() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..TargetContext::default()
     };
     let hal = parse_mmakefile_with_dirs_and_context(
         &root.join("workbench/devs/networks/atheros5000/hal/mmakefile.src"),
@@ -825,6 +833,7 @@ fn port_sources_depend_directly_on_the_longest_fetch_destination_owner() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..TargetContext::default()
     };
     let parsed = parse_mmakefile_with_dirs_and_context(
         &root.join("workbench/libs/png/mmakefile.src"),
@@ -1060,6 +1069,7 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
         cpu32: Some("i386".to_owned()),
         use_mmu: Some("1".to_owned()),
         float_abi: Some(String::new()),
+        ..TargetContext::default()
     };
     let skip_dirs = ["build", "target", ".git"];
     let mut files: Vec<_> = WalkDir::new(&root)

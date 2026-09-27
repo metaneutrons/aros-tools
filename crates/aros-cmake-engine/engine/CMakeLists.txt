@@ -170,6 +170,21 @@ option(AROS_ENABLE_MMU "Include the MetaMake MMU kernel sources" ON)
 set(GCC_CONFIG_FLOAT_ABI "" CACHE STRING
     "MetaMake ARM floating-point ABI (for example hard or soft)")
 
+# Upstream selectors. The CMake path passes an explicit empty value unless
+# configured otherwise, so MetaMake can apply its own defaults. Direct CLI
+# callers may omit a selector entirely; the transpiler never invents a Mesa,
+# target-LLVM, or Rust version for them.
+set(AROS_MESA_VERSION "" CACHE STRING
+    "MetaMake OPT_MESAGL selector passed to aros-transpiler")
+set(AROS_TARGET_LLVM_VER "" CACHE STRING
+    "MetaMake TARGET_LLVM_VER selector passed to aros-transpiler")
+set(AROS_TARGET_LLVM_RUNTIMES_STYLE "" CACHE STRING
+    "MetaMake TARGET_LLVM_RUNTIMES_STYLE selector passed to aros-transpiler")
+set(AROS_TARGET_RUST "" CACHE STRING
+    "MetaMake TARGET_RUST selector passed to aros-transpiler")
+set(AROS_TARGET_RUST_VER "" CACHE STRING
+    "MetaMake TARGET_RUST_VER selector passed to aros-transpiler")
+
 # MetaMake calls the compound machine/CPU selector AROS_TARGET_PLATFORM. Keep
 # that legacy spelling distinct from this build's machine-only platform value
 # so generated meta-target names expand unambiguously.
@@ -255,6 +270,11 @@ execute_process(
             "--cpu32" "${AROS_TARGET_CPU32}"
             "--use-mmu" "${_aros_transpiler_use_mmu}"
             "--float-abi" "${GCC_CONFIG_FLOAT_ABI}"
+            "--mesa-version" "${AROS_MESA_VERSION}"
+            "--target-llvm-ver" "${AROS_TARGET_LLVM_VER}"
+            "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
+            "--target-rust" "${AROS_TARGET_RUST}"
+            "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
     RESULT_VARIABLE TRANSPILER_RES
     ERROR_VARIABLE _aros_transpiler_error
 )
@@ -302,6 +322,11 @@ if(AROS_SOURCE_INVENTORY_FETCH_COUNT GREATER 0)
                 "--cpu32" "${AROS_TARGET_CPU32}"
                 "--use-mmu" "${_aros_transpiler_use_mmu}"
                 "--float-abi" "${GCC_CONFIG_FLOAT_ABI}"
+                "--mesa-version" "${AROS_MESA_VERSION}"
+                "--target-llvm-ver" "${AROS_TARGET_LLVM_VER}"
+                "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
+                "--target-rust" "${AROS_TARGET_RUST}"
+                "--target-rust-ver" "${AROS_TARGET_RUST_VER}"
         RESULT_VARIABLE TRANSPILER_RES
         ERROR_VARIABLE _aros_transpiler_error)
     if(NOT TRANSPILER_RES EQUAL 0)
@@ -340,7 +365,12 @@ set(_aros_transpiler_record
     "--toolchain" "${AROS_TOOLCHAIN}"
     "--cpu32" "${AROS_TARGET_CPU32}"
     "--use-mmu" "${_aros_transpiler_use_mmu}"
-    "--float-abi" "${GCC_CONFIG_FLOAT_ABI}")
+    "--float-abi" "${GCC_CONFIG_FLOAT_ABI}"
+    "--mesa-version" "${AROS_MESA_VERSION}"
+    "--target-llvm-ver" "${AROS_TARGET_LLVM_VER}"
+    "--target-llvm-runtimes-style" "${AROS_TARGET_LLVM_RUNTIMES_STYLE}"
+    "--target-rust" "${AROS_TARGET_RUST}"
+    "--target-rust-ver" "${AROS_TARGET_RUST_VER}")
 string(REPLACE ";" "\n" _aros_transpiler_invocation "${_aros_transpiler_record}")
 file(WRITE "${GENERATED_TARGETS_CMAKE}.invocation"
     "${_aros_transpiler_invocation}\n")

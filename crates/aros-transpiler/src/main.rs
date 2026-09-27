@@ -76,6 +76,26 @@ struct Args {
     #[arg(long)]
     float_abi: Option<String>,
 
+    /// Explicit Mesa version selector (MetaMake OPT_MESAGL)
+    #[arg(long = "mesa-version")]
+    mesa_version: Option<String>,
+
+    /// Explicit target LLVM version selector (MetaMake TARGET_LLVM_VER)
+    #[arg(long = "target-llvm-ver")]
+    target_llvm_ver: Option<String>,
+
+    /// Explicit target LLVM runtimes layout selector
+    #[arg(long = "target-llvm-runtimes-style")]
+    target_llvm_runtimes_style: Option<String>,
+
+    /// Explicit target Rust selector (MetaMake TARGET_RUST)
+    #[arg(long = "target-rust")]
+    target_rust: Option<String>,
+
+    /// Explicit target Rust version selector (MetaMake TARGET_RUST_VER)
+    #[arg(long = "target-rust-ver")]
+    target_rust_ver: Option<String>,
+
     /// Diagnostic renderer used for failures
     #[arg(
         long,
@@ -334,6 +354,11 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         &args.cpu32,
         &args.use_mmu,
         &args.float_abi,
+        &args.mesa_version,
+        &args.target_llvm_ver,
+        &args.target_llvm_runtimes_style,
+        &args.target_rust,
+        &args.target_rust_ver,
     ]
     .iter()
     .any(|value| value.is_some())
@@ -346,6 +371,11 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         cpu32: args.cpu32.clone(),
         use_mmu: args.use_mmu.clone(),
         float_abi: args.float_abi.clone(),
+        mesa_version: args.mesa_version.clone(),
+        target_llvm_ver: args.target_llvm_ver.clone(),
+        target_llvm_runtimes_style: args.target_llvm_runtimes_style.clone(),
+        target_rust: args.target_rust.clone(),
+        target_rust_ver: args.target_rust_ver.clone(),
     });
     let known_fetches = if let Some(target) = target.as_ref() {
         let results: Vec<_> = files
@@ -1245,5 +1275,47 @@ mod error_mapping_tests {
         assert!(diagnostic
             .message
             .contains("unexpected toolchain manifest error"));
+    }
+}
+
+#[cfg(test)]
+mod target_context_cli_tests {
+    use super::*;
+
+    #[test]
+    fn upstream_selector_arguments_are_explicit_and_omittable() {
+        let selected = Args::try_parse_from([
+            "aros-transpiler",
+            "--mesa-version",
+            "26.0.0",
+            "--target-llvm-ver",
+            "23.0.0",
+            "--target-llvm-runtimes-style",
+            "umbrella",
+            "--target-rust",
+            "yes",
+            "--target-rust-ver",
+            "1.98.1",
+        ])
+        .expect("explicit upstream selectors");
+        assert_eq!(selected.mesa_version.as_deref(), Some("26.0.0"));
+        assert_eq!(selected.target_llvm_ver.as_deref(), Some("23.0.0"));
+        assert_eq!(
+            selected.target_llvm_runtimes_style.as_deref(),
+            Some("umbrella")
+        );
+        assert_eq!(selected.target_rust.as_deref(), Some("yes"));
+        assert_eq!(selected.target_rust_ver.as_deref(), Some("1.98.1"));
+
+        let altered = Args::try_parse_from(["aros-transpiler", "--target-llvm-ver", "24.0.0"])
+            .expect("altered LLVM selector");
+        assert_eq!(altered.target_llvm_ver.as_deref(), Some("24.0.0"));
+
+        let omitted = Args::try_parse_from(["aros-transpiler"]).expect("legacy caller");
+        assert_eq!(omitted.mesa_version, None);
+        assert_eq!(omitted.target_llvm_ver, None);
+        assert_eq!(omitted.target_llvm_runtimes_style, None);
+        assert_eq!(omitted.target_rust, None);
+        assert_eq!(omitted.target_rust_ver, None);
     }
 }

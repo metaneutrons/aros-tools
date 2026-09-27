@@ -547,6 +547,7 @@ endif
                 cpu32: None,
                 use_mmu: None,
                 float_abi: None,
+                ..TargetContext::default()
             };
             let scope = collect_vars_with_context(&join_continuations(src), &target);
             collect_fetches_with_scope(src, Path::new("workbench/classes/datatypes/heic"), &scope)

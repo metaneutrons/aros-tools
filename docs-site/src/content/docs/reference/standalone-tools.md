@@ -15,9 +15,12 @@ local logging. Keep them at the same version as the frontend.
 
 The CLI accepts `--source-dir`, `--output`, `--ports-dir`, and the target
 selectors `--cpu`, `--platform`, `--family`, `--variant`,
-`--toolchain`, `--cpu32`, `--use-mmu`, `--float-abi`.
+`--toolchain`, `--cpu32`, `--use-mmu`, `--float-abi`. It also records optional
+source selectors: `--mesa-version`, `--target-llvm-ver`,
+`--target-llvm-runtimes-style`, `--target-rust`, and `--target-rust-ver`.
 Prefer the recorded invocation from a configured build so you retain its exact
-target context.
+target context. Supplying a selector does not add support for an otherwise
+unmodeled Mesa, LLVM, or Rust recipe.
 
 The implementation follows supported MetaMake constructs. It is not a general
 GNU Make interpreter that can execute arbitrary recipes. Recognized capability
