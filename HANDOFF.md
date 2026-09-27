@@ -24,8 +24,8 @@ preserves earlier checkpoints.
   installed and verified all three profiles from the public release in an
   isolated store. This does not establish a complete AROS distribution build
   or a hardware boot.
-- Historical toolchain revisions before the repository reset remain at
-  [`aros-toolchains-legacy`](https://github.com/metaneutrons/aros-toolchains-legacy).
+- Historical toolchain revisions before the repository reset remain in the
+  private, archived `aros-toolchains-legacy` repository.
   The fresh repository's v0.1.0 through v0.1.3 are terminal non-releases and
   must not be published or retargeted.
 - AROS-NX [consumer PR #33](https://github.com/metaneutrons/AROS-NX/pull/33)
@@ -83,20 +83,22 @@ preserves earlier checkpoints.
   evidence boundaries are recorded in the M3, M4, M5, and M6 evidence ledgers.
 - At that historical checkpoint, the legacy `aros-toolchains` executor
   contract pinned aros-tools
-  [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4), the integrated CACHE-M7 command migration. [legacy aros-toolchains PR #53](https://github.com/metaneutrons/aros-toolchains-legacy/pull/53), merged as
-  [`6266ab047058cc2b87e38d9f6018bb25d7b658a2`](https://github.com/metaneutrons/aros-toolchains-legacy/commit/6266ab047058cc2b87e38d9f6018bb25d7b658a2), passed both its PR and main producer-contract gates. The migration neither creates nor changes a release artifact.
+  [`2474bc3c89c21c80d23197c28ef63cd3c18603a4`](https://github.com/metaneutrons/aros-tools/commit/2474bc3c89c21c80d23197c28ef63cd3c18603a4),
+  the integrated CACHE-M7 command migration. Legacy producer PR #53 merged as
+  `6266ab047058cc2b87e38d9f6018bb25d7b658a2` and passed its PR and main
+  contract gates. The migration neither created nor changed a release artifact.
 - CACHE-M1 through CACHE-M7 and CLI-M1 through CLI-M6 have complete evidence in
   their linked issues and evidence ledgers. The cache evidence records the
   supported owned compiler namespace and excludes ambient, remote and
   external cache storage from cleanup authority.
 - The immutable
-  [`toolchain-v1-20260912-rc8`](https://github.com/metaneutrons/aros-toolchains-legacy/releases/tag/toolchain-v1-20260912-rc8)
+  `toolchain-v1-20260912-rc8`
   prerelease was built from producer commit
   `d018d11dd6f995fc1f37d0b2b431f94a6ec78fd5` and AROS-NX
   `9369cc8f8ba4f7d320945c78788c6e2a6d0d1eab`. Its tag object is
   `6b904632d5fda7fea8f9259de27b34e77c1556db`.
 - Producer run
-  [`34699919725`](https://github.com/metaneutrons/aros-toolchains-legacy/actions/runs/34699919725)
+  `34699919725`
   passed 18 independent builds, nine byte-identical A/B comparisons, nine
   compatibility/relocation lanes, and draft creation for the active 3×3 matrix:
   Linux x86-64, Linux AArch64, and macOS AArch64 across `pc-x86_64`,
