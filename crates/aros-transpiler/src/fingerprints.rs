@@ -66,6 +66,7 @@ pub const NAMES: &[&str] = &[
     "mesa20-vc4-recipe",
     "mesa20-v3d-recipe",
     "mesa26-glapi-recipe",
+    "mesa26-egl-recipe",
     "mesa26-config",
     "mesa26-compiler-recipe",
     "mesa26-compiler-manifest",

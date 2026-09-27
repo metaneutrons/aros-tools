@@ -581,7 +581,6 @@ pub(super) fn parse_mmakefile_impl(
                 continue;
             }
         };
-
         // An ABI skeleton has no implementation sources, and the one explicit
         // genmodule-only library is implemented entirely by generated start/end
         // files. Every other empty result keeps the existing strict source-list
@@ -589,14 +588,28 @@ pub(super) fn parse_mmakefile_impl(
         let sources = if is_abi || genmodule_only {
             EvaluatedSources::default()
         } else {
-            // The same source-list rules as every other build macro: the union
-            // of all four lanes, with the reference's *.c default only when no
-            // lane was declared (make.tmpl:2802).
-            let mut sources = match evaluate_macro_sources(rest, &vars, &expression_context) {
-                Ok(sources) => sources,
+            let mut sources = match mesa26::module_sources(root, &rel_dir, &mmake_name, target) {
+                Ok(Some(sources)) => sources,
+                Ok(None) => match evaluate_macro_sources(rest, &vars, &expression_context) {
+                    Ok(sources) => sources,
+                    Err(reason) => {
+                        skipped_programs.push(format!(
+                            "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
+                            rel_dir.display(),
+                            inv.line + 1,
+                            inv.name
+                        ));
+                        continue;
+                    }
+                },
                 Err(reason) => {
+                    capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(inv.line + 1),
+                        format!("Mesa 26 module source closure: {reason}"),
+                    ));
                     skipped_programs.push(format!(
-                        "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} {reason}",
+                        "{}:{}: %{} mmake={mmake_raw} Mesa 26 source closure rejected: {reason}",
                         rel_dir.display(),
                         inv.line + 1,
                         inv.name

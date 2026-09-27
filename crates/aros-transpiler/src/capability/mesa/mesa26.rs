@@ -132,6 +132,19 @@ pub(crate) fn glapi_sources(
     }))
 }
 
+pub(crate) fn module_sources(
+    root: &Path,
+    relative_dir: &Path,
+    mmake: &str,
+    target: Option<&TargetContext>,
+) -> Result<Option<EvaluatedSources>, String> {
+    if relative_dir == Path::new("workbench/libs/egl") && mmake == "workbench-libs-egl" {
+        archive_sources(root, relative_dir, mmake, target)
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) fn archive_sources(
     root: &Path,
     relative_dir: &Path,
@@ -144,6 +157,46 @@ pub(crate) fn archive_sources(
     let Some(profile) = profile(target)? else {
         return Ok(None);
     };
+    if relative_dir == Path::new("workbench/libs/egl") && mmake == "workbench-libs-egl" {
+        require_file_fingerprint(
+            root,
+            "workbench/libs/egl/mmakefile.src",
+            fingerprint("mesa26-egl-recipe")?,
+            "Mesa 26 EGL source closure",
+        )?;
+        require_file_fingerprint(
+            root,
+            "workbench/libs/mesa/mesa.cfg",
+            fingerprint("mesa26-config")?,
+            "Mesa 26 EGL configuration",
+        )?;
+        let mut sources = [
+            "eglapi",
+            "eglarray",
+            "eglconfig",
+            "eglconfigdebug",
+            "eglcontext",
+            "eglcurrent",
+            "egldevice",
+            "egldisplay",
+            "eglglobals",
+            "eglimage",
+            "egllog",
+            "eglsurface",
+            "eglsync",
+        ]
+        .map(|stem| format!("{SOURCE_ROOT}/src/egl/main/{stem}"))
+        .to_vec();
+        sources.extend(
+            ["egl_arosmesa", "emul_arosc", "tls"]
+                .map(|stem| format!("${{AROS_SOURCE_DIR}}/workbench/libs/egl/{stem}")),
+        );
+        return Ok(Some(EvaluatedSources {
+            c: sources,
+            declared: true,
+            ..EvaluatedSources::default()
+        }));
+    }
     if relative_dir == Path::new(super::V3D_RELATIVE_DIR) && profile != "aarch64" {
         return Ok(None);
     }
@@ -512,6 +565,27 @@ pub(crate) fn compile_contract(
         }
         (Some("workbench/libs/gallium"), "workbench-libs-gallium") => {
             includes.push("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned());
+        }
+        (Some("workbench/libs/egl"), "workbench-libs-egl") => {
+            defines.extend(
+                [
+                    "FEATURE_GL=1",
+                    "_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_AROS",
+                    "_EGL_OS_AROS=1",
+                    "HAVE_AROS_BACKEND",
+                    "HAVE_SURFACELESS_PLATFORM",
+                ]
+                .map(str::to_owned),
+            );
+            includes.extend(
+                [
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/egl/main",
+                    "${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/src",
+                    "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/mesa/glapi",
+                    "${AROS_SOURCE_DIR}/workbench/libs/egl",
+                ]
+                .map(str::to_owned),
+            );
         }
         (Some(super::V3D_RELATIVE_DIR), "hidd-v3d") if profile == "aarch64" => {
             defines.extend(["GCA_CONSUMER_MODULE", "AROS_MESA26_V3D=1"].map(str::to_owned));
@@ -1801,167 +1875,5 @@ pub(crate) fn validate_empty_sse41(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{archive_sources, compile_contract, glapi_sources, GLAPI_DIR, GLAPI_MMAKE};
-    use crate::parser::TargetContext;
-    use std::fs;
-    use std::path::Path;
-
-    fn mesa26_source_root() -> std::path::PathBuf {
-        let configured = std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT")
-            .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))
-            .expect("AROS_TEST_MESA26_SOURCE_ROOT must name the Mesa 26 checkout");
-        std::path::PathBuf::from(configured)
-    }
-
-    #[test]
-    fn public_gallium_library_uses_the_selected_mesa26_pipe_headers() {
-        let profile = TargetContext {
-            cpu: Some("arm".to_owned()),
-            platform: Some("raspi".to_owned()),
-            toolchain: Some("llvm".to_owned()),
-            cpu32: Some(String::new()),
-            use_mmu: Some("1".to_owned()),
-            float_abi: Some("hard".to_owned()),
-            mesa_version: Some("26.0.0".to_owned()),
-            ..TargetContext::default()
-        };
-        let relative = Path::new("workbench/libs/gallium");
-        let contract = compile_contract(relative, "workbench-libs-gallium", Some(&profile))
-            .unwrap()
-            .unwrap();
-        assert!(contract
-            .includes
-            .iter()
-            .any(|path| { path == "${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include" }));
-        assert!(!contract
-            .includes
-            .iter()
-            .any(|path| path.contains("mesa-20.0.8")));
-
-        let older = TargetContext {
-            mesa_version: Some("20.0.8".to_owned()),
-            ..profile
-        };
-        assert!(
-            compile_contract(relative, "workbench-libs-gallium", Some(&older))
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn changed_glapi_recipe_is_rejected_before_source_override() {
-        let original = mesa26_source_root();
-        let temporary = tempfile::tempdir().unwrap();
-        for relative in [
-            "workbench/libs/mesa/libglapi/mmakefile.src",
-            "workbench/libs/mesa/mesa.cfg",
-        ] {
-            let output = temporary.path().join(relative);
-            fs::create_dir_all(output.parent().unwrap()).unwrap();
-            fs::copy(original.join(relative), &output).unwrap();
-        }
-        let profile = TargetContext {
-            cpu: Some("x86_64".to_owned()),
-            platform: Some("pc".to_owned()),
-            toolchain: Some("llvm".to_owned()),
-            cpu32: Some("i386".to_owned()),
-            use_mmu: Some("1".to_owned()),
-            float_abi: Some(String::new()),
-            mesa_version: Some("26.0.0".to_owned()),
-            ..TargetContext::default()
-        };
-        let relative = Path::new(GLAPI_DIR);
-        assert!(
-            glapi_sources(temporary.path(), relative, GLAPI_MMAKE, Some(&profile))
-                .unwrap()
-                .is_some()
-        );
-        let recipe = temporary.path().join(GLAPI_DIR).join("mmakefile.src");
-        let contents = fs::read_to_string(&recipe).unwrap();
-        fs::write(
-            &recipe,
-            contents.replace("shared-glapi/core", "shared-glapi/other"),
-        )
-        .unwrap();
-        let error =
-            glapi_sources(temporary.path(), relative, GLAPI_MMAKE, Some(&profile)).unwrap_err();
-        assert!(
-            error.contains("unsupported upstream recipe drift"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn mesa26_archives_use_only_reviewed_inventories() {
-        let original = mesa26_source_root();
-        let profile = TargetContext {
-            cpu: Some("x86_64".to_owned()),
-            platform: Some("pc".to_owned()),
-            toolchain: Some("llvm".to_owned()),
-            cpu32: Some("i386".to_owned()),
-            use_mmu: Some("1".to_owned()),
-            float_abi: Some(String::new()),
-            mesa_version: Some("26.0.0".to_owned()),
-            ..TargetContext::default()
-        };
-        for (relative, mmake, c_count, cxx_count) in [
-            (
-                "workbench/libs/mesa/libcompiler",
-                "mesa3d-linklib-compiler",
-                272,
-                51,
-            ),
-            ("workbench/libs/mesa/libmesa", "mesa3d-linklib-mesa", 215, 4),
-            (
-                "workbench/libs/mesa/libgalliumaux",
-                "mesa3d-linklib-galliumauxiliary",
-                150,
-                0,
-            ),
-            (
-                "workbench/libs/mesa/libmesautil",
-                "mesa3d-linklib-mesautil",
-                93,
-                4,
-            ),
-        ] {
-            let sources = archive_sources(&original, Path::new(relative), mmake, Some(&profile))
-                .unwrap()
-                .expect("closed Mesa 26 archive");
-            assert_eq!(sources.c.len(), c_count, "{mmake}");
-            assert_eq!(sources.cxx.len(), cxx_count, "{mmake}");
-            assert!(sources.declared);
-            assert!(sources.c.iter().all(|source| !source.contains("..")));
-        }
-
-        let temporary = tempfile::tempdir().unwrap();
-        for relative in [
-            "workbench/libs/mesa/mesa.cfg",
-            "workbench/libs/mesa/libmesa/mmakefile.src",
-            "workbench/libs/mesa/libmesa/mesa-26.0.0.sources",
-        ] {
-            let output = temporary.path().join(relative);
-            fs::create_dir_all(output.parent().unwrap()).unwrap();
-            fs::copy(original.join(relative), output).unwrap();
-        }
-        let manifest = temporary
-            .path()
-            .join("workbench/libs/mesa/libmesa/mesa-26.0.0.sources");
-        let mut contents = fs::read_to_string(&manifest).unwrap();
-        contents.push_str("\n# unreviewed inventory drift\n");
-        fs::write(&manifest, contents).unwrap();
-        let error = archive_sources(
-            temporary.path(),
-            Path::new("workbench/libs/mesa/libmesa"),
-            "mesa3d-linklib-mesa",
-            Some(&profile),
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("unsupported upstream recipe drift"),
-            "{error}"
-        );
-    }
-}
+#[path = "mesa26_tests.rs"]
+mod tests;
