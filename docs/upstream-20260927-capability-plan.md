@@ -1,7 +1,7 @@
 # Upstream AROS capability migration
 
 Decision state: implementation authorized on 2026-09-27; detailed Mesa 26
-design remains subject to M1 review. Epic and milestone issue links are pending.
+design remains subject to M1 review. Tracking: [epic #241](https://github.com/metaneutrons/aros-tools/issues/241).
 
 ## Outcome and boundaries
 
@@ -46,7 +46,7 @@ new upstream recipes from the product path and require explicit local reverts.
 
 ### M1: Freeze and review the new capability contract
 
-Execution: issue link pending. Dependencies: AROS-NX PR #34 source identity.
+Execution: [issue #244](https://github.com/metaneutrons/aros-tools/issues/244). Dependencies: AROS-NX PR #34 source identity.
 
 - M1-A1: Record every current AT0004 class and the exact upstream recipe,
   source archive, patch, generated output and target-profile boundary.
@@ -56,7 +56,7 @@ Execution: issue link pending. Dependencies: AROS-NX PR #34 source identity.
 
 ### M2: Support GRUB 2.16 and WirelessManager
 
-Execution: issue link pending. Dependencies: M1 design for those lanes.
+Execution: [issue #245](https://github.com/metaneutrons/aros-tools/issues/245). Dependencies: M1 design for those lanes.
 
 - M2-A1: The three PC GRUB host-tool declarations select a measured GRUB
   2.16 source/patch/build contract. Source hashes, product manifests and counts
@@ -69,7 +69,7 @@ Execution: issue link pending. Dependencies: M1 design for those lanes.
 
 ### M3: Support Mesa 26 without regressing Mesa 20
 
-Execution: issue link pending. Dependencies: M1 Mesa design.
+Execution: [issue #242](https://github.com/metaneutrons/aros-tools/issues/242). Dependencies: M1 Mesa design.
 
 - M3-A1: Versioned source inventories, generators, compiler options, driver
   selection and Gallivm/LLVM boundaries are closed and independently tested
@@ -82,7 +82,7 @@ Execution: issue link pending. Dependencies: M1 Mesa design.
 
 ### M4: Qualify and integrate AROS-NX upstream
 
-Execution: issue link pending. Dependencies: M2 and M3.
+Execution: [issue #243](https://github.com/metaneutrons/aros-tools/issues/243). Dependencies: M2 and M3.
 
 - M4-A1: AROS-NX PR #34 selects an exact reviewed aros-tools commit and its
   shared-source preflight plus all nine Linux/macOS product lanes pass on the
@@ -95,7 +95,7 @@ Execution: issue link pending. Dependencies: M2 and M3.
 
 ### M5: Release the new aros-tools capability set
 
-Execution: issue link pending. Dependencies: M4 and the repository's normal
+Execution: [issue #246](https://github.com/metaneutrons/aros-tools/issues/246). Dependencies: M4 and the repository's normal
 Release Please flow.
 
 - M5-A1: A fresh SemVer tag passes all native, signing, inventory,
