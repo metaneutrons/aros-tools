@@ -12,8 +12,8 @@
 //! name, so cargo rebuilds when the data changes and the binary and the tests
 //! read the same bytes.
 //!
-//! Format: `name = <64 hex digits>`, one per line, `#` comments and blank lines
-//! ignored.
+//! Format: `name = <64 hex digits>`, one per line; `#` comments (including
+//! trailing comments) and blank lines are ignored.
 
 /// Reads one pin by name.
 ///
@@ -36,7 +36,7 @@ pub fn pin<'a>(source: &'a str, file: &str, name: &str) -> &'a str {
 /// is absent, or its value is not a SHA-256 digest.
 pub fn try_pin<'a>(source: &'a str, file: &str, name: &str) -> Result<&'a str, String> {
     for line in source.lines() {
-        let line = line.trim();
+        let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -77,7 +77,7 @@ pub fn entries<'a>(source: &'a str, file: &str) -> Vec<(&'a str, &'a str)> {
 pub fn try_entries<'a>(source: &'a str, file: &str) -> Result<Vec<(&'a str, &'a str)>, String> {
     let mut found = Vec::new();
     for line in source.lines() {
-        let line = line.trim();
+        let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -98,6 +98,7 @@ mod tests {
 first  = 0000000000000000000000000000000000000000000000000000000000000001
 
 second = 0000000000000000000000000000000000000000000000000000000000000002
+third = 0000000000000000000000000000000000000000000000000000000000000003 # public digest
 ";
 
     #[test]
@@ -109,15 +110,17 @@ second = 0000000000000000000000000000000000000000000000000000000000000002
     #[test]
     fn lists_every_entry_in_file_order() {
         let entries = entries(SAMPLE, "sample");
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].0, "first");
         assert_eq!(entries[1].0, "second");
+        assert_eq!(entries[2].0, "third");
+        assert!(pin(SAMPLE, "sample", "third").ends_with("03"));
     }
 
     #[test]
-    #[should_panic(expected = "no pin named third")]
+    #[should_panic(expected = "no pin named fourth")]
     fn a_missing_pin_stops_the_run() {
-        let _ = pin(SAMPLE, "sample", "third");
+        let _ = pin(SAMPLE, "sample", "fourth");
     }
 
     #[test]

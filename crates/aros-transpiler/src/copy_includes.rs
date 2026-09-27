@@ -24,6 +24,7 @@
 
 use crate::includes::{arg_value, arg_value_quoted};
 use crate::make_vars::VarScope;
+use crate::parser::TargetContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -232,8 +233,13 @@ pub(crate) fn collect_copy_includes_with_scope(
     content: &str,
     rel_dir: &Path,
     scope: &VarScope,
+    target: Option<&TargetContext>,
 ) -> CopyIncludesScan {
-    let external = |name: &str| scope.raw_at(name, usize::MAX);
+    let external = |name: &str| {
+        scope
+            .raw_at(name, usize::MAX)
+            .or_else(|| target.and_then(|context| context.value_of(name)))
+    };
     collect_copy_includes_with_lookup(content, rel_dir, Some(&external))
 }
 

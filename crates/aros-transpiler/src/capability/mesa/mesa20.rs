@@ -31,6 +31,7 @@ pub(crate) const DRIVER: &str = "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa20_g
 pub(crate) fn generator_job(script: &str, output: &str, arguments: &[&str]) -> PythonGeneratorJob {
     PythonGeneratorJob {
         script: script.to_owned(),
+        local_script: false,
         output: output.to_owned(),
         arguments: arguments
             .iter()
@@ -521,8 +522,10 @@ fn v3d_outputs(dir_path: &Path) -> Vec<PythonOutputsDecl> {
         build_root: build_root.to_owned(),
         fetch_target: "mesa3d-fetch".to_owned(),
         source_inputs,
+        local_inputs: Vec::new(),
         jobs,
         driver_script: Some(DRIVER.to_owned()),
+        requires_flex_bison: true,
         python_packages: Vec::new(),
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![
@@ -710,8 +713,10 @@ pub(crate) fn parse_remaining(
         build_root: BUILD_ROOT.to_owned(),
         fetch_target: "mesa3d-fetch".to_owned(),
         source_inputs,
+        local_inputs: Vec::new(),
         jobs,
         driver_script: Some(DRIVER.to_owned()),
+        requires_flex_bison: true,
         python_packages: packages,
         audited_source_dir: SOURCE_ROOT.to_owned(),
         local_patch_files: vec![

@@ -23,6 +23,7 @@ use super::{
     Regex, Result, TargetContext, TargetDefinition, META_RULE_RE, PRIVATE_LIBDIR,
 };
 use crate::capability::mesa::mesa20;
+use crate::capability::mesa::mesa26;
 
 #[expect(
     clippy::too_many_lines,
@@ -154,7 +155,8 @@ pub(super) fn parse_mmakefile_impl(
     // parsed out of this file.
     let include_set = collect_includes(&content, &rel_dir);
     let arch_decls = collect_arch_decls(&content, &rel_dir);
-    let mut copy_scan = collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope);
+    let mut copy_scan =
+        collect_copy_includes_with_scope(&content, &rel_dir, &collector_scope, target);
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
@@ -1107,6 +1109,23 @@ pub(super) fn parse_mmakefile_impl(
             }
         };
         let mesa20_capability_active = mesa20_capability_sources.is_some();
+        let mesa26_sources = match mesa26::archive_sources(root, &rel_dir, &mmake_name, target) {
+            Ok(sources) => sources,
+            Err(reason) => {
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(inv.line + 1),
+                    format!("Mesa 26 glapi capability: {reason}"),
+                ));
+                skipped_programs.push(format!(
+                    "{}:{}: Mesa 26 glapi linklib skipped: {reason}",
+                    rel_dir.display(),
+                    inv.line + 1,
+                ));
+                continue;
+            }
+        };
+        let mesa26_archive_active = mesa26_sources.is_some();
         let nouveau_drm_capability_sources = match crate::capability::nouveau::drm_sources(
             root,
             &rel_dir,
@@ -1238,11 +1257,31 @@ pub(super) fn parse_mmakefile_impl(
                 continue;
             }
         }
+        let mesa26_empty_sse41 = mmake_name == sse41::MMAKE
+            && target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0")
+            && mesa26_archive_active;
         let mesa_sse41_profile = (mmake_name == sse41::MMAKE
+            && !mesa26_empty_sse41
             && sse41::validate_static_contract(root, &content).is_ok())
         .then(|| sse41::profile(&rel_dir, target).ok().flatten())
         .flatten();
-        let empty_archive = mesa_sse41_profile == Some(false);
+        let empty_archive = mesa26_empty_sse41 || mesa_sse41_profile == Some(false);
+        if mesa26_empty_sse41 {
+            let Ok(Some(contract)) = mesa26::compile_contract(&rel_dir, &mmake_name, target) else {
+                capability_errors.push(capability_diagnostic(
+                    &relative_path,
+                    Some(inv.line + 1),
+                    "Mesa 26 empty SSE4.1 compile contract is absent".to_owned(),
+                ));
+                continue;
+            };
+            declaration_flags.defines = contract.defines;
+            declaration_flags.undefines = contract.undefines;
+            declaration_flags.compile_options = contract.options;
+            declaration_flags.link_options.clear();
+            declaration_includes.dirs = contract.includes;
+            declaration_includes.arch_modules.clear();
+        }
         if let Some(x86_64) = mesa_sse41_profile {
             // The ordinary local-include scanner cannot adopt mesa.cfg for
             // this file on a cold tree: the neighbouring full libmesa target
@@ -1324,7 +1363,9 @@ pub(super) fn parse_mmakefile_impl(
             None
         };
         let capability_files = mesa_sse41_profile.map(sse41::sources);
-        let mut sources = if let Some(sources) = mesa20_capability_sources {
+        let mut sources = if let Some(sources) = mesa26_sources {
+            sources
+        } else if let Some(sources) = mesa20_capability_sources {
             sources
         } else if let Some(sources) = nouveau_drm_capability_sources {
             sources
@@ -1482,7 +1523,9 @@ pub(super) fn parse_mmakefile_impl(
             && (all_sources_are_fetch_owned(&sources, &fetches)
                 || nouveau_drm_capability_active
                 || nouveau_gallium_capability_active);
-        let linklib_output_dir = if mesa_sse41_profile.is_some() || mesa20_capability_active {
+        let linklib_output_dir = if mesa26_archive_active {
+            Some(mesa26::PRIVATE_LIBDIR.to_owned())
+        } else if mesa_sse41_profile.is_some() || mesa20_capability_active {
             Some(PRIVATE_LIBDIR.to_owned())
         } else if matches!(module_type, ModuleType::LinkLib) {
             macro_arg(&inv.args, "libdir").and_then(|raw| {
@@ -1577,14 +1620,20 @@ pub(super) fn parse_mmakefile_impl(
         }
     }
 
-    if let Err(reason) = sse41::validate(
-        root,
-        &rel_dir,
-        target,
-        &content,
-        &targets,
-        &ownership_fetches,
-    ) {
+    let sse41_result =
+        if target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0") {
+            mesa26::validate_empty_sse41(root, &rel_dir, target, &targets, &ownership_fetches)
+        } else {
+            sse41::validate(
+                root,
+                &rel_dir,
+                target,
+                &content,
+                &targets,
+                &ownership_fetches,
+            )
+        };
+    if let Err(reason) = sse41_result {
         // The ordinary parser may have resolved part of this declaration, but
         // executable empty-archive support and the target-only ISA flag are
         // admitted as one atomic capability. Any drift removes the target.
@@ -1671,7 +1720,14 @@ pub(super) fn parse_mmakefile_impl(
             ));
         }
     }
-    match generators::parse_mesautil(&rel_dir, target, &content, &targets, &ownership_fetches) {
+    match generators::parse_mesautil(
+        root,
+        &rel_dir,
+        target,
+        &content,
+        &targets,
+        &ownership_fetches,
+    ) {
         Ok(Some(declaration)) => python_outputs.push(declaration),
         Ok(None) => {}
         Err(reason) => {
@@ -1697,14 +1753,31 @@ pub(super) fn parse_mmakefile_impl(
         }
         _ => None,
     };
-    match mesa20::parse_remaining(
-        root,
-        &rel_dir,
-        target,
-        &content,
-        &targets,
-        &ownership_fetches,
-    ) {
+    let mesa26 = target.and_then(|profile| profile.mesa_version.as_deref()) == Some("26.0.0");
+    let remaining = if mesa26 {
+        match rel_dir.to_str() {
+            Some("workbench/libs/mesa/libcompiler") => {
+                mesa26::parse_compiler(root, &rel_dir, target, &targets, &ownership_fetches)
+            }
+            Some("workbench/libs/mesa/libgalliumaux") => {
+                mesa26::parse_galliumaux(root, &rel_dir, target, &targets, &ownership_fetches)
+            }
+            Some("workbench/libs/mesa/libmesa") => {
+                mesa26::parse_core(root, &rel_dir, target, &targets, &ownership_fetches)
+            }
+            _ => Ok(None),
+        }
+    } else {
+        mesa20::parse_remaining(
+            root,
+            &rel_dir,
+            target,
+            &content,
+            &targets,
+            &ownership_fetches,
+        )
+    };
+    match remaining {
         Ok(Some(declaration)) => python_outputs.push(declaration),
         Ok(None) => {}
         Err(reason) => {
@@ -1717,24 +1790,28 @@ pub(super) fn parse_mmakefile_impl(
             capability_errors.push(capability_diagnostic(
                 &relative_path,
                 None,
-                format!(
-                    "Mesa 20.0.8 archive/generator no longer matches its closed capability: {reason}"
-                ),
+                format!("Mesa archive/generator no longer matches its closed capability: {reason}"),
             ));
             skipped_programs.push(format!(
-                "{}: Mesa 20.0.8 archive/generator capability skipped: {reason}",
+                "{}: Mesa archive/generator capability skipped: {reason}",
                 rel_dir.display()
             ));
         }
     }
-    match mesa20::parse_v3d(
-        root,
-        &rel_dir,
-        target,
-        &content,
-        &targets,
-        &ownership_fetches,
-    ) {
+    let v3d = if mesa26 {
+        mesa26::parse_v3d(root, &rel_dir, target, &targets, &ownership_fetches)
+            .map(|declaration| declaration.into_iter().collect())
+    } else {
+        mesa20::parse_v3d(
+            root,
+            &rel_dir,
+            target,
+            &content,
+            &targets,
+            &ownership_fetches,
+        )
+    };
+    match v3d {
         Ok(declarations) => python_outputs.extend(declarations),
         Err(reason) => {
             targets.retain(|candidate| candidate.mmake_name != "linklibs-gallium_v3d");
