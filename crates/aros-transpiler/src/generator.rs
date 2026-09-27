@@ -796,6 +796,14 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 writeln!(out, "    JOB").unwrap();
                 writeln!(out, "        SCRIPT {}", cmake_arg(&job.script)).unwrap();
                 writeln!(out, "        OUTPUT {}", cmake_arg(&job.output)).unwrap();
+                if !job.depends_on_outputs.is_empty() {
+                    let dependencies = job
+                        .depends_on_outputs
+                        .iter()
+                        .map(|dependency| cmake_arg(dependency))
+                        .collect::<Vec<_>>();
+                    writeln!(out, "        DEPENDS_ON_OUTPUTS {}", dependencies.join(" ")).unwrap();
+                }
                 if !job.arguments.is_empty() {
                     let arguments = job
                         .arguments

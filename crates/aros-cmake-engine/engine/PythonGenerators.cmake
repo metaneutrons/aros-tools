@@ -59,6 +59,7 @@ endfunction()
 #     JOB
 #       SCRIPT <source-relative-python-file>
 #       OUTPUT <build-relative-product>
+#       [DEPENDS_ON_OUTPUTS <earlier-build-relative-products...>]
 #       [ARGUMENTS <generator-arguments...>]
 #     [JOB ...])
 #
@@ -386,7 +387,8 @@ function(aros_generate_python_outputs)
         endif()
         list(SUBLIST _raw_arguments ${_job_start} ${_job_length}
             _job_arguments)
-        cmake_parse_arguments(PJ "" "SCRIPT;OUTPUT" "ARGUMENTS"
+        cmake_parse_arguments(PJ "" "SCRIPT;OUTPUT"
+            "ARGUMENTS;DEPENDS_ON_OUTPUTS"
             ${_job_arguments})
         if(PJ_UNPARSED_ARGUMENTS OR PJ_KEYWORDS_MISSING_VALUES OR
            NOT PJ_SCRIPT OR NOT PJ_OUTPUT)
@@ -425,6 +427,34 @@ function(aros_generate_python_outputs)
             message(FATAL_ERROR
                 "${PG_OWNER}: duplicate Python-generator OUTPUT: ${_output}")
         endif()
+        set(_job_dependencies "")
+        foreach(_raw_dependency IN LISTS PJ_DEPENDS_ON_OUTPUTS)
+            if("${_raw_dependency}" MATCHES "[;\"$\\\r\n]")
+                message(FATAL_ERROR
+                    "${PG_OWNER}: unsafe Python-generator output dependency '${_raw_dependency}'")
+            endif()
+            if(IS_ABSOLUTE "${_raw_dependency}")
+                message(FATAL_ERROR
+                    "${PG_OWNER}: DEPENDS_ON_OUTPUTS must be build-root relative: ${_raw_dependency}")
+            endif()
+            set(_dependency "${_raw_dependency}")
+            cmake_path(ABSOLUTE_PATH _dependency
+                BASE_DIRECTORY "${_build_root}" NORMALIZE
+                OUTPUT_VARIABLE _dependency)
+            cmake_path(IS_PREFIX _build_root "${_dependency}" NORMALIZE
+                _dependency_is_owned)
+            if(NOT _dependency_is_owned OR
+               _dependency STREQUAL _build_root)
+                message(FATAL_ERROR
+                    "${PG_OWNER}: DEPENDS_ON_OUTPUTS escapes BUILD_ROOT: ${_dependency}")
+            endif()
+            if(NOT _dependency IN_LIST _outputs)
+                message(FATAL_ERROR
+                    "${PG_OWNER}: DEPENDS_ON_OUTPUTS must name an earlier output of this owner: ${_dependency}")
+            endif()
+            list(APPEND _job_dependencies "${_dependency}")
+        endforeach()
+        list(REMOVE_DUPLICATES _job_dependencies)
         string(SHA256 _output_key "${_output}")
         get_property(_previous_owner GLOBAL PROPERTY
             "AROS_PYTHON_OUTPUT_OWNER_${_output_key}")
@@ -470,6 +500,7 @@ function(aros_generate_python_outputs)
                 ${_generator_argument_definitions}
                 -P "${_runner}"
             DEPENDS "${_fetch_stamp}" ${_package_fetch_stamps}
+                ${_job_dependencies}
                 "${_runner}" ${_driver}
             COMMENT "Generating ${_output} with a capability-checked host generator"
             VERBATIM)

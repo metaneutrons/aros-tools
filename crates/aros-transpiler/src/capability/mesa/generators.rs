@@ -198,16 +198,19 @@ pub(crate) fn parse_glapi(
             script: "src/mapi/glapi/gen/gl_apitemp.py".to_owned(),
             output: "src/mapi/glapi/glapitemp.h".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
+            depends_on_outputs: Vec::new(),
         },
         PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_table.py".to_owned(),
             output: "src/mapi/glapi/glapitable.h".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
+            depends_on_outputs: Vec::new(),
         },
         PythonGeneratorJob {
             script: "src/mapi/glapi/gen/gl_procs.py".to_owned(),
             output: "src/mapi/glapi/glprocs.h".to_owned(),
             arguments: vec!["-c".to_owned(), "-f".to_owned(), XML.to_owned()],
+            depends_on_outputs: Vec::new(),
         },
     ];
     if x86_64 {
@@ -215,6 +218,7 @@ pub(crate) fn parse_glapi(
             script: "src/mapi/glapi/gen/gl_x86-64_asm.py".to_owned(),
             output: "src/mapi/glapi/glapi_x86-64.s".to_owned(),
             arguments: vec!["-f".to_owned(), XML.to_owned()],
+            depends_on_outputs: Vec::new(),
         });
     }
 
@@ -492,11 +496,13 @@ pub(crate) fn parse_mesautil(
                 script: "src/util/format_srgb.py".to_owned(),
                 output: "src/util/format_srgb.c".to_owned(),
                 arguments: vec![CSV.to_owned()],
+                depends_on_outputs: Vec::new(),
             },
             PythonGeneratorJob {
                 script: "src/util/format/u_format_table.py".to_owned(),
                 output: "src/util/format/u_format_table.c".to_owned(),
                 arguments: vec![CSV.to_owned()],
+                depends_on_outputs: Vec::new(),
             },
         ],
         driver_script: None,
