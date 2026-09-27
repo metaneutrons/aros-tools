@@ -3,12 +3,12 @@
 use super::{
     all_sources_are_fetch_owned, apply_mesa_compile_contract, capability_diagnostic,
     collect_arch_decls, collect_arch_sources, collect_copy_includes_with_scope,
-    collect_fetches_with_scope, collect_flags, collect_flags_at, collect_flexcat_source_rules,
-    collect_ilbm_sources, collect_includes, collect_includes_at, collect_make_opts, collect_vars,
-    collect_vars_impl, collect_vars_impl_with_forward_locals, collector_forward_local_prelude,
-    copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
-    declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
-    evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
+    collect_fetches_with_scope_and_context, collect_flags, collect_flags_at,
+    collect_flexcat_source_rules, collect_ilbm_sources, collect_includes, collect_includes_at,
+    collect_make_opts, collect_vars, collect_vars_impl, collect_vars_impl_with_forward_locals,
+    collector_forward_local_prelude, copy_directories, current_profile, declaration_flags_at,
+    declaration_global_link_options, declaration_owned_port_scope, evaluate_linklib_list,
+    evaluate_macro_sources, evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
     evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
     expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
     inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
@@ -61,7 +61,7 @@ pub(super) fn parse_mmakefile_impl(
         |target| collect_vars_impl(&collector_input, Some(target)).0,
     );
     let (fetches, skipped_fetches) =
-        collect_fetches_with_scope(&content, &rel_dir, &collector_scope);
+        collect_fetches_with_scope_and_context(&content, &rel_dir, &collector_scope, target);
     let mut ownership_fetches = known_fetches.to_vec();
     ownership_fetches.extend(fetches.iter().cloned());
 

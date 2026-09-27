@@ -54,6 +54,34 @@ Execution: [issue #244](https://github.com/metaneutrons/aros-tools/issues/244). 
   contracts with positive and altered-input counterprobes. Reject a plan that
   merely refreshes fingerprints or skips unreachable recipes.
 
+The initial source audit identified these exact boundaries; M1 remains open
+until the independent capability tests are complete:
+
+- GRUB 2.16 uses the source digest
+  `f0db0104927df0b9a48bc41b735c702936190d17eb2d73d3018fa77474a0cabe`.
+  The three macOS ARM64 PC/EFI host builds and ISO staging passed against the
+  AROS-NX candidate with [aros-tools PR #249](https://github.com/metaneutrons/aros-tools/pull/249).
+  The version lock, in-tree patch and measured per-lane install manifests are
+  separate from the still-supported GRUB 2.12 contract.
+- Mesa 26.0.0 uses the official 43,776,320-byte `tar.xz`, SHA-256
+  `2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72`.
+  [AROS-NX draft PR #35](https://github.com/metaneutrons/AROS-NX/pull/35)
+  pins that archive and its patch and selects the new `src/mesa/glapi` layout
+  before fetching. The patch passed a dry run against the official archive.
+- Mesa 26 `glapi` compiles `shared-glapi/core` and a generated
+  `public_glapi_wrappers.c`. Its two generated outputs depend on `mapi_abi.py`,
+  `gl_and_es_API.xml`, `libgl-symbols.txt`, the public-symbol manifest and the
+  wrapper shell adapter. A version-bound runner must track all inputs and
+  products; the Mesa 20 direct-Python recipe is not equivalent. Cold-tree
+  source evaluation also requires an exact source inventory rather than
+  dropping the unresolved `top_srcdir` fragment. Inventories for the remaining
+  Mesa 26 core archives are still missing.
+- An explicit `OPT_MESAGL=26.0.0` initially caused the central Mesa fetch to
+  be skipped. The target-aware fetch correction must accept a concrete
+  selector only when Make has not assigned the variable, and must still reject
+  unknown conditional assignments. Four-profile source probes and changed-
+  branch counterprobes are required before accepting that correction.
+
 ### M2: Support GRUB 2.16 and WirelessManager
 
 Execution: [issue #245](https://github.com/metaneutrons/aros-tools/issues/245). Dependencies: M1 design for those lanes.

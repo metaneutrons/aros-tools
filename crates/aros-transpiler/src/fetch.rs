@@ -268,10 +268,23 @@ pub fn collect_fetches(content: &str, rel_dir: &Path) -> (Vec<FetchDecl>, Vec<St
 /// assignments freeze arguments at the declaration line. Using the final
 /// target-aware scope preserves later conditional assignments such as the
 /// GNU-only libheif compatibility patches without applying them to LLVM.
+#[cfg(test)]
 pub(crate) fn collect_fetches_with_scope(
     content: &str,
     rel_dir: &Path,
     scope: &VarScope,
+) -> (Vec<FetchDecl>, Vec<String>) {
+    collect_fetches_with_scope_and_context(content, rel_dir, scope, None)
+}
+
+/// Resolve an explicit target selector when Make has not assigned it locally.
+/// A proven local assignment still wins; an undecidable assignment still fails
+/// closed rather than falling back to the selected profile.
+pub(crate) fn collect_fetches_with_scope_and_context(
+    content: &str,
+    rel_dir: &Path,
+    scope: &VarScope,
+    target: Option<&crate::parser::TargetContext>,
 ) -> (Vec<FetchDecl>, Vec<String>) {
     collect_fetches_with_lookup(content, rel_dir, &|name| {
         if scope.conditionally_assigned_before(name, usize::MAX) {
@@ -280,7 +293,9 @@ pub(crate) fn collect_fetches_with_scope(
             // absent optional patch would silently emit an unpatched fetch.
             Some(format!("$({name})"))
         } else {
-            scope.raw_at(name, usize::MAX)
+            scope
+                .raw_at(name, usize::MAX)
+                .or_else(|| target.and_then(|target| target.value_of(name)))
         }
     })
 }
@@ -574,6 +589,66 @@ endif
         );
         assert!(decls.is_empty());
         assert_eq!(skipped.len(), 2);
+    }
+
+    #[test]
+    fn explicit_target_selector_resolves_fetch_without_overriding_make() {
+        let target = TargetContext {
+            mesa_version: Some("26.0.0".to_owned()),
+            ..TargetContext::default()
+        };
+        let source = "\
+ifeq ($(OPT_MESAGL),26.0.0)
+SUFFIX := tar.xz
+endif
+ARCHIVE := mesa-$(OPT_MESAGL)
+%fetch mmake=mesa-fetch archive=$(ARCHIVE) suffixes=$(SUFFIX) destination=$(PORTSDIR)/mesa
+";
+        let scope = collect_vars_with_context(&join_continuations(source), &target);
+        let (fetches, skipped) = collect_fetches_with_scope_and_context(
+            source,
+            Path::new("workbench/libs/mesa"),
+            &scope,
+            Some(&target),
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(fetches.len(), 1);
+        assert_eq!(fetches[0].archive, "mesa-26.0.0");
+        assert_eq!(fetches[0].suffixes, "tar.xz");
+
+        let local = "OPT_MESAGL := 20.0.8\n%fetch mmake=mesa-fetch archive=mesa-$(OPT_MESAGL) destination=$(PORTSDIR)/mesa\n";
+        let scope = collect_vars_with_context(&join_continuations(local), &target);
+        let (fetches, skipped) = collect_fetches_with_scope_and_context(
+            local,
+            Path::new("workbench/libs/mesa"),
+            &scope,
+            Some(&target),
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(fetches[0].archive, "mesa-20.0.8");
+    }
+
+    #[test]
+    fn unknown_make_branch_cannot_be_replaced_by_target_selector() {
+        let target = TargetContext {
+            mesa_version: Some("26.0.0".to_owned()),
+            ..TargetContext::default()
+        };
+        let source = "\
+ifeq ($(UNKNOWN_SWITCH),yes)
+OPT_MESAGL := 20.0.8
+endif
+%fetch mmake=mesa-fetch archive=mesa-$(OPT_MESAGL) destination=$(PORTSDIR)/mesa
+";
+        let scope = collect_vars_with_context(&join_continuations(source), &target);
+        let (fetches, skipped) = collect_fetches_with_scope_and_context(
+            source,
+            Path::new("workbench/libs/mesa"),
+            &scope,
+            Some(&target),
+        );
+        assert!(fetches.is_empty());
+        assert_eq!(skipped, ["workbench/libs/mesa: mesa-fetch"]);
     }
 
     #[test]

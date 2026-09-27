@@ -14,7 +14,7 @@ use crate::collector::{
 };
 use crate::copy_directories;
 use crate::copy_includes::collect_copy_includes_with_scope;
-use crate::fetch::{collect_fetches_with_scope, FetchDecl};
+use crate::fetch::{collect_fetches_with_scope_and_context, FetchDecl};
 use crate::flags::{collect_flags, collect_flags_at, collect_named_link_flags_at, FlagSet};
 use crate::flexcat::collect_flexcat_source_rules;
 use crate::genmodule_linklibs::resolve_generated_linklib_sources;
@@ -774,7 +774,7 @@ pub fn collect_mmakefile_fetches_with_context(
         collector_joined
     );
     let scope = collect_vars_impl(&collector_input, Some(target)).0;
-    Ok(collect_fetches_with_scope(&content, &rel_dir, &scope).0)
+    Ok(collect_fetches_with_scope_and_context(&content, &rel_dir, &scope, Some(target)).0)
 }
 
 fn capability_diagnostic(
