@@ -244,14 +244,7 @@ pub(crate) fn parse(
     if relative_dir == Path::new(WIRELESS_CONFIGURE_DIR)
         && mmake == "workbench-network-wirelessmanager"
     {
-        require_exact_macro_arguments(
-            invocation,
-            &[
-                ("mmake", "workbench-network-wirelessmanager"),
-                ("install_env", "BINDIR=$(AROS_C)"),
-                ("use_build_env", "yes"),
-            ],
-        )?;
+        require_wireless_arguments(invocation)?;
         validate_configure_input_manifest(
             root,
             WIRELESS_CONFIGURE_SOURCE_ROOT,
@@ -281,4 +274,60 @@ pub(crate) fn parse(
     }
 
     Err("unsupported configure-style capability (modelled: tools/ADFlib mmake=host-adflib,linklib-adflib; workbench/network/WirelessManager/wpa_supplicant mmake=workbench-network-wirelessmanager)".to_owned())
+}
+
+fn require_wireless_arguments(invocation: &Invocation) -> std::result::Result<(), String> {
+    // The upstream make recipe added dependency-file generation. The private
+    // CMake build owns its dependency tracking, so the new argument changes
+    // no product output, but its exact value remains part of the source
+    // capability and must never turn into an arbitrary CFLAGS pass-through.
+    if macro_arg(&invocation.args, "extracflags").is_some() {
+        require_exact_macro_arguments(
+            invocation,
+            &[
+                ("mmake", "workbench-network-wirelessmanager"),
+                ("install_env", "BINDIR=$(AROS_C)"),
+                ("use_build_env", "yes"),
+                ("extracflags", "$(OPTIMIZATION_CFLAGS) -MD"),
+            ],
+        )
+    } else {
+        require_exact_macro_arguments(
+            invocation,
+            &[
+                ("mmake", "workbench-network-wirelessmanager"),
+                ("install_env", "BINDIR=$(AROS_C)"),
+                ("use_build_env", "yes"),
+            ],
+        )
+    }
+}
+
+#[cfg(test)]
+mod wireless_argument_tests {
+    use super::*;
+
+    fn invocation(extra: &str) -> Invocation {
+        Invocation {
+            name: "build_with_configure".to_owned(),
+            args: format!(
+                "mmake=workbench-network-wirelessmanager install_env=\"BINDIR=$(AROS_C)\" use_build_env=yes {extra}"
+            ),
+            line: 1,
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_two_audited_wireless_forms() {
+        assert!(require_wireless_arguments(&invocation("")).is_ok());
+        assert!(require_wireless_arguments(&invocation(
+            "extracflags=\"$(OPTIMIZATION_CFLAGS) -MD\""
+        ))
+        .is_ok());
+        assert!(require_wireless_arguments(&invocation("extracflags=\"-O0 -MD\"")).is_err());
+        assert!(require_wireless_arguments(&invocation(
+            "extracflags=\"$(OPTIMIZATION_CFLAGS) -MD\" extra=unexpected"
+        ))
+        .is_err());
+    }
 }
