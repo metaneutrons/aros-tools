@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.22)
+
 # Package the two ARM pipe-driver archives with one generated ABI table.
 # Only closed paths and a verified target llvm-ar/objcopy may reach here.
 foreach(_required IN ITEMS GCA_AR GCA_OBJCOPY GCA_NM GCA_GENERATED
