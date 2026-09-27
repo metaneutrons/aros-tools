@@ -20,10 +20,9 @@ aros setup --preset pc-x86_64
 aros toolchain verify --preset pc-x86_64
 ```
 
-For repeatable qualification, add `--ref` with the exact reviewed source
-commit; an explicit ref leaves HEAD detached. The tools' test source identity is recorded in
-[`contracts/aros-source-v1.toml`](https://github.com/metaneutrons/aros-tools/blob/main/contracts/aros-source-v1.toml);
-this documentation does not claim every later `main` revision is qualified.
+For a tested source revision, pass its exact commit with `--ref`; this leaves
+HEAD detached. The tools' current test pin is in
+[`contracts/aros-source-v1.toml`](https://github.com/metaneutrons/aros-tools/blob/main/contracts/aros-source-v1.toml).
 
 ## Build
 

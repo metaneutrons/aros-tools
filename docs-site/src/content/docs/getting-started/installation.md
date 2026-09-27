@@ -3,11 +3,8 @@ title: Installation
 description: Install the verified native tools release or build the suite from source.
 ---
 
-:::note[Beta availability]
-The verified v0.3.12 native archives and APT, Homebrew and AUR packages are
-public. You can also build from source. Check
-[release status](/aros-tools/reference/release-status/) before upgrading.
-:::
+AROS tools v0.3.12 is available as a native archive, through APT, Homebrew or
+AUR, or from source. Choose the method for your host below.
 
 ## Requirements
 
@@ -202,7 +199,7 @@ package index, including content-addressed by-hash downloads. Do not add
 
 ## Homebrew
 
-After the formula is publicly qualified:
+On a supported host:
 
 ```sh
 brew install metaneutrons/tap/aros-tools
@@ -216,7 +213,7 @@ selection.
 
 ## Arch Linux (AUR)
 
-After the package is publicly qualified, review its `PKGBUILD` and install
+Review the published `PKGBUILD` and install
 with your usual AUR workflow. For example:
 
 ```sh

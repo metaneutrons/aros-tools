@@ -10,8 +10,8 @@ source/component work. The CMake engine is embedded in the tools in both cases.
 
 ## Path A: build an AROS-NX product
 
-This path needs usable cross-toolchain entries in the checkout's lock. A source
-clone alone does not install compilers or establish that every target is qualified.
+This path needs the cross-toolchain lock in AROS-NX. Cloning the source does
+not install a compiler.
 
 Create and enter the AROS-NX checkout:
 
@@ -31,10 +31,8 @@ aros setup --preset pc-x86_64
 aros toolchain verify --preset pc-x86_64
 ```
 
-Build and run the bounded boot test:
-
-Install `qemu-system-x86_64` from the [prerequisites](/aros-tools/getting-started/prerequisites/)
-before the test. This checker implements the PC x86 boot path only.
+Build, then run the PC boot test. Install `qemu-system-x86_64` from the
+[prerequisites](/aros-tools/getting-started/prerequisites/) first.
 
 ```sh
 aros build --preset pc-x86_64

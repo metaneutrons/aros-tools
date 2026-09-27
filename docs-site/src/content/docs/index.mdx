@@ -8,21 +8,18 @@ next: false
 import { LinkCard, CardGrid } from '@astrojs/starlight/components';
 
 <div class="doc-intro">
-  <strong>Beta · native release available.</strong>{' '}
-  Install the verified v0.3.12 tools release or build from source. Check the{' '}
-  <a href="/aros-tools/reference/release-status/">release status</a>{' '}
-  before choosing a package channel.
+  <strong>Beta.</strong>{' '}
+  <a href="/aros-tools/getting-started/installation/">Install AROS tools v0.3.12</a>{' '}
+  on Linux x86-64, Linux ARM64 or Apple silicon.
 </div>
 
-`aros` is the command-line entry point. It coordinates seven companion programs
-for translation, linking, source fetching, verification and code generation.
-Keep the suite beside your AROS checkout; the tools and the operating system
-have independent source trees.
+`aros` is the command-line entry point for checkout, build, toolchain and board
+workflows. The tools and AROS source live in separate repositories.
 
 ## Start with a working environment
 
 <CardGrid>
-  <LinkCard title="Install the tools" description="Build the complete suite, put it on PATH, and check that the helpers agree." href="/aros-tools/getting-started/installation/" />
+  <LinkCard title="Install the tools" description="Choose a package channel, native archive or source build." href="/aros-tools/getting-started/installation/" />
   <LinkCard title="Make your first build" description="Choose AROS-NX for the integrated build path, or start with pristine upstream." href="/aros-tools/getting-started/quick-start/" />
 </CardGrid>
 
