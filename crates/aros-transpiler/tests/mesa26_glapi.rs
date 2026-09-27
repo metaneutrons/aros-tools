@@ -138,6 +138,21 @@ fn mesa26_vc4_has_closed_driver_on_raspberry_pi_profiles() {
         assert!(driver
             .include_dirs
             .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/drivers/vc4".to_owned()));
+        let hidd = parsed
+            .targets
+            .iter()
+            .find(|candidate| candidate.mmake_name == "hidd-vc4gallium")
+            .expect("VC4 HIDD");
+        assert!(hidd
+            .source_files
+            .iter()
+            .all(|source| !source.contains("/src/gallium/drivers/vc4/")));
+        assert!(hidd
+            .include_dirs
+            .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned()));
+        assert!(hidd.include_dirs.contains(
+            &"${AROS_BUILD_DIR}/gen/workbench/libs/mesa/26.0.0/galliumcoreapi".to_owned()
+        ));
     }
 }
 

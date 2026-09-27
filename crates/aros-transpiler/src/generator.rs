@@ -1326,6 +1326,23 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         writeln!(out).unwrap();
     }
 
+    // Mesa 26's ARM pipe HIDDs import core functions across module
+    // boundaries. Only the audited VC4 declaration enables the single
+    // GalliumCoreAPI provider/consumer graph; the helper validates its exact
+    // source inputs and verified target tools before it creates any output.
+    if graph
+        .targets
+        .get("linklibs-gallium_vc4")
+        .is_some_and(|target| {
+            target
+                .defines
+                .iter()
+                .any(|value| value == "AROS_MESA_MAJOR=26")
+        })
+    {
+        writeln!(out, "aros_build_mesa26_gallium_core_api()\n").unwrap();
+    }
+
     // Python output groups had to register their clean-tree products before
     // source resolution. Their compile consumers exist now, so attach the
     // explicit owner edges without relying on include discovery.
