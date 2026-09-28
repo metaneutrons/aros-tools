@@ -2,10 +2,11 @@
 
 use super::{
     legacy_bundle_build_receipt, publish_staged_directory_noreplace, sha256_file,
-    stage_boot_bundle, stage_fat32_media_plan, validate_boot_bundle, verify_fat32_media_artifact,
-    BundleExpectation, PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST,
-    BOOT_BUNDLE_MANIFEST, BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST,
-    MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
+    stage_boot_bundle, stage_fat32_media_plan, stage_fat32_media_plan_with_gate,
+    validate_boot_bundle, verify_fat32_media_artifact, BundleExpectation, PartitionLayout,
+    UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,
+    BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST, MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME,
+    UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
 };
 use aros_common::media_plan::plan_media_image;
 use std::fmt::Write as _;
@@ -165,6 +166,8 @@ fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&first.manifest_path).unwrap()).unwrap();
     assert_eq!(manifest["kind"], "aros-media-image");
+    assert_eq!(manifest["format_version"], 2);
+    assert!(manifest["build_identity"].is_null());
     assert_eq!(manifest["profile_id"], "rpi4-uboot-usb-ecm");
     assert_eq!(manifest["image"]["sha256"], first.image.sha256());
     assert!(first.artifact_dir.join(ARTIFACT_CHECKSUMS).is_file());
@@ -175,6 +178,14 @@ fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
         MEDIA_RAW_IMAGE_FILENAME
     )));
     assert!(stage_fat32_media_plan(&plan, &first.artifact_dir).is_err());
+    let refused_output = temporary.path().join("refused-by-identity-gate");
+    assert!(
+        stage_fat32_media_plan_with_gate(&plan, &refused_output, || {
+            Err(miette::miette!("source identity changed"))
+        })
+        .is_err()
+    );
+    assert!(!refused_output.exists());
     assert!(first.artifact_dir.join(MEDIA_ARTIFACT_MANIFEST).is_file());
 
     let checksums_path = first.artifact_dir.join(ARTIFACT_CHECKSUMS);

@@ -1,7 +1,10 @@
 //! Process-boundary contracts for the opt-in boot-media image workflow.
 
 use aros_common::media_profile::built_in_media_profiles;
-use aros_common::media_receipt::{MediaBuildFile, MediaBuildReceipt, MediaReceiptOrigin};
+use aros_common::media_receipt::{
+    MediaBuildFile, MediaBuildIdentity, MediaBuildReceipt, MediaReceiptOrigin,
+};
+use aros_common::{sha256_bytes, toolchain_tree_inventory, ArosToolchainManifest, Sha256Digest};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -128,4 +131,130 @@ fn image_build_rejects_changed_inputs_before_any_publication() {
     let diagnostics: Value = serde_json::from_slice(&result.stderr).unwrap();
     assert!(diagnostics.to_string().contains("image.build"));
     assert!(!artifact.exists());
+}
+
+#[allow(clippy::literal_string_with_formatting_args)] // Git's ^{tree} syntax is literal.
+#[test]
+fn image_build_binds_v2_source_and_toolchain_before_publication() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("inputs");
+    let source = temporary.path().join("source");
+    let toolchain = temporary.path().join("toolchain");
+    let artifact = temporary.path().join("artifact");
+    inputs(&root);
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&toolchain).unwrap();
+    let git = |args: &[&str]| {
+        let result = Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    fs::write(source.join("source.txt"), b"source").unwrap();
+    git(&["add", "source.txt"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "source",
+    ]);
+    let source_commit = git(&["rev-parse", "HEAD"]);
+    fs::write(toolchain.join("clang"), b"compiler").unwrap();
+    let (tree_sha256, files) = toolchain_tree_inventory(&toolchain).unwrap();
+    let manifest = ArosToolchainManifest {
+        schema: 1,
+        release_id: "test-1".into(),
+        host: "linux-x86_64".into(),
+        target_profile: "rpi-aarch64".into(),
+        target_triple: "aarch64-unknown-aros".into(),
+        tree_sha256: tree_sha256.clone(),
+        llvm_version: Some("1.2.3".into()),
+        recipe_sha256: "1".repeat(64),
+        source_lock_sha256: "2".repeat(64),
+        profiles_sha256: "3".repeat(64),
+        source_commit: source_commit.clone(),
+        producer_commit: source_commit.clone(),
+        tools_commit: source_commit.clone(),
+        source_date_epoch: 1,
+        capabilities: vec!["compiler".into()],
+        build_environment: serde_json::Map::new(),
+        files,
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(toolchain.join("toolchain-manifest.json"), &manifest_bytes).unwrap();
+    let prior: MediaBuildReceipt =
+        serde_json::from_slice(&fs::read(root.join("receipt.json")).unwrap()).unwrap();
+    let bound = MediaBuildReceipt::new_bound_cmake(
+        prior.target_preset,
+        prior.model,
+        prior.transport,
+        MediaBuildIdentity {
+            source_commit,
+            source_tree: git(&["rev-parse", "HEAD^{tree}"]),
+            toolchain_release_id: manifest.release_id,
+            toolchain_tree_sha256: Sha256Digest::parse(&tree_sha256).unwrap(),
+            toolchain_manifest_sha256: sha256_bytes(&manifest_bytes),
+        },
+        prior.files,
+    )
+    .unwrap();
+    fs::write(
+        root.join("receipt.json"),
+        serde_json::to_vec(&bound).unwrap(),
+    )
+    .unwrap();
+
+    let missing_roots = invoke(&root, &artifact, &["--apply"]);
+    assert!(!missing_roots.status.success());
+    assert!(!artifact.exists());
+    let root_args = [
+        "--source-root",
+        source.to_str().unwrap(),
+        "--toolchain-root",
+        toolchain.to_str().unwrap(),
+    ];
+    let plan = success_json(&invoke(&root, &artifact, &root_args));
+    assert_eq!(
+        plan["build_identity"]["source_commit"],
+        bound.build_identity.as_ref().unwrap().source_commit
+    );
+    assert!(!artifact.exists());
+    fs::write(source.join("source.txt"), b"dirty").unwrap();
+    let changed = invoke(&root, &artifact, &root_args);
+    assert!(!changed.status.success());
+    assert!(!artifact.exists());
+    fs::write(source.join("source.txt"), b"source").unwrap();
+    let mut apply_args = root_args.to_vec();
+    apply_args.push("--apply");
+    let built = success_json(&invoke(&root, &artifact, &apply_args));
+    assert_eq!(
+        built["build_identity"]["source_commit"],
+        bound.build_identity.unwrap().source_commit
+    );
+    let verified = success_json(
+        &Command::new(env!("CARGO_BIN_EXE_aros"))
+            .args([
+                "image",
+                "verify",
+                "--artifact",
+                artifact.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(verified["build_identity"], built["build_identity"]);
 }

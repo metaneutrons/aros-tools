@@ -8,7 +8,8 @@ use crate::media_input_lock::{
 };
 use crate::media_profile::{MediaLayout, ResolvedMediaProfile};
 use crate::media_receipt::{
-    parse_media_build_receipt, verify_media_build_receipt, MediaReceiptError, MediaReceiptOrigin,
+    parse_media_build_receipt, verify_media_build_receipt, MediaBuildIdentity, MediaReceiptError,
+    MediaReceiptOrigin,
 };
 use crate::{sha256_bytes, Sha256Digest};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +48,7 @@ pub struct MediaImagePlan {
     pub profile_sha256: Sha256Digest,
     pub receipt_sha256: Sha256Digest,
     pub receipt_origin: MediaReceiptOrigin,
+    pub build_identity: Option<MediaBuildIdentity>,
     pub target_preset: String,
     pub model: String,
     pub transport: String,
@@ -222,6 +224,7 @@ pub fn plan_media_image(
         profile_sha256: profile.sha256.clone(),
         receipt_sha256: sha256_bytes(receipt_bytes),
         receipt_origin: receipt.origin,
+        build_identity: receipt.build_identity,
         target_preset: profile.profile.target_preset.clone(),
         model: profile.profile.model.clone(),
         transport: profile.profile.transport.clone(),

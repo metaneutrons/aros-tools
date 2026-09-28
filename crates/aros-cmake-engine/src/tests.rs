@@ -258,6 +258,86 @@ add_custom_target(media-receipt
     assert!(graph.contains("-DMODE=verify\" -P \"${_opensbi_receipt_script}"));
 }
 
+#[allow(clippy::literal_string_with_formatting_args)] // Git's ^{tree} syntax is literal.
+#[test]
+fn cmake_media_receipt_binds_clean_git_and_release_toolchain_inputs() {
+    use aros_common::media_receipt::parse_media_build_receipt;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("embedded engine");
+    let source = directory.path().join("source");
+    let toolchain = directory.path().join("toolchain");
+    let payload = directory.path().join("payload");
+    for path in [&source, &toolchain, &payload] {
+        fs::create_dir(path).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let result = Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    fs::write(source.join("source.txt"), b"source").unwrap();
+    git(&["add", "source.txt"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "source",
+    ]);
+    let source_commit = git(&["rev-parse", "HEAD"]);
+    let source_tree = git(&["rev-parse", "HEAD^{tree}"]);
+    let tree_sha256 = "a".repeat(64);
+    let manifest = format!("{{\"release_id\":\"test-1\",\"tree_sha256\":\"{tree_sha256}\"}}");
+    fs::write(toolchain.join("toolchain-manifest.json"), manifest).unwrap();
+    fs::write(payload.join("kernel"), b"kernel bytes").unwrap();
+    let invoke = |mode: &str| {
+        Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", payload.display()))
+            .arg("-DTARGET_PRESET=pc-x86_64")
+            .arg("-DMODEL=pc")
+            .arg("-DTRANSPORT=bios-iso")
+            .arg("-DFILE_SPECS=bootstrap|kernel")
+            .arg(format!("-DSOURCE_DIR={}", source.display()))
+            .arg(format!("-DTOOLCHAIN_ROOT={}", toolchain.display()))
+            .arg(format!("-DMODE={mode}"))
+            .arg("-P")
+            .arg(engine.join("scripts/EmitMediaBuildReceipt.cmake"))
+            .output()
+            .unwrap()
+    };
+    let written = invoke("write");
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let receipt =
+        parse_media_build_receipt(&fs::read(payload.join("media-build-receipt.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt.format_version, 2);
+    let identity = receipt.build_identity.unwrap();
+    assert_eq!(identity.source_commit, source_commit);
+    assert_eq!(identity.source_tree, source_tree);
+    assert_eq!(identity.toolchain_tree_sha256.as_str(), tree_sha256);
+    assert!(invoke("verify").status.success());
+    fs::write(source.join("source.txt"), b"dirty").unwrap();
+    assert!(!invoke("verify").status.success());
+}
+
 #[test]
 fn placement_writes_every_file_and_stamps_it() {
     let directory = tempfile::tempdir().expect("temp dir");

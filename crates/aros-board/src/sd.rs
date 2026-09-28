@@ -491,6 +491,23 @@ pub fn stage_fat32_media_plan(
     plan: &MediaImagePlan,
     output_dir: &Path,
 ) -> Result<StagedMediaImage> {
+    stage_fat32_media_plan_with_gate(plan, output_dir, || Ok(()))
+}
+
+/// Compose a FAT32 artifact and run one caller-supplied identity check after
+/// isolated read-back, immediately before the no-replace publication step.
+///
+/// # Errors
+///
+/// Refuses publication if composition, read-back or the identity gate fails.
+pub fn stage_fat32_media_plan_with_gate<F>(
+    plan: &MediaImagePlan,
+    output_dir: &Path,
+    identity_gate: F,
+) -> Result<StagedMediaImage>
+where
+    F: FnOnce() -> Result<()>,
+{
     let (partition, files) = validate_media_plan_for_fat32(plan)?;
     let destination = resolve_new_output_path(output_dir)?;
     let parent = destination
@@ -516,6 +533,8 @@ pub fn stage_fat32_media_plan(
         image.sha256, MEDIA_RAW_IMAGE_FILENAME, manifest_sha256, MEDIA_ARTIFACT_MANIFEST
     );
     write_new_file(&stage.path().join(ARTIFACT_CHECKSUMS), checksums.as_bytes())?;
+    verify_fat32_media_artifact(stage.path())?;
+    identity_gate()?;
     publish_staged_directory_noreplace(stage.path(), &destination).map_err(|error| {
         miette::miette!(
             "Could not atomically publish staged media artifact '{}': {error}",
