@@ -9,7 +9,9 @@ use super::{
     verify_raw_image, ImageFileExpectation, PartitionLayout, ARTIFACT_CHECKSUMS,
     MEDIA_ARTIFACT_MANIFEST, MEDIA_RAW_IMAGE_FILENAME, MIB, SECTOR_BYTES,
 };
-use aros_common::media_receipt::MediaReceiptOrigin;
+use aros_common::media_receipt::{
+    validate_media_build_identity, MediaBuildIdentity, MediaReceiptOrigin,
+};
 use aros_common::Sha256Digest;
 use aros_common::{casefold_path_key, open_regular_file_nofollow, sha256_bytes, sha256_reader};
 use miette::Result;
@@ -29,6 +31,7 @@ pub struct VerifiedMediaArtifact {
     pub profile_sha256: Sha256Digest,
     pub receipt_sha256: Sha256Digest,
     pub receipt_origin: MediaReceiptOrigin,
+    pub build_identity: Option<MediaBuildIdentity>,
     pub target_preset: String,
     pub external_lock_sha256: BTreeMap<String, Sha256Digest>,
     pub image_sha256: Sha256Digest,
@@ -45,6 +48,8 @@ struct Manifest {
     profile_sha256: Sha256Digest,
     receipt_sha256: Sha256Digest,
     receipt_origin: MediaReceiptOrigin,
+    #[serde(default)]
+    build_identity: Option<MediaBuildIdentity>,
     target_preset: String,
     model: String,
     transport: String,
@@ -177,6 +182,7 @@ pub fn verify_fat32_media_artifact(artifact_dir: &Path) -> Result<VerifiedMediaA
         profile_sha256: manifest.profile_sha256,
         receipt_sha256: manifest.receipt_sha256,
         receipt_origin: manifest.receipt_origin,
+        build_identity: manifest.build_identity,
         target_preset: manifest.target_preset,
         external_lock_sha256: manifest.external_lock_sha256,
         image_sha256: measure.0,
@@ -186,7 +192,7 @@ pub fn verify_fat32_media_artifact(artifact_dir: &Path) -> Result<VerifiedMediaA
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<Vec<ImageFileExpectation>> {
-    if manifest.format_version != 1
+    if !matches!(manifest.format_version, 1 | 2)
         || manifest.kind != "aros-media-image"
         || manifest.medium != "mbr-fat32"
         || manifest.partition.scheme != "mbr"
@@ -194,6 +200,18 @@ fn validate_manifest(manifest: &Manifest) -> Result<Vec<ImageFileExpectation>> {
         || manifest.image.filename != MEDIA_RAW_IMAGE_FILENAME
     {
         miette::bail!("Unsupported media image manifest identity or layout.");
+    }
+    if manifest.format_version == 1 && manifest.build_identity.is_some() {
+        miette::bail!("Historical media manifest cannot claim a build identity.");
+    }
+    if manifest.receipt_origin == MediaReceiptOrigin::LegacyV1 && manifest.build_identity.is_some()
+    {
+        miette::bail!("Legacy media manifest cannot claim a build identity.");
+    }
+    if let Some(identity) = &manifest.build_identity {
+        validate_media_build_identity(identity).map_err(|error| {
+            miette::miette!("Media manifest build identity is invalid: {error}")
+        })?;
     }
     for (value, label) in [
         (&manifest.profile_id, "profile ID"),

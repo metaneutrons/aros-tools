@@ -10,6 +10,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros image build` | profile | --profile | — | required | 1 |  |  | — |  |
 | `aros image build` | build_root | --build-root | — | required | 1 |  |  | — |  |
 | `aros image build` | receipt | --receipt | — | required | 1 |  |  | — |  |
+| `aros image build` | source_root | --source-root | — | optional | 1 |  |  | — |  |
+| `aros image build` | toolchain_root | --toolchain-root | — | optional | 1 |  |  | — |  |
 | `aros image build` | output | --output | — | required | 1 |  |  | — |  |
 | `aros image build` | lock | --lock | — | optional | 1 |  |  | — |  |
 | `aros image build` | external | --external | — | optional | 1 |  |  | — |  |

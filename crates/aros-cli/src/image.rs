@@ -1,8 +1,11 @@
 //! Reviewed boot-media planning, composition and artifact inspection commands.
 
-use aros_board::sd::{stage_fat32_media_plan, verify_fat32_media_artifact, VerifiedMediaArtifact};
+use aros_board::sd::{
+    stage_fat32_media_plan_with_gate, verify_fat32_media_artifact, VerifiedMediaArtifact,
+};
 use aros_common::media_plan::{plan_media_image, MediaExternalFile};
 use aros_common::media_profile::{built_in_media_profiles, MediaLayout};
+use aros_common::media_receipt::{parse_media_build_receipt, verify_media_build_identity};
 use clap::{Args, Subcommand, ValueEnum};
 use miette::Result;
 use std::io::Read;
@@ -35,6 +38,14 @@ pub struct ImageBuildArgs {
     /// Versioned CMake or legacy-adapter build receipt
     #[arg(long, value_name = "FILE")]
     receipt: PathBuf,
+
+    /// Clean source Git checkout required by a bound v2 CMake receipt
+    #[arg(long, value_name = "DIR", requires = "toolchain_root")]
+    source_root: Option<PathBuf>,
+
+    /// Installed release toolchain required by a bound v2 CMake receipt
+    #[arg(long, value_name = "DIR", requires = "source_root")]
+    toolchain_root: Option<PathBuf>,
 
     /// New output artifact directory; an existing path is refused
     #[arg(long, value_name = "DIR")]
@@ -118,6 +129,27 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
         miette::bail!("The selected media profile has no implemented image backend.");
     }
     let receipt = read_regular_bounded(&args.receipt)?;
+    let decoded = parse_media_build_receipt(&receipt)
+        .map_err(|error| miette::miette!("Invalid media build receipt: {error}"))?;
+    match (
+        decoded.build_identity.as_ref(),
+        args.source_root.as_deref(),
+        args.toolchain_root.as_deref(),
+    ) {
+        (Some(_), Some(source), Some(toolchain)) => {
+            verify_media_build_identity(&decoded, source, toolchain)
+                .map_err(|error| miette::miette!("Cannot bind media build identity: {error}"))?;
+        }
+        (Some(_), _, _) => {
+            miette::bail!("Bound media receipt requires --source-root and --toolchain-root.");
+        }
+        (None, None, None) => {}
+        (None, _, _) => {
+            miette::bail!(
+                "Historical v1 media receipt has no source/toolchain identity to verify."
+            );
+        }
+    }
     let mut lock_bytes = Vec::with_capacity(args.lock.len());
     for binding in &args.lock {
         lock_bytes.push((binding.id.as_str(), read_regular_bounded(&binding.path)?));
@@ -154,6 +186,7 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
                     "profile_id": plan.profile_id,
                     "profile_sha256": plan.profile_sha256,
                     "receipt_sha256": plan.receipt_sha256,
+                    "build_identity": plan.build_identity,
                     "target_preset": plan.target_preset,
                     "file_count": plan.files.len(),
                     "payload_size_bytes": plan.total_payload_bytes,
@@ -165,7 +198,15 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let staged = stage_fat32_media_plan(&plan, &args.output)?;
+    let staged = stage_fat32_media_plan_with_gate(&plan, &args.output, || {
+        if let (Some(source), Some(toolchain)) =
+            (args.source_root.as_deref(), args.toolchain_root.as_deref())
+        {
+            verify_media_build_identity(&decoded, source, toolchain)
+                .map_err(|error| miette::miette!("Media build identity changed: {error}"))?;
+        }
+        Ok(())
+    })?;
     let verified = verify_fat32_media_artifact(&staged.artifact_dir)?;
     if verified.profile_sha256 != plan.profile_sha256
         || verified.receipt_sha256 != plan.receipt_sha256
@@ -191,6 +232,7 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
                 "profile_id": verified.profile_id,
                 "profile_sha256": verified.profile_sha256,
                 "receipt_sha256": verified.receipt_sha256,
+                "build_identity": verified.build_identity,
                 "image_sha256": verified.image_sha256,
                 "image_size_bytes": verified.image_size_bytes,
                 "file_count": verified.file_count,
@@ -274,6 +316,7 @@ fn print_json(operation: &str, result: &VerifiedMediaArtifact) -> Result<()> {
         "profile_sha256": result.profile_sha256,
         "receipt_sha256": result.receipt_sha256,
         "receipt_origin": result.receipt_origin,
+        "build_identity": result.build_identity,
         "target_preset": result.target_preset,
         "external_lock_sha256": result.external_lock_sha256,
         "image_sha256": result.image_sha256,
@@ -329,6 +372,8 @@ mod tests {
             profile: profile.id,
             build_root: root.to_path_buf(),
             receipt: receipt_path,
+            source_root: None,
+            toolchain_root: None,
             output: output.to_path_buf(),
             lock: Vec::new(),
             external: Vec::new(),

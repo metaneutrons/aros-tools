@@ -54,6 +54,12 @@ set(_opensbi_receipt_script
     "${AROS_CMAKE_ENGINE_DIR}/scripts/EmitMediaBuildReceipt.cmake")
 set(_opensbi_receipt_specs
     "uefi-loader|EFI/BOOT/BOOTRISCV64.EFI;kernel-image|EFI/AROS/Image;bsp-package|aros-bsp.pkg;command-line|aros.cmd;startup-script|startup.nsh")
+set(_opensbi_origin_args "")
+if(EXISTS "${AROS_CROSS_TOOLCHAIN_ROOT}/toolchain-manifest.json")
+    set(_opensbi_origin_args
+        "-DSOURCE_DIR=${AROS_SOURCE_DIR}"
+        "-DTOOLCHAIN_ROOT=${AROS_CROSS_TOOLCHAIN_ROOT}")
+endif()
 
 function(_aros_opensbi_unavailable target reason)
     add_custom_target(${target}
@@ -198,6 +204,7 @@ add_custom_command(
             "-DMODEL=${AROS_OPENSBI_MODEL}"
             "-DTRANSPORT=uefi-esp"
             "-DFILE_SPECS=${_opensbi_receipt_specs}"
+            ${_opensbi_origin_args}
             "-DMODE=write" -P "${_opensbi_receipt_script}"
     COMMAND "${CMAKE_COMMAND}" -E touch "${_opensbi_stamp}"
     DEPENDS "${_opensbi_image}" "${_opensbi_bsp}" "${_opensbi_command_line}"
@@ -216,6 +223,7 @@ add_custom_target(opensbi-uefi-verify
             "-DMODEL=${AROS_OPENSBI_MODEL}"
             "-DTRANSPORT=uefi-esp"
             "-DFILE_SPECS=${_opensbi_receipt_specs}"
+            ${_opensbi_origin_args}
             "-DMODE=verify" -P "${_opensbi_receipt_script}"
     DEPENDS opensbi-uefi-artifacts VERBATIM)
 

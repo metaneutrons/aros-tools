@@ -138,7 +138,7 @@ pub(super) fn render_media_manifest(
         })
         .collect();
     let document = serde_json::json!({
-        "format_version": 1,
+        "format_version": 2,
         "kind": "aros-media-image",
         "profile_id": plan.profile_id,
         "profile_sha256": plan.profile_sha256,
@@ -147,6 +147,7 @@ pub(super) fn render_media_manifest(
             MediaReceiptOrigin::Cmake => "cmake",
             MediaReceiptOrigin::LegacyV1 => "legacy-v1",
         },
+        "build_identity": plan.build_identity,
         "target_preset": plan.target_preset,
         "model": plan.model,
         "transport": plan.transport,

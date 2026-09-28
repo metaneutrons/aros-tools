@@ -1,18 +1,25 @@
 //! Closed contract for source-dependent media inputs.
 //!
 //! A CMake target can report built files; a verified legacy v1 boot bundle can
-//! only report its measured inputs. These origins must not be conflated. This
-//! receipt is an input to a future composer, not proof that a medium boots or
-//! that legacy bytes came from a specific build. The composer must separately
-//! bind source, toolchain, reviewed profile and locked external inputs.
+//! only report its measured inputs. These origins must not be conflated. A
+//! bound v2 CMake receipt records source and release-toolchain identities for
+//! independent remeasurement. A v1 receipt remains an explicitly weaker input,
+//! not proof that legacy bytes came from a specific build. Neither version
+//! proves that a medium boots or authenticates its producing repository.
 
 use crate::media_profile::{valid_target_preset, MediaProfile};
-use crate::{casefold_path_key, open_regular_file_nofollow, sha256_reader, Sha256Digest};
+use crate::{
+    casefold_path_key, open_regular_file_nofollow, sha256_reader, toolchain_tree_inventory,
+    ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const FORMAT_VERSION: u32 = 1;
+const BOUND_FORMAT_VERSION: u32 = 2;
 const KIND: &str = "aros-media-inputs";
 const MAX_RECEIPT_BYTES: usize = 1024 * 1024;
 const MAX_FILES: usize = 1024;
@@ -36,6 +43,18 @@ pub enum MediaReceiptOrigin {
     LegacyV1,
 }
 
+/// Measured source and installed release-toolchain identity. This binds
+/// content to a checkout and toolchain, but is not a cryptographic attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaBuildIdentity {
+    pub source_commit: String,
+    pub source_tree: String,
+    pub toolchain_release_id: String,
+    pub toolchain_tree_sha256: Sha256Digest,
+    pub toolchain_manifest_sha256: Sha256Digest,
+}
+
 /// Versioned media input inventory, intentionally excluding final media identity.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +67,9 @@ pub struct MediaBuildReceipt {
     pub target_preset: String,
     pub model: String,
     pub transport: String,
+    /// Absent only in the explicitly weaker historical v1 receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<MediaBuildIdentity>,
     pub files: Vec<MediaBuildFile>,
 }
 
@@ -72,6 +94,33 @@ impl MediaBuildReceipt {
             target_preset,
             model,
             transport,
+            build_identity: None,
+            files,
+        };
+        validate_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Construct a source/toolchain-bound CMake receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an incomplete identity or invalid inventory.
+    pub fn new_bound_cmake(
+        target_preset: String,
+        model: String,
+        transport: String,
+        identity: MediaBuildIdentity,
+        files: Vec<MediaBuildFile>,
+    ) -> Result<Self, MediaReceiptError> {
+        let receipt = Self {
+            format_version: BOUND_FORMAT_VERSION,
+            kind: KIND.to_string(),
+            origin: MediaReceiptOrigin::Cmake,
+            target_preset,
+            model,
+            transport,
+            build_identity: Some(identity),
             files,
         };
         validate_receipt(&receipt)?;
@@ -168,6 +217,89 @@ pub fn verify_media_build_receipt(
     Ok(())
 }
 
+/// Re-derive a bound receipt's origin.
+///
+/// Check the selected clean Git source and installed release toolchain.
+/// Historical v1 receipts cannot pass and must be labelled unverified.
+///
+/// # Errors
+///
+/// Rejects a dirty or different checkout, a changed manifest, or a changed
+/// toolchain payload. This does not authenticate the repository or its owner.
+pub fn verify_media_build_identity(
+    receipt: &MediaBuildReceipt,
+    source_root: &Path,
+    toolchain_root: &Path,
+) -> Result<(), MediaReceiptError> {
+    validate_receipt(receipt)?;
+    let identity = receipt
+        .build_identity
+        .as_ref()
+        .ok_or_else(|| invalid("historical v1 receipt has no source/toolchain binding"))?;
+    let selected_root = source_root.canonicalize()?;
+    let git_root = git_value(source_root, &["rev-parse", "--show-toplevel"])?;
+    if Path::new(&git_root).canonicalize()? != selected_root {
+        return Err(invalid("source root is not the Git checkout root"));
+    }
+    let source_commit = git_value(source_root, &["rev-parse", "--verify", "HEAD"])?;
+    let source_tree = git_value(source_root, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+    let changes = git_value(
+        source_root,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?;
+    if !changes.is_empty() {
+        return Err(invalid("source checkout is dirty"));
+    }
+    if source_commit != identity.source_commit || source_tree != identity.source_tree {
+        return Err(invalid(
+            "source Git identity differs from the media receipt",
+        ));
+    }
+    let manifest_path = toolchain_root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
+    let file = open_regular_file_nofollow(&manifest_path)?;
+    let mut manifest_bytes = Vec::new();
+    file.take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut manifest_bytes)?;
+    if manifest_bytes.len() > 4 * 1024 * 1024 {
+        return Err(invalid("toolchain manifest exceeds four megabytes"));
+    }
+    if crate::sha256_bytes(&manifest_bytes) != identity.toolchain_manifest_sha256 {
+        return Err(invalid("toolchain manifest differs from the media receipt"));
+    }
+    let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| invalid(&format!("invalid installed toolchain manifest: {error}")))?;
+    manifest
+        .validate()
+        .map_err(|error| invalid(&format!("invalid installed toolchain manifest: {error}")))?;
+    if manifest.release_id != identity.toolchain_release_id
+        || manifest.tree_sha256 != identity.toolchain_tree_sha256.as_str()
+    {
+        return Err(invalid("toolchain identity differs from the media receipt"));
+    }
+    let (tree_sha256, inventory) = toolchain_tree_inventory(toolchain_root)
+        .map_err(|error| invalid(&format!("cannot measure installed toolchain: {error}")))?;
+    if tree_sha256 != manifest.tree_sha256 || inventory != manifest.files {
+        return Err(invalid(
+            "installed toolchain payload differs from its manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn git_value(root: &Path, args: &[&str]) -> Result<String, MediaReceiptError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(invalid("cannot verify source Git checkout"));
+    }
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| invalid("source Git output is not UTF-8"))?;
+    Ok(value.trim().to_string())
+}
+
 fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError> {
     let encoded_size = serde_json::to_vec(receipt)
         .map_err(|_| invalid("receipt cannot be serialized"))?
@@ -175,8 +307,27 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
     if encoded_size > MAX_RECEIPT_BYTES {
         return Err(invalid("receipt exceeds its one-megabyte limit"));
     }
-    if receipt.format_version != FORMAT_VERSION || receipt.kind != KIND {
+    if !matches!(
+        receipt.format_version,
+        FORMAT_VERSION | BOUND_FORMAT_VERSION
+    ) || receipt.kind != KIND
+    {
         return Err(invalid("unsupported format_version or kind"));
+    }
+    match (
+        receipt.format_version,
+        receipt.origin,
+        &receipt.build_identity,
+    ) {
+        (FORMAT_VERSION, _, None) => {}
+        (BOUND_FORMAT_VERSION, MediaReceiptOrigin::Cmake, Some(identity)) => {
+            validate_media_build_identity(identity)?;
+        }
+        _ => {
+            return Err(invalid(
+                "receipt version, origin and build identity disagree",
+            ))
+        }
     }
     if !valid_target_preset(&receipt.target_preset) {
         return Err(invalid("target_preset must be a portable target name"));
@@ -219,6 +370,39 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
     Ok(())
 }
 
+/// Validate the syntax of one bound identity without claiming independent
+/// origin authentication. Use [`verify_media_build_identity`] for remeasurement.
+///
+/// # Errors
+///
+/// Rejects malformed Git IDs or release identity.
+pub fn validate_media_build_identity(
+    identity: &MediaBuildIdentity,
+) -> Result<(), MediaReceiptError> {
+    for (label, value) in [
+        ("source_commit", identity.source_commit.as_str()),
+        ("source_tree", identity.source_tree.as_str()),
+    ] {
+        if value.len() != 40
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid(&format!(
+                "{label} must be a lowercase Git object ID"
+            )));
+        }
+    }
+    if identity.toolchain_release_id.is_empty()
+        || identity.toolchain_release_id.len() > 128
+        || identity.toolchain_release_id.trim() != identity.toolchain_release_id
+        || identity.toolchain_release_id.chars().any(char::is_control)
+    {
+        return Err(invalid("toolchain_release_id is invalid"));
+    }
+    Ok(())
+}
+
 fn valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value.starts_with(|character: char| {
@@ -236,12 +420,13 @@ fn invalid(message: &str) -> MediaReceiptError {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_media_build_receipt, verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt,
-        MediaReceiptOrigin, KIND,
+        parse_media_build_receipt, verify_media_build_identity, verify_media_build_receipt,
+        MediaBuildFile, MediaBuildIdentity, MediaBuildReceipt, MediaReceiptOrigin, KIND,
     };
     use crate::media_profile::{built_in_media_profiles, parse_media_profile};
-    use crate::sha256_bytes;
+    use crate::{sha256_bytes, toolchain_tree_inventory, ArosToolchainManifest, Sha256Digest};
     use std::fs;
+    use std::process::Command;
 
     fn fixture() -> (tempfile::TempDir, Vec<u8>) {
         let root = tempfile::tempdir().expect("build root");
@@ -251,6 +436,103 @@ mod tests {
             r#"{{"format_version":1,"kind":"{KIND}","origin":"cmake","target_preset":"opensbi-riscv64","model":"milk-v-titan","transport":"uefi-esp","files":[{{"role":"uefi-loader","path":"loader.efi","sha256":"{digest}","size_bytes":12}}]}}"#
         );
         (root, receipt.into_bytes())
+    }
+
+    #[allow(clippy::literal_string_with_formatting_args)] // Git's ^{tree} syntax is literal.
+    #[test]
+    fn bound_receipt_rechecks_clean_source_and_complete_toolchain_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let toolchain = temp.path().join("toolchain");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&toolchain).unwrap();
+        let git = |args: &[&str]| {
+            let result = Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            String::from_utf8(result.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        fs::write(source.join("tracked.txt"), b"source").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "source",
+        ]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        let tree_ref = "HEAD^{tree}";
+        let tree = git(&["rev-parse", tree_ref]);
+
+        fs::write(toolchain.join("clang"), b"compiler bytes").unwrap();
+        let (tree_sha256, inventory) = toolchain_tree_inventory(&toolchain).unwrap();
+        let manifest = ArosToolchainManifest {
+            schema: 1,
+            release_id: "test-1".into(),
+            host: "linux-x86_64".into(),
+            target_profile: "pc-x86_64".into(),
+            target_triple: "x86_64-unknown-aros".into(),
+            tree_sha256: tree_sha256.clone(),
+            llvm_version: Some("1.2.3".into()),
+            recipe_sha256: "1".repeat(64),
+            source_lock_sha256: "2".repeat(64),
+            profiles_sha256: "3".repeat(64),
+            source_commit: commit.clone(),
+            producer_commit: commit.clone(),
+            tools_commit: commit.clone(),
+            source_date_epoch: 1,
+            capabilities: vec!["compiler".into()],
+            build_environment: serde_json::Map::new(),
+            files: inventory,
+        };
+        manifest.validate().unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(toolchain.join("toolchain-manifest.json"), &manifest_bytes).unwrap();
+        let identity = MediaBuildIdentity {
+            source_commit: commit,
+            source_tree: tree,
+            toolchain_release_id: manifest.release_id,
+            toolchain_tree_sha256: Sha256Digest::parse(&tree_sha256).unwrap(),
+            toolchain_manifest_sha256: sha256_bytes(&manifest_bytes),
+        };
+        let receipt = MediaBuildReceipt::new_bound_cmake(
+            "pc-x86_64".into(),
+            "pc".into(),
+            "bios-iso".into(),
+            identity,
+            vec![MediaBuildFile {
+                role: "bootstrap".into(),
+                path: "tracked.txt".into(),
+                sha256: sha256_bytes(b"source").to_string(),
+                size_bytes: 6,
+            }],
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        let decoded = parse_media_build_receipt(&bytes).unwrap();
+        verify_media_build_identity(&decoded, &source, &toolchain).unwrap();
+
+        let mut altered = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        altered["build_identity"]["source_commit"] = serde_json::json!("0".repeat(40));
+        let wrong = parse_media_build_receipt(&serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(verify_media_build_identity(&wrong, &source, &toolchain).is_err());
+        fs::write(source.join("tracked.txt"), b"changed").unwrap();
+        assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
+        fs::write(source.join("tracked.txt"), b"source").unwrap();
+        fs::write(toolchain.join("clang"), b"changed compiler").unwrap();
+        assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
     }
 
     #[test]

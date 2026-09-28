@@ -161,9 +161,14 @@ It selects an exact ID from the built-in reviewed registry and requires a
 versioned CMake or legacy build receipt. Where the profile declares external
 inputs, pass each reviewed lock as `--lock ID=FILE` and each local file as
 `--external LOCK_ID:FILE_ID=PATH`. The planner verifies the locks and remeasures
-every input; `--apply` composes and independently verifies a new artifact.
-None of these commands writes a device or establishes source provenance or a
-successful board boot. ISO composition is not yet available. `aros board sd
+every input. A bound v2 CMake receipt additionally requires `--source-root DIR`
+and `--toolchain-root DIR`: the CLI rechecks the clean Git commit/tree, release
+manifest and complete installed toolchain inventory before publication. A v1
+receipt remains supported but has no source/toolchain binding and cannot be
+upgraded by merely passing these flags. `--apply` composes and independently
+verifies a new artifact. The manifest distinguishes these origin states;
+neither is an authenticated attestation or a successful board boot. No image
+command writes a device. ISO composition is not yet available. `aros board sd
 image` retains its existing v1 bundle behavior.
 
 ## Source and repository
