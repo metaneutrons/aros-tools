@@ -173,10 +173,12 @@ fn validate_origin_url(value: &str) -> Result<(), MediaInputLockError> {
         || url.query().is_some()
         || url.fragment().is_some()
         || url.port().is_some_and(|port| port != 443)
+        || !host.contains('.')
+        || host.ends_with('.')
         || matches!(domain_suffix, "localhost" | "local" | "internal")
         || url.path() == "/"
     {
-        return Err(invalid("origin_url is not an allowed public HTTPS URL"));
+        return Err(invalid("origin_url is not an allowed HTTPS DNS URL"));
     }
     Ok(())
 }
@@ -244,6 +246,12 @@ mod tests {
                 .as_bytes()
         )
         .is_err());
+        for host in ["localhost", "localhost.", "firmware.local", "intranet"] {
+            assert!(
+                parse_media_input_lock(text.replace("downloads.example.com", host).as_bytes())
+                    .is_err()
+            );
+        }
         let entry = text.split("[[files]]").nth(1).expect("file entry");
         let duplicate = format!("{text}\n[[files]]{entry}");
         assert!(parse_media_input_lock(duplicate.as_bytes()).is_err());
