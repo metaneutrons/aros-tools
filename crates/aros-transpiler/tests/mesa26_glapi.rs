@@ -135,6 +135,20 @@ fn mesa26_v3d_has_closed_aarch64_driver_and_generators() {
         .iter()
         .find(|candidate| candidate.mmake_name == "hidd-v3d")
         .expect("V3D HIDD module");
+    let device_tree_source = std::fs::read_to_string(
+        root.join("arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src"),
+    )
+    .unwrap()
+    .lines()
+    .any(|line| line.trim() == "v3d_dt \\");
+    assert_eq!(
+        hidd.source_files
+            .iter()
+            .any(|source| source.ends_with("v3d_dt")),
+        device_tree_source,
+        "the HIDD must follow the admitted recipe variant: {:?}",
+        hidd.source_files
+    );
     assert!(hidd
         .include_dirs
         .contains(&"${AROS_PORTS_DIR}/mesa/mesa-26.0.0/src/gallium/include".to_owned()));
