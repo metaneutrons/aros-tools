@@ -131,6 +131,15 @@ pub fn verify_media_build_receipt(
         .map(|file| file.role.as_str())
         .collect();
     for required in &profile.required_files {
+        if receipt.origin == MediaReceiptOrigin::Cmake && required.external_input.is_some() {
+            if actual_roles.contains(required.role.as_str()) {
+                return Err(invalid(&format!(
+                    "CMake receipt must not claim external role '{}'",
+                    required.role
+                )));
+            }
+            continue;
+        }
         if !actual_roles.contains(required.role.as_str()) {
             return Err(invalid(&format!(
                 "missing required build role '{}'",
@@ -230,7 +239,7 @@ mod tests {
         parse_media_build_receipt, verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt,
         MediaReceiptOrigin, KIND,
     };
-    use crate::media_profile::built_in_media_profiles;
+    use crate::media_profile::{built_in_media_profiles, parse_media_profile};
     use crate::sha256_bytes;
     use std::fs;
 
@@ -325,6 +334,76 @@ mod tests {
         verify_media_build_receipt(root.path(), &receipt, &one_role).expect("measured file");
         fs::write(root.path().join("loader.efi"), b"changed bytes").expect("tamper");
         assert!(verify_media_build_receipt(root.path(), &receipt, &one_role).is_err());
+    }
+
+    #[test]
+    fn cmake_receipt_only_claims_built_roles_and_legacy_inventory_stays_compatible() {
+        let profile = format!(
+            r#"format_version = 1
+id = "test-native-sd"
+target_preset = "rpi-aarch64"
+model = "rpi5"
+transport = "native-sd"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware"
+label = "Test only"
+
+[[external_locks]]
+id = "firmware-test"
+sha256 = "{}"
+
+[[required_files]]
+role = "kernel-image"
+destination = "kernel8.img"
+
+[[required_files]]
+role = "firmware-start"
+destination = "start4.elf"
+external_input = {{ lock_id = "firmware-test", file_id = "firmware-start" }}
+"#,
+            "0".repeat(64)
+        );
+        let profile = parse_media_profile("test", &profile).expect("profile");
+        let root = tempfile::tempdir().expect("root");
+        fs::write(root.path().join("kernel8.img"), b"kernel").expect("kernel");
+        fs::write(root.path().join("start4.elf"), b"firmware").expect("firmware");
+        let built = MediaBuildFile {
+            role: "kernel-image".to_string(),
+            path: "kernel8.img".to_string(),
+            sha256: sha256_bytes(b"kernel").to_string(),
+            size_bytes: 6,
+        };
+        let external = MediaBuildFile {
+            role: "firmware-start".to_string(),
+            path: "start4.elf".to_string(),
+            sha256: sha256_bytes(b"firmware").to_string(),
+            size_bytes: 8,
+        };
+        let cmake = MediaBuildReceipt::new(
+            MediaReceiptOrigin::Cmake,
+            "rpi-aarch64".to_string(),
+            "rpi5".to_string(),
+            "native-sd".to_string(),
+            vec![built.clone()],
+        )
+        .expect("CMake receipt");
+        verify_media_build_receipt(root.path(), &cmake, &profile.profile)
+            .expect("CMake only claims built files");
+
+        let mut false_claim = cmake;
+        false_claim.files.push(external.clone());
+        assert!(verify_media_build_receipt(root.path(), &false_claim, &profile.profile).is_err());
+
+        let legacy = MediaBuildReceipt::new(
+            MediaReceiptOrigin::LegacyV1,
+            "rpi-aarch64".to_string(),
+            "rpi5".to_string(),
+            "native-sd".to_string(),
+            vec![built, external],
+        )
+        .expect("legacy inventory");
+        verify_media_build_receipt(root.path(), &legacy, &profile.profile)
+            .expect("legacy input measurement remains supported");
     }
 
     #[cfg(unix)]

@@ -4,7 +4,7 @@
 //! redistribute, license-check or authenticate upstream hosting. A caller must
 //! bind the raw lock digest to a reviewed media profile before using any file.
 
-use crate::media_profile::valid_slug;
+use crate::media_profile::{valid_slug, ResolvedMediaProfile};
 use crate::{open_regular_file_nofollow, sha256_bytes, sha256_reader, Sha256Digest};
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -99,6 +99,55 @@ pub fn bind_media_input_lock(
     Ok(resolved)
 }
 
+/// Resolve the complete lock set required by one reviewed profile.
+///
+/// This checks raw lock digests and every external role's file identity. It
+/// does not fetch or qualify those files; callers must separately remeasure
+/// each locked regular file before composition.
+///
+/// # Errors
+///
+/// Returns an error for missing, extra, duplicate, changed or incomplete locks.
+pub fn bind_profile_media_input_locks(
+    profile: &ResolvedMediaProfile,
+    supplied: &[(&str, &[u8])],
+) -> Result<Vec<ResolvedMediaInputLock>, MediaInputLockError> {
+    if supplied.len() != profile.profile.external_locks.len() {
+        return Err(invalid("supplied lock set differs from the profile pins"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(supplied.len());
+    for (id, bytes) in supplied {
+        if !seen.insert(*id) {
+            return Err(invalid("duplicate supplied lock ID"));
+        }
+        let pin = profile
+            .profile
+            .external_locks
+            .iter()
+            .find(|pin| pin.id == *id)
+            .ok_or_else(|| invalid("supplied lock is not pinned by the profile"))?;
+        resolved.push(bind_media_input_lock(&pin.id, &pin.sha256, bytes)?);
+    }
+    for file in &profile.profile.required_files {
+        if let Some(external) = &file.external_input {
+            let lock = resolved
+                .iter()
+                .find(|lock| lock.lock.id == external.lock_id)
+                .ok_or_else(|| invalid("external role references a missing lock"))?;
+            if !lock
+                .lock
+                .files
+                .iter()
+                .any(|input| input.id == external.file_id)
+            {
+                return Err(invalid("external role references a missing locked file"));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// Measure one local regular file against a selected, already-bound entry.
 ///
 /// The caller still owns source and destination containment. This read-only
@@ -189,7 +238,11 @@ fn invalid(message: &str) -> MediaInputLockError {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_media_input_lock, parse_media_input_lock, verify_media_locked_input};
+    use super::{
+        bind_media_input_lock, bind_profile_media_input_locks, parse_media_input_lock,
+        verify_media_locked_input,
+    };
+    use crate::media_profile::parse_media_profile;
     use crate::sha256_bytes;
     use std::fs;
 
@@ -212,6 +265,59 @@ mod tests {
         verify_media_locked_input(&file, &lock.lock.files[0]).expect("verified bytes");
         fs::write(&file, b"changed bytes!").expect("tamper");
         assert!(verify_media_locked_input(&file, &lock.lock.files[0]).is_err());
+    }
+
+    #[test]
+    fn binds_a_profile_to_the_complete_exact_external_file_set() {
+        let lock = fixture();
+        let profile = format!(
+            r#"format_version = 1
+id = "test-native-sd"
+target_preset = "rpi-aarch64"
+model = "rpi5"
+transport = "native-sd"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware"
+label = "Test only"
+
+[[external_locks]]
+id = "firmware-test"
+sha256 = "{}"
+
+[[required_files]]
+role = "kernel-image"
+destination = "kernel8.img"
+
+[[required_files]]
+role = "firmware-start"
+destination = "start4.elf"
+external_input = {{ lock_id = "firmware-test", file_id = "firmware-start" }}
+"#,
+            sha256_bytes(&lock)
+        );
+        let resolved = parse_media_profile("test", &profile).expect("profile");
+        let bound = bind_profile_media_input_locks(&resolved, &[("firmware-test", &lock)])
+            .expect("complete exact lock");
+        assert_eq!(bound.len(), 1);
+        assert!(bind_profile_media_input_locks(&resolved, &[]).is_err());
+        assert!(bind_profile_media_input_locks(&resolved, &[("wrong", &lock)]).is_err());
+        assert!(
+            bind_profile_media_input_locks(&resolved, &[("firmware-test", b"changed")]).is_err()
+        );
+        assert!(bind_profile_media_input_locks(
+            &resolved,
+            &[("firmware-test", &lock), ("firmware-test", &lock)]
+        )
+        .is_err());
+
+        let bad_file = profile.replace("file_id = \"firmware-start\"", "file_id = \"missing\"");
+        let parsed = parse_media_profile("test", &bad_file).expect("syntactically valid profile");
+        assert!(bind_profile_media_input_locks(&parsed, &[("firmware-test", &lock)]).is_err());
+        let orphan = profile.replace(
+            "external_input = { lock_id = \"firmware-test\", file_id = \"firmware-start\" }",
+            "",
+        );
+        assert!(parse_media_profile("test", &orphan).is_err());
     }
 
     #[test]

@@ -37,5 +37,12 @@ credential-free HTTPS DNS origins, source-revision labels and declared license
 IDs. Its raw bytes must match a reviewed lock ID and digest before any file is
 used. This contract does not fetch firmware or make a license or
 boot-qualification claim.
+Profiles can pin an external lock by exact ID and raw-byte SHA-256 and bind a
+required file role to one locked file ID. Every referenced lock must be pinned,
+every pin must be used, and the supplied lock set must match exactly. A CMake
+receipt then reports only build-produced roles; it cannot claim an external
+file as its output. The legacy-v1 receipt still measures all bundled roles,
+but does not independently establish their origin. These bindings are an
+internal contract slice, not a registered native-SD profile or media composer.
 The current Pi 4 reference firmware lock still lacks per-file hashes and is
 not accepted as a complete automated media input lock.
