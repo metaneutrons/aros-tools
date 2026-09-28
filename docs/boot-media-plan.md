@@ -1,6 +1,6 @@
 # Boot media initiative plan
 
-Epic: pending issue creation
+Epic: https://github.com/metaneutrons/aros-tools/issues/273
 Decision state: proposed for review; Fabian authorized planning and implementation on 2026-09-28.
 
 ## Outcome and boundaries
@@ -70,7 +70,7 @@ requiring exact device selection and explicit confirmation.
 
 ### BM1: Versioned media and artifact contracts
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/274
 Dependencies: none
 
 - BM1-A1: A closed, versioned media-profile schema and built-artifact receipt
@@ -90,7 +90,7 @@ Dependencies: none
 
 ### BM2: Generic media composition and verification
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/275
 Dependencies: BM1
 
 - BM2-A1: One planner validates the build receipt, selected profile and
@@ -109,7 +109,7 @@ Dependencies: BM1
 
 ### BM3: PC BIOS ISO from a native CMake build
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/276
 Dependencies: BM1, BM2
 
 - BM3-A1: A fresh supported host builds the required PC SYS modules, GRUB
@@ -123,7 +123,7 @@ Dependencies: BM1, BM2
 
 ### BM4: Native Raspberry Pi SD media
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/277
 Dependencies: BM1, BM2
 
 - BM4-A1: Pi 3, Pi 4 and Pi 5 CMake builds produce their required AROS
@@ -140,7 +140,7 @@ Dependencies: BM1, BM2
 
 ### BM5: Milk-V Titan OpenSBI/UEFI SD media
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/278
 Dependencies: BM1, BM2, a qualified RISC-V compiler/toolchain input
 
 - BM5-A1: A fresh CMake build produces its OpenSBI core, BSP and five UEFI
@@ -156,7 +156,7 @@ Dependencies: BM1, BM2, a qualified RISC-V compiler/toolchain input
 
 ### BM6: User documentation and qualification policy
 
-Execution: pending issue creation
+Execution: https://github.com/metaneutrons/aros-tools/issues/279
 Dependencies: BM3, BM4, BM5
 
 - BM6-A1: Astro documents tested build, inspect, verify and guarded write
