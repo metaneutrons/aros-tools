@@ -6,8 +6,9 @@ the compiler target; `boards.toml` supplies a local board identity and guarded
 device settings. A media profile binds a stable model and transport to required
 file roles and destinations.
 
-The current registry contains only the existing Pi 4 U-Boot USB-ECM and
-Milk-V Titan UEFI bundle layouts. It does not yet describe native Pi SD media
+The current registry contains only `rpi4-uboot-usb-ecm` and
+`milk-v-titan-uefi`, the existing Pi 4 U-Boot USB-ECM and Milk-V Titan UEFI
+bundle layouts. It does not yet describe native Pi SD media
 or the PC ISO, and it does not imply that either board has passed a physical
 boot qualification. The SD bundle validator loads these contracts from the
 binary's reviewed source revision; changing a profile requires a new tools
@@ -37,8 +38,9 @@ unsafe paths, symlinks, missing required roles and altered bytes. An adapter
 can derive this receipt from an already validated `boot-bundle.toml` v1
 without changing that public bundle format.
 The Titan CMake staging target emits and verifies a measured build receipt.
-No general `aros image` command consumes it yet; neither profile selection nor
-receipt validation is boot evidence.
+`aros image build` consumes an exact receipt and reviewed profile; its default
+is a non-mutating plan and `--apply` creates a new image artifact. Neither
+profile selection nor receipt validation is boot evidence.
 
 The internal external-input lock contract records exact file sizes, SHA-256,
 credential-free HTTPS DNS origins, source-revision labels and declared license
@@ -58,8 +60,9 @@ image output exists. Its file paths remain point-in-time observations. The
 internal MBR/FAT32 backend remeasures during copying, checks filesystem
 capacity, reads back the image, and publishes without replacing an existing
 directory. Its independent artifact verifier checks the exact file inventory,
-checksums, MBR, FAT32 tree and payload hashes without the source tree. This is
-self-consistency evidence, not authenticated origin or a boot test. ISO and
-the public `aros image` command remain unimplemented.
+checksums, MBR, FAT32 tree and payload hashes without the source tree. The
+public `aros image inspect` and `aros image verify` commands use that verifier.
+This is self-consistency evidence, not authenticated origin or a boot test.
+The ISO backend and native Pi media profiles remain unimplemented.
 The current Pi 4 reference firmware lock still lacks per-file hashes and is
 not accepted as a complete automated media input lock.
