@@ -348,6 +348,12 @@ medium = "mbr-fat32"
 boot_protocol = "pi-firmware"
 label = "Test only"
 
+[layout]
+kind = "mbr-fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+
 [[external_locks]]
 id = "firmware-test"
 sha256 = "{}"

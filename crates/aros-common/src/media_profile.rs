@@ -47,6 +47,21 @@ pub struct MediaExternalLockPin {
     pub sha256: String,
 }
 
+/// Closed, format-specific media geometry. This never selects a host device.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum MediaLayout {
+    MbrFat32 {
+        start_lba: u64,
+        size_bytes: u64,
+        label: String,
+    },
+    Iso9660ElTorito {
+        volume_id: String,
+        boot_image_role: String,
+    },
+}
+
 /// A portable medium layout, distinct from a target preset or local board.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +74,7 @@ pub struct MediaProfile {
     pub medium: String,
     pub boot_protocol: String,
     pub label: String,
+    pub layout: MediaLayout,
     #[serde(default)]
     pub external_locks: Vec<MediaExternalLockPin>,
     pub required_files: Vec<RequiredMediaFile>,
@@ -202,6 +218,63 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
     if profile.label.trim().is_empty() || profile.label.chars().any(char::is_control) {
         return Err(invalid(source, "label must be printable and nonempty"));
     }
+    match (&profile.layout, profile.medium.as_str()) {
+        (
+            MediaLayout::MbrFat32 {
+                start_lba,
+                size_bytes,
+                label,
+            },
+            "mbr-fat32",
+        ) => {
+            if *start_lba < 2048
+                || !start_lba.is_multiple_of(2048)
+                || *size_bytes < 64 * 1024 * 1024
+                || !size_bytes.is_multiple_of(512)
+                || u32::try_from(*start_lba).is_err()
+                || u32::try_from(size_bytes / 512).is_err()
+                || start_lba
+                    .checked_add(size_bytes / 512)
+                    .is_none_or(|end| end > u64::from(u32::MAX) + 1)
+                || start_lba
+                    .checked_mul(512)
+                    .and_then(|start| start.checked_add(*size_bytes))
+                    .is_none()
+                || label.is_empty()
+                || label.len() > 11
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return Err(invalid(
+                    source,
+                    "invalid MBR/FAT32 partition geometry or label",
+                ));
+            }
+        }
+        (
+            MediaLayout::Iso9660ElTorito {
+                volume_id,
+                boot_image_role,
+            },
+            "iso9660-el-torito",
+        ) => {
+            if volume_id.is_empty()
+                || volume_id.len() > 32
+                || !volume_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+                || !valid_slug(boot_image_role)
+                || !profile
+                    .required_files
+                    .iter()
+                    .any(|file| file.role == *boot_image_role)
+            {
+                return Err(invalid(source, "invalid ISO volume ID or El Torito role"));
+            }
+        }
+        _ => return Err(invalid(source, "medium and layout kind disagree")),
+    }
     if profile.required_files.is_empty() {
         return Err(invalid(source, "required_files must not be empty"));
     }
@@ -249,6 +322,18 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
                     "external input is mapped to multiple roles",
                 ));
             }
+        }
+    }
+    for destination in &destinations {
+        let mut parent = destination.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            if destinations.contains(prefix) {
+                return Err(invalid(
+                    source,
+                    &format!("file destination '{prefix}' is a parent of another file"),
+                ));
+            }
+            parent = prefix;
         }
     }
     let mut pinned_locks = BTreeSet::new();
@@ -310,7 +395,8 @@ fn invalid(file: &str, message: &str) -> ArosError {
 #[cfg(test)]
 mod tests {
     use super::{
-        built_in_media_profiles, parse_media_profile, select_media_profile, BUILT_IN_PROFILES,
+        built_in_media_profiles, parse_media_profile, select_media_profile, MediaLayout,
+        BUILT_IN_PROFILES,
     };
 
     #[test]
@@ -322,6 +408,16 @@ mod tests {
             .iter()
             .any(|entry| entry.profile.model == "milk-v-titan"));
         assert_ne!(profiles[0].sha256, profiles[1].sha256);
+        for profile in profiles {
+            assert!(matches!(
+                profile.profile.layout,
+                MediaLayout::MbrFat32 {
+                    start_lba: 2048,
+                    size_bytes: 67_108_864,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -428,6 +524,41 @@ mod tests {
                 select_media_profile(&[selected], None, "wrong-target", Some(model), None,)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn layout_schema_rejects_mismatched_formats_bad_geometry_and_unknown_fields() {
+        let pi = BUILT_IN_PROFILES[0].1;
+        for invalid in [
+            pi.replace("start_lba = 2048", "start_lba = 1"),
+            pi.replace("start_lba = 2048", "start_lba = 4294967296"),
+            pi.replace("size_bytes = 67108864", "size_bytes = 1024"),
+            pi.replace("size_bytes = 67108864", "size_bytes = 2199023255552"),
+            pi.replace("label = \"AROSBOOT\"", "label = \"TOO-LONG-LABEL\""),
+            pi.replace("kind = \"mbr-fat32\"", "kind = \"iso9660-el-torito\""),
+            pi.replace("destination = \"config.txt\"", "destination = \"EFI\"")
+                .replace(
+                    "destination = \"start4.elf\"",
+                    "destination = \"EFI/BOOT/start4.elf\"",
+                ),
+            pi.replace(
+                "kind = \"mbr-fat32\"",
+                "kind = \"mbr-fat32\"\ncommand = \"sh\"",
+            ),
+        ] {
+            assert!(parse_media_profile("bad SD layout", &invalid).is_err());
+        }
+        let iso = include_str!("../tests/fixtures/media/pc-bios-iso.schema-fixture.toml");
+        for invalid in [
+            iso.replace("volume_id = \"AROSLIVE\"", "volume_id = \"bad volume\""),
+            iso.replace(
+                "boot_image_role = \"grub-boot-image\"",
+                "boot_image_role = \"missing-role\"",
+            ),
+            iso.replace("kind = \"iso9660-el-torito\"", "kind = \"mbr-fat32\""),
+        ] {
+            assert!(parse_media_profile("bad ISO layout", &invalid).is_err());
         }
     }
 }
