@@ -90,7 +90,7 @@ fn cmake_media_receipt_measures_real_staged_files_and_rejects_changed_inputs() {
     let engine = directory.path().join("engine");
     materialize(&engine).expect("embedded engine");
     let script = engine.join("scripts/EmitMediaBuildReceipt.cmake");
-    let root = directory.path().join("payload");
+    let root = directory.path().join("payload with spaces");
     fs::create_dir_all(root.join("EFI/BOOT")).expect("boot dir");
     fs::create_dir_all(root.join("EFI/AROS")).expect("AROS dir");
     for (path, bytes) in [
