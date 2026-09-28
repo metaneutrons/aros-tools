@@ -36,8 +36,9 @@ inputs; a legacy bundle cannot prove its own build origin. Verification rejects
 unsafe paths, symlinks, missing required roles and altered bytes. An adapter
 can derive this receipt from an already validated `boot-bundle.toml` v1
 without changing that public bundle format.
-No CMake producer or general `aros image` command emits or consumes the new
-receipt yet; neither profile selection nor receipt validation is boot evidence.
+The Titan CMake staging target emits and verifies a measured build receipt.
+No general `aros image` command consumes it yet; neither profile selection nor
+receipt validation is boot evidence.
 
 The internal external-input lock contract records exact file sizes, SHA-256,
 credential-free HTTPS DNS origins, source-revision labels and declared license
@@ -51,5 +52,11 @@ receipt then reports only build-produced roles; it cannot claim an external
 file as its output. The legacy-v1 receipt still measures all bundled roles,
 but does not independently establish their origin. These bindings are an
 internal contract slice, not a registered native-SD profile or media composer.
+The read-only `MediaImagePlan` resolver checks the complete selected role set,
+build receipt, pinned lock bytes and actual regular input files before any
+image output exists. Its file paths remain point-in-time observations: a
+future format backend must remeasure during copying and read back the image.
+For FAT32, the plan records the raw image extent and rejects a payload larger
+than the partition; exact filesystem overhead is checked by the backend.
 The current Pi 4 reference firmware lock still lacks per-file hashes and is
 not accepted as a complete automated media input lock.
