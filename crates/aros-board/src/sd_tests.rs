@@ -1,11 +1,13 @@
 //! Regression tests for boot-bundle validation and deterministic image staging.
 
 use super::{
-    legacy_bundle_build_receipt, sha256_file, stage_boot_bundle, validate_boot_bundle,
-    BundleExpectation, PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST,
-    BOOT_BUNDLE_MANIFEST, BOOT_PAYLOAD_DIRECTORY, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT,
-    UEFI_ESP_TRANSPORT,
+    legacy_bundle_build_receipt, publish_staged_directory_noreplace, sha256_file,
+    stage_boot_bundle, stage_fat32_media_plan, validate_boot_bundle, BundleExpectation,
+    PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,
+    BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST, MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME,
+    UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
 };
+use aros_common::media_plan::plan_media_image;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
@@ -117,6 +119,98 @@ fn write_valid_titan_bundle(bundle_dir: &Path) {
 fn validate_and_stage_for_test(bundle_dir: &Path, output_dir: &Path) -> super::StagedArtifact {
     let bundle = validate_boot_bundle(bundle_dir, &expectation()).expect("validated bundle");
     stage_boot_bundle(&bundle, output_dir).expect("staged bundle")
+}
+
+#[test]
+fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_bundle(&bundle_dir);
+    let bundle = validate_boot_bundle(&bundle_dir, &expectation()).expect("validated bundle");
+    let (receipt, profile) = legacy_bundle_build_receipt(&bundle).expect("adapted inputs");
+    let receipt_bytes = serde_json::to_vec(&receipt).expect("receipt JSON");
+    let plan = plan_media_image(&profile, &bundle_dir, &receipt_bytes, &[], &[])
+        .expect("closed media plan");
+    let first =
+        stage_fat32_media_plan(&plan, &temporary.path().join("first")).expect("first image");
+    let second =
+        stage_fat32_media_plan(&plan, &temporary.path().join("second")).expect("second image");
+    assert_eq!(first.image.sha256(), second.image.sha256());
+    let mut reordered = plan.clone();
+    reordered.files.reverse();
+    let third = stage_fat32_media_plan(&reordered, &temporary.path().join("third"))
+        .expect("order-independent image");
+    assert_eq!(first.image.sha256(), third.image.sha256());
+    assert_eq!(
+        fs::read(&first.manifest_path).unwrap(),
+        fs::read(&third.manifest_path).unwrap()
+    );
+    assert_eq!(first.image.size_bytes(), 65 * 1024 * 1024);
+    assert_eq!(
+        first.image.path(),
+        first.artifact_dir.join(MEDIA_RAW_IMAGE_FILENAME)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first.manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "aros-media-image");
+    assert_eq!(manifest["profile_id"], "rpi4-uboot-usb-ecm");
+    assert_eq!(manifest["image"]["sha256"], first.image.sha256());
+    assert!(first.artifact_dir.join(ARTIFACT_CHECKSUMS).is_file());
+    let checksums = fs::read_to_string(first.artifact_dir.join(ARTIFACT_CHECKSUMS)).unwrap();
+    assert!(checksums.contains(&format!(
+        "{}  {}",
+        first.image.sha256(),
+        MEDIA_RAW_IMAGE_FILENAME
+    )));
+    assert!(stage_fat32_media_plan(&plan, &first.artifact_dir).is_err());
+    assert!(first.artifact_dir.join(MEDIA_ARTIFACT_MANIFEST).is_file());
+
+    let mut forged = plan.clone();
+    forged.raw_image_size_bytes = Some(1024);
+    let forged_output = temporary.path().join("forged");
+    assert!(stage_fat32_media_plan(&forged, &forged_output).is_err());
+    assert!(!forged_output.exists());
+    let mut collided = plan.clone();
+    collided.files[0].destination = "EFI".into();
+    collided.files[1].destination = "EFI/BOOT/file.bin".into();
+    let collided_output = temporary.path().join("collided");
+    assert!(stage_fat32_media_plan(&collided, &collided_output).is_err());
+    assert!(!collided_output.exists());
+    #[cfg(unix)]
+    {
+        let linked_source = temporary.path().join("linked-config");
+        std::os::unix::fs::symlink(bundle_dir.join("config.txt"), &linked_source).unwrap();
+        let mut linked = plan.clone();
+        linked
+            .files
+            .iter_mut()
+            .find(|file| file.role == "config")
+            .unwrap()
+            .source_path = linked_source;
+        let linked_output = temporary.path().join("linked");
+        assert!(stage_fat32_media_plan(&linked, &linked_output).is_err());
+        assert!(!linked_output.exists());
+    }
+
+    fs::write(bundle_dir.join("config.txt"), b"changed").expect("alter source");
+    let rejected_output = temporary.path().join("rejected");
+    assert!(stage_fat32_media_plan(&plan, &rejected_output).is_err());
+    assert!(!rejected_output.exists());
+    assert!(bundle_dir.join(BOOT_BUNDLE_MANIFEST).is_file());
+}
+
+#[test]
+fn atomic_publication_never_replaces_a_racing_destination() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let staged = temporary.path().join("staged");
+    let destination = temporary.path().join("destination");
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("image"), b"new").unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep"), b"old").unwrap();
+    assert!(publish_staged_directory_noreplace(&staged, &destination).is_err());
+    assert_eq!(fs::read(destination.join("keep")).unwrap(), b"old");
+    assert_eq!(fs::read(staged.join("image")).unwrap(), b"new");
 }
 
 #[test]
