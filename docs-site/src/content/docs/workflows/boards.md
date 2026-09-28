@@ -96,7 +96,11 @@ evidence using your board's bring-up procedure.
 
 Image creation needs an external `boot-bundle.toml` plus its hash-declared
 firmware and artifact inputs. A build directory alone is not a boot bundle.
-Use the prepared bundle for the exact board/transport.
+Use the prepared bundle for the exact model/transport. The reviewed Pi 4
+U-Boot USB-ECM and Milk-V Titan UEFI file layouts are defined in the
+[media-profile registry](https://github.com/metaneutrons/aros-tools/tree/main/profiles/media);
+the local board name does not select a different layout. Native Pi SD and PC
+ISO profiles are not yet available through this SD command.
 
 ```sh
 aros board sd image --profile rpi4-usb --boot-bundle /verified/bundle --output /new/artifact

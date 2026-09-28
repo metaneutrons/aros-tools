@@ -1,0 +1,28 @@
+format_version = 1
+id = "milk-v-titan-uefi"
+target_preset = "opensbi-riscv64"
+model = "milk-v-titan"
+transport = "uefi-esp"
+medium = "mbr-fat32"
+boot_protocol = "uefi-riscv64"
+label = "OpenSBI/UEFI"
+
+[[required_files]]
+role = "uefi-loader"
+destination = "EFI/BOOT/BOOTRISCV64.EFI"
+
+[[required_files]]
+role = "kernel-image"
+destination = "EFI/AROS/Image"
+
+[[required_files]]
+role = "bsp-package"
+destination = "aros-bsp.pkg"
+
+[[required_files]]
+role = "command-line"
+destination = "aros.cmd"
+
+[[required_files]]
+role = "startup-script"
+destination = "startup.nsh"
