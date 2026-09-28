@@ -1,7 +1,9 @@
 # Boot media initiative plan
 
 Epic: https://github.com/metaneutrons/aros-tools/issues/273
-Decision state: proposed for review; Fabian authorized planning and implementation on 2026-09-28.
+Decision state: accepted as the execution baseline by PR #272 on 2026-09-28;
+Fabian authorized planning and implementation. Milestone acceptance remains
+separate from plan acceptance.
 
 ## Outcome and boundaries
 
