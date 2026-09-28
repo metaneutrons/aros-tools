@@ -278,6 +278,10 @@ _gia_run("creating BIOS core.img"
     "${GIA_HOST_PC}/grub-mkimage"
     -O i386-pc -p /boot/grub -d "${_pc_module_dir}"
     -o "${GIA_BINARY_DIR}/pc/core.img" biosdisk ${_common_modules})
+_gia_run("creating BIOS El Torito image"
+    "${GIA_HOST_PC}/grub-mkimage"
+    -O i386-pc-eltorito -p /boot/grub -d "${_pc_module_dir}"
+    -o "${GIA_BINARY_DIR}/pc/grub2_eltorito" biosdisk ${_common_modules})
 _gia_run("creating x86_64 EFI GRUB image"
     "${GIA_HOST_EFI64}/grub-mkimage"
     -O x86_64-efi -p /EFI/BOOT/grub -d "${_efi64_module_dir}"
@@ -288,6 +292,7 @@ _gia_run("creating i386 EFI GRUB image"
     -o "${GIA_BINARY_DIR}/efi32/grub.efi" ${_common_modules})
 foreach(_private_image IN ITEMS
         "${GIA_BINARY_DIR}/pc/core.img"
+        "${GIA_BINARY_DIR}/pc/grub2_eltorito"
         "${GIA_BINARY_DIR}/efi64/grub.efi"
         "${GIA_BINARY_DIR}/efi32/grub.efi")
     _aros_grub_iso_assets_require_regular("${_private_image}" "generated GRUB image")
@@ -300,25 +305,16 @@ foreach(_relative IN LISTS _pc_products)
 endforeach()
 _gia_copy_checked("${GIA_BINARY_DIR}/pc/core.img"
     "${GIA_SYS_DIR}/boot/grub/i386-pc/core.img")
-_gia_require_executable(/bin/cat "GRUB2 ISO concatenation tool")
-# Create the concatenated image with an explicit output file.  Keeping this
-# outside a shell preserves argument boundaries and prevents an inherited PATH
-# from choosing the concatenation tool.
-execute_process(
-    COMMAND /bin/cat "${GIA_SYS_DIR}/boot/grub/i386-pc/cdboot.img"
-        "${GIA_BINARY_DIR}/pc/core.img"
-    OUTPUT_FILE "${GIA_BINARY_DIR}/pc/grub2_eltorito"
-    RESULT_VARIABLE _eltorito_result
-    ERROR_VARIABLE _eltorito_error)
-if(NOT _eltorito_result EQUAL 0)
-    message(FATAL_ERROR "creating GRUB2 El Torito image failed (${_eltorito_result})\n${_eltorito_error}")
-endif()
 file(SIZE "${GIA_SYS_DIR}/boot/grub/i386-pc/cdboot.img" _cdboot_size)
-file(SIZE "${GIA_BINARY_DIR}/pc/core.img" _core_size)
 file(SIZE "${GIA_BINARY_DIR}/pc/grub2_eltorito" _eltorito_size)
-math(EXPR _expected_eltorito_size "${_cdboot_size} + ${_core_size}")
-if(NOT _eltorito_size EQUAL _expected_eltorito_size)
-    message(FATAL_ERROR "GRUB2 El Torito image is not cdboot.img concatenated with core.img")
+if(_eltorito_size LESS_EQUAL _cdboot_size)
+    message(FATAL_ERROR "GRUB2 El Torito image omits the GRUB core")
+endif()
+file(READ "${GIA_SYS_DIR}/boot/grub/i386-pc/cdboot.img" _cdboot_prefix HEX)
+file(READ "${GIA_BINARY_DIR}/pc/grub2_eltorito" _eltorito_prefix
+    OFFSET 0 LIMIT ${_cdboot_size} HEX)
+if(NOT _eltorito_prefix STREQUAL _cdboot_prefix)
+    message(FATAL_ERROR "GRUB2 El Torito image has an unexpected CD boot header")
 endif()
 _gia_copy_checked("${GIA_BINARY_DIR}/pc/grub2_eltorito"
     "${GIA_SYS_DIR}/boot/grub/i386-pc/grub2_eltorito")

@@ -67,6 +67,24 @@ The checker expects the PC bootstrap/kernel layout and uses the x86 emulator.
 Use [board workflows](/aros-tools/workflows/boards/) and actual UART evidence
 for physical targets.
 
+## Create a BIOS-bootable PC ISO
+
+After building the `pc-x86_64` system tree, install `mkisofs` (or
+`genisoimage`) and run:
+
+```sh
+aros build --preset pc-x86_64 --target boot-iso
+```
+
+The image is `build/pc-x86_64/aros-x86_64-pc.iso`. This target verifies that
+the existing bootstrap and kernel modules are present, stages GRUB, and checks
+the El Torito boot catalog before replacing the image. It does not rebuild
+existing AROS packages or qualify an AROS desktop boot. The current image is
+BIOS-bootable; UEFI boot is not claimed.
+
+`aros test` is a separate direct-kernel check. To inspect the ISO's video path,
+boot the image as a CD in QEMU with an emulated VGA device.
+
 ## Rebuild or synchronize
 
 Ordinary `build` reuses the configured build directory.
