@@ -50,6 +50,10 @@ set(_opensbi_linker_script
     "${AROS_SOURCE_DIR}/arch/riscv64-opensbi/kernel/ldscript.lds")
 set(_opensbi_verify_script
     "${AROS_CMAKE_ENGINE_DIR}/scripts/VerifyOpenSbiUefiBundle.cmake")
+set(_opensbi_receipt_script
+    "${AROS_CMAKE_ENGINE_DIR}/scripts/EmitMediaBuildReceipt.cmake")
+set(_opensbi_receipt_specs
+    "uefi-loader|EFI/BOOT/BOOTRISCV64.EFI;kernel-image|EFI/AROS/Image;bsp-package|aros-bsp.pkg;command-line|aros.cmd;startup-script|startup.nsh")
 
 function(_aros_opensbi_unavailable target reason)
     add_custom_target(${target}
@@ -188,10 +192,17 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -DBUNDLE_DIR="${_opensbi_bundle_dir}"
             -DMODEL="${AROS_OPENSBI_MODEL}" -DWRITE_MANIFEST=ON
             -P "${_opensbi_verify_script}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DROOT_DIR=${_opensbi_bundle_dir}"
+            "-DTARGET_PRESET=opensbi-riscv64"
+            "-DMODEL=${AROS_OPENSBI_MODEL}"
+            "-DTRANSPORT=uefi-esp"
+            "-DFILE_SPECS=${_opensbi_receipt_specs}"
+            "-DMODE=write" -P "${_opensbi_receipt_script}"
     COMMAND "${CMAKE_COMMAND}" -E touch "${_opensbi_stamp}"
     DEPENDS "${_opensbi_image}" "${_opensbi_bsp}" "${_opensbi_command_line}"
             "${_opensbi_startup}" kernel-bsp-opensbi-riscv64
-            "${_opensbi_verify_script}"
+            "${_opensbi_verify_script}" "${_opensbi_receipt_script}"
     COMMENT "Staging Milk-V Titan OpenSBI/UEFI payload"
     VERBATIM)
 add_custom_target(opensbi-uefi-artifacts DEPENDS "${_opensbi_stamp}")
@@ -199,6 +210,13 @@ add_custom_target(opensbi-uefi-verify
     COMMAND "${CMAKE_COMMAND}" -DBUNDLE_DIR="${_opensbi_bundle_dir}"
             -DMODEL="${AROS_OPENSBI_MODEL}" -DWRITE_MANIFEST=OFF
             -P "${_opensbi_verify_script}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DROOT_DIR=${_opensbi_bundle_dir}"
+            "-DTARGET_PRESET=opensbi-riscv64"
+            "-DMODEL=${AROS_OPENSBI_MODEL}"
+            "-DTRANSPORT=uefi-esp"
+            "-DFILE_SPECS=${_opensbi_receipt_specs}"
+            "-DMODE=verify" -P "${_opensbi_receipt_script}"
     DEPENDS opensbi-uefi-artifacts VERBATIM)
 
 message(STATUS

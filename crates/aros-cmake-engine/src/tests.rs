@@ -82,6 +82,183 @@ fn the_digest_is_a_sha256() {
 }
 
 #[test]
+fn cmake_media_receipt_measures_real_staged_files_and_rejects_changed_inputs() {
+    use aros_common::media_profile::built_in_media_profiles;
+    use aros_common::media_receipt::{parse_media_build_receipt, verify_media_build_receipt};
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("embedded engine");
+    let script = engine.join("scripts/EmitMediaBuildReceipt.cmake");
+    let root = directory.path().join("payload with spaces");
+    fs::create_dir_all(root.join("EFI/BOOT")).expect("boot dir");
+    fs::create_dir_all(root.join("EFI/AROS")).expect("AROS dir");
+    for (path, bytes) in [
+        ("EFI/BOOT/BOOTRISCV64.EFI", b"loader".as_slice()),
+        ("EFI/AROS/Image", b"image".as_slice()),
+        ("aros-bsp.pkg", b"BSP".as_slice()),
+        ("aros.cmd", b"command".as_slice()),
+        ("startup.nsh", b"startup".as_slice()),
+    ] {
+        fs::write(root.join(path), bytes).expect("staged file");
+    }
+    let specs = "uefi-loader|EFI/BOOT/BOOTRISCV64.EFI;kernel-image|EFI/AROS/Image;bsp-package|aros-bsp.pkg;command-line|aros.cmd;startup-script|startup.nsh";
+    let invoke = |mode: &str, selected_specs: &str| {
+        Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", root.display()))
+            .arg("-DTARGET_PRESET=opensbi-riscv64")
+            .arg("-DMODEL=milk-v-titan")
+            .arg("-DTRANSPORT=uefi-esp")
+            .arg(format!("-DFILE_SPECS={selected_specs}"))
+            .arg(format!("-DMODE={mode}"))
+            .arg("-P")
+            .arg(&script)
+            .output()
+            .expect("CMake script must run")
+    };
+    let written = invoke("write", specs);
+    assert!(
+        written.status.success(),
+        "CMake receipt failed: {}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let receipt_path = root.join("media-build-receipt.json");
+    let receipt_bytes = fs::read(&receipt_path).expect("receipt");
+    let receipt = parse_media_build_receipt(&receipt_bytes).expect("closed JSON receipt");
+    let profile = built_in_media_profiles()
+        .expect("reviewed profiles")
+        .into_iter()
+        .find(|item| item.profile.id == "milk-v-titan-uefi")
+        .expect("Titan profile");
+    verify_media_build_receipt(&root, &receipt, &profile.profile)
+        .expect("CMake-produced receipt matches files and profile");
+    assert!(invoke("verify", specs).status.success());
+
+    fs::write(root.join("aros.cmd"), b"changed").expect("changed input");
+    assert!(!invoke("verify", specs).status.success());
+    assert_eq!(
+        fs::read(&receipt_path).expect("preserved receipt"),
+        receipt_bytes
+    );
+    assert!(!invoke("write", "bsp-package|../outside").status.success());
+    assert!(
+        !invoke("write", "bsp-package|aros-bsp.pkg;bsp-package|aros.cmd")
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(&receipt_path).expect("preserved receipt"),
+        receipt_bytes
+    );
+
+    let fixture_source = directory.path().join("cmake-fixture");
+    let fixture_build = directory.path().join("cmake-build");
+    fs::create_dir(&fixture_source).expect("fixture source");
+    fs::write(
+        fixture_source.join("CMakeLists.txt"),
+        format!(
+            r#"cmake_minimum_required(VERSION 3.22)
+project(media_receipt_fixture NONE)
+set(_specs "{specs}")
+add_custom_target(media-receipt
+    COMMAND "${{CMAKE_COMMAND}}"
+        "-DROOT_DIR={root}"
+        "-DTARGET_PRESET=opensbi-riscv64"
+        "-DMODEL=milk-v-titan"
+        "-DTRANSPORT=uefi-esp"
+        "-DFILE_SPECS=${{_specs}}"
+        "-DMODE=write" -P "{script}"
+    VERBATIM)
+"#,
+            root = cmake_path(&root),
+            script = cmake_path(&script)
+        ),
+    )
+    .expect("CMake fixture");
+    let configured = Command::new("cmake")
+        .arg("-S")
+        .arg(&fixture_source)
+        .arg("-B")
+        .arg(&fixture_build)
+        .arg("-G")
+        .arg("Ninja")
+        .output()
+        .expect("configure fixture");
+    assert!(
+        configured.status.success(),
+        "configure failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let built = Command::new("cmake")
+        .arg("--build")
+        .arg(&fixture_build)
+        .arg("--target")
+        .arg("media-receipt")
+        .output()
+        .expect("run generated build command");
+    assert!(
+        built.status.success(),
+        "generated command failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    parse_media_build_receipt(&fs::read(&receipt_path).expect("generated receipt"))
+        .expect("generated receipt schema");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+
+        symlink(root.join("EFI"), root.join("linked")).expect("linked parent");
+        assert!(!invoke("write", "uefi-loader|linked/BOOT/BOOTRISCV64.EFI")
+            .status
+            .success());
+        assert!(!invoke(
+            "write",
+            "first-role|EFI/BOOT/BOOTRISCV64.EFI;second-role|efi/boot/bootriscv64.efi"
+        )
+        .status
+        .success());
+
+        assert!(Command::new("mkfifo")
+            .arg(root.join("pipe"))
+            .status()
+            .expect("mkfifo")
+            .success());
+        let mut child = Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", root.display()))
+            .arg("-DTARGET_PRESET=opensbi-riscv64")
+            .arg("-DMODEL=milk-v-titan")
+            .arg("-DTRANSPORT=uefi-esp")
+            .arg("-DFILE_SPECS=bsp-package|pipe")
+            .arg("-DMODE=write")
+            .arg("-P")
+            .arg(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("CMake FIFO probe");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().expect("probe status") {
+                assert!(!status.success(), "FIFO must be rejected");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop blocked probe");
+                child.wait().expect("reap blocked probe");
+                panic!("CMake blocked while measuring a FIFO");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let graph = file("OpenSbiUefi.cmake").expect("Titan graph");
+    assert!(graph.contains("-DMODE=write\" -P \"${_opensbi_receipt_script}"));
+    assert!(graph.contains("-DMODE=verify\" -P \"${_opensbi_receipt_script}"));
+}
+
+#[test]
 fn placement_writes_every_file_and_stamps_it() {
     let directory = tempfile::tempdir().expect("temp dir");
     let placement = materialize(directory.path()).expect("materialize");
