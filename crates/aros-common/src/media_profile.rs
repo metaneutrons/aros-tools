@@ -87,6 +87,73 @@ pub fn built_in_media_profiles() -> Result<Vec<ResolvedMediaProfile>> {
     Ok(profiles)
 }
 
+/// Select a portable profile for one target without inferring a board from a
+/// target preset. A missing ID is allowed only when precisely one profile
+/// matches the target, model and transport constraints.
+///
+/// # Errors
+///
+/// Returns an error for an unknown ID, an incompatible explicit selection,
+/// no matching profile, or an ambiguous implicit selection.
+pub fn select_media_profile(
+    profiles: &[ResolvedMediaProfile],
+    requested_id: Option<&str>,
+    target_preset: &str,
+    model: Option<&str>,
+    transport: Option<&str>,
+) -> Result<ResolvedMediaProfile> {
+    let mut ids = BTreeSet::new();
+    if profiles
+        .iter()
+        .any(|entry| !ids.insert(entry.profile.id.as_str()))
+    {
+        return Err(invalid(
+            "<media-profile-selection>",
+            "duplicate profile ID in media registry",
+        ));
+    }
+    if let Some(id) = requested_id {
+        return profiles
+            .iter()
+            .find(|entry| entry.profile.id == id)
+            .filter(|entry| {
+                entry.profile.target_preset == target_preset
+                    && model.is_none_or(|value| entry.profile.model == value)
+                    && transport.is_none_or(|value| entry.profile.transport == value)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                invalid(
+                    "<media-profile-selection>",
+                    &format!(
+                        "profile '{id}' is unknown or incompatible with target '{target_preset}'"
+                    ),
+                )
+            });
+    }
+    let matching: Vec<_> = profiles
+        .iter()
+        .filter(|entry| {
+            entry.profile.target_preset == target_preset
+                && model.is_none_or(|value| entry.profile.model == value)
+                && transport.is_none_or(|value| entry.profile.transport == value)
+        })
+        .collect();
+    match matching.as_slice() {
+        [profile] => Ok((*profile).clone()),
+        [] => Err(invalid(
+            "<media-profile-selection>",
+            &format!("no media profile matches target '{target_preset}'"),
+        )),
+        _ => Err(invalid(
+            "<media-profile-selection>",
+            &format!(
+                "multiple media profiles match target '{target_preset}'; select a profile ID explicitly"
+            ),
+        )),
+    }
+}
+
 fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
     if profile.format_version != FORMAT_VERSION {
         return Err(invalid(source, "unsupported format_version"));
@@ -172,7 +239,9 @@ fn invalid(file: &str, message: &str) -> ArosError {
 
 #[cfg(test)]
 mod tests {
-    use super::{built_in_media_profiles, parse_media_profile, BUILT_IN_PROFILES};
+    use super::{
+        built_in_media_profiles, parse_media_profile, select_media_profile, BUILT_IN_PROFILES,
+    };
 
     #[test]
     fn built_in_registry_has_distinct_model_bound_layouts() {
@@ -205,5 +274,50 @@ mod tests {
 
         let version = text.replace("format_version = 1", "format_version = 2");
         assert!(parse_media_profile("fixture", &version).is_err());
+    }
+
+    #[test]
+    fn selection_requires_a_profile_id_when_one_target_has_multiple_media() {
+        let mut profiles = built_in_media_profiles().expect("built-in profiles");
+        let mut second = profiles[0].clone();
+        second.profile.id = "rpi4-native-sd".to_string();
+        second.profile.transport = "native-sd".to_string();
+        profiles.push(second);
+
+        let ambiguous = select_media_profile(&profiles, None, "rpi-aarch64", Some("rpi4"), None)
+            .expect_err("target and model do not select a medium");
+        assert!(ambiguous
+            .to_string()
+            .contains("select a profile ID explicitly"));
+
+        let selected = select_media_profile(
+            &profiles,
+            Some("rpi4-native-sd"),
+            "rpi-aarch64",
+            Some("rpi4"),
+            Some("native-sd"),
+        )
+        .expect("explicitly selected profile");
+        assert_eq!(selected.profile.id, "rpi4-native-sd");
+
+        assert!(select_media_profile(
+            &profiles,
+            Some("rpi4-native-sd"),
+            "arm-raspi",
+            Some("rpi4"),
+            Some("native-sd")
+        )
+        .is_err());
+
+        let duplicate = profiles[0].clone();
+        profiles.push(duplicate);
+        assert!(select_media_profile(
+            &profiles,
+            Some("rpi4-uboot-usb-ecm"),
+            "rpi-aarch64",
+            Some("rpi4"),
+            Some("uboot-usb-ecm")
+        )
+        .is_err());
     }
 }

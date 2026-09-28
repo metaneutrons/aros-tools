@@ -1,9 +1,10 @@
 //! Regression tests for boot-bundle validation and deterministic image staging.
 
 use super::{
-    sha256_file, stage_boot_bundle, validate_boot_bundle, BundleExpectation, PartitionLayout,
-    UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,
-    BOOT_PAYLOAD_DIRECTORY, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
+    legacy_bundle_build_receipt, sha256_file, stage_boot_bundle, validate_boot_bundle,
+    BundleExpectation, PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST,
+    BOOT_BUNDLE_MANIFEST, BOOT_PAYLOAD_DIRECTORY, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT,
+    UEFI_ESP_TRANSPORT,
 };
 use std::fmt::Write as _;
 use std::fs;
@@ -260,6 +261,36 @@ fn rejects_a_known_role_at_the_wrong_profile_destination() {
     assert!(error
         .to_string()
         .contains("must stage as 'EFI/BOOT/BOOTRISCV64.EFI'"));
+}
+
+#[test]
+fn adapts_a_verified_uefi_bundle_without_changing_the_v1_manifest() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_before = fs::read(bundle_dir.join(BOOT_BUNDLE_MANIFEST)).expect("v1 manifest");
+    let expectation = BundleExpectation::new("milk-v-titan", "milk-v-titan", UEFI_ESP_TRANSPORT);
+    let bundle = validate_boot_bundle(&bundle_dir, &expectation).expect("validated v1 bundle");
+
+    let (receipt, profile) = legacy_bundle_build_receipt(&bundle).expect("adapted receipt");
+    assert_eq!(
+        receipt.origin,
+        aros_common::media_receipt::MediaReceiptOrigin::LegacyV1
+    );
+    assert_eq!(receipt.target_preset, "opensbi-riscv64");
+    assert_eq!(receipt.files.len(), 5);
+    assert_eq!(profile.profile.id, "milk-v-titan-uefi");
+    let encoded = serde_json::to_vec(&receipt).expect("receipt JSON");
+    let decoded = aros_common::media_receipt::parse_media_build_receipt(&encoded)
+        .expect("round-trip legacy receipt");
+    assert_eq!(decoded, receipt);
+    assert_eq!(
+        fs::read(bundle_dir.join(BOOT_BUNDLE_MANIFEST)).expect("v1 manifest"),
+        manifest_before
+    );
+
+    fs::write(bundle_dir.join("EFI/AROS/Image"), b"changed image").expect("tamper");
+    assert!(legacy_bundle_build_receipt(&bundle).is_err());
 }
 
 #[test]
