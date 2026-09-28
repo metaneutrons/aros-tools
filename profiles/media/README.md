@@ -31,3 +31,11 @@ can derive this receipt from an already validated `boot-bundle.toml` v1
 without changing that public bundle format.
 No CMake producer or general `aros image` command emits or consumes the new
 receipt yet; neither profile selection nor receipt validation is boot evidence.
+
+The internal external-input lock contract records exact file sizes, SHA-256,
+credential-free HTTPS DNS origins, source-revision labels and declared license
+IDs. Its raw bytes must match a reviewed lock ID and digest before any file is
+used. This contract does not fetch firmware or make a license or
+boot-qualification claim.
+The current Pi 4 reference firmware lock still lacks per-file hashes and is
+not accepted as a complete automated media input lock.
