@@ -205,7 +205,7 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
 
 fn parse_lock_binding(raw: &str) -> std::result::Result<LockBinding, String> {
     let (id, path) = raw.split_once('=').ok_or("expected ID=FILE")?;
-    if id.is_empty() || path.is_empty() || path.contains('=') {
+    if id.is_empty() || path.is_empty() {
         return Err("expected nonempty ID=FILE".into());
     }
     Ok(LockBinding {
@@ -219,7 +219,7 @@ fn parse_external_binding(raw: &str) -> std::result::Result<MediaExternalFile, S
     let (lock_id, file_id) = identity
         .split_once(':')
         .ok_or("expected LOCK_ID:FILE_ID=PATH")?;
-    if lock_id.is_empty() || file_id.is_empty() || path.is_empty() || path.contains('=') {
+    if lock_id.is_empty() || file_id.is_empty() || path.is_empty() {
         return Err("expected nonempty LOCK_ID:FILE_ID=PATH".into());
     }
     Ok(MediaExternalFile {
@@ -371,6 +371,12 @@ mod tests {
                 .unwrap()
                 .file_id,
             "file"
+        );
+        assert_eq!(
+            parse_lock_binding("firmware=/tmp/firmware=v1.toml")
+                .unwrap()
+                .path,
+            PathBuf::from("/tmp/firmware=v1.toml")
         );
     }
 }
