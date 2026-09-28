@@ -145,6 +145,7 @@ pub fn bind_profile_media_input_locks(
             }
         }
     }
+    resolved.sort_by(|left, right| left.lock.id.cmp(&right.lock.id));
     Ok(resolved)
 }
 
@@ -318,6 +319,60 @@ external_input = {{ lock_id = "firmware-test", file_id = "firmware-start" }}
             "",
         );
         assert!(parse_media_profile("test", &orphan).is_err());
+    }
+
+    #[test]
+    fn lock_binding_order_is_independent_of_caller_order() {
+        let first = fixture();
+        let second = String::from_utf8(first.clone())
+            .expect("fixture UTF-8")
+            .replace("firmware-test", "second-lock")
+            .replace("firmware-start", "second-file")
+            .into_bytes();
+        let profile = format!(
+            r#"format_version = 1
+id = "two-locks"
+target_preset = "rpi-aarch64"
+model = "rpi5"
+transport = "native-sd"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware"
+label = "Test only"
+
+[[external_locks]]
+id = "second-lock"
+sha256 = "{}"
+
+[[external_locks]]
+id = "firmware-test"
+sha256 = "{}"
+
+[[required_files]]
+role = "firmware-start"
+destination = "start4.elf"
+external_input = {{ lock_id = "firmware-test", file_id = "firmware-start" }}
+
+[[required_files]]
+role = "firmware-second"
+destination = "fixup4.dat"
+external_input = {{ lock_id = "second-lock", file_id = "second-file" }}
+"#,
+            sha256_bytes(&second),
+            sha256_bytes(&first)
+        );
+        let profile = parse_media_profile("test", &profile).expect("profile");
+        let a = bind_profile_media_input_locks(
+            &profile,
+            &[("second-lock", &second), ("firmware-test", &first)],
+        )
+        .expect("first ordering");
+        let b = bind_profile_media_input_locks(
+            &profile,
+            &[("firmware-test", &first), ("second-lock", &second)],
+        )
+        .expect("second ordering");
+        assert_eq!(a, b);
+        assert_eq!(a[0].lock.id, "firmware-test");
     }
 
     #[test]
