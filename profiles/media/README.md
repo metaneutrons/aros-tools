@@ -17,3 +17,13 @@ Each TOML document has a closed `format_version = 1` schema. It may declare
 identities and file destinations, never commands or host devices. Required
 roles and FAT destinations must be unique, relative and traversal-free. The
 external bundle must still supply regular files with measured hashes.
+
+The internal `MediaBuildReceipt` v1 contract records target, model, transport,
+and the roles, relative paths, sizes and SHA-256 digests of source-dependent
+inputs. It distinguishes future CMake output from measured legacy-v1 bundle
+inputs; a legacy bundle cannot prove its own build origin. Verification rejects
+unsafe paths, symlinks, missing required roles and altered bytes. An adapter
+can derive this receipt from an already validated `boot-bundle.toml` v1
+without changing that public bundle format.
+No CMake producer or general `aros image` command emits or consumes the new
+receipt yet; neither profile selection nor receipt validation is boot evidence.

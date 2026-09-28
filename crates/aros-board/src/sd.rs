@@ -50,6 +50,9 @@ use super::sd_manifest::{
 };
 use crate::{canonical_existing_directory, sha256_file_with_size as sha256_file};
 use aros_common::media_profile::{built_in_media_profiles, ResolvedMediaProfile};
+use aros_common::media_receipt::{
+    verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt, MediaReceiptOrigin,
+};
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -214,6 +217,51 @@ impl ValidatedBootBundle {
     pub fn files(&self) -> &[VerifiedBootFile] {
         &self.files
     }
+}
+
+/// Adapt an existing verified v1 boot bundle to the new source-dependent
+/// input contract without changing its on-disk schema or CLI behavior.
+///
+/// The receipt identifies its origin as legacy v1. Its target preset is the
+/// selected profile's expectation, not proof of which build produced the
+/// files. The adapter remeasures every source file before returning; a composer
+/// must revalidate again immediately before publishing a medium.
+///
+/// # Errors
+///
+/// Returns an error if no reviewed profile matches, a file escapes the bundle
+/// root, or any measured content differs from the v1 bundle declaration.
+pub fn legacy_bundle_build_receipt(
+    bundle: &ValidatedBootBundle,
+) -> Result<(MediaBuildReceipt, ResolvedMediaProfile)> {
+    let profile = required_media_profile(&bundle.model, &bundle.transport)?
+        .ok_or_else(|| miette::miette!("No reviewed media profile matches the v1 boot bundle."))?;
+    let files = bundle
+        .files
+        .iter()
+        .map(|file| {
+            let relative = file.source.strip_prefix(&bundle.source_dir).map_err(|_| {
+                miette::miette!("A verified bundle file escaped its source directory.")
+            })?;
+            Ok(MediaBuildFile {
+                role: file.role.clone(),
+                path: portable_path(relative),
+                sha256: file.sha256.clone(),
+                size_bytes: file.size_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let receipt = MediaBuildReceipt::new(
+        MediaReceiptOrigin::LegacyV1,
+        profile.profile.target_preset.clone(),
+        bundle.model.clone(),
+        bundle.transport.clone(),
+        files,
+    )
+    .map_err(|error| miette::miette!("Invalid adapted v1 media build receipt: {error}"))?;
+    verify_media_build_receipt(&bundle.source_dir, &receipt, &profile.profile)
+        .map_err(|error| miette::miette!("V1 media build receipt verification failed: {error}"))?;
+    Ok((receipt, profile))
 }
 
 /// Paths and checksums created by [`stage_boot_bundle`].

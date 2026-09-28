@@ -27,6 +27,7 @@ pub mod digest;
 pub mod elf;
 pub mod error;
 pub mod media_profile;
+pub mod media_receipt;
 pub mod observability;
 pub mod pins;
 pub mod process;
