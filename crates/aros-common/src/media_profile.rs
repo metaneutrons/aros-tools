@@ -160,7 +160,6 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
     }
     for (label, value) in [
         ("id", profile.id.as_str()),
-        ("target_preset", profile.target_preset.as_str()),
         ("model", profile.model.as_str()),
         ("transport", profile.transport.as_str()),
         ("medium", profile.medium.as_str()),
@@ -172,6 +171,12 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
                 &format!("{label} must be a nonempty lowercase slug"),
             ));
         }
+    }
+    if !valid_target_preset(&profile.target_preset) {
+        return Err(invalid(
+            source,
+            "target_preset must be a portable target name",
+        ));
     }
     if profile.label.trim().is_empty() || profile.label.chars().any(char::is_control) {
         return Err(invalid(source, "label must be printable and nonempty"));
@@ -218,6 +223,19 @@ fn valid_slug(value: &str) -> bool {
         })
         && value.chars().all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+}
+
+pub(crate) fn valid_target_preset(value: &str) -> bool {
+    !value.is_empty()
+        && value.starts_with(|character: char| {
+            character.is_ascii_lowercase() || character.is_ascii_digit()
+        })
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '-'
+                || character == '_'
         })
 }
 
@@ -319,5 +337,45 @@ mod tests {
             Some("uboot-usb-ecm")
         )
         .is_err());
+    }
+
+    #[test]
+    fn schema_fixtures_accept_pc_and_distinct_pi_targets_without_registering_them() {
+        for (name, text, target, model) in [
+            (
+                "pc-bios-iso.schema-fixture.toml",
+                include_str!("../tests/fixtures/media/pc-bios-iso.schema-fixture.toml"),
+                "pc-x86_64",
+                "pc",
+            ),
+            (
+                "rpi3-native-sd.schema-fixture.toml",
+                include_str!("../tests/fixtures/media/rpi3-native-sd.schema-fixture.toml"),
+                "arm-raspi",
+                "rpi3",
+            ),
+            (
+                "rpi5-native-sd.schema-fixture.toml",
+                include_str!("../tests/fixtures/media/rpi5-native-sd.schema-fixture.toml"),
+                "rpi-aarch64",
+                "rpi5",
+            ),
+        ] {
+            let selected = parse_media_profile(name, text).expect("valid schema fixture");
+            assert_eq!(selected.profile.target_preset, target);
+            assert_eq!(selected.profile.model, model);
+            assert!(select_media_profile(
+                std::slice::from_ref(&selected),
+                Some(&selected.profile.id),
+                target,
+                Some(model),
+                Some(&selected.profile.transport),
+            )
+            .is_ok());
+            assert!(
+                select_media_profile(&[selected], None, "wrong-target", Some(model), None,)
+                    .is_err()
+            );
+        }
     }
 }
