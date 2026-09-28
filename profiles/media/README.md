@@ -51,12 +51,15 @@ every pin must be used, and the supplied lock set must match exactly. A CMake
 receipt then reports only build-produced roles; it cannot claim an external
 file as its output. The legacy-v1 receipt still measures all bundled roles,
 but does not independently establish their origin. These bindings are an
-internal contract slice, not a registered native-SD profile or media composer.
+internal contract slice, not a registered native-SD profile.
 The read-only `MediaImagePlan` resolver checks the complete selected role set,
 build receipt, pinned lock bytes and actual regular input files before any
-image output exists. Its file paths remain point-in-time observations: a
-future format backend must remeasure during copying and read back the image.
-For FAT32, the plan records the raw image extent and rejects a payload larger
-than the partition; exact filesystem overhead is checked by the backend.
+image output exists. Its file paths remain point-in-time observations. The
+internal MBR/FAT32 backend remeasures during copying, checks filesystem
+capacity, reads back the image, and publishes without replacing an existing
+directory. Its independent artifact verifier checks the exact file inventory,
+checksums, MBR, FAT32 tree and payload hashes without the source tree. This is
+self-consistency evidence, not authenticated origin or a boot test. ISO and
+the public `aros image` command remain unimplemented.
 The current Pi 4 reference firmware lock still lacks per-file hashes and is
 not accepted as a complete automated media input lock.
