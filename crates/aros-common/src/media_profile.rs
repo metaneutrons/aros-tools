@@ -26,6 +26,25 @@ const BUILT_IN_PROFILES: [(&str, &str); 2] = [
 pub struct RequiredMediaFile {
     pub role: String,
     pub destination: String,
+    /// External bytes must resolve through an exact lock pin, not a build receipt.
+    #[serde(default)]
+    pub external_input: Option<ExternalMediaInput>,
+}
+
+/// Identity of one file in a separately reviewed external-input lock.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalMediaInput {
+    pub lock_id: String,
+    pub file_id: String,
+}
+
+/// Exact raw-byte lock identity required by a media profile.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaExternalLockPin {
+    pub id: String,
+    pub sha256: String,
 }
 
 /// A portable medium layout, distinct from a target preset or local board.
@@ -40,6 +59,8 @@ pub struct MediaProfile {
     pub medium: String,
     pub boot_protocol: String,
     pub label: String,
+    #[serde(default)]
+    pub external_locks: Vec<MediaExternalLockPin>,
     pub required_files: Vec<RequiredMediaFile>,
 }
 
@@ -186,6 +207,8 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
     }
     let mut roles = BTreeSet::new();
     let mut destinations = BTreeSet::new();
+    let mut referenced_locks = BTreeSet::new();
+    let mut referenced_files = BTreeSet::new();
     for file in &profile.required_files {
         if !valid_slug(&file.role) {
             return Err(invalid(
@@ -212,6 +235,35 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
                 &format!("duplicate destination '{}'", file.destination),
             ));
         }
+        if let Some(external) = &file.external_input {
+            if !valid_slug(&external.lock_id) || !valid_slug(&external.file_id) {
+                return Err(invalid(
+                    source,
+                    "external lock and file IDs must be lowercase slugs",
+                ));
+            }
+            referenced_locks.insert(external.lock_id.as_str());
+            if !referenced_files.insert((&external.lock_id, &external.file_id)) {
+                return Err(invalid(
+                    source,
+                    "external input is mapped to multiple roles",
+                ));
+            }
+        }
+    }
+    let mut pinned_locks = BTreeSet::new();
+    for pin in &profile.external_locks {
+        if !valid_slug(&pin.id) || !pinned_locks.insert(pin.id.as_str()) {
+            return Err(invalid(source, "external lock ID is invalid or duplicated"));
+        }
+        Sha256Digest::parse(&pin.sha256)
+            .map_err(|_| invalid(source, "external lock SHA-256 is malformed"))?;
+    }
+    if pinned_locks != referenced_locks {
+        return Err(invalid(
+            source,
+            "external locks and referenced file roles differ",
+        ));
     }
     Ok(())
 }
