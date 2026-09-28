@@ -56,7 +56,13 @@ pub struct MediaImagePlan {
     pub layout: MediaLayout,
     pub external_lock_sha256: BTreeMap<String, Sha256Digest>,
     pub files: Vec<MediaPlanFile>,
+    /// Complete declared directory placements, including empty directories.
+    pub directories: Vec<String>,
+    /// Backend-generated paths included in the final filesystem inventory.
+    pub generated_files: Vec<String>,
     pub total_payload_bytes: u64,
+    /// Upper bound for the complete image when the format is variable-sized.
+    pub image_capacity_bytes: Option<u64>,
     /// Exact raw-image extent for MBR media; ISO size is backend-dependent.
     pub raw_image_size_bytes: Option<u64>,
 }
@@ -199,25 +205,120 @@ pub fn plan_media_image(
             origin,
         });
     }
-    files.sort_by(|left, right| left.destination.cmp(&right.destination));
-    let raw_image_size_bytes = match &profile.profile.layout {
-        MediaLayout::MbrFat32 {
-            start_lba,
-            size_bytes,
-            ..
-        } => {
-            if total_payload_bytes > *size_bytes {
-                return Err(invalid("payload bytes exceed the FAT32 partition extent"));
+    let mut directories = BTreeSet::new();
+    for declared in &receipt.trees {
+        let required = profile
+            .profile
+            .required_trees
+            .iter()
+            .find(|tree| tree.role == declared.role)
+            .ok_or_else(|| invalid("unselected media tree in build receipt"))?;
+        let inventory = crate::media_tree::measure_media_tree(&build_root.join(&declared.path))
+            .map_err(|error| invalid(&format!("cannot measure media tree: {error}")))?;
+        for directory in &inventory.directories {
+            directories.insert(join_destination(&required.destination, directory));
+        }
+        for (index, file) in inventory.files.iter().enumerate() {
+            let destination = join_destination(&required.destination, &file.relative);
+            if let Some(explicit) = files.iter().find(|item| item.destination == destination) {
+                if explicit.sha256 != file.sha256 || explicit.size_bytes != file.size_bytes {
+                    return Err(invalid("explicit ISO input differs from its complete tree"));
+                }
+                continue;
             }
-            Some(
-                start_lba
+            total_payload_bytes = total_payload_bytes
+                .checked_add(file.size_bytes)
+                .ok_or_else(|| invalid("total payload size overflows u64"))?;
+            files.push(MediaPlanFile {
+                role: format!("{}-{}", declared.role, index + 1),
+                destination,
+                sha256: file.sha256.clone(),
+                size_bytes: file.size_bytes,
+                source_path: file.source_path.clone(),
+                origin: MediaPlanFileOrigin::Build,
+            });
+        }
+    }
+    files.sort_by(|left, right| left.destination.cmp(&right.destination));
+    let (raw_image_size_bytes, generated_files, image_capacity_bytes) =
+        match &profile.profile.layout {
+            MediaLayout::MbrFat32 {
+                start_lba,
+                size_bytes,
+                ..
+            } => {
+                if total_payload_bytes > *size_bytes {
+                    return Err(invalid("payload bytes exceed the FAT32 partition extent"));
+                }
+                let image_size = start_lba
                     .checked_mul(512)
                     .and_then(|start| start.checked_add(*size_bytes))
-                    .ok_or_else(|| invalid("raw image size overflows u64"))?,
-            )
+                    .ok_or_else(|| invalid("raw image size overflows u64"))?;
+                (Some(image_size), Vec::new(), Some(image_size))
+            }
+            MediaLayout::Iso9660ElTorito {
+                max_size_bytes,
+                catalog_path,
+                ..
+            } => {
+                if total_payload_bytes > *max_size_bytes {
+                    return Err(invalid("payload bytes exceed the ISO profile capacity"));
+                }
+                (None, vec![catalog_path.clone()], Some(*max_size_bytes))
+            }
+        };
+    for destination in files
+        .iter()
+        .map(|file| &file.destination)
+        .chain(generated_files.iter())
+    {
+        let mut parent = destination.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            directories.insert(prefix.to_string());
+            parent = prefix;
         }
-        MediaLayout::Iso9660ElTorito { .. } => None,
-    };
+    }
+    if files
+        .iter()
+        .any(|file| directories.contains(&file.destination))
+    {
+        return Err(invalid("media file conflicts with a required directory"));
+    }
+    let mut file_roles = BTreeSet::new();
+    let mut file_destinations = BTreeSet::new();
+    for file in &files {
+        if !file_roles.insert(file.role.as_str())
+            || !file_destinations.insert(file.destination.as_str())
+        {
+            return Err(invalid("media plan has duplicate file roles or placements"));
+        }
+    }
+    if generated_files
+        .iter()
+        .any(|path| file_destinations.contains(path.as_str()))
+    {
+        return Err(invalid("media input conflicts with a generated file"));
+    }
+    if generated_files
+        .iter()
+        .any(|path| directories.contains(path))
+    {
+        return Err(invalid("generated media file conflicts with a directory"));
+    }
+    if matches!(profile.profile.layout, MediaLayout::Iso9660ElTorito { .. }) {
+        for path in files
+            .iter()
+            .map(|file| file.destination.as_str())
+            .chain(directories.iter().map(String::as_str))
+            .chain(generated_files.iter().map(String::as_str))
+        {
+            if !valid_iso_media_path(path) {
+                return Err(invalid(
+                    "ISO filesystem path contains unsupported characters",
+                ));
+            }
+        }
+    }
 
     Ok(MediaImagePlan {
         profile_id: profile.profile.id.clone(),
@@ -235,9 +336,30 @@ pub fn plan_media_image(
             .map(|lock| (lock.lock.id, lock.sha256))
             .collect(),
         files,
+        directories: directories.into_iter().collect(),
+        generated_files,
         total_payload_bytes,
+        image_capacity_bytes,
         raw_image_size_bytes,
     })
+}
+
+fn join_destination(prefix: &str, relative: &str) -> String {
+    if prefix.is_empty() {
+        relative.to_string()
+    } else {
+        format!("{prefix}/{relative}")
+    }
+}
+
+fn valid_iso_media_path(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_+.-".contains(&byte))
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn invalid(message: &str) -> MediaPlanError {
@@ -351,7 +473,7 @@ mod tests {
             sha256_bytes(b"locked")
         );
         let profile = format!(
-            "format_version = 1\nid = \"test-media\"\ntarget_preset = \"pc-x86_64\"\nmodel = \"pc\"\ntransport = \"bios\"\nmedium = \"iso9660-el-torito\"\nboot_protocol = \"grub-bios\"\nlabel = \"Test media\"\n\n[layout]\nkind = \"iso9660-el-torito\"\nvolume_id = \"AROSTEST\"\nboot_image_role = \"bootstrap\"\n\n[[external_locks]]\nid = \"firmware\"\nsha256 = \"{}\"\n\n[[required_files]]\nrole = \"bootstrap\"\ndestination = \"boot/bootstrap\"\n\n[[required_files]]\nrole = \"firmware\"\ndestination = \"boot/firmware.bin\"\nexternal_input = {{ lock_id = \"firmware\", file_id = \"blob\" }}\n",
+            "format_version = 1\nid = \"test-media\"\ntarget_preset = \"pc-x86_64\"\nmodel = \"pc\"\ntransport = \"bios\"\nmedium = \"iso9660-el-torito\"\nboot_protocol = \"grub-bios\"\nlabel = \"Test media\"\n\n[layout]\nkind = \"iso9660-el-torito\"\nvolume_id = \"AROSTEST\"\nboot_image_role = \"bootstrap\"\ncatalog_path = \"boot/catalog\"\nmax_size_bytes = 536870912\n\n[[external_locks]]\nid = \"firmware\"\nsha256 = \"{}\"\n\n[[required_files]]\nrole = \"bootstrap\"\ndestination = \"boot/bootstrap\"\n\n[[required_files]]\nrole = \"firmware\"\ndestination = \"boot/firmware.bin\"\nexternal_input = {{ lock_id = \"firmware\", file_id = \"blob\" }}\n",
             sha256_bytes(lock.as_bytes())
         );
         let profile = parse_media_profile("test", &profile).unwrap();

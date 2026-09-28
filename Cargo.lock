@@ -192,6 +192,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
+ "walkdir",
  "which",
 ]
 

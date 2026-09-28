@@ -20,6 +20,7 @@ use std::process::Command;
 
 const FORMAT_VERSION: u32 = 1;
 const BOUND_FORMAT_VERSION: u32 = 2;
+const TREE_FORMAT_VERSION: u32 = 3;
 const KIND: &str = "aros-media-inputs";
 const MAX_RECEIPT_BYTES: usize = 1024 * 1024;
 const MAX_FILES: usize = 1024;
@@ -32,6 +33,17 @@ pub struct MediaBuildFile {
     pub path: String,
     pub sha256: String,
     pub size_bytes: u64,
+}
+
+/// Digest and cardinality of an entire built directory, including empty dirs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaBuildTree {
+    pub role: String,
+    pub path: String,
+    pub sha256: Sha256Digest,
+    pub file_count: usize,
+    pub directory_count: usize,
 }
 
 /// Origin of measured files; legacy inputs do not assert CMake provenance.
@@ -71,6 +83,8 @@ pub struct MediaBuildReceipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_identity: Option<MediaBuildIdentity>,
     pub files: Vec<MediaBuildFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trees: Vec<MediaBuildTree>,
 }
 
 impl MediaBuildReceipt {
@@ -96,6 +110,7 @@ impl MediaBuildReceipt {
             transport,
             build_identity: None,
             files,
+            trees: Vec::new(),
         };
         validate_receipt(&receipt)?;
         Ok(receipt)
@@ -122,6 +137,34 @@ impl MediaBuildReceipt {
             transport,
             build_identity: Some(identity),
             files,
+            trees: Vec::new(),
+        };
+        validate_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Construct a bound CMake receipt with complete built-directory inputs.
+    ///
+    /// # Errors
+    /// Rejects malformed roles, paths, digests, counts or origin identity.
+    pub fn new_bound_cmake_with_trees(
+        target_preset: String,
+        model: String,
+        transport: String,
+        identity: MediaBuildIdentity,
+        files: Vec<MediaBuildFile>,
+        trees: Vec<MediaBuildTree>,
+    ) -> Result<Self, MediaReceiptError> {
+        let receipt = Self {
+            format_version: TREE_FORMAT_VERSION,
+            kind: KIND.to_string(),
+            origin: MediaReceiptOrigin::Cmake,
+            target_preset,
+            model,
+            transport,
+            build_identity: Some(identity),
+            files,
+            trees,
         };
         validate_receipt(&receipt)?;
         Ok(receipt)
@@ -196,6 +239,21 @@ pub fn verify_media_build_receipt(
             )));
         }
     }
+    let expected_tree_roles: BTreeSet<_> = profile
+        .required_trees
+        .iter()
+        .map(|tree| tree.role.as_str())
+        .collect();
+    let actual_tree_roles: BTreeSet<_> = receipt
+        .trees
+        .iter()
+        .map(|tree| tree.role.as_str())
+        .collect();
+    if expected_tree_roles != actual_tree_roles {
+        return Err(invalid(
+            "build receipt tree roles differ from the selected profile",
+        ));
+    }
 
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -210,6 +268,18 @@ pub fn verify_media_build_receipt(
         if actual.size != declared.size_bytes || actual.digest != expected {
             return Err(invalid(&format!(
                 "measured size or SHA-256 differs for role '{}'",
+                declared.role
+            )));
+        }
+    }
+    for declared in &receipt.trees {
+        let measured = crate::media_tree::measure_media_tree(&root.join(&declared.path))?;
+        if measured.sha256 != declared.sha256
+            || measured.files.len() != declared.file_count
+            || measured.directories.len() != declared.directory_count
+        {
+            return Err(invalid(&format!(
+                "measured tree differs for role '{}'",
                 declared.role
             )));
         }
@@ -309,7 +379,7 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
     }
     if !matches!(
         receipt.format_version,
-        FORMAT_VERSION | BOUND_FORMAT_VERSION
+        FORMAT_VERSION | BOUND_FORMAT_VERSION | TREE_FORMAT_VERSION
     ) || receipt.kind != KIND
     {
         return Err(invalid("unsupported format_version or kind"));
@@ -319,8 +389,15 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
         receipt.origin,
         &receipt.build_identity,
     ) {
-        (FORMAT_VERSION, _, None) => {}
-        (BOUND_FORMAT_VERSION, MediaReceiptOrigin::Cmake, Some(identity)) => {
+        (FORMAT_VERSION, _, None) if receipt.trees.is_empty() => {}
+        (BOUND_FORMAT_VERSION, MediaReceiptOrigin::Cmake, Some(identity))
+            if receipt.trees.is_empty() =>
+        {
+            validate_media_build_identity(identity)?;
+        }
+        (TREE_FORMAT_VERSION, MediaReceiptOrigin::Cmake, Some(identity))
+            if !receipt.trees.is_empty() =>
+        {
             validate_media_build_identity(identity)?;
         }
         _ => {
@@ -366,6 +443,19 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
         }
         Sha256Digest::parse(&file.sha256)
             .map_err(|_| invalid("file.sha256 is not a SHA-256 digest"))?;
+    }
+    let mut tree_roles = BTreeSet::new();
+    let mut tree_paths = BTreeSet::new();
+    for tree in &receipt.trees {
+        if !valid_slug(&tree.role) || !tree_roles.insert(&tree.role) || roles.contains(&tree.role) {
+            return Err(invalid("tree role is invalid or duplicated"));
+        }
+        if !crate::media_profile::valid_destination(&tree.path) || !tree_paths.insert(&tree.path) {
+            return Err(invalid("tree path is unsafe or duplicated"));
+        }
+        if tree.file_count == 0 || tree.file_count > 20_000 || tree.directory_count > 20_000 {
+            return Err(invalid("tree inventory has invalid cardinality"));
+        }
     }
     Ok(())
 }

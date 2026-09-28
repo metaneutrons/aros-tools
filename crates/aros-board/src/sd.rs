@@ -79,6 +79,8 @@ pub const RAW_IMAGE_FILENAME: &str = "aros-board-boot.img";
 
 /// Stable filename for a profile-composed MBR/FAT32 image.
 pub const MEDIA_RAW_IMAGE_FILENAME: &str = "aros-media.img";
+/// Stable filename for a profile-composed ISO image.
+pub const MEDIA_ISO_IMAGE_FILENAME: &str = "aros-media.iso";
 /// Closed metadata for one composed image; it does not assert boot success.
 pub const MEDIA_ARTIFACT_MANIFEST: &str = "media-image.json";
 
@@ -89,6 +91,9 @@ use sd_media::{render_media_manifest, stable_media_volume_id, validate_media_pla
 #[path = "sd_verify.rs"]
 mod sd_verify;
 pub use sd_verify::{verify_fat32_media_artifact, VerifiedMediaArtifact};
+#[path = "sd_iso.rs"]
+mod sd_iso;
+pub use sd_iso::{stage_iso_media_plan_with_gate, verify_iso_media_artifact};
 
 /// Transport string used by the Pi 4 USB-C CDC-ECM bootstrap.
 pub const UBOOT_USB_ECM_TRANSPORT: &str = "uboot-usb-ecm";
@@ -1166,7 +1171,7 @@ fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<()>
 }
 
 fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64)> {
-    let mut input = File::open(source).map_err(|error| {
+    let mut input = aros_common::open_regular_file_nofollow(source).map_err(|error| {
         miette::miette!(
             "Could not open verified boot input '{}' for staging: {error}",
             source.display()

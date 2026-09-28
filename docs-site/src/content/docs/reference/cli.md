@@ -151,9 +151,9 @@ the safe entry stages and explains the required checkout/cache separation.
 
 | Command | Effect |
 | --- | --- |
-| `aros image build` | Validate a reviewed MBR/FAT32 profile and measured inputs; plan only by default, compose into a new artifact directory with `--apply` |
-| `aros image inspect` | Verify a composed MBR/FAT32 artifact from `--artifact DIR`, then show measured image and input identities |
-| `aros image verify` | Recheck the exact artifact inventory, SHA256SUMS, MBR, FAT32 tree and payload hashes from `--artifact DIR` |
+| `aros image build` | Plan a reviewed FAT32 or BIOS ISO profile; compose into a new artifact directory with `--apply` |
+| `aros image inspect` | Read back a composed image from `--artifact DIR` and show measured facts |
+| `aros image verify` | Check the artifact inventory, SHA256SUMS, image filesystem, embedded files and boot metadata |
 
 These commands work without an AROS checkout and accept `--format human|json`.
 `build` requires `--profile ID --build-root DIR --receipt FILE --output DIR`.
@@ -161,15 +161,21 @@ It selects an exact ID from the built-in reviewed registry and requires a
 versioned CMake or legacy build receipt. Where the profile declares external
 inputs, pass each reviewed lock as `--lock ID=FILE` and each local file as
 `--external LOCK_ID:FILE_ID=PATH`. The planner verifies the locks and remeasures
-every input. A bound v2 CMake receipt additionally requires `--source-root DIR`
+every input. A bound v2/v3 CMake receipt additionally requires `--source-root DIR`
 and `--toolchain-root DIR`: the CLI rechecks the clean Git commit/tree, release
 manifest and complete installed toolchain inventory before publication. A v1
 receipt remains supported but has no source/toolchain binding and cannot be
 upgraded by merely passing these flags. `--apply` composes and independently
 verifies a new artifact. The manifest distinguishes these origin states;
 neither is an authenticated attestation or a successful board boot. No image
-command writes a device. ISO composition is not yet available. `aros board sd
-image` retains its existing v1 bundle behavior.
+command writes a device. ISO composition uses `xorriso` and requires it on the
+host. The `pc-bios-iso` profile requires a bound receipt for the complete SYS
+tree, including empty directories, plus explicit bootstrap and GRUB inputs.
+The composer checks capacity, file placement and the El Torito entry; it does
+not claim a fresh PC build graph or guest boot. Those are BM3 gates. The
+existing CMake `boot-iso` target does not yet emit the v3 tree receipt; native
+producer integration belongs to BM3. `aros board
+sd image` retains its existing v1 bundle behavior.
 
 ## Source and repository
 

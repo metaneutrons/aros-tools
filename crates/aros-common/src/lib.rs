@@ -30,6 +30,7 @@ pub mod media_input_lock;
 pub mod media_plan;
 pub mod media_profile;
 pub mod media_receipt;
+pub mod media_tree;
 pub mod observability;
 pub mod pins;
 pub mod process;
