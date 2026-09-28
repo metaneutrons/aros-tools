@@ -207,6 +207,8 @@ add_custom_target(media-receipt
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+
         symlink(root.join("EFI"), root.join("linked")).expect("linked parent");
         assert!(!invoke("write", "uefi-loader|linked/BOOT/BOOTRISCV64.EFI")
             .status
@@ -217,6 +219,38 @@ add_custom_target(media-receipt
         )
         .status
         .success());
+
+        assert!(Command::new("mkfifo")
+            .arg(root.join("pipe"))
+            .status()
+            .expect("mkfifo")
+            .success());
+        let mut child = Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", root.display()))
+            .arg("-DTARGET_PRESET=opensbi-riscv64")
+            .arg("-DMODEL=milk-v-titan")
+            .arg("-DTRANSPORT=uefi-esp")
+            .arg("-DFILE_SPECS=bsp-package|pipe")
+            .arg("-DMODE=write")
+            .arg("-P")
+            .arg(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("CMake FIFO probe");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().expect("probe status") {
+                assert!(!status.success(), "FIFO must be rejected");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop blocked probe");
+                child.wait().expect("reap blocked probe");
+                panic!("CMake blocked while measuring a FIFO");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     let graph = file("OpenSbiUefi.cmake").expect("Titan graph");

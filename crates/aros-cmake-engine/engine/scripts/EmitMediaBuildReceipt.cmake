@@ -63,6 +63,14 @@ foreach(_spec IN LISTS FILE_SPECS)
     if(NOT EXISTS "${_file}" OR IS_DIRECTORY "${_file}")
         message(FATAL_ERROR "media build receipt is missing a regular file: ${_relative}")
     endif()
+    # CMake's EXISTS/IS_DIRECTORY pair also accepts FIFOs and sockets. The
+    # fixed POSIX test rejects those before file(SIZE)/file(SHA256) can block.
+    # Rust revalidates the produced receipt through no-follow descriptors.
+    execute_process(COMMAND /bin/sh -c "test -f \"$1\""
+        aros-media-file "${_file}" RESULT_VARIABLE _regular_result)
+    if(NOT _regular_result EQUAL 0)
+        message(FATAL_ERROR "media build receipt refuses a non-regular file: ${_relative}")
+    endif()
     file(SIZE "${_file}" _size)
     file(SHA256 "${_file}" _sha)
     string(APPEND _json "${_separator}{\"role\":\"${_role}\",\"path\":\"${_relative}\",\"sha256\":\"${_sha}\",\"size_bytes\":${_size}}")
@@ -81,6 +89,11 @@ endif()
 if(MODE STREQUAL "verify")
     if(NOT EXISTS "${_receipt}")
         message(FATAL_ERROR "media build receipt is missing")
+    endif()
+    execute_process(COMMAND /bin/sh -c "test -f \"$1\""
+        aros-media-receipt "${_receipt}" RESULT_VARIABLE _regular_result)
+    if(NOT _regular_result EQUAL 0)
+        message(FATAL_ERROR "media build receipt is not a regular file")
     endif()
     file(READ "${_receipt}" _actual LIMIT 1048577)
     if(NOT _actual STREQUAL _json)
