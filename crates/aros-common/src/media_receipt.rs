@@ -6,7 +6,7 @@
 //! that legacy bytes came from a specific build. The composer must separately
 //! bind source, toolchain, reviewed profile and locked external inputs.
 
-use crate::media_profile::MediaProfile;
+use crate::media_profile::{valid_target_preset, MediaProfile};
 use crate::{casefold_path_key, open_regular_file_nofollow, sha256_reader, Sha256Digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -169,8 +169,10 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
     if receipt.format_version != FORMAT_VERSION || receipt.kind != KIND {
         return Err(invalid("unsupported format_version or kind"));
     }
+    if !valid_target_preset(&receipt.target_preset) {
+        return Err(invalid("target_preset must be a portable target name"));
+    }
     for (label, value) in [
-        ("target_preset", receipt.target_preset.as_str()),
         ("model", receipt.model.as_str()),
         ("transport", receipt.transport.as_str()),
     ] {
@@ -254,6 +256,14 @@ mod tests {
         assert!(parse_media_build_receipt(
             text.replace("\"origin\":\"cmake\"", "\"origin\":\"unknown\"")
                 .as_bytes()
+        )
+        .is_err());
+        assert!(
+            parse_media_build_receipt(text.replace("opensbi-riscv64", "pc-x86_64").as_bytes())
+                .is_ok()
+        );
+        assert!(parse_media_build_receipt(
+            text.replace("opensbi-riscv64", "-pc-x86_64").as_bytes()
         )
         .is_err());
         assert!(

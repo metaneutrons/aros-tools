@@ -13,6 +13,10 @@ boot qualification. The SD bundle validator loads these contracts from the
 binary's reviewed source revision; changing a profile requires a new tools
 build and tests.
 
+Parser fixtures under `crates/aros-common/tests/fixtures/media/` exercise PC
+BIOS ISO and native Pi target identities, including `pc-x86_64`. They are not
+part of the runtime registry and are not media-build or boot claims.
+
 Each TOML document has a closed `format_version = 1` schema. It may declare
 identities and file destinations, never commands or host devices. Required
 roles and FAT destinations must be unique, relative and traversal-free. The

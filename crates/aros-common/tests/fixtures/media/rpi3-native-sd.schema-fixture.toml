@@ -1,0 +1,17 @@
+# Schema fixture only: firmware locking and physical boot are not qualified.
+format_version = 1
+id = "rpi3-native-sd-fixture"
+target_preset = "arm-raspi"
+model = "rpi3"
+transport = "native-sd"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware"
+label = "Pi 3 native SD schema fixture"
+
+[[required_files]]
+role = "aros-image"
+destination = "aros-arm-raspi.img"
+
+[[required_files]]
+role = "bsp-package"
+destination = "aros-arm-bsp.rom"
