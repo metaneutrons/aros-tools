@@ -175,6 +175,9 @@ capabilities must not be documented as already shipped.
   interfaces from implemented and qualified behavior.
 - [CMake engine migration](docs/cmake-engine-migration.md): implemented
   ownership changes, measured evidence and the remaining source boundary.
+- [Boot media initiative plan](docs/boot-media-plan.md): portable media
+  profiles, native build closure, image composition and platform-specific
+  qualification gates.
 
 ## Commits and pull requests
 
