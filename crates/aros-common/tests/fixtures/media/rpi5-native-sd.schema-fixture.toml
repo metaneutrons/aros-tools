@@ -8,6 +8,12 @@ medium = "mbr-fat32"
 boot_protocol = "pi-firmware"
 label = "Pi 5 native SD schema fixture"
 
+[layout]
+kind = "mbr-fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+
 [[required_files]]
 role = "aros-image"
 destination = "aros-aarch64-raspi.img"

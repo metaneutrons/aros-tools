@@ -7,6 +7,12 @@ medium = "mbr-fat32"
 boot_protocol = "pi-firmware-uboot"
 label = "Pi 4 U-Boot USB-ECM"
 
+[layout]
+kind = "mbr-fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+
 [[required_files]]
 role = "config"
 destination = "config.txt"

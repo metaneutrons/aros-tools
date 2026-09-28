@@ -19,8 +19,15 @@ part of the runtime registry and are not media-build or boot claims.
 
 Each TOML document has a closed `format_version = 1` schema. It may declare
 identities and file destinations, never commands or host devices. Required
-roles and FAT destinations must be unique, relative and traversal-free. The
+roles and media destinations must be unique, relative and traversal-free. The
 external bundle must still supply regular files with measured hashes.
+The `layout` section is format-specific: MBR/FAT32 profiles declare a
+sector-aligned partition and FAT label; BIOS ISO profiles declare a volume ID
+and the required El Torito boot-image role. The existing Pi 4 and Titan
+profiles declare a reviewed 64 MiB/2048-LBA geometry for future portable
+composition. Legacy v1 bundles may still declare other valid geometries;
+their existing `aros board sd image` behavior is unchanged. The PC/Pi schema
+fixtures are not runtime profiles.
 
 The internal `MediaBuildReceipt` v1 contract records target, model, transport,
 and the roles, relative paths, sizes and SHA-256 digests of source-dependent

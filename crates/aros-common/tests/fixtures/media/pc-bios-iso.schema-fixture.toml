@@ -8,6 +8,11 @@ medium = "iso9660-el-torito"
 boot_protocol = "grub-bios"
 label = "PC BIOS ISO schema fixture"
 
+[layout]
+kind = "iso9660-el-torito"
+volume_id = "AROSLIVE"
+boot_image_role = "grub-boot-image"
+
 [[required_files]]
 role = "bootstrap"
 destination = "boot/pc/bootstrap"

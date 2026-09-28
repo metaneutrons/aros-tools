@@ -7,6 +7,12 @@ medium = "mbr-fat32"
 boot_protocol = "uefi-riscv64"
 label = "OpenSBI/UEFI"
 
+[layout]
+kind = "mbr-fat32"
+start_lba = 2048
+size_bytes = 67108864
+label = "AROSBOOT"
+
 [[required_files]]
 role = "uefi-loader"
 destination = "EFI/BOOT/BOOTRISCV64.EFI"
