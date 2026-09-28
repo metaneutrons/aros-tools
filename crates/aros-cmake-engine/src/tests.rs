@@ -344,3 +344,183 @@ fn run_cmake_script(script: &std::path::Path) {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+#[test]
+fn pc_boot_iso_uses_eltorito_and_the_source_module_order() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let source = directory.path().join("aros-source");
+    fs::create_dir_all(source.join("arch/x86_64-pc/boot")).expect("module directory");
+    fs::create_dir_all(source.join("workbench/s")).expect("startup directory");
+    fs::write(
+        source.join("arch/x86_64-pc/boot/modules.default"),
+        "/boot/@arch.dir@/kernel.@pkg.fmt@\n/boot/@arch.dir@/aros-bsp.pkg.@pkg.fmt@\n/boot/aros-base.pkg.@pkg.fmt@\n",
+    )
+    .expect("module list");
+    fs::write(source.join("workbench/s/Startup-Sequence"), "EndCLI\n").expect("startup sequence");
+    let fixture = directory.path().join("fixture");
+    fs::create_dir(&fixture).expect("fixture directory");
+    fs::write(
+        fixture.join("CMakeLists.txt"),
+        format!(
+            r#"cmake_minimum_required(VERSION 3.22)
+project(BootIsoContract NONE)
+set(AROS_SOURCE_DIR "{}")
+set(AROS_TARGET_CPU x86_64)
+set(AROS_TARGET_PLATFORM pc)
+set(AROS_BOOT_ISO "${{CMAKE_BINARY_DIR}}/aros-x86_64-pc.iso")
+set(AROS_MKISOFS_BIN /usr/bin/true)
+add_custom_target(aros-grub2-iso-assets)
+add_custom_target(workbench-c)
+include("{}/PcBootIso.cmake")
+aros_add_pc_boot_iso()
+"#,
+            cmake_path(&source),
+            cmake_path(&engine),
+        ),
+    )
+    .expect("fixture CMakeLists");
+    let build = directory.path().join("build");
+    let output = Command::new("cmake")
+        .args(["-G", "Ninja", "-S"])
+        .arg(&fixture)
+        .arg("-B")
+        .arg(&build)
+        .output()
+        .expect("configure fixture");
+    assert!(
+        output.status.success(),
+        "boot-iso configure failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = fs::read_to_string(build.join("gen/boot-iso/grub.cfg")).expect("GRUB config");
+    assert!(config.contains("insmod multiboot2"));
+    assert!(config.contains("multiboot2 /boot/pc/bootstrap vesa=800x600x32"));
+    let kernel = config
+        .find("module2 /boot/pc/kernel")
+        .expect("kernel module");
+    let bsp = config
+        .find("module2 /boot/pc/aros-bsp.pkg")
+        .expect("BSP module");
+    let base = config
+        .find("module2 /boot/aros-base.pkg")
+        .expect("base module");
+    assert!(kernel < bsp && bsp < base, "source module order changed");
+    assert!(!config.contains('@'), "unexpanded module placeholder");
+    let ninja = fs::read_to_string(build.join("build.ninja")).expect("Ninja graph");
+    for required in [
+        "boot/grub/i386-pc/grub2_eltorito",
+        "-no-emul-boot",
+        "-boot-info-table",
+        "aros-grub2-iso-assets",
+    ] {
+        assert!(ninja.contains(required), "missing ISO contract: {required}");
+    }
+
+    // A completed SYS tree is an input, not a dependency that re-runs the
+    // package producer (which deliberately refuses to overwrite packages).
+    let sys_boot = build.join("SYS/boot");
+    fs::create_dir_all(sys_boot.join("pc")).expect("PC boot directory");
+    fs::create_dir_all(sys_boot.join("grub/i386-pc")).expect("GRUB boot directory");
+    for relative in [
+        "pc/bootstrap",
+        "pc/kernel",
+        "pc/aros-bsp.pkg",
+        "aros-base.pkg",
+        "grub/i386-pc/grub2_eltorito",
+    ] {
+        fs::write(sys_boot.join(relative), "fixture\n").expect("SYS input");
+    }
+    let output = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "boot-iso"])
+        .output()
+        .expect("assemble fixture");
+    assert!(
+        !output.status.success(),
+        "fake ISO composer unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("did not produce a regular ISO"),
+        "missing final ISO was not diagnosed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("gen/boot-iso/stage/boot/grub/grub.cfg"))
+            .expect("staged config"),
+        config
+    );
+    assert!(build
+        .join("gen/boot-iso/stage/S/Startup-Sequence")
+        .is_file());
+    assert!(!sys_boot.join("grub/grub.cfg").exists());
+    assert!(!build.join("SYS/S/Startup-Sequence").exists());
+
+    #[cfg(unix)]
+    {
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        std::os::unix::fs::symlink(&outside, build.join("SYS/S")).expect("unsafe SYS destination");
+        let output = Command::new("cmake")
+            .arg("--build")
+            .arg(&build)
+            .args(["--target", "boot-iso"])
+            .output()
+            .expect("reject unsafe destination");
+        assert!(!output.status.success(), "symlinked SYS/S was accepted");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("unsafe SYS directory"),
+            "symlink rejection was not diagnosed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!outside.join("Startup-Sequence").exists());
+    }
+}
+
+#[test]
+fn pc_boot_iso_verifier_rejects_data_iso_and_accepts_boot_catalog() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let verify = engine.join("VerifyPcBootIso.cmake");
+    let iso = directory.path().join("boot.iso");
+    let mut bytes = vec![0_u8; 131_072];
+    fs::write(&iso, &bytes).expect("data ISO fixture");
+    let run = || {
+        Command::new("cmake")
+            .arg(format!("-DISO_PATH={}", iso.display()))
+            .arg("-P")
+            .arg(&verify)
+            .output()
+            .expect("run ISO verifier")
+    };
+    assert!(!run().status.success(), "data-only ISO was accepted");
+
+    let record = 17 * 2048;
+    bytes[record..record + 7].copy_from_slice(b"\0CD001\x01");
+    bytes[record + 7..record + 30].copy_from_slice(b"EL TORITO SPECIFICATION");
+    bytes[record + 71..record + 75].copy_from_slice(&20_u32.to_le_bytes());
+    let catalog = 20 * 2048;
+    bytes[catalog] = 1;
+    bytes[catalog + 30..catalog + 32].copy_from_slice(&[0x55, 0xaa]);
+    bytes[catalog + 32..catalog + 34].copy_from_slice(&[0x88, 0]);
+    fs::write(&iso, &bytes).expect("boot ISO without image fixture");
+    assert!(
+        !run().status.success(),
+        "catalog without boot image was accepted"
+    );
+    bytes[catalog + 38..catalog + 40].copy_from_slice(&4_u16.to_le_bytes());
+    bytes[catalog + 40..catalog + 44].copy_from_slice(&40_u32.to_le_bytes());
+    fs::write(&iso, &bytes).expect("empty image fixture");
+    assert!(!run().status.success(), "empty boot image was accepted");
+    bytes[40 * 2048] = 0xe8;
+    fs::write(&iso, bytes).expect("boot ISO fixture");
+    let output = run();
+    assert!(
+        output.status.success(),
+        "valid boot catalog was rejected:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

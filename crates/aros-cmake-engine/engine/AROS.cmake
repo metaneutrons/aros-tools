@@ -5609,32 +5609,9 @@ endfunction()
 # =============================================================================
 # Bootable Image & Distribution Targets
 # =============================================================================
-find_program(MKISOFS_BIN mkisofs HINTS "/opt/homebrew/bin" "/usr/bin" "/usr/local/bin")
-find_program(HDIUTIL_BIN hdiutil HINTS "/usr/bin")
-
 set(AROS_BOOT_ISO "${CMAKE_BINARY_DIR}/aros-${AROS_TARGET_CPU}-${AROS_TARGET_PLATFORM}.iso")
-
-if(MKISOFS_BIN)
-    add_custom_target(boot-iso
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/SYS/S"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
-        COMMAND ${MKISOFS_BIN} -o "${AROS_BOOT_ISO}"
-                -V "AROS Live CD"
-                -p "The AROS Dev Team"
-                -iso-level 4 -l -J -r
-                "${CMAKE_BINARY_DIR}/SYS"
-        DEPENDS workbench-c
-        COMMENT "💿 Packaging AROS-NX Bootable ISO Disk Image -> ${AROS_BOOT_ISO}"
-    )
-elseif(HDIUTIL_BIN)
-    add_custom_target(boot-iso
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/SYS/S"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence" "${CMAKE_BINARY_DIR}/SYS/S/Startup-Sequence"
-        COMMAND ${HDIUTIL_BIN} makehybrid -iso -joliet -o "${AROS_BOOT_ISO}" "${CMAKE_BINARY_DIR}/SYS"
-        DEPENDS workbench-c
-        COMMENT "💿 Packaging AROS-NX Bootable ISO Disk Image via hdiutil -> ${AROS_BOOT_ISO}"
-    )
-endif()
+# The PC boot-iso target is declared after generated targets and the audited
+# GRUB ISO assets exist. A plain ISO of SYS is only a data disc, not boot media.
 
 # =============================================================================
 # Kickstart Packages (PKG containers)

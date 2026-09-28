@@ -583,6 +583,11 @@ file(MAKE_DIRECTORY "${_build_dir}")
 
 set(_target_link_flags
     "${GB_TARGET_ISA_FLAGS} -fuse-ld=lld -Wl,--image-base=0 -nostartfiles")
+if(GB_MODE STREQUAL "pc")
+    # BIOS core images are loaded directly; Clang/LLD must not inject the
+    # Linux ELF interpreter that a dynamically linked executable would need.
+    string(APPEND _target_link_flags " -static -no-pie")
+endif()
 if(GB_VERSION STREQUAL "2.16")
     set(_target_cflags "${GB_TARGET_ISA_FLAGS} -Os")
     set(_host_libs "-lpthread")
@@ -688,6 +693,19 @@ _gb_file_matches("native grub-mkimage" "${_build_dir}/grub-mkimage" "Mach-O" "ar
 if(GB_MODE STREQUAL "pc")
     _gb_file_matches("PC boot.img" "${_build_dir}/grub-core/boot.img" "DOS/MBR boot sector")
     _gb_file_matches("PC kernel.img" "${_build_dir}/grub-core/kernel.img" "ELF 32-bit" "Intel 80386")
+    get_filename_component(_llvm_dir "${GB_TARGET_CLANG}" DIRECTORY)
+    set(_readelf "${_llvm_dir}/llvm-readelf")
+    _gb_require_executable("${_readelf}" "target llvm-readelf")
+    execute_process(
+        COMMAND "${_readelf}" -S -l "${_build_dir}/grub-core/kernel.img"
+        RESULT_VARIABLE _readelf_result
+        OUTPUT_VARIABLE _readelf_output
+        ERROR_VARIABLE _readelf_error)
+    if(NOT _readelf_result EQUAL 0 OR
+       _readelf_output MATCHES "\\.interp|[ ]INTERP[ ]")
+        message(FATAL_ERROR
+            "PC GRUB kernel must be static without an ELF interpreter\n${_readelf_output}${_readelf_error}")
+    endif()
     _gb_file_matches("PC normal.mod" "${_build_dir}/grub-core/normal.mod" "ELF 32-bit" "Intel 80386" "relocatable")
 else()
     if(GB_MODE STREQUAL "efi64")

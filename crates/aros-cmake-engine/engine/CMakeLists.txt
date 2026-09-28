@@ -569,6 +569,8 @@ if(AROS_TOOLCHAIN STREQUAL "llvm" AND
         HOST_PC "${CMAKE_BINARY_DIR}/hosttools/grub2/pc"
         HOST_EFI64 "${CMAKE_BINARY_DIR}/hosttools/grub2/efi-x86_64"
         HOST_EFI32 "${CMAKE_BINARY_DIR}/hosttools/grub2/efi-i386")
+    include("${AROS_CMAKE_ENGINE_DIR}/PcBootIso.cmake")
+    aros_add_pc_boot_iso()
 endif()
 
 # 4a. Configure-time diagnostics accumulated by the CMake target helpers. The

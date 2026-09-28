@@ -40,15 +40,31 @@ function(_fixture_host_prefix prefix manifest)
     file(MAKE_DIRECTORY "${prefix}")
     _fixture_write_if_changed("${prefix}/grub-mkimage" [=[#!/bin/sh
 out=
+format=
+module_dir=
 while [ "$#" -gt 0 ]; do
     if [ "$1" = "-o" ]; then
         out="$2"
+        shift 2
+    elif [ "$1" = "-O" ]; then
+        format="$2"
+        shift 2
+    elif [ "$1" = "-d" ]; then
+        module_dir="$2"
         shift 2
     else
         shift
     fi
 done
 [ -n "$out" ] || exit 2
+case "$out" in
+    */pc/core.img) [ "$format" = "i386-pc" ] || exit 3 ;;
+    */pc/grub2_eltorito)
+        [ "$format" = "i386-pc-eltorito" ] || exit 3
+        command cp "$module_dir/cdboot.img" "$out" || exit 4
+        printf 'fixture grub image\n' >> "$out"
+        exit 0 ;;
+esac
 printf 'fixture grub image\n' > "$out"
 ]=])
     file(CHMOD "${prefix}/grub-mkimage"
