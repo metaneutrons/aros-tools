@@ -1,4 +1,4 @@
-//! Read-only boot-media artifact commands.
+//! Reviewed boot-media planning, composition and artifact inspection commands.
 
 use aros_board::sd::{stage_fat32_media_plan, verify_fat32_media_artifact, VerifiedMediaArtifact};
 use aros_common::media_plan::{plan_media_image, MediaExternalFile};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_INPUT_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Operations on a completed image artifact, never a block device.
+/// Plan, compose or inspect an image artifact; never write a block device.
 #[derive(Subcommand)]
 pub enum ImageCommand {
     /// Plan or explicitly compose a reviewed MBR/FAT32 media profile
@@ -88,7 +88,7 @@ pub enum ImageOutputFormat {
     Json,
 }
 
-/// Run one read-only image command.
+/// Run one boot-media image command.
 ///
 /// # Errors
 ///
