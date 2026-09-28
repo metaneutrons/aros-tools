@@ -151,13 +151,20 @@ the safe entry stages and explains the required checkout/cache separation.
 
 | Command | Effect |
 | --- | --- |
+| `aros image build` | Validate a reviewed MBR/FAT32 profile and measured inputs; plan only by default, compose into a new artifact directory with `--apply` |
 | `aros image inspect` | Verify a composed MBR/FAT32 artifact from `--artifact DIR`, then show measured image and input identities |
 | `aros image verify` | Recheck the exact artifact inventory, SHA256SUMS, MBR, FAT32 tree and payload hashes from `--artifact DIR` |
 
-Both commands work without an AROS checkout and accept `--format human|json`.
-They neither write a device nor establish source provenance or a successful
-board boot. The public `aros image build` command and ISO support are not yet
-available; `aros board sd image` retains its existing v1 bundle behavior.
+These commands work without an AROS checkout and accept `--format human|json`.
+`build` requires `--profile ID --build-root DIR --receipt FILE --output DIR`.
+It selects an exact ID from the built-in reviewed registry and requires a
+versioned CMake or legacy build receipt. Where the profile declares external
+inputs, pass each reviewed lock as `--lock ID=FILE` and each local file as
+`--external LOCK_ID:FILE_ID=PATH`. The planner verifies the locks and remeasures
+every input; `--apply` composes and independently verifies a new artifact.
+None of these commands writes a device or establishes source provenance or a
+successful board boot. ISO composition is not yet available. `aros board sd
+image` retains its existing v1 bundle behavior.
 
 ## Source and repository
 
