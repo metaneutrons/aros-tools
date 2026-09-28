@@ -86,6 +86,10 @@ pub const MEDIA_ARTIFACT_MANIFEST: &str = "media-image.json";
 mod sd_media;
 use sd_media::{render_media_manifest, stable_media_volume_id, validate_media_plan_for_fat32};
 
+#[path = "sd_verify.rs"]
+mod sd_verify;
+pub use sd_verify::{verify_fat32_media_artifact, VerifiedMediaArtifact};
+
 /// Transport string used by the Pi 4 USB-C CDC-ECM bootstrap.
 pub const UBOOT_USB_ECM_TRANSPORT: &str = "uboot-usb-ecm";
 /// Transport string used by OpenSBI boards booting from a UEFI ESP.
@@ -176,6 +180,13 @@ pub struct VerifiedBootFile {
     pub destination: PathBuf,
     pub sha256: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ImageFileExpectation {
+    destination: PathBuf,
+    sha256: String,
+    size_bytes: u64,
 }
 
 /// A complete, verified raw MBR/FAT32 image inside a staged artifact.
@@ -1253,7 +1264,15 @@ fn build_raw_image_from_parts(
 
     write_fat32_payload(partition, files, volume_id, &image_path, &geometry)?;
     sync_image_file(&image_path)?;
-    verify_raw_image(files, &image_path, &geometry)?;
+    let expected: Vec<_> = files
+        .iter()
+        .map(|file| ImageFileExpectation {
+            destination: file.destination.clone(),
+            sha256: file.sha256.clone(),
+            size_bytes: file.size_bytes,
+        })
+        .collect();
+    verify_raw_image(&expected, &image_path, &geometry)?;
     sync_image_file(&image_path)?;
     let (sha256, size_bytes) = sha256_file(&image_path)?;
     if size_bytes != geometry.image_size_bytes {
@@ -1529,21 +1548,17 @@ fn copy_source_to_writer<W: Write>(
 }
 
 fn verify_raw_image(
-    files: &[VerifiedBootFile],
+    files: &[ImageFileExpectation],
     image_path: &Path,
     geometry: &ImageGeometry,
 ) -> Result<()> {
     verify_mbr(image_path, geometry)?;
-    let image = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image_path)
-        .map_err(|error| {
-            miette::miette!(
-                "Could not reopen staged raw SD image '{}' for verification: {error}",
-                image_path.display()
-            )
-        })?;
+    let image = aros_common::open_regular_file_nofollow(image_path).map_err(|error| {
+        miette::miette!(
+            "Could not reopen staged raw SD image '{}' for verification: {error}",
+            image_path.display()
+        )
+    })?;
     let mut partition = PartitionStream::new(
         image,
         geometry.partition_start_bytes,
@@ -1576,6 +1591,7 @@ fn verify_raw_image(
     }
     {
         let root = filesystem.root_dir();
+        sd_verify::verify_fat_inventory(&root, files)?;
         for file in files {
             let destination = portable_path(&file.destination);
             let mut input = root.open_file(&destination).map_err(|error| {
@@ -1608,7 +1624,7 @@ fn verify_raw_image(
 }
 
 fn verify_mbr(image_path: &Path, geometry: &ImageGeometry) -> Result<()> {
-    let mut image = File::open(image_path).map_err(|error| {
+    let mut image = aros_common::open_regular_file_nofollow(image_path).map_err(|error| {
         miette::miette!(
             "Could not open staged raw SD image '{}' for MBR verification: {error}",
             image_path.display()
