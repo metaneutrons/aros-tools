@@ -2,10 +2,10 @@
 
 use super::{
     legacy_bundle_build_receipt, publish_staged_directory_noreplace, sha256_file,
-    stage_boot_bundle, stage_fat32_media_plan, validate_boot_bundle, BundleExpectation,
-    PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,
-    BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST, MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME,
-    UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
+    stage_boot_bundle, stage_fat32_media_plan, validate_boot_bundle, verify_fat32_media_artifact,
+    BundleExpectation, PartitionLayout, UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST,
+    BOOT_BUNDLE_MANIFEST, BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST,
+    MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
 };
 use aros_common::media_plan::plan_media_image;
 use std::fmt::Write as _;
@@ -136,6 +136,18 @@ fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
     let second =
         stage_fat32_media_plan(&plan, &temporary.path().join("second")).expect("second image");
     assert_eq!(first.image.sha256(), second.image.sha256());
+    let verified = verify_fat32_media_artifact(&first.artifact_dir).expect("independent read-back");
+    assert_eq!(verified.profile_id, "rpi4-uboot-usb-ecm");
+    assert_eq!(verified.image_sha256.to_string(), first.image.sha256());
+    assert_eq!(verified.file_count, plan.files.len());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(first.image.path()).unwrap().permissions();
+        permissions.set_mode(0o444);
+        fs::set_permissions(first.image.path(), permissions).unwrap();
+        assert!(verify_fat32_media_artifact(&first.artifact_dir).is_ok());
+    }
     let mut reordered = plan.clone();
     reordered.files.reverse();
     let third = stage_fat32_media_plan(&reordered, &temporary.path().join("third"))
@@ -164,6 +176,14 @@ fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
     )));
     assert!(stage_fat32_media_plan(&plan, &first.artifact_dir).is_err());
     assert!(first.artifact_dir.join(MEDIA_ARTIFACT_MANIFEST).is_file());
+
+    let checksums_path = first.artifact_dir.join(ARTIFACT_CHECKSUMS);
+    let original_checksums = fs::read(&checksums_path).unwrap();
+    fs::write(&checksums_path, b"wrong\n").unwrap();
+    assert!(verify_fat32_media_artifact(&first.artifact_dir).is_err());
+    fs::write(&checksums_path, original_checksums).unwrap();
+    fs::write(first.artifact_dir.join("unexpected"), b"extra").unwrap();
+    assert!(verify_fat32_media_artifact(&first.artifact_dir).is_err());
 
     let mut forged = plan.clone();
     forged.raw_image_size_bytes = Some(1024);
@@ -196,6 +216,7 @@ fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
     let rejected_output = temporary.path().join("rejected");
     assert!(stage_fat32_media_plan(&plan, &rejected_output).is_err());
     assert!(!rejected_output.exists());
+    assert!(verify_fat32_media_artifact(&second.artifact_dir).is_ok());
     assert!(bundle_dir.join(BOOT_BUNDLE_MANIFEST).is_file());
 }
 
