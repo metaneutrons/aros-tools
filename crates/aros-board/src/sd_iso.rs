@@ -575,18 +575,8 @@ fn run_xorriso_in(directory: &Path, args: &[&str]) -> Result<Output> {
 }
 
 fn run_xorriso_command(mut command: Command, args: &[&str]) -> Result<Output> {
-    let output = command
-        .arg("-no_rc")
-        .args(args)
-        .output()
-        .map_err(|error| miette::miette!("Cannot execute xorriso ISO backend: {error}"))?;
-    if !output.status.success() {
-        miette::bail!(
-            "xorriso ISO backend failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(output)
+    command.arg("-no_rc").args(args);
+    crate::run_output(&mut command, "xorriso ISO backend")
 }
 
 fn xorriso_version() -> Result<String> {
@@ -652,17 +642,9 @@ fn extract_inventory(
             ]);
             outputs.push((relative.clone(), output));
         }
-        let output = Command::new("xorriso")
-            .arg("-no_rc")
-            .args(&args)
-            .output()
-            .map_err(|error| miette::miette!("Cannot execute ISO read-back: {error}"))?;
-        if !output.status.success() {
-            miette::bail!(
-                "ISO read-back failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        let mut command = Command::new("xorriso");
+        command.arg("-no_rc").args(&args);
+        crate::run_output(&mut command, "xorriso ISO read-back")?;
         for (relative, output) in outputs {
             measured.insert(relative, measure(&output)?);
             fs::remove_file(&output)
@@ -748,7 +730,7 @@ mod tests {
         assert_eq!(first.image.sha256(), second.image.sha256());
         let verified = verify_iso_media_artifact(&first.artifact_dir).unwrap();
         assert_eq!(verified.file_count, tree.files.len() + 1);
-        println!(
+        aros_common::outputln!(
             "complete PC SYS: files={}, directories={}, tree_sha256={}, iso_bytes={}, iso_sha256={}",
             tree.files.len(),
             tree.directories.len(),
