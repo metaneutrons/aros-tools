@@ -38,6 +38,7 @@ mod commands;
 mod completion_model;
 mod golden;
 mod host_compiler;
+mod image;
 mod observability;
 mod repo;
 mod source;
@@ -147,6 +148,12 @@ enum Commands {
     Board {
         #[command(subcommand)]
         command: BoardCommand,
+    },
+
+    /// Inspect or verify a composed boot-media artifact
+    Image {
+        #[command(subcommand)]
+        command: image::ImageCommand,
     },
 
     /// Create and configure an AROS source checkout
@@ -828,6 +835,16 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 ),
             }
         }
+        Commands::Image { command } => (
+            DiagnosticCode::CliMediaSafety,
+            DiagnosticStage::MediaSafety,
+            match command {
+                image::ImageCommand::Inspect(_) => "image.inspect",
+                image::ImageCommand::Verify(_) => "image.verify",
+            },
+            None,
+            "check the artifact directory, manifest, SHA256SUMS and image read-back failure",
+        ),
         Commands::Board { command } => match command {
             BoardCommand::Build { board, .. } => (
                 DiagnosticCode::CliBuild,
@@ -1334,6 +1351,14 @@ mod tests {
             ),
             (&["aros", "board", "scan"], "board.scan"),
             (&["aros", "board", "sd", "scan"], "board.sd.scan"),
+            (
+                &["aros", "image", "verify", "--artifact", "/tmp/media"],
+                "image.verify",
+            ),
+            (
+                &["aros", "image", "inspect", "--artifact", "/tmp/media"],
+                "image.inspect",
+            ),
             (&["aros", "golden", "capture"], "golden.capture"),
             (&["aros", "source", "init", "/tmp/AROS"], "source.init"),
         ];
@@ -1391,6 +1416,10 @@ mod tests {
         );
         assert_eq!(
             requirement(&["aros", "board", "scan"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
+            requirement(&["aros", "image", "verify", "--artifact", "/tmp/media"]),
             RepositoryRequirement::Global
         );
         assert_eq!(

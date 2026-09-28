@@ -147,6 +147,18 @@ the safe entry stages and explains the required checkout/cache separation.
 | `aros board sd write` | Preview or explicitly write a verified image with an exact opaque token |
 | `aros board console` | Launch or preview an external serial terminal; no UART driver is embedded |
 
+## Composed image artifacts (experimental)
+
+| Command | Effect |
+| --- | --- |
+| `aros image inspect --artifact DIR` | Verify a composed MBR/FAT32 artifact, then show measured image and input identities |
+| `aros image verify --artifact DIR` | Recheck the exact artifact inventory, SHA256SUMS, MBR, FAT32 tree and payload hashes |
+
+Both commands work without an AROS checkout and accept `--format human|json`.
+They neither write a device nor establish source provenance or a successful
+board boot. The public `aros image build` command and ISO support are not yet
+available; `aros board sd image` retains its existing v1 bundle behavior.
+
 ## Source and repository
 
 | Command | Checkout | Behavior |

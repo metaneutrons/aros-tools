@@ -4,7 +4,7 @@
 //! handler here owns the validation and orchestration for one command family.
 
 use super::{
-    artifact, board, boot, build, cache, golden, host_compiler, observability, repo, source,
+    artifact, board, boot, build, cache, golden, host_compiler, image, observability, repo, source,
     toolchain, BoardCommand, BoardProfileSelection, BuildCompilerCache, BuildToolsCommand,
     CacheArchivesCommand, CacheCargoCommand, CacheCommand, CacheCompilerBackend,
     CacheCompilerCommand, CacheGenmfCommand, CacheSourcesCommand, Commands, GoldenAction,
@@ -73,6 +73,7 @@ pub async fn run(command: Commands, repo_root: Option<&Path>) -> Result<()> {
             toolchain_command(required_repo(repo_root)?, command).await
         }
         Commands::Board { command } => board_command(command, repo_root).await,
+        Commands::Image { command } => image::run(command),
         Commands::Source { command } => source_command(command, repo_root),
         Commands::Install { source_bin, prefix } => install_suite(source_bin, prefix),
         Commands::Build {
