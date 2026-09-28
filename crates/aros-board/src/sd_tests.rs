@@ -219,6 +219,50 @@ fn stages_a_milk_v_titan_uefi_bundle_with_nested_esp_paths() {
 }
 
 #[test]
+fn rejects_an_unreviewed_model_using_a_known_media_transport() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_path = bundle_dir.join(BOOT_BUNDLE_MANIFEST);
+    let manifest = fs::read_to_string(&manifest_path).expect("manifest");
+    fs::write(
+        &manifest_path,
+        manifest.replace("milk-v-titan", "other-riscv-board"),
+    )
+    .expect("modified manifest");
+
+    let expectation =
+        BundleExpectation::new("other-riscv-board", "other-riscv-board", UEFI_ESP_TRANSPORT);
+    let error = validate_boot_bundle(&bundle_dir, &expectation)
+        .expect_err("UEFI layout is not a generic RISC-V board profile");
+    assert!(error.to_string().contains("only for model 'milk-v-titan'"));
+}
+
+#[test]
+fn rejects_a_known_role_at_the_wrong_profile_destination() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_path = bundle_dir.join(BOOT_BUNDLE_MANIFEST);
+    let manifest = fs::read_to_string(&manifest_path).expect("manifest");
+    fs::write(
+        &manifest_path,
+        manifest.replace(
+            "destination = \"EFI/BOOT/BOOTRISCV64.EFI\"",
+            "destination = \"EFI/BOOT/WRONG.EFI\"",
+        ),
+    )
+    .expect("modified manifest");
+
+    let expectation = BundleExpectation::new("milk-v-titan", "milk-v-titan", UEFI_ESP_TRANSPORT);
+    let error = validate_boot_bundle(&bundle_dir, &expectation)
+        .expect_err("UEFI loader destination must be profile-bound");
+    assert!(error
+        .to_string()
+        .contains("must stage as 'EFI/BOOT/BOOTRISCV64.EFI'"));
+}
+
+#[test]
 fn reports_all_core_inputs_when_the_external_uboot_bundle_is_absent() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let error = validate_boot_bundle(temporary.path(), &expectation())

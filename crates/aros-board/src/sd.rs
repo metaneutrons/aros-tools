@@ -49,6 +49,7 @@ use super::sd_manifest::{
     ManifestUsbEcmIdentity,
 };
 use crate::{canonical_existing_directory, sha256_file_with_size as sha256_file};
+use aros_common::media_profile::{built_in_media_profiles, ResolvedMediaProfile};
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -81,23 +82,6 @@ const FORMAT_VERSION: u32 = 1;
 const SHA256_HEX_LENGTH: usize = 64;
 const SECTOR_BYTES: u64 = 512;
 const MIB: u64 = 1024 * 1024;
-
-const REQUIRED_RPI4_UBOOT_FILES: [(&str, &str); 6] = [
-    ("config", "config.txt"),
-    ("firmware-start", "start4.elf"),
-    ("firmware-fixup", "fixup4.dat"),
-    ("device-tree", "bcm2711-rpi-4-b.dtb"),
-    ("u-boot", "u-boot.bin"),
-    ("boot-script", "boot.scr"),
-];
-
-const REQUIRED_UEFI_ESP_FILES: [(&str, &str); 5] = [
-    ("uefi-loader", "EFI/BOOT/BOOTRISCV64.EFI"),
-    ("kernel-image", "EFI/AROS/Image"),
-    ("bsp-package", "aros-bsp.pkg"),
-    ("command-line", "aros.cmd"),
-    ("startup-script", "startup.nsh"),
-];
 
 /// Stable USB-ECM identity which binds a boot bundle to one physical Pi.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -505,21 +489,51 @@ fn read_bundle_manifest(
 
 fn missing_bundle_manifest<T>(source_dir: &Path, expectation: &BundleExpectation) -> Result<T> {
     let mut inputs = vec![format!("{BOOT_BUNDLE_MANIFEST} (versioned manifest)")];
-    if expectation.transport == UBOOT_USB_ECM_TRANSPORT {
-        inputs.extend(
-            REQUIRED_RPI4_UBOOT_FILES.iter().map(|(_, destination)| {
-                format!("{destination} (Pi 4 U-Boot USB-ECM boot payload)")
-            }),
-        );
-    }
-    if expectation.transport == UEFI_ESP_TRANSPORT {
-        inputs.extend(
-            REQUIRED_UEFI_ESP_FILES
-                .iter()
-                .map(|(_, destination)| format!("{destination} (OpenSBI/UEFI boot payload)")),
-        );
+    if let Some(profile) = required_media_profile(&expectation.model, &expectation.transport)? {
+        inputs.extend(profile.profile.required_files.iter().map(|file| {
+            format!(
+                "{} ({} boot payload)",
+                file.destination, profile.profile.label
+            )
+        }));
     }
     missing_inputs(source_dir, &inputs)
+}
+
+fn required_media_profile(model: &str, transport: &str) -> Result<Option<ResolvedMediaProfile>> {
+    let profiles = built_in_media_profiles()
+        .map_err(|error| miette::miette!("Invalid built-in media profile registry: {error}"))?;
+    let matching: Vec<_> = profiles
+        .iter()
+        .filter(|entry| entry.profile.model == model && entry.profile.transport == transport)
+        .collect();
+    if matching.len() > 1 {
+        miette::bail!(
+            "Multiple media profiles match model '{}' and transport '{}'; boot-bundle format 1 cannot select one implicitly.",
+            model,
+            transport
+        );
+    }
+    if let Some(profile) = matching.first() {
+        if profile.profile.medium != "mbr-fat32" {
+            miette::bail!(
+                "Media profile '{}' is not an MBR/FAT32 SD layout.",
+                profile.profile.id
+            );
+        }
+        return Ok(Some((*profile).clone()));
+    }
+    if let Some(profile) = profiles
+        .iter()
+        .find(|entry| entry.profile.transport == transport)
+    {
+        miette::bail!(
+            "boot-bundle format 1 defines '{}' only for model '{}'.",
+            transport,
+            profile.profile.model
+        );
+    }
+    Ok(None)
 }
 
 fn validate_manifest_header(
@@ -667,43 +681,31 @@ fn validate_required_profile_files(
     board: &ManifestBoard,
     files: &[DeclaredFile],
 ) -> Result<()> {
-    let (required, profile_label) = if board.transport == UBOOT_USB_ECM_TRANSPORT {
-        if board.model != "rpi4" {
-            miette::bail!(
-                "boot-bundle format 1 defines '{}' only for model 'rpi4'.",
-                UBOOT_USB_ECM_TRANSPORT
-            );
-        }
-        (&REQUIRED_RPI4_UBOOT_FILES[..], "Pi 4 U-Boot USB-ECM")
-    } else if board.transport == UEFI_ESP_TRANSPORT {
-        if board.model != "milk-v-titan" {
-            miette::bail!(
-                "boot-bundle format 1 defines '{}' only for model 'milk-v-titan'.",
-                UEFI_ESP_TRANSPORT
-            );
-        }
-        (&REQUIRED_UEFI_ESP_FILES[..], "OpenSBI/UEFI")
-    } else {
+    let Some(resolved) = required_media_profile(&board.model, &board.transport)? else {
         return Ok(());
     };
+    let profile = &resolved.profile;
     let by_role: BTreeMap<&str, &DeclaredFile> = files
         .iter()
         .map(|file| (file.role.as_str(), file))
         .collect();
     let mut missing = Vec::new();
-    for (role, destination) in required {
-        match by_role.get(role) {
-            Some(file) if portable_path(&file.destination) == *destination => {}
+    for required in &profile.required_files {
+        match by_role.get(required.role.as_str()) {
+            Some(file) if portable_path(&file.destination) == required.destination => {}
             Some(file) => {
                 miette::bail!(
                     "{} role '{}' must stage as '{}', not '{}'.",
-                    profile_label,
-                    role,
-                    destination,
+                    profile.label,
+                    required.role,
+                    required.destination,
                     portable_path(&file.destination)
                 );
             }
-            None => missing.push(format!("{destination} (required files role '{role}')")),
+            None => missing.push(format!(
+                "{} (required files role '{}')",
+                required.destination, required.role
+            )),
         }
     }
     if !missing.is_empty() {

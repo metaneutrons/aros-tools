@@ -1105,6 +1105,14 @@ fn error_to_diagnostics(error: ArosError) -> DiagnosticSet {
             )
             .with_location(SourceLocation::new(file)),
         ),
+        ArosError::MediaProfile { file, message } => DiagnosticSet::single(
+            Diagnostic::error(
+                DiagnosticCode::InternalInvariant,
+                DiagnosticStage::Internal,
+                format!("unexpected media profile error in `{file}`: {message}"),
+            )
+            .with_location(SourceLocation::new(file)),
+        ),
         ArosError::DependencyCycle { target } => DiagnosticSet::single(
             Diagnostic::error(
                 DiagnosticCode::GraphValidation,

@@ -1,0 +1,32 @@
+format_version = 1
+id = "rpi4-uboot-usb-ecm"
+target_preset = "rpi-aarch64"
+model = "rpi4"
+transport = "uboot-usb-ecm"
+medium = "mbr-fat32"
+boot_protocol = "pi-firmware-uboot"
+label = "Pi 4 U-Boot USB-ECM"
+
+[[required_files]]
+role = "config"
+destination = "config.txt"
+
+[[required_files]]
+role = "firmware-start"
+destination = "start4.elf"
+
+[[required_files]]
+role = "firmware-fixup"
+destination = "fixup4.dat"
+
+[[required_files]]
+role = "device-tree"
+destination = "bcm2711-rpi-4-b.dtb"
+
+[[required_files]]
+role = "u-boot"
+destination = "u-boot.bin"
+
+[[required_files]]
+role = "boot-script"
+destination = "boot.scr"
