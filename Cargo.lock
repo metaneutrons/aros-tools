@@ -160,6 +160,7 @@ dependencies = [
 name = "aros-cmake-engine"
 version = "0.3.13"
 dependencies = [
+ "aros-common",
  "sha2",
  "tempfile",
 ]
