@@ -26,6 +26,7 @@ pub mod diagnostic;
 pub mod digest;
 pub mod elf;
 pub mod error;
+pub mod media_input_lock;
 pub mod media_profile;
 pub mod media_receipt;
 pub mod observability;

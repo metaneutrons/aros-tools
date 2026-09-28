@@ -216,7 +216,7 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
     Ok(())
 }
 
-fn valid_slug(value: &str) -> bool {
+pub(crate) fn valid_slug(value: &str) -> bool {
     !value.is_empty()
         && value.starts_with(|character: char| {
             character.is_ascii_lowercase() || character.is_ascii_digit()
