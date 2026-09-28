@@ -145,12 +145,12 @@ class ReleasePleaseApp(unittest.TestCase):
 
     def test_release_pr_head_converges(self):
         old, new = 'a' * 40, 'b' * 40
-        result = self.probe_release_pr([old, new, new, new])
+        result = self.probe_release_pr([old, new, new, new, new, new])
         self.assertIn(new, result.stdout)
 
     def test_release_pr_head_never_stabilizes(self):
         old, new = 'a' * 40, 'b' * 40
-        result = self.probe_release_pr([old, new] * 5, expected_success=False)
+        result = self.probe_release_pr([old, new] * 8, expected_success=False)
         self.assertIn('did not stabilize', result.stdout + result.stderr)
 
     def test_release_pr_rejects_unexpected_file_after_convergence(self):
