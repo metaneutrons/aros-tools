@@ -135,14 +135,28 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
         .path()
         .join("arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src");
     let original = fs::read_to_string(&recipe).unwrap();
+    let original_digest = aros_common::sha256_bytes(original.as_bytes()).to_string();
+    let old_pin = crate::fingerprints::fingerprint("mesa26-v3d-recipe").unwrap();
+    let device_tree_pin =
+        crate::fingerprints::fingerprint("mesa26-v3d-recipe-device-tree").unwrap();
     let marker = "V3D_HIDD_SOURCES := \\\n    v3d_init \\\n";
     assert_eq!(original.matches(marker).count(), 1);
-    let updated = original.replacen(marker, &format!("{marker}    v3d_dt \\\n"), 1);
+    let device_tree_line = "    v3d_dt \\\n";
+    let (alternate, alternate_pin) = if original_digest == old_pin {
+        (
+            original.replacen(marker, &format!("{marker}{device_tree_line}"), 1),
+            device_tree_pin,
+        )
+    } else {
+        assert_eq!(original_digest, device_tree_pin);
+        assert_eq!(original.matches(device_tree_line).count(), 1);
+        (original.replacen(device_tree_line, "", 1), old_pin)
+    };
     assert_eq!(
-        aros_common::sha256_bytes(updated.as_bytes()).to_string(),
-        crate::fingerprints::fingerprint("mesa26-v3d-recipe-device-tree").unwrap()
+        aros_common::sha256_bytes(alternate.as_bytes()).to_string(),
+        alternate_pin
     );
-    fs::write(&recipe, &updated).unwrap();
+    fs::write(&recipe, &alternate).unwrap();
     let admitted = archive_sources(
         temporary.path(),
         relative,
@@ -153,7 +167,11 @@ fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
     .expect("reviewed upstream V3D recipe");
     assert_eq!(admitted.c, baseline.c, "Mesa archive must not change");
 
-    fs::write(&recipe, updated.replace("v3d_dt", "v3d_unreviewed")).unwrap();
+    fs::write(
+        &recipe,
+        format!("{alternate}\n# unreviewed V3D recipe drift\n"),
+    )
+    .unwrap();
     let error = archive_sources(
         temporary.path(),
         relative,
