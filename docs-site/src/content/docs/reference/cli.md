@@ -151,8 +151,8 @@ the safe entry stages and explains the required checkout/cache separation.
 
 | Command | Effect |
 | --- | --- |
-| `aros image inspect --artifact DIR` | Verify a composed MBR/FAT32 artifact, then show measured image and input identities |
-| `aros image verify --artifact DIR` | Recheck the exact artifact inventory, SHA256SUMS, MBR, FAT32 tree and payload hashes |
+| `aros image inspect` | Verify a composed MBR/FAT32 artifact from `--artifact DIR`, then show measured image and input identities |
+| `aros image verify` | Recheck the exact artifact inventory, SHA256SUMS, MBR, FAT32 tree and payload hashes from `--artifact DIR` |
 
 Both commands work without an AROS checkout and accept `--format human|json`.
 They neither write a device nor establish source provenance or a successful
