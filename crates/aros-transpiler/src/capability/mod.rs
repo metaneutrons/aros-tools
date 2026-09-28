@@ -53,6 +53,27 @@ pub(crate) fn require_file_fingerprint(
     ))
 }
 
+/// Admits one of several separately reviewed revisions of an opaque recipe.
+/// Every admitted digest must expand to the same capability contract.
+pub(crate) fn require_file_fingerprint_one_of(
+    root: &Path,
+    relative: &str,
+    expected: &[&str],
+    capability: &str,
+) -> std::result::Result<(), String> {
+    let path = root.join(relative);
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("{capability}: cannot read {}: {error}", path.display()))?;
+    let actual = aros_common::sha256_bytes(&bytes).to_string();
+    if expected.contains(&actual.as_str()) {
+        return Ok(());
+    }
+    Err(format!(
+        "{capability}: unsupported upstream recipe drift in {relative} (expected one of fingerprints [{}], found {actual}); the transpiler capability must be reviewed and updated",
+        expected.join(", ")
+    ))
+}
+
 pub(crate) fn require_text_fingerprint(
     label: &str,
     text: &str,

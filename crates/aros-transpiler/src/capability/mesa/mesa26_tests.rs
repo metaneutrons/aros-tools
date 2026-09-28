@@ -104,6 +104,70 @@ fn egl_archive_is_versioned_and_rejects_recipe_drift() {
 }
 
 #[test]
+fn v3d_archive_admits_only_the_reviewed_device_tree_recipe() {
+    let root = mesa26_source_root();
+    let profile = TargetContext {
+        cpu: Some("aarch64".to_owned()),
+        platform: Some("raspi".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some(String::new()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    };
+    let relative = Path::new("arch/arm-native/soc/broadcom/2708/hidd/v3d");
+    let baseline = archive_sources(&root, relative, "linklibs-gallium_v3d", Some(&profile))
+        .unwrap()
+        .expect("reviewed Mesa 26 V3D archive");
+
+    let temporary = tempfile::tempdir().unwrap();
+    for path in [
+        "arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src",
+        "arch/arm-native/soc/broadcom/2708/hidd/v3d/v3d-26.0.0.sources",
+        "workbench/libs/mesa/mesa.cfg",
+    ] {
+        let destination = temporary.path().join(path);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(root.join(path), destination).unwrap();
+    }
+    let recipe = temporary
+        .path()
+        .join("arch/arm-native/soc/broadcom/2708/hidd/v3d/mmakefile.src");
+    let original = fs::read_to_string(&recipe).unwrap();
+    let marker = "V3D_HIDD_SOURCES := \\\n    v3d_init \\\n";
+    assert_eq!(original.matches(marker).count(), 1);
+    let updated = original.replacen(marker, &format!("{marker}    v3d_dt \\\n"), 1);
+    assert_eq!(
+        aros_common::sha256_bytes(updated.as_bytes()).to_string(),
+        crate::fingerprints::fingerprint("mesa26-v3d-recipe-device-tree").unwrap()
+    );
+    fs::write(&recipe, &updated).unwrap();
+    let admitted = archive_sources(
+        temporary.path(),
+        relative,
+        "linklibs-gallium_v3d",
+        Some(&profile),
+    )
+    .unwrap()
+    .expect("reviewed upstream V3D recipe");
+    assert_eq!(admitted.c, baseline.c, "Mesa archive must not change");
+
+    fs::write(&recipe, updated.replace("v3d_dt", "v3d_unreviewed")).unwrap();
+    let error = archive_sources(
+        temporary.path(),
+        relative,
+        "linklibs-gallium_v3d",
+        Some(&profile),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("unsupported upstream recipe drift"),
+        "{error}"
+    );
+}
+
+#[test]
 fn changed_glapi_recipe_is_rejected_before_source_override() {
     let original = mesa26_source_root();
     let temporary = tempfile::tempdir().unwrap();
