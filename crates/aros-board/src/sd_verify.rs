@@ -27,6 +27,7 @@ const MAX_CHECKSUM_BYTES: u64 = 512;
 /// Exact image facts obtained from the artifact, without its original sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedMediaArtifact {
+    pub medium: String,
     pub profile_id: String,
     pub profile_sha256: Sha256Digest,
     pub receipt_sha256: Sha256Digest,
@@ -178,6 +179,7 @@ pub fn verify_fat32_media_artifact(artifact_dir: &Path) -> Result<VerifiedMediaA
         miette::bail!("Media image changed during filesystem verification.");
     }
     Ok(VerifiedMediaArtifact {
+        medium: manifest.medium,
         profile_id: manifest.profile_id,
         profile_sha256: manifest.profile_sha256,
         receipt_sha256: manifest.receipt_sha256,

@@ -1,12 +1,11 @@
-# Schema fixture only: not registered, assembled, or boot-qualified.
-format_version = 1
-id = "pc-bios-iso-fixture"
+format_version = 2
+id = "pc-bios-iso"
 target_preset = "pc-x86_64"
 model = "pc"
 transport = "bios-iso"
 medium = "iso9660-el-torito"
 boot_protocol = "grub-bios"
-label = "PC BIOS ISO schema fixture"
+label = "PC BIOS ISO composition"
 
 [layout]
 kind = "iso9660-el-torito"
@@ -22,3 +21,7 @@ destination = "boot/pc/bootstrap"
 [[required_files]]
 role = "grub-boot-image"
 destination = "boot/grub/i386-pc/grub2_eltorito"
+
+[[required_trees]]
+role = "sys-tree"
+destination = ""

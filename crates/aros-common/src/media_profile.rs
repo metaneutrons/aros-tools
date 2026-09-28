@@ -9,7 +9,8 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 
 const FORMAT_VERSION: u32 = 1;
-const BUILT_IN_PROFILES: [(&str, &str); 2] = [
+const TREE_FORMAT_VERSION: u32 = 2;
+const BUILT_IN_PROFILES: [(&str, &str); 3] = [
     (
         "rpi4-uboot-usb-ecm.toml",
         include_str!("../../../profiles/media/rpi4-uboot-usb-ecm.toml"),
@@ -17,6 +18,10 @@ const BUILT_IN_PROFILES: [(&str, &str); 2] = [
     (
         "milk-v-titan-uefi.toml",
         include_str!("../../../profiles/media/milk-v-titan-uefi.toml"),
+    ),
+    (
+        "pc-bios-iso.toml",
+        include_str!("../../../profiles/media/pc-bios-iso.toml"),
     ),
 ];
 
@@ -59,6 +64,8 @@ pub enum MediaLayout {
     Iso9660ElTorito {
         volume_id: String,
         boot_image_role: String,
+        catalog_path: String,
+        max_size_bytes: u64,
     },
 }
 
@@ -78,6 +85,17 @@ pub struct MediaProfile {
     #[serde(default)]
     pub external_locks: Vec<MediaExternalLockPin>,
     pub required_files: Vec<RequiredMediaFile>,
+    #[serde(default)]
+    pub required_trees: Vec<RequiredMediaTree>,
+}
+
+/// One complete build-directory subtree placed under a profile destination.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredMediaTree {
+    pub role: String,
+    /// Empty means the filesystem root; no host path is selected here.
+    pub destination: String,
 }
 
 /// Validated profile bound to the bytes reviewed in this repository.
@@ -192,8 +210,16 @@ pub fn select_media_profile(
 }
 
 fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
-    if profile.format_version != FORMAT_VERSION {
+    if !matches!(profile.format_version, FORMAT_VERSION | TREE_FORMAT_VERSION) {
         return Err(invalid(source, "unsupported format_version"));
+    }
+    if (profile.format_version == FORMAT_VERSION && !profile.required_trees.is_empty())
+        || (profile.format_version == TREE_FORMAT_VERSION && profile.required_trees.is_empty())
+    {
+        return Err(invalid(
+            source,
+            "profile version and tree inventory disagree",
+        ));
     }
     for (label, value) in [
         ("id", profile.id.as_str()),
@@ -256,15 +282,20 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
             MediaLayout::Iso9660ElTorito {
                 volume_id,
                 boot_image_role,
+                catalog_path,
+                max_size_bytes,
             },
             "iso9660-el-torito",
         ) => {
-            if volume_id.is_empty()
+            if *max_size_bytes < 1024 * 1024
+                || !max_size_bytes.is_multiple_of(2048)
+                || volume_id.is_empty()
                 || volume_id.len() > 32
                 || !volume_id
                     .bytes()
                     .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
                 || !valid_slug(boot_image_role)
+                || !valid_destination(catalog_path)
                 || !profile
                     .required_files
                     .iter()
@@ -275,8 +306,8 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
         }
         _ => return Err(invalid(source, "medium and layout kind disagree")),
     }
-    if profile.required_files.is_empty() {
-        return Err(invalid(source, "required_files must not be empty"));
+    if profile.required_files.is_empty() && profile.required_trees.is_empty() {
+        return Err(invalid(source, "media profile must declare files or trees"));
     }
     let mut roles = BTreeSet::new();
     let mut destinations = BTreeSet::new();
@@ -324,6 +355,27 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
             }
         }
     }
+    for tree in &profile.required_trees {
+        if !valid_slug(&tree.role) || !roles.insert(tree.role.clone()) {
+            return Err(invalid(
+                source,
+                "required tree role is invalid or duplicated",
+            ));
+        }
+        if !tree.destination.is_empty() && !valid_destination(&tree.destination) {
+            return Err(invalid(source, "required tree destination is unsafe"));
+        }
+        if !tree.destination.is_empty()
+            && destinations
+                .iter()
+                .any(|path| path == &tree.destination.to_ascii_lowercase())
+        {
+            return Err(invalid(
+                source,
+                "required tree destination conflicts with a file",
+            ));
+        }
+    }
     for destination in &destinations {
         let mut parent = destination.as_str();
         while let Some((prefix, _)) = parent.rsplit_once('/') {
@@ -334,6 +386,30 @@ fn validate_profile(source: &str, profile: &MediaProfile) -> Result<()> {
                 ));
             }
             parent = prefix;
+        }
+    }
+    if let MediaLayout::Iso9660ElTorito { catalog_path, .. } = &profile.layout {
+        if destinations
+            .iter()
+            .any(|path| path.starts_with(&format!("{}/", catalog_path.to_ascii_lowercase())))
+        {
+            return Err(invalid(
+                source,
+                "ISO input is nested beneath the generated catalog",
+            ));
+        }
+        let mut path = catalog_path.to_ascii_lowercase();
+        loop {
+            if destinations.contains(&path) {
+                return Err(invalid(
+                    source,
+                    "ISO profile conflicts with its generated boot catalog",
+                ));
+            }
+            let Some((parent, _)) = path.rsplit_once('/') else {
+                break;
+            };
+            path = parent.to_string();
         }
     }
     let mut pinned_locks = BTreeSet::new();
@@ -376,7 +452,7 @@ pub(crate) fn valid_target_preset(value: &str) -> bool {
         })
 }
 
-fn valid_destination(value: &str) -> bool {
+pub(crate) fn valid_destination(value: &str) -> bool {
     !value.is_empty()
         && !value.contains('\\')
         && !value.contains(':')
@@ -402,13 +478,21 @@ mod tests {
     #[test]
     fn built_in_registry_has_distinct_model_bound_layouts() {
         let profiles = built_in_media_profiles().expect("valid built-in profiles");
-        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles.len(), 3);
         assert!(profiles.iter().any(|entry| entry.profile.model == "rpi4"));
         assert!(profiles
             .iter()
             .any(|entry| entry.profile.model == "milk-v-titan"));
+        assert!(profiles.iter().any(|entry| {
+            entry.profile.id == "pc-bios-iso"
+                && entry.profile.format_version == 2
+                && entry.profile.required_trees.len() == 1
+        }));
         assert_ne!(profiles[0].sha256, profiles[1].sha256);
-        for profile in profiles {
+        for profile in profiles
+            .iter()
+            .filter(|entry| entry.profile.medium == "mbr-fat32")
+        {
             assert!(matches!(
                 profile.profile.layout,
                 MediaLayout::MbrFat32 {
@@ -552,6 +636,11 @@ mod tests {
         let iso = include_str!("../tests/fixtures/media/pc-bios-iso.schema-fixture.toml");
         for invalid in [
             iso.replace("volume_id = \"AROSLIVE\"", "volume_id = \"bad volume\""),
+            iso.replace("max_size_bytes = 536870912", "max_size_bytes = 123"),
+            iso.replace(
+                "catalog_path = \"boot/grub/boot.catalog\"",
+                "catalog_path = \"../escape\"",
+            ),
             iso.replace(
                 "boot_image_role = \"grub-boot-image\"",
                 "boot_image_role = \"missing-role\"",

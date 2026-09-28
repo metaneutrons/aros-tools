@@ -1,11 +1,14 @@
 //! Reviewed boot-media planning, composition and artifact inspection commands.
 
 use aros_board::sd::{
-    stage_fat32_media_plan_with_gate, verify_fat32_media_artifact, VerifiedMediaArtifact,
+    stage_fat32_media_plan_with_gate, stage_iso_media_plan_with_gate, verify_fat32_media_artifact,
+    verify_iso_media_artifact, VerifiedMediaArtifact,
 };
 use aros_common::media_plan::{plan_media_image, MediaExternalFile};
 use aros_common::media_profile::{built_in_media_profiles, MediaLayout};
-use aros_common::media_receipt::{parse_media_build_receipt, verify_media_build_identity};
+use aros_common::media_receipt::{
+    parse_media_build_receipt, verify_media_build_identity, verify_media_build_receipt,
+};
 use clap::{Args, Subcommand, ValueEnum};
 use miette::Result;
 use std::io::Read;
@@ -16,7 +19,7 @@ const MAX_INPUT_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 /// Plan, compose or inspect an image artifact; never write a block device.
 #[derive(Subcommand)]
 pub enum ImageCommand {
-    /// Plan or explicitly compose a reviewed MBR/FAT32 media profile
+    /// Plan or explicitly compose a reviewed FAT32 or ISO media profile
     Build(ImageBuildArgs),
     /// Show measured facts after independently verifying the artifact
     Inspect(ImageArtifactArgs),
@@ -81,7 +84,7 @@ struct LockBinding {
 /// An existing, complete artifact directory.
 #[derive(Args)]
 pub struct ImageArtifactArgs {
-    /// Directory containing media-image.json, SHA256SUMS and aros-media.img
+    /// Directory containing a verified image, media-image.json and SHA256SUMS
     #[arg(long, value_name = "DIR")]
     artifact: PathBuf,
 
@@ -111,7 +114,7 @@ pub fn run(command: ImageCommand) -> Result<()> {
         ImageCommand::Inspect(args) => ("inspect", args),
         ImageCommand::Verify(args) => ("verify", args),
     };
-    let result = verify_fat32_media_artifact(&args.artifact)?;
+    let result = verify_media_artifact(&args.artifact)?;
     match args.format {
         ImageOutputFormat::Human => print_human(operation, &result),
         ImageOutputFormat::Json => print_json(operation, &result)?,
@@ -125,9 +128,6 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
         .into_iter()
         .find(|entry| entry.profile.id == args.profile)
         .ok_or_else(|| miette::miette!("Unknown reviewed media profile '{}'.", args.profile))?;
-    if !matches!(&profile.profile.layout, MediaLayout::MbrFat32 { .. }) {
-        miette::bail!("The selected media profile has no implemented image backend.");
-    }
     let receipt = read_regular_bounded(&args.receipt)?;
     let decoded = parse_media_build_receipt(&receipt)
         .map_err(|error| miette::miette!("Invalid media build receipt: {error}"))?;
@@ -170,10 +170,10 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
         match args.format {
             ImageOutputFormat::Human => {
                 aros_common::outputln!(
-                    "Ready to compose {} files for profile '{}' ({} raw image bytes).",
+                    "Ready to compose {} files for profile '{}' ({} payload bytes).",
                     plan.files.len(),
                     plan.profile_id,
-                    plan.raw_image_size_bytes.unwrap_or_default()
+                    plan.total_payload_bytes
                 );
                 aros_common::outputln!("  Output: {}", args.output.display());
                 aros_common::outputln!("  Use --apply to create the image; no device is written.");
@@ -189,7 +189,10 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
                     "build_identity": plan.build_identity,
                     "target_preset": plan.target_preset,
                     "file_count": plan.files.len(),
+                    "directory_count": plan.directories.len(),
+                    "generated_files": plan.generated_files,
                     "payload_size_bytes": plan.total_payload_bytes,
+                    "image_capacity_bytes": plan.image_capacity_bytes,
                     "raw_image_size_bytes": plan.raw_image_size_bytes,
                     "output": args.output,
                 });
@@ -198,7 +201,9 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let staged = stage_fat32_media_plan_with_gate(&plan, &args.output, || {
+    let identity_gate = || {
+        verify_media_build_receipt(&args.build_root, &decoded, &profile.profile)
+            .map_err(|error| miette::miette!("Media inputs changed before publication: {error}"))?;
         if let (Some(source), Some(toolchain)) =
             (args.source_root.as_deref(), args.toolchain_root.as_deref())
         {
@@ -206,8 +211,16 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
                 .map_err(|error| miette::miette!("Media build identity changed: {error}"))?;
         }
         Ok(())
-    })?;
-    let verified = verify_fat32_media_artifact(&staged.artifact_dir)?;
+    };
+    let staged = match &plan.layout {
+        MediaLayout::MbrFat32 { .. } => {
+            stage_fat32_media_plan_with_gate(&plan, &args.output, identity_gate)?
+        }
+        MediaLayout::Iso9660ElTorito { .. } => {
+            stage_iso_media_plan_with_gate(&plan, &args.output, identity_gate)?
+        }
+    };
+    let verified = verify_media_artifact(&staged.artifact_dir)?;
     if verified.profile_sha256 != plan.profile_sha256
         || verified.receipt_sha256 != plan.receipt_sha256
         || verified.image_sha256.to_string() != staged.image.sha256()
@@ -217,7 +230,8 @@ fn build(args: &ImageBuildArgs) -> Result<()> {
     match args.format {
         ImageOutputFormat::Human => {
             aros_common::outputln!(
-                "Created verified MBR/FAT32 artifact: {}",
+                "Created verified {} artifact: {}",
+                plan.medium,
                 staged.artifact_dir.display()
             );
             print_human("verify", &verified);
@@ -287,16 +301,26 @@ fn read_regular_bounded(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn verify_media_artifact(path: &Path) -> Result<VerifiedMediaArtifact> {
+    let iso = path.join("aros-media.iso");
+    let raw = path.join("aros-media.img");
+    match (iso.exists(), raw.exists()) {
+        (true, false) => verify_iso_media_artifact(path),
+        (false, true) => verify_fat32_media_artifact(path),
+        _ => miette::bail!("Media artifact must contain exactly one supported image format."),
+    }
+}
+
 fn print_human(operation: &str, result: &VerifiedMediaArtifact) {
     if operation == "verify" {
         aros_common::outputln!(
-            "Verified FAT32 image: SHA-256 {} ({} bytes, {} files).",
+            "Verified media image: SHA-256 {} ({} bytes, {} files).",
             result.image_sha256,
             result.image_size_bytes,
             result.file_count
         );
     } else {
-        aros_common::outputln!("Media artifact: verified MBR/FAT32 image");
+        aros_common::outputln!("Media artifact: verified image");
         aros_common::outputln!("  Profile:     {}", result.profile_id);
         aros_common::outputln!("  Target:      {}", result.target_preset);
         aros_common::outputln!("  Image SHA:   {}", result.image_sha256);
@@ -311,7 +335,7 @@ fn print_json(operation: &str, result: &VerifiedMediaArtifact) -> Result<()> {
         "kind": "aros-media-verification",
         "operation": operation,
         "verified": true,
-        "format": "mbr-fat32",
+        "format": result.medium,
         "profile_id": result.profile_id,
         "profile_sha256": result.profile_sha256,
         "receipt_sha256": result.receipt_sha256,

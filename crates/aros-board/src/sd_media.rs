@@ -42,6 +42,11 @@ pub(super) fn validate_media_plan_for_fat32(
     if plan.raw_image_size_bytes != Some(geometry.image_size_bytes) {
         miette::bail!("The media plan's raw-image extent differs from its layout.");
     }
+    if !plan.generated_files.is_empty()
+        || plan.image_capacity_bytes != Some(geometry.image_size_bytes)
+    {
+        miette::bail!("The FAT32 media plan has an inconsistent capacity or generated inventory.");
+    }
     if plan.files.is_empty() || plan.files.len() > 1024 {
         miette::bail!("The media plan has an invalid file count.");
     }
