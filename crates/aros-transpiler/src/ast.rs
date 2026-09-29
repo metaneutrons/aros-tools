@@ -130,6 +130,9 @@ pub struct TargetDefinition {
     /// a declaration without `conffile=` means.
     #[serde(default)]
     pub config_file: Option<String>,
+    /// The declaration's `confoverride=` file, applied after `config_file`.
+    #[serde(default)]
+    pub config_override_file: Option<String>,
     /// Full-module normal/relative client archive composition.
     #[serde(default)]
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,

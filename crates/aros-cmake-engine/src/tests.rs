@@ -83,6 +83,15 @@ fn the_digest_is_a_sha256() {
 }
 
 #[test]
+fn reference_genmodule_applies_and_tracks_declared_overrides() {
+    let cmake = file("AROS.cmake").expect("module implementation");
+    assert!(cmake.contains("function(aros_set_module_config_override mmake override)"));
+    assert!(cmake.contains("list(APPEND _opts -o \"${_override}\")"));
+    assert!(cmake.contains("list(APPEND _config_inputs \"${_override}\")"));
+    assert!(cmake.contains("DEPENDS \"${AROS_HOST_GENMODULE}\" ${_config_inputs}"));
+}
+
+#[test]
 fn cmake_media_receipt_measures_real_staged_files_and_rejects_changed_inputs() {
     use aros_common::media_profile::built_in_media_profiles;
     use aros_common::media_receipt::{parse_media_build_receipt, verify_media_build_receipt};
@@ -664,7 +673,7 @@ fn demos_images_are_generated_before_their_consumer_compiles() {
     .expect("reviewed Make rule");
     fs::write(
         images.join("datfilt.awk"),
-        "FNR == 1 { name = FILENAME; sub(/.*\\//, \"\", name); sub(/\\..*$/, \"\", name); print \"#define IMAGE_READY 1\" > name \".h\" }\n",
+        "FNR == 1 { name = FILENAME; sub(/.*\\//, \"\", name); sub(/\\..*$/, \"\", name); print \"#define IMAGE_READY 1\" > (name \".h\") }\n",
     )
     .expect("fixture image generator");
     let mut consumer = String::new();

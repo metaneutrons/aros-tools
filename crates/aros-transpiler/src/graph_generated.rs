@@ -299,6 +299,7 @@ impl DependencyGraph {
                 // accept for a plain link library.
                 linklib_name: None,
                 config_file: None,
+                config_override_file: None,
                 genmodule_linklibs: None,
                 linklib_output_dir: None,
                 // Public, and not by inference: `compiler/libhiddstubs`

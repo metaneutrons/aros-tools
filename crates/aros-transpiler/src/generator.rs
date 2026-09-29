@@ -669,6 +669,39 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // Reference genmodule must receive the same override as MetaMake. HPET's
+    // clocksource base type and resident priority live only in that file.
+    {
+        let mut named: Vec<(&String, &String)> = graph
+            .targets
+            .iter()
+            .filter_map(|(mmake, target)| {
+                target
+                    .config_override_file
+                    .as_ref()
+                    .map(|config| (mmake, config))
+            })
+            .collect();
+        named.sort();
+        if !named.is_empty() {
+            writeln!(
+                out,
+                "# ---- Explicit genmodule overrides (confoverride=) ----"
+            )
+            .unwrap();
+            for (mmake, config) in named {
+                writeln!(
+                    out,
+                    "aros_set_module_config_override({} {})",
+                    cmake_arg(mmake),
+                    cmake_arg(config)
+                )
+                .unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+    }
+
     // The genmodule config a declaration names with `conffile=`. Declared
     // before every target, because the module builders consult it while they
     // are read.

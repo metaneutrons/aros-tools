@@ -8,6 +8,71 @@ use crate::graph::DependencyGraph;
 use crate::icons::IconTarget;
 use crate::packages::{PackageDecl, ResolvedPackageMember};
 use crate::parse_mmakefile_with_dirs;
+use crate::testing::TempTree;
+use std::fs;
+
+#[test]
+fn module_config_override_is_emitted_before_its_module() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/hpet");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("hpet_init.c"), "").unwrap();
+    fs::write(
+        module.join("hpet.conf"),
+        "##begin config\nlibbase HPETBase\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-pc-hpet modname=hpet modtype=resource \
+         conffile=$(SRCDIR)/rom/kernel/clocksource.conf \
+         confoverride=hpet.conf files=hpet_init\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    let target = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "kernel-pc-hpet")
+        .unwrap();
+    assert_eq!(
+        target.config_override_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/arch/all-pc/hpet/hpet.conf")
+    );
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    let override_at = cmake
+        .find("aros_set_module_config_override(\"kernel-pc-hpet\" \"${AROS_SOURCE_DIR}/arch/all-pc/hpet/hpet.conf\")")
+        .unwrap();
+    let target_at = cmake.find("MMAKE_ID kernel-pc-hpet").unwrap();
+    assert!(override_at < target_at);
+}
+
+#[test]
+fn invalid_module_config_override_cannot_emit_a_module() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/hpet");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("hpet_init.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-pc-hpet modname=hpet modtype=resource \
+         conffile=$(SRCDIR)/rom/kernel/clocksource.conf \
+         confoverride=\"bad override.conf\" files=hpet_init\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(parsed.targets.is_empty());
+    assert!(parsed
+        .skipped_programs
+        .iter()
+        .any(|reason| reason.contains("confoverride") && reason.contains("not one path")));
+}
 
 fn root() -> std::path::PathBuf {
     crate::testing::root()

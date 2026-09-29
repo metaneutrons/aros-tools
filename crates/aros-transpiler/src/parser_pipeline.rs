@@ -696,6 +696,44 @@ pub(super) fn parse_mmakefile_impl(
                 }
             }
         });
+        let config_override_arg = macro_arg(&inv.args, "confoverride");
+        let config_override_file = config_override_arg.as_ref().and_then(|raw| {
+            let raw = raw.trim().trim_matches('"');
+            match evaluate_make_expr(raw, &expression_context) {
+                Ok(value) => {
+                    let value = value.trim().trim_matches('"').to_owned();
+                    if value.is_empty() || value.contains(char::is_whitespace) {
+                        skipped_programs.push(format!(
+                            "{}: %{} mmake={mmake_raw} confoverride={raw} is not one path",
+                            rel_dir.display(),
+                            inv.name
+                        ));
+                        None
+                    } else if value.starts_with("${") || value.starts_with('/') {
+                        Some(value)
+                    } else {
+                        Some(format!(
+                            "${{AROS_SOURCE_DIR}}/{}/{value}",
+                            rel_dir.display()
+                        ))
+                    }
+                }
+                Err(error) => {
+                    skipped_programs.push(format!(
+                        "{}: %{} mmake={mmake_raw} confoverride={raw} cannot be \
+                         evaluated: {error}",
+                        rel_dir.display(),
+                        inv.name
+                    ));
+                    None
+                }
+            }
+        });
+        // An invalid override must not silently produce a module with the
+        // wrong allocated base type or resident priority.
+        if config_override_arg.is_some() && config_override_file.is_none() {
+            continue;
+        }
 
         // Upstream creates the client archive when `<mod>_LINKLIB` is
         // non-empty, and make.tmpl derives that from the file set, not from
@@ -861,6 +899,7 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix,
             linklib_name,
             config_file,
+            config_override_file,
             genmodule_linklibs,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
@@ -1028,6 +1067,7 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix: None,
             linklib_name: None,
             config_file: None,
+            config_override_file: None,
             genmodule_linklibs: None,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
@@ -1591,6 +1631,7 @@ pub(super) fn parse_mmakefile_impl(
             mod_suffix,
             linklib_name: None,
             config_file: None,
+            config_override_file: None,
             genmodule_linklibs: None,
             canonical_linklib_output,
             canonical_linklib_eligible,

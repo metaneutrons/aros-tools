@@ -3530,8 +3530,9 @@ endfunction()
 #     TARGET <module-name> MMAKE_ID <target-id> DIRECTORY <source-dir>
 #     MODTYPE <type> [MODSUFFIX <suffix>] [ABI])
 #
-# Runs the reference tools/genmodule against one exact .conf.  All generation is
-# declaration-private first.  Public headers are then copied into the three
+# Runs the reference tools/genmodule against the declaration's exact .conf and
+# optional confoverride. All generation is declaration-private first. Public
+# headers are then copied into the three
 # include roots the CMake build and the system image expose.  Keeping the
 # private root is essential for duplicate config stems: the global Rust scan is
 # intentionally broad and currently lets rom/usb/classes/arosx/arosx.conf race
@@ -3559,6 +3560,15 @@ set(AROS_GENMODULE_MODTYPES
 function(aros_set_module_config mmake config)
     string(MAKE_C_IDENTIFIER "${mmake}" _key)
     set_property(GLOBAL PROPERTY "AROS_MODULE_CONFIG_${_key}" "${config}")
+endfunction()
+
+# aros_set_module_config_override(<mmake-id> <override-path>)
+#
+# MetaMake's `confoverride=` is passed to the reference genmodule as `-o`.
+# It may change the allocated library base type, so omitting it is unsafe.
+function(aros_set_module_config_override mmake override)
+    string(MAKE_C_IDENTIFIER "${mmake}" _key)
+    set_property(GLOBAL PROPERTY "AROS_MODULE_CONFIG_OVERRIDE_${_key}" "${override}")
 endfunction()
 
 # _aros_module_config(<out-var> <mmake-id> <directory> <target>)
@@ -3603,6 +3613,13 @@ function(_aros_generate_module_support out_prefix)
     if(NOT EXISTS "${_conf}")
         message(FATAL_ERROR "${GM_MMAKE_ID}: missing genmodule config ${_conf}")
     endif()
+    string(MAKE_C_IDENTIFIER "${GM_MMAKE_ID}" _override_key)
+    get_property(_override GLOBAL PROPERTY
+        "AROS_MODULE_CONFIG_OVERRIDE_${_override_key}")
+    if(_override AND NOT EXISTS "${_override}")
+        message(FATAL_ERROR
+            "${GM_MMAKE_ID}: missing genmodule config override ${_override}")
+    endif()
 
     file(RELATIVE_PATH _module_rel "${AROS_SOURCE_DIR}" "${_module_dir}")
     if(_module_rel MATCHES "^\\.\\." OR IS_ABSOLUTE "${_module_rel}")
@@ -3616,6 +3633,13 @@ function(_aros_generate_module_support out_prefix)
     set(_fd_dir "${_root}/fd")
 
     set(_opts -c "${_conf}")
+    if(_override)
+        list(APPEND _opts -o "${_override}")
+    endif()
+    set(_config_inputs "${_conf}")
+    if(_override)
+        list(APPEND _config_inputs "${_override}")
+    endif()
     if(GM_MODSUFFIX)
         list(APPEND _opts -s "${GM_MODSUFFIX}")
     endif()
@@ -3676,7 +3700,7 @@ function(_aros_generate_module_support out_prefix)
             COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_include_dir}"
                 writeincludes "${GM_TARGET}" "${GM_MODTYPE}"
             ${_publish_commands}
-            DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+            DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} ABI headers"
             VERBATIM)
         set(_includes_target "${GM_MMAKE_ID}-includes-generated")
@@ -3691,7 +3715,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gen_dir}"
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts} -d "${_gen_dir}"
             writelibdefs "${GM_TARGET}" "${GM_MODTYPE}"
-        DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+        DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
         COMMENT "Generating exact ${GM_TARGET}.${GM_MODTYPE} libdefs"
         VERBATIM)
     # Only an existing Rust header with the same module name can shadow this
@@ -3744,7 +3768,7 @@ function(_aros_generate_module_support out_prefix)
         COMMAND "${AROS_HOST_GENMODULE}" ${_opts}
             -d "${_gen_dir}" -l "${_stub_dir}"
             writefiles "${GM_TARGET}" "${GM_MODTYPE}"
-        DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}" "${_libdefs}"
+        DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs} "${_libdefs}"
         COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} module support sources"
         VERBATIM)
 
@@ -3790,7 +3814,7 @@ function(_aros_generate_module_support out_prefix)
                 writefd "${GM_TARGET}" "${GM_MODTYPE}"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "${_private_fd}" "${_fd}"
-            DEPENDS "${AROS_HOST_GENMODULE}" "${_conf}"
+            DEPENDS "${AROS_HOST_GENMODULE}" ${_config_inputs}
             COMMENT "Generating ${GM_TARGET}.${GM_MODTYPE} FD"
             VERBATIM)
         set(_fd_target "${GM_MMAKE_ID}-fd-generated")
