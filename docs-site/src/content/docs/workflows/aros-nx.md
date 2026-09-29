@@ -69,7 +69,7 @@ for physical targets.
 
 ## Create a BIOS-bootable PC ISO
 
-Install `mkisofs` (or `genisoimage`) and run from a clean AROS checkout:
+Install `xorriso` and run from a clean AROS checkout:
 
 ```sh
 aros build --preset pc-x86_64 --target boot-iso
