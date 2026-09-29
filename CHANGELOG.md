@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.16](https://github.com/metaneutrons/aros-tools/compare/v0.3.15...v0.3.16) (2026-09-29)
+
+
+### Bug Fixes
+
+* **release:** remove verified orphaned OpenSSL runner symlink ([205ff04](https://github.com/metaneutrons/aros-tools/commit/205ff043bc741b9ce6d376c4cf82f7d13b5fe342))
+
 ## [0.3.15](https://github.com/metaneutrons/aros-tools/compare/v0.3.14...v0.3.15) (2026-09-29)
 
 
