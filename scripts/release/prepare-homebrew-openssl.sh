@@ -18,12 +18,13 @@ prefix=$(brew --prefix)
 link="$prefix/bin/openssl"
 legacy="$prefix/opt/openssl@1.1/bin/openssl"
 
-# Hosted macOS images can retain a linked openssl@1.1 alongside the current
-# openssl@3 dependency. Remove only this exact, known conflicting formula link.
+# Hosted macOS images can retain an orphaned openssl@1.1 symlink alongside the
+# current openssl@3 dependency. Homebrew's own unlink removes zero links in
+# that state, so remove only this exact symlink after verifying its target.
 if [[ -L "$link" && $(readlink "$link") == "$legacy" ]]; then
-    brew unlink openssl@1.1
+    unlink "$link"
     if [[ -e "$link" || -L "$link" ]]; then
-        echo "legacy OpenSSL link remains after brew unlink: $link" >&2
+        echo "legacy OpenSSL link remains after unlink: $link" >&2
         exit 1
     fi
 fi
