@@ -22,6 +22,9 @@ pub enum ArosError {
     #[error("Invalid AROS toolchain manifest in '{file}': {message}")]
     ToolchainManifest { file: String, message: String },
 
+    #[error("Invalid media profile in '{file}': {message}")]
+    MediaProfile { file: String, message: String },
+
     #[error("{0}")]
     Diagnostics(DiagnosticSet),
 

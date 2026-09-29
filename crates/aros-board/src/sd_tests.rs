@@ -1,10 +1,14 @@
 //! Regression tests for boot-bundle validation and deterministic image staging.
 
 use super::{
-    sha256_file, stage_boot_bundle, validate_boot_bundle, BundleExpectation, PartitionLayout,
+    legacy_bundle_build_receipt, publish_staged_directory_noreplace, sha256_file,
+    stage_boot_bundle, stage_fat32_media_plan, stage_fat32_media_plan_with_gate,
+    validate_boot_bundle, verify_fat32_media_artifact, BundleExpectation, PartitionLayout,
     UsbEcmIdentity, ARTIFACT_CHECKSUMS, ARTIFACT_MANIFEST, BOOT_BUNDLE_MANIFEST,
-    BOOT_PAYLOAD_DIRECTORY, RAW_IMAGE_FILENAME, UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
+    BOOT_PAYLOAD_DIRECTORY, MEDIA_ARTIFACT_MANIFEST, MEDIA_RAW_IMAGE_FILENAME, RAW_IMAGE_FILENAME,
+    UBOOT_USB_ECM_TRANSPORT, UEFI_ESP_TRANSPORT,
 };
+use aros_common::media_plan::plan_media_image;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
@@ -119,6 +123,129 @@ fn validate_and_stage_for_test(bundle_dir: &Path, output_dir: &Path) -> super::S
 }
 
 #[test]
+fn composes_a_neutral_fat32_plan_without_changing_the_v1_bundle() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_bundle(&bundle_dir);
+    let bundle = validate_boot_bundle(&bundle_dir, &expectation()).expect("validated bundle");
+    let (receipt, profile) = legacy_bundle_build_receipt(&bundle).expect("adapted inputs");
+    let receipt_bytes = serde_json::to_vec(&receipt).expect("receipt JSON");
+    let plan = plan_media_image(&profile, &bundle_dir, &receipt_bytes, &[], &[])
+        .expect("closed media plan");
+    let first =
+        stage_fat32_media_plan(&plan, &temporary.path().join("first")).expect("first image");
+    let second =
+        stage_fat32_media_plan(&plan, &temporary.path().join("second")).expect("second image");
+    assert_eq!(first.image.sha256(), second.image.sha256());
+    let verified = verify_fat32_media_artifact(&first.artifact_dir).expect("independent read-back");
+    assert_eq!(verified.profile_id, "rpi4-uboot-usb-ecm");
+    assert_eq!(verified.image_sha256.to_string(), first.image.sha256());
+    assert_eq!(verified.file_count, plan.files.len());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(first.image.path()).unwrap().permissions();
+        permissions.set_mode(0o444);
+        fs::set_permissions(first.image.path(), permissions).unwrap();
+        assert!(verify_fat32_media_artifact(&first.artifact_dir).is_ok());
+    }
+    let mut reordered = plan.clone();
+    reordered.files.reverse();
+    let third = stage_fat32_media_plan(&reordered, &temporary.path().join("third"))
+        .expect("order-independent image");
+    assert_eq!(first.image.sha256(), third.image.sha256());
+    assert_eq!(
+        fs::read(&first.manifest_path).unwrap(),
+        fs::read(&third.manifest_path).unwrap()
+    );
+    assert_eq!(first.image.size_bytes(), 65 * 1024 * 1024);
+    assert_eq!(
+        first.image.path(),
+        first.artifact_dir.join(MEDIA_RAW_IMAGE_FILENAME)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&first.manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "aros-media-image");
+    assert_eq!(manifest["format_version"], 2);
+    assert!(manifest["build_identity"].is_null());
+    assert_eq!(manifest["profile_id"], "rpi4-uboot-usb-ecm");
+    assert_eq!(manifest["image"]["sha256"], first.image.sha256());
+    assert!(first.artifact_dir.join(ARTIFACT_CHECKSUMS).is_file());
+    let checksums = fs::read_to_string(first.artifact_dir.join(ARTIFACT_CHECKSUMS)).unwrap();
+    assert!(checksums.contains(&format!(
+        "{}  {}",
+        first.image.sha256(),
+        MEDIA_RAW_IMAGE_FILENAME
+    )));
+    assert!(stage_fat32_media_plan(&plan, &first.artifact_dir).is_err());
+    let refused_output = temporary.path().join("refused-by-identity-gate");
+    assert!(
+        stage_fat32_media_plan_with_gate(&plan, &refused_output, || {
+            Err(miette::miette!("source identity changed"))
+        })
+        .is_err()
+    );
+    assert!(!refused_output.exists());
+    assert!(first.artifact_dir.join(MEDIA_ARTIFACT_MANIFEST).is_file());
+
+    let checksums_path = first.artifact_dir.join(ARTIFACT_CHECKSUMS);
+    let original_checksums = fs::read(&checksums_path).unwrap();
+    fs::write(&checksums_path, b"wrong\n").unwrap();
+    assert!(verify_fat32_media_artifact(&first.artifact_dir).is_err());
+    fs::write(&checksums_path, original_checksums).unwrap();
+    fs::write(first.artifact_dir.join("unexpected"), b"extra").unwrap();
+    assert!(verify_fat32_media_artifact(&first.artifact_dir).is_err());
+
+    let mut forged = plan.clone();
+    forged.raw_image_size_bytes = Some(1024);
+    let forged_output = temporary.path().join("forged");
+    assert!(stage_fat32_media_plan(&forged, &forged_output).is_err());
+    assert!(!forged_output.exists());
+    let mut collided = plan.clone();
+    collided.files[0].destination = "EFI".into();
+    collided.files[1].destination = "EFI/BOOT/file.bin".into();
+    let collided_output = temporary.path().join("collided");
+    assert!(stage_fat32_media_plan(&collided, &collided_output).is_err());
+    assert!(!collided_output.exists());
+    #[cfg(unix)]
+    {
+        let linked_source = temporary.path().join("linked-config");
+        std::os::unix::fs::symlink(bundle_dir.join("config.txt"), &linked_source).unwrap();
+        let mut linked = plan.clone();
+        linked
+            .files
+            .iter_mut()
+            .find(|file| file.role == "config")
+            .unwrap()
+            .source_path = linked_source;
+        let linked_output = temporary.path().join("linked");
+        assert!(stage_fat32_media_plan(&linked, &linked_output).is_err());
+        assert!(!linked_output.exists());
+    }
+
+    fs::write(bundle_dir.join("config.txt"), b"changed").expect("alter source");
+    let rejected_output = temporary.path().join("rejected");
+    assert!(stage_fat32_media_plan(&plan, &rejected_output).is_err());
+    assert!(!rejected_output.exists());
+    assert!(verify_fat32_media_artifact(&second.artifact_dir).is_ok());
+    assert!(bundle_dir.join(BOOT_BUNDLE_MANIFEST).is_file());
+}
+
+#[test]
+fn atomic_publication_never_replaces_a_racing_destination() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let staged = temporary.path().join("staged");
+    let destination = temporary.path().join("destination");
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("image"), b"new").unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep"), b"old").unwrap();
+    assert!(publish_staged_directory_noreplace(&staged, &destination).is_err());
+    assert_eq!(fs::read(destination.join("keep")).unwrap(), b"old");
+    assert_eq!(fs::read(staged.join("image")).unwrap(), b"new");
+}
+
+#[test]
 fn stages_a_verified_bundle_with_deterministic_metadata() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let bundle_dir = temporary.path().join("bundle");
@@ -216,6 +343,80 @@ fn stages_a_milk_v_titan_uefi_bundle_with_nested_esp_paths() {
     assert!(manifest.contains("\"model\": \"milk-v-titan\""));
     assert!(manifest.contains("\"transport\": \"uefi-esp\""));
     assert!(manifest.contains("EFI/BOOT/BOOTRISCV64.EFI"));
+}
+
+#[test]
+fn rejects_an_unreviewed_model_using_a_known_media_transport() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_path = bundle_dir.join(BOOT_BUNDLE_MANIFEST);
+    let manifest = fs::read_to_string(&manifest_path).expect("manifest");
+    fs::write(
+        &manifest_path,
+        manifest.replace("milk-v-titan", "other-riscv-board"),
+    )
+    .expect("modified manifest");
+
+    let expectation =
+        BundleExpectation::new("other-riscv-board", "other-riscv-board", UEFI_ESP_TRANSPORT);
+    let error = validate_boot_bundle(&bundle_dir, &expectation)
+        .expect_err("UEFI layout is not a generic RISC-V board profile");
+    assert!(error.to_string().contains("only for model 'milk-v-titan'"));
+}
+
+#[test]
+fn rejects_a_known_role_at_the_wrong_profile_destination() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_path = bundle_dir.join(BOOT_BUNDLE_MANIFEST);
+    let manifest = fs::read_to_string(&manifest_path).expect("manifest");
+    fs::write(
+        &manifest_path,
+        manifest.replace(
+            "destination = \"EFI/BOOT/BOOTRISCV64.EFI\"",
+            "destination = \"EFI/BOOT/WRONG.EFI\"",
+        ),
+    )
+    .expect("modified manifest");
+
+    let expectation = BundleExpectation::new("milk-v-titan", "milk-v-titan", UEFI_ESP_TRANSPORT);
+    let error = validate_boot_bundle(&bundle_dir, &expectation)
+        .expect_err("UEFI loader destination must be profile-bound");
+    assert!(error
+        .to_string()
+        .contains("must stage as 'EFI/BOOT/BOOTRISCV64.EFI'"));
+}
+
+#[test]
+fn adapts_a_verified_uefi_bundle_without_changing_the_v1_manifest() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bundle_dir = temporary.path().join("bundle");
+    write_valid_titan_bundle(&bundle_dir);
+    let manifest_before = fs::read(bundle_dir.join(BOOT_BUNDLE_MANIFEST)).expect("v1 manifest");
+    let expectation = BundleExpectation::new("milk-v-titan", "milk-v-titan", UEFI_ESP_TRANSPORT);
+    let bundle = validate_boot_bundle(&bundle_dir, &expectation).expect("validated v1 bundle");
+
+    let (receipt, profile) = legacy_bundle_build_receipt(&bundle).expect("adapted receipt");
+    assert_eq!(
+        receipt.origin,
+        aros_common::media_receipt::MediaReceiptOrigin::LegacyV1
+    );
+    assert_eq!(receipt.target_preset, "opensbi-riscv64");
+    assert_eq!(receipt.files.len(), 5);
+    assert_eq!(profile.profile.id, "milk-v-titan-uefi");
+    let encoded = serde_json::to_vec(&receipt).expect("receipt JSON");
+    let decoded = aros_common::media_receipt::parse_media_build_receipt(&encoded)
+        .expect("round-trip legacy receipt");
+    assert_eq!(decoded, receipt);
+    assert_eq!(
+        fs::read(bundle_dir.join(BOOT_BUNDLE_MANIFEST)).expect("v1 manifest"),
+        manifest_before
+    );
+
+    fs::write(bundle_dir.join("EFI/AROS/Image"), b"changed image").expect("tamper");
+    assert!(legacy_bundle_build_receipt(&bundle).is_err());
 }
 
 #[test]

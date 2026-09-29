@@ -1,0 +1,27 @@
+format_version = 2
+id = "pc-bios-iso"
+target_preset = "pc-x86_64"
+model = "pc"
+transport = "bios-iso"
+medium = "iso9660-el-torito"
+boot_protocol = "grub-bios"
+label = "PC BIOS ISO composition"
+
+[layout]
+kind = "iso9660-el-torito"
+volume_id = "AROSLIVE"
+boot_image_role = "grub-boot-image"
+catalog_path = "boot/grub/boot.catalog"
+max_size_bytes = 536870912
+
+[[required_files]]
+role = "bootstrap"
+destination = "boot/pc/bootstrap"
+
+[[required_files]]
+role = "grub-boot-image"
+destination = "boot/grub/i386-pc/grub2_eltorito"
+
+[[required_trees]]
+role = "sys-tree"
+destination = ""

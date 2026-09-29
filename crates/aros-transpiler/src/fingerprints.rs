@@ -77,6 +77,7 @@ pub const NAMES: &[&str] = &[
     "mesa26-util-recipe",
     "mesa26-util-manifest",
     "mesa26-v3d-recipe",
+    "mesa26-v3d-recipe-device-tree",
     "mesa26-v3d-manifest",
     "mesa26-vc4-recipe",
     "mesa26-vc4-manifest",

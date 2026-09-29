@@ -49,6 +49,11 @@ use super::sd_manifest::{
     ManifestUsbEcmIdentity,
 };
 use crate::{canonical_existing_directory, sha256_file_with_size as sha256_file};
+use aros_common::media_plan::MediaImagePlan;
+use aros_common::media_profile::{built_in_media_profiles, ResolvedMediaProfile};
+use aros_common::media_receipt::{
+    verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt, MediaReceiptOrigin,
+};
 use miette::Result;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -72,6 +77,24 @@ pub const BOOT_PAYLOAD_DIRECTORY: &str = "boot";
 /// Stable raw-image filename inside a staged SD artifact.
 pub const RAW_IMAGE_FILENAME: &str = "aros-board-boot.img";
 
+/// Stable filename for a profile-composed MBR/FAT32 image.
+pub const MEDIA_RAW_IMAGE_FILENAME: &str = "aros-media.img";
+/// Stable filename for a profile-composed ISO image.
+pub const MEDIA_ISO_IMAGE_FILENAME: &str = "aros-media.iso";
+/// Closed metadata for one composed image; it does not assert boot success.
+pub const MEDIA_ARTIFACT_MANIFEST: &str = "media-image.json";
+
+#[path = "sd_media.rs"]
+mod sd_media;
+use sd_media::{render_media_manifest, stable_media_volume_id, validate_media_plan_for_fat32};
+
+#[path = "sd_verify.rs"]
+mod sd_verify;
+pub use sd_verify::{verify_fat32_media_artifact, VerifiedMediaArtifact};
+#[path = "sd_iso.rs"]
+mod sd_iso;
+pub use sd_iso::{stage_iso_media_plan_with_gate, verify_iso_media_artifact};
+
 /// Transport string used by the Pi 4 USB-C CDC-ECM bootstrap.
 pub const UBOOT_USB_ECM_TRANSPORT: &str = "uboot-usb-ecm";
 /// Transport string used by OpenSBI boards booting from a UEFI ESP.
@@ -81,23 +104,6 @@ const FORMAT_VERSION: u32 = 1;
 const SHA256_HEX_LENGTH: usize = 64;
 const SECTOR_BYTES: u64 = 512;
 const MIB: u64 = 1024 * 1024;
-
-const REQUIRED_RPI4_UBOOT_FILES: [(&str, &str); 6] = [
-    ("config", "config.txt"),
-    ("firmware-start", "start4.elf"),
-    ("firmware-fixup", "fixup4.dat"),
-    ("device-tree", "bcm2711-rpi-4-b.dtb"),
-    ("u-boot", "u-boot.bin"),
-    ("boot-script", "boot.scr"),
-];
-
-const REQUIRED_UEFI_ESP_FILES: [(&str, &str); 5] = [
-    ("uefi-loader", "EFI/BOOT/BOOTRISCV64.EFI"),
-    ("kernel-image", "EFI/AROS/Image"),
-    ("bsp-package", "aros-bsp.pkg"),
-    ("command-line", "aros.cmd"),
-    ("startup-script", "startup.nsh"),
-];
 
 /// Stable USB-ECM identity which binds a boot bundle to one physical Pi.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -181,6 +187,13 @@ pub struct VerifiedBootFile {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct ImageFileExpectation {
+    destination: PathBuf,
+    sha256: String,
+    size_bytes: u64,
+}
+
 /// A complete, verified raw MBR/FAT32 image inside a staged artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawImage {
@@ -199,6 +212,19 @@ impl RawImage {
     pub fn sha256(&self) -> &str {
         &self.sha256
     }
+
+    #[must_use]
+    pub const fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+}
+
+/// Atomic, read-back-verified image built from a neutral media plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedMediaImage {
+    pub artifact_dir: PathBuf,
+    pub image: RawImage,
+    pub manifest_path: PathBuf,
 }
 
 /// A boot bundle that has passed all content, identity and path checks.
@@ -230,6 +256,51 @@ impl ValidatedBootBundle {
     pub fn files(&self) -> &[VerifiedBootFile] {
         &self.files
     }
+}
+
+/// Adapt an existing verified v1 boot bundle to the new source-dependent
+/// input contract without changing its on-disk schema or CLI behavior.
+///
+/// The receipt identifies its origin as legacy v1. Its target preset is the
+/// selected profile's expectation, not proof of which build produced the
+/// files. The adapter remeasures every source file before returning; a composer
+/// must revalidate again immediately before publishing a medium.
+///
+/// # Errors
+///
+/// Returns an error if no reviewed profile matches, a file escapes the bundle
+/// root, or any measured content differs from the v1 bundle declaration.
+pub fn legacy_bundle_build_receipt(
+    bundle: &ValidatedBootBundle,
+) -> Result<(MediaBuildReceipt, ResolvedMediaProfile)> {
+    let profile = required_media_profile(&bundle.model, &bundle.transport)?
+        .ok_or_else(|| miette::miette!("No reviewed media profile matches the v1 boot bundle."))?;
+    let files = bundle
+        .files
+        .iter()
+        .map(|file| {
+            let relative = file.source.strip_prefix(&bundle.source_dir).map_err(|_| {
+                miette::miette!("A verified bundle file escaped its source directory.")
+            })?;
+            Ok(MediaBuildFile {
+                role: file.role.clone(),
+                path: portable_path(relative),
+                sha256: file.sha256.clone(),
+                size_bytes: file.size_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let receipt = MediaBuildReceipt::new(
+        MediaReceiptOrigin::LegacyV1,
+        profile.profile.target_preset.clone(),
+        bundle.model.clone(),
+        bundle.transport.clone(),
+        files,
+    )
+    .map_err(|error| miette::miette!("Invalid adapted v1 media build receipt: {error}"))?;
+    verify_media_build_receipt(&bundle.source_dir, &receipt, &profile.profile)
+        .map_err(|error| miette::miette!("V1 media build receipt verification failed: {error}"))?;
+    Ok((receipt, profile))
 }
 
 /// Paths and checksums created by [`stage_boot_bundle`].
@@ -388,8 +459,7 @@ pub fn stage_boot_bundle(
     let checksums_path = stage_path.join(ARTIFACT_CHECKSUMS);
     write_new_file(&checksums_path, checksums.as_bytes())?;
 
-    ensure_path_absent(&destination, "output artifact")?;
-    fs::rename(stage_path, &destination).map_err(|error| {
+    publish_staged_directory_noreplace(stage_path, &destination).map_err(|error| {
         miette::miette!(
             "Could not atomically publish staged SD artifact '{}' to '{}': {error}",
             stage_path.display(),
@@ -405,6 +475,85 @@ pub fn stage_boot_bundle(
             size_bytes: staged_image.size_bytes,
         },
         manifest_path: destination.join(ARTIFACT_MANIFEST),
+    })
+}
+
+/// Build a neutral MBR/FAT32 media plan into a new ordinary output directory.
+///
+/// The image is assembled in an isolated sibling directory, every source is
+/// remeasured before and during copying, and the MBR/FAT filesystem and file
+/// contents are read back before an atomic no-replace directory rename. The
+/// caller must obtain the plan from `plan_media_image` using the reviewed raw
+/// profile, receipt and lock documents; a plan's metadata is not an
+/// independent attestation. This does not write a device or claim that the
+/// resulting bytes boot on hardware.
+///
+/// # Errors
+///
+/// Rejects invalid geometry or placements, a changed or non-regular input,
+/// insufficient FAT32 capacity, an existing output path, or failed read-back.
+pub fn stage_fat32_media_plan(
+    plan: &MediaImagePlan,
+    output_dir: &Path,
+) -> Result<StagedMediaImage> {
+    stage_fat32_media_plan_with_gate(plan, output_dir, || Ok(()))
+}
+
+/// Compose a FAT32 artifact and run one caller-supplied identity check after
+/// isolated read-back, immediately before the no-replace publication step.
+///
+/// # Errors
+///
+/// Refuses publication if composition, read-back or the identity gate fails.
+pub fn stage_fat32_media_plan_with_gate<F>(
+    plan: &MediaImagePlan,
+    output_dir: &Path,
+    identity_gate: F,
+) -> Result<StagedMediaImage>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let (partition, files) = validate_media_plan_for_fat32(plan)?;
+    let destination = resolve_new_output_path(output_dir)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| miette::miette!("Media output has no parent directory."))?;
+    let stage = tempfile::Builder::new()
+        .prefix(".aros-media-stage-")
+        .tempdir_in(parent)
+        .map_err(|error| miette::miette!("Could not create media staging directory: {error}"))?;
+    let image = build_raw_image_from_parts(
+        &partition,
+        &files,
+        stable_media_volume_id(plan),
+        stage.path(),
+        MEDIA_RAW_IMAGE_FILENAME,
+    )?;
+    let manifest = render_media_manifest(plan, &partition, &image)?;
+    let manifest_path = stage.path().join(MEDIA_ARTIFACT_MANIFEST);
+    write_new_file(&manifest_path, &manifest)?;
+    let manifest_sha256 = sha256_hex(&manifest);
+    let checksums = format!(
+        "{}  {}\n{}  {}\n",
+        image.sha256, MEDIA_RAW_IMAGE_FILENAME, manifest_sha256, MEDIA_ARTIFACT_MANIFEST
+    );
+    write_new_file(&stage.path().join(ARTIFACT_CHECKSUMS), checksums.as_bytes())?;
+    verify_fat32_media_artifact(stage.path())?;
+    identity_gate()?;
+    publish_staged_directory_noreplace(stage.path(), &destination).map_err(|error| {
+        miette::miette!(
+            "Could not atomically publish staged media artifact '{}': {error}",
+            destination.display()
+        )
+    })?;
+    Ok(StagedMediaImage {
+        artifact_dir: destination.clone(),
+        image: RawImage {
+            path: destination.join(MEDIA_RAW_IMAGE_FILENAME),
+            sha256: image.sha256,
+            size_bytes: image.size_bytes,
+        },
+        manifest_path: destination.join(MEDIA_ARTIFACT_MANIFEST),
     })
 }
 
@@ -505,21 +654,51 @@ fn read_bundle_manifest(
 
 fn missing_bundle_manifest<T>(source_dir: &Path, expectation: &BundleExpectation) -> Result<T> {
     let mut inputs = vec![format!("{BOOT_BUNDLE_MANIFEST} (versioned manifest)")];
-    if expectation.transport == UBOOT_USB_ECM_TRANSPORT {
-        inputs.extend(
-            REQUIRED_RPI4_UBOOT_FILES.iter().map(|(_, destination)| {
-                format!("{destination} (Pi 4 U-Boot USB-ECM boot payload)")
-            }),
-        );
-    }
-    if expectation.transport == UEFI_ESP_TRANSPORT {
-        inputs.extend(
-            REQUIRED_UEFI_ESP_FILES
-                .iter()
-                .map(|(_, destination)| format!("{destination} (OpenSBI/UEFI boot payload)")),
-        );
+    if let Some(profile) = required_media_profile(&expectation.model, &expectation.transport)? {
+        inputs.extend(profile.profile.required_files.iter().map(|file| {
+            format!(
+                "{} ({} boot payload)",
+                file.destination, profile.profile.label
+            )
+        }));
     }
     missing_inputs(source_dir, &inputs)
+}
+
+fn required_media_profile(model: &str, transport: &str) -> Result<Option<ResolvedMediaProfile>> {
+    let profiles = built_in_media_profiles()
+        .map_err(|error| miette::miette!("Invalid built-in media profile registry: {error}"))?;
+    let matching: Vec<_> = profiles
+        .iter()
+        .filter(|entry| entry.profile.model == model && entry.profile.transport == transport)
+        .collect();
+    if matching.len() > 1 {
+        miette::bail!(
+            "Multiple media profiles match model '{}' and transport '{}'; boot-bundle format 1 cannot select one implicitly.",
+            model,
+            transport
+        );
+    }
+    if let Some(profile) = matching.first() {
+        if profile.profile.medium != "mbr-fat32" {
+            miette::bail!(
+                "Media profile '{}' is not an MBR/FAT32 SD layout.",
+                profile.profile.id
+            );
+        }
+        return Ok(Some((*profile).clone()));
+    }
+    if let Some(profile) = profiles
+        .iter()
+        .find(|entry| entry.profile.transport == transport)
+    {
+        miette::bail!(
+            "boot-bundle format 1 defines '{}' only for model '{}'.",
+            transport,
+            profile.profile.model
+        );
+    }
+    Ok(None)
 }
 
 fn validate_manifest_header(
@@ -667,43 +846,31 @@ fn validate_required_profile_files(
     board: &ManifestBoard,
     files: &[DeclaredFile],
 ) -> Result<()> {
-    let (required, profile_label) = if board.transport == UBOOT_USB_ECM_TRANSPORT {
-        if board.model != "rpi4" {
-            miette::bail!(
-                "boot-bundle format 1 defines '{}' only for model 'rpi4'.",
-                UBOOT_USB_ECM_TRANSPORT
-            );
-        }
-        (&REQUIRED_RPI4_UBOOT_FILES[..], "Pi 4 U-Boot USB-ECM")
-    } else if board.transport == UEFI_ESP_TRANSPORT {
-        if board.model != "milk-v-titan" {
-            miette::bail!(
-                "boot-bundle format 1 defines '{}' only for model 'milk-v-titan'.",
-                UEFI_ESP_TRANSPORT
-            );
-        }
-        (&REQUIRED_UEFI_ESP_FILES[..], "OpenSBI/UEFI")
-    } else {
+    let Some(resolved) = required_media_profile(&board.model, &board.transport)? else {
         return Ok(());
     };
+    let profile = &resolved.profile;
     let by_role: BTreeMap<&str, &DeclaredFile> = files
         .iter()
         .map(|file| (file.role.as_str(), file))
         .collect();
     let mut missing = Vec::new();
-    for (role, destination) in required {
-        match by_role.get(role) {
-            Some(file) if portable_path(&file.destination) == *destination => {}
+    for required in &profile.required_files {
+        match by_role.get(required.role.as_str()) {
+            Some(file) if portable_path(&file.destination) == required.destination => {}
             Some(file) => {
                 miette::bail!(
                     "{} role '{}' must stage as '{}', not '{}'.",
-                    profile_label,
-                    role,
-                    destination,
+                    profile.label,
+                    required.role,
+                    required.destination,
                     portable_path(&file.destination)
                 );
             }
-            None => missing.push(format!("{destination} (required files role '{role}')")),
+            None => missing.push(format!(
+                "{} (required files role '{}')",
+                required.destination, required.role
+            )),
         }
     }
     if !missing.is_empty() {
@@ -858,6 +1025,17 @@ fn ensure_path_absent(path: &Path, label: &str) -> Result<()> {
     }
 }
 
+fn publish_staged_directory_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        destination,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(std::io::Error::from)
+}
+
 fn validate_nonempty(value: &str, label: &str) -> Result<()> {
     if value.trim().is_empty() || value != value.trim() {
         miette::bail!("{label} must be non-empty and have no surrounding whitespace.");
@@ -993,7 +1171,7 @@ fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<()>
 }
 
 fn copy_and_hash(source: &Path, destination: &Path) -> Result<(String, u64)> {
-    let mut input = File::open(source).map_err(|error| {
+    let mut input = aros_common::open_regular_file_nofollow(source).map_err(|error| {
         miette::miette!(
             "Could not open verified boot input '{}' for staging: {error}",
             source.display()
@@ -1060,8 +1238,24 @@ fn write_new_file(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 fn build_raw_image(bundle: &ValidatedBootBundle, artifact_dir: &Path) -> Result<RawImage> {
-    let geometry = image_geometry(&bundle.partition)?;
-    let image_path = artifact_dir.join(RAW_IMAGE_FILENAME);
+    build_raw_image_from_parts(
+        &bundle.partition,
+        &bundle.files,
+        stable_volume_id(bundle),
+        artifact_dir,
+        RAW_IMAGE_FILENAME,
+    )
+}
+
+fn build_raw_image_from_parts(
+    partition: &PartitionLayout,
+    files: &[VerifiedBootFile],
+    volume_id: u32,
+    artifact_dir: &Path,
+    image_name: &str,
+) -> Result<RawImage> {
+    let geometry = image_geometry(partition)?;
+    let image_path = artifact_dir.join(image_name);
     ensure_path_absent(&image_path, "staged raw SD image")?;
 
     {
@@ -1092,9 +1286,17 @@ fn build_raw_image(bundle: &ValidatedBootBundle, artifact_dir: &Path) -> Result<
         })?;
     }
 
-    write_fat32_payload(bundle, &image_path, &geometry)?;
+    write_fat32_payload(partition, files, volume_id, &image_path, &geometry)?;
     sync_image_file(&image_path)?;
-    verify_raw_image(bundle, &image_path, &geometry)?;
+    let expected: Vec<_> = files
+        .iter()
+        .map(|file| ImageFileExpectation {
+            destination: file.destination.clone(),
+            sha256: file.sha256.clone(),
+            size_bytes: file.size_bytes,
+        })
+        .collect();
+    verify_raw_image(&expected, &image_path, &geometry)?;
     sync_image_file(&image_path)?;
     let (sha256, size_bytes) = sha256_file(&image_path)?;
     if size_bytes != geometry.image_size_bytes {
@@ -1178,7 +1380,9 @@ fn write_mbr(image: &mut File, geometry: &ImageGeometry) -> Result<()> {
 }
 
 fn write_fat32_payload(
-    bundle: &ValidatedBootBundle,
+    partition_layout: &PartitionLayout,
+    files: &[VerifiedBootFile],
+    volume_id: u32,
     image_path: &Path,
     geometry: &ImageGeometry,
 ) -> Result<()> {
@@ -1207,8 +1411,8 @@ fn write_fat32_payload(
         .bytes_per_sector(SECTOR_BYTES as u16)
         .total_sectors(geometry.partition_sector_count)
         .fat_type(fatfs::FatType::Fat32)
-        .volume_label(fat_volume_label(&bundle.partition.label))
-        .volume_id(stable_volume_id(bundle));
+        .volume_label(fat_volume_label(&partition_layout.label))
+        .volume_id(volume_id);
     fatfs::format_volume(&mut partition, options).map_err(|error| {
         miette::miette!(
             "Could not format the FAT32 boot partition in '{}': {error}",
@@ -1236,7 +1440,7 @@ fn write_fat32_payload(
     }
     {
         let root = filesystem.root_dir();
-        for file in &bundle.files {
+        for file in files {
             write_file_to_fat(&root, file, image_path)?;
         }
     }
@@ -1320,7 +1524,7 @@ fn copy_source_to_writer<W: Write>(
     output: &mut W,
     destination: &str,
 ) -> Result<(String, u64)> {
-    let mut input = File::open(source).map_err(|error| {
+    let mut input = aros_common::open_regular_file_nofollow(source).map_err(|error| {
         miette::miette!(
             "Could not open verified boot input '{}' for '{}': {error}",
             source.display(),
@@ -1368,21 +1572,17 @@ fn copy_source_to_writer<W: Write>(
 }
 
 fn verify_raw_image(
-    bundle: &ValidatedBootBundle,
+    files: &[ImageFileExpectation],
     image_path: &Path,
     geometry: &ImageGeometry,
 ) -> Result<()> {
     verify_mbr(image_path, geometry)?;
-    let image = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image_path)
-        .map_err(|error| {
-            miette::miette!(
-                "Could not reopen staged raw SD image '{}' for verification: {error}",
-                image_path.display()
-            )
-        })?;
+    let image = aros_common::open_regular_file_nofollow(image_path).map_err(|error| {
+        miette::miette!(
+            "Could not reopen staged raw SD image '{}' for verification: {error}",
+            image_path.display()
+        )
+    })?;
     let mut partition = PartitionStream::new(
         image,
         geometry.partition_start_bytes,
@@ -1415,7 +1615,8 @@ fn verify_raw_image(
     }
     {
         let root = filesystem.root_dir();
-        for file in &bundle.files {
+        sd_verify::verify_fat_inventory(&root, files)?;
+        for file in files {
             let destination = portable_path(&file.destination);
             let mut input = root.open_file(&destination).map_err(|error| {
                 miette::miette!(
@@ -1447,7 +1648,7 @@ fn verify_raw_image(
 }
 
 fn verify_mbr(image_path: &Path, geometry: &ImageGeometry) -> Result<()> {
-    let mut image = File::open(image_path).map_err(|error| {
+    let mut image = aros_common::open_regular_file_nofollow(image_path).map_err(|error| {
         miette::miette!(
             "Could not open staged raw SD image '{}' for MBR verification: {error}",
             image_path.display()

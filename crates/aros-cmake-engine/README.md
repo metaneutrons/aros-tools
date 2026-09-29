@@ -17,3 +17,14 @@ Engine modules and build runners resolve those inventories from the selected
 engine, never from a source checkout's legacy `cmake/` copy. Source recipes,
 patches and input manifests remain source-owned. The contract fixtures exercise
 that boundary against isolated source trees without a CMake engine.
+
+The Titan `opensbi-uefi-artifacts` target also emits a versioned
+`media-build-receipt.json` from its five staged files. The receipt generator
+measures the files after staging; `opensbi-uefi-verify` recomputes and compares
+the receipt without changing it. With an installed release-toolchain manifest,
+the producer emits v2 and measures the clean source Git commit/tree plus the
+toolchain release/tree/manifest identities. A local toolchain without that
+manifest keeps the explicitly weaker v1 receipt. `aros image build` independently
+remeasures a v2 identity against `--source-root` and `--toolchain-root`; external
+files still require reviewed input locks. The receipt does not prove that the
+legacy core-object dependency has been removed or that the board boots.

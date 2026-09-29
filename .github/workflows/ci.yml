@@ -210,6 +210,17 @@ jobs:
         with:
           path: aros-tools
           persist-credentials: false
+      - name: Install the ISO read-back backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq xorriso
+          else
+            brew install xorriso
+          fi
+          xorriso -version
       - name: Read the versioned source and producer contract
         if: matrix.source_qualification
         id: contract

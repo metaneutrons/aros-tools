@@ -4,7 +4,7 @@ use super::{inventory_stems, CompileContract};
 use crate::ast::{
     ModuleType, PythonGeneratorJob, PythonOutputsDecl, PythonPackageDecl, TargetDefinition,
 };
-use crate::capability::require_file_fingerprint;
+use crate::capability::{require_file_fingerprint, require_file_fingerprint_one_of};
 use crate::fetch::FetchDecl;
 use crate::fingerprints::fingerprint;
 use crate::parser::TargetContext;
@@ -282,7 +282,21 @@ pub(crate) fn archive_sources(
         ),
         _ => unreachable!("closed family selection"),
     };
-    require_file_fingerprint(root, recipe, fingerprint(recipe_pin)?, family)?;
+    if family == "v3d" {
+        // Upstream added v3d_dt to the HIDD, not to the closed Mesa archive.
+        // Both reviewed recipes expand to the same archive and generator jobs.
+        require_file_fingerprint_one_of(
+            root,
+            recipe,
+            &[
+                fingerprint(recipe_pin)?,
+                fingerprint("mesa26-v3d-recipe-device-tree")?,
+            ],
+            family,
+        )?;
+    } else {
+        require_file_fingerprint(root, recipe, fingerprint(recipe_pin)?, family)?;
+    }
     require_file_fingerprint(root, manifest, fingerprint(manifest_pin)?, family)?;
     require_file_fingerprint(
         root,

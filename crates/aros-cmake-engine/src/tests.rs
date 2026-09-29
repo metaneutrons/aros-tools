@@ -82,6 +82,263 @@ fn the_digest_is_a_sha256() {
 }
 
 #[test]
+fn cmake_media_receipt_measures_real_staged_files_and_rejects_changed_inputs() {
+    use aros_common::media_profile::built_in_media_profiles;
+    use aros_common::media_receipt::{parse_media_build_receipt, verify_media_build_receipt};
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("embedded engine");
+    let script = engine.join("scripts/EmitMediaBuildReceipt.cmake");
+    let root = directory.path().join("payload with spaces");
+    fs::create_dir_all(root.join("EFI/BOOT")).expect("boot dir");
+    fs::create_dir_all(root.join("EFI/AROS")).expect("AROS dir");
+    for (path, bytes) in [
+        ("EFI/BOOT/BOOTRISCV64.EFI", b"loader".as_slice()),
+        ("EFI/AROS/Image", b"image".as_slice()),
+        ("aros-bsp.pkg", b"BSP".as_slice()),
+        ("aros.cmd", b"command".as_slice()),
+        ("startup.nsh", b"startup".as_slice()),
+    ] {
+        fs::write(root.join(path), bytes).expect("staged file");
+    }
+    let specs = "uefi-loader|EFI/BOOT/BOOTRISCV64.EFI;kernel-image|EFI/AROS/Image;bsp-package|aros-bsp.pkg;command-line|aros.cmd;startup-script|startup.nsh";
+    let invoke = |mode: &str, selected_specs: &str| {
+        Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", root.display()))
+            .arg("-DTARGET_PRESET=opensbi-riscv64")
+            .arg("-DMODEL=milk-v-titan")
+            .arg("-DTRANSPORT=uefi-esp")
+            .arg(format!("-DFILE_SPECS={selected_specs}"))
+            .arg(format!("-DMODE={mode}"))
+            .arg("-P")
+            .arg(&script)
+            .output()
+            .expect("CMake script must run")
+    };
+    let written = invoke("write", specs);
+    assert!(
+        written.status.success(),
+        "CMake receipt failed: {}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let receipt_path = root.join("media-build-receipt.json");
+    let receipt_bytes = fs::read(&receipt_path).expect("receipt");
+    let receipt = parse_media_build_receipt(&receipt_bytes).expect("closed JSON receipt");
+    let profile = built_in_media_profiles()
+        .expect("reviewed profiles")
+        .into_iter()
+        .find(|item| item.profile.id == "milk-v-titan-uefi")
+        .expect("Titan profile");
+    verify_media_build_receipt(&root, &receipt, &profile.profile)
+        .expect("CMake-produced receipt matches files and profile");
+    assert!(invoke("verify", specs).status.success());
+
+    fs::write(root.join("aros.cmd"), b"changed").expect("changed input");
+    assert!(!invoke("verify", specs).status.success());
+    assert_eq!(
+        fs::read(&receipt_path).expect("preserved receipt"),
+        receipt_bytes
+    );
+    assert!(!invoke("write", "bsp-package|../outside").status.success());
+    assert!(
+        !invoke("write", "bsp-package|aros-bsp.pkg;bsp-package|aros.cmd")
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(&receipt_path).expect("preserved receipt"),
+        receipt_bytes
+    );
+
+    let fixture_source = directory.path().join("cmake-fixture");
+    let fixture_build = directory.path().join("cmake-build");
+    fs::create_dir(&fixture_source).expect("fixture source");
+    fs::write(
+        fixture_source.join("CMakeLists.txt"),
+        format!(
+            r#"cmake_minimum_required(VERSION 3.22)
+project(media_receipt_fixture NONE)
+set(_specs "{specs}")
+add_custom_target(media-receipt
+    COMMAND "${{CMAKE_COMMAND}}"
+        "-DROOT_DIR={root}"
+        "-DTARGET_PRESET=opensbi-riscv64"
+        "-DMODEL=milk-v-titan"
+        "-DTRANSPORT=uefi-esp"
+        "-DFILE_SPECS=${{_specs}}"
+        "-DMODE=write" -P "{script}"
+    VERBATIM)
+"#,
+            root = cmake_path(&root),
+            script = cmake_path(&script)
+        ),
+    )
+    .expect("CMake fixture");
+    let configured = Command::new("cmake")
+        .arg("-S")
+        .arg(&fixture_source)
+        .arg("-B")
+        .arg(&fixture_build)
+        .arg("-G")
+        .arg("Ninja")
+        .output()
+        .expect("configure fixture");
+    assert!(
+        configured.status.success(),
+        "configure failed: {}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let built = Command::new("cmake")
+        .arg("--build")
+        .arg(&fixture_build)
+        .arg("--target")
+        .arg("media-receipt")
+        .output()
+        .expect("run generated build command");
+    assert!(
+        built.status.success(),
+        "generated command failed: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    parse_media_build_receipt(&fs::read(&receipt_path).expect("generated receipt"))
+        .expect("generated receipt schema");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+
+        symlink(root.join("EFI"), root.join("linked")).expect("linked parent");
+        assert!(!invoke("write", "uefi-loader|linked/BOOT/BOOTRISCV64.EFI")
+            .status
+            .success());
+        assert!(!invoke(
+            "write",
+            "first-role|EFI/BOOT/BOOTRISCV64.EFI;second-role|efi/boot/bootriscv64.efi"
+        )
+        .status
+        .success());
+
+        assert!(Command::new("mkfifo")
+            .arg(root.join("pipe"))
+            .status()
+            .expect("mkfifo")
+            .success());
+        let mut child = Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", root.display()))
+            .arg("-DTARGET_PRESET=opensbi-riscv64")
+            .arg("-DMODEL=milk-v-titan")
+            .arg("-DTRANSPORT=uefi-esp")
+            .arg("-DFILE_SPECS=bsp-package|pipe")
+            .arg("-DMODE=write")
+            .arg("-P")
+            .arg(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("CMake FIFO probe");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().expect("probe status") {
+                assert!(!status.success(), "FIFO must be rejected");
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop blocked probe");
+                child.wait().expect("reap blocked probe");
+                panic!("CMake blocked while measuring a FIFO");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let graph = file("OpenSbiUefi.cmake").expect("Titan graph");
+    assert!(graph.contains("-DMODE=write\" -P \"${_opensbi_receipt_script}"));
+    assert!(graph.contains("-DMODE=verify\" -P \"${_opensbi_receipt_script}"));
+}
+
+#[allow(clippy::literal_string_with_formatting_args)] // Git's ^{tree} syntax is literal.
+#[test]
+fn cmake_media_receipt_binds_clean_git_and_release_toolchain_inputs() {
+    use aros_common::media_receipt::parse_media_build_receipt;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("embedded engine");
+    let source = directory.path().join("source");
+    let toolchain = directory.path().join("toolchain");
+    let payload = directory.path().join("payload");
+    for path in [&source, &toolchain, &payload] {
+        fs::create_dir(path).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let result = Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    fs::write(source.join("source.txt"), b"source").unwrap();
+    git(&["add", "source.txt"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "source",
+    ]);
+    let source_commit = git(&["rev-parse", "HEAD"]);
+    let source_tree = git(&["rev-parse", "HEAD^{tree}"]);
+    let tree_sha256 = "a".repeat(64);
+    let manifest = format!("{{\"release_id\":\"test-1\",\"tree_sha256\":\"{tree_sha256}\"}}");
+    fs::write(toolchain.join("toolchain-manifest.json"), manifest).unwrap();
+    fs::write(payload.join("kernel"), b"kernel bytes").unwrap();
+    let invoke = |mode: &str| {
+        Command::new("cmake")
+            .arg(format!("-DROOT_DIR={}", payload.display()))
+            .arg("-DTARGET_PRESET=pc-x86_64")
+            .arg("-DMODEL=pc")
+            .arg("-DTRANSPORT=bios-iso")
+            .arg("-DFILE_SPECS=bootstrap|kernel")
+            .arg(format!("-DSOURCE_DIR={}", source.display()))
+            .arg(format!("-DTOOLCHAIN_ROOT={}", toolchain.display()))
+            .arg(format!("-DMODE={mode}"))
+            .arg("-P")
+            .arg(engine.join("scripts/EmitMediaBuildReceipt.cmake"))
+            .output()
+            .unwrap()
+    };
+    let written = invoke("write");
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let receipt =
+        parse_media_build_receipt(&fs::read(payload.join("media-build-receipt.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt.format_version, 2);
+    let identity = receipt.build_identity.unwrap();
+    assert_eq!(identity.source_commit, source_commit);
+    assert_eq!(identity.source_tree, source_tree);
+    assert_eq!(identity.toolchain_tree_sha256.as_str(), tree_sha256);
+    assert!(invoke("verify").status.success());
+    fs::write(source.join("source.txt"), b"dirty").unwrap();
+    assert!(!invoke("verify").status.success());
+}
+
+#[test]
 fn placement_writes_every_file_and_stamps_it() {
     let directory = tempfile::tempdir().expect("temp dir");
     let placement = materialize(directory.path()).expect("materialize");
@@ -387,5 +644,185 @@ fn run_cmake_script(script: &std::path::Path) {
         script.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn pc_boot_iso_uses_eltorito_and_the_source_module_order() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let source = directory.path().join("aros-source");
+    fs::create_dir_all(source.join("arch/x86_64-pc/boot")).expect("module directory");
+    fs::create_dir_all(source.join("workbench/s")).expect("startup directory");
+    fs::write(
+        source.join("arch/x86_64-pc/boot/modules.default"),
+        "/boot/@arch.dir@/kernel.@pkg.fmt@\n/boot/@arch.dir@/aros-bsp.pkg.@pkg.fmt@\n/boot/aros-base.pkg.@pkg.fmt@\n",
+    )
+    .expect("module list");
+    fs::write(source.join("workbench/s/Startup-Sequence"), "EndCLI\n").expect("startup sequence");
+    let fixture = directory.path().join("fixture");
+    fs::create_dir(&fixture).expect("fixture directory");
+    fs::write(
+        fixture.join("CMakeLists.txt"),
+        format!(
+            r#"cmake_minimum_required(VERSION 3.22)
+project(BootIsoContract NONE)
+set(AROS_SOURCE_DIR "{}")
+set(AROS_TARGET_CPU x86_64)
+set(AROS_TARGET_PLATFORM pc)
+set(AROS_BOOT_ISO "${{CMAKE_BINARY_DIR}}/aros-x86_64-pc.iso")
+set(AROS_MKISOFS_BIN /usr/bin/true)
+add_custom_target(aros-grub2-iso-assets)
+add_custom_target(workbench-c)
+include("{}/PcBootIso.cmake")
+aros_add_pc_boot_iso()
+"#,
+            cmake_path(&source),
+            cmake_path(&engine),
+        ),
+    )
+    .expect("fixture CMakeLists");
+    let build = directory.path().join("build");
+    let output = Command::new("cmake")
+        .args(["-G", "Ninja", "-S"])
+        .arg(&fixture)
+        .arg("-B")
+        .arg(&build)
+        .output()
+        .expect("configure fixture");
+    assert!(
+        output.status.success(),
+        "boot-iso configure failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = fs::read_to_string(build.join("gen/boot-iso/grub.cfg")).expect("GRUB config");
+    assert!(config.contains("insmod multiboot2"));
+    assert!(config.contains("multiboot2 /boot/pc/bootstrap vesa=800x600x32"));
+    let kernel = config
+        .find("module2 /boot/pc/kernel")
+        .expect("kernel module");
+    let bsp = config
+        .find("module2 /boot/pc/aros-bsp.pkg")
+        .expect("BSP module");
+    let base = config
+        .find("module2 /boot/aros-base.pkg")
+        .expect("base module");
+    assert!(kernel < bsp && bsp < base, "source module order changed");
+    assert!(!config.contains('@'), "unexpanded module placeholder");
+    let ninja = fs::read_to_string(build.join("build.ninja")).expect("Ninja graph");
+    for required in [
+        "boot/grub/i386-pc/grub2_eltorito",
+        "-no-emul-boot",
+        "-boot-info-table",
+        "aros-grub2-iso-assets",
+    ] {
+        assert!(ninja.contains(required), "missing ISO contract: {required}");
+    }
+
+    // A completed SYS tree is an input, not a dependency that re-runs the
+    // package producer (which deliberately refuses to overwrite packages).
+    let sys_boot = build.join("SYS/boot");
+    fs::create_dir_all(sys_boot.join("pc")).expect("PC boot directory");
+    fs::create_dir_all(sys_boot.join("grub/i386-pc")).expect("GRUB boot directory");
+    for relative in [
+        "pc/bootstrap",
+        "pc/kernel",
+        "pc/aros-bsp.pkg",
+        "aros-base.pkg",
+        "grub/i386-pc/grub2_eltorito",
+    ] {
+        fs::write(sys_boot.join(relative), "fixture\n").expect("SYS input");
+    }
+    let output = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "boot-iso"])
+        .output()
+        .expect("assemble fixture");
+    assert!(
+        !output.status.success(),
+        "fake ISO composer unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("did not produce a regular ISO"),
+        "missing final ISO was not diagnosed:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("gen/boot-iso/stage/boot/grub/grub.cfg"))
+            .expect("staged config"),
+        config
+    );
+    assert!(build
+        .join("gen/boot-iso/stage/S/Startup-Sequence")
+        .is_file());
+    assert!(!sys_boot.join("grub/grub.cfg").exists());
+    assert!(!build.join("SYS/S/Startup-Sequence").exists());
+
+    #[cfg(unix)]
+    {
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        std::os::unix::fs::symlink(&outside, build.join("SYS/S")).expect("unsafe SYS destination");
+        let output = Command::new("cmake")
+            .arg("--build")
+            .arg(&build)
+            .args(["--target", "boot-iso"])
+            .output()
+            .expect("reject unsafe destination");
+        assert!(!output.status.success(), "symlinked SYS/S was accepted");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("unsafe SYS directory"),
+            "symlink rejection was not diagnosed:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!outside.join("Startup-Sequence").exists());
+    }
+}
+
+#[test]
+fn pc_boot_iso_verifier_rejects_data_iso_and_accepts_boot_catalog() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let verify = engine.join("VerifyPcBootIso.cmake");
+    let iso = directory.path().join("boot.iso");
+    let mut bytes = vec![0_u8; 131_072];
+    fs::write(&iso, &bytes).expect("data ISO fixture");
+    let run = || {
+        Command::new("cmake")
+            .arg(format!("-DISO_PATH={}", iso.display()))
+            .arg("-P")
+            .arg(&verify)
+            .output()
+            .expect("run ISO verifier")
+    };
+    assert!(!run().status.success(), "data-only ISO was accepted");
+
+    let record = 17 * 2048;
+    bytes[record..record + 7].copy_from_slice(b"\0CD001\x01");
+    bytes[record + 7..record + 30].copy_from_slice(b"EL TORITO SPECIFICATION");
+    bytes[record + 71..record + 75].copy_from_slice(&20_u32.to_le_bytes());
+    let catalog = 20 * 2048;
+    bytes[catalog] = 1;
+    bytes[catalog + 30..catalog + 32].copy_from_slice(&[0x55, 0xaa]);
+    bytes[catalog + 32..catalog + 34].copy_from_slice(&[0x88, 0]);
+    fs::write(&iso, &bytes).expect("boot ISO without image fixture");
+    assert!(
+        !run().status.success(),
+        "catalog without boot image was accepted"
+    );
+    bytes[catalog + 38..catalog + 40].copy_from_slice(&4_u16.to_le_bytes());
+    bytes[catalog + 40..catalog + 44].copy_from_slice(&40_u32.to_le_bytes());
+    fs::write(&iso, &bytes).expect("empty image fixture");
+    assert!(!run().status.success(), "empty boot image was accepted");
+    bytes[40 * 2048] = 0xe8;
+    fs::write(&iso, bytes).expect("boot ISO fixture");
+    let output = run();
+    assert!(
+        output.status.success(),
+        "valid boot catalog was rejected:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

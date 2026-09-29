@@ -38,6 +38,7 @@ mod commands;
 mod completion_model;
 mod golden;
 mod host_compiler;
+mod image;
 mod observability;
 mod repo;
 mod source;
@@ -147,6 +148,12 @@ enum Commands {
     Board {
         #[command(subcommand)]
         command: BoardCommand,
+    },
+
+    /// Plan, compose, inspect or verify a boot-media artifact
+    Image {
+        #[command(subcommand)]
+        command: image::ImageCommand,
     },
 
     /// Create and configure an AROS source checkout
@@ -828,6 +835,17 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
                 ),
             }
         }
+        Commands::Image { command } => (
+            DiagnosticCode::CliMediaSafety,
+            DiagnosticStage::MediaSafety,
+            match command {
+                image::ImageCommand::Build(_) => "image.build",
+                image::ImageCommand::Inspect(_) => "image.inspect",
+                image::ImageCommand::Verify(_) => "image.verify",
+            },
+            None,
+            "check the reviewed profile, receipt and locked inputs, or inspect the artifact read-back failure",
+        ),
         Commands::Board { command } => match command {
             BoardCommand::Build { board, .. } => (
                 DiagnosticCode::CliBuild,
@@ -1334,6 +1352,30 @@ mod tests {
             ),
             (&["aros", "board", "scan"], "board.scan"),
             (&["aros", "board", "sd", "scan"], "board.sd.scan"),
+            (
+                &["aros", "image", "verify", "--artifact", "/tmp/media"],
+                "image.verify",
+            ),
+            (
+                &[
+                    "aros",
+                    "image",
+                    "build",
+                    "--profile",
+                    "rpi4-uboot-usb-ecm",
+                    "--build-root",
+                    "/tmp/build",
+                    "--receipt",
+                    "/tmp/receipt.json",
+                    "--output",
+                    "/tmp/media",
+                ],
+                "image.build",
+            ),
+            (
+                &["aros", "image", "inspect", "--artifact", "/tmp/media"],
+                "image.inspect",
+            ),
             (&["aros", "golden", "capture"], "golden.capture"),
             (&["aros", "source", "init", "/tmp/AROS"], "source.init"),
         ];
@@ -1394,6 +1436,26 @@ mod tests {
             RepositoryRequirement::Global
         );
         assert_eq!(
+            requirement(&["aros", "image", "verify", "--artifact", "/tmp/media"]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
+            requirement(&[
+                "aros",
+                "image",
+                "build",
+                "--profile",
+                "rpi4-uboot-usb-ecm",
+                "--build-root",
+                "/tmp/build",
+                "--receipt",
+                "/tmp/receipt.json",
+                "--output",
+                "/tmp/media",
+            ]),
+            RepositoryRequirement::Global
+        );
+        assert_eq!(
             requirement(&["aros", "toolchain", "inventory"]),
             RepositoryRequirement::Global
         );
@@ -1409,6 +1471,50 @@ mod tests {
             requirement(&["aros", "source", "sync"]),
             RepositoryRequirement::Required
         );
+    }
+
+    #[test]
+    fn image_build_requires_explicit_inputs_and_apply_is_mutually_exclusive_with_dry_run() {
+        assert_eq!(
+            parse_error(&["aros", "image", "build"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&[
+                "aros",
+                "image",
+                "build",
+                "--profile",
+                "rpi4-uboot-usb-ecm",
+                "--build-root",
+                "/tmp/build",
+                "--receipt",
+                "/tmp/receipt.json",
+                "--output",
+                "/tmp/media",
+                "--apply",
+                "--dry-run",
+            ]),
+            ErrorKind::ArgumentConflict
+        );
+        Cli::try_parse_from([
+            "aros",
+            "image",
+            "build",
+            "--profile",
+            "rpi4-uboot-usb-ecm",
+            "--build-root",
+            "/tmp/build",
+            "--receipt",
+            "/tmp/receipt.json",
+            "--output",
+            "/tmp/media",
+            "--lock",
+            "firmware=/tmp/lock.toml",
+            "--external",
+            "firmware:blob=/tmp/firmware.bin",
+        ])
+        .expect("valid explicit image build");
     }
 
     fn parse_error(arguments: &[&str]) -> ErrorKind {

@@ -20,4 +20,5 @@ workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+aros-common = { path = "../aros-common" }
 tempfile.workspace = true
