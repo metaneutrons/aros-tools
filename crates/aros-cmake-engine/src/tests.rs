@@ -673,7 +673,9 @@ set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
 set(AROS_BOOT_ISO "${{CMAKE_BINARY_DIR}}/aros-x86_64-pc.iso")
 set(AROS_MKISOFS_BIN /usr/bin/true)
+set(AROS_MEDIA_CLI_BIN /usr/bin/true)
 add_custom_target(aros-grub2-iso-assets)
+add_custom_target(AROS)
 add_custom_target(workbench-c)
 include("{}/PcBootIso.cmake")
 aros_add_pc_boot_iso()
@@ -716,12 +718,35 @@ aros_add_pc_boot_iso()
         "-no-emul-boot",
         "-boot-info-table",
         "aros-grub2-iso-assets",
+        "image receipt --profile pc-bios-iso",
+        "sys-tree=gen/boot-iso/stage",
     ] {
         assert!(ninja.contains(required), "missing ISO contract: {required}");
     }
 
-    // A completed SYS tree is an input, not a dependency that re-runs the
-    // package producer (which deliberately refuses to overwrite packages).
+    let graph = Command::new("ninja")
+        .args([
+            "-C",
+            build.to_str().expect("UTF-8 build path"),
+            "-t",
+            "query",
+            "boot-iso",
+        ])
+        .output()
+        .expect("query boot-iso graph");
+    assert!(graph.status.success(), "cannot query boot-iso graph");
+    let graph = String::from_utf8(graph.stdout).expect("UTF-8 Ninja graph");
+    assert!(
+        graph.contains("    AROS\n"),
+        "native SYS producer missing: {graph}"
+    );
+    assert!(
+        graph.contains("    aros-grub2-iso-assets\n"),
+        "audited GRUB producer missing: {graph}"
+    );
+
+    // The fixture's empty AROS/GRUB producers stand in for the complete
+    // native targets; this packaging counterprobe supplies their SYS output.
     let sys_boot = build.join("SYS/boot");
     fs::create_dir_all(sys_boot.join("pc")).expect("PC boot directory");
     fs::create_dir_all(sys_boot.join("grub/i386-pc")).expect("GRUB boot directory");
@@ -734,6 +759,28 @@ aros_add_pc_boot_iso()
     ] {
         fs::write(sys_boot.join(relative), "fixture\n").expect("SYS input");
     }
+    fs::remove_file(sys_boot.join("pc/kernel")).expect("remove required kernel");
+    let missing_kernel = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "boot-iso"])
+        .output()
+        .expect("reject missing kernel");
+    assert!(
+        !missing_kernel.status.success(),
+        "missing kernel was accepted"
+    );
+    let missing_kernel_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&missing_kernel.stdout),
+        String::from_utf8_lossy(&missing_kernel.stderr)
+    );
+    assert!(
+        missing_kernel_output.contains("SYS/boot/pc/kernel"),
+        "missing kernel failure lacked its exact path: {missing_kernel_output}"
+    );
+    assert!(!build.join("aros-x86_64-pc.iso").exists());
+    fs::write(sys_boot.join("pc/kernel"), "fixture\n").expect("restore kernel");
     let output = Command::new("cmake")
         .arg("--build")
         .arg(&build)

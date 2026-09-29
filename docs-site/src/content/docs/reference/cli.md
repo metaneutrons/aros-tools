@@ -152,6 +152,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | Command | Effect |
 | --- | --- |
 | `aros image build` | Plan a reviewed FAT32 or BIOS ISO profile; compose into a new artifact directory with `--apply` |
+| `aros image receipt` | Measure CMake-produced files and complete trees against a clean source checkout and installed toolchain |
 | `aros image inspect` | Read back a composed image from `--artifact DIR` and show measured facts |
 | `aros image verify` | Check the artifact inventory, SHA256SUMS, image filesystem, embedded files and boot metadata |
 

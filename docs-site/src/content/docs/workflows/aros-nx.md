@@ -69,18 +69,18 @@ for physical targets.
 
 ## Create a BIOS-bootable PC ISO
 
-After building the `pc-x86_64` system tree, install `mkisofs` (or
-`genisoimage`) and run:
+Install `mkisofs` (or `genisoimage`) and run from a clean AROS checkout:
 
 ```sh
 aros build --preset pc-x86_64 --target boot-iso
 ```
 
-The image is `build/pc-x86_64/aros-x86_64-pc.iso`. This target verifies that
-the existing bootstrap and kernel modules are present, stages GRUB, and checks
-the El Torito boot catalog before replacing the image. It does not rebuild
-existing AROS packages or qualify an AROS desktop boot. The current image is
-BIOS-bootable; UEFI boot is not claimed.
+The `boot-iso` target depends on the native `AROS` SYS producer and the
+audited GRUB host assets. It stages their output, verifies the required
+bootstrap and kernel modules, records the complete staged tree in
+`build/pc-x86_64/media-build-receipt.json`, and verifies the El Torito catalog
+before publishing `build/pc-x86_64/aros-x86_64-pc.iso`. A successful build
+does not establish that the ISO boots. UEFI boot is not claimed.
 
 `aros test` is a separate direct-kernel check. To inspect the ISO's video path,
 boot the image as a CD in QEMU with an emulated VGA device.

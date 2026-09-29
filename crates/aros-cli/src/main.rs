@@ -839,6 +839,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             DiagnosticCode::CliMediaSafety,
             DiagnosticStage::MediaSafety,
             match command {
+                image::ImageCommand::Receipt(_) => "image.receipt",
                 image::ImageCommand::Build(_) => "image.build",
                 image::ImageCommand::Inspect(_) => "image.inspect",
                 image::ImageCommand::Verify(_) => "image.verify",
