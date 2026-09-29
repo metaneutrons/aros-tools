@@ -6,7 +6,7 @@ use super::{
     validate_relative_path, validate_role, write_new_file, RawImage, StagedMediaImage,
     VerifiedMediaArtifact, ARTIFACT_CHECKSUMS, MEDIA_ARTIFACT_MANIFEST, MEDIA_ISO_IMAGE_FILENAME,
 };
-use aros_common::media_plan::MediaImagePlan;
+use aros_common::media_plan::{valid_iso_media_path, MediaImagePlan};
 use aros_common::media_profile::MediaLayout;
 use aros_common::media_receipt::{
     validate_media_build_identity, MediaBuildIdentity, MediaReceiptOrigin,
@@ -189,6 +189,10 @@ where
             "-path-list",
             "grafts.txt",
             "-R",
+            "-input-charset",
+            "UTF-8",
+            "-output-charset",
+            "UTF-8",
             "-iso-level",
             "3",
             "-uid",
@@ -514,10 +518,7 @@ pub fn verify_iso_media_artifact(dir: &Path) -> Result<VerifiedMediaArtifact> {
 
 fn validate_iso_path(raw: &str) -> Result<PathBuf> {
     let path = validate_relative_path(raw, "ISO destination")?;
-    if !raw
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"/_+.-".contains(&byte))
-    {
+    if !valid_iso_media_path(raw) {
         miette::bail!("ISO destination contains unsupported characters.");
     }
     Ok(path)
@@ -593,7 +594,14 @@ fn xorriso_text(image: &Path, args: &[&str]) -> Result<String> {
     let path = image
         .to_str()
         .ok_or_else(|| miette::miette!("Non-Unicode ISO path."))?;
-    let mut command = vec!["-indev", path];
+    let mut command = vec![
+        "-in_charset",
+        "UTF-8",
+        "-out_charset",
+        "UTF-8",
+        "-indev",
+        path,
+    ];
     command.extend_from_slice(args);
     let output = run_xorriso(&command)?;
     String::from_utf8(output.stdout).map_err(|_| miette::miette!("xorriso output is not UTF-8."))
@@ -614,6 +622,10 @@ fn extract_inventory(
     let mut measured = BTreeMap::new();
     for (chunk_index, chunk) in paths.chunks(128).enumerate() {
         let mut args = vec![
+            "-in_charset".to_string(),
+            "UTF-8".to_string(),
+            "-out_charset".to_string(),
+            "UTF-8".to_string(),
             "-osirrox".to_string(),
             "on".to_string(),
             "-indev".to_string(),
@@ -747,6 +759,8 @@ mod tests {
         let sys = source.join("SYS");
         fs::create_dir_all(sys.join("Docs/empty")).unwrap();
         fs::write(sys.join("Docs/readme"), b"readme").unwrap();
+        fs::write(sys.join("Docs/Kitty Mascot.bmp"), b"space").unwrap();
+        fs::write(sys.join("Docs/Ara±a.anim"), b"utf8").unwrap();
         let profile = built_in_media_profiles()
             .unwrap()
             .into_iter()
@@ -800,7 +814,7 @@ mod tests {
         );
         let verified = verify_iso_media_artifact(&first.artifact_dir).unwrap();
         assert_eq!(verified.medium, "iso9660-el-torito");
-        assert_eq!(verified.file_count, 4); // three SYS files plus generated catalog
+        assert_eq!(verified.file_count, 6); // five SYS files plus generated catalog
         assert!(
             stage_iso_media_plan_with_gate(&plan, &temp.path().join("refused"), || {
                 Err(miette::miette!("source identity changed"))
