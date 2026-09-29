@@ -60,6 +60,7 @@ function(aros_add_pc_boot_iso)
         message(FATAL_ERROR "boot-iso requires the kernel ELF as its first module")
     endif()
     set(_startup_source "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence")
+    set(_bootstrap "${CMAKE_BINARY_DIR}/SYS/boot/pc/bootstrap")
     set(_grub_config "${CMAKE_BINARY_DIR}/gen/boot-iso/grub.cfg")
     set(_stage_dir "${CMAKE_BINARY_DIR}/gen/boot-iso/stage")
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/gen/boot-iso")
@@ -102,7 +103,11 @@ function(aros_add_pc_boot_iso)
             "-DTOOLCHAIN_ROOT=${AROS_CROSS_TOOLCHAIN_ROOT}"
             "-DISO_PATH=${AROS_BOOT_ISO}"
             -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
-        DEPENDS "${_modules_file}" "${_startup_source}" "${_grub_config}"
+        # AROS is not a complete producer of the bootstrap or every package
+        # named by modules.default. Bind the exact generated outputs as file
+        # dependencies instead of relying on its historically partial root.
+        DEPENDS "${_bootstrap}" ${_module_inputs}
+            "${_modules_file}" "${_startup_source}" "${_grub_config}"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
         COMMENT "Packaging native AROS SYS tree as BIOS-bootable PC ISO -> ${AROS_BOOT_ISO}"

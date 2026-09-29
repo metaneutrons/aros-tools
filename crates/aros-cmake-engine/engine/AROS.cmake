@@ -5792,9 +5792,13 @@ function(aros_make_package)
         BYPRODUCTS ${STAGED_FILES}
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUT_DIR}"
         ${STAGE_COMMANDS}
-        COMMAND "${AROS_ROMTOOL_BIN}" pkg create --basename
-                -o "${ARG_OUTPUT}" ${STAGED_FILES}
+        COMMAND "${CMAKE_COMMAND}"
+                "-DPACKAGE_OUTPUT=${ARG_OUTPUT}"
+                "-DPACKAGE_ROMTOOL=${AROS_ROMTOOL_BIN}"
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/BuildPackage.cmake"
+                -- ${STAGED_FILES}
         DEPENDS ${PRESENT}
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/BuildPackage.cmake"
         COMMENT "📦 Packing kickstart package ${ARG_NAME}"
         VERBATIM
         COMMAND_EXPAND_LISTS

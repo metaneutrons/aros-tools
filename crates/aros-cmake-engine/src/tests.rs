@@ -1,6 +1,7 @@
 //! Tests for the embedded engine and its placement.
 
 use super::{api_version, digest, file, file_count, materialize, paths, STAMP_FILE};
+use std::fmt::Write as _;
 use std::fs;
 use std::process::Command;
 
@@ -648,6 +649,153 @@ fn run_cmake_script(script: &std::path::Path) {
 }
 
 #[test]
+fn demos_images_are_generated_before_their_consumer_compiles() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let source = directory.path().join("source");
+    let images = source.join("developer/demos/images");
+    fs::create_dir_all(&images).expect("images source directory");
+    fs::write(
+        images.join("mmakefile"),
+        "IMAGES := ArrowUp ArrowDown ArrowLeft ArrowRight ImageButton\n\
+         demos-images-setup : $(IMAGEFILES)\n",
+    )
+    .expect("reviewed Make rule");
+    fs::write(
+        images.join("datfilt.awk"),
+        "FNR == 1 { name = FILENAME; sub(/.*\\//, \"\", name); sub(/\\..*$/, \"\", name); print \"#define IMAGE_READY 1\" > name \".h\" }\n",
+    )
+    .expect("fixture image generator");
+    let mut consumer = String::new();
+    for stem in [
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "ImageButton",
+    ] {
+        for variant in [0, 1] {
+            let name = format!("{stem}{variant}");
+            fs::write(images.join(format!("{name}.dat")), "X\n").expect("image data");
+            writeln!(consumer, "#include \"images/{name}.h\"").expect("image include");
+        }
+    }
+    consumer.push_str("int main(void) { return IMAGE_READY - 1; }\n");
+    fs::write(source.join("developer/demos/demowin.c"), consumer).expect("image consumer");
+    let project = directory.path().join("project");
+    fs::create_dir(&project).expect("fixture project");
+    fs::write(
+        project.join("CMakeLists.txt"),
+        format!(
+            "cmake_minimum_required(VERSION 3.22)\n\
+             project(DemosImages C)\n\
+             set(AROS_SOURCE_DIR \"{}\")\n\
+             add_executable(demos-demowin \"${{AROS_SOURCE_DIR}}/developer/demos/demowin.c\")\n\
+             include(\"{}/DemosImages.cmake\")\n\
+             aros_add_demos_images()\n",
+            cmake_path(&source),
+            cmake_path(&engine),
+        ),
+    )
+    .expect("fixture CMake project");
+    let build = directory.path().join("build");
+    let configure = Command::new("cmake")
+        .args(["-G", "Ninja", "-S"])
+        .arg(&project)
+        .arg("-B")
+        .arg(&build)
+        .output()
+        .expect("configure image fixture");
+    assert!(
+        configure.status.success(),
+        "image fixture configure failed: {}",
+        String::from_utf8_lossy(&configure.stderr)
+    );
+    let compile = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "demos-demowin", "--parallel", "8"])
+        .output()
+        .expect("build image fixture");
+    assert!(
+        compile.status.success(),
+        "image consumer raced its headers: {}{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(
+        build.join("developer/demos/images/ArrowUp0.h").is_file(),
+        "image header was not generated"
+    );
+
+    fs::write(images.join("mmakefile"), "IMAGES := ArrowUp\n").expect("mutated Make rule");
+    let rejected = Command::new("cmake")
+        .args(["-G", "Ninja", "-S"])
+        .arg(&project)
+        .arg("-B")
+        .arg(directory.path().join("rejected"))
+        .output()
+        .expect("configure altered image fixture");
+    assert!(
+        !rejected.status.success(),
+        "changed image rule was accepted"
+    );
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("demos image inventory differs from the reviewed Make rule"));
+}
+
+#[cfg(unix)]
+#[test]
+fn package_rebuild_replaces_only_after_private_creation_and_inspection() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let script = engine.join("BuildPackage.cmake");
+    let romtool = directory.path().join("romtool-stub");
+    fs::write(
+        &romtool,
+        "#!/bin/sh\ncase \"$1 $2\" in\n\
+         'pkg create') [ \"$3\" = --basename ] && [ \"$4\" = -o ] || exit 2; \
+         [ \"$AROS_TEST_PKG_FAIL\" = 0 ] || exit 19; /bin/cp \"$6\" \"$5\" ;;\n\
+         'pkg list') test -s \"$3\" ;;\n\
+         *) exit 2 ;;\nesac\n",
+    )
+    .expect("stub romtool");
+    fs::set_permissions(&romtool, fs::Permissions::from_mode(0o755)).expect("executable stub");
+    let member = directory.path().join("member.elf");
+    let output = directory.path().join("package.pkg");
+    let run = |fail: bool| {
+        Command::new("cmake")
+            .arg(format!("-DPACKAGE_OUTPUT={}", output.display()))
+            .arg(format!("-DPACKAGE_ROMTOOL={}", romtool.display()))
+            .arg("-P")
+            .arg(&script)
+            .arg("--")
+            .arg(&member)
+            .env("AROS_TEST_PKG_FAIL", if fail { "1" } else { "0" })
+            .output()
+            .expect("run package publication")
+    };
+    fs::write(&member, b"original").expect("first member");
+    assert!(run(false).status.success());
+    assert_eq!(fs::read(&output).unwrap(), b"original");
+    fs::write(&member, b"replacement").expect("changed member");
+    assert!(
+        !run(true).status.success(),
+        "failed producer published output"
+    );
+    assert_eq!(fs::read(&output).unwrap(), b"original");
+    assert!(
+        run(false).status.success(),
+        "incremental replacement failed"
+    );
+    assert_eq!(fs::read(&output).unwrap(), b"replacement");
+}
+
+#[test]
 fn pc_boot_iso_uses_eltorito_and_the_source_module_order() {
     let directory = tempfile::tempdir().expect("temp dir");
     let engine = directory.path().join("engine");
@@ -714,6 +862,21 @@ aros_add_pc_boot_iso()
     assert!(kernel < bsp && bsp < base, "source module order changed");
     assert!(!config.contains('@'), "unexpanded module placeholder");
     let ninja = fs::read_to_string(build.join("build.ninja")).expect("Ninja graph");
+    let iso_rule = ninja
+        .lines()
+        .find(|line| line.starts_with("build CMakeFiles/boot-iso |"))
+        .expect("ISO custom command");
+    for output in [
+        "SYS/boot/pc/bootstrap",
+        "SYS/boot/pc/kernel",
+        "SYS/boot/pc/aros-bsp.pkg",
+        "SYS/boot/aros-base.pkg",
+    ] {
+        assert!(
+            iso_rule.contains(output),
+            "ISO target does not depend on generated output {output}"
+        );
+    }
     for required in [
         "boot/grub/i386-pc/grub2_eltorito",
         "ComposePcBootIso.cmake",

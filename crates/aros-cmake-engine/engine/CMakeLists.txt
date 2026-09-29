@@ -381,6 +381,12 @@ include("${AROS_CMAKE_ENGINE_DIR}/StandaloneLink.cmake")
 include("${AROS_CMAKE_ENGINE_DIR}/HostGeneratedHeaders.cmake")
 include("${GENERATED_TARGETS_CMAKE}")
 
+# The classic demos-images-setup rule lives in a hand-written mmakefile rather
+# than an mmakefile.src declaration. Bind its exact generated headers to the
+# consumer before Ninja is allowed to compile demowin.c.
+include("${AROS_CMAKE_ENGINE_DIR}/DemosImages.cmake")
+aros_add_demos_images()
+
 # Compiler depfiles cannot express the producer of a header which was absent
 # when compilation started. Once the complete generated graph exists, attach
 # ordinary source consumers to the %copy_includes owners they reference.
