@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.15](https://github.com/metaneutrons/aros-tools/compare/v0.3.14...v0.3.15) (2026-09-29)
+
+
+### Bug Fixes
+
+* **release:** unlink legacy OpenSSL on macOS qualification runners ([d22e3ef](https://github.com/metaneutrons/aros-tools/commit/d22e3ef6566f22e166d35c4ad8fa6c728cd4c017))
+
 ## [0.3.14](https://github.com/metaneutrons/aros-tools/compare/v0.3.13...v0.3.14) (2026-09-29)
 
 
