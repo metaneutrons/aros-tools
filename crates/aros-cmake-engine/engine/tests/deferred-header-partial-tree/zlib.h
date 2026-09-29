@@ -1,0 +1,1 @@
+#define FIXTURE_HEADER_VALUE 42

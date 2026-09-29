@@ -592,30 +592,41 @@ function(aros_copy_includes)
     else()
         set(SRC_ABS "${AROS_SOURCE_DIR}/${CI_SOURCE}")
     endif()
-    if(NOT IS_DIRECTORY "${SRC_ABS}")
-        # A cache-empty fetched port cannot be globbed at configure time.  An
-        # explicit file list has known output names even though its port has
-        # not been fetched yet.  Bind those outputs to their MetaMake owner
-        # below, ordered after the fetch which owns the source path.
-        set(_fetch_owner "")
-        set(_fetch_owner_len -1)
-        get_property(_fetch_targets GLOBAL PROPERTY AROS_FETCH_TARGETS)
-        foreach(_fetch IN LISTS _fetch_targets)
-            if(NOT TARGET "${_fetch}")
-                continue()
-            endif()
-            get_property(_fetch_dest TARGET "${_fetch}" PROPERTY AROS_FETCH_DESTINATION)
-            if(NOT _fetch_dest)
-                continue()
-            endif()
-            string(LENGTH "${_fetch_dest}" _fetch_len)
-            string(FIND "${SRC_ABS}" "${_fetch_dest}/" _fetch_prefix)
-            if(("${SRC_ABS}" STREQUAL "${_fetch_dest}" OR _fetch_prefix EQUAL 0)
-               AND _fetch_len GREATER _fetch_owner_len)
-                set(_fetch_owner "${_fetch}")
-                set(_fetch_owner_len "${_fetch_len}")
-            endif()
-        endforeach()
+    # A fetched destination may already exist before its completion stamp:
+    # another configure step can create an empty parent, and an interrupted
+    # fetch can leave a partial tree.  Directory existence alone must never
+    # turn an unfinished port into configure-time header inputs.
+    set(_fetch_owner "")
+    set(_fetch_owner_len -1)
+    get_property(_fetch_targets GLOBAL PROPERTY AROS_FETCH_TARGETS)
+    foreach(_fetch IN LISTS _fetch_targets)
+        if(NOT TARGET "${_fetch}")
+            continue()
+        endif()
+        get_property(_fetch_dest TARGET "${_fetch}" PROPERTY AROS_FETCH_DESTINATION)
+        if(NOT _fetch_dest)
+            continue()
+        endif()
+        string(LENGTH "${_fetch_dest}" _fetch_len)
+        string(FIND "${SRC_ABS}" "${_fetch_dest}/" _fetch_prefix)
+        if(("${SRC_ABS}" STREQUAL "${_fetch_dest}" OR _fetch_prefix EQUAL 0)
+           AND _fetch_len GREATER _fetch_owner_len)
+            set(_fetch_owner "${_fetch}")
+            set(_fetch_owner_len "${_fetch_len}")
+        endif()
+    endforeach()
+    set(_fetch_incomplete FALSE)
+    if(_fetch_owner)
+        get_property(_fetch_stamp TARGET "${_fetch_owner}" PROPERTY
+            AROS_FETCH_COMPLETION_STAMP)
+        if(NOT _fetch_stamp OR NOT EXISTS "${_fetch_stamp}")
+            set(_fetch_incomplete TRUE)
+        endif()
+    endif()
+    if(NOT IS_DIRECTORY "${SRC_ABS}" OR _fetch_incomplete)
+        # A cache-empty or incomplete fetched port cannot be globbed at
+        # configure time. An explicit file list has stable output names;
+        # bind those outputs to their MetaMake owner after the fetch.
 
         set(_unsupported "")
         if(NOT CI_NAME)
