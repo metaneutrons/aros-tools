@@ -759,6 +759,17 @@ aros_add_pc_boot_iso()
     ] {
         fs::write(sys_boot.join(relative), "fixture\n").expect("SYS input");
     }
+    let private_grub = build.join("gen/grub2-iso-assets/x86_64/pc");
+    fs::create_dir_all(&private_grub).expect("private GRUB directory");
+    fs::write(private_grub.join("grub2_eltorito"), "fixture\n").expect("private GRUB image");
+    fs::write(
+        build.join("gen/grub2-iso-assets/x86_64/.grub2-iso-assets.stamp"),
+        format!(
+            "GRUB2 ISO assets: 2.16 x86_64\nEl Torito SHA256: {}\n",
+            aros_common::sha256_bytes(b"fixture\n")
+        ),
+    )
+    .expect("GRUB asset stamp");
     fs::remove_file(sys_boot.join("pc/kernel")).expect("remove required kernel");
     let missing_kernel = Command::new("cmake")
         .arg("--build")
@@ -781,6 +792,27 @@ aros_add_pc_boot_iso()
     );
     assert!(!build.join("aros-x86_64-pc.iso").exists());
     fs::write(sys_boot.join("pc/kernel"), "fixture\n").expect("restore kernel");
+    fs::write(sys_boot.join("grub/i386-pc/grub2_eltorito"), "changed\n")
+        .expect("tamper with GRUB output");
+    let changed_grub = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "boot-iso"])
+        .output()
+        .expect("reject altered GRUB output");
+    assert!(
+        !changed_grub.status.success(),
+        "altered GRUB input was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&changed_grub.stdout)
+            .contains("GRUB input changed after audited staging"),
+        "altered GRUB input lacked a precise diagnosis:\n{}",
+        String::from_utf8_lossy(&changed_grub.stdout)
+    );
+    assert!(!build.join("aros-x86_64-pc.iso").exists());
+    fs::write(sys_boot.join("grub/i386-pc/grub2_eltorito"), "fixture\n")
+        .expect("restore GRUB output");
     fs::write(build.join("media-build-receipt.json"), "{}\n")
         .expect("fake receipt for composer counterprobe");
     let output = Command::new("cmake")
