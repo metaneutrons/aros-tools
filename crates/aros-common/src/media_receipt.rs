@@ -338,6 +338,13 @@ pub fn measure_media_build_identity(
             "source checkout tracks files in the generated build directory",
         ));
     }
+    match std::fs::symlink_metadata(source_root.join("build")) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(invalid("generated build path is not a regular directory"));
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
     let changes = git_value(
         source_root,
         &[
@@ -648,6 +655,13 @@ mod tests {
         fs::write(source.join("unexpected.txt"), b"untracked source").unwrap();
         assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
         fs::remove_file(source.join("unexpected.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(source.join("build")).unwrap();
+            std::os::unix::fs::symlink(&toolchain, source.join("build")).unwrap();
+            assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
+            fs::remove_file(source.join("build")).unwrap();
+        }
 
         let mut altered = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         altered["build_identity"]["source_commit"] = serde_json::json!("0".repeat(40));

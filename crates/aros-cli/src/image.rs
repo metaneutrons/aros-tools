@@ -11,7 +11,9 @@ use aros_common::media_receipt::{
     verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt, MediaBuildTree,
 };
 use aros_common::media_tree::measure_media_tree;
-use aros_common::{open_regular_file_nofollow, sha256_reader};
+use aros_common::{
+    open_regular_file_nofollow, sha256_reader, validate_existing_directory_prefix_nofollow,
+};
 use clap::{Args, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
 use std::io::{Read, Write};
@@ -176,6 +178,7 @@ fn receipt(args: &ImageReceiptArgs) -> Result<()> {
         .into_iter()
         .find(|entry| entry.profile.id == args.profile)
         .ok_or_else(|| miette::miette!("Unknown reviewed media profile '{}'.", args.profile))?;
+    validate_existing_directory_prefix_nofollow(&args.build_root).into_diagnostic()?;
     let root_metadata = std::fs::symlink_metadata(&args.build_root).into_diagnostic()?;
     if !root_metadata.file_type().is_dir() {
         miette::bail!("Media build root must be a regular directory.");
