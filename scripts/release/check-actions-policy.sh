@@ -270,6 +270,7 @@ for path in sorted((*root.glob('*.yml'), *root.glob('*.yaml'),
             'verify-homebrew-install.py host', 'verify-homebrew-install.py installed',
             "brew ruby -e 'puts Hardware::CPU.arch'", '--brew-prefix "$(brew --prefix)"',
             '--target "$TARGET"', '--manifest "candidate/aros-tools-v${VERSION}-${TARGET}.tar.gz.manifest.json"',
+            'bash scripts/release/prepare-homebrew-openssl.sh "$TARGET"',
             'if ! brew install --verbose "$tap/aros-tools"; then',
             'AP7322', 'brew test "$tap/aros-tools"',
         ):
