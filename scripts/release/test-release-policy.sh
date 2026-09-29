@@ -1119,6 +1119,21 @@ cp -R "$root/.github/actions/install-verified-cosign" "$work/policy/.github/acti
 mkdir -p "$work/policy/scripts/release"
 cp "$root/scripts/release/homebrew-qualification.json" "$work/policy/scripts/release/"
 "$root/scripts/release/check-actions-policy.sh" "$work/policy" >/dev/null
+python3 - "$work/policy/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+workflow = path.read_text(encoding='utf-8')
+guard = '          bash scripts/release/prepare-homebrew-openssl.sh "$TARGET"\n'
+if workflow.count(guard) != 1:
+    raise SystemExit('fixture cannot locate the singular Homebrew runner-preparation guard')
+path.write_text(workflow.replace(guard, '', 1), encoding='utf-8')
+PY
+expect_failure_matching 'Homebrew install qualification omits' \
+    "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+cp "$root/.github/workflows/release.yml" \
+    "$work/policy/.github/workflows/release.yml"
 sed -i.bak \
     '/^  ecosystem:/,/^  final-audit:/ s/^      attestations: read$/      attestations: none/' \
     "$work/policy/.github/workflows/release.yml"
@@ -1174,3 +1189,4 @@ PY
 expect_failure "$root/scripts/release/check-actions-policy.sh" "$work/policy"
 
 printf '%s\n' 'release policy fixtures passed'
+bash "$root/scripts/release/test-prepare-homebrew-openssl.sh"
