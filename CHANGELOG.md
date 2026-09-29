@@ -4,6 +4,35 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.14](https://github.com/metaneutrons/aros-tools/compare/v0.3.13...v0.3.14) (2026-09-29)
+
+
+### Features
+
+* add closed media input receipt contracts ([0913b2e](https://github.com/metaneutrons/aros-tools/commit/0913b2e628d9609d2a3452c2f45ffebcc2782749))
+* add read-only media artifact inspection ([4dca3ef](https://github.com/metaneutrons/aros-tools/commit/4dca3ef6f41d585d84f0d26012f16653c15bcb92))
+* add verified media image build command ([2fd2542](https://github.com/metaneutrons/aros-tools/commit/2fd25424169f620a3b82a0df1991e7eb7c8db248))
+* bind media profiles to external input locks ([940fe45](https://github.com/metaneutrons/aros-tools/commit/940fe45387c2f9d1d2812ac1d649a7cf158f6a6e))
+* bind media receipts to source and toolchain identities ([f110ebe](https://github.com/metaneutrons/aros-tools/commit/f110ebe7bd9e6a4bf65f2d1cce7df9799192610e))
+* build BIOS-bootable PC ISO from audited GRUB assets ([c8407e9](https://github.com/metaneutrons/aros-tools/commit/c8407e97e526ef09f65cd4a5d6ea684b105d70a0))
+* compose and verify complete PC ISO media plans ([#293](https://github.com/metaneutrons/aros-tools/issues/293)) ([f0c2c33](https://github.com/metaneutrons/aros-tools/commit/f0c2c33406dd85ca61953316105d66d7e20f4a14))
+* declare closed format-specific media layouts ([#286](https://github.com/metaneutrons/aros-tools/issues/286)) ([862ac2b](https://github.com/metaneutrons/aros-tools/commit/862ac2b68e2e04b2ccbbba0bde404b1948443a16))
+* emit measured CMake media build receipts ([#285](https://github.com/metaneutrons/aros-tools/issues/285)) ([0a0ff20](https://github.com/metaneutrons/aros-tools/commit/0a0ff2063dad0d664212ccff0dd6db38bd207df7))
+* **media:** compose verified deterministic FAT32 artifacts ([4617b3b](https://github.com/metaneutrons/aros-tools/commit/4617b3b36bdf05051ac78e8e2ee2cbc2b8138132))
+* **media:** resolve verified image composition plans ([c30ce02](https://github.com/metaneutrons/aros-tools/commit/c30ce025a42570f17aade038c2c357ef192f1ac6))
+* **media:** verify composed FAT32 artifacts independently ([fe3b0f2](https://github.com/metaneutrons/aros-tools/commit/fe3b0f249b40ee7ec7da3fdcb87f8bc68dcdd001))
+* move board media layouts into reviewed profiles ([b75f293](https://github.com/metaneutrons/aros-tools/commit/b75f2936c2bdd69930fbb90eb85b4dcb00b75b31))
+* validate locked external media inputs ([c96abf3](https://github.com/metaneutrons/aros-tools/commit/c96abf36dfd1eac12b58b5bff8a480b58ae1b522))
+
+
+### Bug Fixes
+
+* accept GitHub App REST actor in release finalization ([62e2ec4](https://github.com/metaneutrons/aros-tools/commit/62e2ec408f7a1b80b55f82361699ad48cfe0693d))
+* accept real PC target names in media contracts ([5851bba](https://github.com/metaneutrons/aros-tools/commit/5851bba8cecf1c4d93a3a88451051321092e9835))
+* admit reviewed upstream Mesa 26 V3D device-tree recipe ([d47e0aa](https://github.com/metaneutrons/aros-tools/commit/d47e0aaf29dc6c599d8cb8b9c4972f9c03346c39))
+* keep PC bootstrap Multiboot header within first 8 KiB ([d20a0a3](https://github.com/metaneutrons/aros-tools/commit/d20a0a370a3a23982e12544ac20d84b14809ed3a))
+* pin patched Undici in documentation tooling ([b0efc37](https://github.com/metaneutrons/aros-tools/commit/b0efc3780651202491cce1cb4358ff148f491619))
+
 ## [0.3.13](https://github.com/metaneutrons/aros-tools/compare/v0.3.12...v0.3.13) (2026-09-27)
 
 
