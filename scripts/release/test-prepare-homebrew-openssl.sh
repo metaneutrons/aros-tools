@@ -15,26 +15,31 @@ printf '%s\n' \
     'set -euo pipefail' \
     'case "$1" in' \
     '  --prefix) printf "%s\n" "$TEST_BREW_PREFIX" ;;' \
-    '  unlink)' \
-    '    [[ "$2" == openssl@1.1 ]] || exit 2' \
-    '    printf "unlink %s\n" "$2" >> "$TEST_BREW_CALLS"' \
-    '    [[ "${TEST_UNLINK_FAIL:-0}" == 0 ]] || exit 1' \
-    '    rm -- "$TEST_BREW_PREFIX/bin/openssl" ;;' \
     '  *) exit 2 ;;' \
     'esac' > "$fixture/mock-bin/brew"
 chmod +x "$fixture/mock-bin/brew"
+# This mock also expands its variables only when the helper calls it.
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    '[[ "$1" == "$TEST_BREW_PREFIX/bin/openssl" ]] || exit 2' \
+    'printf "unlink %s\n" "$1" >> "$TEST_BREW_CALLS"' \
+    '[[ "${TEST_UNLINK_FAIL:-0}" == 0 ]] || exit 1' \
+    'rm -- "$1"' > "$fixture/mock-bin/unlink"
+chmod +x "$fixture/mock-bin/unlink"
 
 export PATH="$fixture/mock-bin:$PATH"
 export TEST_BREW_PREFIX="$fixture/prefix"
 export TEST_BREW_CALLS="$fixture/brew-calls"
 script="$root/scripts/release/prepare-homebrew-openssl.sh"
 
-# Positive case: unlink only the observed legacy OpenSSL owner.
+# Positive case: remove only the observed orphaned legacy OpenSSL symlink.
 ln -s "$TEST_BREW_PREFIX/opt/openssl@1.1/bin/openssl" \
     "$TEST_BREW_PREFIX/bin/openssl"
 bash "$script" aarch64-apple-darwin
 [[ ! -e "$TEST_BREW_PREFIX/bin/openssl" && ! -L "$TEST_BREW_PREFIX/bin/openssl" ]]
-[[ $(<"$TEST_BREW_CALLS") == 'unlink openssl@1.1' ]]
+[[ $(<"$TEST_BREW_CALLS") == "unlink $TEST_BREW_PREFIX/bin/openssl" ]]
 
 # An unrelated link must survive untouched, as must a non-macOS host.
 ln -s "$TEST_BREW_PREFIX/opt/openssl@3/bin/openssl" \
@@ -44,7 +49,7 @@ bash "$script" x86_64-unknown-linux-gnu
 bash "$script" aarch64-unknown-linux-gnu
 [[ $(readlink "$TEST_BREW_PREFIX/bin/openssl") == \
     "$TEST_BREW_PREFIX/opt/openssl@3/bin/openssl" ]]
-[[ $(<"$TEST_BREW_CALLS") == 'unlink openssl@1.1' ]]
+[[ $(<"$TEST_BREW_CALLS") == "unlink $TEST_BREW_PREFIX/bin/openssl" ]]
 if bash "$script" misspelled-host >"$fixture/unknown.stdout" 2>"$fixture/unknown.stderr"; then
     echo 'unknown Homebrew release target unexpectedly qualified the runner' >&2
     exit 1
@@ -62,6 +67,7 @@ if bash "$script" aarch64-apple-darwin; then
     exit 1
 fi
 [[ -L "$TEST_BREW_PREFIX/bin/openssl" ]]
-[[ $(<"$TEST_BREW_CALLS") == $'unlink openssl@1.1\nunlink openssl@1.1' ]]
+[[ $(<"$TEST_BREW_CALLS") == "$(printf 'unlink %s\nunlink %s' \
+    "$TEST_BREW_PREFIX/bin/openssl" "$TEST_BREW_PREFIX/bin/openssl")" ]]
 
 printf '%s\n' 'Homebrew OpenSSL runner-preparation probes passed'
