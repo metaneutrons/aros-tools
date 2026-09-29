@@ -41,9 +41,16 @@ ln -s "$TEST_BREW_PREFIX/opt/openssl@3/bin/openssl" \
     "$TEST_BREW_PREFIX/bin/openssl"
 bash "$script" aarch64-apple-darwin
 bash "$script" x86_64-unknown-linux-gnu
+bash "$script" aarch64-unknown-linux-gnu
 [[ $(readlink "$TEST_BREW_PREFIX/bin/openssl") == \
     "$TEST_BREW_PREFIX/opt/openssl@3/bin/openssl" ]]
 [[ $(<"$TEST_BREW_CALLS") == 'unlink openssl@1.1' ]]
+if bash "$script" misspelled-host >"$fixture/unknown.stdout" 2>"$fixture/unknown.stderr"; then
+    echo 'unknown Homebrew release target unexpectedly qualified the runner' >&2
+    exit 1
+fi
+grep -F 'unsupported Homebrew release target: misspelled-host' \
+    "$fixture/unknown.stderr" >/dev/null
 rm -- "$TEST_BREW_PREFIX/bin/openssl"
 
 # Counter-probe: a failed unlink is fatal and leaves the conflict visible.

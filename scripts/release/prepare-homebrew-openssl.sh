@@ -4,7 +4,11 @@ set -euo pipefail
 
 target=${1:?expected release target}
 [[ $# -eq 1 ]] || { echo 'expected exactly one release target' >&2; exit 2; }
-[[ "$target" == aarch64-apple-darwin ]] || exit 0
+case "$target" in
+    aarch64-apple-darwin) ;;
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) exit 0 ;;
+    *) echo "unsupported Homebrew release target: $target" >&2; exit 2 ;;
+esac
 
 prefix=$(brew --prefix)
 [[ "$prefix" == /* && "$prefix" != / ]] || {
