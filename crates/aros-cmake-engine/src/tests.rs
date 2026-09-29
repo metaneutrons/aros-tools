@@ -588,6 +588,51 @@ fn cmake_path(path: &std::path::Path) -> String {
         .replace('"', "\\\"")
 }
 
+#[test]
+fn pc_bootstrap_multiboot_header_must_be_inside_first_eight_kib() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let engine = directory.path().join("engine");
+    materialize(&engine).expect("materialize engine");
+    let verifier = engine.join("scripts/VerifyPcBootstrap.cmake");
+    let image = directory.path().join("bootstrap");
+
+    for (offset, valid) in [(4096, true), (8180, true), (8192, false), (4097, false)] {
+        let mut bytes = vec![0; (offset + 64).max(8192)];
+        bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1]);
+        bytes[offset..offset + 12].copy_from_slice(&[
+            0x02, 0xb0, 0xad, 0x1b, // Multiboot-1 magic
+            0x03, 0x00, 0x00, 0x00, // flags
+            0xfb, 0x4f, 0x52, 0xe4, // checksum
+        ]);
+        fs::write(&image, bytes).expect("write ELF fixture");
+        let output = Command::new("cmake")
+            .arg(format!("-DBOOTSTRAP_ELF={}", image.display()))
+            .args(["-P", verifier.to_str().expect("UTF-8 verifier path")])
+            .output()
+            .expect("run bootstrap verifier");
+        assert_eq!(
+            output.status.success(),
+            valid,
+            "unexpected validation result at offset {offset}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    let mut invalid_checksum = vec![0; 8192];
+    invalid_checksum[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1]);
+    invalid_checksum[4096..4108].copy_from_slice(&[
+        0x02, 0xb0, 0xad, 0x1b, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    fs::write(&image, invalid_checksum).expect("write invalid checksum fixture");
+    let output = Command::new("cmake")
+        .arg(format!("-DBOOTSTRAP_ELF={}", image.display()))
+        .args(["-P", verifier.to_str().expect("UTF-8 verifier path")])
+        .output()
+        .expect("run bootstrap verifier");
+    assert!(!output.status.success(), "invalid checksum was accepted");
+}
+
 fn run_cmake_script(script: &std::path::Path) {
     let output = Command::new("cmake")
         .args(["-P", script.to_str().expect("UTF-8 script path")])
