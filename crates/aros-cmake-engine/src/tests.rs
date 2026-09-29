@@ -672,7 +672,8 @@ set(AROS_SOURCE_DIR "{}")
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
 set(AROS_BOOT_ISO "${{CMAKE_BINARY_DIR}}/aros-x86_64-pc.iso")
-set(AROS_MKISOFS_BIN /usr/bin/true)
+set(AROS_CROSS_TOOLCHAIN_ROOT "${{CMAKE_BINARY_DIR}}/toolchain")
+set(AROS_XORRISO_BIN /usr/bin/true)
 set(AROS_MEDIA_CLI_BIN /usr/bin/true)
 add_custom_target(aros-grub2-iso-assets)
 add_custom_target(AROS)
@@ -715,8 +716,7 @@ aros_add_pc_boot_iso()
     let ninja = fs::read_to_string(build.join("build.ninja")).expect("Ninja graph");
     for required in [
         "boot/grub/i386-pc/grub2_eltorito",
-        "-no-emul-boot",
-        "-boot-info-table",
+        "ComposePcBootIso.cmake",
         "aros-grub2-iso-assets",
         "image receipt --profile pc-bios-iso",
         "sys-tree=gen/boot-iso/stage",
@@ -781,6 +781,8 @@ aros_add_pc_boot_iso()
     );
     assert!(!build.join("aros-x86_64-pc.iso").exists());
     fs::write(sys_boot.join("pc/kernel"), "fixture\n").expect("restore kernel");
+    fs::write(build.join("media-build-receipt.json"), "{}\n")
+        .expect("fake receipt for composer counterprobe");
     let output = Command::new("cmake")
         .arg("--build")
         .arg(&build)
@@ -789,11 +791,11 @@ aros_add_pc_boot_iso()
         .expect("assemble fixture");
     assert!(
         !output.status.success(),
-        "fake ISO composer unexpectedly passed"
+        "fake media composer unexpectedly passed"
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("did not produce a regular ISO"),
-        "missing final ISO was not diagnosed:\n{}",
+        String::from_utf8_lossy(&output.stdout).contains("artifact omits a regular file"),
+        "missing verified artifact was not diagnosed:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
     assert_eq!(

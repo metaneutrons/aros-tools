@@ -14,10 +14,10 @@ function(aros_add_pc_boot_iso)
     if(TARGET boot-iso)
         message(FATAL_ERROR "boot-iso is already declared")
     endif()
-    find_program(AROS_MKISOFS_BIN NAMES mkisofs genisoimage
+    find_program(AROS_XORRISO_BIN NAMES xorriso
         HINTS "/opt/homebrew/bin" "/usr/bin" "/usr/local/bin")
-    if(NOT AROS_MKISOFS_BIN)
-        message(STATUS "boot-iso unavailable: install mkisofs or genisoimage")
+    if(NOT AROS_XORRISO_BIN)
+        message(STATUS "boot-iso unavailable: install xorriso")
         return()
     endif()
     if(NOT AROS_MEDIA_CLI_BIN)
@@ -78,7 +78,6 @@ function(aros_add_pc_boot_iso)
         "}\n")
     file(WRITE "${_grub_config}" "${_grub_content}")
 
-    set(_iso_temp "${AROS_BOOT_ISO}.tmp")
     add_custom_target(boot-iso
         COMMAND "${CMAKE_COMMAND}"
             "-DSYS_DIR=${CMAKE_BINARY_DIR}/SYS"
@@ -94,20 +93,16 @@ function(aros_add_pc_boot_iso)
             --file "bootstrap=gen/boot-iso/stage/boot/pc/bootstrap"
             --file "grub-boot-image=gen/boot-iso/stage/boot/grub/i386-pc/grub2_eltorito"
             --tree "sys-tree=gen/boot-iso/stage"
-        COMMAND "${CMAKE_COMMAND}" -E rm -f "${_iso_temp}"
-        COMMAND "${AROS_MKISOFS_BIN}" -o "${_iso_temp}"
-            -b boot/grub/i386-pc/grub2_eltorito
-            -c boot/grub/boot.catalog
-            -no-emul-boot -boot-load-size 4 -boot-info-table
-            -allow-leading-dots -iso-level 4
-            -V "AROS Live CD" -p "The AROS Dev Team" -l -J -r
-            "${_stage_dir}"
-        COMMAND "${CMAKE_COMMAND}" "-DISO_PATH=${_iso_temp}"
-            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VerifyPcBootIso.cmake"
-        COMMAND "${CMAKE_COMMAND}" -E rename "${_iso_temp}" "${AROS_BOOT_ISO}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DMEDIA_CLI=${AROS_MEDIA_CLI_BIN}"
+            "-DBUILD_ROOT=${CMAKE_BINARY_DIR}"
+            "-DSOURCE_ROOT=${AROS_SOURCE_DIR}"
+            "-DTOOLCHAIN_ROOT=${AROS_CROSS_TOOLCHAIN_ROOT}"
+            "-DISO_PATH=${AROS_BOOT_ISO}"
+            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
         DEPENDS "${_modules_file}" "${_startup_source}" "${_grub_config}"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"
-            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VerifyPcBootIso.cmake"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
         COMMENT "Packaging native AROS SYS tree as BIOS-bootable PC ISO -> ${AROS_BOOT_ISO}"
         VERBATIM)
     add_dependencies(boot-iso AROS aros-grub2-iso-assets)
