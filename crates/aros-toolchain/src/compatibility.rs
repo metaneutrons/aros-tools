@@ -1602,7 +1602,9 @@ mod tests {
             prepare(&failing_request).unwrap(),
             CompatibilityPhase::StandaloneCxx,
             script(failing_root.path(), "batch-success", "printf first"),
-            Duration::from_secs(1),
+            // This fixture tests exit-status/log retention, not scheduling
+            // speed. The separate deadline fixture below exercises timeouts.
+            Duration::from_secs(10),
         );
         failing.commands.push(CompatibilityCommand {
             program: script(
@@ -1614,6 +1616,13 @@ mod tests {
         });
         let error = run_probe(&failing, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
+        let diagnostics = error.diagnostics();
+        let context = diagnostics.diagnostics[0]
+            .context
+            .as_ref()
+            .expect("failed command identity");
+        assert_eq!(context.exit_code, Some(7));
+        assert_eq!(context.tool.as_deref(), Some("standalone-cxx-2"));
         assert!(failing
             .reports_root
             .join("standalone-cxx.1.stdout.log")
