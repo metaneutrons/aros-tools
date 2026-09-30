@@ -1127,10 +1127,11 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             .iter()
             .map(|package| package.resolved.len())
             .sum::<usize>(),
-        409
+        410
     );
     for (package_name, expected_members) in [
         ("kernel-package-fs", &["pfs3-handler"][..]),
+        ("kernel-package-raspi-aarch64", &["battclock.resource"][..]),
         (
             "kernel-bsp-opensbi-riscv64",
             &["pfs3-handler", "security.library"][..],

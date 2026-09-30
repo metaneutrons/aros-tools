@@ -2794,7 +2794,7 @@ fn module_suffix_override_is_separate_from_declared_type() {
 }
 
 #[test]
-fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
+fn real_tree_retains_exactly_three_abi_skeletons_and_zero_source_version() {
     let root = root();
     let dirs = dirs();
     let skip_dirs = ["build", "target", ".git"];
@@ -2816,7 +2816,7 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
                 .count()
         })
         .sum::<usize>();
-    assert_eq!(abi_invocations, 4);
+    assert_eq!(abi_invocations, 3);
 
     let abi_files = [
         (
@@ -2828,11 +2828,6 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
             "rom/usb/classes/mmakefile.src",
             "kernel-usb-usbclass",
             "usbclass",
-        ),
-        (
-            "rom/usb/classes/arosx/include/mmakefile.src",
-            "kernel-usb-classes-arosx-library",
-            "arosx",
         ),
         (
             "workbench/libs/dxtn/mmakefile.src",
@@ -2875,6 +2870,27 @@ fn real_tree_retains_exactly_four_abi_skeletons_and_zero_source_version() {
                 .as_str()
             ));
     }
+
+    let arosx = super::parse_mmakefile_with_dirs(
+        &root.join("rom/usb/classes/arosx/mmakefile.src"),
+        &root,
+        &dirs,
+    )
+    .unwrap();
+    let arosx_class = arosx
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "kernel-usb-classes-arosx")
+        .expect("arosx.class must remain a sourceful USB class");
+    assert_eq!(arosx_class.target_name, "arosx");
+    assert_eq!(arosx_class.module_type, ModuleType::Custom);
+    assert_eq!(arosx_class.declared_mod_type.as_deref(), Some("usbclass"));
+    assert_eq!(arosx_class.mod_suffix.as_deref(), Some("class"));
+    assert!(!arosx_class.genmodule_only);
+    assert!(!arosx_class.source_files.is_empty());
+    assert!(!root
+        .join("rom/usb/classes/arosx/include/mmakefile.src")
+        .exists());
 
     let parsed = super::parse_mmakefile_with_dirs(
         &root.join("workbench/libs/version/mmakefile.src"),
