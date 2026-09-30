@@ -226,7 +226,13 @@ pub fn script(sets: &[SymbolSet], class: Class, libreq: &str) -> String {
     // The version markers follow the sets inside the same output section, which
     // is the order collect-aros.c:390 emits them in.
     out.push_str(libreq);
-    out.push_str("  }\n}\n");
+    // compiler/autoinit/initexitsets.c registers each program's unwind table
+    // through __eh_frame_start. The reference collect-aros linker script
+    // provides both boundaries around .eh_frame; without them the AROS ELF
+    // loader reports an undefined symbol for every ordinary program.
+    out.push_str(
+        "  }\n  .eh_frame : {\n    PROVIDE(__eh_frame_start = .);\n    KEEP(*(.eh_frame))\n    PROVIDE(__eh_frame_end = .);\n  }\n}\n",
+    );
     out
 }
 
@@ -309,6 +315,10 @@ mod tests {
         assert!(minus_one < ten && ten < bare, "{text}");
         assert!(text.contains("QUAD(0)"));
         assert!(text.find("KEEP(*(.aros.startup))").unwrap() < text.find(".aros.sets :").unwrap());
+        assert!(text.find(".aros.sets :").unwrap() < text.find(".eh_frame :").unwrap());
+        assert!(text.contains("PROVIDE(__eh_frame_start = .);"));
+        assert!(text.contains("KEEP(*(.eh_frame))"));
+        assert!(text.contains("PROVIDE(__eh_frame_end = .);"));
     }
 
     #[test]
