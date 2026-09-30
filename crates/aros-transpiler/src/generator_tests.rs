@@ -118,6 +118,44 @@ fn detached_programs_preserve_the_declared_startup_contract() {
 }
 
 #[test]
+fn runtime_header_selection_keeps_compile_and_link_provenance_separate() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("command.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "USER_CFLAGS := -noposixc\n\
+         %build_prog mmake=standard progname=Standard files=command\n\
+         USER_CFLAGS :=\n\
+         USER_LDFLAGS := -noposixc\n\
+         %build_prog mmake=linkonly progname=LinkOnly files=command\n",
+    )
+    .unwrap();
+    let parsed = crate::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &crate::TargetContext::default(),
+    )
+    .unwrap();
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        if target.mmake_name == "standard" {
+            assert_eq!(target.compile_options, ["-noposixc"]);
+            assert!(target.spec_switches.is_empty());
+        } else if target.mmake_name == "linkonly" {
+            assert!(target.compile_options.is_empty());
+            assert_eq!(target.spec_switches, ["noposixc"]);
+        }
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    assert_eq!(cmake.matches("COMPILE_OPTIONS \"-noposixc\"").count(), 1);
+}
+
+#[test]
 fn module_config_override_is_emitted_before_its_module() {
     let tree = TempTree::new();
     let module = tree.0.join("arch/all-pc/hpet");

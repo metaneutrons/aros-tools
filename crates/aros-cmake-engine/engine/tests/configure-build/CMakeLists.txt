@@ -32,9 +32,20 @@ set(CMAKE_C_COMPILER "${_fixture_tools}/mock-tool.sh")
 set(CMAKE_AR "${_fixture_tools}/mock-tool.sh")
 set(CMAKE_RANLIB "${_fixture_tools}/mock-tool.sh")
 set(AROS_LLD_BIN "${_fixture_tools}/mock-linker.sh")
-set(AROS_SDK_INCLUDE_DIR "${CMAKE_BINARY_DIR}/fixture-sdk")
+set(AROS_TARGET_CPU x86_64)
+set(AROS_TARGET_PLATFORM pc)
+set(AROS_SOURCE_DIR "${AROS_REPO_ROOT}")
 set(AROS_CONFIGURE_SOURCE_ROOT "${AROS_REPO_ROOT}")
-include("${AROS_TEST_ENGINE_DIR}/ConfigureBuild.cmake")
+
+# Exercise ConfigureBuild with the same directory-level include expression
+# used by the real engine. SDK staging is outside this test's scope, so stub
+# only BootstrapSDK while loading the full AROS.cmake module.
+set(_fixture_modules "${CMAKE_BINARY_DIR}/fixture-modules")
+file(MAKE_DIRECTORY "${_fixture_modules}")
+file(WRITE "${_fixture_modules}/BootstrapSDK.cmake"
+    "function(aros_bootstrap_sdk_includes)\nendfunction()\n")
+list(INSERT CMAKE_MODULE_PATH 0 "${_fixture_modules}")
+include("${AROS_TEST_ENGINE_DIR}/AROS.cmake")
 
 set(_source_root "${AROS_REPO_ROOT}")
 if(CONFIGURE_BUILD_CASE STREQUAL "symlink-input" OR

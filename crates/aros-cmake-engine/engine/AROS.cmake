@@ -465,8 +465,8 @@ add_compile_options(
 # The generated trees come first. The target compiler's legacy specs search
 # the POSIX and standard-C namespaces before the shared SDK root. LLVM is a
 # bare driver here and has no installed AROS specs, so repeat that order for
-# every target rather than only the handful of genmodule callers which used to
-# carry it locally. Otherwise <errno.h> and <stdlib.h> resolve to the smaller
+# every target unless its compile declaration disables POSIX headers. Otherwise
+# <errno.h> and <stdlib.h> resolve to the smaller
 # C99 namespace and POSIX declarations such as ESRCH, EMFILE and random() are
 # silently lost. Keep these as ordinary includes: a later -isystem path would
 # still lose to the shared SDK's -I path in the compiler's search order.
@@ -477,9 +477,11 @@ add_compile_options(
 # compiler/include ahead of the SDK inverted that, and the hand-written
 # clib/input_protos.h -- which predates genmodule and still declares
 # PeekQualifier through AROS_LP0 -- shadowed the generated one.
+set(AROS_DEFAULT_POSIXC_INCLUDE
+    "$<$<NOT:$<BOOL:$<TARGET_PROPERTY:AROS_NO_POSIXC_HEADERS>>>:${CMAKE_BINARY_DIR}/SDK/include/aros/posixc>")
 include_directories(
     "${CMAKE_BINARY_DIR}/GENINCDIR"
-    "${CMAKE_BINARY_DIR}/SDK/include/aros/posixc"
+    "${AROS_DEFAULT_POSIXC_INCLUDE}"
     "${CMAKE_BINARY_DIR}/SDK/include/aros/stdc"
     "${CMAKE_BINARY_DIR}/SDK/include"
     "${AROS_SOURCE_DIR}/compiler/include"
@@ -1695,9 +1697,21 @@ function(aros_apply_flags target_name)
             list(APPEND _arch_opts "${value}")
         endif()
     endforeach()
-    if(_arch_opts)
-        list(REMOVE_DUPLICATES _arch_opts)
-        target_compile_options(${target_name} PRIVATE ${_arch_opts})
+    # Header namespace switches must not be inferred from link-only flags.
+    # Resolve them per compile target; the automatic POSIX include expressions
+    # evaluate after all target properties and dependencies are known. Explicit
+    # source-declared include paths remain explicit, as in the native driver.
+    list(REMOVE_DUPLICATES _arch_opts)
+    set(_compiler_opts "")
+    foreach(_option IN LISTS _arch_opts FL_COMPILE_OPTIONS)
+        if(_option STREQUAL "-noposixc")
+            set_property(TARGET "${target_name}" PROPERTY AROS_NO_POSIXC_HEADERS TRUE)
+        else()
+            list(APPEND _compiler_opts "${_option}")
+        endif()
+    endforeach()
+    if(_compiler_opts)
+        target_compile_options(${target_name} PRIVATE ${_compiler_opts})
     endif()
 
     if(FL_DEFINES)
@@ -1706,9 +1720,6 @@ function(aros_apply_flags target_name)
     foreach(u IN LISTS FL_UNDEFINES)
         target_compile_options(${target_name} PRIVATE "-U${u}")
     endforeach()
-    if(FL_COMPILE_OPTIONS)
-        target_compile_options(${target_name} PRIVATE ${FL_COMPILE_OPTIONS})
-    endif()
 endfunction()
 
 # Bind one complete MetaMake library list after all currently available target
@@ -1733,8 +1744,18 @@ function(_aros_bind_link_libraries target_name)
             if(_namespace_includes AND
                NOT _namespace_includes STREQUAL
                    "_namespace_includes-NOTFOUND")
-                list(APPEND _client_namespace_includes
-                    ${_namespace_includes})
+                foreach(_namespace_include IN LISTS _namespace_includes)
+                    if(_namespace_include STREQUAL
+                       "${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+                        # A provider's relative-runtime prototype namespace is
+                        # implicit on its consumer, unlike source INCLUDES.
+                        list(APPEND _client_namespace_includes
+                            "${AROS_DEFAULT_POSIXC_INCLUDE}")
+                    else()
+                        list(APPEND _client_namespace_includes
+                            "${_namespace_include}")
+                    endif()
+                endforeach()
             endif()
         endif()
     endforeach()
@@ -2858,6 +2879,11 @@ function(aros_build_external_cmake)
     list(APPEND _external_includes ${_parent_includes})
     list(REMOVE_DUPLICATES _external_includes)
     foreach(_include IN LISTS _external_includes)
+        if(_include STREQUAL AROS_DEFAULT_POSIXC_INCLUDE)
+            # A nested configure build receives the concrete namespace above,
+            # not a native-target generator expression from its parent.
+            continue()
+        endif()
         if(_include STREQUAL
            "$<$<COMPILE_LANGUAGE:CXX>:${AROS_CROSS_TOOLCHAIN_ROOT}/include/c++/v1>")
             # The nested build receives this language-specific root below.
@@ -4233,7 +4259,7 @@ function(aros_add_module_abi)
         LINKER_LANGUAGE C)
     target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
         "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-        "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+        "${AROS_DEFAULT_POSIXC_INCLUDE}"
         "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
     _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}-linklib"
         "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4323,7 +4349,7 @@ function(aros_add_library)
             LINKER_LANGUAGE C)
         target_include_directories("${ARG_MMAKE_ID}-linklib" BEFORE PRIVATE
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-            "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
             "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
         _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}-linklib"
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4370,7 +4396,7 @@ function(aros_add_library)
             __AROS_MODNAME__=${ARG_TARGET})
         target_include_directories("${ARG_MMAKE_ID}" BEFORE PRIVATE
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-            "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+            "${AROS_DEFAULT_POSIXC_INCLUDE}"
             "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
         _aros_add_genmodule_quote_dirs("${ARG_MMAKE_ID}"
             "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4458,7 +4484,7 @@ function(aros_add_library)
             target_include_directories(
                 "${ARG_MMAKE_ID}-linklib-objects" BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(
                 "${ARG_MMAKE_ID}-linklib-objects"
@@ -4582,7 +4608,7 @@ function(aros_add_library)
             endif()
             target_include_directories("${_client_target}" BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs("${_client_target}"
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -4720,7 +4746,7 @@ function(aros_add_library)
         if(_has_genmodule)
             target_include_directories(${ARG_MMAKE_ID} BEFORE PRIVATE
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}"
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(${ARG_MMAKE_ID}
                 "${_gm_INCLUDE_DIR}" "${_gm_GEN_DIR}")
@@ -5432,7 +5458,7 @@ function(aros_add_linklib)
             # ordering for these generated client sources explicitly.
             target_include_directories(${ARG_MMAKE_ID} BEFORE PRIVATE
                 ${_genmodule_include_dirs}
-                "${AROS_SDK_INCLUDE_DIR}/aros/posixc"
+                "${AROS_DEFAULT_POSIXC_INCLUDE}"
                 "${AROS_SDK_INCLUDE_DIR}/aros/stdc")
             _aros_add_genmodule_quote_dirs(${ARG_MMAKE_ID}
                 ${_genmodule_include_dirs})

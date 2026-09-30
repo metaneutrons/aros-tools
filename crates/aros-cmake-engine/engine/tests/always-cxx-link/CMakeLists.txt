@@ -37,6 +37,28 @@ else()
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
 
+# Header selection comes from compile flags, not a declaration's link policy.
+foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
+    add_library("${_header_target}" OBJECT module.c)
+endforeach()
+aros_apply_flags(standard-headers COMPILE_OPTIONS -noposixc)
+aros_apply_flags(explicit-headers COMPILE_OPTIONS -noposixc)
+aros_apply_includes(explicit-headers
+    INCLUDES "${AROS_SDK_INCLUDE_DIR}/aros/posixc")
+# Relative-runtime providers must not reintroduce an implicit POSIX namespace
+# on a consumer whose compile declaration opted out.
+add_library(header-provider INTERFACE)
+set_property(TARGET header-provider PROPERTY AROS_CLIENT_NAMESPACE_INCLUDES
+    "${AROS_SDK_INCLUDE_DIR}/aros/posixc;${AROS_SDK_INCLUDE_DIR}/aros/stdc")
+_aros_bind_link_libraries(default-headers header-provider)
+_aros_bind_link_libraries(standard-headers header-provider)
+foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/${_header_target}.includes"
+        CONTENT "$<TARGET_GENEX_EVAL:${_header_target},$<TARGET_PROPERTY:${_header_target},INCLUDE_DIRECTORIES>>")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/${_header_target}.options"
+        CONTENT "$<TARGET_GENEX_EVAL:${_header_target},$<TARGET_PROPERTY:${_header_target},COMPILE_OPTIONS>>")
+endforeach()
+
 if(TEST_UNSUPPORTED_DETACH)
     aros_add_program(
         TARGET unsupported-detach
