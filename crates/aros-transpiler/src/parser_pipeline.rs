@@ -888,6 +888,7 @@ pub(super) fn parse_mmakefile_impl(
             cxx_source_files: sources.cxx,
             always_cxx_link,
             no_startup: false,
+            detach: false,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1047,6 +1048,17 @@ pub(super) fn parse_mmakefile_impl(
                 continue;
             }
         };
+        let detach = match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
+        };
         let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
             Ok(directory) => directory,
             Err(reason) => {
@@ -1069,6 +1081,7 @@ pub(super) fn parse_mmakefile_impl(
             cxx_source_files: sources.cxx,
             always_cxx_link,
             no_startup,
+            detach,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1534,6 +1547,22 @@ pub(super) fn parse_mmakefile_impl(
         } else {
             false
         };
+        let detach = if is_program_group {
+            match resolve_yes_argument(&inv.args, "detach", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
         let target_dir = if is_simple_module {
             match resolve_module_target_dir(
                 &inv.args,
@@ -1650,6 +1679,7 @@ pub(super) fn parse_mmakefile_impl(
             cxx_source_files: sources.cxx,
             always_cxx_link,
             no_startup,
+            detach,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,

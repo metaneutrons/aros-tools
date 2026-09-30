@@ -65,6 +65,59 @@ fn program_startup_opt_out_is_preserved_in_generated_cmake() {
 }
 
 #[test]
+fn detached_programs_preserve_the_declared_startup_contract() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("command.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "DETACH := yes\n\
+         %build_prog mmake=detached progname=Detached files=command detach=$(DETACH)\n\
+         %build_progs mmake=grouped files=command detach=yes\n\
+         %build_prog mmake=ordinary progname=Ordinary files=command detach=no\n\
+         %build_prog mmake=custom progname=Custom files=command detach=yes usestartup=no\n\
+         %build_prog mmake=unknown progname=Unknown files=command detach=$(UNRESOLVED)\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert_eq!(parsed.skipped_programs.len(), 1);
+    assert!(parsed.skipped_programs[0].contains("detach"));
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        assert_eq!(
+            target.detach,
+            matches!(
+                target.mmake_name.as_str(),
+                "detached" | "grouped" | "custom"
+            )
+        );
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    for (identity, expected) in [
+        ("detached", true),
+        ("grouped", true),
+        ("ordinary", false),
+        ("custom", true),
+    ] {
+        let declaration = cmake
+            .split(&format!("MMAKE_ID {identity}\n"))
+            .nth(1)
+            .unwrap()
+            .split(")\n")
+            .next()
+            .unwrap();
+        assert_eq!(
+            declaration.contains("    DETACH\n"),
+            expected,
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
 fn module_config_override_is_emitted_before_its_module() {
     let tree = TempTree::new();
     let module = tree.0.join("arch/all-pc/hpet");

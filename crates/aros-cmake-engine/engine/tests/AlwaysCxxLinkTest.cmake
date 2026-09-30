@@ -39,6 +39,23 @@ foreach(_mode IN ITEMS development-no-lld development-lld locked)
     endif()
 endforeach()
 
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}"
+        -B "${_build}-unsupported-detach" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+        -DTEST_UNSUPPORTED_DETACH=ON
+    RESULT_VARIABLE _unsupported_result
+    OUTPUT_VARIABLE _unsupported_stdout
+    ERROR_VARIABLE _unsupported_stderr)
+if(_unsupported_result EQUAL 0 OR
+   NOT _unsupported_stderr MATCHES "detached startup is not supported for standalone links")
+    message(FATAL_ERROR
+        "standalone detached declaration did not fail at its capability boundary\n"
+        "${_unsupported_stdout}\n${_unsupported_stderr}")
+endif()
+
 # The locked fixture deliberately uses its host compiler for this small C
 # object, after checking the exact direct-link template separately. Building
 # it proves that the linker-visible sysroot file is a concrete output,
@@ -62,5 +79,6 @@ endif()
 file(REMOVE_RECURSE
     "${_build}-development-no-lld"
     "${_build}-development-lld"
-    "${_build}-locked")
+    "${_build}-locked"
+    "${_build}-unsupported-detach")
 message(STATUS "always C++ linker contract test passed")

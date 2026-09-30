@@ -1174,6 +1174,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if target.no_startup {
             writeln!(out, "    NO_STARTUP").unwrap();
         }
+        if target.detach {
+            writeln!(out, "    DETACH").unwrap();
+        }
         if target.empty_archive {
             writeln!(out, "    EMPTY_ARCHIVE").unwrap();
         }

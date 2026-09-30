@@ -159,6 +159,23 @@ add_custom_target(aros-c-startup DEPENDS "${_aros_c_startup_output}")
 add_dependencies(aros-c-startup aros-c-startup-objects)
 set(AROS_C_STARTUP_TARGET "aros-c-startup")
 
+# The native driver adds detach.o for a declared detached program. Keep this
+# separate from startup.o: ordinary programs and usestartup=no must not inherit
+# its process hand-off behaviour.
+set(_aros_c_detach_output "${AROS_DEVELOPER_LIB_DIR}/detach.o")
+add_library(aros-c-detach-objects OBJECT EXCLUDE_FROM_ALL
+    "${AROS_SOURCE_DIR}/compiler/startup/detach.c")
+set_target_properties(aros-c-detach-objects PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+add_custom_command(
+    OUTPUT "${_aros_c_detach_output}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:aros-c-detach-objects>" "${_aros_c_detach_output}"
+    DEPENDS "$<TARGET_OBJECTS:aros-c-detach-objects>"
+    COMMENT "Publishing detach.o for detached AROS programs"
+    COMMAND_EXPAND_LISTS VERBATIM)
+add_custom_target(aros-c-detach DEPENDS "${_aros_c_detach_output}")
+add_dependencies(aros-c-detach aros-c-detach-objects)
+
 # AROS' normal clang++ driver adds this object to C++ links.  Locked CMake
 # consumers deliberately use the prefix-owned ld.lld directly, so the
 # transpiled graph must publish and name that equivalent input explicitly.
@@ -1931,6 +1948,7 @@ function(aros_bind_c_startup_target target_name)
                 "AROS program startup requires generated headers from ${_include_target}")
         endif()
         aros_add_target_dependency(aros-c-startup-objects "${_include_target}")
+        aros_add_target_dependency(aros-c-detach-objects "${_include_target}")
     endforeach()
     aros_add_target_dependency("${target_name}" "${AROS_C_STARTUP_TARGET}")
 endfunction()
@@ -1945,6 +1963,10 @@ function(aros_attach_program_startup target_name no_startup)
     endif()
     add_dependencies("${target_name}" "${AROS_C_STARTUP_TARGET}")
     target_link_libraries("${target_name}" PRIVATE "${_aros_c_startup_output}")
+    if(ARGN)
+        add_dependencies("${target_name}" aros-c-detach)
+        target_link_libraries("${target_name}" PRIVATE "${_aros_c_detach_output}")
+    endif()
 endfunction()
 
 # A fetched source named without its suffix cannot be a Ninja source node: the
@@ -5438,7 +5460,7 @@ endfunction()
 
 # Macro: aros_add_program
 function(aros_add_program)
-    set(options ALWAYS_CXX_LINK NO_STARTUP)
+    set(options ALWAYS_CXX_LINK NO_STARTUP DETACH)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
@@ -5486,6 +5508,10 @@ function(aros_add_program)
     # cmake/StandaloneLink.cmake.
     aros_standalone_link_wanted(_standalone ${ARG_DRIVER_LINK_OPTIONS})
     if(RESOLVED_SOURCES AND _standalone)
+        if(ARG_DETACH AND NOT ARG_NO_STARTUP)
+            message(FATAL_ERROR
+                "${ARG_MMAKE_ID}: detached startup is not supported for standalone links")
+        endif()
         aros_program_output_dir(_prog_outdir "${ARG_DIRECTORY}"
             "${ARG_INSTALL_DIR}")
         set(_objects "${ARG_MMAKE_ID}-objs")
@@ -5546,7 +5572,7 @@ function(aros_add_program)
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
-        aros_attach_program_startup("${ARG_MMAKE_ID}" "${ARG_NO_STARTUP}")
+        aros_attach_program_startup("${ARG_MMAKE_ID}" "${ARG_NO_STARTUP}" "${ARG_DETACH}")
         aros_gate_arch(${ARG_MMAKE_ID} "${ARG_DIRECTORY}")
         aros_apply_includes(${ARG_MMAKE_ID}
             MODULE_DIR "${ARG_DIRECTORY}"
@@ -5962,7 +5988,7 @@ endfunction()
 # unique, with the plain stem as the output name. A phony target under the mmake
 # id ties them together, which is what the historic build's metatarget does.
 function(aros_add_programs)
-    set(options NO_STARTUP)
+    set(options NO_STARTUP DETACH)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
@@ -6024,7 +6050,7 @@ function(aros_add_programs)
         endif()
         _aros_set_module_linker_language("${_tgt}" ""
             CXX_SOURCES ${_member_cxx_sources})
-        aros_attach_program_startup("${_tgt}" "${ARG_NO_STARTUP}")
+        aros_attach_program_startup("${_tgt}" "${ARG_NO_STARTUP}" "${ARG_DETACH}")
         aros_gate_arch(${_tgt} "${ARG_DIRECTORY}")
         aros_apply_includes(${_tgt}
             MODULE_DIR "${ARG_DIRECTORY}"

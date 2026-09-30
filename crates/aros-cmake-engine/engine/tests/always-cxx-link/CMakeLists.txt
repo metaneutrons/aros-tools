@@ -37,6 +37,16 @@ else()
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
 
+if(TEST_UNSUPPORTED_DETACH)
+    aros_add_program(
+        TARGET unsupported-detach
+        MMAKE_ID unsupported-detach
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+        DETACH SOURCES module
+        DRIVER_LINK_OPTIONS "-Wl,-T,${CMAKE_CURRENT_LIST_DIR}/unused.ld")
+    message(FATAL_ERROR "standalone detached declaration was silently accepted")
+endif()
+
 if(TEST_LOCKED_TOOLCHAIN)
     # The fixture uses the host compiler just to prove the custom output rule.
     # It separately checks the release-only direct-link template below.
@@ -192,6 +202,42 @@ aros_add_programs(
     INSTALL_DIR "${CMAKE_BINARY_DIR}/no-startup-programs"
     NO_STARTUP
     SOURCES module)
+
+aros_add_program(
+    TARGET detached-program
+    MMAKE_ID detached-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    DETACH
+    SOURCES module)
+aros_add_programs(
+    TARGET detached-programs
+    MMAKE_ID detached-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/detached-programs"
+    DETACH
+    SOURCES module second)
+aros_add_program(
+    TARGET custom-detach-program
+    MMAKE_ID custom-detach-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    NO_STARTUP DETACH
+    SOURCES module)
+foreach(_program IN ITEMS detached-program detached-programs-module detached-programs-second)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "${AROS_DEVELOPER_LIB_DIR}/detach.o" IN_LIST _libraries)
+        message(FATAL_ERROR "${_program} lost declared detach.o: ${_libraries}")
+    endif()
+    get_target_property(_dependencies "${_program}" MANUALLY_ADDED_DEPENDENCIES)
+    if(NOT "aros-c-detach" IN_LIST _dependencies)
+        message(FATAL_ERROR "${_program} lacks the detach.o producer dependency")
+    endif()
+endforeach()
+foreach(_program IN ITEMS c-program custom-detach-program)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if("${AROS_DEVELOPER_LIB_DIR}/detach.o" IN_LIST _libraries)
+        message(FATAL_ERROR "detach.o leaked to ${_program}")
+    endif()
+endforeach()
 
 # Driver switches belong to the declaration, including every %build_progs
 # member. Use a dotted identity to also reject regex/prefix-based matching.

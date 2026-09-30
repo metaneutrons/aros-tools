@@ -88,6 +88,9 @@ pub struct TargetDefinition {
     /// `%build_prog(s) usestartup=no` opts out of the default startup.o.
     #[serde(default)]
     pub no_startup: bool,
+    /// `%build_prog(s) detach=yes` adds the native detached startup object.
+    #[serde(default)]
+    pub detach: bool,
     /// Objective-C source stems or paths from `objcfiles=`.
     #[serde(default)]
     pub objc_source_files: Vec<String>,
