@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 
 foreach(_input IN ITEMS SYS_DIR STAGE_DIR CONFIG_SOURCE STARTUP_SOURCE
-        GRUB2_STAMP GRUB2_PRIVATE_IMAGE)
+        CPU_SIGNATURE GRUB2_STAMP GRUB2_PRIVATE_IMAGE)
     if(NOT DEFINED ${_input} OR "${${_input}}" STREQUAL "")
         message(FATAL_ERROR "boot-iso requires ${_input}")
     endif()
 endforeach()
+if(NOT CPU_SIGNATURE MATCHES "^[A-Za-z0-9_+-]+$")
+    message(FATAL_ERROR "boot-iso has an invalid CPU signature")
+endif()
 if(NOT IS_DIRECTORY "${SYS_DIR}" OR IS_SYMLINK "${SYS_DIR}")
     message(FATAL_ERROR "boot-iso requires an existing regular SYS directory; build AROS first")
 endif()
@@ -95,6 +98,26 @@ execute_process(
     RESULT_VARIABLE _stage_result)
 if(NOT _stage_result EQUAL 0)
     message(FATAL_ERROR "boot-iso could not isolate the SYS tree")
+endif()
+# MetaMake's `boot` target writes `$(CPU)\n` as AROS.boot. Without this
+# signature, DOS correctly rejects even a present, mountable CD as unbootable.
+set(_boot_signature "${STAGE_DIR}/AROS.boot")
+if(IS_SYMLINK "${_boot_signature}" OR
+   (EXISTS "${_boot_signature}" AND IS_DIRECTORY "${_boot_signature}"))
+    message(FATAL_ERROR "boot-iso refuses an unsafe AROS.boot")
+endif()
+if(EXISTS "${_boot_signature}")
+    file(SIZE "${_boot_signature}" _signature_size)
+    string(LENGTH "${CPU_SIGNATURE}\n" _expected_signature_size)
+    if(NOT _signature_size EQUAL _expected_signature_size)
+        message(FATAL_ERROR "boot-iso has a mismatched AROS.boot")
+    endif()
+    file(READ "${_boot_signature}" _existing_signature)
+    if(NOT _existing_signature STREQUAL "${CPU_SIGNATURE}\n")
+        message(FATAL_ERROR "boot-iso has a mismatched AROS.boot")
+    endif()
+else()
+    file(WRITE "${_boot_signature}" "${CPU_SIGNATURE}\n")
 endif()
 file(MAKE_DIRECTORY "${STAGE_DIR}/S" "${STAGE_DIR}/boot/grub")
 execute_process(

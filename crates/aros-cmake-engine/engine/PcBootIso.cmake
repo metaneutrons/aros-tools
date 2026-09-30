@@ -85,6 +85,7 @@ function(aros_add_pc_boot_iso)
             "-DSTAGE_DIR=${_stage_dir}"
             "-DCONFIG_SOURCE=${_grub_config}"
             "-DSTARTUP_SOURCE=${_startup_source}"
+            "-DCPU_SIGNATURE=${AROS_TARGET_CPU}"
             "-DGRUB2_STAMP=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/.grub2-iso-assets.stamp"
             "-DGRUB2_PRIVATE_IMAGE=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/pc/grub2_eltorito"
             -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"

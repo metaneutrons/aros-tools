@@ -891,6 +891,7 @@ aros_add_pc_boot_iso()
         "ComposePcBootIso.cmake",
         "aros-grub2-iso-assets",
         "image receipt --profile pc-bios-iso",
+        "-DCPU_SIGNATURE=x86_64",
         "sys-tree=gen/boot-iso/stage",
     ] {
         assert!(ninja.contains(required), "missing ISO contract: {required}");
@@ -985,6 +986,16 @@ aros_add_pc_boot_iso()
     assert!(!build.join("aros-x86_64-pc.iso").exists());
     fs::write(sys_boot.join("grub/i386-pc/grub2_eltorito"), "fixture\n")
         .expect("restore GRUB output");
+    fs::write(build.join("SYS/AROS.boot"), "arm\n").expect("wrong boot signature");
+    let mismatched_signature = Command::new("cmake")
+        .arg("--build")
+        .arg(&build)
+        .args(["--target", "boot-iso"])
+        .output()
+        .expect("reject wrong boot signature");
+    assert!(!mismatched_signature.status.success());
+    assert!(String::from_utf8_lossy(&mismatched_signature.stdout).contains("mismatched AROS.boot"));
+    fs::remove_file(build.join("SYS/AROS.boot")).expect("remove wrong signature");
     fs::write(build.join("media-build-receipt.json"), "{}\n")
         .expect("fake receipt for composer counterprobe");
     let output = Command::new("cmake")
@@ -1006,6 +1017,11 @@ aros_add_pc_boot_iso()
         fs::read_to_string(build.join("gen/boot-iso/stage/boot/grub/grub.cfg"))
             .expect("staged config"),
         config
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("gen/boot-iso/stage/AROS.boot"))
+            .expect("staged boot signature"),
+        "x86_64\n"
     );
     assert!(build
         .join("gen/boot-iso/stage/S/Startup-Sequence")
