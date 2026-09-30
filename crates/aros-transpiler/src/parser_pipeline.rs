@@ -16,7 +16,7 @@ use super::{
     map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config, read_source,
     record_partial_source_lists, remaining_linklib_sources, render_meta_token,
     resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
-    resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
+    resolve_no_argument, resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
     select_target_invocations, sse41, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
     GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy,
     LocalMakeIncludeLimits, MakeExprContext, MetaTargetRule, ModuleType, ParsedMmakefile, Path,
@@ -887,6 +887,7 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup: false,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1034,6 +1035,18 @@ pub(super) fn parse_mmakefile_impl(
                     continue;
                 }
             };
+        let no_startup = match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line)
+        {
+            Ok(value) => value,
+            Err(reason) => {
+                skipped_programs.push(format!(
+                    "{}:{}: %build_prog mmake={mmake_raw} {reason}",
+                    rel_dir.display(),
+                    inv.line + 1
+                ));
+                continue;
+            }
+        };
         let target_dir = match evaluate_output_directory(&inv.args, &expression_context) {
             Ok(directory) => directory,
             Err(reason) => {
@@ -1055,6 +1068,7 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,
@@ -1504,6 +1518,22 @@ pub(super) fn parse_mmakefile_impl(
             None
         };
         let is_program_group = matches!(module_type, ModuleType::ProgramGroup);
+        let no_startup = if is_program_group {
+            match resolve_no_argument(&inv.args, "usestartup", &scope, dirs, inv.line) {
+                Ok(value) => value,
+                Err(reason) => {
+                    skipped_programs.push(format!(
+                        "{}:{}: %{} mmake={mmake_raw} {reason}",
+                        rel_dir.display(),
+                        inv.line + 1,
+                        inv.name
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
         let target_dir = if is_simple_module {
             match resolve_module_target_dir(
                 &inv.args,
@@ -1619,6 +1649,7 @@ pub(super) fn parse_mmakefile_impl(
             source_files: sources.c,
             cxx_source_files: sources.cxx,
             always_cxx_link,
+            no_startup,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
             use_libs,

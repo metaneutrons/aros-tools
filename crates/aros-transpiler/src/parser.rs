@@ -31,7 +31,7 @@ use crate::make_vars::{
 };
 use crate::module_paths::{
     implicit_module_meta_rules, is_explicit_genmodule_only, resolve_module_suffix,
-    resolve_module_target_dir, resolve_yes_argument,
+    resolve_module_target_dir, resolve_no_argument, resolve_yes_argument,
 };
 use crate::sources::{
     evaluate_linklib_list, evaluate_macro_sources, evaluate_macro_sources_with_files,

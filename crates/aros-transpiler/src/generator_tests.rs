@@ -12,6 +12,59 @@ use crate::testing::TempTree;
 use std::fs;
 
 #[test]
+fn program_startup_opt_out_is_preserved_in_generated_cmake() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    for stem in ["default", "custom", "grouped"] {
+        fs::write(module.join(format!("{stem}.c")), "").unwrap();
+    }
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_prog mmake=default progname=Default files=default\n\
+         %build_prog mmake=custom progname=Custom files=custom usestartup=no\n\
+         %build_progs mmake=grouped files=grouped usestartup=no\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(
+        parsed.skipped_programs.is_empty(),
+        "{:?}",
+        parsed.skipped_programs
+    );
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    let default = cmake
+        .split("MMAKE_ID default")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    let custom = cmake
+        .split("MMAKE_ID custom")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    let grouped = cmake
+        .split("MMAKE_ID grouped")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(!default.contains("NO_STARTUP"));
+    assert!(custom.contains("NO_STARTUP"));
+    assert!(grouped.contains("NO_STARTUP"));
+}
+
+#[test]
 fn module_config_override_is_emitted_before_its_module() {
     let tree = TempTree::new();
     let module = tree.0.join("arch/all-pc/hpet");

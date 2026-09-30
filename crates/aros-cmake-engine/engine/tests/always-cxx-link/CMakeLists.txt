@@ -168,6 +168,30 @@ aros_add_programs(
     MMAKE_ID cxx-programs
     DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
     CXX_SOURCES module)
+aros_add_program(
+    TARGET c-program
+    MMAKE_ID c-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    SOURCES module)
+aros_add_program(
+    TARGET no-startup-program
+    MMAKE_ID no-startup-program
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    NO_STARTUP
+    SOURCES module)
+aros_add_programs(
+    TARGET c-programs
+    MMAKE_ID c-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/c-programs"
+    SOURCES module)
+aros_add_programs(
+    TARGET no-startup-programs
+    MMAKE_ID no-startup-programs
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/no-startup-programs"
+    NO_STARTUP
+    SOURCES module)
 
 # Cover the shared full-module, custom-module and simple-module paths too.
 aros_add_library(
@@ -234,6 +258,29 @@ foreach(_target IN ITEMS
     _assert_linker_language("${_target}" CXX)
 endforeach()
 _assert_linker_language(hidd-c-default C)
+
+if(NOT TARGET aros-c-startup OR NOT TARGET aros-c-startup-objects)
+    message(FATAL_ERROR "AROS program startup producer targets are missing")
+endif()
+get_target_property(_c_startup_sources aros-c-startup-objects SOURCES)
+if(NOT "${_c_startup_sources}" MATCHES "compiler/startup/startup[.]c")
+    message(FATAL_ERROR "AROS program startup uses the wrong source: ${_c_startup_sources}")
+endif()
+foreach(_program IN ITEMS c-program cxx-program c-programs-module)
+    _assert_manual_dependency("${_program}" aros-c-startup TRUE)
+    get_target_property(_program_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "${_aros_c_startup_output}" IN_LIST _program_libraries)
+        message(FATAL_ERROR "${_program} did not link explicit startup.o")
+    endif()
+endforeach()
+foreach(_no_startup IN ITEMS hidd-c-default no-startup-program
+        no-startup-programs-module)
+    _assert_manual_dependency("${_no_startup}" aros-c-startup FALSE)
+    get_target_property(_libraries "${_no_startup}" LINK_LIBRARIES)
+    if("${_aros_c_startup_output}" IN_LIST _libraries)
+        message(FATAL_ERROR "${_no_startup} unexpectedly links startup.o")
+    endif()
+endforeach()
 
 if(TEST_LOCKED_TOOLCHAIN)
     if(NOT TARGET aros-cxx-startup OR

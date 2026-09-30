@@ -1171,6 +1171,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         if target.always_cxx_link {
             writeln!(out, "    ALWAYS_CXX_LINK").unwrap();
         }
+        if target.no_startup {
+            writeln!(out, "    NO_STARTUP").unwrap();
+        }
         if target.empty_archive {
             writeln!(out, "    EMPTY_ARCHIVE").unwrap();
         }

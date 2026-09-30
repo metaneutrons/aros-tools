@@ -424,6 +424,7 @@ aros_report_host_header_gaps()
 if(AROS_CROSS_TOOLCHAIN_ROOT)
     aros_bind_cxx_startup_target("linklibs-startup")
 endif()
+aros_bind_c_startup_target("linklibs-startup")
 
 # The universal SDK deliberately exposes hostlib.resource's public API even
 # when the selected runtime is not a hosted one. `rom/mmakefile.src` puts this

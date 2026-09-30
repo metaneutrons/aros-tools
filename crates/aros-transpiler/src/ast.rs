@@ -85,6 +85,9 @@ pub struct TargetDefinition {
     /// link contract of the legacy module macro.
     #[serde(default)]
     pub always_cxx_link: bool,
+    /// `%build_prog(s) usestartup=no` opts out of the default startup.o.
+    #[serde(default)]
+    pub no_startup: bool,
     /// Objective-C source stems or paths from `objcfiles=`.
     #[serde(default)]
     pub objc_source_files: Vec<String>,

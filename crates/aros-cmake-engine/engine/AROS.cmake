@@ -134,6 +134,31 @@ file(MAKE_DIRECTORY
 # Bootstrap SDK Includes
 aros_bootstrap_sdk_includes()
 
+# %rule_link_prog supplies startup.o by default. It is an explicit object,
+# not a linker default: aros-collect calls ld.lld directly. Without it a
+# program such as Compositor starts at its first unrelated .text function.
+set(_aros_c_startup_source "${AROS_SOURCE_DIR}/compiler/startup/startup.c")
+if(NOT EXISTS "${_aros_c_startup_source}")
+    message(FATAL_ERROR "AROS program startup source is missing: ${_aros_c_startup_source}")
+endif()
+set(_aros_c_startup_output "${AROS_DEVELOPER_LIB_DIR}/startup.o")
+add_library(aros-c-startup-objects OBJECT EXCLUDE_FROM_ALL
+    "${_aros_c_startup_source}")
+set_target_properties(aros-c-startup-objects PROPERTIES
+    POSITION_INDEPENDENT_CODE OFF)
+add_custom_command(
+    OUTPUT "${_aros_c_startup_output}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:aros-c-startup-objects>"
+        "${_aros_c_startup_output}"
+    DEPENDS "$<TARGET_OBJECTS:aros-c-startup-objects>"
+    COMMENT "Publishing startup.o for AROS programs"
+    COMMAND_EXPAND_LISTS
+    VERBATIM)
+add_custom_target(aros-c-startup DEPENDS "${_aros_c_startup_output}")
+add_dependencies(aros-c-startup aros-c-startup-objects)
+set(AROS_C_STARTUP_TARGET "aros-c-startup")
+
 # AROS' normal clang++ driver adds this object to C++ links.  Locked CMake
 # consumers deliberately use the prefix-owned ld.lld directly, so the
 # transpiled graph must publish and name that equivalent input explicitly.
@@ -1891,6 +1916,35 @@ function(aros_bind_cxx_startup_target target_name)
             "Locked AROS C++ consumer has no cxx-startup producer target")
     endif()
     aros_add_target_dependency("${target_name}" "${AROS_CXX_STARTUP_TARGET}")
+endfunction()
+
+function(aros_bind_c_startup_target target_name)
+    if(NOT TARGET "${target_name}" OR
+       NOT TARGET "${AROS_C_STARTUP_TARGET}")
+        message(FATAL_ERROR
+            "AROS program startup requires aggregate ${target_name} and a producer")
+    endif()
+    foreach(_include_target IN ITEMS compiler-stdc-includes
+            compiler-posixc-includes kernel-task-includes kernel-dos-includes)
+        if(NOT TARGET "${_include_target}")
+            message(FATAL_ERROR
+                "AROS program startup requires generated headers from ${_include_target}")
+        endif()
+        aros_add_target_dependency(aros-c-startup-objects "${_include_target}")
+    endforeach()
+    aros_add_target_dependency("${target_name}" "${AROS_C_STARTUP_TARGET}")
+endfunction()
+
+function(aros_attach_program_startup target_name no_startup)
+    if(no_startup)
+        return()
+    endif()
+    if(NOT TARGET "${target_name}" OR
+       NOT TARGET "${AROS_C_STARTUP_TARGET}")
+        message(FATAL_ERROR "${target_name}: AROS program startup producer is missing")
+    endif()
+    add_dependencies("${target_name}" "${AROS_C_STARTUP_TARGET}")
+    target_link_libraries("${target_name}" PRIVATE "${_aros_c_startup_output}")
 endfunction()
 
 # A fetched source named without its suffix cannot be a Ninja source node: the
@@ -5384,7 +5438,7 @@ endfunction()
 
 # Macro: aros_add_program
 function(aros_add_program)
-    set(options ALWAYS_CXX_LINK)
+    set(options ALWAYS_CXX_LINK NO_STARTUP)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
@@ -5492,6 +5546,7 @@ function(aros_add_program)
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
+        aros_attach_program_startup("${ARG_MMAKE_ID}" "${ARG_NO_STARTUP}")
         aros_gate_arch(${ARG_MMAKE_ID} "${ARG_DIRECTORY}")
         aros_apply_includes(${ARG_MMAKE_ID}
             MODULE_DIR "${ARG_DIRECTORY}"
@@ -5907,12 +5962,13 @@ endfunction()
 # unique, with the plain stem as the output name. A phony target under the mmake
 # id ties them together, which is what the historic build's metatarget does.
 function(aros_add_programs)
+    set(options NO_STARTUP)
     set(oneValueArgs TARGET MMAKE_ID DIRECTORY INSTALL_DIR)
     set(multiValueArgs SOURCES CXX_SOURCES OBJC_SOURCES ASM_SOURCES
         LIBS USELIBS INCLUDES ARCH_INCLUDES
         DEFINES UNDEFINES COMPILE_OPTIONS ARCH_SOURCES
         ARCH_DEFINES ARCH_COMPILE_OPTIONS LINK_OPTIONS)
-    cmake_parse_arguments(ARG "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if((NOT ARG_SOURCES AND NOT ARG_CXX_SOURCES AND
         NOT ARG_OBJC_SOURCES AND NOT ARG_ASM_SOURCES AND
@@ -5967,6 +6023,7 @@ function(aros_add_programs)
         endif()
         _aros_set_module_linker_language("${_tgt}" ""
             CXX_SOURCES ${_member_cxx_sources})
+        aros_attach_program_startup("${_tgt}" "${ARG_NO_STARTUP}")
         aros_gate_arch(${_tgt} "${ARG_DIRECTORY}")
         aros_apply_includes(${_tgt}
             MODULE_DIR "${ARG_DIRECTORY}"

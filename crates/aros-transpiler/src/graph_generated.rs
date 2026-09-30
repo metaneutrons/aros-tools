@@ -284,6 +284,7 @@ impl DependencyGraph {
                 source_files: sources,
                 cxx_source_files: Vec::new(),
                 always_cxx_link: false,
+                no_startup: false,
                 objc_source_files: Vec::new(),
                 asm_source_files: Vec::new(),
                 use_libs: Vec::new(),
