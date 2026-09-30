@@ -193,6 +193,60 @@ aros_add_programs(
     NO_STARTUP
     SOURCES module)
 
+# Driver switches belong to the declaration, including every %build_progs
+# member. Use a dotted identity to also reject regex/prefix-based matching.
+aros_add_programs(
+    TARGET static.commands
+    MMAKE_ID static.commands
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/static-commands"
+    NO_STARTUP
+    SOURCES module second)
+aros_add_programs(
+    TARGET staticXcommands
+    MMAKE_ID staticXcommands
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    INSTALL_DIR "${CMAKE_BINARY_DIR}/dynamic-commands"
+    NO_STARTUP
+    SOURCES module second)
+include("${CMAKE_CURRENT_LIST_DIR}/../../DefaultLinkSet.cmake")
+foreach(_runtime IN ITEMS posixc stdcio stdc stdc.static exec)
+    add_library("fixture-${_runtime}" STATIC module.c)
+endforeach()
+aros_set_default_link_set(
+    "posixc|fixture-posixc|nostdc,noposixc|"
+    "stdcio|fixture-stdcio|nostdc|"
+    "stdc|fixture-stdc|nostdc|"
+    "stdc.static|fixture-stdc.static||nostdc"
+    "exec|fixture-exec|nosysbase|")
+file(WRITE "${CMAKE_BINARY_DIR}/generated_targets.spec-switches.txt"
+    "static.commands\tstatic\tnosysbase\nno-startup-program\tstatic\n")
+aros_apply_default_link_set()
+foreach(_program IN ITEMS static.commands-module static.commands-second
+        no-startup-program)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "fixture-stdc.static" IN_LIST _libraries)
+        message(FATAL_ERROR "${_program} lost its static runtime: ${_libraries}")
+    endif()
+    foreach(_dynamic IN ITEMS fixture-posixc fixture-stdcio fixture-stdc)
+        if(_dynamic IN_LIST _libraries)
+            message(FATAL_ERROR "${_program} retained ${_dynamic}")
+        endif()
+    endforeach()
+endforeach()
+get_target_property(_static_libraries static.commands-module LINK_LIBRARIES)
+if("fixture-exec" IN_LIST _static_libraries)
+    message(FATAL_ERROR "program group lost nosysbase")
+endif()
+foreach(_program IN ITEMS staticXcommands-module staticXcommands-second
+        c-programs-module)
+    get_target_property(_libraries "${_program}" LINK_LIBRARIES)
+    if(NOT "fixture-stdc" IN_LIST _libraries OR
+       "fixture-stdc.static" IN_LIST _libraries)
+        message(FATAL_ERROR "static flag leaked to ${_program}: ${_libraries}")
+    endif()
+endforeach()
+
 # Cover the shared full-module, custom-module and simple-module paths too.
 aros_add_library(
     TARGET mesa

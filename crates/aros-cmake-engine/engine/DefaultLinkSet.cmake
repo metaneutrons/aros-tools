@@ -43,7 +43,10 @@ function(_aros_read_spec_switches out_var)
             string(REPLACE "\t" ";" _fields "${_line}")
             list(POP_FRONT _fields _mmake)
             if(_mmake AND _fields)
-                list(APPEND _entries "${_mmake}=${_fields}")
+                # Keep each declaration as one CMake list item even when its
+                # snapshot contains several switches.
+                string(JOIN "," _switches ${_fields})
+                list(APPEND _entries "${_mmake}=${_switches}")
             endif()
         endforeach()
     endif()
@@ -163,9 +166,20 @@ function(aros_apply_default_link_set)
         # A declaration's own -nostdc/-noposixc/-nosysbase suppress part of the
         # set, and each exists because it would otherwise link against itself.
         set(_switches "")
+        # A %build_progs declaration owns one flag snapshot but creates several
+        # executable targets. Resolve their explicit declaration identity rather
+        # than guessing it from a name prefix (which can overlap other targets).
+        get_target_property(_declaration "${_target}" AROS_LINK_DECLARATION_ID)
+        if(NOT _declaration)
+            set(_declaration "${_target}")
+        endif()
         foreach(_entry IN LISTS _switch_entries)
-            if(_entry MATCHES "^${_target}=(.*)$")
-                set(_switches "${CMAKE_MATCH_1}")
+            string(FIND "${_entry}" "=" _separator)
+            string(SUBSTRING "${_entry}" 0 ${_separator} _identity)
+            if(_identity STREQUAL _declaration)
+                math(EXPR _switch_start "${_separator} + 1")
+                string(SUBSTRING "${_entry}" ${_switch_start} -1 _switches)
+                string(REPLACE "," ";" _switches "${_switches}")
                 break()
             endif()
         endforeach()

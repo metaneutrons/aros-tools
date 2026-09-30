@@ -6015,7 +6015,8 @@ function(aros_add_programs)
             "${ARG_INSTALL_DIR}")
         set_target_properties(${_tgt} PROPERTIES
             OUTPUT_NAME "${_stem}"
-            RUNTIME_OUTPUT_DIRECTORY "${_outdir}")
+            RUNTIME_OUTPUT_DIRECTORY "${_outdir}"
+            AROS_LINK_DECLARATION_ID "${ARG_MMAKE_ID}")
         if(_language STREQUAL "CXX")
             set(_member_cxx_sources "${src}")
         else()
