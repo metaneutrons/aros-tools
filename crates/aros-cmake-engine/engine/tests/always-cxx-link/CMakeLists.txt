@@ -341,6 +341,57 @@ aros_add_custom_target(
     MODTYPE hook
     ALWAYS_CXX_LINK
     SOURCES module)
+
+# Build-rule identity must not leak into loader-visible module filenames.
+# The Wanderer parent-class lookup is a real consumer of this contract.
+foreach(_case IN ITEMS
+        "IconDrawerList|mui|IconDrawerList.mui"
+        "IconImage|mcc|IconImage.mcc"
+        "IconSettings|mcp|IconSettings.mcp"
+        "usb-fixture|usbclass|usb-fixture.class"
+        "bluetooth-fixture|btclass|bluetooth-fixture.class"
+        "console-fixture|handler|console-fixture-handler"
+        "printer-fixture|printer|printer-fixture")
+    string(REPLACE "|" ";" _fields "${_case}")
+    list(GET _fields 0 _public_name)
+    list(GET _fields 1 _modtype)
+    list(GET _fields 2 _expected_name)
+    set(_build_id "build-id-${_public_name}")
+    aros_add_custom_target(TARGET "${_public_name}"
+        MMAKE_ID "${_build_id}" MODTYPE "${_modtype}"
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+    get_target_property(_actual_name "${_build_id}" OUTPUT_NAME)
+    if(NOT _actual_name STREQUAL _expected_name)
+        message(FATAL_ERROR
+            "${_build_id}: expected runtime name ${_expected_name}, got ${_actual_name}")
+    endif()
+endforeach()
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/mui-runtime-path.txt"
+    CONTENT "$<TARGET_FILE:build-id-IconDrawerList>")
+
+# An explicit suffix/directory is a supported namespace distinction, not a
+# reason to substitute an arbitrary build id for the public name.
+aros_add_custom_target(TARGET IconDrawerList
+    MMAKE_ID separate-mui-class MODTYPE mui MODSUFFIX mcc
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+get_target_property(_separate_name separate-mui-class OUTPUT_NAME)
+if(NOT _separate_name STREQUAL "IconDrawerList.mcc")
+    message(FATAL_ERROR "explicit module suffix was not preserved")
+endif()
+aros_add_custom_target(TARGET IconDrawerList
+    MMAKE_ID separate-mui-directory MODTYPE mui
+    INSTALL_DIR "Classes/Other"
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+get_target_property(_separate_dir separate-mui-directory RUNTIME_OUTPUT_DIRECTORY)
+if(NOT _separate_dir STREQUAL "${AROS_SYS_DIR}/Classes/Other")
+    message(FATAL_ERROR "explicit module runtime namespace was not preserved")
+endif()
+if(TEST_DUPLICATE_RUNTIME_MODULE)
+    aros_add_custom_target(TARGET icondrawerlist
+        MMAKE_ID conflicting-class MODTYPE mui
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+    message(FATAL_ERROR "ambiguous runtime module was silently accepted")
+endif()
 aros_add_module_simple(
     TARGET simple
     MMAKE_ID simple-module

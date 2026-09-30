@@ -5681,8 +5681,8 @@ function(aros_add_custom_target)
 
     # genmodule maps usbclass and btclass to the runtime suffix `.class` even
     # when no explicit modsuffix was supplied. Other full modules default to
-    # their modtype. The mmake id remains the basename until the known duplicate
-    # modname outputs can be represented without generating duplicate rules.
+    # their modtype. MMAKE_ID identifies the build rule, not the public module:
+    # loaders such as MUI resolve the declared module name at runtime.
     if(ARG_MODTYPE STREQUAL "usbclass" OR ARG_MODTYPE STREQUAL "btclass")
         set(_default_modsuffix "class")
     elseif(ARG_MODTYPE STREQUAL "printer")
@@ -5690,7 +5690,7 @@ function(aros_add_custom_target)
     else()
         set(_default_modsuffix "${ARG_MODTYPE}")
     endif()
-    _aros_module_output_name(_outname "${ARG_MMAKE_ID}"
+    _aros_module_output_name(_outname "${ARG_TARGET}"
         "${_default_modsuffix}" "${ARG_MODSUFFIX}")
 
     aros_resolve_source_lanes(RESOLVED_SOURCES "${ARG_DIRECTORY}"
@@ -5721,6 +5721,20 @@ function(aros_add_custom_target)
     if(NOT RESOLVED_SOURCES)
         return()
     endif()
+    # Do not hide ambiguous declarations behind build-id filenames. AROS's
+    # runtime namespace is case-insensitive, even on a case-sensitive host.
+    # Distinct install directories or suffixes are valid disambiguators.
+    string(TOLOWER "${_moddir}/${_outname}" _runtime_path)
+    string(SHA256 _runtime_key "${_runtime_path}")
+    get_property(_runtime_owner GLOBAL PROPERTY
+        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
+    if(_runtime_owner)
+        message(FATAL_ERROR
+            "Conflicting runtime module output ${_moddir}/${_outname}: "
+            "${_runtime_owner} and ${ARG_MMAKE_ID}")
+    endif()
+    set_property(GLOBAL PROPERTY
+        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
     aros_module_scaffolding(_scaffold_sources _scaffold
         MODTYPE "${ARG_MODTYPE}"
         TARGET "${ARG_TARGET}"

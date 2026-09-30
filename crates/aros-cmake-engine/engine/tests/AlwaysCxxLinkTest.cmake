@@ -37,6 +37,12 @@ foreach(_mode IN ITEMS development-no-lld development-lld locked)
             "always-cxx-link ${_mode} fixture configure failed (${_result})\n"
             "${_stdout}\n${_stderr}")
     endif()
+    file(READ "${_build}-${_mode}/mui-runtime-path.txt" _mui_path)
+    set(_expected_mui_path "${_build}-${_mode}/SYS/Classes/Zune/IconDrawerList.mui")
+    cmake_path(NORMAL_PATH _expected_mui_path)
+    if(NOT _mui_path STREQUAL _expected_mui_path)
+        message(FATAL_ERROR "MUI loader cannot resolve generated path: ${_mui_path}")
+    endif()
     foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
         file(READ "${_build}-${_mode}/${_header_target}.includes" _includes)
         file(READ "${_build}-${_mode}/${_header_target}.options" _options)
@@ -55,6 +61,23 @@ foreach(_mode IN ITEMS development-no-lld development-lld locked)
         endif()
     endforeach()
 endforeach()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}"
+        -B "${_build}-duplicate-runtime" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+        -DTEST_DUPLICATE_RUNTIME_MODULE=ON
+    RESULT_VARIABLE _duplicate_result
+    OUTPUT_VARIABLE _duplicate_stdout
+    ERROR_VARIABLE _duplicate_stderr)
+if(_duplicate_result EQUAL 0 OR
+   NOT _duplicate_stderr MATCHES "Conflicting runtime module output")
+    message(FATAL_ERROR
+        "ambiguous runtime module did not fail closed\n"
+        "${_duplicate_stdout}\n${_duplicate_stderr}")
+endif()
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}"
@@ -97,5 +120,6 @@ file(REMOVE_RECURSE
     "${_build}-development-no-lld"
     "${_build}-development-lld"
     "${_build}-locked"
+    "${_build}-duplicate-runtime"
     "${_build}-unsupported-detach")
 message(STATUS "always C++ linker contract test passed")
