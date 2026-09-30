@@ -8,6 +8,13 @@ compiler=@AROS_AHI_WRAPPER_COMPILER_QUOTED@
 collector=@AROS_AHI_WRAPPER_COLLECTOR_QUOTED@
 linker=@AROS_AHI_WRAPPER_LINKER_QUOTED@
 emulation=@AROS_AHI_WRAPPER_EMULATION_QUOTED@
+amiga=@AROS_AHI_WRAPPER_AMIGA_QUOTED@
+posixc=@AROS_AHI_WRAPPER_POSIXC_QUOTED@
+stdcio=@AROS_AHI_WRAPPER_STDCIO_QUOTED@
+stdc=@AROS_AHI_WRAPPER_STDC_QUOTED@
+exec_lib=@AROS_AHI_WRAPPER_EXEC_QUOTED@
+libinit=@AROS_AHI_WRAPPER_LIBINIT_QUOTED@
+autoinit=@AROS_AHI_WRAPPER_AUTOINIT_QUOTED@
 
 compile_only=
 compiler_probe=
@@ -183,4 +190,10 @@ set --
 while IFS= read -r argument || [ -n "$argument" ]; do
     set -- "$@" "$argument"
 done < "$link_args"
-"$collector" --ld "$linker" -- "$@"
+# A direct collector/linker invocation bypasses config/elf-specs.in, including
+# its implicit C and Exec library stubs. Resident INIT/EXIT sets also call
+# _set_call_funcs, whose implementation also needs set_call_libfuncs;
+# its error formatter needs amiga's GetDataStreamFromFormat. Driver Makefiles
+# deliberately omit explicit LIBS. The audited AHI recipes do not select
+# -nostdc, -noposixc or -nosysbase, so restore their bounded default closure.
+"$collector" --ld "$linker" -- "$@" --start-group "$amiga" "$posixc" "$stdcio" "$stdc" "$exec_lib" "$libinit" "$autoinit" --end-group

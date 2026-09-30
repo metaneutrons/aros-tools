@@ -52,11 +52,23 @@ file(CHMOD "${CMAKE_BINARY_DIR}/hosttools/flexcat" PERMISSIONS
 # fixture declares targets rather than only staging files. Imported archives
 # are the honest stand-in: this fixture's C compiler is a mock, so it cannot
 # build a real one.
-foreach(_name IN ITEMS amiga libm mui)
+foreach(_name IN ITEMS amiga libm mui posixc stdcio stdc exec libinit autoinit)
+    set(_target "linklibs-${_name}")
+    if(_name MATCHES "^(posixc|stdcio|stdc)$")
+        set(_target "compiler-${_name}-linklib")
+        # Public aggregate names are not archive producers in the real tree.
+        add_custom_target("linklibs-${_name}")
+    elseif(_name STREQUAL "exec")
+        set(_target "kernel-exec-linklib")
+        add_custom_target("linklibs-exec")
+    endif()
+    if(AHI_FIXTURE_CASE STREQUAL "missing-${_name}")
+        continue()
+    endif()
     file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/liblinklibs-${_name}.a"
         CONTENT "fixture ${_name} archive\n")
-    add_library("linklibs-${_name}" STATIC IMPORTED)
-    set_target_properties("linklibs-${_name}" PROPERTIES
+    add_library("${_target}" STATIC IMPORTED)
+    set_target_properties("${_target}" PROPERTIES
         IMPORTED_LOCATION "${CMAKE_BINARY_DIR}/liblinklibs-${_name}.a")
 endforeach()
 

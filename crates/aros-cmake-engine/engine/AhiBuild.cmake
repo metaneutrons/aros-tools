@@ -468,7 +468,7 @@ function(aros_build_ahi)
         list(APPEND _feature_headers "${_header_real}")
     endforeach()
 
-    # The three link libraries this build links against, asked of their own
+    # The link libraries this build links against, asked of their own
     # targets rather than spelled as `<build root>/liblinklibs-<mmake>.a`.
     # Carrying `conffile=` made four declarations real -- the ipv4 network
     # module, the VMM handler and two SysExplorer modules -- each of them
@@ -480,7 +480,10 @@ function(aros_build_ahi)
     #
     # aros_linklib_archive_path carries the reasoning and the checks.
     set(_dependency_lexical "")
-    foreach(_linklib IN ITEMS linklibs-amiga linklibs-libm linklibs-mui)
+    foreach(_linklib IN ITEMS linklibs-amiga linklibs-libm linklibs-mui
+            compiler-posixc-linklib compiler-stdcio-linklib compiler-stdc-linklib
+            kernel-exec-linklib
+            linklibs-libinit linklibs-autoinit)
         aros_linklib_archive_path("${_linklib}" _linklib_archive)
         list(APPEND _dependency_lexical "${_linklib_archive}")
     endforeach()
@@ -569,6 +572,20 @@ function(aros_build_ahi)
     _aros_ahi_shell_quote("${_collect}" AROS_AHI_WRAPPER_COLLECTOR_QUOTED)
     _aros_ahi_shell_quote("${_lld}" AROS_AHI_WRAPPER_LINKER_QUOTED)
     _aros_ahi_shell_quote("${_lld_emulation}" AROS_AHI_WRAPPER_EMULATION_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libamiga.a"
+        AROS_AHI_WRAPPER_AMIGA_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libposixc.a"
+        AROS_AHI_WRAPPER_POSIXC_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libstdcio.a"
+        AROS_AHI_WRAPPER_STDCIO_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libstdc.a"
+        AROS_AHI_WRAPPER_STDC_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libexec.a"
+        AROS_AHI_WRAPPER_EXEC_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/liblibinit.a"
+        AROS_AHI_WRAPPER_LIBINIT_QUOTED)
+    _aros_ahi_shell_quote("${_stage_linklibs}/libautoinit.a"
+        AROS_AHI_WRAPPER_AUTOINIT_QUOTED)
     configure_file("${_cc_wrapper_template}" "${_cc_wrapper}" @ONLY)
     file(CHMOD "${_cc_wrapper}" PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
