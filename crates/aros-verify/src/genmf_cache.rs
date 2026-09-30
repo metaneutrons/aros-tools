@@ -546,6 +546,26 @@ pub fn materialize(
     cancellation: &CancellationToken,
 ) -> Result<GenmfCacheMaterialization, GenmfCacheError> {
     let selection = select_with_cancellation(request, cancellation)?;
+    Ok(materialize_selected(
+        request,
+        selection,
+        refresh,
+        cancellation,
+    ))
+}
+
+/// Materialize a selection already produced for `request` without re-running
+/// selection or probing the interpreter. The caller must pass a selection
+/// produced for this request. Production callers should use
+/// [`materialize`], which selects immediately before materializing; this
+/// internal entry point also lets tests separate setup selection from the
+/// measured generator deadline.
+pub(crate) fn materialize_selected(
+    request: &GenmfCacheRequest,
+    selection: GenmfCacheSelection,
+    refresh: bool,
+    cancellation: &CancellationToken,
+) -> GenmfCacheMaterialization {
     let entries = selection
         .entries
         .par_iter()
@@ -562,7 +582,7 @@ pub fn materialize(
             }
         })
         .collect();
-    Ok(GenmfCacheMaterialization { selection, entries })
+    GenmfCacheMaterialization { selection, entries }
 }
 
 /// Refresh every selected GenMF expansion through its exact interpreter.
