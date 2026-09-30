@@ -1127,7 +1127,7 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             .iter()
             .map(|package| package.resolved.len())
             .sum::<usize>(),
-        401
+        409
     );
     for (package_name, expected_members) in [
         ("kernel-package-fs", &["pfs3-handler"][..]),

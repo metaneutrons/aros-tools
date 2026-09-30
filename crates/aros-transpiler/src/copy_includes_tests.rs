@@ -605,8 +605,8 @@ fn vc4_cle_stdout_generators_are_modelled_exactly() {
     let rel = "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium";
     let content = aros_common::read_source(&root.join(rel).join("mmakefile.src")).unwrap();
     let external = |name: &str| match name {
-        "top_builddir" => Some("$(GENDIR)/workbench/libs/mesa/20.0.8".to_owned()),
-        "top_srcdir" => Some("$(PORTSDIR)/mesa/mesa-20.0.8".to_owned()),
+        "top_builddir" => Some("$(GENDIR)/workbench/libs/mesa/26.0.0".to_owned()),
+        "top_srcdir" => Some("$(PORTSDIR)/mesa/mesa-26.0.0".to_owned()),
         _ => None,
     };
     let scan =
@@ -620,20 +620,20 @@ fn vc4_cle_stdout_generators_are_modelled_exactly() {
         "{:?}",
         scan.skipped_script_outputs
     );
-    assert_eq!(scan.script_outputs.len(), 4, "{:?}", scan.script_outputs);
-    let v33 = scan
+    assert_eq!(scan.script_outputs.len(), 1, "{:?}", scan.script_outputs);
+    let v21 = scan
         .script_outputs
         .iter()
-        .find(|declaration| declaration.output.ends_with("v3d_packet_v33_pack.h"))
-        .expect("v33 generator");
-    assert!(v33.stdout);
-    assert_eq!(v33.arguments.last().map(String::as_str), Some("33"));
-    assert!(v33.script.ends_with("/src/broadcom/cle/gen_pack_header.py"));
-    assert!(v33
+        .find(|declaration| declaration.output.ends_with("v3d_packet_v21_pack.h"))
+        .expect("VC4 v21 generator");
+    assert!(v21.stdout);
+    assert_eq!(v21.arguments.last().map(String::as_str), Some("21"));
+    assert!(v21.script.ends_with("/src/broadcom/cle/gen_pack_header.py"));
+    assert!(v21
         .depends
         .iter()
-        .any(|path| path.ends_with("v3d_packet_v33.xml")));
-    assert!(v33.working_directory.is_none());
+        .any(|path| path.ends_with("vc4_packet.xml")));
+    assert!(v21.working_directory.is_none());
     assert!(
         !scan
             .generated_files

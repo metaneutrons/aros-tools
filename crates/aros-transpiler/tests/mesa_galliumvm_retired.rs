@@ -9,12 +9,12 @@ fn source_root() -> PathBuf {
 }
 
 #[test]
-fn galliumvm_has_no_legacy_declaration_or_consumer_without_a_target_llvm_runtime() {
+fn galliumvm_has_no_active_archive_or_llvmpipe_consumer() {
     let root = source_root();
     let tombstone = root.join("workbench/libs/mesa/libgalliumvm/mmakefile.src");
     let explanation = read_source(&tombstone).unwrap();
     assert!(explanation.contains("intentionally retired"));
-    assert!(explanation.contains("target-side LLVM"));
+    assert!(explanation.contains("target LLVM runtime"));
     assert!(explanation.contains("active consumer"));
 
     let mut active_references = Vec::new();
@@ -49,6 +49,25 @@ fn galliumvm_has_no_legacy_declaration_or_consumer_without_a_target_llvm_runtime
 
     assert!(
         active_references.is_empty(),
-        "Gallivm was reintroduced without its target LLVM capability: {active_references:#?}"
+        "Gallivm has an active consumer without a target archive: {active_references:#?}"
     );
+
+    for (recipe, declaration) in [
+        (
+            "workbench/libs/mesa/libllvmpipe/mmakefile.src",
+            "%build_linklib mmake=mesa3d-linklib-llvmpipe",
+        ),
+        (
+            "workbench/hidds/llvmpipe/mmakefile.src",
+            "%build_module mmake=hidd-llvmpipe",
+        ),
+    ] {
+        let content = read_source(&root.join(recipe)).unwrap();
+        assert!(
+            !content
+                .lines()
+                .any(|line| line.trim_start().starts_with(declaration)),
+            "{recipe} still declares an unbuildable target"
+        );
+    }
 }

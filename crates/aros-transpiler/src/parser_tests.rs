@@ -1244,19 +1244,23 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
             "{cpu}: {:#?}",
             parsed.skipped_copy_includes
         );
-        assert_eq!(parsed.fetches.len(), 3, "{cpu}");
+        assert_eq!(parsed.fetches.len(), 4, "{cpu}");
         let fetch = parsed
             .fetches
             .iter()
             .find(|fetch| fetch.name == "mesa3d-fetch")
             .unwrap();
         assert_eq!(fetch.name, "mesa3d-fetch");
-        assert_eq!(fetch.archive, "mesa-20.0.8");
-        assert_eq!(fetch.suffixes, "tar.xz tar.gz");
+        assert_eq!(fetch.archive, "mesa-26.0.0");
+        assert_eq!(fetch.suffixes, "tar.xz");
+        assert_eq!(
+            fetch.checksums,
+            "mesa-26.0.0.tar.xz=sha256:2a44e98e64d5c36cec64633de2d0ec7eff64703ee25b35364ba8fcaa84f33f72"
+        );
         assert_eq!(fetch.destination, "${AROS_PORTS_DIR}/mesa");
         assert_eq!(fetch.location, "${AROS_PORTS_SOURCE_DIR}");
-        assert!(fetch.origins.ends_with("older-versions/20.x"));
-        assert_eq!(fetch.patches, "mesa-20.0.8-aros.diff:mesa-20.0.8:-p1");
+        assert!(fetch.origins.ends_with("older-versions/26.x"));
+        assert_eq!(fetch.patches, "mesa-26.0.0-aros.diff:mesa-26.0.0:-p1");
         for (name, archive, origin) in [
                 (
                     "mesa3d-mako-fetch",
@@ -1282,7 +1286,22 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
                 assert_eq!(package.patches, "::");
             }
 
-        assert_eq!(parsed.copy_includes.len(), 4, "{cpu}");
+        let pyyaml = parsed
+            .fetches
+            .iter()
+            .find(|fetch| fetch.name == "mesa3d-pyyaml-fetch")
+            .unwrap();
+        assert_eq!(pyyaml.archive, "pyyaml-6.0.3");
+        assert_eq!(pyyaml.suffixes, "tar.gz");
+        assert_eq!(
+            pyyaml.checksums,
+            "pyyaml-6.0.3.tar.gz=sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"
+        );
+        assert_eq!(pyyaml.destination, "${AROS_PORTS_DIR}/mesa-python");
+        assert_eq!(pyyaml.location, "${AROS_PORTS_SOURCE_DIR}");
+        assert_eq!(pyyaml.patches, "::");
+
+        assert_eq!(parsed.copy_includes.len(), 5, "{cpu}");
         assert!(parsed
             .copy_includes
             .iter()
@@ -1309,16 +1328,33 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
             ["vulkan.h", "vulkan_core.h", "vk_icd.h", "vk_platform.h"]
         );
         assert_eq!(
+            headers["vk_video"],
+            [
+                "vulkan_video_codecs_common.h",
+                "vulkan_video_codec_h264std.h",
+                "vulkan_video_codec_h264std_decode.h",
+                "vulkan_video_codec_h264std_encode.h",
+                "vulkan_video_codec_h265std.h",
+                "vulkan_video_codec_h265std_decode.h",
+                "vulkan_video_codec_h265std_encode.h",
+                "vulkan_video_codec_av1std.h",
+                "vulkan_video_codec_av1std_decode.h",
+                "vulkan_video_codec_av1std_encode.h",
+                "vulkan_video_codec_vp9std.h",
+                "vulkan_video_codec_vp9std_decode.h"
+            ]
+        );
+        assert_eq!(
             parsed
                 .copy_includes
                 .iter()
                 .map(|copy| copy.patterns.len())
                 .sum::<usize>(),
-            12
+            24
         );
         assert!(parsed.copy_includes.iter().all(|copy| copy
             .source_dir
-            .starts_with("${AROS_PORTS_DIR}/mesa/mesa-20.0.8/include/")));
+            .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/")));
     }
 }
 
@@ -2299,7 +2335,7 @@ fn relative_zlib_dependencies_have_exact_full_module_archive_inputs() {
     let root = root();
     let dirs = dirs();
     for (relative, mmake, source_count, object_count) in [
-        ("compiler/crt/posixc/mmakefile.src", "compiler-posixc", 8, 1),
+        ("compiler/crt/posixc/mmakefile.src", "compiler-posixc", 9, 1),
         ("compiler/crt/stdc/mmakefile.src", "compiler-stdc", 9, 13),
     ] {
         let parsed = super::parse_mmakefile_with_dirs_and_context(
@@ -2974,11 +3010,11 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
     }
 
     assert!(output_errors.is_empty(), "{output_errors:#?}");
-    assert_eq!(install_dirs.len(), 61);
+    assert_eq!(install_dirs.len(), 64);
     assert!(install_dirs.iter().any(|(mmake, directory)| {
         mmake == "workbench-devs-networks-bcmgenet" && directory == "Devs/Networks"
     }));
-    assert_eq!(suffixes.len(), 48);
+    assert_eq!(suffixes.len(), 49);
     for expected in [
         "kernel-bluetooth-classes-btserial",
         "kernel-bluetooth-classes-btpan",
@@ -2995,7 +3031,7 @@ fn real_tree_module_output_metadata_has_expected_coverage() {
                     && directory == "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/Library/Libs"
             })
             .count(),
-        4
+        5
     );
     assert_eq!(
         install_dirs

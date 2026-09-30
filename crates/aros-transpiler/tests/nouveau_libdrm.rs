@@ -9,9 +9,6 @@ const LIBDRM_SOURCES: &[&str] = &[
     "libdrm/arosdrm",
     "libdrm/arosdrmmode",
     "libdrm/nouveau/nouveau",
-    "libdrm/nouveau/pushbuf",
-    "libdrm/nouveau/bufctx",
-    "libdrm/nouveau/abi16",
 ];
 
 fn source_root() -> PathBuf {
@@ -104,7 +101,7 @@ fn production_nouveau_libdrm_is_exact_for_all_current_architectures() {
             ],
             "{cpu}"
         );
-        assert!(target.defines.is_empty(), "{cpu}: {:#?}", target.defines);
+        assert_eq!(target.defines, ["NOUVEAU_USE_UTIL_LIST"], "{cpu}");
         assert!(
             target.compile_options.is_empty(),
             "{cpu}: {:#?}",

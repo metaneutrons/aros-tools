@@ -1051,9 +1051,9 @@ ICONS := A
         assert_eq!(ids.len(), 178);
         assert_eq!(skipped.len(), 1, "{skipped:#?}");
         assert!(skipped[0].contains("AROS_DIR__TOOLS"));
-        // 180 resolvable declarations plus six additional conditional
-        // variants across the Medium and Small monitor files.
-        assert_eq!(sets.len(), 186);
+        // 180 resolvable declarations plus ten conditional variants across
+        // the Medium and Small monitor and raspi WiFi preference files.
+        assert_eq!(sets.len(), 190);
 
         let env_sets: Vec<_> = sets
             .iter()
