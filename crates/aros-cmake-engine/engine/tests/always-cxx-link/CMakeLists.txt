@@ -17,6 +17,12 @@ if(TEST_LOCKED_TOOLCHAIN)
         "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/clang/11.0.0/lib/aros/libclang_rt.builtins-x86_64.a")
     set(AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES
         ${_expected_cxx_runtime_libraries})
+    list(GET _expected_cxx_runtime_libraries 3
+        AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE)
+    get_filename_component(_builtins_dir
+        "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" DIRECTORY)
+    file(MAKE_DIRECTORY "${_builtins_dir}")
+    file(WRITE "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" "fixture\n")
     add_custom_target(linklibs-startup)
 elseif(TEST_DEVELOPMENT_LLD)
     # Select a known executable without depending on which LLVM packages the
@@ -48,6 +54,10 @@ if(TEST_LOCKED_TOOLCHAIN)
     if(NOT CMAKE_C_LINK_EXECUTABLE MATCHES "${_expected_link_prefix}" OR
        NOT CMAKE_C_LINK_EXECUTABLE MATCHES
             "--sysroot=.*/SYS/Developer" OR
+       NOT CMAKE_C_LINK_EXECUTABLE MATCHES
+            "<LINK_LIBRARIES> \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"" OR
+       NOT CMAKE_C_CREATE_SHARED_MODULE MATCHES
+            "<LINK_LIBRARIES> \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"" OR
        NOT CMAKE_CXX_LINK_EXECUTABLE MATCHES "${_expected_link_prefix}" OR
        NOT CMAKE_CXX_LINK_EXECUTABLE MATCHES
             "--sysroot=.*/SYS/Developer" OR

@@ -298,10 +298,24 @@ if(AROS_LLD_BIN)
     endif()
     set(_aros_link "\"${AROS_COLLECT_BIN}\" --ld \"${AROS_LLD_BIN}\" --")
 
+    set(_aros_c_builtins_link_arg "")
+    if(AROS_CROSS_TOOLCHAIN_ROOT)
+        if(NOT IS_ABSOLUTE "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" OR
+           NOT EXISTS "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" OR
+           IS_DIRECTORY "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}")
+            message(FATAL_ERROR
+                "Locked AROS C links require the validated prefix compiler-rt archive")
+        endif()
+        # MetaMake adds TARGET_C_LIBS to target-module links. Clang emits
+        # compiler-rt calls from ordinary C too; aros-collect invokes ld.lld
+        # directly, so no compiler driver supplies this archive implicitly.
+        set(_aros_c_builtins_link_arg
+            " \"${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}\"")
+    endif()
     set(CMAKE_C_LINK_EXECUTABLE
-        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>${_aros_c_builtins_link_arg}")
     set(CMAKE_C_CREATE_SHARED_MODULE
-        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+        "${_aros_link} -r --sysroot=\"${AROS_TARGET_SYSROOT}\" <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>${_aros_c_builtins_link_arg}")
     if(AROS_CROSS_TOOLCHAIN_ROOT)
         if(NOT AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES)
             message(FATAL_ERROR
