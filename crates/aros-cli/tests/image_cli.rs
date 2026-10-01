@@ -156,12 +156,66 @@ fn iso_inputs(root: &Path) -> (PathBuf, PathBuf) {
 }
 
 #[test]
+fn image_receipt_measures_complete_native_sys_and_preserves_prior_output_on_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("iso-inputs");
+    let (source, toolchain) = iso_inputs(&root);
+    fs::create_dir(source.join("build")).unwrap();
+    fs::write(
+        source.join("build/generated.bin"),
+        b"generated build output",
+    )
+    .unwrap();
+    let capture = || {
+        Command::new(env!("CARGO_BIN_EXE_aros"))
+            .args([
+                "image",
+                "receipt",
+                "--profile",
+                "pc-bios-iso",
+                "--build-root",
+                root.to_str().unwrap(),
+                "--source-root",
+                source.to_str().unwrap(),
+                "--toolchain-root",
+                toolchain.to_str().unwrap(),
+                "--file",
+                "bootstrap=SYS/boot/pc/bootstrap",
+                "--file",
+                "grub-boot-image=SYS/boot/grub/i386-pc/grub2_eltorito",
+                "--tree",
+                "sys-tree=SYS",
+            ])
+            .output()
+            .unwrap()
+    };
+    let output = capture();
+    assert!(
+        output.status.success(),
+        "native receipt failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = root.join("media-build-receipt.json");
+    let first = fs::read(&path).unwrap();
+    let receipt = aros_common::media_receipt::parse_media_build_receipt(&first).unwrap();
+    assert_eq!(receipt.format_version, 3);
+    assert_eq!(receipt.files.len(), 2);
+    assert_eq!(receipt.trees.len(), 1);
+    assert_eq!(receipt.trees[0].file_count, 3);
+
+    fs::write(source.join("source.txt"), b"changed source").unwrap();
+    let output = capture();
+    assert!(!output.status.success(), "dirty source was accepted");
+    assert_eq!(fs::read(&path).unwrap(), first, "prior receipt was changed");
+}
+
+#[test]
 fn iso_cli_plans_composes_and_readback_verifies_without_device_write() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("iso-inputs");
     let artifact = temporary.path().join("iso-artifact");
     let (source, toolchain) = iso_inputs(&root);
-    let command = |extra: &[&str]| {
+    let command = |output: &Path, extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_aros"))
             .args([
                 "image",
@@ -177,7 +231,7 @@ fn iso_cli_plans_composes_and_readback_verifies_without_device_write() {
                 "--toolchain-root",
                 toolchain.to_str().unwrap(),
                 "--output",
-                artifact.to_str().unwrap(),
+                output.to_str().unwrap(),
                 "--format",
                 "json",
             ])
@@ -185,11 +239,11 @@ fn iso_cli_plans_composes_and_readback_verifies_without_device_write() {
             .output()
             .unwrap()
     };
-    let preview = success_json(&command(&[]));
+    let preview = success_json(&command(&artifact, &[]));
     assert_eq!(preview["applied"], false);
     assert_eq!(preview["file_count"], 3);
     assert!(!artifact.exists());
-    let built = success_json(&command(&["--apply"]));
+    let built = success_json(&command(&artifact, &["--apply"]));
     assert_eq!(built["device_written"], false);
     assert_eq!(built["boot_qualified"], false);
     assert!(artifact.join("aros-media.iso").is_file());
@@ -209,7 +263,7 @@ fn iso_cli_plans_composes_and_readback_verifies_without_device_write() {
     assert_eq!(verified["format"], "iso9660-el-torito");
     assert_eq!(verified["file_count"], 4);
     assert_eq!(verified["image_sha256"], built["image_sha256"]);
-    let refused = command(&["--apply"]);
+    let refused = command(&artifact, &["--apply"]);
     assert!(!refused.status.success());
     fs::write(root.join("SYS/Docs/readme"), b"changed").unwrap();
     let new_output = temporary.path().join("never-created");
@@ -242,6 +296,20 @@ fn iso_cli_plans_composes_and_readback_verifies_without_device_write() {
     assert!(diagnostics.to_string().contains("image.build"));
     assert!(!new_output.exists());
     assert!(artifact.join("aros-media.iso").is_file());
+
+    fs::write(root.join("SYS/Docs/readme"), b"readme").unwrap();
+    fs::write(
+        root.join("SYS/boot/grub/i386-pc/grub2_eltorito"),
+        b"altered GRUB input",
+    )
+    .unwrap();
+    let grub_output = temporary.path().join("altered-grub-output");
+    let changed_grub = command(&grub_output, &["--apply"]);
+    assert!(
+        !changed_grub.status.success(),
+        "altered GRUB input was accepted"
+    );
+    assert!(!grub_output.exists());
 }
 
 fn invoke(root: &Path, output: &Path, extra: &[&str]) -> Output {

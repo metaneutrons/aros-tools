@@ -284,6 +284,8 @@ impl DependencyGraph {
                 source_files: sources,
                 cxx_source_files: Vec::new(),
                 always_cxx_link: false,
+                no_startup: false,
+                detach: false,
                 objc_source_files: Vec::new(),
                 asm_source_files: Vec::new(),
                 use_libs: Vec::new(),
@@ -299,7 +301,9 @@ impl DependencyGraph {
                 // accept for a plain link library.
                 linklib_name: None,
                 config_file: None,
+                config_override_file: None,
                 genmodule_linklibs: None,
+                config_relative_libraries: Vec::new(),
                 linklib_output_dir: None,
                 // Public, and not by inference: `compiler/libhiddstubs`
                 // states the output as `$(AROS_LIB)/libhiddstubs.a`, which is

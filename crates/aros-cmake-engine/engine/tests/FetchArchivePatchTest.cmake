@@ -25,6 +25,14 @@ file(MAKE_DIRECTORY
 file(WRITE "${_archive_stage}/fixture-src/value.txt" "original\n")
 file(WRITE "${_source}/cmake/BootstrapSDK.cmake"
     "function(aros_bootstrap_sdk_includes)\nendfunction()\n")
+# Loading AROS.cmake declares the real startup objects, even though this
+# isolated fetch fixture never builds them. Keep its source-containment root
+# local while supplying the exact required upstream inputs.
+file(MAKE_DIRECTORY "${_source}/compiler/startup")
+file(COPY
+    "${AROS_TEST_TREE}/compiler/startup/startup.c"
+    "${AROS_TEST_TREE}/compiler/startup/detach.c"
+    DESTINATION "${_source}/compiler/startup")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E tar czf
@@ -59,7 +67,7 @@ get_filename_component(_cmake_dir "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 get_filename_component(_repo_root "${_cmake_dir}/.." ABSOLUTE)
 set(_fixture_cmake [=[
 cmake_minimum_required(VERSION 3.22)
-project(FetchArchivePatchFixture NONE)
+project(FetchArchivePatchFixture C)
 
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)

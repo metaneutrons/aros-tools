@@ -111,19 +111,27 @@ evidence.
 `AROS_TEST_SOURCE_ROOT` enables the otherwise skipped real
 `aros source init` → `aros source sync` → `aros-transpiler` integration case.
 The configured source is read-only input: the test creates and removes only its
-own temporary checkout. Workspace tests normally find all six required real
+own temporary checkout. The real sync regression proves rejection without branch
+mutation for the full Mesa 26/RISC-V manifest, then a successful fast-forward
+with an explicitly reduced three-profile test fixture. It does not qualify
+whole-source synchronization of the current four-profile NX manifest.
+Workspace tests normally find all six required real
 build-tool executables in the Cargo target directory; set
 `AROS_TEST_TOOLS_DIR` explicitly when testing prebuilt binaries from another
 directory.
-The current source must match `contracts/aros-source-v1.toml`.
+The current source must match `[integration]` in `contracts/aros-source-v1.toml`
+(or `[source]` in an older contract without that table). The `[source]` and
+`[producer]` pins remain the paired identities of the qualified toolchain
+producer; advancing development integration does not retarget that release.
 `AROS_TEST_MESA26_SOURCE_ROOT` selects that same current tree for Mesa 26
 capability probes. The separate `AROS_TEST_MESA20_SOURCE_ROOT` must be the
 clean, recursively initialized AROS-NX checkout at
 `cb6974f1c3de43c6f1168d69039af7c32e56153c`. The source-coupled Rust
-suite uses that historical baseline for its Mesa 20 and other version-bound
-regressions; the dedicated Mesa 26 probes use the current source. CI checks
-out and validates both trees. The current source's complete product graph is
-qualified separately by the AROS-NX product matrix.
+suite uses the current source by default. Only the Mesa 20 patch/inventory and
+Mesa 20 Nouveau Gallium regression tests explicitly use the historical oracle;
+whole-tree inventories, CLI source workflows and Mesa 26 probes use the current
+source. CI checks out and validates both trees. The current source's complete
+product graph is qualified separately by the AROS-NX product matrix.
 
 Build the documentation with the checked-in JavaScript lockfile:
 

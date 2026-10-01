@@ -302,10 +302,30 @@ pub fn verify_media_build_identity(
     toolchain_root: &Path,
 ) -> Result<(), MediaReceiptError> {
     validate_receipt(receipt)?;
-    let identity = receipt
+    let expected = receipt
         .build_identity
         .as_ref()
         .ok_or_else(|| invalid("historical v1 receipt has no source/toolchain binding"))?;
+    let measured = measure_media_build_identity(source_root, toolchain_root)?;
+    if &measured != expected {
+        return Err(invalid(
+            "source or toolchain identity differs from the media receipt",
+        ));
+    }
+    Ok(())
+}
+
+/// Measure the clean source checkout and the complete installed toolchain.
+///
+/// Generated files below the CLI-owned `build/` directory are excluded from
+/// source dirtiness only when no tracked source file exists there.
+///
+/// # Errors
+/// Rejects any other source change or an altered toolchain installation.
+pub fn measure_media_build_identity(
+    source_root: &Path,
+    toolchain_root: &Path,
+) -> Result<MediaBuildIdentity, MediaReceiptError> {
     let selected_root = source_root.canonicalize()?;
     let git_root = git_value(source_root, &["rev-parse", "--show-toplevel"])?;
     if Path::new(&git_root).canonicalize()? != selected_root {
@@ -313,17 +333,31 @@ pub fn verify_media_build_identity(
     }
     let source_commit = git_value(source_root, &["rev-parse", "--verify", "HEAD"])?;
     let source_tree = git_value(source_root, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+    if !git_value(source_root, &["ls-files", "--", "build"])?.is_empty() {
+        return Err(invalid(
+            "source checkout tracks files in the generated build directory",
+        ));
+    }
+    match std::fs::symlink_metadata(source_root.join("build")) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(invalid("generated build path is not a regular directory"));
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
     let changes = git_value(
         source_root,
-        &["status", "--porcelain=v1", "--untracked-files=normal"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            ":(exclude)build",
+        ],
     )?;
     if !changes.is_empty() {
         return Err(invalid("source checkout is dirty"));
-    }
-    if source_commit != identity.source_commit || source_tree != identity.source_tree {
-        return Err(invalid(
-            "source Git identity differs from the media receipt",
-        ));
     }
     let manifest_path = toolchain_root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
     let file = open_regular_file_nofollow(&manifest_path)?;
@@ -333,19 +367,12 @@ pub fn verify_media_build_identity(
     if manifest_bytes.len() > 4 * 1024 * 1024 {
         return Err(invalid("toolchain manifest exceeds four megabytes"));
     }
-    if crate::sha256_bytes(&manifest_bytes) != identity.toolchain_manifest_sha256 {
-        return Err(invalid("toolchain manifest differs from the media receipt"));
-    }
+    let manifest_sha256 = crate::sha256_bytes(&manifest_bytes);
     let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| invalid(&format!("invalid installed toolchain manifest: {error}")))?;
     manifest
         .validate()
         .map_err(|error| invalid(&format!("invalid installed toolchain manifest: {error}")))?;
-    if manifest.release_id != identity.toolchain_release_id
-        || manifest.tree_sha256 != identity.toolchain_tree_sha256.as_str()
-    {
-        return Err(invalid("toolchain identity differs from the media receipt"));
-    }
     let (tree_sha256, inventory) = toolchain_tree_inventory(toolchain_root)
         .map_err(|error| invalid(&format!("cannot measure installed toolchain: {error}")))?;
     if tree_sha256 != manifest.tree_sha256 || inventory != manifest.files {
@@ -353,7 +380,16 @@ pub fn verify_media_build_identity(
             "installed toolchain payload differs from its manifest",
         ));
     }
-    Ok(())
+    let identity = MediaBuildIdentity {
+        source_commit,
+        source_tree,
+        toolchain_release_id: manifest.release_id,
+        toolchain_tree_sha256: Sha256Digest::parse(&tree_sha256)
+            .map_err(|_| invalid("invalid installed toolchain tree digest"))?,
+        toolchain_manifest_sha256: manifest_sha256,
+    };
+    validate_media_build_identity(&identity)?;
+    Ok(identity)
 }
 
 fn git_value(root: &Path, args: &[&str]) -> Result<String, MediaReceiptError> {
@@ -613,6 +649,19 @@ mod tests {
         let bytes = serde_json::to_vec(&receipt).unwrap();
         let decoded = parse_media_build_receipt(&bytes).unwrap();
         verify_media_build_identity(&decoded, &source, &toolchain).unwrap();
+        fs::create_dir(source.join("build")).unwrap();
+        fs::write(source.join("build/generated.bin"), b"generated").unwrap();
+        verify_media_build_identity(&decoded, &source, &toolchain).unwrap();
+        fs::write(source.join("unexpected.txt"), b"untracked source").unwrap();
+        assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
+        fs::remove_file(source.join("unexpected.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            fs::remove_dir_all(source.join("build")).unwrap();
+            std::os::unix::fs::symlink(&toolchain, source.join("build")).unwrap();
+            assert!(verify_media_build_identity(&decoded, &source, &toolchain).is_err());
+            fs::remove_file(source.join("build")).unwrap();
+        }
 
         let mut altered = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         altered["build_identity"]["source_commit"] = serde_json::json!("0".repeat(40));

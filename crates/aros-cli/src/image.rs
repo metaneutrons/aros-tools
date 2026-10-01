@@ -7,11 +7,16 @@ use aros_board::sd::{
 use aros_common::media_plan::{plan_media_image, MediaExternalFile};
 use aros_common::media_profile::{built_in_media_profiles, MediaLayout};
 use aros_common::media_receipt::{
-    parse_media_build_receipt, verify_media_build_identity, verify_media_build_receipt,
+    measure_media_build_identity, parse_media_build_receipt, verify_media_build_identity,
+    verify_media_build_receipt, MediaBuildFile, MediaBuildReceipt, MediaBuildTree,
+};
+use aros_common::media_tree::measure_media_tree;
+use aros_common::{
+    open_regular_file_nofollow, sha256_reader, validate_existing_directory_prefix_nofollow,
 };
 use clap::{Args, Subcommand, ValueEnum};
-use miette::Result;
-use std::io::Read;
+use miette::{IntoDiagnostic, Result};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_INPUT_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
@@ -19,12 +24,56 @@ const MAX_INPUT_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 /// Plan, compose or inspect an image artifact; never write a block device.
 #[derive(Subcommand)]
 pub enum ImageCommand {
+    /// Measure CMake-built files and trees after their producer targets finish
+    Receipt(ImageReceiptArgs),
     /// Plan or explicitly compose a reviewed FAT32 or ISO media profile
     Build(ImageBuildArgs),
     /// Show measured facts after independently verifying the artifact
     Inspect(ImageArtifactArgs),
     /// Verify the manifest, checksums and image filesystem
     Verify(ImageArtifactArgs),
+}
+
+/// Closed producer boundary for a source- and toolchain-bound build receipt.
+#[derive(Args)]
+pub struct ImageReceiptArgs {
+    /// Exact profile ID from the reviewed built-in media registry
+    #[arg(long, value_name = "ID")]
+    profile: String,
+    /// Root containing the produced files and trees
+    #[arg(long, value_name = "DIR")]
+    build_root: PathBuf,
+    /// Git source checkout that supplied the native build
+    #[arg(long, value_name = "DIR")]
+    source_root: PathBuf,
+    /// Installed, verified cross-toolchain used by the native build
+    #[arg(long, value_name = "DIR")]
+    toolchain_root: PathBuf,
+    /// Measured file role and relative path, ROLE=PATH
+    #[arg(long, value_name = "ROLE=PATH", value_parser = parse_role_path)]
+    file: Vec<RolePath>,
+    /// Complete measured directory role and relative path, ROLE=PATH
+    #[arg(long, value_name = "ROLE=PATH", value_parser = parse_role_path)]
+    tree: Vec<RolePath>,
+}
+
+#[derive(Clone)]
+struct RolePath {
+    role: String,
+    path: String,
+}
+
+fn parse_role_path(value: &str) -> std::result::Result<RolePath, String> {
+    let (role, path) = value
+        .split_once('=')
+        .ok_or_else(|| "expected ROLE=PATH".to_string())?;
+    if role.is_empty() || path.is_empty() {
+        return Err("expected nonempty ROLE=PATH".into());
+    }
+    Ok(RolePath {
+        role: role.to_string(),
+        path: path.to_string(),
+    })
 }
 
 /// Exact paths to reviewed media contracts and measured inputs.
@@ -110,6 +159,7 @@ pub enum ImageOutputFormat {
 /// paths before printing a success result.
 pub fn run(command: ImageCommand) -> Result<()> {
     let (operation, args) = match command {
+        ImageCommand::Receipt(args) => return receipt(&args),
         ImageCommand::Build(args) => return build(&args),
         ImageCommand::Inspect(args) => ("inspect", args),
         ImageCommand::Verify(args) => ("verify", args),
@@ -119,6 +169,76 @@ pub fn run(command: ImageCommand) -> Result<()> {
         ImageOutputFormat::Human => print_human(operation, &result),
         ImageOutputFormat::Json => print_json(operation, &result)?,
     }
+    Ok(())
+}
+
+fn receipt(args: &ImageReceiptArgs) -> Result<()> {
+    let profile = built_in_media_profiles()
+        .map_err(|error| miette::miette!("Cannot load reviewed media profiles: {error}"))?
+        .into_iter()
+        .find(|entry| entry.profile.id == args.profile)
+        .ok_or_else(|| miette::miette!("Unknown reviewed media profile '{}'.", args.profile))?;
+    validate_existing_directory_prefix_nofollow(&args.build_root).into_diagnostic()?;
+    let root_metadata = std::fs::symlink_metadata(&args.build_root).into_diagnostic()?;
+    if !root_metadata.file_type().is_dir() {
+        miette::bail!("Media build root must be a regular directory.");
+    }
+    let root = args.build_root.canonicalize().into_diagnostic()?;
+    let identity = measure_media_build_identity(&args.source_root, &args.toolchain_root)
+        .map_err(|error| miette::miette!("Cannot measure media build identity: {error}"))?;
+    let mut files = Vec::with_capacity(args.file.len());
+    for binding in &args.file {
+        let mut file = open_regular_file_nofollow(&root.join(&binding.path)).into_diagnostic()?;
+        let measured = sha256_reader(&mut file).into_diagnostic()?;
+        files.push(MediaBuildFile {
+            role: binding.role.clone(),
+            path: binding.path.clone(),
+            sha256: measured.digest.to_string(),
+            size_bytes: measured.size,
+        });
+    }
+    let mut trees = Vec::with_capacity(args.tree.len());
+    for binding in &args.tree {
+        let measured = measure_media_tree(&root.join(&binding.path)).into_diagnostic()?;
+        trees.push(MediaBuildTree {
+            role: binding.role.clone(),
+            path: binding.path.clone(),
+            sha256: measured.sha256,
+            file_count: measured.files.len(),
+            directory_count: measured.directories.len(),
+        });
+    }
+    files.sort_by(|a, b| a.role.cmp(&b.role));
+    trees.sort_by(|a, b| a.role.cmp(&b.role));
+    let receipt = MediaBuildReceipt::new_bound_cmake_with_trees(
+        profile.profile.target_preset.clone(),
+        profile.profile.model.clone(),
+        profile.profile.transport.clone(),
+        identity,
+        files,
+        trees,
+    )
+    .map_err(|error| miette::miette!("Cannot construct media build receipt: {error}"))?;
+    verify_media_build_receipt(&root, &receipt, &profile.profile)
+        .map_err(|error| miette::miette!("Cannot verify produced media inputs: {error}"))?;
+    verify_media_build_identity(&receipt, &args.source_root, &args.toolchain_root)
+        .map_err(|error| miette::miette!("Media build identity changed: {error}"))?;
+    let path = root.join("media-build-receipt.json");
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if !metadata.file_type().is_file() {
+            miette::bail!("Media build receipt destination is not a regular file.");
+        }
+    }
+    let mut serialized = serde_json::to_vec(&receipt)
+        .map_err(|error| miette::miette!("Cannot serialize media build receipt: {error}"))?;
+    serialized.push(b'\n');
+    let mut staged = tempfile::NamedTempFile::new_in(&root).into_diagnostic()?;
+    staged.write_all(&serialized).into_diagnostic()?;
+    staged.as_file().sync_all().into_diagnostic()?;
+    staged
+        .persist(&path)
+        .map_err(|error| miette::miette!("Cannot publish media build receipt: {error}"))?;
+    aros_common::outputln!("Verified CMake media build receipt: {}", path.display());
     Ok(())
 }
 

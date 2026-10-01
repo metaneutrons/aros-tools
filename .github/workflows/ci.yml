@@ -245,6 +245,13 @@ jobs:
                   raise SystemExit(f'malformed {section} identity')
               print(f'{section}_repository={repository}')
               print(f'{section}_commit={commit}')
+          integration = contract.get('integration', contract['source'])
+          if integration['repository'] != contract['source']['repository']:
+              raise SystemExit('integration source repository differs from producer source')
+          if re.fullmatch(r'[0-9a-f]{40}', integration['commit']) is None:
+              raise SystemExit('malformed integration source identity')
+          print(f'integration_repository={integration["repository"]}')
+          print(f'integration_commit={integration["commit"]}')
           workflow = contract['producer']['workflow']
           workflow_path = PurePosixPath(workflow)
           if (
@@ -329,8 +336,8 @@ jobs:
         if: matrix.source_qualification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: ${{ steps.contract.outputs.source_repository }}
-          ref: ${{ steps.contract.outputs.source_commit }}
+          repository: ${{ steps.contract.outputs.integration_repository }}
+          ref: ${{ steps.contract.outputs.integration_commit }}
           path: aros-source
           submodules: recursive
           persist-credentials: false
@@ -338,7 +345,7 @@ jobs:
         if: matrix.source_qualification
         shell: bash
         env:
-          SOURCE_COMMIT: ${{ steps.contract.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ steps.contract.outputs.integration_commit }}
         run: |
           set -euo pipefail
           if [[ $(git -C aros-source rev-parse HEAD) != "$SOURCE_COMMIT" ]]; then

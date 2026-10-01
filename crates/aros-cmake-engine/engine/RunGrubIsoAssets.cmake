@@ -352,4 +352,7 @@ if(NOT _host_mmake_before STREQUAL _host_mmake_after OR
    NOT _efi32_manifest_before STREQUAL _efi32_manifest_after)
     message(FATAL_ERROR "GRUB2 ISO staging modified its source inputs")
 endif()
-file(WRITE "${GIA_STAMP}" "GRUB2 ISO assets: ${GIA_VERSION} x86_64\n")
+file(SHA256 "${GIA_SYS_DIR}/boot/grub/i386-pc/grub2_eltorito" _eltorito_sha256)
+file(WRITE "${GIA_STAMP}"
+    "GRUB2 ISO assets: ${GIA_VERSION} x86_64\n"
+    "El Torito SHA256: ${_eltorito_sha256}\n")

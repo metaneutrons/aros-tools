@@ -123,12 +123,27 @@ endif()
 
 foreach(_name IN ITEMS host-adflib linklib-adflib workbench-network-wirelessmanager)
     file(READ "${_build}/.aros-${_name}-configure-contract.cmake" _contract)
+    if(_contract MATCHES "\\$<")
+        message(FATAL_ERROR
+            "${_name} configure contract retained a parent generator expression")
+    endif()
     if(_name STREQUAL "workbench-network-wirelessmanager")
         if(NOT _contract MATCHES "CB_LINKER")
             message(FATAL_ERROR "WirelessManager contract omitted its linker")
         endif()
     elseif(_contract MATCHES "CB_LINKER")
         message(FATAL_ERROR "${_name} unnecessarily requires a linker")
+    endif()
+    if(_name STREQUAL "linklib-adflib" OR
+       _name STREQUAL "workbench-network-wirelessmanager")
+        if(NOT _contract MATCHES "SDK/include/aros/posixc" OR
+           NOT _contract MATCHES "SDK/include/aros/stdc")
+            message(FATAL_ERROR
+                "${_name} C-only configure contract lost SDK namespace defaults:\n${_contract}")
+        endif()
+    elseif(_contract MATCHES "SDK/include/aros/(posixc|stdc)")
+        message(FATAL_ERROR
+            "host ADFlib configure contract unexpectedly inherited target SDK headers:\n${_contract}")
     endif()
 endforeach()
 

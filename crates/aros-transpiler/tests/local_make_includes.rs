@@ -580,14 +580,8 @@ fn strict_tree_inventory_enables_only_audited_plain_source_fragments() {
     assert_eq!(
         accepted,
         [
-            "arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/mmakefile.src -> arch/arm-native/soc/broadcom/2708/hidd/vc4gallium/vc4-20.0.8.sources",
             "rom/bluetooth/stack/mmakefile.src -> rom/bluetooth/stack/core.files",
-            "workbench/devs/monitors/IntelGMA/i915/mmakefile.src -> workbench/devs/monitors/IntelGMA/i915/i915-20.0.8.sources",
             "workbench/hidds/nouveau/mmakefile.src -> workbench/hidds/nouveau/nouveau-libdrm.sources",
-            "workbench/hidds/softpipe/mmakefile.src -> workbench/hidds/softpipe/softpipe-20.0.8.sources",
-            "workbench/libs/mesa/libglapi/mmakefile.src -> workbench/libs/mesa/libglapi/glapi-20.0.8.sources",
-            "workbench/libs/mesa/libmesa/mmakefile.src -> workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-            "workbench/libs/mesa/libmesautil/mmakefile.src -> workbench/libs/mesa/libmesautil/mesautil-20.0.8.sources",
             "workbench/libs/zstd/mmakefile.src -> workbench/libs/zstd/zstd-1.5.7.files",
         ]
     );

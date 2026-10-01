@@ -1456,7 +1456,7 @@ fn committed_sync_tolerates_a_closed_stdout_consumer() {
 }
 
 #[test]
-fn real_aros_source_sync_runs_the_real_transpiler_when_explicitly_configured() {
+fn real_aros_source_sync_rejects_full_manifest_then_accepts_supported_fixture() {
     let Some(source_root) = std::env::var_os("AROS_TEST_SOURCE_ROOT") else {
         return;
     };
@@ -1579,6 +1579,221 @@ fn real_aros_source_sync_runs_the_real_transpiler_when_explicitly_configured() {
         "{}",
         String::from_utf8_lossy(&attached.stderr)
     );
+
+    // The production manifest declares Mesa 26 for opensbi-riscv64, which is
+    // intentionally unsupported. Full-source validation must reject that
+    // candidate without changing the local branch, index, or tracked files.
+    let before_head = git(&checkout, ["rev-parse", "HEAD"]);
+    assert_eq!(before_head, qualified_commit);
+    let before_status = git(
+        &checkout,
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    assert!(before_status.is_empty(), "{before_status}");
+    let index_path = checkout.join(git(&checkout, ["rev-parse", "--git-path", "index"]));
+    let before_index = fs::read(&index_path).expect("source checkout index");
+    let tracked_diff = |root: &Path| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["diff", "--binary", "--no-ext-diff", "HEAD", "--"])
+            .output()
+            .expect("tracked worktree diff");
+        assert!(output.status.success());
+        output.stdout
+    };
+    let before_tracked_diff = tracked_diff(&checkout);
+    assert!(before_tracked_diff.is_empty());
+
+    let rejected = run(Command::new(aros())
+        .current_dir(&checkout)
+        .env("AROS_BUILD_TOOLS_DIR", &tools)
+        .args(["--diagnostic-format=json", "source", "sync", "--upstream"])
+        .arg(&qualified_upstream)
+        .args(["--branch", "qualified"]));
+    let diagnostic = diagnostic(&rejected);
+    assert_eq!(diagnostic["diagnostics"][0]["code"], "AR0115");
+    let message = diagnostic["diagnostics"][0]["message"]
+        .as_str()
+        .expect("source validation diagnostic message");
+    assert!(
+        message.contains("opensbi-riscv64")
+            && message.contains(
+                "Mesa 26.0.0 capability does not support target profile cpu=riscv64 platform=opensbi"
+            ),
+        "{message}"
+    );
+    assert_eq!(git(&checkout, ["rev-parse", "HEAD"]), before_head);
+    assert_eq!(
+        fs::read(&index_path).expect("source checkout index"),
+        before_index
+    );
+    assert_eq!(tracked_diff(&checkout), before_tracked_diff);
+    assert_eq!(
+        git(
+            &checkout,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+        before_status
+    );
+
+    // Derive a test-only child commit from the exact source candidate. The
+    // production checkout and its manifest remain untouched; TOML parsing
+    // verifies that the sole semantic change is removal of opensbi-riscv64.
+    let fixture_seed = temporary.path().join("qualified-seed");
+    let cloned = Command::new("git")
+        .args(["clone", "--no-local"])
+        .arg(&qualified_upstream)
+        .arg(&fixture_seed)
+        .output()
+        .expect("isolated fixture clone");
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    git(&fixture_seed, ["config", "user.name", "AROS fixture"]);
+    git(
+        &fixture_seed,
+        ["config", "user.email", "aros-fixture@example.invalid"],
+    );
+    let manifest_path = fixture_seed.join("aros-targets.toml");
+    let manifest_text = fs::read_to_string(&manifest_path).expect("fixture target manifest");
+    let mut manifest: toml::Value = toml::from_str(&manifest_text).expect("valid TOML manifest");
+    let profile_names = |manifest: &toml::Value| {
+        manifest
+            .get("targets")
+            .and_then(toml::Value::as_array)
+            .expect("target profile array")
+            .iter()
+            .map(|profile| {
+                profile
+                    .get("name")
+                    .and_then(toml::Value::as_str)
+                    .expect("target profile name")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        profile_names(&manifest),
+        vec![
+            "pc-x86_64".to_owned(),
+            "rpi-aarch64".to_owned(),
+            "arm-raspi".to_owned(),
+            "opensbi-riscv64".to_owned()
+        ]
+    );
+    let original_manifest = manifest.clone();
+    let targets = manifest
+        .get_mut("targets")
+        .and_then(toml::Value::as_array_mut)
+        .expect("mutable target profile array");
+    let unsupported = targets
+        .iter()
+        .find(|profile| {
+            profile.get("name").and_then(toml::Value::as_str) == Some("opensbi-riscv64")
+        })
+        .expect("RISC-V target profile");
+    assert_eq!(
+        unsupported.get("arch").and_then(toml::Value::as_str),
+        Some("riscv64")
+    );
+    assert_eq!(
+        unsupported.get("platform").and_then(toml::Value::as_str),
+        Some("opensbi")
+    );
+    assert_eq!(
+        unsupported
+            .get("transpiler")
+            .and_then(|context| context.get("mesa_version"))
+            .and_then(toml::Value::as_str),
+        Some("26.0.0")
+    );
+    let expected_targets = targets
+        .iter()
+        .filter(|profile| {
+            profile.get("name").and_then(toml::Value::as_str) != Some("opensbi-riscv64")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(expected_targets.len(), 3);
+    *manifest
+        .get_mut("targets")
+        .and_then(toml::Value::as_array_mut)
+        .expect("mutable target profile array") = expected_targets.clone();
+    assert_eq!(
+        profile_names(&manifest),
+        vec![
+            "pc-x86_64".to_owned(),
+            "rpi-aarch64".to_owned(),
+            "arm-raspi".to_owned()
+        ]
+    );
+    let mut expected_manifest = original_manifest;
+    *expected_manifest
+        .get_mut("targets")
+        .and_then(toml::Value::as_array_mut)
+        .expect("mutable expected profile array") = expected_targets;
+    assert_eq!(manifest, expected_manifest);
+    fs::write(
+        &manifest_path,
+        toml::to_string_pretty(&manifest).expect("serialize supported-profile fixture"),
+    )
+    .expect("write test-only target manifest");
+    let reparsed: toml::Value =
+        toml::from_str(&fs::read_to_string(&manifest_path).expect("written fixture manifest"))
+            .expect("round-trip test-only manifest");
+    assert_eq!(reparsed, manifest);
+    git(&fixture_seed, ["add", "--", "aros-targets.toml"]);
+    assert_eq!(
+        git(&fixture_seed, ["diff", "--cached", "--name-only"]),
+        "aros-targets.toml"
+    );
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(&fixture_seed)
+        .args([
+            "commit",
+            "-m",
+            "Limit source-sync fixture to supported Mesa profiles",
+        ])
+        .env("GIT_AUTHOR_NAME", "AROS fixture")
+        .env("GIT_AUTHOR_EMAIL", "aros-fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "AROS fixture")
+        .env("GIT_COMMITTER_EMAIL", "aros-fixture@example.invalid")
+        .output()
+        .expect("test-only manifest commit");
+    assert!(
+        child.status.success(),
+        "{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let supported_commit = git(&fixture_seed, ["rev-parse", "HEAD"]);
+    assert_eq!(git(&fixture_seed, ["rev-parse", "HEAD^"]), qualified_commit);
+    assert_eq!(
+        git(
+            &fixture_seed,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+        ),
+        "aros-targets.toml"
+    );
+    let published = Command::new("git")
+        .arg("-C")
+        .arg(&fixture_seed)
+        .args(["push", "origin", "HEAD:refs/heads/qualified"])
+        .output()
+        .expect("publish test-only source candidate");
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    assert_eq!(
+        git(&qualified_upstream, ["rev-parse", "refs/heads/qualified"]),
+        supported_commit
+    );
+
     let synchronized = run(Command::new(aros())
         .current_dir(&checkout)
         .env("AROS_BUILD_TOOLS_DIR", &tools)
@@ -1589,5 +1804,12 @@ fn real_aros_source_sync_runs_the_real_transpiler_when_explicitly_configured() {
         synchronized.status.success(),
         "{}",
         String::from_utf8_lossy(&synchronized.stderr)
+    );
+    assert_eq!(git(&checkout, ["rev-parse", "HEAD"]), supported_commit);
+    assert!(
+        String::from_utf8_lossy(&synchronized.stdout)
+            .contains("3 declared target profile(s) validated in isolation"),
+        "{}",
+        String::from_utf8_lossy(&synchronized.stdout)
     );
 }

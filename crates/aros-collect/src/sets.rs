@@ -186,13 +186,10 @@ pub fn discover(sections: &[String]) -> (Vec<SymbolSet>, Vec<String>) {
 
 /// The linker script that lays the sets out.
 ///
-/// The arrays go into a section of their own rather than at the end of
-/// `.rodata`, where `tools/collect-aros/ldscript.h` puts them. The reference
-/// can place them there because its script rebuilds every output section
-/// anyway; ours is added to a link that already has its layout, and claiming
-/// `.rodata` here would refold every `.rodata.*` input as a side effect. A
-/// section of its own is allocatable and read-only just the same, and the ELF
-/// loader treats it like any other.
+/// The reference puts `.aros.startup` first in `.text`. DOS RunCommand enters
+/// the first loaded hunk, so the startup code must precede the set arrays in
+/// section-header order. The arrays remain in their own allocatable section
+/// rather than being folded into `.rodata` by this partial-link script.
 pub fn script(sets: &[SymbolSet], class: Class, libreq: &str) -> String {
     let word = class.pointer_directive();
     let width = class.pointer_bytes();
@@ -208,7 +205,9 @@ pub fn script(sets: &[SymbolSet], class: Class, libreq: &str) -> String {
         let _ = writeln!(out, "EXTERN(__{}__symbol_set_handler_missing)", set.name);
     }
 
-    out.push_str("SECTIONS\n{\n  .aros.sets : {\n");
+    out.push_str(
+        "SECTIONS\n{\n  .text : {\n    KEEP(*(.aros.startup))\n    *(.text)\n    *(.text.*)\n  }\n  .aros.sets : {\n",
+    );
     for set in sets {
         let name = &set.name;
         let _ = writeln!(out, "    . = ALIGN({width});");
@@ -227,7 +226,13 @@ pub fn script(sets: &[SymbolSet], class: Class, libreq: &str) -> String {
     // The version markers follow the sets inside the same output section, which
     // is the order collect-aros.c:390 emits them in.
     out.push_str(libreq);
-    out.push_str("  }\n}\n");
+    // compiler/autoinit/initexitsets.c registers each program's unwind table
+    // through __eh_frame_start. The reference collect-aros linker script
+    // provides both boundaries around .eh_frame; without them the AROS ELF
+    // loader reports an undefined symbol for every ordinary program.
+    out.push_str(
+        "  }\n  .eh_frame : {\n    PROVIDE(__eh_frame_start = .);\n    KEEP(*(.eh_frame))\n    PROVIDE(__eh_frame_end = .);\n  }\n}\n",
+    );
     out
 }
 
@@ -309,6 +314,11 @@ mod tests {
         let bare = text.find("KEEP(*(.aros.set.INITLIB))").unwrap();
         assert!(minus_one < ten && ten < bare, "{text}");
         assert!(text.contains("QUAD(0)"));
+        assert!(text.find("KEEP(*(.aros.startup))").unwrap() < text.find(".aros.sets :").unwrap());
+        assert!(text.find(".aros.sets :").unwrap() < text.find(".eh_frame :").unwrap());
+        assert!(text.contains("PROVIDE(__eh_frame_start = .);"));
+        assert!(text.contains("KEEP(*(.eh_frame))"));
+        assert!(text.contains("PROVIDE(__eh_frame_end = .);"));
     }
 
     #[test]

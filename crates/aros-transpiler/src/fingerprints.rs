@@ -81,6 +81,11 @@ pub const NAMES: &[&str] = &[
     "mesa26-v3d-manifest",
     "mesa26-vc4-recipe",
     "mesa26-vc4-manifest",
+    "mesa26-gallivm-recipe",
+    "mesa26-gallivm-manifest",
+    "mesa26-llvmpipe-recipe",
+    "mesa26-llvmpipe-hidd-recipe",
+    "llvm11-target-recipe",
     "mesautil-generator-capability",
 ];
 

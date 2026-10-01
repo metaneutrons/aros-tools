@@ -8,8 +8,8 @@ use aros_cache::{
 use aros_common::CancellationToken;
 
 use crate::genmf_cache::{
-    list, materialize, refresh, retain, select, select_lifecycle_object, status, verify,
-    GenmfCacheEntryState, GenmfCacheRequest,
+    list, materialize, materialize_selected, refresh, retain, select, select_lifecycle_object,
+    status, verify, GenmfCacheEntryState, GenmfCacheRequest,
 };
 
 fn fixture() -> (tempfile::TempDir, GenmfCacheRequest) {
@@ -235,8 +235,8 @@ fn template_and_generator_content_changes_select_new_immutable_generations() {
 }
 
 #[test]
-fn failed_or_timed_out_generators_never_publish_a_final_generation() {
-    let (_temporary, mut request) = fixture();
+fn failed_generators_never_publish_a_final_generation() {
+    let (_temporary, request) = fixture();
     fs::write(
         request.source_dir.join("tools/genmf/genmf.py"),
         "import sys\nsys.stderr.write('intentional failure\\n')\nsys.exit(9)\n",
@@ -248,19 +248,75 @@ fn failed_or_timed_out_generators_never_publish_a_final_generation() {
         list(&request).unwrap().entries[0].state,
         GenmfCacheEntryState::Missing
     );
+}
 
+#[cfg(unix)]
+#[test]
+fn timed_out_generator_process_group_never_publishes_a_final_generation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_temporary, mut request) = fixture();
+    let wrapper = request.source_dir.join("fixture-python");
+    let marker = wrapper.with_file_name(format!(
+        "{}.started",
+        wrapper.file_name().unwrap().to_string_lossy()
+    ));
     fs::write(
-        request.source_dir.join("tools/genmf/genmf.py"),
-        "import time\ntime.sleep(60)\n",
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'Python fixture 1'; exit 0; fi\nprintf started > \"${0}.started\"\n/bin/sleep 60 &\nwait\n",
     )
     .unwrap();
-    request.timeout = Duration::from_millis(100);
-    let timed_out = refresh(&request, &CancellationToken::default()).unwrap_err();
-    assert!(timed_out.timed_out());
-    assert_eq!(
-        list(&request).unwrap().entries[0].state,
-        GenmfCacheEntryState::Missing
-    );
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    request.python = wrapper;
+    // Interpreter setup is deliberately completed outside the measured
+    // one-second generator deadline.
+    let selection = select(&request).unwrap();
+    let generation = selection.entries[0].generation.clone();
+    request.timeout = Duration::from_secs(1);
+
+    let materialized =
+        materialize_selected(&request, selection, true, &CancellationToken::default());
+    assert_eq!(materialized.entries.len(), 1);
+    let failure = materialized.entries[0]
+        .result
+        .as_ref()
+        .expect_err("the long-running generator must time out");
+    assert!(failure.timed_out);
+    assert!(failure
+        .message
+        .contains("GenMF cache refresh exceeded its invocation deadline"));
+    assert!(marker.is_file(), "the generator branch must have started");
+    assert!(!request.cache_dir.join("genmf/v1").join(generation).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn materialize_selects_the_interpreter_once_before_generating() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_temporary, mut request) = fixture();
+    let wrapper = request.source_dir.join("fixture-python");
+    let probe_log = wrapper.with_file_name(format!(
+        "{}.probes",
+        wrapper.file_name().unwrap().to_string_lossy()
+    ));
+    let system_python = which::which("python3").unwrap();
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf probe >> \"${{0}}.probes\"; printf '%s\\n' 'Python fixture 1'; exit 0; fi\nexec '{}' \"$@\"\n",
+            system_python.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    request.python = wrapper;
+
+    let materialized = materialize(&request, true, &CancellationToken::default()).unwrap();
+
+    assert_eq!(materialized.entries.len(), 1);
+    assert!(materialized.entries[0].result.is_ok());
+    assert_eq!(fs::read(probe_log).unwrap(), b"probe");
 }
 
 #[cfg(unix)]

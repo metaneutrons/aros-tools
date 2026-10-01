@@ -8,6 +8,215 @@ use crate::graph::DependencyGraph;
 use crate::icons::IconTarget;
 use crate::packages::{PackageDecl, ResolvedPackageMember};
 use crate::parse_mmakefile_with_dirs;
+use crate::testing::TempTree;
+use std::fs;
+
+#[test]
+fn program_startup_opt_out_is_preserved_in_generated_cmake() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    for stem in ["default", "custom", "grouped"] {
+        fs::write(module.join(format!("{stem}.c")), "").unwrap();
+    }
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_prog mmake=default progname=Default files=default\n\
+         %build_prog mmake=custom progname=Custom files=custom usestartup=no\n\
+         %build_progs mmake=grouped files=grouped usestartup=no\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(
+        parsed.skipped_programs.is_empty(),
+        "{:?}",
+        parsed.skipped_programs
+    );
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    let default = cmake
+        .split("MMAKE_ID default")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    let custom = cmake
+        .split("MMAKE_ID custom")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    let grouped = cmake
+        .split("MMAKE_ID grouped")
+        .nth(1)
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(!default.contains("NO_STARTUP"));
+    assert!(custom.contains("NO_STARTUP"));
+    assert!(grouped.contains("NO_STARTUP"));
+}
+
+#[test]
+fn detached_programs_preserve_the_declared_startup_contract() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("command.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "DETACH := yes\n\
+         %build_prog mmake=detached progname=Detached files=command detach=$(DETACH)\n\
+         %build_progs mmake=grouped files=command detach=yes\n\
+         %build_prog mmake=ordinary progname=Ordinary files=command detach=no\n\
+         %build_prog mmake=custom progname=Custom files=command detach=yes usestartup=no\n\
+         %build_prog mmake=unknown progname=Unknown files=command detach=$(UNRESOLVED)\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert_eq!(parsed.skipped_programs.len(), 1);
+    assert!(parsed.skipped_programs[0].contains("detach"));
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        assert_eq!(
+            target.detach,
+            matches!(
+                target.mmake_name.as_str(),
+                "detached" | "grouped" | "custom"
+            )
+        );
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    for (identity, expected) in [
+        ("detached", true),
+        ("grouped", true),
+        ("ordinary", false),
+        ("custom", true),
+    ] {
+        let declaration = cmake
+            .split(&format!("MMAKE_ID {identity}\n"))
+            .nth(1)
+            .unwrap()
+            .split(")\n")
+            .next()
+            .unwrap();
+        assert_eq!(
+            declaration.contains("    DETACH\n"),
+            expected,
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn runtime_header_selection_keeps_compile_and_link_provenance_separate() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/example");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("command.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "USER_CFLAGS := -noposixc\n\
+         %build_prog mmake=standard progname=Standard files=command\n\
+         USER_CFLAGS :=\n\
+         USER_LDFLAGS := -noposixc\n\
+         %build_prog mmake=linkonly progname=LinkOnly files=command\n",
+    )
+    .unwrap();
+    let parsed = crate::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &crate::TargetContext::default(),
+    )
+    .unwrap();
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        if target.mmake_name == "standard" {
+            assert_eq!(target.compile_options, ["-noposixc"]);
+            assert!(target.spec_switches.is_empty());
+        } else if target.mmake_name == "linkonly" {
+            assert!(target.compile_options.is_empty());
+            assert_eq!(target.spec_switches, ["noposixc"]);
+        }
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    assert_eq!(cmake.matches("COMPILE_OPTIONS \"-noposixc\"").count(), 1);
+}
+
+#[test]
+fn module_config_override_is_emitted_before_its_module() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/hpet");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("hpet_init.c"), "").unwrap();
+    fs::write(
+        module.join("hpet.conf"),
+        "##begin config\nlibbase HPETBase\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-pc-hpet modname=hpet modtype=resource \
+         conffile=$(SRCDIR)/rom/kernel/clocksource.conf \
+         confoverride=hpet.conf files=hpet_init\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    let target = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "kernel-pc-hpet")
+        .unwrap();
+    assert_eq!(
+        target.config_override_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/arch/all-pc/hpet/hpet.conf")
+    );
+    let mut graph = DependencyGraph::new();
+    for target in parsed.targets {
+        graph.add_target(target);
+    }
+    let cmake = generate_cmake(&graph);
+    let override_at = cmake
+        .find("aros_set_module_config_override(\"kernel-pc-hpet\" \"${AROS_SOURCE_DIR}/arch/all-pc/hpet/hpet.conf\")")
+        .unwrap();
+    let target_at = cmake.find("MMAKE_ID kernel-pc-hpet").unwrap();
+    assert!(override_at < target_at);
+}
+
+#[test]
+fn invalid_module_config_override_cannot_emit_a_module() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/hpet");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("hpet_init.c"), "").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-pc-hpet modname=hpet modtype=resource \
+         conffile=$(SRCDIR)/rom/kernel/clocksource.conf \
+         confoverride=\"bad override.conf\" files=hpet_init\n",
+    )
+    .unwrap();
+    let parsed = parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(parsed.targets.is_empty());
+    assert!(parsed
+        .skipped_programs
+        .iter()
+        .any(|reason| reason.contains("confoverride") && reason.contains("not one path")));
+}
 
 fn root() -> std::path::PathBuf {
     crate::testing::root()

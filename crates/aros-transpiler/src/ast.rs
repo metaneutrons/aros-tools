@@ -85,6 +85,12 @@ pub struct TargetDefinition {
     /// link contract of the legacy module macro.
     #[serde(default)]
     pub always_cxx_link: bool,
+    /// `%build_prog(s) usestartup=no` opts out of the default startup.o.
+    #[serde(default)]
+    pub no_startup: bool,
+    /// `%build_prog(s) detach=yes` adds the native detached startup object.
+    #[serde(default)]
+    pub detach: bool,
     /// Objective-C source stems or paths from `objcfiles=`.
     #[serde(default)]
     pub objc_source_files: Vec<String>,
@@ -130,9 +136,16 @@ pub struct TargetDefinition {
     /// a declaration without `conffile=` means.
     #[serde(default)]
     pub config_file: Option<String>,
+    /// The declaration's `confoverride=` file, applied after `config_file`.
+    #[serde(default)]
+    pub config_override_file: Option<String>,
     /// Full-module normal/relative client archive composition.
     #[serde(default)]
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,
+    /// Consumer-side `rellib` requirements from the effective genmodule config.
+    /// These do not imply that this module produces a client archive.
+    #[serde(default)]
+    pub config_relative_libraries: Vec<String>,
     /// Explicit private archive directory from a proven `%build_linklib`
     /// `libdir=` expression. The parser records this only after resolving the
     /// path below the build tree. A raw `-l<name>` consumer may use this
@@ -312,6 +325,21 @@ pub struct ExternalCMakeDecl {
     pub public_include_dirs: Vec<String>,
     /// Fully selected, allowlisted upstream CMake options.
     pub options: Vec<String>,
+    /// Optional closed component build/install rather than upstream's default all.
+    #[serde(default)]
+    pub build_targets: Vec<String>,
+    /// Upstream install components needed by the selected static build.
+    #[serde(default)]
+    pub install_components: Vec<String>,
+    /// Static components form a single linker rescan group, not one archive.
+    #[serde(default)]
+    pub library_group: bool,
+    /// Host executables supplied by the verified cross-toolchain, never target ELF.
+    #[serde(default)]
+    pub host_tools: Vec<String>,
+    /// Validated declaration-specific target compile definitions.
+    #[serde(default)]
+    pub compile_defines: Vec<String>,
     /// Source-root-relative directory of the declaring mmakefile.
     pub dir_path: PathBuf,
 }

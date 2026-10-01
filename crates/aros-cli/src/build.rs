@@ -2,7 +2,7 @@
 
 use crate::{build_tools, toolchain};
 use console::{style, Emoji};
-use miette::Result;
+use miette::{IntoDiagnostic, Result, WrapErr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -273,6 +273,10 @@ pub async fn run(repo_root: &Path, options: &BuildOptions) -> Result<()> {
         "-DAROS_RUST_TOOLS_DIR={}",
         build_tools.bin_dir.display()
     ));
+    let media_cli = std::env::current_exe()
+        .into_diagnostic()
+        .wrap_err("cannot locate the current aros executable for media receipts")?;
+    configure.arg(format!("-DAROS_MEDIA_CLI_BIN={}", media_cli.display()));
     configure.arg(format!("-DAROS_TARGET_CPU={}", profile.arch));
     configure.arg(format!("-DAROS_TARGET_PLATFORM={}", profile.platform));
     configure.arg(format!("-DAROS_TARGET_PROFILE={}", profile.name));

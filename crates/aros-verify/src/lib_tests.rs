@@ -331,15 +331,15 @@ fn current_architecture_denominators_are_pinned() {
         .map(|declaration| declaration.mmake)
         .collect();
 
-    // The August 2026 upstream sync adds the LLVM runtimes umbrella and
-    // new Bluetooth, Raspberry Pi and driver declarations while replacing
-    // the split rtl8168/rtl8169 lanes with rtl816x.
-    assert_eq!(global.len(), 1218);
-    assert_eq!(ids(&x86, true).len(), 1093);
-    assert_eq!(ids(&arm, true).len(), 1089);
-    assert_eq!(ids(&aarch64, true).len(), 1089);
+    // The integration source restores the Mesa 26 target Gallivm declaration
+    // on top of the September snapshot. Build trees are excluded; these are
+    // source-owned IDs, independently of provisioning classification.
+    assert_eq!(global.len(), 1255);
+    assert_eq!(ids(&x86, true).len(), 1125);
+    assert_eq!(ids(&arm, true).len(), 1125);
+    assert_eq!(ids(&aarch64, true).len(), 1125);
     assert!(global.contains("test-library-dummytest_auto"));
-    assert!(!global.contains("mesa3d-linklib-galliumvm"));
+    assert!(global.contains("mesa3d-linklib-galliumvm"));
 
     let arm_removed: BTreeSet<String> = ids(&arm, false)
         .difference(&ids(&arm, true))
@@ -414,10 +414,11 @@ fn toolchain_provisioning_splits_the_target_obligations() {
         .map(|declaration| declaration.mmake.clone())
         .collect();
 
-    assert_eq!(global_target.len(), 1208);
-    assert_eq!(target_ids(&x86).len(), 1083);
-    assert_eq!(target_ids(&arm).len(), 1081);
-    assert_eq!(target_ids(&aarch64).len(), 1081);
+    assert_eq!(global_target.len(), 1245);
+    assert_eq!(target_ids(&x86).len(), 1115);
+    assert_eq!(target_ids(&arm).len(), 1117);
+    assert_eq!(target_ids(&aarch64).len(), 1117);
+    assert!(global_target.contains("mesa3d-linklib-galliumvm"));
     let common_provisioning = BTreeSet::from([
         "crosstools-compiler-rt".to_owned(),
         "crosstools-compiler-rt-release".to_owned(),
@@ -441,7 +442,7 @@ fn toolchain_provisioning_splits_the_target_obligations() {
     assert!(!global_target.contains("tools-crosstools-gcc-libatomic"));
     for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
         assert!(inventory.contains("test-library-dummytest_auto"));
-        assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
+        assert!(inventory.contains("mesa3d-linklib-galliumvm"));
         assert!(!inventory.contains("tools-crosstools-gcc-libatomic"));
     }
 }
@@ -494,6 +495,67 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
             cmake_lists,
         ));
     };
+    for (needle, replacement) in [
+        (
+            "$(PORTSDIR)/llvm/llvm-project/$(LLVM_PROJECT_ARCHBASE)",
+            "$(HOSTDIR)/llvm",
+        ),
+        (
+            "ifeq ($(TARGET_LLVM_RUNTIMES_STYLE),umbrella)",
+            "ifeq ($(TARGET_LLVM_RUNTIMES_STYLE),separate)",
+        ),
+        (
+            "$(LLVM_TARGET_PROJECT_SRCDIR)/compiler-rt",
+            "$(LLVM_TARGET_PROJECT_SRCDIR)/other",
+        ),
+        (
+            "$(LLVM_TARGET_PROJECT_SRCDIR)/runtimes",
+            "$(LLVM_TARGET_PROJECT_SRCDIR)/other",
+        ),
+        (
+            "COMPILER_RT_LINKLIB_SRCDIR   := $(COMPILER_RT_BUILDBASE)",
+            "COMPILER_RT_LINKLIB_SRCDIR   := $(HOSTDIR)/other",
+        ),
+        (
+            "LLVM_RUNTIMES_LINKLIB_SRCDIR := $(MONOTREE_BUILDBASE)/runtimes",
+            "LLVM_RUNTIMES_LINKLIB_SRCDIR := $(HOSTDIR)/other",
+        ),
+    ] {
+        assert!(
+            mmake.contains(needle),
+            "missing selector mutation anchor: {needle}"
+        );
+        assert_context_rejected(
+            &mmake.replace(needle, replacement),
+            &make_config,
+            cmake_lists,
+        );
+    }
+    for variable in [
+        "LLVM_TARGET_PROJECT_SRCDIR",
+        "COMPILER_RT_LINKLIB_SRCDIR",
+        "LLVM_RUNTIMES_LINKLIB_SRCDIR",
+    ] {
+        for assignment in [
+            format!("{variable} := /unexpected/reassignment"),
+            format!("{variable}=/unexpected/reassignment"),
+            format!("override {variable} := /unexpected/reassignment"),
+            format!("export {variable}=/unexpected/reassignment"),
+            format!("private {variable} += /unexpected/reassignment"),
+            format!("crosstools-compiler-rt: {variable} := /unexpected/reassignment"),
+            format!(
+                "crosstools-compiler-rt: private export {variable} ?= /unexpected/reassignment"
+            ),
+            format!("define {variable}\n/unexpected/reassignment\nendef"),
+            format!("undefine {variable}"),
+        ] {
+            assert_context_rejected(
+                &format!("{mmake}\n{assignment}\n"),
+                &make_config,
+                cmake_lists,
+            );
+        }
+    }
     assert_context_rejected(
         &mmake.replace(
             "LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin",
@@ -540,6 +602,46 @@ fn llvm_provisioning_contract_mutations_fail_closed() {
         llvm: true,
         gcc_libatomic: true,
     };
+    for (target, selector) in [
+        (
+            "crosstools-llvm-runtimes",
+            "$(LLVM_RUNTIMES_LINKLIB_SRCDIR)",
+        ),
+        ("crosstools-compiler-rt", "$(COMPILER_RT_LINKLIB_SRCDIR)"),
+        ("crosstools-compiler-rt32", "$(COMPILER_RT_LINKLIB_SRCDIR)"),
+    ] {
+        let declaration = declarations
+            .iter()
+            .find(|declaration| declaration.mmake == target)
+            .unwrap();
+        assert!(
+            is_toolchain_provisioning_declaration(declaration, context),
+            "{target}"
+        );
+        let mut mutated = declaration.clone();
+        mutated.arguments = mutated.arguments.replace(selector, "$(HOSTDIR)/unexpected");
+        assert!(
+            !is_toolchain_provisioning_declaration(&mutated, context),
+            "{target}"
+        );
+        let release_target = format!("{target}-release");
+        let release = declarations
+            .iter()
+            .find(|declaration| declaration.mmake == release_target)
+            .unwrap();
+        assert!(is_toolchain_provisioning_declaration(release, context));
+        let mut mutated_release = release.clone();
+        let original = if target == "crosstools-llvm-runtimes" {
+            "$(MONOTREE_BUILDBASE)/runtimes"
+        } else {
+            "$(COMPILER_RT_BUILDBASE)"
+        };
+        mutated_release.arguments = mutated_release.arguments.replace(original, selector);
+        assert!(!is_toolchain_provisioning_declaration(
+            &mutated_release,
+            context
+        ));
+    }
     for (needle, replacement) in [
         ("compiler=host", "compiler=target"),
         (
@@ -936,8 +1038,11 @@ fn a_declaration_without_a_name_is_skipped() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
 #[test]
 fn genmf_expansion_has_a_hard_process_group_deadline() {
+    use std::os::unix::fs::PermissionsExt;
+
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("source");
     let cache = directory.path().join("cache");
@@ -954,16 +1059,36 @@ fn genmf_expansion_has_a_hard_process_group_deadline() {
     .unwrap();
     fs::write(&mmake, "%build_prog mmake=test files=test\n").unwrap();
 
-    let result = expand_all(&root, &cache, true, Duration::from_millis(100));
+    // Keep interpreter identification independent of the actual generator
+    // deadline. The child deliberately inherits both output pipes: killing
+    // only the wrapper instead of its process group would retain them.
+    let python = root.join("fixture-python");
+    fs::write(
+        &python,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'Python fixture 1'; exit 0; fi\nprintf '%s\\n' started > \"${0}.started\"\n/bin/sleep 60 &\nwait\n",
+    )
+    .unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut request = genmf_cache::GenmfCacheRequest {
+        source_dir: root,
+        cache_dir: cache.clone(),
+        python: python.clone(),
+        timeout: Duration::from_secs(10),
+    };
+    let selection = genmf_cache::select(&request).unwrap();
+    let generation = selection.entries[0].generation.clone();
+    request.timeout = Duration::from_secs(1);
+    let result = genmf::expand_all_with_selection(&request, selection, true);
 
     assert!(result.expanded.is_empty());
     assert_eq!(result.failures.len(), 1);
     assert!(result.failures[0].timed_out);
-    assert_eq!(result.failures[0].timeout_ms, Some(100));
+    assert_eq!(result.failures[0].timeout_ms, Some(1000));
     assert!(result.failures[0]
         .message
-        .contains("timed out after 100 ms"));
-    assert!(!cache.join("rom%test%mmakefile.src.mk").exists());
+        .contains("timed out after 1000 ms"));
+    assert!(python.with_extension("started").is_file());
+    assert!(!cache.join("genmf/v1").join(generation).exists());
 }
 
 #[test]

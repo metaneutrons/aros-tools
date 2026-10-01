@@ -375,6 +375,25 @@ pub(crate) fn resolve_yes_argument(
         .map_err(|missing| format!("{key}={raw} references {}", missing.join(", ")))
 }
 
+pub(crate) fn resolve_no_argument(
+    args: &str,
+    key: &str,
+    scope: &VarScope,
+    dirs: &crate::dirs::DirVars,
+    line: usize,
+) -> std::result::Result<bool, String> {
+    let Some(raw) = macro_arg(args, key) else {
+        return Ok(false);
+    };
+    let local = |name: &str| scope.raw_at(name, line);
+    match dirs.expand_with(&raw, &local) {
+        Ok(value) if value == "no" => Ok(true),
+        Ok(value) if value == "yes" => Ok(false),
+        Ok(value) => Err(format!("{key}={raw} resolves to unsupported value {value}")),
+        Err(missing) => Err(format!("{key}={raw} references {}", missing.join(", "))),
+    }
+}
+
 pub(crate) fn resolve_module_suffix(
     args: &str,
     scope: &VarScope,

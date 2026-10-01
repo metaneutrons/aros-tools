@@ -69,7 +69,10 @@ def main() -> None:
 
     with args.contract.open("rb") as source_file:
         document = tomllib.load(source_file)
-    exact_keys(document, {"schema_version", "source", "producer"}, "document")
+    expected = {"schema_version", "source", "producer"}
+    if "integration" in document:
+        expected.add("integration")
+    exact_keys(document, expected, "document")
     if document.get("schema_version") != 1:
         fail("schema_version must be exactly 1")
 
@@ -79,6 +82,14 @@ def main() -> None:
     exact_keys(producer, {"repository", "commit", "workflow"}, "[producer]")
     source_repository = required_string(source, "repository")
     source_commit = required_string(source, "commit")
+    integration = document.get("integration", source)
+    if not isinstance(integration, dict):
+        fail("[integration] must be a table")
+    exact_keys(integration, {"repository", "commit"}, "[integration]")
+    integration_repository = required_string(integration, "repository")
+    integration_commit = required_string(integration, "commit")
+    if integration_repository != source_repository:
+        fail("integration and producer source repositories must agree")
     producer_repository = required_string(producer, "repository")
     producer_commit = required_string(producer, "commit")
     producer_workflow = required_string(producer, "workflow")
@@ -86,12 +97,14 @@ def main() -> None:
     for label, repository in (
         ("source.repository", source_repository),
         ("producer.repository", producer_repository),
+        ("integration.repository", integration_repository),
     ):
         if REPOSITORY.fullmatch(repository) is None:
             fail(f"{label} is not an owner/repository name: {repository}")
     for label, commit in (
         ("source.commit", source_commit),
         ("producer.commit", producer_commit),
+        ("integration.commit", integration_commit),
     ):
         if SHA1.fullmatch(commit) is None:
             fail(f"{label} is not a full lowercase Git commit: {commit}")
@@ -123,6 +136,7 @@ def main() -> None:
         "source-contract: valid "
         f"source={source_repository}@{source_commit} "
         f"producer={producer_repository}@{producer_commit}"
+        f" integration={integration_repository}@{integration_commit}"
     )
 
 

@@ -95,6 +95,13 @@ to make this check pass.
 performs it. A successful sync validates the candidate graphs, not a complete
 product build.
 
+:::caution[Mesa 26 and RISC-V]
+Graph validation checks every declared profile. A source manifest that requests
+Mesa 26 for `opensbi-riscv64` currently fails with `AR0115`: that capability is
+not supported. The checkout remains unchanged. Do not remove the profile or use
+`--no-transpile` to treat this as a qualified whole-source synchronization.
+:::
+
 ## When synchronization stops
 
 - `AR0113`: another process owns the repository lock. The lock's owner file

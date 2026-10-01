@@ -64,17 +64,63 @@ fn mesa26_egl_target_retains_the_full_upstream_core_and_local_backend() {
 }
 
 #[test]
-fn mesa26_gallivm_remains_retired_without_target_llvm() {
+fn mesa26_gallivm_and_llvmpipe_expose_active_llvm_order_edges_on_release_profiles() {
     let root = mesa26_source_root();
-    let source =
-        std::fs::read_to_string(root.join("workbench/libs/mesa/libgalliumvm/mmakefile.src"))
-            .expect("Gallivm source boundary");
-    assert!(source.contains("intentionally retired"));
-    assert!(source.contains("target LLVM runtime"));
-    assert!(!source.contains("%build_linklib"));
-    assert!(!source
-        .lines()
-        .any(|line| { line.trim_start().starts_with("#MM") && line.contains("galliumvm") }));
+    for (cpu, platform, cpu32, float_abi) in [
+        ("x86_64", "pc", "i386", ""),
+        ("arm", "raspi", "", "hard"),
+        ("aarch64", "raspi", "", ""),
+    ] {
+        let profile = context(cpu, platform, cpu32, float_abi);
+        let fetches = collect_mmakefile_fetches_with_context(
+            &root.join("workbench/libs/mesa/mmakefile.src"),
+            &root,
+            &profile,
+        )
+        .unwrap();
+        let dirs = DirVars::load(&root);
+        let gallivm = parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join("workbench/libs/mesa/libgalliumvm/mmakefile.src"),
+            &root,
+            &dirs,
+            &profile,
+            &fetches,
+        )
+        .unwrap();
+        assert!(gallivm.capability_errors.is_empty(), "{cpu}: {gallivm:#?}");
+        let gallivm_order = gallivm
+            .meta_rules
+            .iter()
+            .find(|rule| rule.name == "mesa3d-linklib-galliumvm")
+            .unwrap_or_else(|| panic!("{cpu}: missing Gallivm order edge: {gallivm:#?}"));
+        assert!(gallivm_order
+            .dependencies
+            .contains(&"workbench-libs-llvm".to_owned()));
+
+        let llvmpipe = parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join("workbench/libs/mesa/libllvmpipe/mmakefile.src"),
+            &root,
+            &dirs,
+            &profile,
+            &fetches,
+        )
+        .unwrap();
+        assert!(
+            llvmpipe.capability_errors.is_empty(),
+            "{cpu}: {llvmpipe:#?}"
+        );
+        let llvmpipe_order = llvmpipe
+            .meta_rules
+            .iter()
+            .find(|rule| rule.name == "mesa3d-linklib-llvmpipe")
+            .unwrap_or_else(|| panic!("{cpu}: missing llvmpipe order edge: {llvmpipe:#?}"));
+        assert!(llvmpipe_order
+            .dependencies
+            .contains(&"workbench-libs-llvm".to_owned()));
+        assert!(llvmpipe_order
+            .dependencies
+            .contains(&"mesa3d-linklib-galliumvm".to_owned()));
+    }
 }
 
 #[test]

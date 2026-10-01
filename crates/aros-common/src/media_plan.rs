@@ -352,11 +352,21 @@ fn join_destination(prefix: &str, relative: &str) -> String {
     }
 }
 
-fn valid_iso_media_path(value: &str) -> bool {
+/// Validate a Rock Ridge ISO path.
+///
+/// The path passes through xorriso's graft list and line-oriented inventory.
+/// The backend independently reads every planned file back, so charset or
+/// name conversion cannot go unnoticed.
+#[must_use]
+pub fn valid_iso_media_path(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/_+.-".contains(&byte))
+        && value.chars().all(|character| {
+            !character.is_control()
+                && !matches!(
+                    character,
+                    '\\' | ':' | '=' | '\'' | '"' | '\u{2028}' | '\u{2029}'
+                )
+        })
         && value
             .split('/')
             .all(|part| !part.is_empty() && part != "." && part != "..")
@@ -368,11 +378,32 @@ fn invalid(message: &str) -> MediaPlanError {
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_media_image, MediaExternalFile, MediaPlanFileOrigin};
+    use super::{plan_media_image, valid_iso_media_path, MediaExternalFile, MediaPlanFileOrigin};
     use crate::media_profile::{built_in_media_profiles, parse_media_profile};
     use crate::media_receipt::{MediaBuildFile, MediaBuildReceipt, MediaReceiptOrigin};
     use crate::sha256_bytes;
     use std::fs;
+
+    #[test]
+    fn iso_paths_accept_printable_source_names_but_reject_graft_and_listing_delimiters() {
+        assert!(valid_iso_media_path("SYS/Developer/Kitty Mascot.bmp"));
+        assert!(valid_iso_media_path("SYS/Developer/Ara±a.anim"));
+        for invalid in [
+            "",
+            "SYS//file",
+            "SYS/./file",
+            "SYS/../file",
+            "SYS/name=other",
+            "SYS/name'other",
+            "SYS/name\"other",
+            "SYS/name:other",
+            "SYS/name\\other",
+            "SYS/name\nother",
+            "SYS/name\u{2028}other",
+        ] {
+            assert!(!valid_iso_media_path(invalid), "accepted {invalid:?}");
+        }
+    }
 
     fn receipt(
         origin: MediaReceiptOrigin,

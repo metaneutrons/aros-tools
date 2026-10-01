@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+#[allow(
+    dead_code,
+    reason = "not every integration binary uses the current-source oracle"
+)]
 pub fn source_root() -> PathBuf {
     let configured = std::env::var_os("AROS_TEST_SOURCE_ROOT").unwrap_or_else(|| {
         panic!("AROS_TEST_SOURCE_ROOT must name the AROS checkout used by source-contract tests")
@@ -14,4 +18,13 @@ pub fn source_root() -> PathBuf {
         );
     }
     root
+}
+
+#[allow(dead_code)]
+pub fn mesa20_source_root() -> PathBuf {
+    let configured = std::env::var_os("AROS_TEST_MESA20_SOURCE_ROOT")
+        .expect("AROS_TEST_MESA20_SOURCE_ROOT must name the pinned Mesa 20 checkout");
+    PathBuf::from(configured)
+        .canonicalize()
+        .expect("AROS_TEST_MESA20_SOURCE_ROOT must resolve to a directory")
 }

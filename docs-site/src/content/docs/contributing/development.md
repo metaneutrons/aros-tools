@@ -57,12 +57,21 @@ From the tools repository:
 | `scripts/check-workspace.sh all` | Explicit complete gate: quality, docs and integration |
 | `scripts/check-workspace.sh` | Default iteration gate: quality + portable Rust; no product build |
 
-The exact-source gate requires a recursive checkout of the immutable revision in
+The exact-source gate requires a recursive checkout of the integration revision in
 [`contracts/aros-source-v1.toml`](https://github.com/metaneutrons/aros-tools/blob/main/contracts/aros-source-v1.toml).
-Pass it explicitly when running the integration checkpoint:
+Use its `[integration]` pin, or `[source]` for an older contract without that
+table. The `[source]`/`[producer]` pair records the qualified toolchain producer;
+it is not changed merely to advance development tests.
+
+Historical Mesa 20 regression tests also need a separate, clean recursive
+AROS-NX checkout at `cb6974f1c3de43c6f1168d69039af7c32e56153c`.
+Pass both checkouts explicitly; the Mesa 26 input is the current integration
+checkout, not the historical tree:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+AROS_TEST_MESA20_SOURCE_ROOT=/absolute/path/to/mesa20/AROS-NX \
+AROS_TEST_MESA26_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
   scripts/check-workspace.sh all
 ```
 
@@ -101,6 +110,45 @@ See [architecture](/aros-tools/reference/architecture/) for these boundaries.
 For a CMake-engine experiment, build the tools normally and pass
 `aros build --engine-dir /absolute/path/to/engine` explicitly.
 The default embedded engine is versioned with the tools.
+
+When changing the native engine and its helpers together, rebuild the CLI,
+transpiler and SDK header generator:
+
+```sh
+cargo build -p aros-genmodule -p aros-transpiler -p aros-cli
+```
+
+Building only `aros-cli` does not rebuild the standalone transpiler or header
+generator. For an existing build tree, keep its cached engine source path: the
+CLI refreshes that embedded engine in place. Do not switch `--engine-dir`
+on a configured tree.
+
+## Exercise the native PC llvmpipe path
+
+This development lane requires the reviewed Mesa 26/Gallivm source recipes,
+Target-LLVM 11 and CMake 3.24 or newer. It does not qualify ARM graphics.
+From the configured AROS checkout, using the newly built tools:
+
+```sh
+AROS_LLVMPIPE_RUNTIME_PROBE=1 aros build --preset pc-x86_64 \
+  --target boot-iso --jobs 12 --compiler-cache off
+aros test --preset pc-x86_64 --iso build/pc-x86_64/aros-x86_64-pc.iso \
+  --require-llvmpipe-jit --timeout 120 --memory 1024
+```
+
+The test ISO contains a tools-owned shader probe and an instrumented HIDD.
+Its startup is staged into the image, not written into the AROS sources.
+Success requires the expected renderer, a named non-null MCJIT shader address
+and the correct rendered pixel in the same guest run, with no classified fault.
+A guest supervisor supplies a 1 MiB workload stack and must confirm successful
+return and ELF unloading before the CLI accepts the proof.
+The CLI stops QEMU after complete proof or a definitive failure; deadline
+expiry fails this strict test.
+The retained evidence includes the image hash and complete logs.
+Disable the cached probe option with `AROS_LLVMPIPE_RUNTIME_PROBE=0` when
+building an ordinary image. See the
+[native llvmpipe contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/native-llvmpipe.md)
+for the producer and evidence boundaries.
 
 ## Submit a focused change
 

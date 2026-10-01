@@ -72,6 +72,20 @@ pub fn root() -> PathBuf {
     root
 }
 
+/// Historical Mesa 20 oracle, never substituted for the current source tree.
+///
+/// # Panics
+///
+/// Panics if the regression checkout is unset or cannot be canonicalized.
+#[must_use]
+pub fn mesa20_root() -> PathBuf {
+    let configured = std::env::var_os("AROS_TEST_MESA20_SOURCE_ROOT")
+        .expect("AROS_TEST_MESA20_SOURCE_ROOT must name the pinned Mesa 20 checkout");
+    PathBuf::from(configured)
+        .canonicalize()
+        .expect("AROS_TEST_MESA20_SOURCE_ROOT must resolve to a directory")
+}
+
 /// A concrete target profile, the way CMake derives one for a preset.
 #[must_use]
 pub fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

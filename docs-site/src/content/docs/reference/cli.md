@@ -152,6 +152,7 @@ the safe entry stages and explains the required checkout/cache separation.
 | Command | Effect |
 | --- | --- |
 | `aros image build` | Plan a reviewed FAT32 or BIOS ISO profile; compose into a new artifact directory with `--apply` |
+| `aros image receipt` | Measure CMake-produced files and complete trees against a clean source checkout and installed toolchain |
 | `aros image inspect` | Read back a composed image from `--artifact DIR` and show measured facts |
 | `aros image verify` | Check the artifact inventory, SHA256SUMS, image filesystem, embedded files and boot metadata |
 
@@ -171,11 +172,13 @@ neither is an authenticated attestation or a successful board boot. No image
 command writes a device. ISO composition uses `xorriso` and requires it on the
 host. The `pc-bios-iso` profile requires a bound receipt for the complete SYS
 tree, including empty directories, plus explicit bootstrap and GRUB inputs.
-The composer checks capacity, file placement and the El Torito entry; it does
-not claim a fresh PC build graph or guest boot. Those are BM3 gates. The
-existing CMake `boot-iso` target does not yet emit the v3 tree receipt; native
-producer integration belongs to BM3. `aros board
-sd image` retains its existing v1 bundle behavior.
+The composer checks capacity, file placement and the El Torito entry; image
+verification alone does not prove a guest boot. For the native PC path,
+`aros build --preset pc-x86_64 --target boot-iso` builds the SYS/GRUB dependency
+graph, emits a v3 tree receipt and uses this composer. See the
+[AROS-NX workflow](/aros-tools/workflows/aros-nx/) for prerequisites and outputs.
+Fresh-build and guest-readiness qualification remain separate BM3 gates.
+`aros board sd image` retains its existing v1 bundle behavior.
 
 ## Source and repository
 
@@ -577,6 +580,16 @@ for ASM, so assembly remains a direct deterministic invocation.
 `--evidence DIR` selects the root for a new private evidence directory.
 The implementation runs `qemu-system-x86_64` and expects PC bootstrap/kernel
 paths. A different preset does not select an ARM or RISC-V emulator.
+
+`--iso FILE` instead boots an existing PC x86-64 ISO through BIOS/GRUB under
+QEMU TCG. It does not build the image and cannot be combined with `--packages`
+or `--module`. The evidence records its canonical path and SHA-256.
+`--require-llvmpipe-jit` requires `--iso` and the opt-in development probe:
+renderer identity, a named non-null LLVM MCJIT shader address, passing shader
+pixel readback, successful probe return and ELF unloading, and no classified
+guest fault. The CLI stops QEMU after proof
+or a definitive failure; deadline expiry fails the strict test. See the
+[native PC graphics workflow](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 
 Golden commands take repeatable `--preset NAME` options. Run them from the
 AROS repository root after configuring the selected builds; they consume

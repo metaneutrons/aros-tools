@@ -10,7 +10,7 @@ const NOUVEAU_DIR: &str = "workbench/hidds/nouveau";
 const MESA_SOURCE_PREFIX: &str = "${AROS_PORTS_DIR}/mesa/mesa-20.0.8/src/gallium";
 
 fn source_root() -> PathBuf {
-    common::source_root()
+    common::mesa20_source_root()
 }
 
 fn target_context(cpu: &str, platform: &str, float_abi: &str) -> TargetContext {

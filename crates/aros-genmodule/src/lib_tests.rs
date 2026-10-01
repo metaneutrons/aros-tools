@@ -6,7 +6,82 @@ use super::*;
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn config_with_options(
+        root: &Path,
+        module_type: &str,
+        options: &str,
+        resident_pri: Option<i32>,
+    ) -> ConfModule {
+        let config = root.join("probe.conf");
+        let mut contents = String::from("##begin config\n");
+        if !options.is_empty() {
+            let _ = writeln!(contents, "options {options}");
+        }
+        if let Some(priority) = resident_pri {
+            let _ = writeln!(contents, "residentpri {priority}");
+        }
+        if module_type == "handler" {
+            contents.push_str("handler_func ProbeHandler\n");
+        }
+        contents.push_str("##end config\n");
+        fs::write(&config, contents).expect("write genmodule config");
+
+        let mut module = parse_conf_variant(&config, root, None)
+            .expect("read genmodule config")
+            .expect("parse genmodule config");
+        module.mod_type = module_type.to_owned();
+        module
+    }
+
+    fn reference_genmodule() -> Option<std::path::PathBuf> {
+        if let Some(path) = std::env::var_os("AROS_HOST_GENMODULE") {
+            return Some(path.into());
+        }
+        std::env::var_os("AROS_TEST_SOURCE_ROOT")
+            .map(|root| std::path::PathBuf::from(root).join("build/pc-x86_64/hosttools/genmodule"))
+            .filter(|path| path.is_file())
+    }
+
+    fn reference_resident_flags(
+        genmodule: &Path,
+        config: &Path,
+        output_root: &Path,
+        module_name: &str,
+        module_type: &str,
+    ) -> std::io::Result<String> {
+        fs::create_dir_all(output_root)?;
+        let output = Command::new(genmodule)
+            .arg("-c")
+            .arg(config)
+            .arg("-d")
+            .arg(output_root)
+            .args(["writelibdefs", module_name, module_type])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "reference genmodule failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let libdefs = fs::read_to_string(output_root.join(format!("{module_name}_libdefs.h")))?;
+        libdefs
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("#define RESIDENTFLAGS")
+                    .map(str::trim)
+                    .map(str::to_owned)
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "reference libdefs omitted RESIDENTFLAGS",
+                )
+            })
+    }
 
     #[test]
     fn generated_output_is_written_only_when_its_bytes_change() {
@@ -93,6 +168,177 @@ mod tests {
         assert_eq!(functions_count(&module("library", 0, "")), 4);
         assert_eq!(functions_count(&module("device", 0, "")), 6);
         assert_eq!(functions_count(&module("resource", 0, "")), 0);
+    }
+
+    #[test]
+    fn resident_autoinit_follows_reference_defaults_not_client_autoinit() {
+        let directory = tempfile::tempdir().expect("create test directory");
+        let cases = [
+            ("library", "", None, "RTF_COLDSTART|RTF_AUTOINIT"),
+            ("library", "noautoinit", None, "RTF_COLDSTART|RTF_AUTOINIT"),
+            ("library", "autoinit", None, "RTF_COLDSTART|RTF_AUTOINIT"),
+            ("library", "selfinit", None, "RTF_COLDSTART"),
+            ("library", "noinittable", None, "RTF_COLDSTART|RTF_AUTOINIT"),
+            ("resource", "", None, "RTF_COLDSTART"),
+            (
+                "resource",
+                "resautoinit",
+                None,
+                "RTF_COLDSTART|RTF_AUTOINIT",
+            ),
+            ("handler", "", None, "RTF_COLDSTART"),
+            ("handler", "resautoinit", None, "RTF_COLDSTART|RTF_AUTOINIT"),
+            ("library", "", Some(105), "RTF_SINGLETASK|RTF_AUTOINIT"),
+        ];
+
+        for (index, (module_type, options, resident_pri, expected)) in cases.iter().enumerate() {
+            let root = directory.path().join(index.to_string());
+            fs::create_dir_all(&root).expect("create case directory");
+            let module = config_with_options(&root, module_type, options, *resident_pri);
+            assert_eq!(
+                resident_flags(&module),
+                *expected,
+                "{module_type}: {options}"
+            );
+            assert_eq!(
+                module.options.contains(ConfModuleOptions::NO_INIT_TABLE),
+                *options == "noinittable",
+                "noinittable option tracking"
+            );
+        }
+    }
+
+    #[test]
+    fn contradictory_autoinit_options_fail_closed() {
+        let directory = tempfile::tempdir().expect("create test directory");
+        for (index, options) in ["resautoinit,selfinit", "selfinit,resautoinit"]
+            .into_iter()
+            .enumerate()
+        {
+            let root = directory.path().join(index.to_string());
+            fs::create_dir_all(&root).expect("create case directory");
+            let config = root.join("probe.conf");
+            fs::write(
+                &config,
+                format!("##begin config\noptions {options}\n##end config\n"),
+            )
+            .expect("write contradictory options");
+            let error = parse_conf_variant(&config, &root, None)
+                .expect_err("incompatible Resident options must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+
+        let config = directory.path().join("client-conflict.conf");
+        fs::write(
+            &config,
+            "##begin config\noptions autoinit,noautoinit\n##end config\n",
+        )
+        .expect("write contradictory client options");
+        let error = parse_conf_variant(&config, directory.path(), None)
+            .expect_err("incompatible client autoinit options must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn gl_library_fixture_defaults_resident_autoinit() {
+        let directory = tempfile::tempdir().expect("create test directory");
+        let config = directory.path().join("gl.conf");
+        fs::write(
+            &config,
+            "##begin config\nversion 20.1\nlibbase GLBase\noptions rellinklib\n##end config\n",
+        )
+        .expect("write portable GL config fixture");
+        let mut module = parse_conf_variant(&config, directory.path(), None)
+            .expect("read portable GL config")
+            .expect("parse portable GL config");
+        module.mod_type = "library".to_owned();
+        assert_eq!(resident_flags(&module), "RTF_COLDSTART|RTF_AUTOINIT");
+    }
+
+    #[test]
+    fn real_gl_config_uses_library_resident_autoinit_default() {
+        let Some(source_root) = std::env::var_os("AROS_TEST_SOURCE_ROOT") else {
+            eprintln!("skipping real GL config check: no source tree configured");
+            return;
+        };
+        let source_root = std::path::PathBuf::from(source_root);
+        let config = source_root.join("workbench/libs/gl/gl.conf");
+        assert!(
+            config.is_file(),
+            "real GL config not found: {}",
+            config.display()
+        );
+        let mut module = parse_conf_variant(&config, &source_root, None)
+            .expect("read real GL config")
+            .expect("parse real GL config");
+        module.mod_type = "library".to_owned();
+        assert_eq!(resident_flags(&module), "RTF_COLDSTART|RTF_AUTOINIT");
+    }
+
+    #[test]
+    fn resident_flags_match_reference_genmodule_for_real_gl_and_option_probes() {
+        let Some(genmodule) = reference_genmodule() else {
+            eprintln!("skipping reference genmodule comparison: no host tool configured");
+            return;
+        };
+        assert!(
+            genmodule.is_file(),
+            "configured reference genmodule does not exist: {}",
+            genmodule.display()
+        );
+        let output_root = tempfile::tempdir().expect("create reference output root");
+        let cases = [
+            ("library", "", None),
+            ("library", "noautoinit", None),
+            ("library", "selfinit", None),
+            ("library", "noinittable", None),
+            ("resource", "", None),
+            ("handler", "", None),
+            ("resource", "resautoinit", None),
+            ("handler", "resautoinit", None),
+            ("library", "", Some(105)),
+        ];
+        for (index, (module_type, options, resident_pri)) in cases.iter().enumerate() {
+            let root = output_root.path().join(format!("fixture-{index}"));
+            fs::create_dir_all(&root).expect("create reference case directory");
+            let module = config_with_options(&root, module_type, options, *resident_pri);
+            let config = root.join("probe.conf");
+            let expected = resident_flags(&module);
+            let output = reference_resident_flags(
+                &genmodule,
+                &config,
+                &root.join("generated"),
+                "probe",
+                module_type,
+            )
+            .expect("reference genmodule should produce libdefs");
+            assert_eq!(expected, output, "{module_type}: {options}");
+        }
+
+        if let Some(source_root) = std::env::var_os("AROS_TEST_SOURCE_ROOT") {
+            let source_root = std::path::PathBuf::from(source_root);
+            let config = source_root.join("workbench/libs/gl/gl.conf");
+            assert!(
+                config.is_file(),
+                "real GL config not found: {}",
+                config.display()
+            );
+            let mut module = parse_conf_variant(&config, &source_root, None)
+                .expect("read real GL config")
+                .expect("parse real GL config");
+            module.mod_type = "library".to_owned();
+            let expected = resident_flags(&module);
+            let output = reference_resident_flags(
+                &genmodule,
+                &config,
+                &output_root.path().join("real-gl"),
+                "gl",
+                "library",
+            )
+            .expect("reference genmodule should produce real GL libdefs");
+            assert_eq!(expected, output, "real workbench/libs/gl/gl.conf");
+            assert_eq!(expected, "RTF_COLDSTART|RTF_AUTOINIT");
+        }
     }
 
     #[test]

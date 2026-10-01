@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DefineHeaderBuild NONE)
+project(DefineHeaderBuild C)
 # This fixture stubs BootstrapSDK; its directory has to come first.
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")
 

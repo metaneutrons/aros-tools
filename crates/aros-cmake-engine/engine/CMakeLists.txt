@@ -381,6 +381,15 @@ include("${AROS_CMAKE_ENGINE_DIR}/StandaloneLink.cmake")
 include("${AROS_CMAKE_ENGINE_DIR}/HostGeneratedHeaders.cmake")
 include("${GENERATED_TARGETS_CMAKE}")
 
+# The classic demos-images-setup rule lives in a hand-written mmakefile rather
+# than an mmakefile.src declaration. Bind its exact generated headers to the
+# consumer before Ninja is allowed to compile demowin.c.
+include("${AROS_CMAKE_ENGINE_DIR}/DemosImages.cmake")
+aros_add_demos_images()
+include("${AROS_CMAKE_ENGINE_DIR}/Mesa26Runtime.cmake")
+aros_configure_mesa26_runtime()
+include("${AROS_CMAKE_ENGINE_DIR}/RuntimeProbes.cmake")
+
 # Compiler depfiles cannot express the producer of a header which was absent
 # when compilation started. Once the complete generated graph exists, attach
 # ordinary source consumers to the %copy_includes owners they reference.
@@ -418,6 +427,7 @@ aros_report_host_header_gaps()
 if(AROS_CROSS_TOOLCHAIN_ROOT)
     aros_bind_cxx_startup_target("linklibs-startup")
 endif()
+aros_bind_c_startup_target("linklibs-startup")
 
 # The universal SDK deliberately exposes hostlib.resource's public API even
 # when the selected runtime is not a hosted one. `rom/mmakefile.src` puts this

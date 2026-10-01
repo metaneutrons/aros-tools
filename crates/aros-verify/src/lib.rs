@@ -394,7 +394,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "crosstools-llvm-runtimes",
-        "mmake=crosstools-llvm-runtimes package=runtimes srcdir=$(MONOTREE_BUILDBASE)/runtimes prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_RUNTIMES_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+        "mmake=crosstools-llvm-runtimes package=runtimes srcdir=$(LLVM_RUNTIMES_LINKLIB_SRCDIR) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_RUNTIMES_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
         "crosstools-llvm-runtimes-release",
@@ -402,7 +402,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "crosstools-compiler-rt",
-        "mmake=crosstools-compiler-rt package=compiler-rt srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+        "mmake=crosstools-compiler-rt package=compiler-rt srcdir=$(COMPILER_RT_LINKLIB_SRCDIR) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
         "crosstools-compiler-rt-release",
@@ -410,7 +410,7 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "crosstools-compiler-rt32",
-        "mmake=crosstools-compiler-rt32 package=compiler-rt32 srcdir=$(COMPILER_RT_BUILDBASE) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no",
+        "mmake=crosstools-compiler-rt32 package=compiler-rt32 srcdir=$(COMPILER_RT_LINKLIB_SRCDIR) prefix=\"$(CROSSTOOLSDIR)\" extraoptions=\"$(LLVM_COMPILER_RT32_CMAKEOPTIONS)\" compiler=host usecppflags=no",
     ),
     (
         "crosstools-compiler-rt32-release",
@@ -426,6 +426,36 @@ const LLVM_PROVISIONING_DECLARATIONS: &[(&str, &str)] = &[
 struct ToolchainProvisioningContext {
     llvm: bool,
     gcc_libatomic: bool,
+}
+
+// Upstream routes LLVM 23 umbrella runtimes through the target source cache,
+// but still installs these host-driven builds into the compiler prefix. Check
+// both branches and reject later reassignments before exempting their targets.
+const LLVM_RUNTIME_SOURCE_SELECTORS: &str = concat!(
+    "LLVM_TARGET_PROJECT_SRCDIR := $(PORTSDIR)/llvm/llvm-project/$(LLVM_PROJECT_ARCHBASE)\n",
+    "ifeq ($(TARGET_LLVM_RUNTIMES_STYLE),umbrella)\n",
+    "COMPILER_RT_LINKLIB_SRCDIR := $(LLVM_TARGET_PROJECT_SRCDIR)/compiler-rt\n",
+    "LLVM_RUNTIMES_LINKLIB_SRCDIR := $(LLVM_TARGET_PROJECT_SRCDIR)/runtimes\n",
+    "else\n",
+    "COMPILER_RT_LINKLIB_SRCDIR := $(COMPILER_RT_BUILDBASE)\n",
+    "LLVM_RUNTIMES_LINKLIB_SRCDIR := $(MONOTREE_BUILDBASE)/runtimes\n",
+    "endif",
+);
+
+fn llvm_runtime_source_selectors_match(semantics: &str) -> bool {
+    semantics.contains(LLVM_RUNTIME_SOURCE_SELECTORS)
+        && [
+            ("LLVM_TARGET_PROJECT_SRCDIR", 1),
+            ("COMPILER_RT_LINKLIB_SRCDIR", 2),
+            ("LLVM_RUNTIMES_LINKLIB_SRCDIR", 2),
+        ]
+        .into_iter()
+        .all(|(variable, count)| {
+            let assignments = Regex::new(&format!(
+                r"(?m)^(?:[^=\n]+:[ \t]+)?(?:(?:override|export|private)[ \t]+)*(?:(?:define|undefine)[ \t]+)?{variable}\b[ \t]*(?:[:?!+]*=|$)"
+            )).unwrap();
+            assignments.find_iter(semantics).count() == count
+        })
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -503,6 +533,7 @@ fn llvm_provisioning_context_matches_sources(
     let cmake_lines: BTreeSet<&str> = cmake_preamble.lines().collect();
 
     llvm_lines.contains("LLVM_BUILD_BINDIR:=$(CROSSTOOLSDIR)/bin")
+        && llvm_runtime_source_selectors_match(&llvm_semantics)
         && llvm_lines.contains("AROS_TOOLCHAIN_DEFAULT_SYSROOT ?= $(AROS_DEVELOPER)")
         && crosstools_placeholders == ["CROSSTOOLSDIR := @AROS_CROSSTOOLSDIR@"]
         && !cmake_lists.contains("CROSSTOOLSDIR")

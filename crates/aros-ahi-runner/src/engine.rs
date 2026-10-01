@@ -15,13 +15,12 @@ use aros_common::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::contract::{Contract, Mode};
+use crate::contract::{Contract, Mode, DEPENDENCY_ALIASES};
 use crate::installation;
 use crate::observability::{LogLevel, Logger};
 use crate::{AhiFailure, AhiResult};
 
 const SCRIPT_NAMES: &[&str] = &["configure", "config.guess", "config.sub", "install-sh"];
-const DEPENDENCY_ALIASES: &[&str] = &["libamiga.a", "libm.a", "libmui.a"];
 
 /// Execute one already parsed and filesystem-validated AHI contract.
 ///

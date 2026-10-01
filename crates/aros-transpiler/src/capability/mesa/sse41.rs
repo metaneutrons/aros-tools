@@ -317,15 +317,15 @@ mod tests {
     use crate::parser::{
         collect_mmakefile_fetches_with_context, parse_mmakefile_with_dirs_and_context_and_fetches,
     };
-    use crate::testing::{dirs, root, target_context, TempTree};
-    use aros_common::read_source;
+    use crate::testing::{dirs, root, target_context};
     use std::path::Path;
 
     #[test]
-    fn mesa_sse41_capability_rejects_recipe_target_fetch_and_profile_drift() {
+    fn legacy_mesa_sse41_rejects_current_dual_version_recipe() {
         let root = root();
         let relative_dir = Path::new("workbench/libs/mesa/libmesa");
-        let profile = target_context("x86_64", "pc", "");
+        let mut profile = target_context("x86_64", "pc", "");
+        profile.mesa_version = Some("20.0.8".to_owned());
         let central_fetches = collect_mmakefile_fetches_with_context(
             &root.join("workbench/libs/mesa/mmakefile.src"),
             &root,
@@ -340,127 +340,22 @@ mod tests {
             &central_fetches,
         )
         .unwrap();
-        let content = read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
-        let validate = |content: &str,
-                        targets: &[crate::ast::TargetDefinition],
-                        fetches: &[crate::fetch::FetchDecl],
-                        profile: &TargetContext| {
-            validate(
-                &root,
-                relative_dir,
-                Some(profile),
-                content,
-                targets,
-                fetches,
-            )
-            .unwrap_err()
-        };
-
-        let changed_content = content.replace(
-            "TARGET_ISA_CFLAGS += -msse4.1",
-            "TARGET_ISA_CFLAGS += -msse4.2",
-        );
-        assert!(validate(
-            &changed_content,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
-
-        let changed_local_context = content.replace(
-            "-iquote $(top_builddir)/$(CUR_MESADIR)/main",
-            "-iquote $(top_builddir)/$(CUR_MESADIR)/unreviewed-main",
-        );
-        assert!(validate(
-            &changed_local_context,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
-
-        let changed_manifest_include = content.replace(
-            "include $(SRCDIR)/$(CURDIR)/mesa-sse41-20.0.8.sources",
-            "include $(SRCDIR)/$(CURDIR)/mesa-sse41-unreviewed.sources",
-        );
-        assert!(validate(
-            &changed_manifest_include,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
-
-        let changed_intervening_context = content.replace(
-            "MESA3D_GALLIUM_SSE41_SOURCES :=",
-            "USER_CFLAGS += -funreviewed\n\nMESA3D_GALLIUM_SSE41_SOURCES :=",
-        );
-        assert!(validate(
-            &changed_intervening_context,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("unsupported upstream recipe drift"));
-
-        let disabled_fetch_edge = content.replace(
-            "#MM mesa3d-linklib-mesa-sse41 : mesa3d-fetch",
-            "#MM- mesa3d-linklib-mesa-sse41 : mesa3d-fetch",
-        );
-        assert!(validate(
-            &disabled_fetch_edge,
-            &parsed.targets,
-            &central_fetches,
-            &profile
-        )
-        .contains("fetch edge differs from the supported shape"));
-
-        let mut changed_targets = parsed.targets.clone();
-        let sse41 = changed_targets
-            .iter_mut()
-            .find(|target| target.mmake_name == MMAKE)
-            .unwrap();
-        sse41.source_files.pop();
-        assert!(
-            validate(&content, &changed_targets, &central_fetches, &profile)
-                .contains("source, empty-archive, flag, include or output contract")
-        );
-
-        let mut changed_fetches = central_fetches.clone();
-        changed_fetches[0].patches = "mesa-20.0.8-unreviewed.diff:mesa-20.0.8:-p1".to_owned();
-        assert!(
-            validate(&content, &parsed.targets, &changed_fetches, &profile)
-                .contains("fetch declaration differs")
-        );
-
-        let mut changed_profile = profile;
-        changed_profile.toolchain = Some("gnu".to_owned());
-        assert!(validate(
+        let content =
+            aros_common::read_source(&root.join(relative_dir).join("mmakefile.src")).unwrap();
+        // The current AROS-NX recipe selects Mesa 26 by default and contains
+        // dual-version logic. Never silently admit it under the Mesa 20 pin.
+        let error = validate(
+            &root,
+            relative_dir,
+            Some(&profile),
             &content,
             &parsed.targets,
             &central_fetches,
-            &changed_profile
         )
-        .contains("does not support target profile"));
-
-        let fixture_tree = TempTree::new();
-        for relative in [
-            "workbench/libs/mesa/mesa.cfg",
-            "workbench/libs/mesa/mesa-20.0.8-aros.diff",
-            "workbench/libs/mesa/libmesa/mesa-sse41-20.0.8.sources",
-        ] {
-            let destination = fixture_tree.0.join(relative);
-            fs::create_dir_all(destination.parent().unwrap()).unwrap();
-            fs::copy(root.join(relative), destination).unwrap();
-        }
-        assert!(validate_static_contract(&fixture_tree.0, &content).is_ok());
-        let config_path = fixture_tree.0.join("workbench/libs/mesa/mesa.cfg");
-        let changed_config = read_source(&config_path).unwrap().replace(
-            "aros_mesadir := workbench/libs/mesa",
-            "aros_mesadir := workbench/libs/mesa-unreviewed",
+        .unwrap_err();
+        assert!(
+            error.contains("unsupported upstream recipe drift"),
+            "{error}"
         );
-        fs::write(config_path, changed_config).unwrap();
-        assert!(validate_static_contract(&fixture_tree.0, &content).is_err());
     }
 }
