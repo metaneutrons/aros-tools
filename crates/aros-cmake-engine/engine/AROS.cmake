@@ -3027,6 +3027,24 @@ function(aros_build_external_cmake)
         endif()
     endif()
 
+    # Nested CMake depfiles are not visible to the parent Ninja graph. Check
+    # the complete staged public SDK at build time (after generated headers),
+    # including additions/deletions, and change this shared byproduct only
+    # when its contents change. Reconfiguring alone must not rebuild LLVM.
+    set(_sdk_contract "${CMAKE_BINARY_DIR}/gen/external-cmake/sdk.contract")
+    if(NOT TARGET aros-external-sdk-contract)
+        add_custom_target(aros-external-sdk-contract
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSDK_ROOT=${AROS_SDK_INCLUDE_DIR}"
+                "-DGEN_ROOT=${AROS_GENINC_DIR}"
+                "-DOUTPUT=${_sdk_contract}"
+                -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ExternalSdkContract.cmake"
+            BYPRODUCTS "${_sdk_contract}"
+            COMMENT "Checking external producer SDK contract"
+            VERBATIM)
+        set_property(TARGET aros-external-sdk-contract PROPERTY
+            AROS_EXTERNAL_SDK_CHECK TRUE)
+    endif()
     set(_stamp "${_binary}/.aros-${EC_MMAKE_ID}-installed")
     set(_build_command "${CMAKE_COMMAND}" --build "${_binary}")
     set(_install_commands "")
@@ -3056,13 +3074,18 @@ function(aros_build_external_cmake)
             ${EC_OPTIONS}
             ${_forced_options}
         COMMAND ${_build_command}
+        # CMake's ordinary install freshness check compares size/timestamps,
+        # not bytes. A fast equal-sized ABI rebuild can otherwise leave the
+        # old installed archive in place. Remove only declared build products
+        # after a successful build, before installing their replacements.
+        COMMAND "${CMAKE_COMMAND}" -E rm -f ${_products}
         ${_install_commands}
         COMMAND "${CMAKE_COMMAND}"
             "-DMANIFEST=${_products_manifest}"
             -P "${_output_verifier}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
         DEPENDS "${_fetch_stamp}" "${_output_verifier}"
-            "${_products_manifest}" ${_host_inputs}
+            "${_products_manifest}" "${_sdk_contract}" ${_host_inputs}
         COMMENT "Building external CMake target ${EC_MMAKE_ID}"
         VERBATIM
         COMMAND_EXPAND_LISTS)
@@ -3727,8 +3750,9 @@ function(_aros_attach_genmodule_public_includes)
         endif()
         get_target_property(_type "${_target}" TYPE)
         get_target_property(_external_interface "${_target}" AROS_EXTERNAL_INTERFACE_TARGET)
+        get_target_property(_sdk_check "${_target}" AROS_EXTERNAL_SDK_CHECK)
         if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$" OR
-           _external_interface)
+           _external_interface OR _sdk_check)
             add_dependencies("${_target}" aros-genmodule-public-includes)
         endif()
     endforeach()
@@ -3865,6 +3889,18 @@ function(_aros_generate_module_support out_prefix)
         list(APPEND _opts -s "${GM_MODSUFFIX}")
     endif()
 
+    set(_manifest_override_args "")
+    if(_override)
+        list(APPEND _manifest_override_args CONFIG_OVERRIDE "${_override}")
+    endif()
+    aros_genmodule_writefiles_manifest(_manifest
+        CONFIG "${_conf}"
+        ${_manifest_override_args}
+        MODULE "${GM_TARGET}"
+        MODTYPE "${GM_MODTYPE}"
+        GEN_DIR "${_gen_dir}"
+        STUB_DIR "${_stub_dir}")
+
     set(_include_rel
         "clib/${GM_TARGET}_protos.h"
         "inline/${GM_TARGET}.h"
@@ -3908,7 +3944,7 @@ function(_aros_generate_module_support out_prefix)
     # scan; publishing 265 more modules into the same three roots would put
     # same-named headers into a race whose winner is parse order.
     set(_includes_target "")
-    if(NOT GM_SOURCES_ONLY)
+    if(NOT GM_SOURCES_ONLY AND _manifest_HAS_INCLUDES)
         # BootstrapSDK's broad configure-time scan may just have written one of
         # these paths from a same-named, non-ABI config.  Remove only the outputs
         # this exact declaration owns; Ninja will now require the rule below and
@@ -3928,6 +3964,13 @@ function(_aros_generate_module_support out_prefix)
         add_custom_target("${_includes_target}" DEPENDS ${_published_headers})
     else()
         set(_published_headers "")
+        if(NOT GM_SOURCES_ONLY)
+            # MetaMake still exposes its includes phony for noincludes
+            # libraries. Their getlibbase archive remains a real producer;
+            # only headers and FD are deliberately absent.
+            set(_includes_target "${GM_MMAKE_ID}-includes-generated")
+            add_custom_target("${_includes_target}")
+        endif()
     endif()
 
     set(_libdefs "${_gen_dir}/${GM_TARGET}_libdefs.h")
@@ -3966,12 +4009,6 @@ function(_aros_generate_module_support out_prefix)
     set(_start "${_gen_dir}/${GM_TARGET}_start.c")
     set(_end "${_gen_dir}/${GM_TARGET}_end.c")
     set(_entrypoints "${_gen_dir}/${GM_TARGET}${GM_MODTYPE}.entrypoints")
-    aros_genmodule_writefiles_manifest(_manifest
-        CONFIG "${_conf}"
-        MODULE "${GM_TARGET}"
-        MODTYPE "${GM_MODTYPE}"
-        GEN_DIR "${_gen_dir}"
-        STUB_DIR "${_stub_dir}")
     set(_normal_linklib_sources
         ${_manifest_NORMAL_STUBS}
         ${_manifest_NORMAL_AUTOINIT}
@@ -4023,7 +4060,7 @@ function(_aros_generate_module_support out_prefix)
             endif()
         endforeach()
     endif()
-    if(GM_ABI AND _has_exported_functions)
+    if(GM_ABI AND _has_exported_functions AND _manifest_HAS_INCLUDES)
         set(_private_fd "${_fd_dir}/${GM_TARGET}_lib.fd")
         set(_fd "${AROS_DEVELOPER_FD_DIR}/${GM_TARGET}_lib.fd")
         file(REMOVE "${_fd}")
@@ -4825,7 +4862,7 @@ function(aros_add_library)
         endif()
         _aros_module_install_dir(_install_dir
             "${_default_install_dir}" "${ARG_INSTALL_DIR}")
-        if(_has_genmodule)
+        if(_has_genmodule OR _scaffold_GENMODFILES_TARGET)
             set(_module_base_name "${ARG_TARGET}")
         else()
             set(_module_base_name "${ARG_MMAKE_ID}")
@@ -6356,16 +6393,33 @@ function(aros_add_module_simple)
     # shell whose implementation lives in the Mesa port.
     _aros_module_install_dir(_install_dir
         "${_default_install_dir}" "${ARG_INSTALL_DIR}")
-    _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+    # %build_module_simple publishes the declared module name. The graph id
+    # is private: callers of OpenLibrary("gl.library") cannot open an artifact
+    # named after workbench-libs-gl.
+    _aros_module_output_name(_output_name "${ARG_TARGET}"
         "${_default_modsuffix}" "${ARG_MODSUFFIX}")
+    aros_arch_path_matches(_simple_native_arch "${ARG_DIRECTORY}")
+    if(NOT _simple_native_arch)
+        string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
+        set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
+    endif()
+    string(TOLOWER "${_install_dir}/${_output_name}" _runtime_path)
+    string(SHA256 _runtime_key "${_runtime_path}")
+    get_property(_runtime_owner GLOBAL PROPERTY
+        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
+    if(_runtime_owner)
+        message(FATAL_ERROR
+            "Conflicting runtime module output ${_install_dir}/${_output_name}: "
+            "${_runtime_owner} and ${ARG_MMAKE_ID}")
+    endif()
+    set_property(GLOBAL PROPERTY
+        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
 
     add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
     target_compile_definitions(${ARG_MMAKE_ID} PRIVATE
         __AROS_MODNAME__=${ARG_TARGET}
     )
     set_target_properties(${ARG_MMAKE_ID} PROPERTIES
-        # Named after the mmake id, as every other module builder here does;
-        # known duplicate modnames would otherwise produce duplicate rules.
         OUTPUT_NAME "${_output_name}"
         RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
     _aros_set_module_linker_language("${ARG_MMAKE_ID}"

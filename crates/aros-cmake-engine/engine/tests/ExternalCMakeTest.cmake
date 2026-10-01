@@ -81,11 +81,43 @@ if(NOT _noop_result EQUAL 0)
         "${_noop_stdout}\n${_noop_stderr}")
 endif()
 set(_noop_log "${_noop_stdout}\n${_noop_stderr}")
-string(FIND "${_noop_log}" "ninja: no work to do." _noop_found)
-if(_noop_found LESS 0)
+if(_noop_log MATCHES "Building external CMake target")
     message(FATAL_ERROR
-        "second external-cmake build was not a no-op:\n${_noop_log}")
+        "unchanged SDK rebuilt external archives:\n${_noop_log}")
 endif()
+
+# ABI/header changes must invalidate nested archives without requiring a clean
+# build. Timestamp-only updates and unchanged reconfiguration must not do so.
+function(_sdk_build expected_rebuild)
+    execute_process(COMMAND "${CMAKE_COMMAND}" --build "${_success_build}"
+        --target external-consumer RESULT_VARIABLE _result
+        OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    set(_rebuilt FALSE)
+    if("${_out}${_err}" MATCHES "Building external CMake target fixture-external")
+        set(_rebuilt TRUE)
+    endif()
+    if(NOT _result EQUAL 0 OR NOT "${_rebuilt}" STREQUAL "${expected_rebuild}")
+        message(FATAL_ERROR "SDK rebuild contract (${expected_rebuild}) failed: ${_out}${_err}")
+    endif()
+endfunction()
+file(SHA256 "${_archive}" _original_archive_digest)
+_configure(success TRUE "")
+_sdk_build(FALSE)
+file(TOUCH "${_success_build}/SDK/include/fixture-abi.h")
+_sdk_build(FALSE)
+file(WRITE "${_success_build}/SDK/include/fixture-abi.h"
+    "#define FIXTURE_ABI_SIZE 232\n")
+_sdk_build(TRUE)
+file(SHA256 "${_archive}" _changed_archive_digest)
+if(_original_archive_digest STREQUAL _changed_archive_digest)
+    message(FATAL_ERROR "SDK ABI change did not reach the compiled external archive")
+endif()
+_sdk_build(FALSE)
+file(WRITE "${_success_build}/SDK/include/new-public-header.h" "/* new API */\n")
+_sdk_build(TRUE)
+file(REMOVE "${_success_build}/SDK/include/new-public-header.h")
+_sdk_build(TRUE)
+_sdk_build(FALSE)
 
 file(REMOVE "${_archive}" "${_metadata}")
 execute_process(
@@ -179,9 +211,7 @@ if(NOT _components_noop_result EQUAL 0)
 endif()
 set(_components_noop_log
     "${_components_noop_stdout}\n${_components_noop_stderr}")
-string(FIND "${_components_noop_log}" "ninja: no work to do."
-    _components_noop_found)
-if(_components_noop_found LESS 0)
+if(_components_noop_log MATCHES "Building external CMake target")
     message(FATAL_ERROR
         "second component external CMake build was not a no-op:\n"
         "${_components_noop_log}")

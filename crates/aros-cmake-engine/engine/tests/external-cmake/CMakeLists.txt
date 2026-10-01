@@ -9,6 +9,12 @@ set(AROS_PORTS_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/archive"
     CACHE PATH "fixture archive root")
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
 
+file(MAKE_DIRECTORY "${AROS_SDK_INCLUDE_DIR}")
+if(NOT EXISTS "${AROS_SDK_INCLUDE_DIR}/fixture-abi.h")
+    file(WRITE "${AROS_SDK_INCLUDE_DIR}/fixture-abi.h"
+        "#define FIXTURE_ABI_SIZE 104\n")
+endif()
+
 set(_archive "${CMAKE_CURRENT_LIST_DIR}/archive/source.txt")
 if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
     set(_upstream "${CMAKE_CURRENT_LIST_DIR}/components/upstream")

@@ -416,6 +416,10 @@ aros_add_module_simple(
     MODTYPE library
     ALWAYS_CXX_LINK
     SOURCES module)
+get_target_property(_simple_name simple-module OUTPUT_NAME)
+if(NOT _simple_name STREQUAL "simple.library")
+    message(FATAL_ERROR "simple runtime module lost its loader-visible name: ${_simple_name}")
+endif()
 
 function(_assert_linker_language target expected)
     get_target_property(_actual "${target}" LINKER_LANGUAGE)

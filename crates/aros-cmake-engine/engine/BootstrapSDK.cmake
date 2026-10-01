@@ -2,6 +2,21 @@
 
 include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 
+# Platform ABI padding is independent of whether this kernel enables SMP.
+# configure sets PLATFORM_EXECSMP for these targets even in uniprocessor builds.
+# Omitting it changes public Exec/pthread layouts relative to released libc++.
+function(aros_platform_abi_config cpu platform output)
+    if((platform STREQUAL "pc" AND cpu MATCHES "^(i386|x86_64)$") OR
+       (platform STREQUAL "raspi" AND cpu MATCHES "^(arm|aarch64)$") OR
+       (platform STREQUAL "opensbi" AND cpu STREQUAL "riscv64"))
+        set(${output} "#define __AROSPLATFORM_SMP__" PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR
+            "No platform ABI contract is known for '${platform}-${cpu}'; "
+            "mirror configure's PLATFORM_EXECSMP before enabling this target")
+    endif()
+endfunction()
+
 # aros_generate_asm_header(<sdk_inc> <geninc>)
 #
 # Compiles compiler/include/asm.c to assembly and turns the .ascii strings it
@@ -219,7 +234,10 @@ function(aros_bootstrap_sdk_includes)
             "letting it default.")
     endif()
 
-    # 15 of the 20 values config/config.h.in substitutes are still missing from
+    aros_platform_abi_config("${AROS_TARGET_CPU}" "${AROS_TARGET_PLATFORM}"
+        _aros_platform_abi)
+
+    # 14 of the 20 values config/config.h.in substitutes are still missing from
     # this file, and a missing macro is silently zero in `#if`. See OPEN-POINTS
     # point 35 for the list and what each one would change.
     set(CONFIG_H "${SDK_INC}/aros/config.h")
@@ -241,6 +259,9 @@ function(aros_bootstrap_sdk_includes)
 #define AROS_FLAVOUR                    ${_aros_flavour}
 #define AROS_DOS_PACKETS                1
 #define AROS_AMIGAOS_COMPLIANCE         1
+
+/* Public ABI padding; this does not enable the SMP execution path. */
+${_aros_platform_abi}
 
 #define AROS_NOMINAL_WIDTH              640
 #define AROS_NOMINAL_HEIGHT             480
