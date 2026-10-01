@@ -307,6 +307,11 @@ pub(crate) fn parse(
             "-DCMAKE_BUILD_TYPE=DEBUG".to_owned(),
             "-Wno-error=dev".to_owned(),
         ],
+        build_targets: Vec::new(),
+        install_components: Vec::new(),
+        library_group: false,
+        host_tools: Vec::new(),
+        compile_defines: Vec::new(),
         dir_path: relative_dir.to_path_buf(),
     })
 }
@@ -482,6 +487,11 @@ pub(crate) fn parse_aom(
         auxiliary_products: vec![format!("{install_prefix}/lib/pkgconfig/aom.pc")],
         public_include_dirs: vec![format!("{install_prefix}/include")],
         options,
+        build_targets: Vec::new(),
+        install_components: Vec::new(),
+        library_group: false,
+        host_tools: Vec::new(),
+        compile_defines: Vec::new(),
         dir_path: relative_dir.to_path_buf(),
     })
 }

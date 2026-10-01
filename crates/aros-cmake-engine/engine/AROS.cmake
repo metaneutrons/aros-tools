@@ -2634,6 +2634,11 @@ endfunction()
 #     LIBRARY_PRODUCTS <installed-archives...>
 #     [HEADER_PRODUCTS <installed-headers...>]
 #     [AUXILIARY_PRODUCTS <installed-metadata...>]
+#     [BUILD_TARGETS <closed-upstream-targets...>]
+#     [INSTALL_COMPONENTS <closed-header-components...>]
+#     [HOST_TOOLS <cmake-key=tool@LLVM-version...>]
+#     [COMPILE_DEFINES <target-definitions...>]
+#     [LIBRARY_GROUP]
 #     PUBLIC_INCLUDE_DIRS <installed-include-dirs...>)
 #
 # Materialises the deliberately small, audited subset of
@@ -2641,12 +2646,15 @@ endfunction()
 # options and installed products; this helper independently validates every
 # path and produces one output-tracked configure/build/install rule. It is not
 # an escape hatch for arbitrary configure commands.
+# Component builds stage only declared archives from the private lib directory.
+# Host tools must run from the verified toolchain; they never come from a target
+# output tree. External consumers share the generated public SDK header barrier.
 function(aros_build_external_cmake)
     set(oneValueArgs MMAKE_ID SOURCE_DIR BINARY_DIR INSTALL_PREFIX
         FETCH_TARGET PROVIDED_LIBRARY)
     set(multiValueArgs OPTIONS LIBRARY_PRODUCTS HEADER_PRODUCTS
-        AUXILIARY_PRODUCTS PUBLIC_INCLUDE_DIRS)
-    cmake_parse_arguments(PARSE_ARGV 0 EC "" "${oneValueArgs}" "${multiValueArgs}")
+        AUXILIARY_PRODUCTS PUBLIC_INCLUDE_DIRS BUILD_TARGETS INSTALL_COMPONENTS HOST_TOOLS COMPILE_DEFINES)
+    cmake_parse_arguments(PARSE_ARGV 0 EC "LIBRARY_GROUP" "${oneValueArgs}" "${multiValueArgs}")
 
     if(EC_UNPARSED_ARGUMENTS OR EC_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR
@@ -2795,11 +2803,22 @@ function(aros_build_external_cmake)
     set(_expected_archive
         "${_prefix}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${EC_PROVIDED_LIBRARY}${CMAKE_STATIC_LIBRARY_SUFFIX}")
     cmake_path(NORMAL_PATH _expected_archive)
-    if(NOT _library_count EQUAL 1 OR
-       NOT _expected_archive IN_LIST _library_products)
+    if(NOT EC_LIBRARY_GROUP AND (NOT _library_count EQUAL 1 OR
+       NOT _expected_archive IN_LIST _library_products))
         message(FATAL_ERROR
             "${EC_MMAKE_ID}: provided library must install exactly ${_expected_archive}")
     endif()
+    if(EC_LIBRARY_GROUP AND NOT EC_BUILD_TARGETS)
+        message(FATAL_ERROR "${EC_MMAKE_ID}: component library group requires explicit build targets")
+    endif()
+    if(EC_BUILD_TARGETS AND NOT EC_INSTALL_COMPONENTS)
+        message(FATAL_ERROR "${EC_MMAKE_ID}: selective build requires explicit install components")
+    endif()
+    foreach(_component IN LISTS EC_BUILD_TARGETS EC_INSTALL_COMPONENTS)
+        if(NOT _component MATCHES "^[A-Za-z0-9_.+-]+$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid external build/install component ${_component}")
+        endif()
+    endforeach()
     foreach(_product IN LISTS _products)
         string(SHA256 _product_key "${_product}")
         get_property(_previous_owner GLOBAL PROPERTY
@@ -2811,8 +2830,13 @@ function(aros_build_external_cmake)
         set_property(GLOBAL PROPERTY
             "AROS_EXTERNAL_PRODUCT_OWNER_${_product_key}" "${EC_MMAKE_ID}")
     endforeach()
-    _aros_claim_linklib_archive(
-        "${EC_MMAKE_ID}" "${_prefix}/lib" "${EC_PROVIDED_LIBRARY}")
+    foreach(_library IN LISTS _library_products)
+        cmake_path(GET _library FILENAME _archive_name)
+        if(NOT _archive_name MATCHES "^lib([A-Za-z0-9_.+-]+)\\.a$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: component is not a static archive: ${_library}")
+        endif()
+        _aros_claim_linklib_archive("${EC_MMAKE_ID}" "${_prefix}/lib" "${CMAKE_MATCH_1}")
+    endforeach()
 
     set(_public_include_dirs "")
     foreach(_raw_include IN LISTS EC_PUBLIC_INCLUDE_DIRS)
@@ -2836,7 +2860,7 @@ function(aros_build_external_cmake)
         string(FIND "${_option}" ";" _semicolon)
         string(FIND "${_option}" "\n" _newline)
         if(NOT _semicolon EQUAL -1 OR NOT _newline EQUAL -1 OR
-           NOT _option MATCHES "^(-D[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z]+)?=[A-Za-z0-9_.+:/=-]+|-Wno-error=dev)$")
+           NOT _option MATCHES "^(-D[A-Za-z_][A-Za-z0-9_]*(:[A-Za-z]+)?=[A-Za-z0-9_.+:/=-]*|-Wno-error=dev)$")
             message(FATAL_ERROR
                 "${EC_MMAKE_ID}: unsafe external CMake option '${_option}'")
         endif()
@@ -2854,6 +2878,12 @@ function(aros_build_external_cmake)
     get_directory_property(_parent_definitions COMPILE_DEFINITIONS)
     get_directory_property(_parent_includes INCLUDE_DIRECTORIES)
     set(_target_flags "")
+    foreach(_define IN LISTS EC_COMPILE_DEFINES)
+        if(NOT _define MATCHES "^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_.+-]+)?$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid external compile definition ${_define}")
+        endif()
+        list(APPEND _target_flags "-D${_define}")
+    endforeach()
     foreach(_option IN LISTS _parent_options)
         if(_option STREQUAL "$<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>")
             # Reapplied to the nested C++ flags below together with the
@@ -2940,7 +2970,7 @@ function(aros_build_external_cmake)
         "-DCMAKE_SYSTEM_NAME=AROS"
         "-DCMAKE_SYSTEM_VERSION=1"
         "-DCMAKE_SYSTEM_PROCESSOR=${AROS_TARGET_CPU}"
-        "-DCMAKE_MODULE_PATH=${_aros_source_root}/config/cmake"
+        "-DCMAKE_MODULE_PATH=${AROS_SOURCE_DIR}/config/cmake"
         "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
         "-DBUILD_SHARED_LIBS=OFF"
         "-DCMAKE_INSTALL_PREFIX=${_prefix}"
@@ -2952,6 +2982,38 @@ function(aros_build_external_cmake)
         "-DCMAKE_C_FLAGS=${_C_flags}"
         "-DCMAKE_CXX_FLAGS=${_CXX_flags}"
         "-DCMAKE_ASM_FLAGS=${_ASM_flags}")
+    set(_host_inputs "")
+    set(_host_keys "")
+    foreach(_binding IN LISTS EC_HOST_TOOLS)
+        if(NOT _binding MATCHES "^([A-Z][A-Z0-9_]+)=([A-Za-z0-9_.+-]+)@([0-9]+\\.[0-9]+\\.[0-9]+)$")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: invalid host-tool binding '${_binding}'")
+        endif()
+        set(_key "${CMAKE_MATCH_1}")
+        set(_tool "${CMAKE_MATCH_2}")
+        set(_version "${CMAKE_MATCH_3}")
+        if(_key IN_LIST _host_keys)
+            message(FATAL_ERROR "${EC_MMAKE_ID}: duplicate host-tool binding ${_key}")
+        endif()
+        list(APPEND _host_keys "${_key}")
+        set(_executable "${AROS_CROSS_TOOLCHAIN_ROOT}/bin/${_tool}")
+        if(NOT AROS_CROSS_TOOLCHAIN_ROOT OR NOT EXISTS "${_executable}" OR IS_DIRECTORY "${_executable}")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: missing verified cross-toolchain host tool ${_tool}")
+        endif()
+        execute_process(COMMAND "${_executable}" --version
+            TIMEOUT 10 RESULT_VARIABLE _result OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
+        string(REPLACE "." "\\." _version_pattern "${_version}")
+        if(NOT _result EQUAL 0 OR
+           NOT "${_stdout}\n${_stderr}" MATCHES "LLVM version ${_version_pattern}([ \t\r\n]|$)")
+            message(FATAL_ERROR "${EC_MMAKE_ID}: ${_tool} is not runnable host LLVM ${_version}: ${_stdout}${_stderr}")
+        endif()
+        foreach(_option IN LISTS EC_OPTIONS)
+            if(_option MATCHES "^-D${_key}(:|=)")
+                message(FATAL_ERROR "${EC_MMAKE_ID}: option overrides verified host-tool binding ${_key}")
+            endif()
+        endforeach()
+        list(APPEND _forced_options "-D${_key}=${_executable}")
+        list(APPEND _host_inputs "${_executable}")
+    endforeach()
     # Pass the frontend policy, not CMake's derived launcher variables. CMake
     # implements compiler launchers for C/C++ only; each nested build must
     # apply the same explicit policy through CompilerCache.cmake.
@@ -2966,6 +3028,22 @@ function(aros_build_external_cmake)
     endif()
 
     set(_stamp "${_binary}/.aros-${EC_MMAKE_ID}-installed")
+    set(_build_command "${CMAKE_COMMAND}" --build "${_binary}")
+    set(_install_commands "")
+    if(EC_BUILD_TARGETS)
+        list(APPEND _build_command --target ${EC_BUILD_TARGETS})
+        foreach(_component IN LISTS EC_INSTALL_COMPONENTS)
+            list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" --install "${_binary}" --component "${_component}")
+        endforeach()
+        list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" -E make_directory "${_prefix}/lib")
+        foreach(_library IN LISTS _library_products)
+            cmake_path(GET _library FILENAME _archive_name)
+            list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_binary}/lib/${_archive_name}" "${_library}")
+        endforeach()
+    else()
+        list(APPEND _install_commands COMMAND "${CMAKE_COMMAND}" --install "${_binary}")
+    endif()
     add_custom_command(
         OUTPUT "${_stamp}" ${_products}
         # The rule runs only when an input/contract changed or a product is
@@ -2977,14 +3055,14 @@ function(aros_build_external_cmake)
             -G "${CMAKE_GENERATOR}"
             ${EC_OPTIONS}
             ${_forced_options}
-        COMMAND "${CMAKE_COMMAND}" --build "${_binary}"
-        COMMAND "${CMAKE_COMMAND}" --install "${_binary}"
+        COMMAND ${_build_command}
+        ${_install_commands}
         COMMAND "${CMAKE_COMMAND}"
             "-DMANIFEST=${_products_manifest}"
             -P "${_output_verifier}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
         DEPENDS "${_fetch_stamp}" "${_output_verifier}"
-            "${_products_manifest}"
+            "${_products_manifest}" ${_host_inputs}
         COMMENT "Building external CMake target ${EC_MMAKE_ID}"
         VERBATIM
         COMMAND_EXPAND_LISTS)
@@ -2993,7 +3071,19 @@ function(aros_build_external_cmake)
 
     add_library("${_interface_target}" INTERFACE)
     add_dependencies("${_interface_target}" "${EC_MMAKE_ID}")
-    target_link_libraries("${_interface_target}" INTERFACE "${_expected_archive}")
+    if(EC_LIBRARY_GROUP)
+        if(AROS_COLLECT_BIN)
+            set(_group_start "--start-group")
+            set(_group_end "--end-group")
+        else()
+            set(_group_start "-Wl,--start-group")
+            set(_group_end "-Wl,--end-group")
+        endif()
+        target_link_libraries("${_interface_target}" INTERFACE
+            "${_group_start}" ${_library_products} "${_group_end}")
+    else()
+        target_link_libraries("${_interface_target}" INTERFACE "${_expected_archive}")
+    endif()
     target_include_directories("${_interface_target}" INTERFACE
         ${_public_include_dirs})
     set_property(TARGET "${EC_MMAKE_ID}" PROPERTY
@@ -3623,7 +3713,9 @@ function(_aros_attach_genmodule_public_includes)
             continue()
         endif()
         get_target_property(_type "${_target}" TYPE)
-        if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
+        get_target_property(_external_interface "${_target}" AROS_EXTERNAL_INTERFACE_TARGET)
+        if(_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$" OR
+           _external_interface)
             add_dependencies("${_target}" aros-genmodule-public-includes)
         endif()
     endforeach()

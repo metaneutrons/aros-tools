@@ -321,6 +321,21 @@ pub struct ExternalCMakeDecl {
     pub public_include_dirs: Vec<String>,
     /// Fully selected, allowlisted upstream CMake options.
     pub options: Vec<String>,
+    /// Optional closed component build/install rather than upstream's default all.
+    #[serde(default)]
+    pub build_targets: Vec<String>,
+    /// Upstream install components needed by the selected static build.
+    #[serde(default)]
+    pub install_components: Vec<String>,
+    /// Static components form a single linker rescan group, not one archive.
+    #[serde(default)]
+    pub library_group: bool,
+    /// Host executables supplied by the verified cross-toolchain, never target ELF.
+    #[serde(default)]
+    pub host_tools: Vec<String>,
+    /// Validated declaration-specific target compile definitions.
+    #[serde(default)]
+    pub compile_defines: Vec<String>,
     /// Source-root-relative directory of the declaring mmakefile.
     pub dir_path: PathBuf,
 }

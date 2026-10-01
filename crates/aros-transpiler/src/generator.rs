@@ -573,6 +573,20 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                 .map(|option| cmake_arg(option))
                 .collect();
             writeln!(out, "    OPTIONS {}", options.join(" ")).unwrap();
+            for (keyword, values) in [
+                ("BUILD_TARGETS", &declaration.build_targets),
+                ("INSTALL_COMPONENTS", &declaration.install_components),
+                ("HOST_TOOLS", &declaration.host_tools),
+                ("COMPILE_DEFINES", &declaration.compile_defines),
+            ] {
+                if !values.is_empty() {
+                    let values: Vec<_> = values.iter().map(|value| cmake_arg(value)).collect();
+                    writeln!(out, "    {keyword} {}", values.join(" ")).unwrap();
+                }
+            }
+            if declaration.library_group {
+                writeln!(out, "    LIBRARY_GROUP").unwrap();
+            }
             writeln!(out, ")\n").unwrap();
         }
     }
