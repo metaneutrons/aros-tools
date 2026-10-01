@@ -217,10 +217,24 @@ fn merge_named_link_flags(flags: &mut FlagSet, scope: &VarScope, line: usize, va
 }
 
 fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<GenmoduleConfigFacts> {
-    let content = fs::read_to_string(directory.join(format!("{module}.conf"))).ok()?;
+    read_genmodule_linklib_config_files(&directory.join(format!("{module}.conf")), None)
+}
+
+fn read_genmodule_linklib_config_files(
+    config: &Path,
+    override_config: Option<&Path>,
+) -> Option<GenmoduleConfigFacts> {
+    let mut content = fs::read_to_string(config).ok()?;
+    if let Some(override_config) = override_config {
+        content.push('\n');
+        content.push_str(&fs::read_to_string(override_config).ok()?);
+    }
     let mut in_config = false;
     let mut has_relative = false;
-    let mut forces_client_archive = false;
+    let mut stubs = true;
+    let mut autoinit = true;
+    let mut explicit_stubs = false;
+    let mut explicit_autoinit = false;
     let mut relative_libraries = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -244,7 +258,16 @@ fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<Genmo
             for option in stated.by_ref() {
                 match option {
                     "rellinklib" => has_relative = true,
-                    "stubs" | "autoinit" => forces_client_archive = true,
+                    "stubs" => {
+                        stubs = true;
+                        explicit_stubs = true;
+                    }
+                    "nostubs" => stubs = false,
+                    "autoinit" => {
+                        autoinit = true;
+                        explicit_autoinit = true;
+                    }
+                    "noautoinit" => autoinit = false,
                     _ => {}
                 }
             }
@@ -255,6 +278,7 @@ fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<Genmo
             }
         }
     }
+    let forces_client_archive = (explicit_stubs && stubs) || (explicit_autoinit && autoinit);
     Some(GenmoduleConfigFacts {
         has_relative,
         relative_libraries,

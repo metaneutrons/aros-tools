@@ -3,6 +3,44 @@ use crate::parser::TargetContext;
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn runtime_identity_rejects_changed_source_module_names() {
+    let root = mesa26_source_root();
+    let profile = TargetContext {
+        cpu: Some("x86_64".to_owned()),
+        platform: Some("pc".to_owned()),
+        toolchain: Some("llvm".to_owned()),
+        cpu32: Some("i386".to_owned()),
+        use_mmu: Some("1".to_owned()),
+        float_abi: Some(String::new()),
+        mesa_version: Some("26.0.0".to_owned()),
+        ..TargetContext::default()
+    };
+    assert_eq!(
+        super::runtime_module_name(
+            &root,
+            Path::new("workbench/libs/mesa"),
+            "mesa3dgl-library",
+            "mesa3dgl$(MESAGLBUILD)",
+            Some(&profile),
+        )
+        .unwrap()
+        .as_deref(),
+        Some("mesa3dgl26-0")
+    );
+    for raw_name in ["different$(MESAGLBUILD)", "mesa3dgl$(MESAGLVERSION)"] {
+        assert!(super::runtime_module_name(
+            &root,
+            Path::new("workbench/libs/mesa"),
+            "mesa3dgl-library",
+            raw_name,
+            Some(&profile),
+        )
+        .unwrap_err()
+        .contains("unexpected Mesa 26 runtime modname"));
+    }
+}
+
 fn mesa26_source_root() -> std::path::PathBuf {
     let configured = std::env::var_os("AROS_TEST_MESA26_SOURCE_ROOT")
         .or_else(|| std::env::var_os("AROS_TEST_SOURCE_ROOT"))

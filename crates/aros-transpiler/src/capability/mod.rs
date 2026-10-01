@@ -19,6 +19,7 @@ pub mod configure;
 pub mod external_cmake;
 pub mod grub2;
 pub mod literal_defines;
+pub mod llvm;
 pub mod mesa;
 pub mod nouveau;
 

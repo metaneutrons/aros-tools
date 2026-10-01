@@ -13,14 +13,15 @@ use super::{
     expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
     inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
     join_continuations, join_mm_continuations, literal_defines, macro_arg,
-    map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config, read_source,
-    record_partial_source_lists, remaining_linklib_sources, render_meta_token,
-    resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
-    resolve_no_argument, resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
-    select_target_invocations, sse41, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
-    GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy,
-    LocalMakeIncludeLimits, MakeExprContext, MetaTargetRule, ModuleType, ParsedMmakefile, Path,
-    Regex, Result, TargetContext, TargetDefinition, META_RULE_RE, PRIVATE_LIBDIR,
+    map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config,
+    read_genmodule_linklib_config_files, read_source, record_partial_source_lists,
+    remaining_linklib_sources, render_meta_token, resolve_generated_linklib_sources,
+    resolve_module_suffix, resolve_module_target_dir, resolve_no_argument, resolve_yes_argument,
+    safe_build_tree_output_directory, sanitize_ident, select_target_invocations, sse41,
+    wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl, GenmoduleConfigFacts,
+    GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy, LocalMakeIncludeLimits, MakeExprContext,
+    MetaTargetRule, ModuleType, ParsedMmakefile, Path, Regex, Result, TargetContext,
+    TargetDefinition, META_RULE_RE, PRIVATE_LIBDIR,
 };
 use crate::capability::mesa::mesa20;
 use crate::capability::mesa::mesa26;
@@ -61,8 +62,20 @@ pub(super) fn parse_mmakefile_impl(
         || collect_vars(&collector_input),
         |target| collect_vars_impl(&collector_input, Some(target)).0,
     );
-    let (fetches, skipped_fetches) =
+    let (mut fetches, mut skipped_fetches) =
         collect_fetches_with_scope_and_context(&content, &rel_dir, &collector_scope, target);
+    let llvm_capability =
+        crate::capability::llvm::admit(root, &rel_dir, target).map_err(|message| {
+            aros_common::ArosError::Configuration {
+                file: relative_path.display().to_string(),
+                message,
+            }
+        })?;
+    if let Some((fetch, _)) = &llvm_capability {
+        fetches.clear();
+        fetches.push(fetch.clone());
+        skipped_fetches.clear();
+    }
     let mut ownership_fetches = known_fetches.to_vec();
     ownership_fetches.extend(fetches.iter().cloned());
 
@@ -303,10 +316,18 @@ pub(super) fn parse_mmakefile_impl(
         copy_directory_line_states,
     );
     let mut external_cmake = Vec::new();
+    if let Some((_, declaration)) = &llvm_capability {
+        external_cmake.push(declaration.clone());
+    }
     for invocation in invocations
         .iter()
         .filter(|invocation| invocation.name == "build_with_cmake")
     {
+        if llvm_capability.is_some()
+            && macro_arg(&invocation.args, "mmake").as_deref() == Some("workbench-libs-llvm")
+        {
+            continue;
+        }
         let expression_context =
             MakeExprContext::new(&scope, dirs, invocation.line, root, &rel_dir);
         match external_cmake::parse(
@@ -486,7 +507,19 @@ pub(super) fn parse_mmakefile_impl(
             ));
             continue;
         }
-        let mod_name = sanitize_ident(&mod_raw);
+        let mod_name =
+            match mesa26::runtime_module_name(root, &rel_dir, &mmake_name, &mod_raw, target) {
+                Ok(Some(name)) => name,
+                Ok(None) => sanitize_ident(&mod_raw),
+                Err(reason) => {
+                    capability_errors.push(capability_diagnostic(
+                        &relative_path,
+                        Some(inv.line + 1),
+                        format!("Mesa runtime identity: {reason}"),
+                    ));
+                    continue;
+                }
+            };
         let mod_type_owned = macro_arg(&inv.args, "modtype").unwrap_or_default();
         let mod_type_str = mod_type_owned.as_str();
         let rest = inv.args.as_str();
@@ -776,7 +809,25 @@ pub(super) fn parse_mmakefile_impl(
             }
         }
         let genmodule_linklibs = if module_type == ModuleType::Library {
-            read_genmodule_linklib_config(parent_dir, &mod_name).map(
+            let source_path = |value: &str| {
+                value
+                    .strip_prefix("${AROS_SOURCE_DIR}/")
+                    .map(|relative| root.join(relative))
+                    .or_else(|| {
+                        Path::new(value)
+                            .is_absolute()
+                            .then(|| Path::new(value).to_path_buf())
+                    })
+            };
+            let config_path = config_file.as_deref().and_then(source_path);
+            let override_path = config_override_file.as_deref().and_then(source_path);
+            let facts = config_path.map_or_else(
+                || read_genmodule_linklib_config(parent_dir, &mod_name),
+                |config_path| {
+                    read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
+                },
+            );
+            facts.map(
                 |GenmoduleConfigFacts {
                      has_relative,
                      relative_libraries,
@@ -1978,6 +2029,53 @@ pub(super) fn parse_mmakefile_impl(
                 name: meta_name,
                 dependencies: deps,
             });
+        }
+    }
+
+    // LLVM is a structured multi-archive provider, not a configure-time SDK
+    // wildcard. Its consumers acquire both the real build edge and includes.
+    if target.is_some_and(|context| context.mesa_version.as_deref() == Some("26.0.0")) {
+        for declaration in &mut targets {
+            if matches!(
+                declaration.mmake_name.as_str(),
+                "mesa3d-linklib-galliumvm"
+                    | "mesa3d-linklib-llvmpipe"
+                    | "mesa3d-linklib-galliumdrawllvm"
+                    | "hidd-llvmpipe"
+            ) {
+                declaration.use_libs.push("LLVM".to_owned());
+            }
+            if declaration.mmake_name == "hidd-llvmpipe"
+                && rel_dir == Path::new("workbench/hidds/llvmpipe")
+            {
+                declaration.use_libs = [
+                    "llvmpipe",
+                    "galliumvm",
+                    "compiler",
+                    "galliumdrawllvm",
+                    "galliumtess",
+                    "galliumauxiliary",
+                    "mesautil",
+                    "LLVM",
+                    "z",
+                    "pthread",
+                    "posixc_rel",
+                    "stdc_rel",
+                ]
+                .map(str::to_owned)
+                .to_vec();
+                // The source recipe deliberately retains the complete MCJIT
+                // helper archive. Preserve that semantics without importing
+                // its unresolved SDK LLVM wildcard or Make shell expansion.
+                declaration.link_options = [
+                    "-L${AROS_BUILD_DIR}/gen/lib/mesa26.0.0",
+                    "--whole-archive",
+                    "-lgalliumvm",
+                    "--no-whole-archive",
+                ]
+                .map(str::to_owned)
+                .to_vec();
+            }
         }
     }
 

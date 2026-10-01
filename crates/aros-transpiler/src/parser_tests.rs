@@ -2648,6 +2648,39 @@ fn every_library_module_materialises_its_client_archive() {
 }
 
 #[test]
+fn explicit_noincludes_config_preserves_the_library_getlibbase_archive() {
+    let tree = TempTree::new();
+    let module = tree.0.join("rom/thing");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("thing.c"), "").unwrap();
+    fs::write(
+        module.join("private.conf"),
+        "##begin config\nbasename Private\noptions noincludes, nostubs, noautoinit\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=kernel-thing modname=thing modtype=library conffile=private.conf files=thing\n",
+    )
+    .unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    assert!(
+        parsed.targets[0]
+            .genmodule_linklibs
+            .as_ref()
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
 fn non_library_module_needing_a_client_archive_is_reported() {
     let tree = TempTree::new();
     let module = tree.0.join("rom/clock");
