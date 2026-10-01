@@ -3,12 +3,12 @@
 use super::{
     all_sources_are_fetch_owned, apply_mesa_compile_contract, capability_diagnostic,
     collect_arch_decls, collect_arch_sources, collect_copy_includes_with_scope,
-    collect_fetches_with_scope_and_context, collect_flags, collect_flags_at,
-    collect_flexcat_source_rules, collect_ilbm_sources, collect_includes, collect_includes_at,
-    collect_make_opts, collect_vars, collect_vars_impl, collect_vars_impl_with_forward_locals,
-    collector_forward_local_prelude, copy_directories, current_profile, declaration_flags_at,
-    declaration_global_link_options, declaration_owned_port_scope, evaluate_linklib_list,
-    evaluate_macro_sources, evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
+    collect_fetches_with_scope_and_context, collect_flags, collect_flexcat_source_rules,
+    collect_ilbm_sources, collect_includes, collect_includes_at, collect_make_opts, collect_vars,
+    collect_vars_impl, collect_vars_impl_with_forward_locals, collector_forward_local_prelude,
+    copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
+    declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
+    evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
     evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
     expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
     inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
@@ -181,22 +181,7 @@ pub(super) fn parse_mmakefile_impl(
     // numbers drift with every continuation and every inlined fragment, so the
     // positional flag lookup below would read some other declaration's flags.
     let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&joined, &rel_dir, target);
-    // A %build_archspecific file contributes to a target defined elsewhere, so
-    // its own USER_INCLUDES and flags have to travel with the declaration.
-    //
-    // Read at the declaration's own line, not file-wide. One mmakefile can hold
-    // several declarations with different flags:
-    // arch/i386-all/hidd/gfx sets `USER_CFLAGS :=` before the baseline lane,
-    // `$(HIDDGFX_SSE_CFLAGS)` before the SSE lane and `$(HIDDGFX_AVX_CFLAGS)`
-    // before the AVX one. The file-wide value is whichever assignment happens to
-    // win, and with it rgbconv_avx.c cannot compile at all.
-    for d in &mut arch_sources {
-        let at = collect_includes_at(&joined, &scope, d.line, &rel_dir);
-        let flags = collect_flags_at(&scope, d.line);
-        d.include_dirs = at.dirs;
-        d.defines = flags.defines;
-        d.compile_options = flags.compile_options;
-    }
+    crate::arch_sources::bind_declaration_context(&mut arch_sources, &joined, &scope, &rel_dir)?;
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.

@@ -8,6 +8,7 @@ endif()
 # Modern Multi-Platform Build System for AROS
 
 include(CMakeParseArguments)
+include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/Executable.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleManifest.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/GenmoduleTargets.cmake")
@@ -1104,7 +1105,7 @@ function(_aros_add_genmodule_quote_dirs target)
         endif()
     endforeach()
     if(_quotes)
-        target_compile_options("${target}" BEFORE PRIVATE ${_quotes})
+        aros_add_quote_options("${target}" BEFORE ${_quotes})
     endif()
 endfunction()
 
@@ -1641,9 +1642,11 @@ function(aros_apply_includes target_name)
         ${GENERIC_DIRS} ${FALLBACK_DIRS})
     if(QUOTE_DIRS)
         list(REMOVE_DUPLICATES QUOTE_DIRS)
+        set(_quote_options "")
         foreach(d IN LISTS QUOTE_DIRS)
-            target_compile_options(${target_name} PRIVATE "-iquote${d}")
+            list(APPEND _quote_options "-iquote${d}")
         endforeach()
+        aros_add_quote_options(${target_name} ${_quote_options})
     endif()
 endfunction()
 
@@ -1926,7 +1929,7 @@ function(aros_add_target_dependency target_name dependency)
                 get_target_property(_attached "${_consumer}"
                     AROS_GENERATED_DEPENDENCY_INCLUDE_DIRS)
                 if(NOT "${_generated_include}" IN_LIST _attached)
-                    target_compile_options("${_consumer}" BEFORE PRIVATE
+                    aros_add_quote_options("${_consumer}" BEFORE
                         "-iquote${_generated_include}")
                     set_property(TARGET "${_consumer}" APPEND PROPERTY
                         AROS_GENERATED_DEPENDENCY_INCLUDE_DIRS
@@ -3541,7 +3544,18 @@ function(_aros_apply_arch_source_options tag dir name path)
         list(GET _parts 2 _file)
         list(GET _parts 3 _option)
         if(_tag STREQUAL tag AND _dir STREQUAL dir AND _file STREQUAL name)
-            list(APPEND _options "${_option}")
+            if(_option MATCHES "^-iquote(.+)$")
+                set(_quote "${CMAKE_MATCH_1}")
+                get_source_file_property(_previous "${path}" AROS_ARCH_QUOTE_INCLUDE)
+                if(_previous AND NOT _previous STREQUAL "NOTFOUND" AND
+                   NOT _previous STREQUAL _quote)
+                    message(FATAL_ERROR "Conflicting architecture quote paths for ${path}")
+                endif()
+                set_source_files_properties("${path}" PROPERTIES
+                    AROS_ARCH_QUOTE_INCLUDE "${_quote}")
+            else()
+                list(APPEND _options "${_option}")
+            endif()
         endif()
     endforeach()
     if(NOT _options)
