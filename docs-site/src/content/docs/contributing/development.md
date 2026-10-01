@@ -57,12 +57,21 @@ From the tools repository:
 | `scripts/check-workspace.sh all` | Explicit complete gate: quality, docs and integration |
 | `scripts/check-workspace.sh` | Default iteration gate: quality + portable Rust; no product build |
 
-The exact-source gate requires a recursive checkout of the immutable revision in
+The exact-source gate requires a recursive checkout of the integration revision in
 [`contracts/aros-source-v1.toml`](https://github.com/metaneutrons/aros-tools/blob/main/contracts/aros-source-v1.toml).
-Pass it explicitly when running the integration checkpoint:
+Use its `[integration]` pin, or `[source]` for an older contract without that
+table. The `[source]`/`[producer]` pair records the qualified toolchain producer;
+it is not changed merely to advance development tests.
+
+Historical Mesa 20 regression tests also need a separate, clean recursive
+AROS-NX checkout at `cb6974f1c3de43c6f1168d69039af7c32e56153c`.
+Pass both checkouts explicitly; the Mesa 26 input is the current integration
+checkout, not the historical tree:
 
 ```sh
 AROS_TEST_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
+AROS_TEST_MESA20_SOURCE_ROOT=/absolute/path/to/mesa20/AROS-NX \
+AROS_TEST_MESA26_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
   scripts/check-workspace.sh all
 ```
 

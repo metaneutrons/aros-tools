@@ -172,11 +172,13 @@ neither is an authenticated attestation or a successful board boot. No image
 command writes a device. ISO composition uses `xorriso` and requires it on the
 host. The `pc-bios-iso` profile requires a bound receipt for the complete SYS
 tree, including empty directories, plus explicit bootstrap and GRUB inputs.
-The composer checks capacity, file placement and the El Torito entry; it does
-not claim a fresh PC build graph or guest boot. Those are BM3 gates. The
-existing CMake `boot-iso` target does not yet emit the v3 tree receipt; native
-producer integration belongs to BM3. `aros board
-sd image` retains its existing v1 bundle behavior.
+The composer checks capacity, file placement and the El Torito entry; image
+verification alone does not prove a guest boot. For the native PC path,
+`aros build --preset pc-x86_64 --target boot-iso` builds the SYS/GRUB dependency
+graph, emits a v3 tree receipt and uses this composer. See the
+[AROS-NX workflow](/aros-tools/workflows/aros-nx/) for prerequisites and outputs.
+Fresh-build and guest-readiness qualification remain separate BM3 gates.
+`aros board sd image` retains its existing v1 bundle behavior.
 
 ## Source and repository
 

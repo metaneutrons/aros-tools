@@ -82,8 +82,18 @@ bootstrap and kernel modules, records the complete staged tree in
 before publishing `build/pc-x86_64/aros-x86_64-pc.iso`. A successful build
 does not establish that the ISO boots. UEFI boot is not claimed.
 
-`aros test` is a separate direct-kernel check. To inspect the ISO's video path,
-boot the image as a CD in QEMU with an emulated VGA device.
+Test the generated ISO through BIOS/GRUB rather than the direct-kernel loader:
+
+```sh
+aros test --preset pc-x86_64 --iso build/pc-x86_64/aros-x86_64-pc.iso \
+  --timeout 45 --memory 1024 --evidence build/pc-x86_64/iso-check
+```
+
+The CLI boots a verified, read-only ISO snapshot and retains its digest and
+serial/exception logs. ISO mode rejects `--packages` and
+`--module`; without `--iso`, `aros test` remains the direct-kernel check.
+For the separate experimental GLSL/JIT proof, see
+[native llvmpipe development](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 
 ## Rebuild or synchronize
 
