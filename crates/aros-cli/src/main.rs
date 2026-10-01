@@ -258,12 +258,20 @@ enum Commands {
         timeout: u64,
 
         /// Also pass every built package as a multiboot module
-        #[arg(long)]
+        #[arg(long, conflicts_with = "iso")]
         packages: bool,
 
         /// Pass this file as a multiboot module; repeatable
-        #[arg(long = "module")]
+        #[arg(long = "module", conflicts_with = "iso")]
         modules: Vec<PathBuf>,
+
+        /// Boot this existing ISO directly from the virtual CD-ROM
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["packages", "modules"])]
+        iso: Option<PathBuf>,
+
+        /// Require the serial proof from the LLVM 11 llvmpipe GLSL/JIT probe
+        #[arg(long, requires = "iso")]
+        require_llvmpipe_jit: bool,
 
         /// Root below which each invocation keeps one private evidence directory
         #[arg(long)]
@@ -1726,6 +1734,41 @@ mod tests {
             );
         }
         assert!(Cli::try_parse_from(["aros", "test", "--timeout", "1", "--memory", "1",]).is_ok());
+    }
+
+    #[test]
+    fn iso_boot_flags_require_iso_and_conflict_with_multiboot_modules() {
+        assert_eq!(
+            parse_error(&["aros", "test", "--require-llvmpipe-jit"]),
+            ErrorKind::MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_error(&["aros", "test", "--iso", "/tmp/boot.iso", "--packages"]),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse_error(&[
+                "aros",
+                "test",
+                "--iso",
+                "/tmp/boot.iso",
+                "--module",
+                "/tmp/module",
+            ]),
+            ErrorKind::ArgumentConflict
+        );
+        assert!(Cli::try_parse_from([
+            "aros",
+            "test",
+            "--iso",
+            "/tmp/boot.iso",
+            "--require-llvmpipe-jit",
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["aros", "test", "--packages", "--module", "/tmp/extra.pkg",])
+                .is_ok()
+        );
     }
 
     #[test]

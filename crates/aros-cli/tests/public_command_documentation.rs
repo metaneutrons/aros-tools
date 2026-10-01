@@ -28,6 +28,10 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
         "source_cli.rs, public_cli_semantics.rs, discoverability_cli.rs",
     ),
     (
+        "contributing/development.md",
+        "main.rs::tests::iso_boot_flags_require_iso_and_conflict_with_multiboot_modules; commands.rs::tests::iso_and_jit_modes_are_limited_to_pc_x86_64; boot.rs::tests::jit_parser_requires_renderer_symbol_pixel_and_exact_pass_marker; boot.rs::tests::iso_snapshot_is_hashed_read_only_and_does_not_modify_the_source",
+    ),
+    (
         "reference/cli.md",
         "public_cli_semantics.rs, toolchain_plan_cli.rs, observability_cli.rs",
     ),
@@ -334,6 +338,61 @@ fn public_reference_preserves_the_current_board_native_lifecycle_and_installatio
         CLI_REFERENCE.contains("older unreleased revisions accepted bare `aros clean`"),
         "the cleanup reference must retain its explicit migration boundary"
     );
+}
+
+#[test]
+fn development_guide_iso_jit_example_matches_the_supported_cli_contract() {
+    let path = documentation_root().join("contributing/development.md");
+    let document = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "could not read development guide {}: {error}",
+            path.display()
+        )
+    });
+    let invocations = documented_aros_invocations(&document)
+        .expect("development-guide AROS examples must be valid shell commands");
+    let test_invocation = invocations
+        .iter()
+        .find(|invocation| invocation.get(1).is_some_and(|argument| argument == "test"))
+        .expect("development guide must retain its direct ISO test example");
+    assert_eq!(
+        test_invocation,
+        &[
+            "aros",
+            "test",
+            "--preset",
+            "pc-x86_64",
+            "--iso",
+            "build/pc-x86_64/aros-x86_64-pc.iso",
+            "--require-llvmpipe-jit",
+            "--timeout",
+            "120",
+            "--memory",
+            "1024",
+        ]
+    );
+
+    let help = Command::new(aros())
+        .args(&test_invocation[1..])
+        .arg("--help")
+        .output()
+        .expect("the documented ISO test invocation must reach CLI help");
+    assert!(
+        help.status.success(),
+        "the documented ISO test invocation must parse: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help = String::from_utf8(help.stdout).expect("CLI help must be UTF-8");
+    assert!(help.contains("--iso <PATH>"), "{help}");
+    assert!(help.contains("--require-llvmpipe-jit"), "{help}");
+
+    let owner = DOCUMENTED_AROS_EXAMPLE_PAGES
+        .iter()
+        .find(|(page, _)| *page == "contributing/development.md")
+        .map(|(_, owner)| *owner)
+        .expect("the development guide must declare its semantic fixture owner");
+    assert!(owner.contains("iso_boot_flags_require_iso_and_conflict_with_multiboot_modules"));
+    assert!(owner.contains("jit_parser_requires_renderer_symbol_pixel_and_exact_pass_marker"));
 }
 
 #[test]

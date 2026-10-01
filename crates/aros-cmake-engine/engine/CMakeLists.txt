@@ -386,6 +386,9 @@ include("${GENERATED_TARGETS_CMAKE}")
 # consumer before Ninja is allowed to compile demowin.c.
 include("${AROS_CMAKE_ENGINE_DIR}/DemosImages.cmake")
 aros_add_demos_images()
+include("${AROS_CMAKE_ENGINE_DIR}/Mesa26Runtime.cmake")
+aros_configure_mesa26_runtime()
+include("${AROS_CMAKE_ENGINE_DIR}/RuntimeProbes.cmake")
 
 # Compiler depfiles cannot express the producer of a header which was absent
 # when compilation started. Once the complete generated graph exists, attach

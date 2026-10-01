@@ -6,6 +6,24 @@ foreach(_input IN ITEMS SYS_DIR STAGE_DIR CONFIG_SOURCE STARTUP_SOURCE
         message(FATAL_ERROR "boot-iso requires ${_input}")
     endif()
 endforeach()
+if(LLVMPIPE_PROBE_STARTUP)
+    # Instrumentation is staged only into this isolated test ISO. Never
+    # replace a user startup or alter either the source or native SYS tree.
+    if(NOT LLVMPIPE_PROBE_STARTUP STREQUAL
+       "${CMAKE_CURRENT_LIST_DIR}/tests/runtime/llvmpipe-jit-startup" OR
+       EXISTS "${SYS_DIR}/S/User-Startup" OR
+       IS_SYMLINK "${SYS_DIR}/S/User-Startup")
+        message(FATAL_ERROR "boot-iso refuses an unsafe llvmpipe probe startup")
+    endif()
+    foreach(_probe_input IN ITEMS "${LLVMPIPE_PROBE_STARTUP}"
+            "${SYS_DIR}/Devs/Drivers/llvmpipe.hidd"
+            "${SYS_DIR}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit")
+        if(NOT EXISTS "${_probe_input}" OR IS_DIRECTORY "${_probe_input}" OR
+           IS_SYMLINK "${_probe_input}")
+            message(FATAL_ERROR "boot-iso is missing a regular llvmpipe probe input: ${_probe_input}")
+        endif()
+    endforeach()
+endif()
 if(NOT CPU_SIGNATURE MATCHES "^[A-Za-z0-9_+-]+$")
     message(FATAL_ERROR "boot-iso has an invalid CPU signature")
 endif()
@@ -126,6 +144,14 @@ execute_process(
     RESULT_VARIABLE _startup_result)
 if(NOT _startup_result EQUAL 0)
     message(FATAL_ERROR "boot-iso could not stage Startup-Sequence")
+endif()
+if(LLVMPIPE_PROBE_STARTUP)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${LLVMPIPE_PROBE_STARTUP}" "${STAGE_DIR}/S/User-Startup"
+        RESULT_VARIABLE _probe_startup_result)
+    if(NOT _probe_startup_result EQUAL 0)
+        message(FATAL_ERROR "boot-iso could not stage llvmpipe probe startup")
+    endif()
 endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different

@@ -579,6 +579,15 @@ for ASM, so assembly remains a direct deterministic invocation.
 The implementation runs `qemu-system-x86_64` and expects PC bootstrap/kernel
 paths. A different preset does not select an ARM or RISC-V emulator.
 
+`--iso FILE` instead boots an existing PC x86-64 ISO through BIOS/GRUB under
+QEMU TCG. It does not build the image and cannot be combined with `--packages`
+or `--module`. The evidence records its canonical path and SHA-256.
+`--require-llvmpipe-jit` requires `--iso` and the opt-in development probe:
+renderer identity, a named non-null LLVM MCJIT shader address, passing shader
+pixel readback and no classified guest fault. The CLI stops QEMU after proof
+or a definitive failure; deadline expiry fails the strict test. See the
+[native PC graphics workflow](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
+
 Golden commands take repeatable `--preset NAME` options. Run them from the
 AROS repository root after configuring the selected builds; they consume
 recorded transpiler invocations under `build/`.

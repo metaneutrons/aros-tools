@@ -9,7 +9,9 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `aros test` | preset | -p, --preset | — | optional | 1 | pc-x86_64 |  | — |  |
 | `aros test` | timeout | -t, --timeout | — | optional | 1 | 20 |  | — |  |
-| `aros test` | packages | --packages | — | optional | 0 | false |  | — |  |
-| `aros test` | modules | --module | — | optional | 1 |  |  | — |  |
+| `aros test` | packages | --packages | — | optional | 0 | false |  | — | iso |
+| `aros test` | modules | --module | — | optional | 1 |  |  | — | iso |
+| `aros test` | iso | --iso | — | optional | 1 |  |  | — | packages, modules |
+| `aros test` | require_llvmpipe_jit | --require-llvmpipe-jit | — | optional | 0 | false |  | — |  |
 | `aros test` | evidence | --evidence | — | optional | 1 |  |  | — |  |
 | `aros test` | memory | --memory | — | optional | 1 | 512 |  | — |  |

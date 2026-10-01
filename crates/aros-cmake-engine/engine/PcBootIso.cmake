@@ -60,6 +60,13 @@ function(aros_add_pc_boot_iso)
         message(FATAL_ERROR "boot-iso requires the kernel ELF as its first module")
     endif()
     set(_startup_source "${AROS_SOURCE_DIR}/workbench/s/Startup-Sequence")
+    set(_probe_startup "")
+    if(AROS_LLVMPIPE_RUNTIME_PROBE)
+        if(NOT TARGET tools-test-llvmpipe-jit)
+            message(FATAL_ERROR "boot-iso runtime probe has no native guest producer")
+        endif()
+        set(_probe_startup "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/runtime/llvmpipe-jit-startup")
+    endif()
     set(_bootstrap "${CMAKE_BINARY_DIR}/SYS/boot/pc/bootstrap")
     set(_grub_config "${CMAKE_BINARY_DIR}/gen/boot-iso/grub.cfg")
     set(_stage_dir "${CMAKE_BINARY_DIR}/gen/boot-iso/stage")
@@ -85,6 +92,7 @@ function(aros_add_pc_boot_iso)
             "-DSTAGE_DIR=${_stage_dir}"
             "-DCONFIG_SOURCE=${_grub_config}"
             "-DSTARTUP_SOURCE=${_startup_source}"
+            "-DLLVMPIPE_PROBE_STARTUP=${_probe_startup}"
             "-DCPU_SIGNATURE=${AROS_TARGET_CPU}"
             "-DGRUB2_STAMP=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/.grub2-iso-assets.stamp"
             "-DGRUB2_PRIVATE_IMAGE=${CMAKE_BINARY_DIR}/gen/grub2-iso-assets/x86_64/pc/grub2_eltorito"
@@ -108,10 +116,13 @@ function(aros_add_pc_boot_iso)
         # named by modules.default. Bind the exact generated outputs as file
         # dependencies instead of relying on its historically partial root.
         DEPENDS "${_bootstrap}" ${_module_inputs}
-            "${_modules_file}" "${_startup_source}" "${_grub_config}"
+            "${_modules_file}" "${_startup_source}" "${_grub_config}" ${_probe_startup}
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PreparePcBootIso.cmake"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ComposePcBootIso.cmake"
         COMMENT "Packaging native AROS SYS tree as BIOS-bootable PC ISO -> ${AROS_BOOT_ISO}"
         VERBATIM)
     add_dependencies(boot-iso AROS aros-grub2-iso-assets)
+    if(AROS_LLVMPIPE_RUNTIME_PROBE)
+        add_dependencies(boot-iso tools-test-llvmpipe-jit)
+    endif()
 endfunction()
