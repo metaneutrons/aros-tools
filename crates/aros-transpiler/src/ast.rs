@@ -142,6 +142,10 @@ pub struct TargetDefinition {
     /// Full-module normal/relative client archive composition.
     #[serde(default)]
     pub genmodule_linklibs: Option<GenmoduleLinklibs>,
+    /// Consumer-side `rellib` requirements from the effective genmodule config.
+    /// These do not imply that this module produces a client archive.
+    #[serde(default)]
+    pub config_relative_libraries: Vec<String>,
     /// Explicit private archive directory from a proven `%build_linklib`
     /// `libdir=` expression. The parser records this only after resolving the
     /// path below the build tree. A raw `-l<name>` consumer may use this

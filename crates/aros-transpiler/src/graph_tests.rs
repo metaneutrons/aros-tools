@@ -4,8 +4,10 @@ use crate::copy_includes::CopyIncludesDecl;
 use crate::dirs::DirVars;
 use crate::fetch::FetchDecl;
 use crate::packages::{PackageDecl, ResolvedPackageMember};
+use crate::testing::TempTree;
 use crate::{parse_mmakefile_with_dirs, parse_mmakefile_with_dirs_and_context, TargetContext};
 use std::collections::HashSet;
+use std::fs;
 use walkdir::WalkDir;
 
 fn root() -> std::path::PathBuf {
@@ -744,6 +746,123 @@ fn genmodule_only_library_mmake_id_is_still_a_compile_target() {
         define_header_compile_targets(&target.mmake_name, &target),
         ["workbench-libs-version"]
     );
+}
+
+#[test]
+fn consumer_rellib_links_only_the_relative_provider() {
+    let tree = TempTree::new();
+    let datatype_dir = tree.0.join("workbench/classes/datatypes");
+    let png_provider_dir = tree.0.join("workbench/libs/png");
+    let plain_provider_dir = tree.0.join("workbench/libs/plain");
+    for directory in [&datatype_dir, &png_provider_dir, &plain_provider_dir] {
+        fs::create_dir_all(directory).unwrap();
+    }
+
+    fs::write(datatype_dir.join("pngclass.c"), "").unwrap();
+    fs::write(datatype_dir.join("plainclass.c"), "").unwrap();
+    fs::write(
+        datatype_dir.join("pngdt.conf"),
+        "##begin config\nbasename PNGDT\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        datatype_dir.join("pngdt.override"),
+        "##begin config\nrellib png\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        datatype_dir.join("plain.conf"),
+        "##begin config\nbasename PLAINDT\nrellib plain\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        datatype_dir.join("mmakefile.src"),
+        "%build_module mmake=png-consumer modname=png modtype=datatype \
+         conffile=pngdt.conf confoverride=pngdt.override files=pngclass\n\
+         %build_module mmake=plain-consumer modname=plain modtype=datatype \
+         conffile=plain.conf files=plainclass\n",
+    )
+    .unwrap();
+
+    fs::write(png_provider_dir.join("png.c"), "").unwrap();
+    fs::write(
+        png_provider_dir.join("png.conf"),
+        "##begin config\nbasename Png\noptions rellinklib\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        png_provider_dir.join("mmakefile.src"),
+        "%build_module mmake=workbench-libs-png modname=png modtype=library files=png\n",
+    )
+    .unwrap();
+
+    fs::write(plain_provider_dir.join("plain.c"), "").unwrap();
+    fs::write(
+        plain_provider_dir.join("plain.conf"),
+        "##begin config\nbasename Plain\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        plain_provider_dir.join("mmakefile.src"),
+        "%build_module mmake=workbench-libs-plain modname=plain modtype=library files=plain\n",
+    )
+    .unwrap();
+
+    let dirs = DirVars::load(&tree.0);
+    let mut graph = DependencyGraph::new();
+    for relative in [
+        "workbench/classes/datatypes/mmakefile.src",
+        "workbench/libs/png/mmakefile.src",
+        "workbench/libs/plain/mmakefile.src",
+    ] {
+        let parsed = parse_mmakefile_with_dirs(&tree.0.join(relative), &tree.0, &dirs).unwrap();
+        for target in parsed.targets {
+            graph.add_target(target);
+        }
+    }
+
+    let unresolved = graph.resolve_use_libs();
+    assert_eq!(unresolved.len(), 1, "{unresolved:#?}");
+    assert!(
+        unresolved[0].contains("plain-consumer uselibs=plain_rel has no link library"),
+        "{unresolved:#?}"
+    );
+    assert_eq!(
+        graph.targets["png-consumer"].config_relative_libraries,
+        ["png"]
+    );
+    assert!(graph.targets["png-consumer"].genmodule_linklibs.is_none());
+    assert_eq!(
+        graph.targets["png-consumer"].link_libs,
+        ["workbench-libs-png-linklib-rel"]
+    );
+    assert!(graph.targets["plain-consumer"].genmodule_linklibs.is_none());
+    assert!(graph.targets["plain-consumer"].link_libs.is_empty());
+
+    let cmake = crate::generate_cmake(&graph);
+    let png_block = cmake
+        .split("MMAKE_ID png-consumer\n")
+        .nth(1)
+        .expect("generated PNG datatype")
+        .split(")\n")
+        .next()
+        .unwrap();
+    assert!(
+        png_block.contains("LIBS \"workbench-libs-png-linklib-rel\""),
+        "{png_block}"
+    );
+    assert!(
+        !png_block.contains("LIBS \"workbench-libs-png-linklib\""),
+        "{png_block}"
+    );
+    let plain_block = cmake
+        .split("MMAKE_ID plain-consumer\n")
+        .nth(1)
+        .expect("generated plain datatype")
+        .split(")\n")
+        .next()
+        .unwrap();
+    assert!(!plain_block.contains("LIBS "), "{plain_block}");
 }
 
 #[test]

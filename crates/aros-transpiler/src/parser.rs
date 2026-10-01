@@ -216,8 +216,12 @@ fn merge_named_link_flags(flags: &mut FlagSet, scope: &VarScope, line: usize, va
     }
 }
 
-fn read_genmodule_linklib_config(directory: &Path, module: &str) -> Option<GenmoduleConfigFacts> {
-    read_genmodule_linklib_config_files(&directory.join(format!("{module}.conf")), None)
+fn read_genmodule_linklib_config(
+    directory: &Path,
+    module: &str,
+    override_config: Option<&Path>,
+) -> Option<GenmoduleConfigFacts> {
+    read_genmodule_linklib_config_files(&directory.join(format!("{module}.conf")), override_config)
 }
 
 fn read_genmodule_linklib_config_files(

@@ -793,8 +793,30 @@ pub(super) fn parse_mmakefile_impl(
         // the rest: the base is defined by AROS_LIBSET in <mod>_autoinit.c
         // (compiler/include/aros/symbolsets.h:118), and that object lives in
         // exactly this archive.
+        let source_path = |value: &str| {
+            value
+                .strip_prefix("${AROS_SOURCE_DIR}/")
+                .map(|relative| root.join(relative))
+                .or_else(|| {
+                    Path::new(value)
+                        .is_absolute()
+                        .then(|| Path::new(value).to_path_buf())
+                })
+        };
+        let config_path = config_file.as_deref().and_then(source_path);
+        let override_path = config_override_file.as_deref().and_then(source_path);
+        let config_facts = config_path.map_or_else(
+            || read_genmodule_linklib_config(parent_dir, &mod_name, override_path.as_deref()),
+            |config_path| {
+                read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
+            },
+        );
+        let config_relative_libraries = config_facts
+            .as_ref()
+            .map(|facts| facts.relative_libraries.clone())
+            .unwrap_or_default();
         if module_type != ModuleType::Library {
-            if let Some(facts) = read_genmodule_linklib_config(parent_dir, &mod_name) {
+            if let Some(facts) = config_facts.as_ref() {
                 if facts.forces_client_archive {
                     skipped_client_archives.push(format!(
                         "{}:{}: %{} mmake={mmake_raw} modname={mod_raw} modtype={mod_type_owned}: \
@@ -809,25 +831,7 @@ pub(super) fn parse_mmakefile_impl(
             }
         }
         let genmodule_linklibs = if module_type == ModuleType::Library {
-            let source_path = |value: &str| {
-                value
-                    .strip_prefix("${AROS_SOURCE_DIR}/")
-                    .map(|relative| root.join(relative))
-                    .or_else(|| {
-                        Path::new(value)
-                            .is_absolute()
-                            .then(|| Path::new(value).to_path_buf())
-                    })
-            };
-            let config_path = config_file.as_deref().and_then(source_path);
-            let override_path = config_override_file.as_deref().and_then(source_path);
-            let facts = config_path.map_or_else(
-                || read_genmodule_linklib_config(parent_dir, &mod_name),
-                |config_path| {
-                    read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
-                },
-            );
-            facts.map(
+            config_facts.map(
                 |GenmoduleConfigFacts {
                      has_relative,
                      relative_libraries,
@@ -954,6 +958,7 @@ pub(super) fn parse_mmakefile_impl(
             config_file,
             config_override_file,
             genmodule_linklibs,
+            config_relative_libraries,
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
             linklib_output_dir: None,
@@ -1147,6 +1152,7 @@ pub(super) fn parse_mmakefile_impl(
             config_file: None,
             config_override_file: None,
             genmodule_linklibs: None,
+            config_relative_libraries: Vec::new(),
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
             linklib_output_dir: None,
@@ -1745,6 +1751,7 @@ pub(super) fn parse_mmakefile_impl(
             config_file: None,
             config_override_file: None,
             genmodule_linklibs: None,
+            config_relative_libraries: Vec::new(),
             canonical_linklib_output,
             canonical_linklib_eligible,
             linklib_output_dir,

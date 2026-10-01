@@ -2715,6 +2715,138 @@ fn non_library_module_needing_a_client_archive_is_reported() {
 }
 
 #[test]
+fn non_library_module_preserves_rellibs_from_explicit_config_and_override() {
+    let tree = TempTree::new();
+    let module = tree.0.join("workbench/classes/datatypes/png");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("pngclass.c"), "").unwrap();
+    fs::write(
+        module.join("pngdt.conf"),
+        "##begin config\nbasename PNGDT\nrellib png\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        module.join("pngdt.override"),
+        "##begin config\nrellib z1\n##end config\n",
+    )
+    .unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=workbench-datatypes-png modname=png modtype=datatype \
+         conffile=pngdt.conf confoverride=pngdt.override files=pngclass\n",
+    )
+    .unwrap();
+
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    let target = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "workbench-datatypes-png")
+        .expect("datatype module");
+
+    assert_eq!(
+        target.config_relative_libraries,
+        ["png", "z1"],
+        "the effective config includes both conffile and confoverride"
+    );
+    assert_eq!(
+        target.config_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.conf")
+    );
+    assert_eq!(
+        target.config_override_file.as_deref(),
+        Some("${AROS_SOURCE_DIR}/workbench/classes/datatypes/png/pngdt.override")
+    );
+    assert!(target.genmodule_linklibs.is_none());
+    assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
+}
+
+#[test]
+fn default_module_configs_merge_rellibs_from_confoverride() {
+    let tree = TempTree::new();
+    let datatype_dir = tree.0.join("workbench/classes/datatypes/png");
+    let library_dir = tree.0.join("workbench/libs/png");
+    fs::create_dir_all(&datatype_dir).unwrap();
+    fs::create_dir_all(&library_dir).unwrap();
+
+    fs::write(datatype_dir.join("pngclass.c"), "").unwrap();
+    fs::write(
+        datatype_dir.join("png.conf"),
+        "##begin config\nbasename PNGDT\nrellib png\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        datatype_dir.join("png.override"),
+        "##begin config\nrellib z1\n##end config\n",
+    )
+    .unwrap();
+    let datatype_mmake = datatype_dir.join("mmakefile.src");
+    fs::write(
+        &datatype_mmake,
+        "%build_module mmake=workbench-datatypes-png modname=png modtype=datatype \
+         confoverride=png.override files=pngclass\n",
+    )
+    .unwrap();
+
+    fs::write(library_dir.join("png.c"), "").unwrap();
+    fs::write(
+        library_dir.join("png.conf"),
+        "##begin config\nbasename Png\noptions rellinklib\nrellib posixc\n##end config\n",
+    )
+    .unwrap();
+    fs::write(
+        library_dir.join("png.override"),
+        "##begin config\nrellib stdc\n##end config\n",
+    )
+    .unwrap();
+    let library_mmake = library_dir.join("mmakefile.src");
+    fs::write(
+        &library_mmake,
+        "%build_module mmake=workbench-libs-png modname=png modtype=library \
+         confoverride=png.override files=png\n",
+    )
+    .unwrap();
+
+    let dirs = DirVars::load(&tree.0);
+    let context = target_context("x86_64", "pc", "");
+    let datatype =
+        super::parse_mmakefile_with_dirs_and_context(&datatype_mmake, &tree.0, &dirs, &context)
+            .unwrap();
+    let datatype = datatype
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-datatypes-png")
+        .expect("datatype module using default png.conf");
+    assert_eq!(datatype.config_file, None);
+    assert_eq!(datatype.config_relative_libraries, ["png", "z1"]);
+    assert!(datatype.genmodule_linklibs.is_none());
+
+    let library =
+        super::parse_mmakefile_with_dirs_and_context(&library_mmake, &tree.0, &dirs, &context)
+            .unwrap();
+    let library = library
+        .targets
+        .into_iter()
+        .find(|target| target.mmake_name == "workbench-libs-png")
+        .expect("library module using default png.conf");
+    assert_eq!(library.config_file, None);
+    assert_eq!(library.config_relative_libraries, ["posixc", "stdc"]);
+    let metadata = library
+        .genmodule_linklibs
+        .as_ref()
+        .expect("library client-link metadata");
+    assert!(metadata.enabled && metadata.has_relative && metadata.inputs_exact);
+    assert_eq!(metadata.relative_libraries, ["posixc", "stdc"]);
+}
+
+#[test]
 fn module_directory_expansion_is_positional_and_reports_unknowns() {
     let joined = join_continuations(
         "MODDIR := Devs/First\n\

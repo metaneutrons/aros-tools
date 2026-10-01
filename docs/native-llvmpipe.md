@@ -31,6 +31,12 @@ use the source module identity, so the loader can open `llvmpipe.hidd`.
 The ISO/probe dependency closure also includes `gl.library`,
 `mesa3dgl26-0.library` and its source-selected `SYS/GL.default` setting.
 
+Source-owned `rellib` directives are consumer requirements for datatypes,
+devices and libraries, independent of client-archive production. The link
+graph reads the effective default or explicit config together with its
+override and selects the relative archive provider, never a normal-archive
+fallback. This also preserves the PNG datatype bindings used by the desktop.
+
 Rebuild the CLI, transpiler and SDK header generator after changing their
 source or the engine:
 
