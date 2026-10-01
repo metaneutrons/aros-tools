@@ -83,7 +83,11 @@ is absent, a probe reports failure, or the guest raises a classified fault.
 After complete proof or a definitive failure, the CLI stops QEMU's process
 group and validates the final logs. Deadline expiry fails the strict test;
 it is distinct from proof-triggered shutdown. The probe emits PASS only after
-GL and window cleanup.
+GL and window cleanup. A separate guest supervisor runs the workload with a
+1 MiB stack, checks its return code and unloads its ELF. The CLI also requires
+the supervisor's `EXIT PASS` marker: an earlier pixel PASS cannot hide a CRT
+or unload failure. This fixture-specific stack requirement does not change
+AROS's global stack defaults or the Rust CLI's build policy.
 The evidence directory retains a read-only ISO snapshot and records its
 SHA-256 and original canonical path together with this run's serial and
 exception logs. QEMU boots the verified snapshot, not the mutable build-tree

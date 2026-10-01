@@ -131,6 +131,8 @@ The test ISO contains a tools-owned shader probe and an instrumented HIDD.
 Its startup is staged into the image, not written into the AROS sources.
 Success requires the expected renderer, a named non-null MCJIT shader address
 and the correct rendered pixel in the same guest run, with no classified fault.
+A guest supervisor supplies a 1 MiB workload stack and must confirm successful
+return and ELF unloading before the CLI accepts the proof.
 The CLI stops QEMU after complete proof or a definitive failure; deadline
 expiry fails this strict test.
 The retained evidence includes the image hash and complete logs.

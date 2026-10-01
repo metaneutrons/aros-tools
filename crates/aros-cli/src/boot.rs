@@ -112,7 +112,7 @@ struct ValidatedIsoImage {
     sha256: String,
 }
 
-/// The three independent serial facts that prove the llvmpipe JIT probe.
+/// Renderer, generated shader, pixel and successful unload evidence must agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlvmPipeJitProof {
     /// Renderer reported by GL_RENDERER.
@@ -627,8 +627,16 @@ fn parse_llvmpipe_jit_proof(serial: &str) -> std::result::Result<LlvmPipeJitProo
         }
     })?;
 
-    if !lines.contains(&PASS_MARKER) {
-        return Err("missing the exact llvmpipe LLVM 11 GLSL/JIT probe PASS marker".to_owned());
+    let pass_line = lines
+        .iter()
+        .position(|line| *line == PASS_MARKER)
+        .ok_or_else(|| {
+            "missing the exact llvmpipe LLVM 11 GLSL/JIT probe PASS marker".to_owned()
+        })?;
+    if !lines.iter().enumerate().any(|(index, line)| {
+        index > pass_line && *line == "=== LLVMPipe LLVM 11 GLSL/JIT PROBE EXIT PASS ==="
+    }) {
+        return Err("missing successful probe return and ELF unload evidence".to_owned());
     }
 
     Ok(LlvmPipeJitProof {
@@ -1868,6 +1876,7 @@ pub fn render(report: &BootReport) -> String {
                 "  llvmpipe pixel: {},{},{},{}",
                 proof.pixel[0], proof.pixel[1], proof.pixel[2], proof.pixel[3]
             );
+            out.push_str("  llvmpipe probe lifecycle: returned and ELF unloaded\n");
         } else {
             out.push_str("  llvmpipe JIT proof: missing or invalid\n");
         }
@@ -2160,6 +2169,11 @@ mod tests {
             good.replace("function=fs_variant_whole", "function=other_variant"),
             good.replace("address=FFEEDDCCBBAA9988", "address=0000000000000000"),
             good.replace("64 128 191 255", "64 128 181 255"),
+            good.replace("=== LLVMPipe LLVM 11 GLSL/JIT PROBE EXIT PASS ===", ""),
+            format!(
+                "=== LLVMPipe LLVM 11 GLSL/JIT PROBE EXIT PASS ===\n{}",
+                good.replace("=== LLVMPipe LLVM 11 GLSL/JIT PROBE EXIT PASS ===", "")
+            ),
             format!("{good}\n[llvmpipe-jit] FAIL: shader compilation failed\n"),
             good.replace("address=FFEEDDCCBBAA9988", "address=0000000000000000"),
         ] {
@@ -2708,7 +2722,8 @@ mod tests {
         "[llvmpipe-jit] GL_RENDERER: llvmpipe (LLVM 11.0.0, 256 bits)\n\
          [llvmpipe-mcjit] function=fs_variant_whole address=FFEEDDCCBBAA9988\n\
          [llvmpipe-jit] center RGBA: 64 128 191 255; expected 64 128 191 255 +/- 8\n\
-         === LLVMPipe LLVM 11 GLSL/JIT PROBE PASS ===\n"
+         === LLVMPipe LLVM 11 GLSL/JIT PROBE PASS ===\n\
+         === LLVMPipe LLVM 11 GLSL/JIT PROBE EXIT PASS ===\n"
             .to_owned()
     }
 }

@@ -11,6 +11,7 @@
 #include <aros/debug.h>
 
 #include <exec/types.h>
+#include <exec/tasks.h>
 #include <intuition/intuition.h>
 #include <proto/exec.h>
 #include <proto/intuition.h>
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include "llvmpipe-jit-contract.h"
 
 #define PROBE_WIDTH  96
 #define PROBE_HEIGHT 96
@@ -206,6 +208,17 @@ int main(void)
     int result = 1;
 
     out("[llvmpipe-jit] starting; SYS/Gallium.default must be llvmpipe\n");
+    {
+        struct Task *task = FindTask(NULL);
+        out("[llvmpipe-jit] stack lower=%p upper=%p local=%p bytes=%lu\n",
+            task->tc_SPLower, task->tc_SPUpper, &result,
+            (unsigned long)((char *)task->tc_SPUpper - (char *)task->tc_SPLower));
+        if ((char *)task->tc_SPUpper - (char *)task->tc_SPLower < (long)JIT_STACK_BYTES)
+        {
+            out("[llvmpipe-jit] FAIL: run the probe through llvmpipe-jit-runner; LLVM requires the fixture's 1 MiB stack\n");
+            return 1;
+        }
+    }
 
     pubscreen = LockPubScreen(NULL);
     if (!pubscreen)

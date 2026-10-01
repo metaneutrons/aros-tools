@@ -1,3 +1,3 @@
 ; Tools-owned, opt-in guest test. Never installed into the source checkout.
 SetEnv SYS/Gallium.default llvmpipe
-SYS:Developer/Debug/Tests/graphics/gl/llvmpipe-jit >RAM:llvmpipe-jit.log
+SYS:Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner >RAM:llvmpipe-jit.log

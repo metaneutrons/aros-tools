@@ -50,11 +50,13 @@ function(_prepare_case case root_out helper_out startup_out)
     file(WRITE "${_grub_stamp}"
         "GRUB2 ISO assets: 2.12 x86_64\nEl Torito SHA256: ${_grub_digest}\n")
 
-    if(case MATCHES "^(opt-in|preexisting-user-startup|missing-hidd|symlink-hidd|missing-probe|symlink-probe|missing-startup|symlink-startup)$")
+    if(case MATCHES "^(opt-in|preexisting-user-startup|missing-hidd|symlink-hidd|missing-probe|symlink-probe|missing-runner|symlink-runner|missing-startup|symlink-startup)$")
         file(WRITE "${_sys_dir}/Devs/Drivers/llvmpipe.hidd"
             "fixture llvmpipe HIDD\n")
         file(WRITE "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit"
             "fixture llvmpipe probe executable\n")
+        file(WRITE "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner"
+            "fixture llvmpipe supervisor executable\n")
         if(NOT case STREQUAL "missing-startup")
             file(COPY_FILE "${_source_probe_startup}" "${_probe_startup}")
         endif()
@@ -82,6 +84,12 @@ function(_prepare_case case root_out helper_out startup_out)
             file(REMOVE "${_probe_startup}")
             file(CREATE_LINK "${_case_root}/probe-startup-target"
                 "${_probe_startup}" SYMBOLIC)
+        elseif(case STREQUAL "missing-runner")
+            file(REMOVE "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner")
+        elseif(case STREQUAL "symlink-runner")
+            file(REMOVE "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner")
+            file(CREATE_LINK "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit"
+                "${_sys_dir}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner" SYMBOLIC)
         endif()
     endif()
 
@@ -161,7 +169,7 @@ _run_case(default-off FALSE TRUE "")
 _run_case(opt-in TRUE TRUE "")
 _run_case(preexisting-user-startup TRUE FALSE
     "boot-iso refuses an unsafe llvmpipe probe startup")
-foreach(_input IN ITEMS hidd probe startup)
+foreach(_input IN ITEMS hidd probe runner startup)
     _run_case("missing-${_input}" TRUE FALSE
         "boot-iso is missing a regular llvmpipe probe input")
     _run_case("symlink-${_input}" TRUE FALSE

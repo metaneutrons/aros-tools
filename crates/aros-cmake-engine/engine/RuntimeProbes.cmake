@@ -38,5 +38,12 @@ if(AROS_LLVMPIPE_RUNTIME_PROBE)
         message(FATAL_ERROR "llvmpipe guest probe did not materialize")
     endif()
     add_dependencies(tools-test-llvmpipe-jit hidd-llvmpipe workbench-libs-gl)
+    aros_add_program(
+        TARGET llvmpipe-jit-runner
+        MMAKE_ID tools-test-llvmpipe-jit-runner
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/tests/runtime"
+        INSTALL_DIR "${AROS_BUILD_DIR}/SYS/Developer/Debug/Tests/graphics/gl"
+        SOURCES llvmpipe-jit-runner)
+    add_dependencies(tools-test-llvmpipe-jit-runner tools-test-llvmpipe-jit)
     message(STATUS "llvmpipe runtime probe enabled: MCJIT address logging is instrumentation, not a PASS gate")
 endif()

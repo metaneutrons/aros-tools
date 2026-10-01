@@ -17,7 +17,8 @@ if(LLVMPIPE_PROBE_STARTUP)
     endif()
     foreach(_probe_input IN ITEMS "${LLVMPIPE_PROBE_STARTUP}"
             "${SYS_DIR}/Devs/Drivers/llvmpipe.hidd"
-            "${SYS_DIR}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit")
+            "${SYS_DIR}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit"
+            "${SYS_DIR}/Developer/Debug/Tests/graphics/gl/llvmpipe-jit-runner")
         if(NOT EXISTS "${_probe_input}" OR IS_DIRECTORY "${_probe_input}" OR
            IS_SYMLINK "${_probe_input}")
             message(FATAL_ERROR "boot-iso is missing a regular llvmpipe probe input: ${_probe_input}")

@@ -584,7 +584,8 @@ QEMU TCG. It does not build the image and cannot be combined with `--packages`
 or `--module`. The evidence records its canonical path and SHA-256.
 `--require-llvmpipe-jit` requires `--iso` and the opt-in development probe:
 renderer identity, a named non-null LLVM MCJIT shader address, passing shader
-pixel readback and no classified guest fault. The CLI stops QEMU after proof
+pixel readback, successful probe return and ELF unloading, and no classified
+guest fault. The CLI stops QEMU after proof
 or a definitive failure; deadline expiry fails the strict test. See the
 [native PC graphics workflow](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 
