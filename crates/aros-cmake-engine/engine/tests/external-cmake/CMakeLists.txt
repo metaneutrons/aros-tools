@@ -203,8 +203,8 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
             message(FATAL_ERROR
                 "component archives are not linked as one ordered group: ${_component_libraries}")
         endif()
-        # The AROS collector invokes ld.lld directly, so remove the host
-        # platform's default CMake driver flags from this cross-link probe.
+        # Keep this shared probe free of host-default link flags: its direct
+        # collector mode invokes ELF LLD, not the host platform's linker.
         set(CMAKE_C_LINK_FLAGS "")
         add_executable(external-component-link-consumer EXCLUDE_FROM_ALL
             components/link-consumer.c)
