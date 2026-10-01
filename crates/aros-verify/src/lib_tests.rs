@@ -331,15 +331,15 @@ fn current_architecture_denominators_are_pinned() {
         .map(|declaration| declaration.mmake)
         .collect();
 
-    // Qualified September upstream snapshot 6747c370 adds target declarations
-    // and selector-backed LLVM runtime builds. Build trees are excluded; these
-    // are source-owned IDs, independently of provisioning classification.
-    assert_eq!(global.len(), 1254);
-    assert_eq!(ids(&x86, true).len(), 1124);
-    assert_eq!(ids(&arm, true).len(), 1124);
-    assert_eq!(ids(&aarch64, true).len(), 1124);
+    // The integration source restores the Mesa 26 target Gallivm declaration
+    // on top of the September snapshot. Build trees are excluded; these are
+    // source-owned IDs, independently of provisioning classification.
+    assert_eq!(global.len(), 1255);
+    assert_eq!(ids(&x86, true).len(), 1125);
+    assert_eq!(ids(&arm, true).len(), 1125);
+    assert_eq!(ids(&aarch64, true).len(), 1125);
     assert!(global.contains("test-library-dummytest_auto"));
-    assert!(!global.contains("mesa3d-linklib-galliumvm"));
+    assert!(global.contains("mesa3d-linklib-galliumvm"));
 
     let arm_removed: BTreeSet<String> = ids(&arm, false)
         .difference(&ids(&arm, true))
@@ -414,10 +414,11 @@ fn toolchain_provisioning_splits_the_target_obligations() {
         .map(|declaration| declaration.mmake.clone())
         .collect();
 
-    assert_eq!(global_target.len(), 1244);
-    assert_eq!(target_ids(&x86).len(), 1114);
-    assert_eq!(target_ids(&arm).len(), 1116);
-    assert_eq!(target_ids(&aarch64).len(), 1116);
+    assert_eq!(global_target.len(), 1245);
+    assert_eq!(target_ids(&x86).len(), 1115);
+    assert_eq!(target_ids(&arm).len(), 1117);
+    assert_eq!(target_ids(&aarch64).len(), 1117);
+    assert!(global_target.contains("mesa3d-linklib-galliumvm"));
     let common_provisioning = BTreeSet::from([
         "crosstools-compiler-rt".to_owned(),
         "crosstools-compiler-rt-release".to_owned(),
@@ -441,7 +442,7 @@ fn toolchain_provisioning_splits_the_target_obligations() {
     assert!(!global_target.contains("tools-crosstools-gcc-libatomic"));
     for inventory in [target_ids(&x86), target_ids(&arm), target_ids(&aarch64)] {
         assert!(inventory.contains("test-library-dummytest_auto"));
-        assert!(!inventory.contains("mesa3d-linklib-galliumvm"));
+        assert!(inventory.contains("mesa3d-linklib-galliumvm"));
         assert!(!inventory.contains("tools-crosstools-gcc-libatomic"));
     }
 }

@@ -730,7 +730,7 @@ pub(crate) fn parse_remaining(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{root, target_context};
+    use crate::testing::target_context;
     use aros_common::read_source;
     use std::path::Path;
 
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn mesa20_release_patch_and_archive_inventories_are_exact() {
-        let root = root();
+        let root = crate::testing::mesa20_root();
         let patch_relative = "workbench/libs/mesa/mesa-20.0.8-aros.diff";
         let patch = read_source(&root.join(patch_relative)).unwrap();
         for required in [

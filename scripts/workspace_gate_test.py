@@ -31,12 +31,22 @@ class WorkspaceGateTests(unittest.TestCase):
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-qm", "fixture")
         self.commit = self.git("rev-parse", "HEAD").stdout.strip()
+        self.legacy_source = self.root / "mesa20-source"
+        subprocess.run(["git", "clone", "--quiet", str(self.source), str(self.legacy_source)],
+                       env=self.env, check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "-C", str(self.legacy_source), "-c", "user.name=Fixture",
+                        "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+                        "commit", "--allow-empty", "-qm", "historical Mesa 20 fixture"],
+                       env=self.env, check=True, capture_output=True, timeout=30)
+        self.legacy_commit = subprocess.run(
+            ["git", "-C", str(self.legacy_source), "rev-parse", "HEAD"], env=self.env,
+            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
         self.write("contracts/aros-source-v1.toml", f'[source]\ncommit = "{self.commit}"\n')
         # The inert source fixture has a fresh commit, so substitute that
         # identity only in this copied gate. Production retains the fixed
         # historical Mesa 20 pin and validates it before running Cargo.
         fixture_gate = (ROOT / "scripts/check-workspace.sh").read_text().replace(
-            "cb6974f1c3de43c6f1168d69039af7c32e56153c", self.commit
+            "cb6974f1c3de43c6f1168d69039af7c32e56153c", self.legacy_commit
         )
         self.gate = self.write("scripts/check-workspace.sh", fixture_gate)
         self.fixtures = self.repo / "crates/aros-cmake-engine/engine/tests"
@@ -59,12 +69,19 @@ class WorkspaceGateTests(unittest.TestCase):
         self.write("scripts/check-doc-links.py", "pass\n")
         program = f'''#!{sys.executable}
 import json
+import os
 from pathlib import Path
 import sys
 root = Path({str(self.root)!r})
 name = Path(sys.argv[0]).name
 with (root / "calls.jsonl").open("a") as stream:
     stream.write(json.dumps([name, *sys.argv[1:]]) + "\\n")
+if name in ("cargo", "cmake"):
+    with (root / "sources.jsonl").open("a") as stream:
+        stream.write(json.dumps({{"tool": name,
+            "current": os.environ.get("AROS_TEST_SOURCE_ROOT"),
+            "mesa20": os.environ.get("AROS_TEST_MESA20_SOURCE_ROOT"),
+            "mesa26": os.environ.get("AROS_TEST_MESA26_SOURCE_ROOT")}}) + "\\n")
 if name == "uname":
     linux = (root / "linux").exists()
     print(("Linux" if linux else "Darwin") if sys.argv[1:] == ["-s"] else ("x86_64" if linux else "arm64"))
@@ -98,10 +115,11 @@ if name == "cmake" and (root / "fail-engine").exists():
 
     def run_gate(self, *args, source=False):
         self.log.unlink(missing_ok=True)
+        (self.root / "sources.jsonl").unlink(missing_ok=True)
         env = {**self.env}
         if source:
             env["AROS_TEST_SOURCE_ROOT"] = str(self.source)
-            env["AROS_TEST_MESA20_SOURCE_ROOT"] = str(self.source)
+            env["AROS_TEST_MESA20_SOURCE_ROOT"] = str(self.legacy_source)
             env["AROS_TEST_MESA26_SOURCE_ROOT"] = str(self.source)
         return subprocess.run(["bash", str(self.gate), *args], cwd=self.root,
                               env=env, capture_output=True, text=True, timeout=30)
@@ -178,6 +196,33 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn("GrubBuildTest.cmake", json.dumps(self.calls("cmake")))
         self.assertIn("3 executed, 0 host-qualified omission(s), 3 discovered", result.stdout)
         self.assertFalse(self.calls("npm"))
+
+    def test_current_and_historical_sources_remain_distinct_in_every_stage(self):
+        self.assertNotEqual(self.commit, self.legacy_commit)
+        self.assert_ok(self.run_gate("test", source=True))
+        records = [json.loads(line) for line in (self.root / "sources.jsonl").read_text().splitlines()]
+        self.assertTrue(records)
+        for record in records:
+            self.assertEqual(Path(record["current"]).resolve(), self.source.resolve(), record)
+            self.assertEqual(Path(record["mesa20"]).resolve(), self.legacy_source.resolve(), record)
+            self.assertEqual(Path(record["mesa26"]).resolve(), self.source.resolve(), record)
+
+    def test_integration_identity_does_not_retarget_the_producer_source(self):
+        self.write("contracts/aros-source-v1.toml",
+                   f'[source]\ncommit = "{self.legacy_commit}"\n'
+                   f'[integration]\ncommit = "{self.commit}"\n')
+        self.assert_ok(self.run_gate("source-test", source=True))
+        self.write("contracts/aros-source-v1.toml",
+                   f'[source]\ncommit = "{self.legacy_commit}"\n'
+                   f'[integration]\ncommit = "{"0" * 40}"\n')
+        result = self.run_gate("source-test", source=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls("cargo"))
+
+    def test_dirty_historical_source_fails_before_test_tools(self):
+        (self.legacy_source / "untracked").write_text("not qualified\n")
+        self.assertNotEqual(self.run_gate("source-test", source=True).returncode, 0)
+        self.assertFalse(self.calls("cargo"))
 
     def test_explicit_all_keeps_quality_docs_and_complete_integration(self):
         self.assert_ok(self.run_gate("all", source=True))
