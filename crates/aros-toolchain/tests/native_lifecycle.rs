@@ -774,18 +774,33 @@ fn native_cancellation_reaps_configure_process_group_and_retains_roots() {
     let canceller = token.clone();
     let child_pid = fixture.root.join("work/native-lifecycle/tmp/child-pid");
     let trigger = std::thread::spawn(move || {
-        for _ in 0..100 {
+        // Snapshot and environment preparation precede configure. Contended
+        // hosts can spend more than five seconds there, so cancel only after
+        // observing the descendant, within the 120-second request budget.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let observed = loop {
             if child_pid.is_file() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                break;
+                break true;
+            }
+            if canceller.is_cancelled() || std::time::Instant::now() >= deadline {
+                break false;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        };
+        // A missing marker still requires bounded process cleanup, not a
+        // successful cancellation proof or an unbounded configure process.
         canceller.cancel();
+        observed
     });
 
-    let error = executor::run(&request, &token).unwrap_err();
-    trigger.join().unwrap();
+    let result = executor::run(&request, &token);
+    token.cancel();
+    assert!(
+        trigger.join().unwrap(),
+        "configure descendant never became ready for the cancellation probe"
+    );
+    let error = result.unwrap_err();
     assert!(
         error.to_string().contains("configure phase cancelled"),
         "{error}"
