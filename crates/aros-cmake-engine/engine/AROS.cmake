@@ -3072,6 +3072,9 @@ function(aros_build_external_cmake)
     add_library("${_interface_target}" INTERFACE)
     add_dependencies("${_interface_target}" "${EC_MMAKE_ID}")
     if(EC_LIBRARY_GROUP)
+        if(CMAKE_VERSION VERSION_LESS 3.24)
+            message(FATAL_ERROR "${EC_MMAKE_ID}: external archive groups require CMake 3.24 or newer")
+        endif()
         if(AROS_COLLECT_BIN)
             set(_group_start "--start-group")
             set(_group_end "--end-group")
@@ -3079,8 +3082,18 @@ function(aros_build_external_cmake)
             set(_group_start "-Wl,--start-group")
             set(_group_end "-Wl,--end-group")
         endif()
+        # Bare repeated end markers in transitive INTERFACE_LINK_LIBRARIES
+        # are de-duplicated by CMake. A second group then nests in the first
+        # and LLD rejects it. Model this as a real group so CMake owns both
+        # boundaries. Cache variables make the feature visible at the end of
+        # the directory scope, when link generator expressions are evaluated.
+        set(CMAKE_LINK_GROUP_USING_aros_rescan "${_group_start};${_group_end}"
+            CACHE INTERNAL "AROS collector/driver rescan group" FORCE)
+        set(CMAKE_LINK_GROUP_USING_aros_rescan_SUPPORTED TRUE
+            CACHE INTERNAL "AROS rescan group support" FORCE)
+        list(JOIN _library_products "," _group_libraries)
         target_link_libraries("${_interface_target}" INTERFACE
-            "${_group_start}" ${_library_products} "${_group_end}")
+            "$<LINK_GROUP:aros_rescan,${_group_libraries}>")
     else()
         target_link_libraries("${_interface_target}" INTERFACE "${_expected_archive}")
     endif()

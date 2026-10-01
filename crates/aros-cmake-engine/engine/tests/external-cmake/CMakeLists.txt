@@ -176,7 +176,7 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
             set(_group_end "-Wl,--end-group")
         endif()
         set(_expected_component_libraries
-            "${_group_start};${_left_library};${_right_library};${_group_end}")
+            "$<LINK_GROUP:aros_rescan,${_left_library},${_right_library}>")
         if(NOT "${_component_libraries}" STREQUAL
            "${_expected_component_libraries}")
             message(FATAL_ERROR
@@ -187,7 +187,14 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
         set(CMAKE_C_LINK_FLAGS "")
         add_executable(external-component-link-consumer EXCLUDE_FROM_ALL
             components/link-consumer.c)
+        # Reproduce the native HIDD's ordinary library group followed by an
+        # external LLVM group. Raw repeated markers used to lose the second
+        # --end-group during transitive link-item de-duplication.
+        add_library(component-pre-group STATIC components/consumer.c)
+        target_include_directories(component-pre-group PRIVATE "${_prefix}/include")
+        add_dependencies(component-pre-group fixture-components)
         target_link_libraries(external-component-link-consumer PRIVATE
+            ${_group_start} component-pre-group ${_group_end}
             fixture-components-external-components)
     endif()
 else()
