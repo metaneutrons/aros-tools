@@ -5164,6 +5164,24 @@ function(aros_add_hidd)
         # opens `<fallback>.hidd`, using the source declaration's TARGET.
         _aros_module_output_name(_output_name "${ARG_TARGET}"
             "hidd" "${ARG_MODSUFFIX}")
+        aros_arch_path_matches(_hidd_native_arch "${ARG_DIRECTORY}")
+        if(NOT _hidd_native_arch)
+            # Keeping an excluded foreign target addressable must not give
+            # it a second Ninja rule for a native loader-visible SYS file.
+            string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
+            set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
+        endif()
+        string(TOLOWER "${_install_dir}/${_output_name}" _runtime_path)
+        string(SHA256 _runtime_key "${_runtime_path}")
+        get_property(_runtime_owner GLOBAL PROPERTY
+            "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
+        if(_runtime_owner)
+            message(FATAL_ERROR
+                "Conflicting runtime module output ${_install_dir}/${_output_name}: "
+                "${_runtime_owner} and ${ARG_MMAKE_ID}")
+        endif()
+        set_property(GLOBAL PROPERTY
+            "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold
             "${ARG_DIRECTORY}" "${ARG_TARGET}")

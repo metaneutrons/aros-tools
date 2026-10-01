@@ -81,6 +81,21 @@ endif()
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}"
+        -B "${_build}-duplicate-hidd" -G Ninja
+        "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
+        "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
+        ${AROS_TEST_TOOL_ARGS}
+        -DTEST_DUPLICATE_HIDD=ON
+    RESULT_VARIABLE _hidd_duplicate_result
+    OUTPUT_VARIABLE _hidd_duplicate_stdout
+    ERROR_VARIABLE _hidd_duplicate_stderr)
+if(_hidd_duplicate_result EQUAL 0 OR
+   NOT _hidd_duplicate_stderr MATCHES "Conflicting runtime module output")
+    message(FATAL_ERROR "ambiguous HIDD did not fail closed\n${_hidd_duplicate_stdout}\n${_hidd_duplicate_stderr}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${_source}"
         -B "${_build}-unsupported-detach" -G Ninja
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
@@ -121,5 +136,6 @@ file(REMOVE_RECURSE
     "${_build}-development-lld"
     "${_build}-locked"
     "${_build}-duplicate-runtime"
+    "${_build}-duplicate-hidd"
     "${_build}-unsupported-detach")
 message(STATUS "always C++ linker contract test passed")

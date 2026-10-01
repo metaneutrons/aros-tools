@@ -348,6 +348,19 @@ get_target_property(_hidd_runtime_name hidd-softpipe OUTPUT_NAME)
 if(NOT _hidd_runtime_name STREQUAL "softpipe.hidd")
     message(FATAL_ERROR "HIDD runtime name must be softpipe.hidd, got ${_hidd_runtime_name}")
 endif()
+aros_add_hidd(TARGET softpipe MMAKE_ID foreign-softpipe
+    DIRECTORY "${AROS_SOURCE_DIR}/arch/m68k-amiga/hidd/parallel"
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/module.c")
+get_target_property(_foreign_hidd_dir foreign-softpipe RUNTIME_OUTPUT_DIRECTORY)
+get_target_property(_foreign_hidd_excluded foreign-softpipe AROS_FOREIGN_ARCH)
+if(NOT _foreign_hidd_excluded OR NOT _foreign_hidd_dir MATCHES "/gen/foreign-modules/")
+    message(FATAL_ERROR "foreign HIDD was not isolated from the native SYS namespace")
+endif()
+if(TEST_DUPLICATE_HIDD)
+    aros_add_hidd(TARGET SoftPipe MMAKE_ID conflicting-hidd
+        DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
+    message(FATAL_ERROR "ambiguous HIDD runtime module was silently accepted")
+endif()
 foreach(_case IN ITEMS
         "IconDrawerList|mui|IconDrawerList.mui"
         "IconImage|mcc|IconImage.mcc"
