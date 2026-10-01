@@ -344,6 +344,10 @@ aros_add_custom_target(
 
 # Build-rule identity must not leak into loader-visible module filenames.
 # The Wanderer parent-class lookup is a real consumer of this contract.
+get_target_property(_hidd_runtime_name hidd-softpipe OUTPUT_NAME)
+if(NOT _hidd_runtime_name STREQUAL "softpipe.hidd")
+    message(FATAL_ERROR "HIDD runtime name must be softpipe.hidd, got ${_hidd_runtime_name}")
+endif()
 foreach(_case IN ITEMS
         "IconDrawerList|mui|IconDrawerList.mui"
         "IconImage|mcc|IconImage.mcc"

@@ -5160,7 +5160,9 @@ function(aros_add_hidd)
         aros_place_module_scaffolding(RESOLVED_SOURCES "${_scaffold_sources}")
         _aros_module_install_dir(_install_dir
             "${AROS_DRIVERS_DIR}" "${ARG_INSTALL_DIR}")
-        _aros_module_output_name(_output_name "${ARG_MMAKE_ID}"
+        # The build-rule id is not the loader-visible module name. Gallium
+        # opens `<fallback>.hidd`, using the source declaration's TARGET.
+        _aros_module_output_name(_output_name "${ARG_TARGET}"
             "hidd" "${ARG_MODSUFFIX}")
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold
