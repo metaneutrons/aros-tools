@@ -26,6 +26,7 @@ function(_configure case expect_success expected_message)
         "-DCMAKE_C_COMPILER=${_external_test_clang}"
         "-DEXTERNAL_TEST_CLANG=${_external_test_clang}"
         "-DEXTERNAL_CMAKE_CASE=${case}"
+        ${ARGN}
         RESULT_VARIABLE _result
         OUTPUT_VARIABLE _stdout
         ERROR_VARIABLE _stderr)
@@ -136,6 +137,12 @@ endif()
 # A component library group builds only its declared targets, installs only
 # its declared header components, and stages only its declared archives.
 _configure(component-success TRUE "")
+# Selection probes are configure-only: keep the collector populated while
+# independently selecting the compiler-driver and direct-link rule. The latter
+# uses an executable sentinel, never claims to execute it as an actual LLD.
+_configure(component-driver TRUE "" "-DAROS_LLD_BIN=FALSE")
+_configure(component-collector TRUE ""
+    "-DAROS_LLD_BIN=${_external_test_clang}")
 set(_components_build "${_root}/component-success")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" --build "${_components_build}"
