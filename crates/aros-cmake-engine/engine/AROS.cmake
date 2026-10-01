@@ -3101,7 +3101,9 @@ function(aros_build_external_cmake)
         if(CMAKE_VERSION VERSION_LESS 3.24)
             message(FATAL_ERROR "${EC_MMAKE_ID}: external archive groups require CMake 3.24 or newer")
         endif()
-        if(AROS_COLLECT_BIN)
+        # Collector availability alone does not select its link rule. Without
+        # LLD the compiler driver still owns links and needs forwarded flags.
+        if(AROS_LLD_BIN)
             set(_group_start "--start-group")
             set(_group_end "--end-group")
         else()
