@@ -47,6 +47,9 @@ pub struct VarScope {
     /// has to keep its slashes and its references, so path resolution reads
     /// this instead of the word list.
     raw: HashMap<String, Vec<(usize, String)>>,
+    /// Scalar path history with declaration-time Make assignment semantics;
+    /// the legacy general collector remains unchanged for its other consumers.
+    path_raw: HashMap<String, Vec<(usize, String)>>,
     /// Assignments made inside a Make conditional, by source line.
     ///
     /// The legacy list collector intentionally retains its historical
@@ -55,6 +58,12 @@ pub struct VarScope {
     /// stricter: using the last textual branch would silently merge or select
     /// architecture-specific source lists without knowing the condition.
     conditional_assignments: HashMap<String, Vec<(usize, AssignmentKind)>>,
+    /// Proven replacement assignments; an unconditional `=` or `:=` supersedes
+    /// earlier unknown branches for a declaration-local scalar path.
+    path_replacements: HashMap<String, Vec<usize>>,
+    /// Simply-expanded paths whose RHS read an unresolved branch. Preserve
+    /// that uncertainty even when the legacy raw collector freezes a value.
+    uncertain_path_values: HashMap<String, Vec<usize>>,
     /// Names introduced as file-local switches, including an assignment in a
     /// branch proven false and explicitly commented-out `#NAME=value` feature
     /// toggles. Once seen, absence of an active assignment has GNU Make's
@@ -64,6 +73,55 @@ pub struct VarScope {
 }
 
 impl VarScope {
+    /// Whether a scalar path still depends on an unresolved conditional.
+    /// Appends and `?=` cannot erase that uncertainty; a proven replacement can.
+    pub(crate) fn path_is_conditional_at(&self, name: &str, line: usize) -> bool {
+        let reset = self
+            .path_replacements
+            .get(name)
+            .and_then(|history| history.iter().rev().find(|at| **at < line).copied());
+        self.conditional_assignments
+            .get(name)
+            .is_some_and(|history| {
+                history
+                    .iter()
+                    .any(|(at, _)| *at < line && reset.is_none_or(|reset| *at > reset))
+            })
+            || self.uncertain_path_values.get(name).is_some_and(|history| {
+                history
+                    .iter()
+                    .any(|at| *at < line && reset.is_none_or(|reset| *at >= reset))
+            })
+    }
+
+    pub(crate) fn is_known_local(&self, name: &str) -> bool {
+        self.local_names.contains(name)
+    }
+
+    fn path_depends_on_conditional_at(
+        &self,
+        name: &str,
+        line: usize,
+        depth: usize,
+        guard: &mut Vec<String>,
+    ) -> bool {
+        if self.path_is_conditional_at(name, line)
+            || depth == 0
+            || guard.iter().any(|item| item == name)
+        {
+            return true;
+        }
+        let Some(value) = self.path_raw_at(name, line) else {
+            return false;
+        };
+        guard.push(name.to_owned());
+        let uncertain = scalar_references(&value).any(|dependency| {
+            self.path_depends_on_conditional_at(dependency, line, depth - 1, guard)
+        });
+        guard.pop();
+        uncertain
+    }
+
     /// The variable state as Make would see it at `line`.
     ///
     /// A declaration on line N sees every assignment made before it and none of
@@ -90,6 +148,15 @@ impl VarScope {
             .rev()
             .find(|(at, _)| *at < line)
             .map(|(_, v)| v.clone())
+    }
+
+    pub(crate) fn path_raw_at(&self, name: &str, line: usize) -> Option<String> {
+        self.path_raw
+            .get(name)?
+            .iter()
+            .rev()
+            .find(|(at, _)| *at < line)
+            .map(|(_, value)| value.clone())
     }
 
     /// Whether `name` was assigned in a Make conditional before `line`.
@@ -204,6 +271,15 @@ pub(crate) fn strip_make_comment(line: &str) -> &str {
 /// arguments are frozen now, which preserves the source-order semantics the
 /// bounded evaluator needs at the declaration line.
 fn expand_immediate_locals(raw: &str, scope: &VarScope, depth: usize) -> String {
+    expand_immediate_locals_impl(raw, scope, depth, None)
+}
+
+fn expand_immediate_locals_impl(
+    raw: &str,
+    scope: &VarScope,
+    depth: usize,
+    path_names: Option<&HashSet<String>>,
+) -> String {
     if depth == 0 || !raw.contains('$') {
         return raw.to_owned();
     }
@@ -270,14 +346,44 @@ fn expand_immediate_locals(raw: &str, scope: &VarScope, depth: usize) -> String 
         // name while holding no physical current-directory value; freezing
         // that provisional state would turn $(OBJDIR)/x into $(GENDIR)/x.
         let local_value = simple_name
-            .filter(|name| !matches!(*name, "CURDIR" | "OBJDIR"))
-            .and_then(|name| scope.latest_raw(name));
+            .filter(|name| {
+                !matches!(*name, "CURDIR" | "OBJDIR")
+                    && (path_names.is_none() || !crate::includes::is_deferred_path_var(name))
+            })
+            .and_then(|name| {
+                if path_names.is_some() {
+                    scope
+                        .path_raw
+                        .get(name)
+                        .and_then(|history| history.last())
+                        .map(|(_, value)| value.as_str())
+                } else {
+                    scope.latest_raw(name)
+                }
+            });
         if let Some(value) = local_value {
-            output.push_str(&expand_immediate_locals(value, scope, depth - 1));
+            output.push_str(&expand_immediate_locals_impl(
+                value,
+                scope,
+                depth - 1,
+                path_names,
+            ));
+        } else if simple_name.is_some_and(|name| {
+            name != "CURDIR"
+                && !crate::includes::is_deferred_path_var(name)
+                && path_names.is_some_and(|names| names.contains(name))
+        }) {
+            // A file-local variable absent now is empty even if assigned later.
+            // Any unresolved conditional dependency is separately recorded.
         } else {
             output.push('$');
             output.push(open as char);
-            output.push_str(&expand_immediate_locals(body, scope, depth - 1));
+            output.push_str(&expand_immediate_locals_impl(
+                body,
+                scope,
+                depth - 1,
+                path_names,
+            ));
             output.push(close as char);
         }
         cursor = end + 1;
@@ -638,9 +744,22 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
     let mut scope = VarScope {
         assignments: HashMap::new(),
         raw: HashMap::new(),
+        path_raw: HashMap::new(),
         conditional_assignments: HashMap::new(),
+        path_replacements: HashMap::new(),
+        uncertain_path_values: HashMap::new(),
         local_names: HashSet::new(),
     };
+    let path_names: HashSet<String> = joined
+        .lines()
+        .filter_map(|line| {
+            let line = line
+                .trim_start()
+                .strip_prefix('#')
+                .map_or(line, str::trim_start);
+            variable_assignment(strip_make_comment(line)).map(|(name, _, _)| name.to_owned())
+        })
+        .collect();
     if context.is_some() && forward_locals {
         for raw_line in joined.lines() {
             let commented = raw_line.trim_start().strip_prefix('#').map(str::trim_start);
@@ -753,6 +872,19 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
             continue;
         }
 
+        if branch_state == ConditionalTruth::True
+            && matches!(
+                kind,
+                AssignmentKind::SimpleSet | AssignmentKind::RecursiveSet
+            )
+        {
+            scope
+                .path_replacements
+                .entry(var_name.to_owned())
+                .or_default()
+                .push(line_no);
+        }
+
         let flavor = match kind {
             AssignmentKind::SimpleSet => VariableFlavor::Simple,
             AssignmentKind::RecursiveSet | AssignmentKind::SetIfUnset => VariableFlavor::Recursive,
@@ -761,6 +893,47 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
                 .copied()
                 .unwrap_or(VariableFlavor::Recursive),
         };
+        if flavor == VariableFlavor::Simple
+            && scalar_references(value).any(|name| {
+                scope.path_depends_on_conditional_at(
+                    name,
+                    line_no,
+                    MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
+                    &mut Vec::new(),
+                )
+            })
+        {
+            scope
+                .uncertain_path_values
+                .entry(var_name.to_owned())
+                .or_default()
+                .push(line_no);
+        }
+        let path_rhs = if flavor == VariableFlavor::Simple {
+            expand_immediate_locals_impl(
+                value,
+                &scope,
+                MAX_DEPTH_FOR_IMMEDIATE_EXPANSION,
+                Some(&path_names),
+            )
+        } else {
+            value.to_owned()
+        };
+        let path_value = if kind == AssignmentKind::Append {
+            let previous = scope
+                .path_raw
+                .get(var_name)
+                .and_then(|history| history.last())
+                .map_or("", |(_, value)| value.as_str());
+            format!("{previous} {path_rhs}").trim().to_owned()
+        } else {
+            path_rhs
+        };
+        scope
+            .path_raw
+            .entry(var_name.to_owned())
+            .or_default()
+            .push((line_no, path_value));
         let expanded_rhs = if flavor == VariableFlavor::Simple {
             expand_immediate_locals(value, &scope, MAX_DEPTH_FOR_IMMEDIATE_EXPANSION)
         } else {
@@ -798,6 +971,20 @@ pub(crate) fn collect_vars_impl_with_forward_locals(
     }
 
     (scope, line_states)
+}
+
+/// Both Make spellings can be frozen by a simply-expanded assignment. Nested
+/// references are visited too; unsupported function syntax remains unresolved.
+fn scalar_references(value: &str) -> impl Iterator<Item = &str> {
+    value.match_indices('$').filter_map(|(at, _)| {
+        let reference = &value[at + 1..];
+        let close = match reference.as_bytes().first() {
+            Some(b'(') => ')',
+            Some(b'{') => '}',
+            _ => return None,
+        };
+        reference[1..].split_once(close).map(|(name, _)| name)
+    })
 }
 
 /// Whether a word from a Make list is usable as a list item.

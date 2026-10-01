@@ -80,7 +80,7 @@ fn map_known_var(name: &str) -> Option<&'static str> {
     }
 }
 
-fn is_deferred_path_var(name: &str) -> bool {
+pub(crate) fn is_deferred_path_var(name: &str) -> bool {
     name == "OBJDIR" || map_known_var(name).is_some()
 }
 
@@ -295,6 +295,38 @@ fn to_cmake_path(raw: &str, rel_dir: &Path) -> Result<String, String> {
     Ok(collapse_dot_dot(&path))
 }
 
+/// Resolve one explicit include argument without turning it into a flag list.
+/// Empty arguments retain the reference macro's ordinary fallback. Unknown,
+/// cyclic or conditionally assigned locals are never guessed.
+pub(crate) fn resolve_include_argument_at(
+    raw: &str,
+    scope: &VarScope,
+    line: usize,
+    rel_dir: &Path,
+) -> Result<Option<String>, String> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    if unsafe_include_argument(raw) {
+        return Err(raw.to_owned());
+    }
+    let expanded = substitute_inline_scoped_impl(raw, scope, line, 8, &mut Vec::new(), true);
+    if expanded.trim().is_empty() {
+        return Ok(None);
+    }
+    if unsafe_include_argument(&expanded) {
+        return Err(raw.to_owned());
+    }
+    to_cmake_path(&expanded, rel_dir).map(Some)
+}
+
+fn unsafe_include_argument(value: &str) -> bool {
+    value.contains([';', '|', '\n', '\r'])
+        || value
+            .match_indices('$')
+            .any(|(at, _)| !value[at..].starts_with("$("))
+}
+
 /// Collapses `a/b/../c` into `a/c` so CMake receives tidy paths.
 fn collapse_dot_dot(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -459,6 +491,17 @@ fn substitute_inline_scoped(
     depth: usize,
     guard: &mut Vec<String>,
 ) -> String {
+    substitute_inline_scoped_impl(token, scope, line, depth, guard, false)
+}
+
+fn substitute_inline_scoped_impl(
+    token: &str,
+    scope: &VarScope,
+    line: usize,
+    depth: usize,
+    guard: &mut Vec<String>,
+    path_argument: bool,
+) -> String {
     if depth == 0 || !token.contains("$(") {
         return token.to_owned();
     }
@@ -476,25 +519,39 @@ fn substitute_inline_scoped(
         if is_deferred_path_var(name)
             || arch_include_var(name).is_some()
             || guard.iter().any(|item| item == name)
-            || scope.conditionally_assigned_before(name, line)
+            || if path_argument {
+                scope.path_is_conditional_at(name, line)
+            } else {
+                scope.conditionally_assigned_before(name, line)
+            }
         {
             output.push_str(verbatim);
-        } else if let Some(value) = scope.raw_at(name, line) {
+        } else if let Some(value) = if path_argument {
+            scope.path_raw_at(name, line)
+        } else {
+            scope.raw_at(name, line)
+        } {
             // An inline replacement must be one path token. A multi-token
             // value cannot be embedded safely inside another token.
-            if value.split_whitespace().count() == 1 {
+            // A quoted explicit path argument also admits spaces and an empty
+            // local. Ordinary flag-token expansion keeps its stricter shape.
+            if path_argument || value.split_whitespace().count() == 1 {
                 guard.push(name.to_owned());
-                output.push_str(&substitute_inline_scoped(
+                output.push_str(&substitute_inline_scoped_impl(
                     &value,
                     scope,
                     line,
                     depth - 1,
                     guard,
+                    path_argument,
                 ));
                 guard.pop();
             } else {
                 output.push_str(verbatim);
             }
+        } else if path_argument && scope.is_known_local(name) {
+            // A local assigned only in a proven-false branch has Make's empty
+            // value. Unresolved branches were rejected above.
         } else {
             output.push_str(verbatim);
         }

@@ -47,6 +47,10 @@ pub struct ArchSourceDecl {
     /// Source base names. Extensions are resolved by the build, so a `.S` file
     /// overriding a `.c` file needs no special handling here.
     pub files: Vec<String>,
+    /// Explicit `incextra=` quote-only search path for this declaration's
+    /// architecture sources. Bound in declaration-local scope before emission.
+    #[serde(default)]
+    pub extra_quote_include: Option<String>,
     /// Include directories the declaring mmakefile sets. These belong to the
     /// target being extended, not to this file: arch/arm-native/kernel adds
     /// -I$(SRCDIR)/rom/openfirmware, and without it the kernel cannot find
@@ -381,6 +385,8 @@ pub fn collect_arch_sources(
             tag,
             dir: dir.clone(),
             files,
+            extra_quote_include: crate::includes::arg_value_quoted(&body, "incextra")
+                .or_else(|| crate::includes::arg_value(&body, "incextra")),
             // Filled in by the caller, which has already collected them.
             include_dirs: Vec::new(),
             defines: Vec::new(),
@@ -390,6 +396,47 @@ pub fn collect_arch_sources(
     }
 
     (out, skipped)
+}
+
+/// Bind architecture flags and paths where the declaration stands, not from
+/// the final assignments in a multi-lane file. The input must be the same
+/// joined/inlined text used to construct `scope` and the declaration lines.
+pub(crate) fn bind_declaration_context(
+    declarations: &mut [ArchSourceDecl],
+    joined: &str,
+    scope: &crate::make_vars::VarScope,
+    rel_dir: &Path,
+) -> aros_common::Result<()> {
+    for declaration in declarations {
+        let includes =
+            crate::includes::collect_includes_at(joined, scope, declaration.line, rel_dir);
+        let flags = crate::flags::collect_flags_at(scope, declaration.line);
+        declaration.include_dirs = includes.dirs;
+        declaration.defines = flags.defines;
+        declaration.compile_options = flags.compile_options;
+        if let Some(raw) = declaration.extra_quote_include.take() {
+            declaration.extra_quote_include = crate::includes::resolve_include_argument_at(
+                &raw,
+                scope,
+                declaration.line,
+                rel_dir,
+            )
+            .map_err(|argument| aros_common::ArosError::Configuration {
+                file: format!(
+                    "{}/mmakefile.src:{}",
+                    rel_dir.display(),
+                    declaration.line + 1
+                ),
+                message: format!("cannot resolve %build_archspecific incextra={argument:?}"),
+            })?;
+            if let Some(path) = &declaration.extra_quote_include {
+                declaration
+                    .compile_options
+                    .insert(0, format!("-iquote{path}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
