@@ -36,12 +36,29 @@ function(_aros_parse_staged_header_binding
     set(${out_source} "${_source}" PARENT_SCOPE)
 endfunction()
 
-# Build a constant-time lookup table once every %copy_includes declaration has
-# been evaluated. Early genmodule consumers intentionally keep using the plain
-# list while the graph is still growing; the tree-wide source pass calls this
-# only after generated_targets.cmake is complete.
+# Build a constant-time lookup table for the current staged-header bindings.
+# Early genmodule consumers can run while the graph is still growing, so cache
+# the index by the complete binding list and rebuild it when that list changes.
 function(_aros_prepare_staged_header_binding_index)
     get_property(_bindings GLOBAL PROPERTY AROS_STAGED_HEADER_BINDINGS)
+    string(SHA256 _bindings_fingerprint "${_bindings}")
+    get_property(_indexed_fingerprint GLOBAL PROPERTY
+        AROS_STAGED_HEADER_BINDING_INDEX_FINGERPRINT)
+    if(_indexed_fingerprint STREQUAL _bindings_fingerprint)
+        return()
+    endif()
+
+    # Clear buckets from the previous binding list before rebuilding. In
+    # particular, replaced declarations must not leave stale owners in a
+    # bucket, and repeated preparation must not append duplicate entries.
+    get_property(_old_bucket_keys GLOBAL PROPERTY
+        AROS_STAGED_HEADER_BINDING_INDEX_BUCKET_KEYS)
+    foreach(_bucket_key IN LISTS _old_bucket_keys)
+        set_property(GLOBAL PROPERTY
+            "AROS_STAGED_HEADER_BINDING_INDEX_${_bucket_key}" "")
+    endforeach()
+
+    set(_bucket_keys "")
     foreach(_binding IN LISTS _bindings)
         _aros_parse_staged_header_binding("${_binding}"
             _header _owner _hash _source)
@@ -49,9 +66,16 @@ function(_aros_prepare_staged_header_binding_index)
             continue()
         endif()
         string(SHA256 _header_key "${_header}")
+        if(NOT _header_key IN_LIST _bucket_keys)
+            list(APPEND _bucket_keys "${_header_key}")
+        endif()
         set_property(GLOBAL APPEND PROPERTY
             "AROS_STAGED_HEADER_BINDING_INDEX_${_header_key}" "${_binding}")
     endforeach()
+    set_property(GLOBAL PROPERTY AROS_STAGED_HEADER_BINDING_INDEX_BUCKET_KEYS
+        "${_bucket_keys}")
+    set_property(GLOBAL PROPERTY AROS_STAGED_HEADER_BINDING_INDEX_FINGERPRINT
+        "${_bindings_fingerprint}")
     set_property(GLOBAL PROPERTY AROS_STAGED_HEADER_BINDING_INDEX_READY TRUE)
 endfunction()
 
@@ -64,8 +88,7 @@ endfunction()
 function(_aros_collect_transitive_header_bindings
         out_owners out_deferred_hashes)
     get_property(_bindings GLOBAL PROPERTY AROS_STAGED_HEADER_BINDINGS)
-    get_property(_binding_index_ready GLOBAL PROPERTY
-        AROS_STAGED_HEADER_BINDING_INDEX_READY)
+    _aros_prepare_staged_header_binding_index()
     if(NOT _bindings OR NOT ARGN)
         set(${out_owners} "" PARENT_SCOPE)
         set(${out_deferred_hashes} "" PARENT_SCOPE)
@@ -108,13 +131,9 @@ function(_aros_collect_transitive_header_bindings
                 continue()
             endif()
             set(_included_header "${CMAKE_MATCH_1}")
-            if(_binding_index_ready)
-                string(SHA256 _included_header_key "${_included_header}")
-                get_property(_matching_bindings GLOBAL PROPERTY
-                    "AROS_STAGED_HEADER_BINDING_INDEX_${_included_header_key}")
-            else()
-                set(_matching_bindings "${_bindings}")
-            endif()
+            string(SHA256 _included_header_key "${_included_header}")
+            get_property(_matching_bindings GLOBAL PROPERTY
+                "AROS_STAGED_HEADER_BINDING_INDEX_${_included_header_key}")
             foreach(_binding IN LISTS _matching_bindings)
                 _aros_parse_staged_header_binding("${_binding}"
                     _header _owner _hash _source)
