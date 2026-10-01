@@ -4,6 +4,20 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.17](https://github.com/metaneutrons/aros-tools/compare/v0.3.16...v0.3.17) (2026-10-01)
+
+
+### Features
+
+* **media:** qualify native PC BIOS ISO build ([#297](https://github.com/metaneutrons/aros-tools/issues/297)) ([31350a0](https://github.com/metaneutrons/aros-tools/commit/31350a0cd913283092573ad972bf059072737a6f))
+
+
+### Bug Fixes
+
+* **cmake:** select external archive flags from the active link rule ([#308](https://github.com/metaneutrons/aros-tools/issues/308)) ([7825c47](https://github.com/metaneutrons/aros-tools/commit/7825c47eb56c67f9509fc0e98def60e33fdc5f9c))
+* **docs:** update devalue past affected security versions ([#305](https://github.com/metaneutrons/aros-tools/issues/305)) ([6e2de7a](https://github.com/metaneutrons/aros-tools/commit/6e2de7ab7172011875b8d8f9c863f9afa3a04f1e))
+* **transpiler:** preserve architecture quote include semantics ([#307](https://github.com/metaneutrons/aros-tools/issues/307)) ([4f66415](https://github.com/metaneutrons/aros-tools/commit/4f6641512cfd27d675e3ca8cbde228e4583706e2))
+
 ## [0.3.16](https://github.com/metaneutrons/aros-tools/compare/v0.3.15...v0.3.16) (2026-09-29)
 
 
