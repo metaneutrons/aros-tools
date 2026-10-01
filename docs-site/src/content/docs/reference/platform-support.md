@@ -35,7 +35,8 @@ Compiler selection is separately validated by the
 [CMake toolchain](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-cmake-engine/engine/toolchains/AROS.cmake).
 
 The `opensbi-riscv64` profile has no matching published toolchain archive.
-No RISC-V image or boot release is available.
+No RISC-V image or boot release is available. Mesa 26 translation currently
+rejects this profile; its target-side LLVM/MCJIT backend is not qualified.
 
 ## Physical boards
 
