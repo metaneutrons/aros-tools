@@ -19,6 +19,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/TransitiveHeaderBindings.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SourceInventory.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/LibdefsAudit.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/DefaultBuildClosure.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RuntimeModuleOutputs.cmake")
 # aros_add_program calls aros_standalone_link_wanted, so the module that
 # defines it belongs here rather than only in the top-level CMakeLists: a
 # fixture that includes AROS.cmake on its own got "Unknown CMake command"
@@ -4561,6 +4562,8 @@ function(aros_add_library)
         set_target_properties("${ARG_MMAKE_ID}" PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -4898,6 +4901,8 @@ function(aros_add_library)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5046,6 +5051,8 @@ function(aros_add_device)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5136,6 +5143,8 @@ function(aros_add_resource)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}"
+            "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5237,17 +5246,6 @@ function(aros_add_hidd)
             string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
             set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
         endif()
-        string(TOLOWER "${_install_dir}/${_output_name}" _runtime_path)
-        string(SHA256 _runtime_key "${_runtime_path}")
-        get_property(_runtime_owner GLOBAL PROPERTY
-            "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
-        if(_runtime_owner)
-            message(FATAL_ERROR
-                "Conflicting runtime module output ${_install_dir}/${_output_name}: "
-                "${_runtime_owner} and ${ARG_MMAKE_ID}")
-        endif()
-        set_property(GLOBAL PROPERTY
-            "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
         add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
         aros_attach_module_scaffolding("${ARG_MMAKE_ID}" _scaffold
             "${ARG_DIRECTORY}" "${ARG_TARGET}")
@@ -5259,6 +5257,7 @@ function(aros_add_hidd)
         set_target_properties(${ARG_MMAKE_ID} PROPERTIES
             OUTPUT_NAME "${_output_name}"
             RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+        aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_install_dir}" "${_output_name}")
         _aros_set_module_linker_language("${ARG_MMAKE_ID}"
             "${ARG_ALWAYS_CXX_LINK}"
             CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -5902,17 +5901,6 @@ function(aros_add_custom_target)
     # Do not hide ambiguous declarations behind build-id filenames. AROS's
     # runtime namespace is case-insensitive, even on a case-sensitive host.
     # Distinct install directories or suffixes are valid disambiguators.
-    string(TOLOWER "${_moddir}/${_outname}" _runtime_path)
-    string(SHA256 _runtime_key "${_runtime_path}")
-    get_property(_runtime_owner GLOBAL PROPERTY
-        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
-    if(_runtime_owner)
-        message(FATAL_ERROR
-            "Conflicting runtime module output ${_moddir}/${_outname}: "
-            "${_runtime_owner} and ${ARG_MMAKE_ID}")
-    endif()
-    set_property(GLOBAL PROPERTY
-        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
     aros_module_scaffolding(_scaffold_sources _scaffold
         MODTYPE "${ARG_MODTYPE}"
         TARGET "${ARG_TARGET}"
@@ -5932,6 +5920,7 @@ function(aros_add_custom_target)
     set_target_properties(${ARG_MMAKE_ID} PROPERTIES
         OUTPUT_NAME "${_outname}"
         RUNTIME_OUTPUT_DIRECTORY "${_moddir}")
+    aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_moddir}" "${_outname}")
     _aros_set_module_linker_language("${ARG_MMAKE_ID}"
         "${ARG_ALWAYS_CXX_LINK}"
         CXX_SOURCES ${ARG_CXX_SOURCES})
@@ -6419,18 +6408,6 @@ function(aros_add_module_simple)
         string(SHA256 _foreign_owner "${ARG_MMAKE_ID}")
         set(_install_dir "${CMAKE_BINARY_DIR}/gen/foreign-modules/${_foreign_owner}")
     endif()
-    string(TOLOWER "${_install_dir}/${_output_name}" _runtime_path)
-    string(SHA256 _runtime_key "${_runtime_path}")
-    get_property(_runtime_owner GLOBAL PROPERTY
-        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}")
-    if(_runtime_owner)
-        message(FATAL_ERROR
-            "Conflicting runtime module output ${_install_dir}/${_output_name}: "
-            "${_runtime_owner} and ${ARG_MMAKE_ID}")
-    endif()
-    set_property(GLOBAL PROPERTY
-        "AROS_CUSTOM_MODULE_OUTPUT_${_runtime_key}" "${ARG_MMAKE_ID}")
-
     add_executable(${ARG_MMAKE_ID} ${RESOLVED_SOURCES})
     target_compile_definitions(${ARG_MMAKE_ID} PRIVATE
         __AROS_MODNAME__=${ARG_TARGET}
@@ -6438,6 +6415,7 @@ function(aros_add_module_simple)
     set_target_properties(${ARG_MMAKE_ID} PROPERTIES
         OUTPUT_NAME "${_output_name}"
         RUNTIME_OUTPUT_DIRECTORY "${_install_dir}")
+    aros_register_runtime_module_output("${ARG_MMAKE_ID}" "${_install_dir}" "${_output_name}")
     _aros_set_module_linker_language("${ARG_MMAKE_ID}"
         "${ARG_ALWAYS_CXX_LINK}"
         CXX_SOURCES ${ARG_CXX_SOURCES})

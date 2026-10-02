@@ -359,7 +359,6 @@ endif()
 if(TEST_DUPLICATE_HIDD)
     aros_add_hidd(TARGET SoftPipe MMAKE_ID conflicting-hidd
         DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
-    message(FATAL_ERROR "ambiguous HIDD runtime module was silently accepted")
 endif()
 foreach(_case IN ITEMS
         "IconDrawerList|mui|IconDrawerList.mui"
@@ -407,7 +406,6 @@ if(TEST_DUPLICATE_RUNTIME_MODULE)
     aros_add_custom_target(TARGET icondrawerlist
         MMAKE_ID conflicting-class MODTYPE mui
         DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" SOURCES module)
-    message(FATAL_ERROR "ambiguous runtime module was silently accepted")
 endif()
 aros_add_module_simple(
     TARGET simple

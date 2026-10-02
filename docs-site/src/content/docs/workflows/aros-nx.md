@@ -50,6 +50,12 @@ declarations; it does not fill them in.
 uses the engine embedded in the tools, even if the source checkout contains
 another CMake directory.
 
+The default build follows MetaMake's `AROS` dependency closure. A source tree
+may declare alternative modules with the same runtime name: only the selected
+provider writes that SYS path. Unselected alternatives remain explicit targets
+with private outputs under `gen/manual-modules/`. Two selected providers for
+one runtime path are a configuration error, not a last-writer-wins choice.
+
 ## Check a PC boot
 
 Install `qemu-system-x86_64` first, then run:
