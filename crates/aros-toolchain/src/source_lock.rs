@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aros_common::{sha256_bytes, Sha256Digest};
+use aros_common::{sha256_bytes, validate_gnu_compiler_versions, Sha256Digest};
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
@@ -476,9 +476,8 @@ fn validate_gnu_components(record: &Record) -> Result<(), ContractError> {
         .collect::<Vec<_>>();
     if gcc.len() != 1
         || gcc[0].version != record.version.as_str()
-        || !gcc_version(&gcc[0].version)
         || binutils.len() != 1
-        || !numeric_version(&binutils[0].version, 2, 4)
+        || validate_gnu_compiler_versions(&gcc[0].version, &binutils[0].version).is_err()
     {
         return Err(ContractError::invalid(
             "GNU source lock requires one matching GCC and one supported binutils toolchain component",

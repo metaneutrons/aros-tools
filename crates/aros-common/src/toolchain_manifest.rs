@@ -266,12 +266,25 @@ impl ArosCompilerIdentity {
                 gcc_version,
                 binutils_version,
                 ..
-            } => {
-                validate_numeric_version("GCC version", gcc_version, 3, 3)?;
-                validate_numeric_version("binutils version", binutils_version, 2, 4)
-            }
+            } => validate_gnu_compiler_versions(gcc_version, binutils_version),
         }
     }
+}
+
+/// Validate the shared GNU source and artifact version grammar.
+///
+/// GCC requires three numeric components and binutils requires two to four.
+/// Each component has at most ten digits and is at most 2,147,483,647.
+/// This deliberately does not change legacy schema-1 LLVM version validation.
+///
+/// # Errors
+/// Rejects malformed, overlong or out-of-range GNU compiler versions.
+pub fn validate_gnu_compiler_versions(
+    gcc_version: &str,
+    binutils_version: &str,
+) -> std::result::Result<(), String> {
+    validate_numeric_version("GCC version", gcc_version, 3, 3)?;
+    validate_numeric_version("binutils version", binutils_version, 2, 4)
 }
 
 /// One canonical entry in the payload inventory and tree digest.

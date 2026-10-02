@@ -216,6 +216,74 @@ fn rejects_incomplete_or_inconsistent_gnu_components() {
 }
 
 #[test]
+fn gnu_versions_share_the_bounded_artifact_grammar() {
+    for gcc in ["2147483647.0.0", "0.2147483647.0", "0.0.2147483647"] {
+        for binutils in ["2147483647.0", "0.2147483647.0", "0.0.0.2147483647"] {
+            let mut document = gnu_lock();
+            document["version"] = json!(gcc);
+            document["sources"][0]["version"] = json!(gcc);
+            document["sources"][1]["version"] = json!(binutils);
+            let parsed = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+            assert_eq!(parsed.version(), gcc);
+            aros_common::validate_gnu_compiler_versions(gcc, binutils).unwrap();
+        }
+    }
+
+    for gcc in [
+        "2147483648.0.0",
+        "0.2147483648.0",
+        "0.0.2147483648",
+        "4294967296.0.0",
+        "00000000000.0.0",
+    ] {
+        let mut document = gnu_lock();
+        document["version"] = json!(gcc);
+        document["sources"][0]["version"] = json!(gcc);
+        let error = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0101"
+        );
+        assert!(error.to_string().contains("GNU source lock requires"));
+        assert!(aros_common::validate_gnu_compiler_versions(gcc, "2.42").is_err());
+    }
+
+    for binutils in [
+        "2147483648.0",
+        "0.2147483648",
+        "0.0.2147483648",
+        "0.0.0.2147483648",
+        "4294967296.0",
+        "00000000000.0",
+    ] {
+        let mut document = gnu_lock();
+        document["sources"][1]["version"] = json!(binutils);
+        let error = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap_err();
+        assert_eq!(
+            error.diagnostics().diagnostics[0].code.to_string(),
+            "AX0101"
+        );
+        assert!(error.to_string().contains("GNU source lock requires"));
+        assert!(aros_common::validate_gnu_compiler_versions("13.2.0", binutils).is_err());
+    }
+}
+
+#[test]
+fn legacy_llvm_source_versions_keep_their_existing_numeric_grammar() {
+    for schema in [
+        "aros-toolchain-source-lock-v2",
+        "aros-toolchain-source-lock-v3",
+    ] {
+        let mut document = lock();
+        document["schema"] = json!(schema);
+        document["version"] = json!("2147483648.0.0");
+        document["sources"][0]["version"] = json!("2147483648.0.0");
+        let parsed = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(parsed.version(), "2147483648.0.0");
+    }
+}
+
+#[test]
 fn rejects_patches_outside_the_selected_compiler_namespace() {
     let mut gnu_with_llvm_patch = gnu_lock();
     gnu_with_llvm_patch["sources"][0]["patch"] =

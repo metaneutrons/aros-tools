@@ -20,7 +20,10 @@ Schema-2 locks/manifests require a non-null `compiler` record and prohibit
 `target` is the closed `aros-riscv-target-v1` contract. GNU's target triple must
 name the corresponding `riscv` or `riscv64` CPU and end in `aros`; it is not a
 board identity. GCC/LLVM versions have three numeric components; Binutils
-has two through four. Schema-2 versions have bounded components. Unknown,
+has two through four. Schema-2 versions have at most ten digits per component,
+with values from 0 through 2,147,483,647. GNU source-lock v3 uses the same
+version validator, so an accepted compiler input cannot exceed its artifact's
+version grammar. Legacy LLVM source-lock validation is unchanged. Unknown,
 duplicate, mixed-family and missing fields are rejected. Selecting an ISA or
 code model is not measured compiler execution.
 
