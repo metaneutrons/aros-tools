@@ -977,13 +977,13 @@ pub(crate) fn parse_mesautil(
     fetches: &[FetchDecl],
 ) -> Result<Option<PythonOutputsDecl>, String> {
     const DIR: &str = "workbench/libs/mesa/libmesautil";
-    const CONSUMERS: [&str; 2] = ["mesa3d-linklib-mesautil", "mesa3d-linklib-mesadevutil"];
+    const UTIL_TARGETS: [&str; 2] = ["mesa3d-linklib-mesautil", "mesa3d-linklib-mesadevutil"];
     if relative_dir != Path::new(DIR) || profile(target)?.is_none() {
         return Ok(None);
     }
     verify_mesa_fetch(fetches)?;
     let pyyaml = verified_pyyaml_package(fetches)?;
-    for mmake in CONSUMERS {
+    for mmake in UTIL_TARGETS {
         let matches = targets
             .iter()
             .filter(|candidate| candidate.mmake_name == mmake)
@@ -1072,7 +1072,15 @@ pub(crate) fn parse_mesautil(
         local_patch_files: vec![
             "${AROS_SOURCE_DIR}/workbench/libs/mesa/mesa-26.0.0-aros.diff".to_owned(),
         ],
-        consumers: CONSUMERS.map(str::to_owned).to_vec(),
+        // The compiler's glsl_types source includes u_format_gen.h through
+        // util/format/u_format.h. It is declared in a different mmakefile, so
+        // validate this reference against the complete selected graph rather
+        // than requiring it among this file's audited utility declarations.
+        consumers: UTIL_TARGETS
+            .into_iter()
+            .chain(["mesa3d-linklib-compiler"])
+            .map(str::to_owned)
+            .collect(),
         dir_path: relative_dir.to_path_buf(),
     }))
 }

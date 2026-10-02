@@ -50,6 +50,12 @@ declarations; it does not fill them in.
 uses the engine embedded in the tools, even if the source checkout contains
 another CMake directory.
 
+The default build follows MetaMake's `AROS` dependency closure. A source tree
+may declare alternative modules with the same runtime name: only the selected
+provider writes that SYS path. Unselected alternatives remain explicit targets
+with private outputs under `gen/manual-modules/`. Two selected providers for
+one runtime path are a configuration error, not a last-writer-wins choice.
+
 ## Check a PC boot
 
 Install `qemu-system-x86_64` first, then run:
@@ -72,7 +78,8 @@ for physical targets.
 Install `xorriso` and run from a clean AROS checkout:
 
 ```sh
-aros build --preset pc-x86_64 --target boot-iso
+CMAKE_BUILD_PARALLEL_LEVEL=4 AROS_LLVMPIPE_RUNTIME_PROBE=0 \
+  aros build --preset pc-x86_64 --target boot-iso --jobs 4 --compiler-cache off
 ```
 
 The `boot-iso` target depends on the native `AROS` SYS producer and the
@@ -92,6 +99,8 @@ aros test --preset pc-x86_64 --iso build/pc-x86_64/aros-x86_64-pc.iso \
 The CLI boots a verified, read-only ISO snapshot and retains its digest and
 serial/exception logs. ISO mode rejects `--packages` and
 `--module`; without `--iso`, `aros test` remains the direct-kernel check.
+The fresh native build and QEMU user-mode boot were qualified on macOS ARM64;
+see the [exact inputs and ISO evidence](https://github.com/metaneutrons/aros-tools/blob/main/docs/qualifications/bm3-pc-bios.md).
 For the separate experimental GLSL/JIT proof, see
 [native llvmpipe development](/aros-tools/contributing/development/#exercise-the-native-pc-llvmpipe-path).
 

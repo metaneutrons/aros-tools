@@ -22,6 +22,14 @@ the CLI does not automate JTAG, SWD or power equipment.
 
 Source: [board schema and validation](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-board/src/config.rs).
 
+The [portable board registry](https://github.com/metaneutrons/aros-tools/blob/main/profiles/boards/README.md)
+contains the four stable model IDs used by the CLI and template generator.
+Those IDs resolve from the registry embedded in the tools build; the CLI does
+not discover an external registry. A local profile name is an alias and stays
+separate from the model ID. No ESP32-P4 model or support is advertised.
+The `--model` help and generated Bash, Zsh and Fish completions use the same
+catalog as the parser.
+
 ## Create and diagnose a profile
 
 For a **Pi 4 USB-ECM** profile, preview the generated template:
@@ -45,10 +53,15 @@ optional only where the model has one conservative default: Pi 3, Pi 4 and Pi
 must be selected explicitly, as shown above.
 :::
 
-The generated profile is based on the same reviewed contracts as the
-[example registry](https://github.com/metaneutrons/aros-tools/blob/main/support/rpi-debug/boards.example.toml).
-Unsupported model/transport pairs fail before a file is written. For example,
-Pi 3 and Pi 5 cannot select USB-ECM, and Titan cannot select a Pi TFTP path.
+The generated build defaults come from the embedded reviewed registry. The
+example file at
+[support/rpi-debug/boards.example.toml](https://github.com/metaneutrons/aros-tools/blob/main/support/rpi-debug/boards.example.toml)
+is a legacy local-profile example; it is not discovered as a model registry.
+Network addresses and MAC values in generated or example profiles are
+placeholders. Adapt them to the local network and the actual device identity;
+do not infer network or device values from a model ID. Unsupported
+model/transport pairs fail before a file is written. For example, Pi 3 and Pi
+5 cannot select USB-ECM, and Titan cannot select a Pi TFTP path.
 
 Edit the printed file (normally `~/.config/aros/boards.toml`) with the real
 paths, interfaces, serial device and device identity. Use a matching target

@@ -4,6 +4,7 @@
 if(NOT DEFINED AROS_CMAKE_ENGINE_DIR OR "${AROS_CMAKE_ENGINE_DIR}" STREQUAL "")
     set(AROS_CMAKE_ENGINE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/QuoteIncludes.cmake")
 # =============================================================================
 # Host tools
 # =============================================================================
@@ -371,7 +372,7 @@ function(aros_build_catalogs)
                     "aros_build_catalogs: SOURCE consumer is not compilable: ${_consumer}")
             endif()
             add_dependencies("${_consumer}" "${_source_helper}")
-            target_compile_options("${_consumer}" BEFORE PRIVATE
+            aros_add_quote_options("${_consumer}" BEFORE
                 "-iquote${_source_output_dir}")
         endforeach()
         list(APPEND _outputs "${_source_output}")

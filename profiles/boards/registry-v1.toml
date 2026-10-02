@@ -1,0 +1,75 @@
+format_version = 1
+
+[[boards]]
+id = "rpi3"
+backend = "raspberry-pi"
+architecture = "arm"
+device_tree = "bcm2710-rpi-3-b-plus.dtb"
+default_transport = "native-tftp"
+
+[[boards.transports]]
+id = "native-tftp"
+preset = "rpi3-arm-debug"
+toolchain_preset = "arm-raspi"
+build_target = "rpi-artifacts"
+artifact_dir = "build/rpi3-arm-debug/boot/rpi3"
+debug_transport = "jtag"
+legacy_core_architecture = "raspi-arm"
+
+[[boards]]
+id = "rpi4"
+backend = "raspberry-pi"
+architecture = "aarch64"
+device_tree = "bcm2711-rpi-4-b.dtb"
+default_transport = "native-tftp"
+
+[[boards.transports]]
+id = "native-tftp"
+preset = "rpi4-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
+artifact_dir = "build/rpi4-aarch64-debug/boot/rpi4"
+debug_transport = "jtag"
+legacy_core_architecture = "raspi-aarch64"
+
+[[boards.transports]]
+id = "uboot-usb-ecm"
+preset = "rpi4-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
+artifact_dir = "build/rpi4-aarch64-debug/boot/rpi4"
+media_profile = "rpi4-uboot-usb-ecm"
+debug_transport = "jtag"
+legacy_core_architecture = "raspi-aarch64"
+
+[[boards]]
+id = "rpi5"
+backend = "raspberry-pi"
+architecture = "aarch64"
+device_tree = "bcm2712-rpi-5-b.dtb"
+default_transport = "native-tftp"
+
+[[boards.transports]]
+id = "native-tftp"
+preset = "rpi5-aarch64-debug"
+toolchain_preset = "rpi-aarch64"
+build_target = "rpi-artifacts"
+artifact_dir = "build/rpi5-aarch64-debug/boot/rpi5"
+debug_transport = "swd"
+legacy_core_architecture = "raspi-aarch64"
+
+[[boards]]
+id = "milk-v-titan"
+backend = "opensbi-uefi"
+architecture = "riscv64"
+default_transport = "uefi-esp"
+
+[[boards.transports]]
+id = "uefi-esp"
+preset = "milk-v-titan-riscv64-debug"
+toolchain_preset = "opensbi-riscv64"
+build_target = "opensbi-uefi-artifacts"
+artifact_dir = "build/milk-v-titan-riscv64-debug/boot/milk-v-titan"
+media_profile = "milk-v-titan-uefi"
+debug_transport = "jtag"
+legacy_core_architecture = "opensbi-riscv64"

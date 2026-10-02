@@ -186,6 +186,9 @@ capabilities must not be documented as already shipped.
 - [Boot media initiative plan](docs/boot-media-plan.md): portable media
   profiles, native build closure, image composition and platform-specific
   qualification gates.
+- [Declarative boards and RISC-V integration](docs/riscv-board-integration-plan.md):
+  board-registry migration, RV32/P4 and RV64 compiler contracts, native P4
+  artifacts and the dependency on BM5's Titan hardware acceptance.
 
 ## Commits and pull requests
 

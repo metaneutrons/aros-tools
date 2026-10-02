@@ -331,15 +331,21 @@ fn current_architecture_denominators_are_pinned() {
         .map(|declaration| declaration.mmake)
         .collect();
 
-    // The integration source restores the Mesa 26 target Gallivm declaration
-    // on top of the September snapshot. Build trees are excluded; these are
-    // source-owned IDs, independently of provisioning classification.
-    assert_eq!(global.len(), 1255);
-    assert_eq!(ids(&x86, true).len(), 1125);
+    // The integration source restores Mesa 26 Gallivm and the October Vanilla
+    // sync adds PC VMD plus five AArch64 Raspberry Pi diagnostic tools. Build
+    // trees are excluded; these are source-owned IDs, not provisioning counts.
+    assert_eq!(global.len(), 1261);
+    assert_eq!(ids(&x86, true).len(), 1126);
     assert_eq!(ids(&arm, true).len(), 1125);
-    assert_eq!(ids(&aarch64, true).len(), 1125);
+    assert_eq!(ids(&aarch64, true).len(), 1130);
     assert!(global.contains("test-library-dummytest_auto"));
     assert!(global.contains("mesa3d-linklib-galliumvm"));
+    assert!(ids(&x86, true).contains("kernel-hidd-pci-pcivmd"));
+    for tool in ["ddcprobe", "dispdump", "modetest", "phytest", "pvtest"] {
+        let id = format!("raspi-{tool}");
+        assert!(ids(&aarch64, true).contains(&id));
+        assert!(!ids(&arm, true).contains(&id));
+    }
 
     let arm_removed: BTreeSet<String> = ids(&arm, false)
         .difference(&ids(&arm, true))
@@ -414,10 +420,10 @@ fn toolchain_provisioning_splits_the_target_obligations() {
         .map(|declaration| declaration.mmake.clone())
         .collect();
 
-    assert_eq!(global_target.len(), 1245);
-    assert_eq!(target_ids(&x86).len(), 1115);
+    assert_eq!(global_target.len(), 1251);
+    assert_eq!(target_ids(&x86).len(), 1116);
     assert_eq!(target_ids(&arm).len(), 1117);
-    assert_eq!(target_ids(&aarch64).len(), 1117);
+    assert_eq!(target_ids(&aarch64).len(), 1122);
     assert!(global_target.contains("mesa3d-linklib-galliumvm"));
     let common_provisioning = BTreeSet::from([
         "crosstools-compiler-rt".to_owned(),

@@ -37,6 +37,7 @@ function(aros_limit_all_to_metamake_root root_target)
     endif()
 
     set_property(GLOBAL PROPERTY AROS_METAMAKE_REACHABLE_TARGETS "")
+    set_property(GLOBAL PROPERTY AROS_METAMAKE_DEFAULT_ROOT "${root_target}")
     _aros_mark_metamake_reachable("${root_target}")
     get_property(_reachable GLOBAL PROPERTY AROS_METAMAKE_REACHABLE_TARGETS)
     get_property(_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

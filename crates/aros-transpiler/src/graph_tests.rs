@@ -1246,7 +1246,8 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             .iter()
             .map(|package| package.resolved.len())
             .sum::<usize>(),
-        410
+        // Vanilla's PC VMD HIDD adds one member to the x86-64 BSP.
+        411
     );
     for (package_name, expected_members) in [
         ("kernel-package-fs", &["pfs3-handler"][..]),
@@ -1255,7 +1256,10 @@ fn real_tree_packages_resolve_to_exact_runtime_files() {
             "kernel-bsp-opensbi-riscv64",
             &["pfs3-handler", "security.library"][..],
         ),
-        ("kernel-bsp-pc-x86_64", &["security.library"][..]),
+        (
+            "kernel-bsp-pc-x86_64",
+            &["security.library", "pcivmd.hidd"][..],
+        ),
     ] {
         let package = packages
             .iter()

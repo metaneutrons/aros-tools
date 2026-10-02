@@ -4,6 +4,36 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.19](https://github.com/metaneutrons/aros-tools/compare/v0.3.18...v0.3.19) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ahi:** prevent ETXTBSY races in installation tests ([#316](https://github.com/metaneutrons/aros-tools/issues/316)) ([b418027](https://github.com/metaneutrons/aros-tools/commit/b418027c7b935008d0e3a7132c559f1615791b06))
+* **release:** grant finalizer pull request read access ([#312](https://github.com/metaneutrons/aros-tools/issues/312)) ([05dcbe4](https://github.com/metaneutrons/aros-tools/commit/05dcbe4993e0949c716c140dfcab2f63b6629ceb))
+* **transpiler:** order declared cross-file Python consumers ([#315](https://github.com/metaneutrons/aros-tools/issues/315)) ([ca4592a](https://github.com/metaneutrons/aros-tools/commit/ca4592a87fb752d43cc71db6408d4abb56b33971))
+
+## [0.3.18](https://github.com/metaneutrons/aros-tools/compare/v0.3.17...v0.3.18) (2026-10-02)
+
+
+### Bug Fixes
+
+* **cmake:** resolve runtime module outputs after root selection ([#310](https://github.com/metaneutrons/aros-tools/issues/310)) ([54b9673](https://github.com/metaneutrons/aros-tools/commit/54b96738856c0ec31881950d2e6b184204a842c0))
+
+## [0.3.17](https://github.com/metaneutrons/aros-tools/compare/v0.3.16...v0.3.17) (2026-10-01)
+
+
+### Features
+
+* **media:** qualify native PC BIOS ISO build ([#297](https://github.com/metaneutrons/aros-tools/issues/297)) ([31350a0](https://github.com/metaneutrons/aros-tools/commit/31350a0cd913283092573ad972bf059072737a6f))
+
+
+### Bug Fixes
+
+* **cmake:** select external archive flags from the active link rule ([#308](https://github.com/metaneutrons/aros-tools/issues/308)) ([7825c47](https://github.com/metaneutrons/aros-tools/commit/7825c47eb56c67f9509fc0e98def60e33fdc5f9c))
+* **docs:** update devalue past affected security versions ([#305](https://github.com/metaneutrons/aros-tools/issues/305)) ([6e2de7a](https://github.com/metaneutrons/aros-tools/commit/6e2de7ab7172011875b8d8f9c863f9afa3a04f1e))
+* **transpiler:** preserve architecture quote include semantics ([#307](https://github.com/metaneutrons/aros-tools/issues/307)) ([4f66415](https://github.com/metaneutrons/aros-tools/commit/4f6641512cfd27d675e3ca8cbde228e4583706e2))
+
 ## [0.3.16](https://github.com/metaneutrons/aros-tools/compare/v0.3.15...v0.3.16) (2026-09-29)
 
 

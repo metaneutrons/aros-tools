@@ -551,7 +551,7 @@ async fn board_command(command: BoardCommand, repo_root: Option<&Path>) -> Resul
         } => crate::board::initialize_template(
             config.as_deref(),
             &profile,
-            model.into(),
+            model,
             transport.map(Into::into),
             apply,
         ),

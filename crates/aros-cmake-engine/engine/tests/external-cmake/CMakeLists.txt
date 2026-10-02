@@ -121,7 +121,7 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
             FIXTURE_TOOL=llvm-ar@11.0.0 FIXTURE_TOOL=missing-tool@11.0.0)
     endif()
 
-    if(EXTERNAL_CMAKE_CASE STREQUAL "component-success")
+    if(EXTERNAL_CMAKE_CASE MATCHES "^component-(success|driver|collector)$")
         set(_generated_public_header
             "${CMAKE_BINARY_DIR}/generated/fixture_public.h")
         add_custom_command(
@@ -151,7 +151,7 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
         ${_component_arguments}
         ${_host_tools})
 
-    if(EXTERNAL_CMAKE_CASE STREQUAL "component-success")
+    if(EXTERNAL_CMAKE_CASE MATCHES "^component-(success|driver|collector)$")
         function(_check_fixture_external_component_barrier)
             get_target_property(_producer_dependencies fixture-components
                 MANUALLY_ADDED_DEPENDENCIES)
@@ -174,12 +174,27 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
         endif()
         get_target_property(_component_libraries
             fixture-components-external-components INTERFACE_LINK_LIBRARIES)
-        if(AROS_COLLECT_BIN)
+        if(AROS_LLD_BIN)
             set(_group_start "--start-group")
             set(_group_end "--end-group")
         else()
             set(_group_start "-Wl,--start-group")
             set(_group_end "-Wl,--end-group")
+        endif()
+        # Derive the oracle from the actual selected link command, not from
+        # either executable's mere presence. EngineTestTree deliberately
+        # supplies a collector even on Linux hosts without LLD.
+        string(FIND "${CMAKE_C_LINK_EXECUTABLE}"
+            "\"${AROS_COLLECT_BIN}\" --ld" _collector_rule_index)
+        if(_collector_rule_index EQUAL 0)
+            set(_expected_group_flags "--start-group;--end-group")
+        else()
+            set(_expected_group_flags "-Wl,--start-group;-Wl,--end-group")
+        endif()
+        if(NOT "${CMAKE_LINK_GROUP_USING_aros_rescan}" STREQUAL
+           "${_expected_group_flags}")
+            message(FATAL_ERROR
+                "external archive group flags do not match the selected C link rule")
         endif()
         set(_expected_component_libraries
             "$<LINK_GROUP:aros_rescan,${_left_library},${_right_library}>")
@@ -188,8 +203,8 @@ if(EXTERNAL_CMAKE_CASE MATCHES "^component-")
             message(FATAL_ERROR
                 "component archives are not linked as one ordered group: ${_component_libraries}")
         endif()
-        # The AROS collector invokes ld.lld directly, so remove the host
-        # platform's default CMake driver flags from this cross-link probe.
+        # Keep this shared probe free of host-default link flags: its direct
+        # collector mode invokes ELF LLD, not the host platform's linker.
         set(CMAKE_C_LINK_FLAGS "")
         add_executable(external-component-link-consumer EXCLUDE_FROM_ALL
             components/link-consumer.c)

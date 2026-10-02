@@ -130,8 +130,8 @@ Target-LLVM 11 and CMake 3.24 or newer. It does not qualify ARM graphics.
 From the configured AROS checkout, using the newly built tools:
 
 ```sh
-AROS_LLVMPIPE_RUNTIME_PROBE=1 aros build --preset pc-x86_64 \
-  --target boot-iso --jobs 12 --compiler-cache off
+CMAKE_BUILD_PARALLEL_LEVEL=4 AROS_LLVMPIPE_RUNTIME_PROBE=1 \
+  aros build --preset pc-x86_64 --target boot-iso --jobs 4 --compiler-cache off
 aros test --preset pc-x86_64 --iso build/pc-x86_64/aros-x86_64-pc.iso \
   --require-llvmpipe-jit --timeout 120 --memory 1024
 ```
@@ -145,6 +145,10 @@ return and ELF unloading before the CLI accepts the proof.
 The CLI stops QEMU after complete proof or a definitive failure; deadline
 expiry fails this strict test.
 The retained evidence includes the image hash and complete logs.
+Set both parallelism controls: `--jobs` bounds the outer build, while
+`CMAKE_BUILD_PARALLEL_LEVEL` bounds the nested LLVM build. A single shared
+job budget is tracked separately in
+[issue #313](https://github.com/metaneutrons/aros-tools/issues/313).
 Disable the cached probe option with `AROS_LLVMPIPE_RUNTIME_PROBE=0` when
 building an ordinary image. See the
 [native llvmpipe contract](https://github.com/metaneutrons/aros-tools/blob/main/docs/native-llvmpipe.md)
