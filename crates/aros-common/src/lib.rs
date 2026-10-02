@@ -22,6 +22,7 @@ macro_rules! outputln {
 }
 
 pub mod arch;
+pub mod board_registry;
 pub mod diagnostic;
 pub mod digest;
 pub mod elf;
