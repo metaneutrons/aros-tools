@@ -25,6 +25,55 @@ therefore leaves an existing good output untouched. Temporary files are
 removed unless `COLLECT_AROS_DEBUG` is set; an explicitly requested retained
 script is never treated as temporary.
 
+## Compiler-driver tool family
+
+The legacy `collect-aros` and `collect-aros32` names use the adjacent
+`ld.lld` and `llvm-strip` executables when no tool manifest is present. A
+prefixed driver name ending in `-collect-aros` requires an adjacent
+`aros-collector-tools.json`; a present manifest also selects the tools for a
+legacy name.
+
+The manifest is a regular JSON file of at most 16 KiB. It rejects duplicate
+and unknown fields. `invocation` must exactly match the running executable's
+filename. `linker` and `strip` are safe single basenames for executable files
+in the canonical directory containing that executable. The collector never
+finds these tools through `PATH` or `COMPILER_PATH`; the manifest names are
+path data, not shell commands.
+
+For example, a GCC target can install the regular `collect-aros` alias beside
+GNU `ld` and `strip` and place this file in that same directory:
+
+```json
+{
+  "schema": "aros-collector-tools-v1",
+  "family": "gnu",
+  "invocation": "collect-aros",
+  "linker": "ld",
+  "strip": "strip",
+  "emulation": "riscvelf_aros",
+  "driver_emulation": "elf32lriscv"
+}
+```
+
+`family` is `llvm` or `gnu`. GNU manifests require `emulation`; it may contain
+only ASCII letters, digits, `_`, and `-`. An optional `driver_emulation` uses
+the same character set and is valid only for GNU manifests. GCC may pass this
+explicitly declared driver-side emulation to the collector; every occurrence
+is removed and the configured linker `emulation` is inserted once for both
+link passes. This is an exact manifest declaration, not a guessed target or
+ISA-to-emulation mapping. The example values record the observed GCC
+`-melf32lriscv` driver selection and GNU AROS `riscvelf_aros` linker selection.
+Other user emulation selections fail before linking. Abbreviated GNU long
+options, ambiguous operands, and malformed attached `-m` spellings fail
+closed so a later option cannot override the configured emulation.
+
+The `family` and tool basenames declare which adjacent siblings to invoke; they
+do not prove a binary's version, provenance, or behavior. For each link, the
+collector passes the manifest's linker emulation as a separate `-m VALUE`
+argument. LLVM manifests may omit `emulation`; if one is supplied, it follows
+the same explicit validation and forwarding rules. `driver_emulation` is
+rejected for LLVM manifests.
+
 ## Diagnostics
 
 Human-readable diagnostics are the default. Machine consumers can request one
