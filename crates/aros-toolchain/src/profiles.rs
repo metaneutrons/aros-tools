@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 
 use aros_common::elf::riscv::TargetContract;
+use aros_common::{sha256_bytes, Sha256Digest};
 
 use crate::recipe::GitObjectId;
 use crate::source_lock::CompilerFamily;
@@ -44,6 +45,7 @@ pub struct Profiles(ProfileDocument);
 #[derive(Debug, Clone)]
 pub struct Profile {
     family: CompilerFamily,
+    document_sha256: Sha256Digest,
     name: String,
     configure_target: String,
     upstream_output_target: String,
@@ -56,6 +58,11 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// Digest of the exact enclosing profiles bytes, retained across clones.
+    #[must_use]
+    pub const fn document_sha256(&self) -> &Sha256Digest {
+        &self.document_sha256
+    }
     /// Compiler family declared by the enclosing profiles-v2 document.
     #[must_use]
     pub const fn family(&self) -> CompilerFamily {
@@ -130,13 +137,14 @@ impl Profiles {
         }
         // Keep the legacy v1 deserialization and its failure contract first:
         // v1 remains byte-for-byte closed and always denotes LLVM.
+        let digest = sha256_bytes(input);
         let profiles = if let Ok(document) = serde_json::from_slice::<ProfileDocumentV1>(input) {
-            parse_v1(document)?
+            parse_v1(document, &digest)?
         } else {
             let document: ProfileDocumentV2 = serde_json::from_slice(input).map_err(|_| {
                 ContractError::invalid("invalid or unsupported closed profiles-v1 document")
             })?;
-            parse_v2(document)?
+            parse_v2(document, &digest)?
         };
         Ok(Self(profiles))
     }
@@ -236,7 +244,10 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
-fn parse_v1(document: ProfileDocumentV1) -> Result<ProfileDocument, ContractError> {
+fn parse_v1(
+    document: ProfileDocumentV1,
+    digest: &Sha256Digest,
+) -> Result<ProfileDocument, ContractError> {
     if document.schema != "aros-toolchain-profiles-v1"
         || document.profiles.is_empty()
         || document.profiles.len() > MAX_PROFILES
@@ -250,6 +261,7 @@ fn parse_v1(document: ProfileDocumentV1) -> Result<ProfileDocument, ContractErro
         .into_iter()
         .map(|profile| Profile {
             family: CompilerFamily::Llvm,
+            document_sha256: digest.clone(),
             name: profile.name,
             configure_target: profile.configure_target,
             upstream_output_target: profile.upstream_output_target,
@@ -269,7 +281,10 @@ fn parse_v1(document: ProfileDocumentV1) -> Result<ProfileDocument, ContractErro
     })
 }
 
-fn parse_v2(document: ProfileDocumentV2) -> Result<ProfileDocument, ContractError> {
+fn parse_v2(
+    document: ProfileDocumentV2,
+    digest: &Sha256Digest,
+) -> Result<ProfileDocument, ContractError> {
     if document.schema != "aros-toolchain-profiles-v2"
         || document.profiles.is_empty()
         || document.profiles.len() > MAX_PROFILES
@@ -283,6 +298,7 @@ fn parse_v2(document: ProfileDocumentV2) -> Result<ProfileDocument, ContractErro
         .into_iter()
         .map(|profile| Profile {
             family: document.family,
+            document_sha256: digest.clone(),
             name: profile.name,
             configure_target: profile.configure_target,
             upstream_output_target: profile.upstream_output_target,

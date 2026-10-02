@@ -216,10 +216,13 @@ through producer, collector, package, verification and managed consumers.
 
 The partial implementation accepts source-lock v3 with explicit GNU components
 and profiles v2 with embedded RISC-V target expectations. Profile clones retain
-their family; native binding rejects mismatched source/profile families, and
-LLVM v1 package/read-back paths reject GNU inputs in either role. These checks
-prevent accidental LLVM routing; they do not implement GNU execution or
-packaging. The reusable C/C++/assembly qualification inputs are retained in
+their family and enclosing document's raw-byte digest. Native binding rejects
+mismatched source/profile families and still rejects GNU execution. The
+library's separate schema-2 package/read-back path carries GCC, Binutils and
+the exact target contract; it requires raw source/profile digests to match the
+recipe and rejects family substitution before filesystem mutation. The CLI's
+native producer declaration still selects LLVM only. The reusable
+C/C++/assembly qualification inputs are retained in
 `crates/aros-toolchain/tests/fixtures/riscv/` with an explicit pointer-width
 selector and allocation-preserving runtime probe.
 
@@ -231,7 +234,7 @@ five-linklib closure is currently ordered only for LLVM. The broad GNU
 cannot be assumed sufficient. Targeted source changes require separate approval.
 
 Still required: fresh source-bound GNU compiler/runtime builds, a separate
-RV64 AROS runtime/sysroot link, family-aware native execution and package
-contracts, self-contained host-tool relocation, existing-target integration
+RV64 AROS runtime/sysroot link, family-aware native execution and complete
+managed-consumer/release integration, self-contained host-tool relocation, existing-target integration
 regressions and complete RV2 acceptance evidence. No compiler release, full
 SDK, board image, boot or physical-device success is established here.

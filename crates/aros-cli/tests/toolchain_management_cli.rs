@@ -46,6 +46,7 @@ fn manifest() -> ArosToolchainManifest {
         target_triple: "x86_64-unknown-aros".into(),
         tree_sha256: "a".repeat(64),
         llvm_version: Some("11.0.0".into()),
+        compiler: None,
         recipe_sha256: "b".repeat(64),
         source_lock_sha256: "c".repeat(64),
         profiles_sha256: "d".repeat(64),

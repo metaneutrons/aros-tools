@@ -1,4 +1,4 @@
-//! Parser support must not route GNU input through an LLVM build or package.
+//! Compiler-family substitution must not route input through another family.
 //! Fixture hashes are synthetic; no compiler provenance is claimed.
 
 use aros_common::{sha256_bytes, DiagnosticCode};
@@ -117,9 +117,7 @@ fn package_and_readback_reject_gnu_without_creating_an_llvm_asset() {
         forbidden_prefixes: vec![],
     };
     let error = package(&request).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("LLVM v1 packaging cannot accept GNU"));
+    assert!(error.to_string().contains("different compiler families"));
     assert_eq!(
         error.diagnostics().diagnostics[0].code,
         DiagnosticCode::ProducerPackage
@@ -148,9 +146,7 @@ fn package_and_readback_reject_gnu_without_creating_an_llvm_asset() {
         .unwrap()
         .clone();
     let error = package(&request).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("LLVM v1 packaging cannot accept GNU"));
+    assert!(error.to_string().contains("different compiler families"));
     assert!(!temporary.path().join("absent").exists());
 
     let error = verify(&PackageVerificationRequest {
@@ -164,9 +160,7 @@ fn package_and_readback_reject_gnu_without_creating_an_llvm_asset() {
         forbidden_prefixes: request.forbidden_prefixes,
     })
     .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("LLVM v1 verification cannot accept GNU"));
+    assert!(error.to_string().contains("different compiler families"));
     assert_eq!(
         error.diagnostics().diagnostics[0].code,
         DiagnosticCode::ProducerVerification

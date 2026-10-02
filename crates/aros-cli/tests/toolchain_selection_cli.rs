@@ -52,6 +52,7 @@ fn lock(release_id: &str) -> ArosToolchainLock {
             sha256: "a".repeat(64),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             size: Some(1),
             enabled: true,
             disabled_reason: None,

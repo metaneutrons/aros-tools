@@ -12,7 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use aros_common::{toolchain_tree_inventory, ArosToolchainManifest};
 
 use crate::filesystem::open_directory;
-use crate::package::canonical_asset_name;
 use crate::package_verify::{
     extract_verified_archive, measure_archive, verify, PackageVerificationRequest, VerifiedPackage,
 };
@@ -53,10 +52,10 @@ pub fn verify_and_extract(
 ) -> Result<ExtractedPackage, ContractError> {
     let verified = verify(&request.verification)?;
     let root = create_fresh_root(&request.output_root)?;
-    let asset = canonical_asset_name(
-        request.verification.source_lock.version(),
+    let asset = crate::package_identity::asset_name(
+        &request.verification.source_lock,
+        &request.verification.profile,
         &request.verification.host,
-        request.verification.profile.name(),
     )?;
     let archive = request.verification.package_dir.join(asset);
     let (file, size, sha256) = measure_archive(&archive)?;

@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aros_common::Sha256Digest;
+use aros_common::{sha256_bytes, Sha256Digest};
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
@@ -19,7 +19,7 @@ const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// One semantically valid source-lock v2 or v3 document.
 #[derive(Debug, Clone)]
-pub struct SourceLock(Record);
+pub struct SourceLock(Record, Sha256Digest);
 
 /// A declared archive whose exact bytes must be present in a verified cache.
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +161,13 @@ impl SourceLock {
             return Err(ContractError::invalid("invalid source-lock-v2 document"));
         }
         validate(&record)?;
-        Ok(Self(record))
+        Ok(Self(record, sha256_bytes(input)))
+    }
+
+    /// Digest of the exact parsed document bytes, not a reserialization.
+    #[must_use]
+    pub const fn sha256(&self) -> &Sha256Digest {
+        &self.1
     }
 
     /// Compiler-family version selected by this lock.
