@@ -491,7 +491,7 @@ mod tests {
             name: "rpi4".to_string(),
             config: BoardConfig {
                 backend: crate::config::BoardBackend::RaspberryPi,
-                model: crate::config::BoardModel::Rpi4,
+                model: crate::config::BoardId::try_from("rpi4".to_owned()).unwrap(),
                 preset: "rpi4-aarch64-debug".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),

@@ -423,9 +423,7 @@ fn remove_staging_tree(stage: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{publication_state, publish, DeploymentPlan};
-    use crate::config::{
-        Board, BoardBackend, BoardConfig, BoardModel, RaspberryPiConfig, Transport,
-    };
+    use crate::config::{Board, BoardBackend, BoardConfig, BoardId, RaspberryPiConfig, Transport};
     use aros_common::CommitState;
     use std::path::Path;
     #[cfg(unix)]
@@ -476,7 +474,7 @@ mod tests {
             name: name.to_string(),
             config: BoardConfig {
                 backend: BoardBackend::RaspberryPi,
-                model: BoardModel::Rpi4,
+                model: BoardId::try_from("rpi4".to_owned()).unwrap(),
                 preset: "rpi-aarch64".to_string(),
                 toolchain_preset: "rpi-aarch64".to_string(),
                 build_target: "rpi-artifacts".to_string(),

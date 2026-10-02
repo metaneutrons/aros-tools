@@ -220,6 +220,13 @@ fn registry_digest_binds_the_exact_embedded_bytes() {
         &sha256_bytes(with_trailing_newline.as_bytes())
     );
     assert_ne!(changed.sha256(), registry.sha256());
+    for board in registry.boards() {
+        let detached = board.clone();
+        assert_eq!(detached.registry_sha256(), registry.sha256());
+        let changed_board = changed.get(board.id().as_str()).unwrap();
+        assert_eq!(changed_board.registry_sha256(), changed.sha256());
+        assert_ne!(changed_board.registry_sha256(), detached.registry_sha256());
+    }
 }
 
 #[test]

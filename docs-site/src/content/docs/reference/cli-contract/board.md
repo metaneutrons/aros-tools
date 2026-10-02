@@ -36,7 +36,7 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros board doctor` | profile | --profile | — | required | 1 |  |  | — |  |
 | `aros board doctor` | config | --config | — | optional | 1 |  |  | AROS_BOARDS_FILE |  |
 | `aros board init` | profile | --profile | — | required | 1 |  |  | — |  |
-| `aros board init` | model | --model | — | required | 1 |  | rpi3, rpi4, rpi5, milk-v-titan | — |  |
+| `aros board init` | model | --model | — | required | 1 |  | milk-v-titan, rpi3, rpi4, rpi5 | — |  |
 | `aros board init` | transport | --transport | — | optional | 1 |  | native-tftp, uboot-usb-ecm, uefi-esp | — |  |
 | `aros board init` | config | --config | — | optional | 1 |  |  | AROS_BOARDS_FILE |  |
 | `aros board init` | apply | --apply | — | optional | 0 | false |  | — |  |
