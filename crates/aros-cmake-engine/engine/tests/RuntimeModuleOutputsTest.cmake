@@ -14,6 +14,7 @@ foreach(_case IN ITEMS selected reverse case-insensitive none-selected
     set(_build "${_root}/${_case}")
     execute_process(COMMAND "${CMAKE_COMMAND}" -G Ninja -S "${_fixture}"
         -B "${_build}" "-DTEST_CASE=${_case}"
+        TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
         RESULT_VARIABLE _status OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
     if(_case MATCHES "^(both-selected|no-root|late-conflict)$")
         if(_status EQUAL 0 OR NOT "${_stdout}${_stderr}" MATCHES
@@ -28,7 +29,7 @@ foreach(_case IN ITEMS selected reverse case-insensitive none-selected
         continue()
     endif()
     if(NOT _status EQUAL 0)
-        message(FATAL_ERROR "runtime outputs ${_case} configure failed: ${_stdout}${_stderr}")
+        message(FATAL_ERROR "runtime outputs ${_case} configure failed (${_status}): ${_stdout}${_stderr}")
     endif()
     file(READ "${_build}/selected-provider.path" _selected)
     file(READ "${_build}/manual-provider.path" _manual)
@@ -62,9 +63,10 @@ foreach(_case IN ITEMS selected reverse case-insensitive none-selected
         message(FATAL_ERROR "runtime alternatives share an output")
     endif()
     execute_process(COMMAND "${CMAKE_COMMAND}" --build "${_build}"
+        TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
         RESULT_VARIABLE _status OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
     if(NOT _status EQUAL 0 OR NOT EXISTS "${_unique}")
-        message(FATAL_ERROR "runtime outputs ${_case} build failed: ${_stdout}${_stderr}")
+        message(FATAL_ERROR "runtime outputs ${_case} build failed (${_status}): ${_stdout}${_stderr}")
     endif()
     if(_case STREQUAL none-selected AND
        (EXISTS "${_selected}" OR EXISTS "${_manual}" OR
@@ -74,6 +76,7 @@ foreach(_case IN ITEMS selected reverse case-insensitive none-selected
     if(_case STREQUAL none-selected)
         execute_process(COMMAND "${CMAKE_COMMAND}" --build "${_build}"
             --target selected-provider manual-provider
+            TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
             RESULT_VARIABLE _status OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
         if(NOT _status EQUAL 0 OR NOT EXISTS "${_selected}" OR
            NOT EXISTS "${_manual}" OR
@@ -89,9 +92,10 @@ foreach(_case IN ITEMS selected reverse case-insensitive none-selected
         endif()
         file(SHA256 "${_selected}" _before)
         execute_process(COMMAND "${CMAKE_COMMAND}" --build "${_build}" --target manual-provider
+            TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
             RESULT_VARIABLE _status OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
         if(NOT _status EQUAL 0 OR NOT EXISTS "${_manual}")
-            message(FATAL_ERROR "manual runtime alternative not buildable: ${_stdout}${_stderr}")
+            message(FATAL_ERROR "manual runtime alternative not buildable (${_status}): ${_stdout}${_stderr}")
         endif()
         file(SHA256 "${_selected}" _after)
         if(NOT _before STREQUAL _after)
@@ -128,6 +132,7 @@ foreach(_builder IN ITEMS library genmodule-only device resource)
             "-DTEST_MANUAL_BUILDER=${_manual_builder}"
             "-DTEST_SELECTION=${_selection}"
             ${AROS_TEST_TOOL_ARGS}
+            TIMEOUT "${AROS_TEST_CHILD_TIMEOUT}"
             RESULT_VARIABLE _status OUTPUT_VARIABLE _stdout ERROR_VARIABLE _stderr)
         if(_selection STREQUAL "both")
             if(_status EQUAL 0 OR NOT "${_stdout}${_stderr}" MATCHES
@@ -145,7 +150,7 @@ foreach(_builder IN ITEMS library genmodule-only device resource)
         endif()
         if(NOT _status EQUAL 0)
             message(FATAL_ERROR
-                "runtime builder ${_case} configure failed: ${_stdout}${_stderr}")
+                "runtime builder ${_case} configure failed (${_status}): ${_stdout}${_stderr}")
         endif()
         file(READ "${_build}/runtime-owner.path" _runtime_path)
         file(READ "${_build}/manual-owner.path" _manual_path)
