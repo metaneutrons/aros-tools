@@ -108,6 +108,7 @@ impl BoardTransportContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardContract {
     id: BoardId,
+    registry_sha256: Sha256Digest,
     backend: String,
     architecture: String,
     device_tree: Option<String>,
@@ -116,6 +117,12 @@ pub struct BoardContract {
 }
 
 impl BoardContract {
+    /// Exact raw registry identity retained when this descriptor is cloned.
+    #[must_use]
+    pub const fn registry_sha256(&self) -> &Sha256Digest {
+        &self.registry_sha256
+    }
+
     /// Stable model identity.
     #[must_use]
     pub const fn id(&self) -> &BoardId {
@@ -190,17 +197,15 @@ impl BoardRegistry {
         if document.boards.is_empty() || document.boards.len() > MAX_BOARDS {
             return Err(invalid(source, "registry must contain 1-128 boards"));
         }
+        let sha256 = sha256_bytes(text.as_bytes());
         let mut boards = BTreeMap::new();
         for record in document.boards {
-            let board = validate_board(source, record)?;
+            let board = validate_board(source, record, &sha256)?;
             if boards.insert(board.id.clone(), board).is_some() {
                 return Err(invalid(source, "duplicate board ID"));
             }
         }
-        Ok(Self {
-            boards,
-            sha256: sha256_bytes(text.as_bytes()),
-        })
+        Ok(Self { boards, sha256 })
     }
 
     /// Resolve a stable ID; malformed IDs and unknown models are distinct errors.
@@ -269,7 +274,11 @@ struct TransportDocument {
     legacy_core_architecture: Option<String>,
 }
 
-fn validate_board(source: &str, record: BoardDocument) -> Result<BoardContract> {
+fn validate_board(
+    source: &str,
+    record: BoardDocument,
+    registry_sha256: &Sha256Digest,
+) -> Result<BoardContract> {
     let compatible_architecture = match record.backend.as_str() {
         "raspberry-pi" => matches!(record.architecture.as_str(), "arm" | "aarch64"),
         "opensbi-uefi" => record.architecture == "riscv64",
@@ -312,6 +321,7 @@ fn validate_board(source: &str, record: BoardDocument) -> Result<BoardContract> 
     }
     Ok(BoardContract {
         id: record.id,
+        registry_sha256: registry_sha256.clone(),
         backend: record.backend,
         architecture: record.architecture,
         device_tree: record.device_tree,

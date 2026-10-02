@@ -1,10 +1,29 @@
 //! Consumer behavior for the embedded board catalog and local format-2 files.
 
-use aros_board::config::{create_template, prepare_template, Transport};
-use aros_common::board_registry::BoardId;
+use aros_board::config::{create_template, prepare_template, resolve_board_contract, Transport};
+use aros_common::board_registry::{built_in_board_registry, BoardId};
 
 fn board_id(value: &str) -> BoardId {
     BoardId::try_from(value.to_owned()).expect("syntactically valid model ID")
+}
+
+#[test]
+fn resolved_descriptors_and_templates_retain_the_same_registry_identity() {
+    let registry = built_in_board_registry().expect("reviewed registry");
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    for board in registry.boards() {
+        let resolved = resolve_board_contract(board.id()).expect("detached resolved descriptor");
+        let template = prepare_template(
+            Some(&temporary.path().join("boards.toml")),
+            "local-board",
+            board.id().clone(),
+            None,
+        )
+        .expect("non-mutating template");
+        assert_eq!(resolved.registry_sha256(), registry.sha256());
+        assert_eq!(template.registry_sha256(), resolved.registry_sha256());
+    }
+    assert!(!temporary.path().join("boards.toml").exists());
 }
 
 #[test]

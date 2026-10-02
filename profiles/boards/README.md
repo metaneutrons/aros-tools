@@ -12,6 +12,8 @@ unsupported backend/transport capabilities, and binds its exact raw-byte
 SHA-256. Entries contain safe source-target/compiler references and relative
 artifact paths, never executable commands or host devices. Model and transport
 iteration is sorted by stable ID; TOML ordering cannot select a default.
+Resolved board descriptors and prepared templates retain that registry digest,
+including descriptors cloned independently of the catalog.
 
 The schema is closed over known fields and implemented capability families,
 not over exactly four model names. The embedded catalog currently contains
