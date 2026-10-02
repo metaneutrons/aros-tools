@@ -8,7 +8,7 @@ use crate::{
     build::{self, BuildOptions},
     observability,
 };
-use config::{Board, BoardModel, Transport};
+use config::{Board, BoardId, Transport};
 use console::ConsoleProgram;
 use miette::Result;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub fn initialize_template(
     config_override: Option<&Path>,
     board_name: &str,
-    model: BoardModel,
+    model: BoardId,
     transport: Option<Transport>,
     apply: bool,
 ) -> Result<()> {

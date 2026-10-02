@@ -1427,7 +1427,13 @@ fn public_parser_semantic_cases_reject_stale_values_and_conflicts_before_setup()
         "board init with a deliberately stale model value",
     );
     assert!(stale_model.contains("invalid value 'rpi2'"));
-    assert!(stale_model.contains("rpi3, rpi4, rpi5, milk-v-titan"));
+    let expected_models = aros_common::board_registry::built_in_board_registry()
+        .expect("embedded board catalog is valid")
+        .boards()
+        .map(|contract| contract.id().as_str().to_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(stale_model.contains(&expected_models));
 
     let conflicting_setup = assert_failure(
         &run(&["setup", "--preset", "pc-x86_64", "--all"]),
