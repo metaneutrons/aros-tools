@@ -4,18 +4,18 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 
-fn write_executable(path: &Path, contents: &str) {
-    fs::write(path, contents).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 fn test_contract(root: &Path, make_body: &str) -> Contract {
     let build_root = root.join("build");
     let binary_dir = build_root.join("gen/configure/workbench/devs/AHI/x86_64");
     let stage_build = binary_dir.join("build");
     fs::create_dir_all(&stage_build).unwrap();
-    let make = root.join("make");
-    write_executable(&make, make_body);
+    // A concurrent fork can inherit a writable CLOEXEC descriptor before its
+    // exec closes it. Executing that freshly written inode then fails with
+    // ETXTBSY on Linux, even after this thread has closed its own descriptor.
+    // Execute an immutable checked-in launcher; per-test bodies are read as
+    // shell input instead of being passed to the kernel's executable loader.
+    fs::write(stage_build.join("make-body.sh"), make_body).unwrap();
+    let make = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/make.sh");
     let install_prefix = build_root.join("SYS");
     let relative = vec![PathBuf::from("C/one"), PathBuf::from("Libs/two")];
     let install_products = relative
@@ -67,6 +67,45 @@ fn test_contract(root: &Path, make_body: &str) -> Contract {
         product_kinds: vec![ProductKind::Data, ProductKind::Data],
         install_products,
         dependency_products: Vec::new(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn immutable_launcher_reads_body_while_a_writer_is_still_open() {
+    let temp = tempfile::Builder::new()
+        .prefix("ahi fixture ")
+        .tempdir()
+        .unwrap();
+    let contract = test_contract(temp.path(), "#!/bin/sh\nexit 23\n");
+    let body = contract.stage_build.join("make-body.sh");
+    fs::set_permissions(&body, fs::Permissions::from_mode(0o755)).unwrap();
+    let writer = fs::OpenOptions::new().write(true).open(&body).unwrap();
+
+    // Counterprobe: the old executable fixture fails before running its body.
+    let error = std::process::Command::new(&body).output().unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(26), "{error:?}");
+
+    // The immutable launcher reaches the exact fixture exit status, without
+    // retrying a spawn or dropping the live writer to hide the condition.
+    let output = run_output(
+        closed_build_command(&contract, &contract.make)
+            .arg("-C")
+            .arg(&contract.stage_build),
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(23));
+    drop(writer);
+}
+
+#[test]
+fn immutable_launcher_rejects_missing_or_relative_build_directory() {
+    let temp = TempDir::new().unwrap();
+    let contract = test_contract(temp.path(), "#!/bin/sh\nexit 23\n");
+    for arguments in [&[][..], &["-C"][..], &["-C", "relative"], &["-x", "/tmp"]] {
+        let output =
+            run_output(closed_build_command(&contract, &contract.make).args(arguments)).unwrap();
+        assert_eq!(output.status.code(), Some(64), "{arguments:?}");
     }
 }
 
@@ -212,7 +251,8 @@ printf extra >"$prefix/unexpected"
 
     assert_eq!(
         error.diagnostic().code,
-        DiagnosticCode::AhiProductValidation
+        DiagnosticCode::AhiProductValidation,
+        "{error:?}"
     );
     assert!(contract.install_products.iter().all(|path| !path.exists()));
     assert_no_private_stages(&contract);
