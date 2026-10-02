@@ -4,6 +4,15 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.19](https://github.com/metaneutrons/aros-tools/compare/v0.3.18...v0.3.19) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ahi:** prevent ETXTBSY races in installation tests ([#316](https://github.com/metaneutrons/aros-tools/issues/316)) ([b418027](https://github.com/metaneutrons/aros-tools/commit/b418027c7b935008d0e3a7132c559f1615791b06))
+* **release:** grant finalizer pull request read access ([#312](https://github.com/metaneutrons/aros-tools/issues/312)) ([05dcbe4](https://github.com/metaneutrons/aros-tools/commit/05dcbe4993e0949c716c140dfcab2f63b6629ceb))
+* **transpiler:** order declared cross-file Python consumers ([#315](https://github.com/metaneutrons/aros-tools/issues/315)) ([ca4592a](https://github.com/metaneutrons/aros-tools/commit/ca4592a87fb752d43cc71db6408d4abb56b33971))
+
 ## [0.3.18](https://github.com/metaneutrons/aros-tools/compare/v0.3.17...v0.3.18) (2026-10-02)
 
 
