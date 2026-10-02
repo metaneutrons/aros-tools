@@ -15,6 +15,13 @@ checkouts and absent work/output leaves.
 
 ## What you need
 
+The native build and v1 package paths currently support LLVM only. GNU
+source-lock v3 and profiles v2 documents bind cache, recipe, compiler family
+and explicit RISC-V ISA/ABI expectations; their families must agree. They
+cannot yet execute a native GNU producer or create a GNU package. RISC-V
+compiler probes are development evidence, not an available compiler release
+or board-support claim.
+
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
 - The `aros` executable built from that selected tools checkout.

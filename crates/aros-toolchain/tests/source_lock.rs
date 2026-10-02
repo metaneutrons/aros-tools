@@ -1,7 +1,11 @@
 //! Source-lock parsing is a closed producer contract, not a JSON convenience API.
 
 use aros_common::sha256_bytes;
-use aros_toolchain::{canonical, source_lock::SourceLock, Recipe};
+use aros_toolchain::{
+    canonical,
+    source_lock::{CompilerFamily, SourceLock},
+    Recipe,
+};
 use serde_json::{json, Value};
 
 fn lock() -> Value {
@@ -27,6 +31,34 @@ fn lock() -> Value {
     })
 }
 
+fn v3_llvm_lock() -> Value {
+    let mut document = lock();
+    document["schema"] = json!("aros-toolchain-source-lock-v3");
+    document
+}
+
+fn gnu_lock() -> Value {
+    let mut document = lock();
+    document["schema"] = json!("aros-toolchain-source-lock-v3");
+    document["family"] = json!("gnu");
+    document["version"] = json!("13.2.0");
+    document["sources"] = json!([
+        {
+            "component": "gcc", "version": "13.2.0", "purpose": "toolchain-component",
+            "patch": "tools/crosstools/gnu/gcc-13.2.0-aros.diff",
+            "filename": "gcc-13.2.0.tar.xz", "url": "https://example.invalid/gcc.tar.xz",
+            "sha256": "a".repeat(64), "size": 42
+        },
+        {
+            "component": "binutils", "version": "2.42", "purpose": "toolchain-component",
+            "patch": "tools/crosstools/gnu/binutils-2.42-aros.diff",
+            "filename": "binutils-2.42.tar.xz", "url": "https://example.invalid/binutils.tar.xz",
+            "sha256": "d".repeat(64), "size": 43
+        }
+    ]);
+    document
+}
+
 fn recipe(patches: &Value) -> Recipe {
     let mut value = json!({
         "schema": "aros-toolchain-recipe-v2",
@@ -45,6 +77,7 @@ fn recipe(patches: &Value) -> Recipe {
 fn validates_the_complete_payload_and_patch_closure() {
     let parsed = SourceLock::parse(&serde_json::to_vec(&lock()).unwrap()).unwrap();
     assert_eq!(parsed.version(), "11.0.0");
+    assert_eq!(parsed.family(), CompilerFamily::Llvm);
     assert_eq!(parsed.payloads().count(), 3);
     assert_eq!(parsed.host_python_packages()[0].name(), "mako");
     assert_eq!(parsed.host_python_packages()[1].python_path(), "src");
@@ -54,6 +87,40 @@ fn validates_the_complete_payload_and_patch_closure() {
     }]);
     let recipe = recipe(&patches);
     parsed.verify_recipe_patches(&recipe).unwrap();
+}
+
+#[test]
+fn accepts_v3_llvm_and_gnu_family_declarations() {
+    let llvm = SourceLock::parse(&serde_json::to_vec(&v3_llvm_lock()).unwrap()).unwrap();
+    assert_eq!(llvm.family(), CompilerFamily::Llvm);
+    assert_eq!(llvm.version(), "11.0.0");
+
+    let gnu = SourceLock::parse(&serde_json::to_vec(&gnu_lock()).unwrap()).unwrap();
+    assert_eq!(gnu.family(), CompilerFamily::Gnu);
+    assert_eq!(gnu.version(), "13.2.0");
+    let components = gnu.source_components().collect::<Vec<_>>();
+    assert_eq!(components.len(), 2);
+    assert_eq!(components[0].component(), "gcc");
+    assert_eq!(
+        components[0].purpose(),
+        aros_toolchain::source_lock::SourcePurpose::ToolchainComponent
+    );
+    assert_eq!(components[1].component(), "binutils");
+    assert_eq!(gnu.source_patch_paths().count(), 2);
+}
+
+#[test]
+fn gnu_recipe_binding_requires_the_exact_source_patch_closure() {
+    let parsed = SourceLock::parse(&serde_json::to_vec(&gnu_lock()).unwrap()).unwrap();
+    let patches = json!([
+        {"path": "tools/crosstools/gnu/binutils-2.42-aros.diff", "sha256": "f".repeat(64)},
+        {"path": "tools/crosstools/gnu/gcc-13.2.0-aros.diff", "sha256": "e".repeat(64)}
+    ]);
+    parsed.verify_recipe_patches(&recipe(&patches)).unwrap();
+    let mut wrong = patches;
+    wrong[1]["path"] = json!("tools/crosstools/llvm/gcc-13.2.0-aros.diff");
+    assert!(parsed.verify_recipe_patches(&recipe(&wrong)).is_err());
+    assert!(parsed.verify_recipe_patches(&recipe(&json!([]))).is_err());
 }
 
 #[test]
@@ -84,6 +151,81 @@ fn rejects_ambiguous_or_unsafe_lock_material() {
         .unwrap()
         .remove("sha256");
     assert!(SourceLock::parse(&serde_json::to_vec(&missing_hash).unwrap()).is_err());
+}
+
+#[test]
+fn rejects_wrong_schema_or_family_combinations() {
+    let mut unknown_schema = v3_llvm_lock();
+    unknown_schema["schema"] = json!("aros-toolchain-source-lock-v4");
+    assert!(SourceLock::parse(&serde_json::to_vec(&unknown_schema).unwrap()).is_err());
+
+    let mut v2_gnu = lock();
+    v2_gnu["family"] = json!("gnu");
+    assert!(SourceLock::parse(&serde_json::to_vec(&v2_gnu).unwrap()).is_err());
+
+    let mut unknown_family = v3_llvm_lock();
+    unknown_family["family"] = json!("other");
+    assert!(SourceLock::parse(&serde_json::to_vec(&unknown_family).unwrap()).is_err());
+}
+
+#[test]
+fn rejects_incomplete_or_inconsistent_gnu_components() {
+    let mut missing_gcc = gnu_lock();
+    missing_gcc["sources"] = json!([missing_gcc["sources"][1].clone()]);
+    assert!(SourceLock::parse(&serde_json::to_vec(&missing_gcc).unwrap()).is_err());
+
+    let mut missing_binutils = gnu_lock();
+    missing_binutils["sources"] = json!([missing_binutils["sources"][0].clone()]);
+    assert!(SourceLock::parse(&serde_json::to_vec(&missing_binutils).unwrap()).is_err());
+
+    let mut mismatched_gcc = gnu_lock();
+    mismatched_gcc["sources"][0]["version"] = json!("13.2.1");
+    assert!(SourceLock::parse(&serde_json::to_vec(&mismatched_gcc).unwrap()).is_err());
+
+    let mut nonnumeric_gcc = gnu_lock();
+    nonnumeric_gcc["version"] = json!("13.2-rc1");
+    nonnumeric_gcc["sources"][0]["version"] = json!("13.2-rc1");
+    assert!(SourceLock::parse(&serde_json::to_vec(&nonnumeric_gcc).unwrap()).is_err());
+
+    let mut unsupported_binutils = gnu_lock();
+    unsupported_binutils["sources"][1]["version"] = json!("2.42.1.0.1");
+    assert!(SourceLock::parse(&serde_json::to_vec(&unsupported_binutils).unwrap()).is_err());
+
+    let mut gcc_without_toolchain_role = gnu_lock();
+    gcc_without_toolchain_role["sources"][0]["purpose"] = json!("target-build-dependency");
+    assert!(SourceLock::parse(&serde_json::to_vec(&gcc_without_toolchain_role).unwrap()).is_err());
+
+    let mut duplicate_gcc = gnu_lock();
+    let duplicate = duplicate_gcc["sources"][0].clone();
+    duplicate_gcc["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    assert!(SourceLock::parse(&serde_json::to_vec(&duplicate_gcc).unwrap()).is_err());
+
+    let mut conflicting_binutils = gnu_lock();
+    let mut duplicate = conflicting_binutils["sources"][1].clone();
+    duplicate["version"] = json!("2.43");
+    duplicate["filename"] = json!("binutils-2.43.tar.xz");
+    duplicate["patch"] = json!("tools/crosstools/gnu/binutils-2.43-aros.diff");
+    conflicting_binutils["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    assert!(SourceLock::parse(&serde_json::to_vec(&conflicting_binutils).unwrap()).is_err());
+}
+
+#[test]
+fn rejects_patches_outside_the_selected_compiler_namespace() {
+    let mut gnu_with_llvm_patch = gnu_lock();
+    gnu_with_llvm_patch["sources"][0]["patch"] =
+        json!("tools/crosstools/llvm/gcc-13.2.0-aros.diff");
+    assert!(SourceLock::parse(&serde_json::to_vec(&gnu_with_llvm_patch).unwrap()).is_err());
+
+    let mut llvm_with_gnu_patch = v3_llvm_lock();
+    llvm_with_gnu_patch["sources"][0]["patch"] =
+        json!("tools/crosstools/gnu/llvm-11.0.0-aros.diff");
+    assert!(SourceLock::parse(&serde_json::to_vec(&llvm_with_gnu_patch).unwrap()).is_err());
 }
 
 #[test]

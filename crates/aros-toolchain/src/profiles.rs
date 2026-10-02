@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
+use aros_common::elf::riscv::TargetContract;
+
 use crate::recipe::GitObjectId;
+use crate::source_lock::CompilerFamily;
 use crate::ContractError;
 
 const MAX_PROFILES: usize = 128;
@@ -24,14 +27,23 @@ const SUPPORTED_CAPABILITIES: &[&str] = &[
     "multilib-collector",
     "standalone-collector",
 ];
+const SUPPORTED_GNU_CAPABILITIES: &[&str] = &[
+    "c",
+    "cxx",
+    "libgcc",
+    "libstdcxx",
+    "libsupcxx",
+    "standalone-collector",
+];
 
-/// Validated profiles-v1 document.
+/// Validated profiles-v1 or profiles-v2 document.
 #[derive(Debug, Clone)]
 pub struct Profiles(ProfileDocument);
 
 /// One selected, producer-defined target profile.
 #[derive(Debug, Clone)]
 pub struct Profile {
+    family: CompilerFamily,
     name: String,
     configure_target: String,
     upstream_output_target: String,
@@ -40,9 +52,16 @@ pub struct Profile {
     platform: String,
     float_abi: String,
     capabilities: Vec<String>,
+    target: Option<TargetContract>,
 }
 
 impl Profile {
+    /// Compiler family declared by the enclosing profiles-v2 document.
+    #[must_use]
+    pub const fn family(&self) -> CompilerFamily {
+        self.family
+    }
+
     /// Producer-owned profile name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -90,10 +109,16 @@ impl Profile {
     pub fn capabilities(&self) -> &[String] {
         &self.capabilities
     }
+
+    /// Embedded RISC-V target contract for a GNU profiles-v2 entry.
+    #[must_use]
+    pub const fn target(&self) -> Option<&TargetContract> {
+        self.target.as_ref()
+    }
 }
 
 impl Profiles {
-    /// Parse a bounded closed profiles-v1 document without filesystem access.
+    /// Parse a bounded closed profiles-v1 or profiles-v2 document without filesystem access.
     ///
     /// # Errors
     ///
@@ -103,10 +128,16 @@ impl Profiles {
         if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
             return Err(ContractError::invalid("profiles document exceeds 1 MiB"));
         }
-        let profiles: ProfileDocument = serde_json::from_slice(input).map_err(|_| {
-            ContractError::invalid("invalid or unsupported closed profiles-v1 document")
-        })?;
-        validate(&profiles)?;
+        // Keep the legacy v1 deserialization and its failure contract first:
+        // v1 remains byte-for-byte closed and always denotes LLVM.
+        let profiles = if let Ok(document) = serde_json::from_slice::<ProfileDocumentV1>(input) {
+            parse_v1(document)?
+        } else {
+            let document: ProfileDocumentV2 = serde_json::from_slice(input).map_err(|_| {
+                ContractError::invalid("invalid or unsupported closed profiles-v1 document")
+            })?;
+            parse_v2(document)?
+        };
         Ok(Self(profiles))
     }
 
@@ -114,6 +145,12 @@ impl Profiles {
     #[must_use]
     pub const fn upstream_commit(&self) -> &GitObjectId {
         &self.0.upstream_commit
+    }
+
+    /// Compiler family declared by profiles-v2; profiles-v1 is LLVM.
+    #[must_use]
+    pub const fn family(&self) -> CompilerFamily {
+        self.0.family
     }
 
     /// Select one exact preset. No heuristic aliasing is supported.
@@ -139,17 +176,33 @@ impl Profiles {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct ProfileDocument {
-    schema: String,
+    family: CompilerFamily,
     upstream_commit: GitObjectId,
     profiles: Vec<Profile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProfileRecord {
+struct ProfileDocumentV1 {
+    schema: String,
+    upstream_commit: GitObjectId,
+    profiles: Vec<ProfileV1Record>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileDocumentV2 {
+    schema: String,
+    family: CompilerFamily,
+    upstream_commit: GitObjectId,
+    profiles: Vec<ProfileV2Record>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileV1Record {
     name: String,
     configure_target: String,
     upstream_output_target: String,
@@ -160,13 +213,43 @@ struct ProfileRecord {
     capabilities: Vec<String>,
 }
 
-impl<'de> Deserialize<'de> for Profile {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileV2Record {
+    name: String,
+    configure_target: String,
+    upstream_output_target: String,
+    target_triple: String,
+    cpu: String,
+    platform: String,
+    float_abi: String,
+    capabilities: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_non_null")]
+    target: Option<TargetContract>,
+}
+
+fn deserialize_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn parse_v1(document: ProfileDocumentV1) -> Result<ProfileDocument, ContractError> {
+    if document.schema != "aros-toolchain-profiles-v1"
+        || document.profiles.is_empty()
+        || document.profiles.len() > MAX_PROFILES
     {
-        let profile = ProfileRecord::deserialize(deserializer)?;
-        Ok(Self {
+        return Err(ContractError::invalid(
+            "expected profiles-v1 with 1..128 entries",
+        ));
+    }
+    let profiles = document
+        .profiles
+        .into_iter()
+        .map(|profile| Profile {
+            family: CompilerFamily::Llvm,
             name: profile.name,
             configure_target: profile.configure_target,
             upstream_output_target: profile.upstream_output_target,
@@ -175,21 +258,57 @@ impl<'de> Deserialize<'de> for Profile {
             platform: profile.platform,
             float_abi: profile.float_abi,
             capabilities: profile.capabilities,
+            target: None,
         })
-    }
+        .collect::<Vec<_>>();
+    validate_profiles(&profiles, CompilerFamily::Llvm)?;
+    Ok(ProfileDocument {
+        family: CompilerFamily::Llvm,
+        upstream_commit: document.upstream_commit,
+        profiles,
+    })
 }
 
-fn validate(profiles: &ProfileDocument) -> Result<(), ContractError> {
-    if profiles.schema != "aros-toolchain-profiles-v1"
-        || profiles.profiles.is_empty()
-        || profiles.profiles.len() > MAX_PROFILES
+fn parse_v2(document: ProfileDocumentV2) -> Result<ProfileDocument, ContractError> {
+    if document.schema != "aros-toolchain-profiles-v2"
+        || document.profiles.is_empty()
+        || document.profiles.len() > MAX_PROFILES
     {
         return Err(ContractError::invalid(
-            "expected profiles-v1 with 1..128 entries",
+            "expected profiles-v2 with 1..128 entries",
         ));
     }
+    let profiles = document
+        .profiles
+        .into_iter()
+        .map(|profile| Profile {
+            family: document.family,
+            name: profile.name,
+            configure_target: profile.configure_target,
+            upstream_output_target: profile.upstream_output_target,
+            target_triple: profile.target_triple,
+            cpu: profile.cpu,
+            platform: profile.platform,
+            float_abi: profile.float_abi,
+            capabilities: profile.capabilities,
+            target: profile.target,
+        })
+        .collect::<Vec<_>>();
+    validate_profiles(&profiles, document.family)?;
+    Ok(ProfileDocument {
+        family: document.family,
+        upstream_commit: document.upstream_commit,
+        profiles,
+    })
+}
+
+fn validate_profiles(profiles: &[Profile], family: CompilerFamily) -> Result<(), ContractError> {
     let mut names = BTreeSet::new();
-    for profile in &profiles.profiles {
+    for profile in profiles {
+        let capabilities = match family {
+            CompilerFamily::Llvm => SUPPORTED_CAPABILITIES,
+            CompilerFamily::Gnu => SUPPORTED_GNU_CAPABILITIES,
+        };
         if !names.insert(&profile.name)
             || [
                 &profile.name,
@@ -203,9 +322,10 @@ fn validate(profiles: &ProfileDocument) -> Result<(), ContractError> {
             .any(|value| !identifier(value))
             || (!profile.float_abi.is_empty() && !identifier(&profile.float_abi))
             || profile.capabilities.is_empty()
-            || profile.capabilities.iter().any(|value| {
-                !identifier(value) || !SUPPORTED_CAPABILITIES.contains(&value.as_str())
-            })
+            || profile
+                .capabilities
+                .iter()
+                .any(|value| !identifier(value) || !capabilities.contains(&value.as_str()))
             || profile.capabilities.iter().collect::<BTreeSet<_>>().len()
                 != profile.capabilities.len()
         {
@@ -213,6 +333,62 @@ fn validate(profiles: &ProfileDocument) -> Result<(), ContractError> {
                 "profiles contain duplicate or invalid identifiers/capabilities",
             ));
         }
+        match family {
+            CompilerFamily::Llvm if profile.target.is_some() => {
+                return Err(ContractError::invalid(
+                    "LLVM profiles-v2 entries cannot declare a RISC-V target contract",
+                ));
+            }
+            CompilerFamily::Llvm => {}
+            CompilerFamily::Gnu => validate_gnu_profile(profile)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_gnu_profile(profile: &Profile) -> Result<(), ContractError> {
+    let target = profile.target.as_ref().ok_or_else(|| {
+        ContractError::invalid("GNU profiles-v2 entries require a RISC-V target contract")
+    })?;
+    let cpu_width = match profile.cpu.as_str() {
+        "riscv" => "ilp32",
+        "riscv64" => "lp64",
+        _ => {
+            return Err(ContractError::invalid(
+                "GNU RISC-V profile cpu must be riscv or riscv64",
+            ));
+        }
+    };
+    if !target.abi().starts_with(cpu_width) {
+        return Err(ContractError::invalid(
+            "GNU profile cpu width differs from its target ABI",
+        ));
+    }
+    if profile.float_abi != target.abi() {
+        return Err(ContractError::invalid(
+            "GNU profile float_abi must equal its target ABI",
+        ));
+    }
+    let triple_prefix = profile.target_triple.strip_suffix("-aros");
+    if triple_prefix.is_none_or(|prefix| {
+        !identifier(prefix) || prefix.split('-').next() != Some(profile.cpu.as_str())
+    }) {
+        return Err(ContractError::invalid(
+            "GNU profile target_triple must match its cpu and end in -aros",
+        ));
+    }
+
+    let has = |capability: &str| profile.capabilities.iter().any(|value| value == capability);
+    if !has("c") || !has("libgcc") || !has("standalone-collector") {
+        return Err(ContractError::invalid(
+            "GNU profiles require c, libgcc and standalone-collector",
+        ));
+    }
+    if has("cxx") != (has("libstdcxx") && has("libsupcxx")) || has("libstdcxx") != has("libsupcxx")
+    {
+        return Err(ContractError::invalid(
+            "GNU C++ capability requires both libstdcxx and libsupcxx",
+        ));
     }
     Ok(())
 }

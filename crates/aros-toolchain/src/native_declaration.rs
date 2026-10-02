@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::{safe_relative_path, GitObjectId};
-use crate::source_lock::SourceLock;
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{ContractError, Recipe};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -132,6 +132,16 @@ impl NativeExecutorDeclaration {
         let source_lock = SourceLock::parse(source_lock_bytes)?;
         source_lock.verify_recipe_patches(recipe)?;
         let profiles = Profiles::parse(profiles_bytes)?;
+        if profiles.family() != source_lock.family() {
+            return Err(ContractError::identity(
+                "native source lock and profiles select different compiler families",
+            ));
+        }
+        if source_lock.family() != CompilerFamily::Llvm {
+            return Err(ContractError::invalid(
+                "GNU inputs are supported for cache and recipe binding only; native GNU execution is not implemented",
+            ));
+        }
         let selected_profile = profiles.select(preset)?.clone();
         Ok(NativeInputContract {
             declaration: self.clone(),

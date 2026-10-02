@@ -27,7 +27,7 @@ use xz2::read::XzDecoder;
 
 use crate::package::{canonical_asset_name, spdx_bytes, validate_link_target};
 use crate::profiles::Profile;
-use crate::source_lock::SourceLock;
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
@@ -188,6 +188,13 @@ fn verify_members_validated(
 }
 
 fn validate_request(request: &PackageVerificationRequest) -> Result<(), ContractError> {
+    if request.source_lock.family() != CompilerFamily::Llvm
+        || request.profile.family() != CompilerFamily::Llvm
+    {
+        return Err(ContractError::verification(
+            "GNU package verification requires the compiler-family artifact contract; LLVM v1 verification cannot accept GNU inputs",
+        ));
+    }
     if !request.package_dir.is_absolute() {
         return Err(ContractError::verification(
             "package verification directory must be absolute",

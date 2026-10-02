@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use xz2::write::XzEncoder;
 
 use crate::profiles::Profile;
-use crate::source_lock::{SourceLock, SourcePurpose};
+use crate::source_lock::{CompilerFamily, SourceLock, SourcePurpose};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
@@ -181,6 +181,13 @@ pub fn canonical_asset_name(
 }
 
 fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
+    if request.source_lock.family() != CompilerFamily::Llvm
+        || request.profile.family() != CompilerFamily::Llvm
+    {
+        return Err(ContractError::package(
+            "GNU packaging requires the compiler-family artifact contract; LLVM v1 packaging cannot accept GNU inputs",
+        ));
+    }
     if !request.candidate_root.is_absolute() || !request.output_dir.is_absolute() {
         return Err(ContractError::package(
             "candidate and package output roots must be absolute paths",

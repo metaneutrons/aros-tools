@@ -1,0 +1,25 @@
+{
+  "schema": "aros-toolchain-source-lock-v3",
+  "family": "gnu",
+  "version": "16.2.0",
+  "sources": [
+    {
+      "component": "gcc", "version": "16.2.0", "purpose": "toolchain-component",
+      "filename": "gcc.tar.xz", "url": "https://example.invalid/gcc.tar.xz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 1
+    },
+    {
+      "component": "binutils", "version": "2.47", "purpose": "toolchain-component",
+      "filename": "binutils.tar.bz2", "url": "https://example.invalid/binutils.tar.bz2",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": 1
+    }
+  ],
+  "host_python_packages": [
+    {
+      "name": "mako", "version": "1.3.10", "filename": "mako.tar.gz",
+      "url": "https://example.invalid/mako.tar.gz",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 1, "source_root": "mako", "python_path": "."
+    }
+  ]
+}

@@ -50,6 +50,48 @@ fn accepts_exact_complete_local_cache_entries() {
 }
 
 #[test]
+fn gnu_cache_request_binds_family_closure_and_rejects_changed_payloads() {
+    let temporary = real_tempdir();
+    let bytes = b"synthetic GNU input, not a compiler archive\n";
+    let mut lock: serde_json::Value = serde_json::from_slice(&lock_bytes(bytes)).unwrap();
+    lock["schema"] = json!("aros-toolchain-source-lock-v3");
+    lock["family"] = json!("gnu");
+    lock["version"] = json!("16.2.0");
+    lock["sources"][0]["component"] = json!("gcc");
+    lock["sources"][0]["version"] = json!("16.2.0");
+    lock["sources"][0]["filename"] = json!("gcc.tar.xz");
+    let mut binutils = lock["sources"][0].clone();
+    binutils["component"] = json!("binutils");
+    binutils["version"] = json!("2.47");
+    binutils["filename"] = json!("binutils.tar.xz");
+    lock["sources"].as_array_mut().unwrap().push(binutils);
+    let raw = serde_json::to_vec(&lock).unwrap();
+    let request = SourceCacheRequest::from_source_lock(&raw).unwrap();
+    assert_eq!(request.request_sha256, sha256_bytes(&raw));
+    for file in ["gcc.tar.xz", "binutils.tar.xz", "mako.tar.gz"] {
+        fs::write(temporary.path().join(file), bytes).unwrap();
+    }
+    assert_eq!(
+        source_cache::verify_request(temporary.path(), &request)
+            .unwrap()
+            .entries
+            .len(),
+        3
+    );
+    let mut corrupt = bytes.to_vec();
+    corrupt[0] ^= 1;
+    fs::write(temporary.path().join("gcc.tar.xz"), corrupt).unwrap();
+    assert_eq!(
+        source_cache::verify_request(temporary.path(), &request)
+            .unwrap_err()
+            .diagnostics()
+            .diagnostics[0]
+            .code,
+        DiagnosticCode::ProducerSources
+    );
+}
+
+#[test]
 fn missing_or_tampered_payload_fails_as_a_source_error() {
     let temporary = real_tempdir();
     let bytes = b"verified source fixture\n";
