@@ -177,7 +177,9 @@ verification alone does not prove a guest boot. For the native PC path,
 `aros build --preset pc-x86_64 --target boot-iso` builds the SYS/GRUB dependency
 graph, emits a v3 tree receipt and uses this composer. See the
 [AROS-NX workflow](/aros-tools/workflows/aros-nx/) for prerequisites and outputs.
-Fresh-build and guest-readiness qualification remain separate BM3 gates.
+Image verification and guest readiness are separate checks. The native PC BIOS
+path has a [fresh-build and QEMU qualification](https://github.com/metaneutrons/aros-tools/blob/main/docs/qualifications/bm3-pc-bios.md);
+this does not qualify physical-board media or UEFI.
 `aros board sd image` retains its existing v1 bundle behavior.
 
 ## Source and repository
