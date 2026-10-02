@@ -4,6 +4,28 @@ use std::fs;
 use std::path::Path;
 
 #[test]
+fn util_consumer_contract_is_absent_outside_mesa26() {
+    let profile = TargetContext {
+        mesa_version: Some("20.0.8".to_owned()),
+        ..TargetContext::default()
+    };
+    for target in [None, Some(&profile)] {
+        // Neither fetched source nor local util targets are required when
+        // this capability is inactive. No compiler-consumer obligation leaks
+        // into the Mesa 20 or unselected context.
+        let output = super::parse_mesautil(
+            Path::new("unused-source-root"),
+            Path::new("workbench/libs/mesa/libmesautil"),
+            target,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(output.is_none());
+    }
+}
+
+#[test]
 fn runtime_identity_rejects_changed_source_module_names() {
     let root = mesa26_source_root();
     let profile = TargetContext {

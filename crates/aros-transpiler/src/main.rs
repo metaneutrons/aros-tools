@@ -554,6 +554,20 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         return Err(diagnostics_error(capability_errors));
     }
 
+    if let Err(errors) = graph.validate_python_output_consumers() {
+        let diagnostics = errors
+            .into_iter()
+            .map(|message| {
+                Diagnostic::error(
+                    DiagnosticCode::GraphValidation,
+                    DiagnosticStage::GraphValidation,
+                    message,
+                )
+            })
+            .collect();
+        return Err(diagnostics_error(diagnostics));
+    }
+
     source_inventory_patterns.sort();
     source_inventory_patterns.dedup();
     partial_source_lists.extend(
