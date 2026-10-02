@@ -1298,6 +1298,7 @@ mod tests {
         object[6] = 1;
         object[7] = os_abi;
         object[8] = AROS_ABI_VERSION;
+        write_u32(&mut object, 0x14, 1);
         write_u64(&mut object, 0x28, section_offset as u64);
         write_u16(&mut object, 0x34, 64);
         write_u16(&mut object, 0x3a, section_size as u16);
