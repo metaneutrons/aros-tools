@@ -49,6 +49,11 @@ The `aros test` implementation uses `qemu-system-x86_64` and PC boot paths.
 It is not a multi-architecture emulator frontend. Physical boards need their
 own boot evidence.
 
+The native PC BIOS ISO path has a fresh-build and QEMU user-mode qualification
+on macOS ARM64, plus a separate strict llvmpipe/LLVM-11 shader/JIT run. See the
+[qualified inputs and limits](https://github.com/metaneutrons/aros-tools/blob/main/docs/qualifications/bm3-pc-bios.md).
+This is not a physical-board or UEFI qualification.
+
 ## Component-specific limits
 
 | Component | Implemented boundary |
