@@ -5,9 +5,9 @@
 //! revalidate through `aros-fetch`.  Keeping this parser here prevents a
 //! second, drift-prone lock interpretation in the CLI or workflow.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use aros_common::Sha256Digest;
+use aros_common::{sha256_bytes, validate_gnu_compiler_versions, Sha256Digest};
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
@@ -17,9 +17,9 @@ use crate::{ContractError, Recipe};
 const MAX_PAYLOADS: usize = 1024;
 const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// One semantically valid source-lock v2 document.
+/// One semantically valid source-lock v2 or v3 document.
 #[derive(Debug, Clone)]
-pub struct SourceLock(Record);
+pub struct SourceLock(Record, Sha256Digest);
 
 /// A declared archive whose exact bytes must be present in a verified cache.
 #[derive(Debug, Clone, Copy)]
@@ -142,8 +142,8 @@ impl HostPythonPackage {
 }
 
 impl SourceLock {
-    /// Parse and close the source-lock v2 schema without accessing the network
-    /// or the filesystem.
+    /// Parse and close a supported source-lock schema without accessing the
+    /// network or the filesystem.
     ///
     /// # Errors
     ///
@@ -154,16 +154,32 @@ impl SourceLock {
         if input.len() > crate::canonical::MAX_DOCUMENT_BYTES {
             return Err(ContractError::invalid("source lock exceeds 1 MiB"));
         }
-        let record: Record = serde_json::from_slice(input)
-            .map_err(|_| ContractError::invalid("invalid source-lock-v2 document"))?;
+        let record: Record = serde_json::from_slice(input).map_err(|_| {
+            ContractError::invalid("invalid or unsupported closed source-lock document")
+        })?;
+        if record.schema == Schema::V2 && record.family == CompilerFamily::Gnu {
+            return Err(ContractError::invalid("invalid source-lock-v2 document"));
+        }
         validate(&record)?;
-        Ok(Self(record))
+        Ok(Self(record, sha256_bytes(input)))
     }
 
-    /// LLVM family version selected by this lock.
+    /// Digest of the exact parsed document bytes, not a reserialization.
+    #[must_use]
+    pub const fn sha256(&self) -> &Sha256Digest {
+        &self.1
+    }
+
+    /// Compiler-family version selected by this lock.
     #[must_use]
     pub fn version(&self) -> &str {
         &self.0.version
+    }
+
+    /// Compiler family selected by this lock.
+    #[must_use]
+    pub const fn family(&self) -> CompilerFamily {
+        self.0.family
     }
 
     /// Every source archive, in the source-owned declaration order.
@@ -240,22 +256,28 @@ impl SourceLock {
 #[serde(deny_unknown_fields)]
 struct Record {
     schema: Schema,
-    family: Family,
+    family: CompilerFamily,
     version: String,
     sources: Vec<Source>,
     host_python_packages: Vec<HostPythonPackage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 enum Schema {
     #[serde(rename = "aros-toolchain-source-lock-v2")]
     V2,
+    #[serde(rename = "aros-toolchain-source-lock-v3")]
+    V3,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-enum Family {
+/// Compiler family described by a source lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompilerFamily {
     #[serde(rename = "llvm")]
     Llvm,
+    #[serde(rename = "gnu")]
+    Gnu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -333,8 +355,12 @@ impl<'de> Deserialize<'de> for HostPythonPackage {
 }
 
 fn validate(record: &Record) -> Result<(), ContractError> {
-    let _ = (&record.schema, &record.family);
-    if !llvm_version(&record.version)
+    let supported_version = match (record.schema, record.family) {
+        (Schema::V2 | Schema::V3, CompilerFamily::Llvm) => llvm_version(&record.version),
+        (Schema::V3, CompilerFamily::Gnu) => gcc_version(&record.version),
+        (Schema::V2, CompilerFamily::Gnu) => false,
+    };
+    if !supported_version
         || record.sources.is_empty()
         || record.host_python_packages.is_empty()
         || record
@@ -343,12 +369,16 @@ fn validate(record: &Record) -> Result<(), ContractError> {
             .saturating_add(record.host_python_packages.len())
             > MAX_PAYLOADS
     {
-        return Err(ContractError::invalid(
-            "source lock must declare a supported LLVM version and 1..1024 payloads",
-        ));
+        let message = if record.family == CompilerFamily::Llvm {
+            "source lock must declare a supported LLVM version and 1..1024 payloads"
+        } else {
+            "source lock must declare a supported GNU version and 1..1024 payloads"
+        };
+        return Err(ContractError::invalid(message));
     }
     let mut filenames = BTreeSet::new();
     let mut components = BTreeSet::new();
+    let mut component_versions = BTreeMap::new();
     let mut patches = BTreeSet::new();
     let mut total = 0_u64;
     for source in &record.sources {
@@ -364,21 +394,40 @@ fn validate(record: &Record) -> Result<(), ContractError> {
                 "source lock contains duplicate or invalid source declarations",
             ));
         }
+        if record.schema == Schema::V3
+            && component_versions
+                .insert(source.component.as_str(), source.version.as_str())
+                .is_some_and(|version| version != source.version)
+        {
+            return Err(ContractError::invalid(
+                "source lock declares conflicting versions for one component",
+            ));
+        }
         if let Some(patch) = &source.patch {
+            let patch_namespace = match record.family {
+                CompilerFamily::Llvm => "tools/crosstools/llvm/",
+                CompilerFamily::Gnu => "tools/crosstools/gnu/",
+            };
             if !safe_relative_path(patch)
-                || !patch.starts_with("tools/crosstools/llvm/")
+                || !patch.starts_with(patch_namespace)
                 || !patch.ends_with("-aros.diff")
                 || !patches.insert(patch)
             {
-                return Err(ContractError::invalid(
-                    "source lock contains an unsafe or duplicate LLVM patch path",
-                ));
+                let message = if record.schema == Schema::V2 {
+                    "source lock contains an unsafe or duplicate LLVM patch path"
+                } else {
+                    "source lock contains an unsafe or duplicate compiler-family patch path"
+                };
+                return Err(ContractError::invalid(message));
             }
         }
         total = total.checked_add(source.size).ok_or_else(|| {
             ContractError::invalid("source-lock payload sizes overflow the supported limit")
         })?;
         let _ = &source.purpose;
+    }
+    if record.schema == Schema::V3 && record.family == CompilerFamily::Gnu {
+        validate_gnu_components(record)?;
     }
     let mut names = BTreeSet::new();
     let mut roots = BTreeSet::new();
@@ -410,6 +459,33 @@ fn validate(record: &Record) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn validate_gnu_components(record: &Record) -> Result<(), ContractError> {
+    let gcc = record
+        .sources
+        .iter()
+        .filter(|source| {
+            source.component == "gcc" && source.purpose == SourcePurpose::ToolchainComponent
+        })
+        .collect::<Vec<_>>();
+    let binutils = record
+        .sources
+        .iter()
+        .filter(|source| {
+            source.component == "binutils" && source.purpose == SourcePurpose::ToolchainComponent
+        })
+        .collect::<Vec<_>>();
+    if gcc.len() != 1
+        || gcc[0].version != record.version.as_str()
+        || binutils.len() != 1
+        || validate_gnu_compiler_versions(&gcc[0].version, &binutils[0].version).is_err()
+    {
+        return Err(ContractError::invalid(
+            "GNU source lock requires one matching GCC and one supported binutils toolchain component",
+        ));
+    }
+    Ok(())
+}
+
 fn digest<'de, D>(deserializer: D) -> Result<Sha256Digest, D::Error>
 where
     D: Deserializer<'de>,
@@ -427,9 +503,18 @@ where
 }
 
 fn llvm_version(value: &str) -> bool {
-    value.split('.').count() == 3
-        && value
-            .split('.')
+    numeric_version(value, 3, 3)
+}
+
+fn gcc_version(value: &str) -> bool {
+    numeric_version(value, 3, 3)
+}
+
+fn numeric_version(value: &str, min_segments: usize, max_segments: usize) -> bool {
+    let segments = value.split('.').collect::<Vec<_>>();
+    (min_segments..=max_segments).contains(&segments.len())
+        && segments
+            .iter()
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 

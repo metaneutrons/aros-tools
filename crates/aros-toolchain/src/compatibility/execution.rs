@@ -1527,6 +1527,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "c".repeat(64),
             source_lock_sha256: "d".repeat(64),
             profiles_sha256: "e".repeat(64),
@@ -1675,6 +1676,7 @@ mod tests {
         object[6] = 1;
         object[7] = aros_common::elf::OS_ABI_AROS;
         object[8] = aros_common::elf::AROS_ABI_VERSION;
+        write_u32(&mut object, 0x14, 1);
         write_u64(&mut object, 0x28, section_offset as u64);
         write_u16(&mut object, 0x34, 64);
         write_u16(&mut object, 0x3a, section_size as u16);
@@ -1714,6 +1716,7 @@ mod tests {
         object[6] = 1;
         object[7] = aros_common::elf::OS_ABI_AROS;
         object[8] = aros_common::elf::AROS_ABI_VERSION;
+        write_u32(&mut object, 0x14, 1);
         write_u32(&mut object, 0x20, section_offset as u32);
         write_u16(&mut object, 0x28, 52);
         write_u16(&mut object, 0x2e, section_size as u16);

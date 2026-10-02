@@ -11,14 +11,14 @@ use std::path::{Component, Path, PathBuf};
 use aros_common::{
     measure_regular_file, payload_casefold_path_key, publish_prepared_tree_noclobber, sha256_file,
     toolchain_tree_inventory, ArosToolchainManifest, Sha256Digest, AROS_TOOLCHAIN_MANIFEST_FILE,
-    AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+    AROS_TOOLCHAIN_MANIFEST_SCHEMA, AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2,
 };
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 use xz2::write::XzEncoder;
 
 use crate::profiles::Profile;
-use crate::source_lock::{SourceLock, SourcePurpose};
+use crate::source_lock::{CompilerFamily, SourceLock, SourcePurpose};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
@@ -49,7 +49,7 @@ pub struct PackageRequest {
     pub host: String,
     /// Validated source recipe.
     pub recipe: Recipe,
-    /// Validated source closure that defines the LLVM version and SPDX inputs.
+    /// Validated compiler-family source closure and SPDX inputs.
     pub source_lock: SourceLock,
     /// Exact profile selected from the validated profiles document.
     pub profile: Profile,
@@ -114,11 +114,8 @@ pub fn package(request: &PackageRequest) -> Result<PackageOutput, ContractError>
         &manifest_bytes,
     )?;
 
-    let asset = canonical_asset_name(
-        request.source_lock.version(),
-        &request.host,
-        request.profile.name(),
-    )?;
+    let asset =
+        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
     let archive = package_stage.path().join(&asset);
     write_archive(&archive, &staged_root, request.recipe.source_date_epoch())?;
     let measured = sha256_file(&archive)
@@ -181,6 +178,12 @@ pub fn canonical_asset_name(
 }
 
 fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
+    let _ = crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
+    crate::package_identity::require_gnu_recipe_binding(
+        &request.recipe,
+        &request.source_lock,
+        &request.profile,
+    )?;
     if !request.candidate_root.is_absolute() || !request.output_dir.is_absolute() {
         return Err(ContractError::package(
             "candidate and package output roots must be absolute paths",
@@ -203,11 +206,8 @@ fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
             "release identifier must be one safe nonempty segment",
         ));
     }
-    let _ = canonical_asset_name(
-        request.source_lock.version(),
-        &request.host,
-        request.profile.name(),
-    )?;
+    let _ =
+        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
     let build_environment = Value::Object(request.build_environment.clone());
     crate::canonical::bytes(&build_environment)?;
     for prefix in &request.forbidden_prefixes {
@@ -474,14 +474,22 @@ fn manifest(
     tree_sha256: String,
     files: Vec<aros_common::ArosToolchainManifestEntry>,
 ) -> Result<ArosToolchainManifest, ContractError> {
+    let gnu = request.source_lock.family() == CompilerFamily::Gnu;
+    let identity =
+        crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
     let manifest = ArosToolchainManifest {
-        schema: AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+        schema: if gnu {
+            AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2
+        } else {
+            AROS_TOOLCHAIN_MANIFEST_SCHEMA
+        },
         release_id: request.release_id.clone(),
         host: request.host.clone(),
         target_profile: request.profile.name().to_owned(),
         target_triple: request.profile.target_triple().to_owned(),
         tree_sha256,
-        llvm_version: Some(request.source_lock.version().to_owned()),
+        llvm_version: (!gnu).then(|| request.source_lock.version().to_owned()),
+        compiler: gnu.then_some(identity),
         recipe_sha256: request.recipe.sha256().to_string(),
         source_lock_sha256: request.recipe.source_lock_sha256().to_string(),
         profiles_sha256: request.recipe.profiles_sha256().to_string(),

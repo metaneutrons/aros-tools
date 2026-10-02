@@ -22,7 +22,7 @@ use crate::package::{canonical_asset_name, pretty_json};
 use crate::package_verify::{verify_members, PackageAssetPaths, PackageVerificationRequest};
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::Recipe;
-use crate::source_lock::SourceLock;
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{canonical, ContractError};
 
 const INDEX_NAME: &str = "toolchain-index-v1.json";
@@ -587,6 +587,11 @@ fn parse_source_lock(
     let bytes = read_metadata(&path, "published source lock")?;
     let source_lock = SourceLock::parse(&bytes)
         .map_err(|_| ContractError::index("published source lock is invalid"))?;
+    if source_lock.family() != CompilerFamily::Llvm {
+        return Err(ContractError::index(
+            "GNU release indexing requires the compiler-family artifact contract; LLVM v1 indexing cannot accept GNU inputs",
+        ));
+    }
     source_lock.verify_recipe_patches(recipe).map_err(|_| {
         ContractError::index("published source lock does not bind the release recipe patches")
     })?;
@@ -604,6 +609,11 @@ fn parse_profiles(directory: &Path, recipe: &Recipe) -> Result<Profiles, Contrac
     let bytes = read_metadata(&path, "published profiles")?;
     let profiles = Profiles::parse(&bytes)
         .map_err(|_| ContractError::index("published profiles are invalid"))?;
+    if profiles.family() != CompilerFamily::Llvm {
+        return Err(ContractError::index(
+            "LLVM v1 release index cannot accept GNU profiles",
+        ));
+    }
     Ok(profiles)
 }
 
@@ -1276,6 +1286,26 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn v1_index_rejects_exactly_bound_gnu_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = include_bytes!("../tests/fixtures/gnu-source-lock-v3.json");
+        let recipe = Recipe::parse(&fixture_recipe(lock, &fixture_profiles())).unwrap();
+        fs::write(directory.path().join("gnu.sources.json"), lock).unwrap();
+        let request = IndexRequest {
+            directory: directory.path().to_owned(),
+            release_id: "local-test".into(),
+            base_url: "https://example.invalid/releases/local-test".into(),
+            source_lock_filename: "gnu.sources.json".into(),
+            stage: IndexStage::PreAttestation,
+        };
+        let error = parse_source_lock(directory.path(), &request, &recipe).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("LLVM v1 indexing cannot accept GNU"));
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     fn fixture_recipe(source_lock: &[u8], profiles: &[u8]) -> Vec<u8> {

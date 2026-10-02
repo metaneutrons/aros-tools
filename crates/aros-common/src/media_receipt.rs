@@ -439,7 +439,7 @@ fn validate_receipt(receipt: &MediaBuildReceipt) -> Result<(), MediaReceiptError
         _ => {
             return Err(invalid(
                 "receipt version, origin and build identity disagree",
-            ))
+            ));
         }
     }
     if !valid_target_preset(&receipt.target_preset) {
@@ -612,6 +612,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             tree_sha256: tree_sha256.clone(),
             llvm_version: Some("1.2.3".into()),
+            compiler: None,
             recipe_sha256: "1".repeat(64),
             source_lock_sha256: "2".repeat(64),
             profiles_sha256: "3".repeat(64),

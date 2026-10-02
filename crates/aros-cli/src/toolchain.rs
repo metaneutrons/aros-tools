@@ -662,12 +662,14 @@ fn verify_locked_install(
         }
     }
     let manifest = ArosToolchainManifest::load(root).into_diagnostic()?;
-    if manifest.release_id != lock.release_id
+    if manifest.schema != lock.schema
+        || manifest.release_id != lock.release_id
         || manifest.host != artifact.host
         || manifest.target_profile != artifact.target_profile
         || manifest.target_triple != artifact.target_triple
         || manifest.tree_sha256 != artifact.tree_sha256
         || manifest.llvm_version != artifact.llvm_version
+        || manifest.compiler != artifact.compiler
     {
         bail!("embedded toolchain manifest does not match the lock entry");
     }
@@ -918,6 +920,7 @@ mod tests {
             sha256: "a".repeat(64),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             size: None,
             enabled: true,
             disabled_reason: None,
@@ -1052,6 +1055,7 @@ mod tests {
             target_triple: format!("{profile}-unknown-aros"),
             tree_sha256: "b".repeat(64),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "c".repeat(64),
             source_lock_sha256: "d".repeat(64),
             profiles_sha256: "e".repeat(64),
@@ -1201,6 +1205,7 @@ mod tests {
             target_triple: "x86_64-unknown-aros".into(),
             tree_sha256: tree_sha256.clone(),
             llvm_version: Some("11.0.0".into()),
+            compiler: None,
             recipe_sha256: "b".repeat(64),
             source_lock_sha256: "c".repeat(64),
             profiles_sha256: "d".repeat(64),
@@ -1225,6 +1230,7 @@ mod tests {
             sha256: "a".repeat(64),
             tree_sha256,
             llvm_version: manifest.llvm_version.clone(),
+            compiler: manifest.compiler.clone(),
             size: None,
             enabled: true,
             disabled_reason: None,
@@ -1246,6 +1252,7 @@ mod tests {
         fs::write(envelope.join(INSTALL_COMPLETE_FILE), b"complete\n").unwrap();
         verify_locked_install(&payload, &lock, &artifact, true).unwrap();
         assert!(!payload.join(INSTALL_COMPLETE_FILE).exists());
+        assert_schema2_locked_compiler_identity(&payload, &lock, &artifact);
 
         fs::write(envelope.join(INSTALL_COMPLETE_FILE), b"incomplete\n").unwrap();
         assert!(verify_locked_install(&payload, &lock, &artifact, true).is_err());
@@ -1261,5 +1268,46 @@ mod tests {
             symlink(&external, &marker).unwrap();
             assert!(verify_locked_install(&payload, &lock, &artifact, true).is_err());
         }
+    }
+
+    fn assert_schema2_locked_compiler_identity(
+        payload: &Path,
+        legacy_lock: &ArosToolchainLock,
+        legacy_artifact: &ArosToolchainArtifact,
+    ) {
+        let path = payload.join(AROS_TOOLCHAIN_MANIFEST_FILE);
+        let original = fs::read(&path).unwrap();
+        let mut manifest = ArosToolchainManifest::load(payload).unwrap();
+        manifest.schema = aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2;
+        manifest.llvm_version = None;
+        manifest.compiler = Some(aros_common::ArosCompilerIdentity::Llvm {
+            version: "11.0.0".into(),
+        });
+        manifest.validate().unwrap();
+        let candidate_bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&path, &candidate_bytes).unwrap();
+        let mut artifact = legacy_artifact.clone();
+        artifact.llvm_version = None;
+        artifact.compiler = manifest.compiler;
+        let mut lock = legacy_lock.clone();
+        lock.schema = aros_common::AROS_TOOLCHAIN_LOCK_SCHEMA_V2;
+        lock.artifacts = vec![artifact.clone()];
+        lock.validate().unwrap();
+        verify_locked_install(payload, &lock, &artifact, true).unwrap();
+
+        // The payload-tree digest excludes the manifest. Compiler metadata
+        // therefore needs its own exact lock binding, not just a tree check.
+        artifact.compiler = Some(aros_common::ArosCompilerIdentity::Llvm {
+            version: "12.0.0".into(),
+        });
+        lock.artifacts = vec![artifact.clone()];
+        lock.validate().unwrap();
+        let error = verify_locked_install(payload, &lock, &artifact, true).unwrap_err();
+        assert!(error.to_string().contains("does not match the lock entry"));
+        assert_eq!(fs::read(&path).unwrap(), candidate_bytes);
+        let error = verify_locked_install(payload, legacy_lock, legacy_artifact, true).unwrap_err();
+        assert!(error.to_string().contains("does not match the lock entry"));
+        assert_eq!(fs::read(&path).unwrap(), candidate_bytes);
+        fs::write(path, original).unwrap();
     }
 }

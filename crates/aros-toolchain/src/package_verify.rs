@@ -25,9 +25,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use xz2::read::XzDecoder;
 
-use crate::package::{canonical_asset_name, spdx_bytes, validate_link_target};
+use crate::package::{spdx_bytes, validate_link_target};
 use crate::profiles::Profile;
-use crate::source_lock::SourceLock;
+use crate::source_lock::{CompilerFamily, SourceLock};
 use crate::{ContractError, Recipe};
 
 const ARCHIVE_ROOT: &str = "toolchain";
@@ -105,11 +105,8 @@ impl PackageAssetPaths {
 /// or an inconsistent manifest, checksum, or SPDX document.
 pub fn verify(request: &PackageVerificationRequest) -> Result<VerifiedPackage, ContractError> {
     validate_request(request)?;
-    let asset = canonical_asset_name(
-        request.source_lock.version(),
-        &request.host,
-        request.profile.name(),
-    )?;
+    let asset =
+        crate::package_identity::asset_name(&request.source_lock, &request.profile, &request.host)?;
     let paths = PackageAssetPaths::for_asset(&request.package_dir, &asset);
     let expected_members = [
         asset.clone(),
@@ -157,7 +154,9 @@ fn verify_members_validated(
     let manifest: ArosToolchainManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ContractError::verification("external package manifest is not valid JSON"))?;
     manifest.validate().map_err(|_| {
-        ContractError::verification("external package manifest violates the v1 contract")
+        ContractError::verification(
+            "external package manifest violates its compiler-family contract",
+        )
     })?;
     verify_manifest_identity(&manifest, request)?;
     let expected_sbom = spdx_bytes(&request.source_lock, &manifest)?;
@@ -188,6 +187,14 @@ fn verify_members_validated(
 }
 
 fn validate_request(request: &PackageVerificationRequest) -> Result<(), ContractError> {
+    crate::package_identity::compiler_identity(&request.source_lock, &request.profile)
+        .map_err(|error| ContractError::verification(error.to_string()))?;
+    crate::package_identity::require_gnu_recipe_binding(
+        &request.recipe,
+        &request.source_lock,
+        &request.profile,
+    )
+    .map_err(|error| ContractError::verification(error.to_string()))?;
     if !request.package_dir.is_absolute() {
         return Err(ContractError::verification(
             "package verification directory must be absolute",
@@ -307,7 +314,6 @@ fn verify_manifest_identity(
         &request.host,
         request.profile.name(),
         request.profile.target_triple(),
-        request.source_lock.version(),
         request.recipe.sha256().as_str(),
         request.recipe.source_lock_sha256().as_str(),
         request.recipe.profiles_sha256().as_str(),
@@ -321,7 +327,6 @@ fn verify_manifest_identity(
         &manifest.host,
         manifest.target_profile.as_str(),
         manifest.target_triple.as_str(),
-        manifest.llvm_version.as_deref().unwrap_or_default(),
         manifest.recipe_sha256.as_str(),
         manifest.source_lock_sha256.as_str(),
         manifest.profiles_sha256.as_str(),
@@ -330,7 +335,17 @@ fn verify_manifest_identity(
         manifest.tools_commit.as_str(),
         manifest.source_date_epoch,
     );
+    let expected_schema = if request.source_lock.family() == CompilerFamily::Gnu {
+        aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2
+    } else {
+        aros_common::AROS_TOOLCHAIN_MANIFEST_SCHEMA
+    };
     if actual != expected
+        || manifest.schema != expected_schema
+        || manifest
+            .compiler_identity()
+            .map_err(ContractError::verification)?
+            != crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?
         || manifest.capabilities != request.profile.capabilities()
         || manifest.build_environment != request.build_environment
     {

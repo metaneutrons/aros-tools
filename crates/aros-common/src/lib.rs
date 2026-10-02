@@ -86,7 +86,8 @@ pub use toolchain_inventory::{
     toolchain_tree_inventory_excluding, ToolchainInventoryError,
 };
 pub use toolchain_manifest::{
-    parse_credential_free_https_url, ArosToolchainArtifact, ArosToolchainLock,
-    ArosToolchainManifest, ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_FILE,
-    AROS_TOOLCHAIN_MANIFEST_SCHEMA,
+    parse_credential_free_https_url, validate_gnu_compiler_versions, ArosCompilerIdentity,
+    ArosToolchainArtifact, ArosToolchainLock, ArosToolchainManifest, ArosToolchainManifestEntry,
+    AROS_TOOLCHAIN_LOCK_SCHEMA, AROS_TOOLCHAIN_LOCK_SCHEMA_V2, AROS_TOOLCHAIN_MANIFEST_FILE,
+    AROS_TOOLCHAIN_MANIFEST_SCHEMA, AROS_TOOLCHAIN_MANIFEST_SCHEMA_V2,
 };

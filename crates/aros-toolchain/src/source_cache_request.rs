@@ -27,7 +27,7 @@ const MAX_SELECTOR_BYTES: u64 = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceCacheRequestKind {
-    /// The native toolchain producer source-lock v2 closure.
+    /// The native toolchain producer source-lock v2/v3 closure.
     ProducerSourceLock,
     /// The native compatibility ports-lock v2 closure.
     CompatibilityPortsLock,
@@ -198,7 +198,7 @@ impl SourceCacheRequest {
         Ok(())
     }
 
-    /// Parse a native producer source-lock v2 document into a cache request.
+    /// Parse a supported native producer source-lock into a cache request.
     ///
     /// # Errors
     ///

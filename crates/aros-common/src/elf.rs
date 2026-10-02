@@ -11,7 +11,9 @@
 //! what a symbol set means and how the loader packs sections, belong to the
 //! callers.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
+
+pub mod riscv;
 
 /// ELF class, which fixes the width of every offset below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +112,12 @@ pub struct Symbol {
 #[derive(Debug, Clone)]
 pub struct Object {
     pub class: Class,
+    /// ELF `e_type`; compiler probes must distinguish objects from final links.
+    pub kind: u16,
+    /// ELF `e_machine`, independently measured rather than inferred from a name.
+    pub machine: u16,
+    /// Architecture-specific ELF `e_flags` (including the RISC-V floating ABI).
+    pub flags: u32,
     /// ELF `EI_OSABI` byte from the object identity.
     pub os_abi: u8,
     /// ELF `EI_ABIVERSION` byte from the object identity.
@@ -139,6 +147,7 @@ pub const SHT_NOBITS: u32 = 8;
 const SHN_UNDEF: u16 = 0;
 const SHN_ABS: u16 = 0xfff1;
 const SHN_XINDEX: u16 = 0xffff;
+const SHN_LORESERVE: u16 = 0xff00;
 const STB_LOCAL: u8 = 0;
 const STB_GLOBAL: u8 = 1;
 const STB_WEAK: u8 = 2;
@@ -170,13 +179,31 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
     Ok(u64::from_le_bytes(slice))
 }
 
-/// A NUL-terminated name out of a string table.
-fn string_at(table: &[u8], at: usize) -> String {
-    table
-        .get(at..)
-        .and_then(|rest| rest.split(|byte| *byte == 0).next())
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        .unwrap_or_default()
+/// Limits copied names across both tables, including shared string suffixes.
+struct NameBudget(usize);
+
+impl NameBudget {
+    fn new(file_bytes: usize) -> Self {
+        Self(file_bytes.saturating_mul(4).min(64 * 1024 * 1024))
+    }
+
+    fn read(&mut self, table: &[u8], at: usize) -> Result<String> {
+        if table.is_empty() && at == 0 {
+            return Ok(String::new());
+        }
+        let rest = table.get(at..).context("ELF name offset out of range")?;
+        let size = rest
+            .iter()
+            .position(|byte| *byte == 0)
+            .context("unterminated ELF name")?;
+        ensure!(size <= self.0, "ELF name allocation budget exceeded");
+        let value = String::from_utf8_lossy(&rest[..size]);
+        self.0 = self
+            .0
+            .checked_sub(value.len())
+            .context("ELF name allocation budget exceeded")?;
+        Ok(value.into_owned())
+    }
 }
 
 /// Reads the class, the section headers and the symbols of an ELF file.
@@ -184,6 +211,8 @@ fn string_at(table: &[u8], at: usize) -> String {
 /// # Errors
 ///
 /// Returns an error for malformed, truncated, unsupported, or non-ELF input.
+/// Copied names are limited to four times the file size, at most 64 MiB, to
+/// prevent repeated string-table offsets from amplifying allocations.
 pub fn read(bytes: &[u8]) -> Result<Object> {
     if bytes.get(..4) != Some(b"\x7fELF") {
         bail!("not an ELF file");
@@ -198,6 +227,28 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
     if bytes.get(5) != Some(&1) {
         bail!("only little-endian ELF is handled");
     }
+    let (header_size, header_size_offset, expected_stride) = match class {
+        Class::Elf32 => (52, 0x28, 40),
+        Class::Elf64 => (64, 0x34, 64),
+    };
+    ensure!(bytes.len() >= header_size, "truncated ELF header");
+    ensure!(
+        bytes[6] == 1 && u32_at(bytes, 0x14)? == 1,
+        "unsupported ELF header version"
+    );
+    ensure!(
+        usize::from(u16_at(bytes, header_size_offset)?) == header_size,
+        "unsupported ELF header size"
+    );
+    let kind = u16_at(bytes, 0x10)?;
+    let machine = u16_at(bytes, 0x12)?;
+    let flags = u32_at(
+        bytes,
+        match class {
+            Class::Elf32 => 0x24,
+            Class::Elf64 => 0x30,
+        },
+    )?;
 
     let (shoff, shentsize, shnum_field, shstrndx_field) = match class {
         Class::Elf64 => (
@@ -213,15 +264,32 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
             u16_at(bytes, 0x32)?,
         ),
     };
-    if shoff == 0 || shentsize == 0 {
+    if shoff == 0 {
+        ensure!(
+            (shentsize == 0 || shentsize == expected_stride)
+                && shnum_field == 0
+                && shstrndx_field == 0,
+            "inconsistent absent ELF section table"
+        );
         return Ok(Object {
             class,
+            kind,
+            machine,
+            flags,
             os_abi: bytes[7],
             abi_version: bytes[8],
             sections: Vec::new(),
             symbols: Vec::new(),
         });
     }
+    if shentsize != expected_stride {
+        bail!("unsupported ELF section-header stride {shentsize}");
+    }
+    ensure!(
+        shnum_field < usize::from(SHN_LORESERVE)
+            && (shstrndx_field < SHN_LORESERVE || shstrndx_field == SHN_XINDEX),
+        "reserved ELF section indices require extended encoding"
+    );
     let shoff = usize::try_from(shoff).context("section table beyond addressable range")?;
 
     // A file with more than 0xff00 sections keeps the real count and the real
@@ -232,6 +300,18 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
     } else {
         shnum_field
     };
+    // Public section indices are u16. Refuse unsupported extended counts
+    // rather than silently saturating indices, and validate the complete span
+    // before using an untrusted count for allocation or iteration.
+    ensure!(
+        shnum <= usize::from(u16::MAX) + 1,
+        "unsupported ELF section count"
+    );
+    let table_end = shnum
+        .checked_mul(shentsize)
+        .and_then(|size| shoff.checked_add(size))
+        .context("section table range overflow")?;
+    ensure!(table_end <= bytes.len(), "truncated section table");
     let shstrndx = if shstrndx_field == SHN_XINDEX {
         first.link as usize
     } else {
@@ -241,29 +321,40 @@ pub fn read(bytes: &[u8]) -> Result<Object> {
         bail!("section name table index {shstrndx} is out of range");
     }
 
-    let names_header = raw_section(bytes, shoff, shstrndx, class)?;
-    let names = table_bytes(bytes, &names_header)?;
+    let names = if shstrndx == 0 {
+        &[][..]
+    } else {
+        let names_header = raw_section(bytes, shoff, shstrndx, class)?;
+        ensure!(
+            names_header.kind == SHT_STRTAB,
+            "invalid section name table type"
+        );
+        table_bytes(bytes, &names_header)?
+    };
 
-    let _ = shentsize;
     let mut sections = Vec::with_capacity(shnum);
+    let mut name_budget = NameBudget::new(bytes.len());
     let mut symtab: Option<RawSection> = None;
     for index in 0..shnum {
         let mut section = raw_section(bytes, shoff, index, class)?;
-        section.name = string_at(names, section.name_offset as usize);
-        if section.kind == SHT_SYMTAB && section.entsize != 0 {
+        section.name = name_budget.read(names, section.name_offset as usize)?;
+        if section.kind == SHT_SYMTAB {
             symtab = Some(section.clone());
         }
         sections.push(section.into());
     }
 
     let symbols = if let Some(header) = symtab {
-        read_symbols(bytes, shoff, class, &header)?
+        read_symbols(bytes, shoff, shnum, class, &header, &mut name_budget)?
     } else {
         Vec::new()
     };
 
     Ok(Object {
         class,
+        kind,
+        machine,
+        flags,
         os_abi: bytes[7],
         abi_version: bytes[8],
         sections,
@@ -307,7 +398,17 @@ fn raw_section(bytes: &[u8], shoff: usize, index: usize, class: Class) -> Result
         Class::Elf64 => 0x40,
         Class::Elf32 => 0x28,
     };
-    let at = shoff + index * entsize;
+    let at = index
+        .checked_mul(entsize)
+        .and_then(|offset| shoff.checked_add(offset))
+        .context("section header range overflow")?;
+    let end = at
+        .checked_add(entsize)
+        .context("section header range overflow")?;
+    // Read all fields relative to a checked slice. Offsets inside the entry
+    // cannot overflow even when the file supplies an extreme table offset.
+    let bytes = bytes.get(at..end).context("truncated section header")?;
+    let at = 0;
     let (name_offset, kind, flags, offset, size, link, table_entsize, align) = match class {
         Class::Elf64 => (
             u32_at(bytes, at)?,
@@ -331,7 +432,7 @@ fn raw_section(bytes: &[u8], shoff: usize, index: usize, class: Class) -> Result
         ),
     };
     Ok(RawSection {
-        index: u16::try_from(index).unwrap_or(u16::MAX),
+        index: u16::try_from(index).context("section index out of range")?,
         name_offset,
         name: String::new(),
         kind,
@@ -355,19 +456,35 @@ fn table_bytes<'a>(bytes: &'a [u8], header: &RawSection) -> Result<&'a [u8]> {
 fn read_symbols(
     bytes: &[u8],
     shoff: usize,
+    shnum: usize,
     class: Class,
     symtab: &RawSection,
+    name_budget: &mut NameBudget,
 ) -> Result<Vec<Symbol>> {
+    ensure!(
+        (symtab.link as usize) < shnum,
+        "symbol string table index out of range"
+    );
     let strtab = raw_section(bytes, shoff, symtab.link as usize, class)?;
+    ensure!(
+        strtab.kind == SHT_STRTAB,
+        "invalid symbol string table type"
+    );
     let names = table_bytes(bytes, &strtab)?;
 
-    let base = usize::try_from(symtab.offset).context("symbol table beyond range")?;
     let entsize = usize::try_from(symtab.entsize).context("symbol entry size out of range")?;
-    let count = usize::try_from(symtab.size).context("symbol table size out of range")? / entsize;
+    let expected = match class {
+        Class::Elf32 => 16,
+        Class::Elf64 => 24,
+    };
+    ensure!(entsize == expected, "unsupported ELF symbol entry size");
+    let bytes = table_bytes(bytes, symtab)?;
+    ensure!(bytes.len() % entsize == 0, "partial ELF symbol entry");
+    let count = bytes.len() / entsize;
 
     let mut out = Vec::with_capacity(count);
     for index in 0..count {
-        let at = base + index * entsize;
+        let at = index * entsize;
         let (name, info, shndx, value, size) = match class {
             Class::Elf64 => (
                 u32_at(bytes, at)?,
@@ -385,7 +502,7 @@ fn read_symbols(
             ),
         };
         out.push(Symbol {
-            name: string_at(names, name as usize),
+            name: name_budget.read(names, name as usize)?,
             value,
             size,
             home: match shndx {
@@ -405,36 +522,5 @@ fn read_symbols(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_non_elf_input_is_refused() {
-        assert!(read(b"not an object").is_err());
-    }
-
-    #[test]
-    fn a_truncated_header_is_refused() {
-        assert!(read(b"\x7fELF\x02\x01").is_err());
-    }
-
-    #[test]
-    fn retains_the_aros_elf_identity() {
-        let mut object = vec![0_u8; 64];
-        object[..4].copy_from_slice(b"\x7fELF");
-        object[4] = 2;
-        object[5] = 1;
-        object[7] = OS_ABI_AROS;
-        object[8] = AROS_ABI_VERSION;
-
-        let parsed = read(&object).unwrap();
-        assert_eq!(parsed.class, Class::Elf64);
-        assert_eq!(parsed.os_abi, OS_ABI_AROS);
-        assert_eq!(parsed.abi_version, AROS_ABI_VERSION);
-    }
-
-    #[test]
-    fn a_big_endian_object_is_refused_rather_than_misread() {
-        assert!(read(b"\x7fELF\x02\x02").is_err());
-    }
-}
+#[path = "elf/tests.rs"]
+mod tests;
