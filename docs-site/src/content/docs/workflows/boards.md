@@ -22,6 +22,10 @@ the CLI does not automate JTAG, SWD or power equipment.
 
 Source: [board schema and validation](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-board/src/config.rs).
 
+The [portable board registry](https://github.com/metaneutrons/aros-tools/blob/main/profiles/boards/README.md)
+is being introduced under [RV1](https://github.com/metaneutrons/aros-tools/issues/320).
+This foundation does not yet change CLI model selection or add ESP32-P4 support.
+
 ## Create and diagnose a profile
 
 For a **Pi 4 USB-ECM** profile, preview the generated template:
