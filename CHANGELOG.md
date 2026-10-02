@@ -4,6 +4,13 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.18](https://github.com/metaneutrons/aros-tools/compare/v0.3.17...v0.3.18) (2026-10-02)
+
+
+### Bug Fixes
+
+* **cmake:** resolve runtime module outputs after root selection ([#310](https://github.com/metaneutrons/aros-tools/issues/310)) ([54b9673](https://github.com/metaneutrons/aros-tools/commit/54b96738856c0ec31881950d2e6b184204a842c0))
+
 ## [0.3.17](https://github.com/metaneutrons/aros-tools/compare/v0.3.16...v0.3.17) (2026-10-01)
 
 
