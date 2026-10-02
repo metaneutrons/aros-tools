@@ -446,6 +446,15 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
         let [generated] = parsed.python_outputs.as_slice() else {
             panic!("{cpu}: expected one Mesa util generator: {parsed:#?}");
         };
+        assert_eq!(
+            generated.consumers,
+            [
+                "mesa3d-linklib-mesautil",
+                "mesa3d-linklib-mesadevutil",
+                "mesa3d-linklib-compiler",
+            ],
+            "{cpu}: util generators must precede every declared consumer"
+        );
         assert_eq!(generated.jobs.len(), 4);
         assert_eq!(
             generated
@@ -473,6 +482,26 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
         }
         graph.add_python_outputs(generated.clone());
         graph.add_fetches(fetches);
+        let missing_compiler = graph.validate_python_output_consumers().unwrap_err();
+        assert!(missing_compiler
+            .join("\n")
+            .contains("mesa3d-linklib-compiler"));
+        let compiler = parse_mmakefile_with_dirs_and_context_and_fetches(
+            &root.join("workbench/libs/mesa/libcompiler/mmakefile.src"),
+            &root,
+            &DirVars::load(&root),
+            &profile,
+            &graph.fetches,
+        )
+        .unwrap();
+        assert!(
+            compiler.capability_errors.is_empty(),
+            "{cpu}: {compiler:#?}"
+        );
+        for target in compiler.targets {
+            graph.add_target(target);
+        }
+        graph.validate_python_output_consumers().unwrap();
         let cmake = generate_cmake(&graph);
         assert!(
             cmake.contains("src/util/format/u_format_gen.h"),
@@ -480,6 +509,8 @@ fn mesa26_mesautil_has_closed_archives_and_four_generators() {
         );
         assert!(cmake.contains("PACKAGE_FETCH_TARGETS"));
         assert!(cmake.contains("mesa3d-pyyaml-fetch"));
+        let binding = "aros_bind_python_output_consumers(\n    OWNER \"mesa3d-linklib-mesautil-generated\"\n    CONSUMERS \"mesa3d-linklib-mesautil\" \"mesa3d-linklib-mesadevutil\" \"mesa3d-linklib-compiler\"\n)";
+        assert!(cmake.contains(binding), "{cpu}: {cmake}");
     }
 }
 

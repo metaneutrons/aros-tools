@@ -69,6 +69,76 @@ impl DependencyGraph {
         }
     }
 
+    /// Verifies that every Python-output consumer names a concrete compile
+    /// target in the complete graph.
+    ///
+    /// Python-output declarations are parsed alongside one mmakefile, while
+    /// their consumers can live in another. Resolve the references only after
+    /// all files have contributed their targets. This mirrors the CMake binder
+    /// which accepts executable and library targets, not utility aggregates.
+    ///
+    /// Program groups are the exception to a one-to-one mmake ID mapping:
+    /// CMake creates one executable per source, named `<mmake>-<stem>`, and
+    /// keeps the mmake ID as a custom aggregate. ABI modules similarly expose
+    /// their generated static archive as `<mmake>-linklib`; their main mmake ID
+    /// is an aggregate target.
+    ///
+    /// # Errors
+    /// Returns one message per missing or noncompiling consumer reference.
+    pub fn validate_python_output_consumers(&self) -> std::result::Result<(), Vec<String>> {
+        let mut compile_targets = HashSet::new();
+        for (mmake, target) in &self.targets {
+            match &target.module_type {
+                ModuleType::ProgramGroup => {
+                    for source in target
+                        .source_files
+                        .iter()
+                        .chain(&target.cxx_source_files)
+                        .chain(&target.objc_source_files)
+                        .chain(&target.asm_source_files)
+                    {
+                        if let Some(stem) = Path::new(source).file_stem() {
+                            compile_targets.insert(format!("{mmake}-{}", stem.to_string_lossy()));
+                        }
+                    }
+                }
+                ModuleType::Abi => {
+                    compile_targets.insert(format!("{mmake}-linklib"));
+                }
+                _ if target_has_compile_inputs(target) => {
+                    compile_targets.insert(mmake.clone());
+                }
+                _ => {}
+            }
+        }
+
+        let mut errors = Vec::new();
+        for declaration in &self.python_outputs {
+            let mut checked = HashSet::new();
+            for consumer in &declaration.consumers {
+                if !checked.insert(consumer.as_str()) || compile_targets.contains(consumer) {
+                    continue;
+                }
+                let reason = if self.targets.contains_key(consumer) {
+                    "does not name a compiling target"
+                } else {
+                    "does not name a target in the complete graph"
+                };
+                errors.push(format!(
+                    "{}: Python-output consumer `{consumer}` {reason}",
+                    declaration.owner
+                ));
+            }
+        }
+        errors.sort();
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     pub fn add_icons(&mut self, targets: Vec<IconTarget>, sets: Vec<IconSet>) {
         for target in targets {
             self.icon_targets
@@ -624,4 +694,14 @@ impl DependencyGraph {
         self.copy_directories = resolved;
         unresolved.into_iter().collect()
     }
+}
+
+fn target_has_compile_inputs(target: &TargetDefinition) -> bool {
+    !target.source_files.is_empty()
+        || !target.cxx_source_files.is_empty()
+        || !target.objc_source_files.is_empty()
+        || !target.asm_source_files.is_empty()
+        || !target.arch_sources.is_empty()
+        || (target.module_type == ModuleType::Library && target.genmodule_only)
+        || (target.module_type == ModuleType::LinkLib && target.empty_archive)
 }
