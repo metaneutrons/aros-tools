@@ -1125,6 +1125,21 @@ import sys
 
 path = Path(sys.argv[1])
 workflow = path.read_text(encoding='utf-8')
+permission = '      pull-requests: read\n'
+if workflow.count(permission) != 1:
+    raise SystemExit('fixture cannot locate the singular finalizer pull-requests permission')
+path.write_text(workflow.replace(permission, '', 1), encoding='utf-8')
+PY
+expect_failure_matching 'Release Please finalizer omits contract marker: pull-requests: read' \
+    "$root/scripts/release/check-actions-policy.sh" "$work/policy"
+cp "$root/.github/workflows/release.yml" \
+    "$work/policy/.github/workflows/release.yml"
+python3 - "$work/policy/.github/workflows/release.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+workflow = path.read_text(encoding='utf-8')
 guard = '          bash scripts/release/prepare-homebrew-openssl.sh "$TARGET"\n'
 if workflow.count(guard) != 1:
     raise SystemExit('fixture cannot locate the singular Homebrew runner-preparation guard')

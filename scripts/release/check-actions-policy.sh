@@ -470,6 +470,7 @@ if (root / 'release.yml').exists() and release_finalizer:
         'needs: [metadata, final-audit]',
         'contents: read',
         'issues: write',
+        'pull-requests: read',
         'scripts/release/finalize-release-please.sh',
         'TAG: ${{ needs.metadata.outputs.tag }}',
         'SOURCE_COMMIT: ${{ needs.metadata.outputs.source_commit }}',
