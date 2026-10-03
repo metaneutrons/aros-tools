@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "approval": {
+    "id": "approval2026-10-03",
+    "approved_on": "2026-10-03",
+    "rationale": "The affected package is confined to the locked documentation build graph, and the existing Worker contract limits publication to static assets. This temporary exception allows the documentation build to continue while the dependency is updated.",
+    "scope": "Static documentation build and publication only, under the existing static-assets-only Worker contract.",
+    "expires_at": "2026-10-10T22:00:00Z"
+  },
+  "exception": {
+    "advisory_url": "https://github.com/advisories/GHSA-ch52-4w7c-c8xp",
+    "package": "http-cache-semantics",
+    "version": "4.2.0",
+    "severity": "high",
+    "affected_range": "<=4.2.0",
+    "integrity": "sha512-dTxcvPXqPvXBQpq5dUr6mEMJX4oIEFv6bwom3FDwKRDsuIjjJGANqhBuoAn9c1RQJIdAKav33ED65E2ys+87QQ=="
+  },
+  "allowed_ancestors": {
+    "astro": {
+      "version": "7.3.3",
+      "integrity": "sha512-NF08hk3edFkVmr9avf9HW/rQyf6NrpbVDyYj2cVN3JfijDhfJYh1ivWVTY5PUd5+rRZn/Vtu4iaeyNlP0Iv6mg=="
+    },
+    "@astrojs/mdx": {
+      "version": "8.0.1",
+      "integrity": "sha512-VKodp/f3+XE6L0950K+ZOAolY47vdt0R78Ao+L2RdJ1hfAdYffL7IEjc/MsoyuS7CPVvCsd5/I3RP0ZyAIewdQ=="
+    },
+    "@astrojs/starlight": {
+      "version": "0.42.1",
+      "integrity": "sha512-ABS/A0IfbJeMbuhCKVkrAcO3EWxhpeLveFuL28+7+BQje7ZHa9OXZbUoiLXdYUhH7XFaiAQjAg44RiF2uuZPJw=="
+    },
+    "astro-expressive-code": {
+      "version": "0.44.2",
+      "integrity": "sha512-avop7nZcRwC7quvIxVguhwEZ9Tp6IoTzKUCLwP30Fb7+er+pWQgcysP01dcuzRIJo81kLGg30q/YAI2Yb1Sdzg=="
+    }
+  },
+  "allowed_via": {
+    "astro": ["http-cache-semantics"],
+    "@astrojs/mdx": ["astro"],
+    "@astrojs/starlight": ["astro", "@astrojs/mdx", "astro-expressive-code"],
+    "astro-expressive-code": ["astro"]
+  },
+  "configuration_sha256": {
+    "docs-site/astro.config.mjs": "4ef636acb86944efe5e3b29e1fb45f8440cdeca311367bdd0f91fb6f3b5ab650",
+    "docs-site/wrangler.jsonc": "b594f73a59533f2765b95a8d286bafb8609d21f5d93b17c8aa5e8de5580d00ad",
+    "docs-site/package.json": "3e78de364e1c5451ce82db990893b85798ec5950753bd2c0d7247d973659b821",
+    "docs-site/package-lock.json": "da23aec91746d3220dd7816ee507fb8672632a39c46ea8d12eca7febfc7dde2f"
+  },
+  "root_package": {
+    "name": "aros-tools-docs",
+    "dependencies": {
+      "@astrojs/starlight": "0.42.1",
+      "astro": "7.3.3",
+      "sharp": "0.35.4"
+    },
+    "devDependencies": {
+      "@astrojs/check": "0.9.10",
+      "typescript": "6.0.3",
+      "wrangler": "4.134.0"
+    }
+  }
+}
