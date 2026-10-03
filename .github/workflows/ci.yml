@@ -210,15 +210,18 @@ jobs:
         with:
           path: aros-tools
           persist-credentials: false
-      - name: Install the ISO read-back backend
+      - name: Install native test prerequisites
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq xorriso
+            sudo apt-get install -y -qq xorriso make bison flex patch pkg-config ninja-build
           else
-            brew install xorriso
+            # The GNU lifecycle fixtures require GNU Make >=4, not Apple's 3.81.
+            # Homebrew's make formula exposes the selected executable as gmake.
+            brew install xorriso make bison flex pkg-config ninja
+            gmake --version
           fi
           xorriso -version
       - name: Read the versioned source and producer contract
