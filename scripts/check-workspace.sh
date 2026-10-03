@@ -170,7 +170,7 @@ run_docs() {
     (
         cd docs-site
         npm ci --ignore-scripts
-        npm audit --audit-level=high
+        python3 ../scripts/check-docs-audit.py
         npm run test:release-status
         npm run build
         python3 ../scripts/check-doc-links.py \
