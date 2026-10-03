@@ -138,9 +138,21 @@ Build the documentation with the checked-in JavaScript lockfile:
 ```sh
 cd docs-site
 npm ci --ignore-scripts
-npm audit --audit-level=high
+python3 ../scripts/check-docs-audit.py
 npm run build
 ```
+
+The documentation audit still rejects high and critical vulnerabilities. The
+only temporary exception is the public advisory
+[GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp),
+approved by the maintainer for the pinned, static documentation build through
+10 October 2026 (22:00 UTC). Its exact dependency chain, lockfile identities,
+configuration hashes and expiry are recorded in
+`contracts/docs-audit-exception-v1.json`. The gate runs a fresh npm audit and
+rejects additional advisories, changed dependencies or configuration, malformed
+reports and use after expiry. This is not an exemption for SSR, an application
+runtime or another repository. Replace the affected dependency when a verified
+fix is available, then remove the exception; do not extend it implicitly.
 
 ## Design rules
 

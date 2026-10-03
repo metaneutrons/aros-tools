@@ -67,6 +67,15 @@ class WorkspaceGateTests(unittest.TestCase):
                        f"#!{sys.executable}\n", executable=True)
         (self.repo / "docs-site").mkdir()
         self.write("scripts/check-doc-links.py", "pass\n")
+        self.write(
+            "scripts/check-docs-audit.py",
+            "import json, pathlib, sys\n"
+            f"root = pathlib.Path({str(self.root)!r})\n"
+            "with (root / 'calls.jsonl').open('a') as stream:\n"
+            "    stream.write(json.dumps(['check-docs-audit', *sys.argv]) + '\\n')\n"
+            "if (root / 'fail-docs-audit').exists():\n"
+            "    sys.exit(31)\n",
+        )
         program = f'''#!{sys.executable}
 import json
 import os
@@ -138,6 +147,7 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertTrue(any("--exclude" in args for args in self.calls("cargo")))
         self.assertFalse(self.calls("cmake"))
         self.assertFalse(self.calls("npm"))
+        self.assertFalse(self.calls("check-docs-audit"))
         self.assertIn("were not executed", result.stdout)
 
     SERIAL_UNIT_CALLS = [
@@ -229,6 +239,21 @@ if name == "cmake" and (root / "fail-engine").exists():
         self.assertIn(["fmt", "--all", "--", "--check"], self.calls("cargo"))
         self.assertIn(["run", "build"], self.calls("npm"))
         self.assertEqual(len(self.calls("cmake")), 3)
+        self.assertEqual(self.calls("check-docs-audit"), [["../scripts/check-docs-audit.py"]])
+        production_gate = (ROOT / "scripts/check-workspace.sh").read_text()
+        docs_gate = production_gate.split("run_docs() {", 1)[1].split(
+            "run_source_tests() {", 1
+        )[0]
+        self.assertIn("python3 ../scripts/check-docs-audit.py", docs_gate)
+        self.assertNotIn("npm audit --audit-level=high", docs_gate)
+
+    def test_failed_docs_audit_stops_before_build_or_deployment(self):
+        (self.root / "fail-docs-audit").touch()
+        result = self.run_gate("docs")
+        self.assertEqual(result.returncode, 31, result.stdout + result.stderr)
+        self.assertEqual(self.calls("npm"), [["ci", "--ignore-scripts"]])
+        self.assertEqual(self.calls("check-docs-audit"), [["../scripts/check-docs-audit.py"]])
+        self.assertFalse(self.calls("cmake"))
 
     def test_linux_reports_grub_omission_instead_of_full_host_coverage(self):
         (self.root / "linux").touch()
