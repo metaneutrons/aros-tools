@@ -48,6 +48,7 @@ pub(super) struct DriverTools {
     pub(super) strip: PathBuf,
     pub(super) emulation: Option<String>,
     pub(super) driver_emulation: Option<String>,
+    pub(super) default_output: Option<PathBuf>,
 }
 
 pub(super) fn resolve_driver_tools(
@@ -58,12 +59,13 @@ pub(super) fn resolve_driver_tools(
 ) -> Result<DriverTools> {
     let manifest_path = bin.join(TOOL_MANIFEST_NAME);
     let manifest = read_tool_manifest(&manifest_path, invocation_filename)?;
-    let (linker, strip, emulation, driver_emulation) = match manifest {
+    let (linker, strip, emulation, driver_emulation, default_output) = match manifest {
         Some(manifest) => (
             manifest.linker,
             manifest.strip,
             manifest.emulation,
             manifest.driver_emulation,
+            matches!(manifest.family, ToolFamily::Gnu).then(|| PathBuf::from("a.out")),
         ),
         None
             if is_legacy_driver_name(invoked_name)
@@ -72,6 +74,7 @@ pub(super) fn resolve_driver_tools(
             (
                 "ld.lld".to_owned(),
                 "llvm-strip".to_owned(),
+                None,
                 None,
                 None,
             )
@@ -87,6 +90,7 @@ pub(super) fn resolve_driver_tools(
         strip,
         emulation,
         driver_emulation,
+        default_output,
     })
 }
 
