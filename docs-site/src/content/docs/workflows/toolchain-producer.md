@@ -123,14 +123,15 @@ repair a missing generation during an offline build; use `cache cargo fetch
 
 ## Construct the recipe and inspect readiness
 
-The source lock and profile paths are producer-root-relative inputs. Recipe
-creation never replaces an existing file.
+Select source lock and profile files inside the producer checkout using absolute
+paths. The recipe records their producer-relative identities. Recipe creation
+never replaces an existing file.
 
 ```sh
 "$AROS" toolchain producer recipe \
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
-  --source-lock toolchains/llvm-11.0.0.sources.json \
-  --profiles toolchains/profiles-v1.json --output "$RECIPE" --format json
+  --source-lock "$PRODUCER/toolchains/llvm-11.0.0.sources.json" \
+  --profiles "$PRODUCER/toolchains/profiles-v1.json" --output "$RECIPE" --format json
 
 "$AROS" toolchain plan --preset pc-x86_64 --recipe "$RECIPE" \
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
@@ -167,6 +168,12 @@ For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
 The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
 owns the target ISA flags, which must not reach host-built Binutils or GCC.
 LLVM builds retain their existing compiler environment.
+
+The v3 source lock can declare source-owned patches for target build
+dependencies outside the compiler directory. Recipe creation reads each patch
+from the exact clean source commit and binds its SHA-256; missing, unsafe or
+duplicate paths and an incomplete recipe patch set are rejected. Compiler
+component patches remain restricted to their selected family directory.
 
 ## Failure and recovery boundary
 
