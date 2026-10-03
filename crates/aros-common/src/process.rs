@@ -822,11 +822,17 @@ fn drain_bounded(
     let mut buffer = [0_u8; 8 * 1024];
     let mut finished_at = None;
     loop {
-        check_pipe_deadline(finished, &mut finished_at)?;
+        // Observe EOF before declaring that a pipe is still open. A drain
+        // worker may have been descheduled past the cleanup deadline even
+        // though every writer has already closed its descriptor.
         let read = match stream.read(&mut buffer) {
             Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                check_pipe_deadline(finished, &mut finished_at)?;
+                continue;
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                check_pipe_deadline(finished, &mut finished_at)?;
                 stream.wait_for_io(false)?;
                 continue;
             }
@@ -835,6 +841,7 @@ fn drain_bounded(
         if read == 0 {
             break;
         }
+        check_pipe_deadline(finished, &mut finished_at)?;
         total_bytes = total_bytes
             .checked_add(u64::try_from(read).map_err(io::Error::other)?)
             .ok_or_else(|| io::Error::other("captured byte count overflowed"))?;
@@ -1057,6 +1064,57 @@ pub const fn exit_signal(_status: ExitStatus) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct DelayedPipeReader {
+        eof_after_wait: bool,
+        waited: bool,
+    }
+
+    #[cfg(unix)]
+    impl Read for DelayedPipeReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            if self.waited && self.eof_after_wait {
+                Ok(0)
+            } else {
+                self.waited = true;
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl PipeReadiness for DelayedPipeReader {
+        fn wait_for_io(&self, _writing: bool) -> io::Result<()> {
+            // Model a descheduled drain worker without spawning descendants.
+            thread::sleep(Duration::from_millis(1100));
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_pipe_eof_wins_over_a_delayed_drain_deadline() {
+        let finished = AtomicBool::new(true);
+        let reader = DelayedPipeReader {
+            eof_after_wait: true,
+            waited: false,
+        };
+        let captured = drain_bounded(reader, 1024, &finished).expect("closed pipe is EOF");
+        assert_eq!(captured.total_bytes(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_drain_still_rejects_an_open_pipe_after_cleanup() {
+        let finished = AtomicBool::new(true);
+        let reader = DelayedPipeReader {
+            eof_after_wait: false,
+            waited: false,
+        };
+        let error = drain_bounded(reader, 1024, &finished).expect_err("live pipe stays bounded");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[cfg(unix)]
     #[test]
