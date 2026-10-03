@@ -7,22 +7,98 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use aros_common::{measure_tree_content_cas, sha256_bytes, CancellationToken};
+use aros_common::toolchain_layout::ToolchainToolLayout;
+use aros_common::{
+    measure_tree_content_cas, sha256_bytes, ArosCompilerIdentity, CancellationToken,
+};
 use aros_toolchain::canonical;
 use aros_toolchain::cargo_vendor::{
     fetch_vendor_generation, select_vendor_generation, CargoVendorRequest,
 };
 use aros_toolchain::executor::{self, BuildRequest, ResumePhase};
+use aros_toolchain::profiles::Profiles;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 use tar::Builder;
+
+const LLVM_FIXTURE_CONFIGURE: &str = r#"#!/bin/sh
+set -eu
+prefix=
+cache=
+for arg in "$@"; do
+  case "$arg" in
+    --with-aros-toolchain-install=*) prefix=${arg#*=} ;;
+    --with-portssources=*) cache=${arg#*=} ;;
+  esac
+done
+test -n "$prefix"
+test -n "$cache"
+printf '%s\n' "$@" > configure.args
+printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
+printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@printf "%%s\\n" "$${CMAKE_BUILD_PARALLEL_LEVEL}" > native-cmake-jobs\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
+"#;
+
+const GNU_FIXTURE_CONFIGURE: &str = r#"#!/bin/sh
+set -eu
+prefix=
+cache=
+toolchain=
+gcc_version=
+binutils_version=
+for arg in "$@"; do
+  case "$arg" in
+    --with-aros-toolchain-install=*) prefix=${arg#*=} ;;
+    --with-portssources=*) cache=${arg#*=} ;;
+    --with-toolchain=*) toolchain=${arg#*=} ;;
+    --with-gcc-version=*) gcc_version=${arg#*=} ;;
+    --with-binutils-version=*) binutils_version=${arg#*=} ;;
+  esac
+done
+test -n "$prefix"
+test -n "$cache"
+test "$toolchain" = gnu
+test "$gcc_version" = 16.2.0
+test "$binutils_version" = 2.47
+test -x "$CC"
+test -x "$CXX"
+printf '%s\n' "$@" > configure.args
+printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
+printf '%s\n' "$CC" > configure-cc
+printf '%s\n' "$CXX" > configure-cxx
+printf 'PREFIX := %s\nCACHE := %s\ncrosstools-release:\n\t@$(FETCH) -a gcc-16.2.0 -s tar.xz -l $(CACHE)\n\t@$(FETCH) -a binutils-2.47 -s tar.bz2 -l $(CACHE)\n\t@mkdir -p $(PREFIX)/riscv64-aros/bin $(PREFIX)/bin $(PREFIX)/lib/cmake/llvm\n\t@for tool in gcc g++ as ld ar ranlib strip nm objcopy; do printf root-tool > $(PREFIX)/riscv64-aros-$$tool; chmod 755 $(PREFIX)/riscv64-aros-$$tool; done\n\t@for tool in ld strip; do printf tuple-tool > $(PREFIX)/riscv64-aros/bin/$$tool; chmod 755 $(PREFIX)/riscv64-aros/bin/$$tool; done\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros-collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros-collect-aros\n\t@printf producer-only > $(PREFIX)/bin/llvm-config\n\t@printf retained-by-gnu > $(PREFIX)/lib/cmake/llvm/producer.marker\n' "$prefix" "$cache" > Makefile
+"#;
+
+const GNU_FIXTURE_BRIDGE: &str = r#"#!/bin/bash
+set -eu
+test "$1" = toolchain
+test "$2" = __metamake-fetch
+arguments=("$@")
+shift 2
+archive=
+suffix=
+while (($#)); do
+  case "$1" in
+    -a) archive=$2; shift 2 ;;
+    -s) suffix=$2; shift 2 ;;
+    -l) shift 2 ;;
+    *) shift ;;
+  esac
+done
+test -n "$archive"
+test -n "$suffix"
+printf '%s.%s\n' "$archive" "$suffix" >> "$AROS_TOOLCHAIN_FETCH_LEDGER"
+exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "${arguments[@]}"
+"#;
 
 struct Fixture {
     _temporary: tempfile::TempDir,
     root: PathBuf,
     recipe: PathBuf,
     bridge: PathBuf,
+    preset: String,
+    source_lock_relative: String,
+    profiles_relative: String,
 }
 
 impl Fixture {
@@ -35,6 +111,14 @@ impl Fixture {
     }
 
     fn new_inner(cold_vendor_generation: bool) -> Self {
+        Self::new_inner_for_family(cold_vendor_generation, false)
+    }
+
+    fn new_gnu() -> Self {
+        Self::new_inner_for_family(false, true)
+    }
+
+    fn new_inner_for_family(cold_vendor_generation: bool, gnu: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary
             .path()
@@ -51,27 +135,18 @@ impl Fixture {
         fs::create_dir(&cache).unwrap();
 
         let patch_path = "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff";
-        fs::create_dir_all(root.join("source/tools/crosstools/llvm")).unwrap();
+        if !gnu {
+            fs::create_dir_all(root.join("source/tools/crosstools/llvm")).unwrap();
+            fs::write(root.join("source").join(patch_path), b"fixture patch\n").unwrap();
+        }
         fs::create_dir_all(root.join("source/scripts")).unwrap();
-        fs::write(root.join("source").join(patch_path), b"fixture patch\n").unwrap();
         write_executable(
             &root.join("source/configure"),
-            r#"#!/bin/sh
-set -eu
-prefix=
-cache=
-for arg in "$@"; do
-  case "$arg" in
-    --with-aros-toolchain-install=*) prefix=${arg#*=} ;;
-    --with-portssources=*) cache=${arg#*=} ;;
-  esac
-done
-test -n "$prefix"
-test -n "$cache"
-printf '%s\n' "$@" > configure.args
-printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
-printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@printf "%%s\\n" "$${CMAKE_BUILD_PARALLEL_LEVEL}" > native-cmake-jobs\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
-"#,
+            if gnu {
+                GNU_FIXTURE_CONFIGURE
+            } else {
+                LLVM_FIXTURE_CONFIGURE
+            },
         );
         write_executable(
             &root.join("source/scripts/fetch.sh"),
@@ -79,7 +154,15 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
         );
 
         let source_payload = b"x";
-        fs::write(cache.join("llvm-11.0.0.src.tar.xz"), source_payload).unwrap();
+        if !gnu {
+            fs::write(cache.join("llvm-11.0.0.src.tar.xz"), source_payload).unwrap();
+        }
+        let gcc_payload = b"fixture gcc 16.2.0 source";
+        let binutils_payload = b"fixture binutils 2.47 source";
+        if gnu {
+            fs::write(cache.join("gcc-16.2.0.tar.xz"), gcc_payload).unwrap();
+            fs::write(cache.join("binutils-2.47.tar.bz2"), binutils_payload).unwrap();
+        }
         let mako = python_archive(
             "mako",
             &[
@@ -154,28 +237,72 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
         );
         let tools_commit = git(&root.join("tools"), &["rev-parse", "HEAD"]);
 
-        let lock = serde_json::to_vec(&json!({
-            "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
-            "sources": [{
-                "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
-                "patch": patch_path, "filename": "llvm-11.0.0.src.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
-                "sha256": sha256_bytes(source_payload), "size": source_payload.len()
-            }],
-            "host_python_packages": [
-                {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": sha256_bytes(&mako), "size": mako.len(), "source_root": "mako", "python_path": "."},
-                {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": sha256_bytes(&markupsafe), "size": markupsafe.len(), "source_root": "markupsafe", "python_path": "."}
-            ]
-        }))
-        .unwrap();
-        let profiles = serde_json::to_vec(&json!({
-            "schema": "aros-toolchain-profiles-v1", "upstream_commit": "4".repeat(40),
-            "profiles": [{
-                "name": "pc-x86_64", "configure_target": "pc-x86_64", "upstream_output_target": "pc-x86_64",
-                "target_triple": "x86_64-unknown-aros", "cpu": "x86_64", "platform": "pc", "float_abi": "",
-                "capabilities": ["c", "cxx", "standalone-collector"]
-            }]
-        }))
-        .unwrap();
+        let lock = if gnu {
+            serde_json::to_vec(&json!({
+                "schema": "aros-toolchain-source-lock-v3", "family": "gnu", "version": "16.2.0",
+                "sources": [
+                    {"component": "gcc", "version": "16.2.0", "purpose": "toolchain-component",
+                     "filename": "gcc-16.2.0.tar.xz", "url": "https://example.invalid/gcc-16.2.0.tar.xz",
+                     "sha256": sha256_bytes(gcc_payload), "size": gcc_payload.len()},
+                    {"component": "binutils", "version": "2.47", "purpose": "toolchain-component",
+                     "filename": "binutils-2.47.tar.bz2", "url": "https://example.invalid/binutils-2.47.tar.bz2",
+                     "sha256": sha256_bytes(binutils_payload), "size": binutils_payload.len()}
+                ],
+                "host_python_packages": [
+                    {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": sha256_bytes(&mako), "size": mako.len(), "source_root": "mako", "python_path": "."},
+                    {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": sha256_bytes(&markupsafe), "size": markupsafe.len(), "source_root": "markupsafe", "python_path": "."}
+                ]
+            }))
+            .unwrap()
+        } else {
+            serde_json::to_vec(&json!({
+                "schema": "aros-toolchain-source-lock-v2", "family": "llvm", "version": "11.0.0",
+                "sources": [{
+                    "component": "llvm", "version": "11.0.0", "purpose": "toolchain-component",
+                    "patch": patch_path, "filename": "llvm-11.0.0.src.tar.xz", "url": "https://example.invalid/llvm.tar.xz",
+                    "sha256": sha256_bytes(source_payload), "size": source_payload.len()
+                }],
+                "host_python_packages": [
+                    {"name": "mako", "version": "1.3.10", "filename": "mako.tar.gz", "url": "https://example.invalid/mako.tar.gz", "sha256": sha256_bytes(&mako), "size": mako.len(), "source_root": "mako", "python_path": "."},
+                    {"name": "markupsafe", "version": "3.0.2", "filename": "markupsafe.tar.gz", "url": "https://example.invalid/markupsafe.tar.gz", "sha256": sha256_bytes(&markupsafe), "size": markupsafe.len(), "source_root": "markupsafe", "python_path": "."}
+                ]
+            }))
+            .unwrap()
+        };
+        let profiles = if gnu {
+            serde_json::to_vec(&json!({
+                "schema": "aros-toolchain-profiles-v2", "family": "gnu", "upstream_commit": "4".repeat(40),
+                "profiles": [{
+                    "name": "rv64-reference", "configure_target": "opensbi-riscv64", "upstream_output_target": "opensbi-riscv64",
+                    "target_triple": "riscv64-aros", "cpu": "riscv64", "platform": "opensbi", "float_abi": "lp64d",
+                    "capabilities": ["c", "libgcc", "standalone-collector"],
+                    "target": {"schema": "aros-riscv-target-v1", "isa": "rva22u64", "abi": "lp64d",
+                        "code_model": "medany", "architecture": "rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0",
+                        "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0}
+                }]
+            }))
+            .unwrap()
+        } else {
+            serde_json::to_vec(&json!({
+                "schema": "aros-toolchain-profiles-v1", "upstream_commit": "4".repeat(40),
+                "profiles": [{
+                    "name": "pc-x86_64", "configure_target": "pc-x86_64", "upstream_output_target": "pc-x86_64",
+                    "target_triple": "x86_64-unknown-aros", "cpu": "x86_64", "platform": "pc", "float_abi": "",
+                    "capabilities": ["c", "cxx", "standalone-collector"]
+                }]
+            }))
+            .unwrap()
+        };
+        let source_lock_relative = if gnu {
+            "toolchains/gnu.sources.json"
+        } else {
+            "toolchains/fixture.sources.json"
+        };
+        let profiles_relative = if gnu {
+            "toolchains/profiles-v2.json"
+        } else {
+            "toolchains/profiles-v1.json"
+        };
         fs::create_dir_all(root.join("producer/toolchains")).unwrap();
         let cargo_channel = current_cargo_channel();
         fs::write(
@@ -185,13 +312,13 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
             ),
         )
         .unwrap();
-        fs::write(root.join("producer/toolchains/fixture.sources.json"), &lock).unwrap();
-        fs::write(root.join("producer/toolchains/profiles-v1.json"), &profiles).unwrap();
+        fs::write(root.join("producer").join(source_lock_relative), &lock).unwrap();
+        fs::write(root.join("producer").join(profiles_relative), &profiles).unwrap();
         fs::write(
             root.join("producer/toolchains/producer-executor-v1.toml"),
             format!(
-                "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"toolchains/fixture.sources.json\"\nprofiles = \"toolchains/profiles-v1.json\"\n",
-                sha256_bytes(contract), tools_commit
+                "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"{}\"\nprofiles = \"{}\"\n",
+                sha256_bytes(contract), tools_commit, source_lock_relative, profiles_relative
             ),
         )
         .unwrap();
@@ -250,34 +377,43 @@ printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@
             "source_date_epoch": 0,
             "source_lock_sha256": sha256_bytes(&lock),
             "profiles_sha256": sha256_bytes(&profiles),
-            "patches": [{"path": patch_path, "sha256": sha256_bytes(b"fixture patch\n")}]
+            "patches": if gnu {
+                Vec::<serde_json::Value>::new()
+            } else {
+                vec![json!({"path": patch_path, "sha256": sha256_bytes(b"fixture patch\n")})]
+            }
         });
         recipe["recipe_sha256"] = json!(sha256_bytes(&canonical::bytes(&recipe).unwrap()));
         let recipe_path = root.join("recipe.json");
         fs::write(&recipe_path, serde_json::to_vec(&recipe).unwrap()).unwrap();
 
         let bridge = root.join("bridge");
-        write_executable(
-            &bridge,
-            r#"#!/bin/sh
+        let llvm_bridge = r#"#!/bin/sh
 set -eu
 test "$1" = toolchain
 test "$2" = __metamake-fetch
 printf '%s\n' llvm-11.0.0.src.tar.xz >> "$AROS_TOOLCHAIN_FETCH_LEDGER"
 exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
-"#,
-        );
+"#;
+        write_executable(&bridge, if gnu { GNU_FIXTURE_BRIDGE } else { llvm_bridge });
         Self {
             _temporary: temporary,
             root,
             recipe: recipe_path,
             bridge,
+            preset: if gnu {
+                "rv64-reference".to_owned()
+            } else {
+                "pc-x86_64".to_owned()
+            },
+            source_lock_relative: source_lock_relative.to_owned(),
+            profiles_relative: profiles_relative.to_owned(),
         }
     }
 
     fn request(&self) -> BuildRequest {
         BuildRequest {
-            preset: "pc-x86_64".into(),
+            preset: self.preset.clone(),
             recipe: self.recipe.clone(),
             source_dir: self.root.join("source"),
             producer_dir: self.root.join("producer"),
@@ -301,10 +437,48 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
             &source,
             &["commit", "-qm", "test: alter native configure phase"],
         );
+        self.refresh_recipe_after_input_change();
+    }
+
+    fn replace_gnu_profiles_with_llvm(&self) {
+        let producer = self.root.join("producer");
+        let profiles = serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-profiles-v1", "upstream_commit": "4".repeat(40),
+            "profiles": [{
+                "name": "pc-x86_64", "configure_target": "pc-x86_64", "upstream_output_target": "pc-x86_64",
+                "target_triple": "x86_64-unknown-aros", "cpu": "x86_64", "platform": "pc", "float_abi": "",
+                "capabilities": ["c", "cxx", "standalone-collector"]
+            }]
+        }))
+        .unwrap();
+        fs::write(producer.join(&self.profiles_relative), profiles).unwrap();
+        git(&producer, &["add", &self.profiles_relative]);
+        git(
+            &producer,
+            &[
+                "commit",
+                "-qm",
+                "test: mismatch GNU source and profile families",
+            ],
+        );
+        self.refresh_recipe_after_input_change();
+    }
+
+    fn refresh_recipe_after_input_change(&self) {
+        let source = self.root.join("source");
+        let producer = self.root.join("producer");
         let mut recipe: serde_json::Value =
             serde_json::from_slice(&fs::read(&self.recipe).unwrap()).unwrap();
         recipe["source_commit"] = json!(git(&source, &["rev-parse", "HEAD"]));
         recipe["source_tree"] = json!(git(&source, &["rev-parse", "HEAD^{tree}"]));
+        recipe["producer_commit"] = json!(git(&producer, &["rev-parse", "HEAD"]));
+        recipe["producer_tree"] = json!(git(&producer, &["rev-parse", "HEAD^{tree}"]));
+        recipe["source_lock_sha256"] = json!(sha256_bytes(
+            &fs::read(producer.join(&self.source_lock_relative)).unwrap()
+        ));
+        recipe["profiles_sha256"] = json!(sha256_bytes(
+            &fs::read(producer.join(&self.profiles_relative)).unwrap()
+        ));
         recipe.as_object_mut().unwrap().remove("recipe_sha256");
         recipe["recipe_sha256"] = json!(sha256_bytes(&canonical::bytes(&recipe).unwrap()));
         fs::write(&self.recipe, serde_json::to_vec(&recipe).unwrap()).unwrap();
@@ -426,6 +600,290 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
     )
     .unwrap();
     assert_eq!(usage, "llvm-11.0.0.src.tar.xz\n");
+}
+
+#[test]
+fn native_gnu_lifecycle_builds_locked_rv64_tools_and_binds_collector_layout() {
+    let fixture = Fixture::new_gnu();
+    let result =
+        executor::run(&fixture.request(), &CancellationToken::default()).unwrap_or_else(|error| {
+            let log_root = &fixture.root;
+            let logs = ["configure", "compiler", "collector"]
+                .into_iter()
+                .flat_map(|phase| {
+                    ["stdout", "stderr"].into_iter().map(move |stream| {
+                        let path = log_root
+                            .join(format!("work/native-lifecycle/logs/{phase}.{stream}.log"));
+                        let content = fs::read_to_string(path)
+                            .unwrap_or_else(|_| format!("<no retained {stream} log>"));
+                        format!("{phase} {stream}:\n{content}")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!("{error}\n{logs}");
+        });
+
+    assert_eq!(result.qualification, "local-only");
+    assert_eq!(result.commit_state, "committed");
+    assert_eq!(
+        result
+            .outputs
+            .iter()
+            .map(|output| output.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "toolchain/riscv64-aros/bin/collect-aros",
+            "toolchain/riscv64-aros-collect-aros",
+            "toolchain/riscv64-aros/bin/aros-collector-tools.json",
+            "toolchain/aros-collector-tools.json",
+            "toolchain/toolchain-tools.json",
+        ]
+    );
+
+    let prefix = fixture.root.join("output/toolchain");
+    let build = fixture.root.join("work/native-lifecycle/build");
+    let configure_args = fs::read_to_string(build.join("configure.args")).unwrap();
+    for expected in [
+        "--target=opensbi-riscv64",
+        "--with-toolchain=gnu",
+        "--with-gcc-version=16.2.0",
+        "--with-binutils-version=2.47",
+        "--enable-toolchain-release",
+        &format!(
+            "--with-portssources={}",
+            fixture.root.join("cache").display()
+        ),
+    ] {
+        assert!(configure_args.contains(expected), "missing {expected}");
+    }
+    assert!(!configure_args.contains("--with-toolchain=llvm"));
+    assert_eq!(
+        fs::read_to_string(build.join("configure-cc"))
+            .unwrap()
+            .trim(),
+        which::which("cc").unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("configure-cxx"))
+            .unwrap()
+            .trim(),
+        which::which("c++").unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(build.join("configure-cmake-jobs"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+
+    // These LLVM-shaped producer markers prove the GNU collector branch does
+    // not apply LLVM's producer-only cleanup.
+    assert_eq!(
+        fs::read(prefix.join("bin/llvm-config")).unwrap(),
+        b"producer-only"
+    );
+    assert_eq!(
+        fs::read(prefix.join("lib/cmake/llvm/producer.marker")).unwrap(),
+        b"retained-by-gnu"
+    );
+    assert!(!fixture
+        .root
+        .join("output/.aros-native-toolchain-stage")
+        .exists());
+
+    let tuple_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(prefix.join("riscv64-aros/bin/aros-collector-tools.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        tuple_manifest,
+        json!({
+            "schema": "aros-collector-tools-v1", "family": "gnu",
+            "invocation": "collect-aros", "linker": "ld", "strip": "strip",
+            "emulation": "riscv64elf_aros", "driver_emulation": "elf64lriscv"
+        })
+    );
+    let root_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(prefix.join("aros-collector-tools.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        root_manifest,
+        json!({
+            "schema": "aros-collector-tools-v1", "family": "gnu",
+            "invocation": "riscv64-aros-collect-aros", "linker": "riscv64-aros-ld",
+            "strip": "riscv64-aros-strip", "emulation": "riscv64elf_aros",
+            "driver_emulation": "elf64lriscv"
+        })
+    );
+    let layout = ToolchainToolLayout::load(&prefix).unwrap();
+    let profiles = Profiles::parse(
+        &fs::read(
+            fixture
+                .root
+                .join("producer")
+                .join(&fixture.profiles_relative),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let profile = profiles.select("rv64-reference").unwrap();
+    let identity = ArosCompilerIdentity::Gnu {
+        gcc_version: "16.2.0".to_owned(),
+        binutils_version: "2.47".to_owned(),
+        target: profile.target().unwrap().clone(),
+    };
+    layout.validate_binding(&identity, "riscv64-aros").unwrap();
+    assert_eq!(
+        layout.tools().entries().collect::<Vec<_>>(),
+        [
+            ("c", "riscv64-aros-gcc"),
+            ("cxx", "riscv64-aros-g++"),
+            ("assembler", "riscv64-aros-as"),
+            ("linker", "riscv64-aros-ld"),
+            ("archive", "riscv64-aros-ar"),
+            ("ranlib", "riscv64-aros-ranlib"),
+            ("strip", "riscv64-aros-strip"),
+            ("collector", "riscv64-aros/bin/collect-aros"),
+            ("nm", "riscv64-aros-nm"),
+            ("objcopy", "riscv64-aros-objcopy"),
+        ]
+    );
+    assert_eq!(layout.resolve_tools(&prefix).unwrap().len(), 10);
+
+    let usage = fs::read_to_string(
+        fixture
+            .root
+            .join("work/native-lifecycle/verified-source-usage.log"),
+    )
+    .unwrap();
+    assert_eq!(usage, "gcc-16.2.0.tar.xz\nbinutils-2.47.tar.bz2\n");
+    let mut previous: Option<String> = None;
+    for phase in [
+        "preflight",
+        "environment",
+        "configure",
+        "compiler",
+        "collector",
+        "publish",
+    ] {
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .root
+                    .join(format!("work/native-lifecycle/receipts/{phase}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["previous_receipt_sha256"].as_str(),
+            previous.as_deref(),
+            "{phase} receipt must bind its exact predecessor"
+        );
+        let expected = receipt["receipt_sha256"].as_str().unwrap().to_owned();
+        let mut unsigned = receipt;
+        unsigned.as_object_mut().unwrap().remove("receipt_sha256");
+        assert_eq!(
+            sha256_bytes(&canonical::bytes(&unsigned).unwrap()).as_str(),
+            expected
+        );
+        previous = Some(expected);
+    }
+}
+
+#[test]
+fn native_gnu_lifecycle_rejects_wrong_family_inputs_before_publication() {
+    let fixture = Fixture::new_gnu();
+    fixture.replace_gnu_profiles_with_llvm();
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("native source lock and profiles select different compiler families"),
+        "{error}"
+    );
+    assert!(!fixture.root.join("output/toolchain").exists());
+    assert!(!fixture
+        .root
+        .join("output/.aros-native-toolchain-stage")
+        .exists());
+    assert!(!fixture
+        .root
+        .join("work/native-lifecycle/build/configure.args")
+        .exists());
+}
+
+#[test]
+fn native_gnu_configure_failure_never_publishes_a_final_prefix() {
+    let fixture = Fixture::new_gnu();
+    fixture.replace_source_configure(
+        "#!/bin/sh\nprintf 'fixture GNU configure failure\\n' >&2\nexit 23\n",
+    );
+
+    let error = executor::run(&fixture.request(), &CancellationToken::default()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("configure phase exited unsuccessfully"),
+        "{error}"
+    );
+    assert!(!fixture.root.join("output/toolchain").exists());
+    assert!(!fixture
+        .root
+        .join("work/native-lifecycle/receipts/configure.json")
+        .exists());
+    assert!(!fixture
+        .root
+        .join("work/native-lifecycle/receipts/publish.json")
+        .exists());
+}
+
+#[test]
+fn native_gnu_collector_resume_reinstalls_contract_without_rebuilding_compiler() {
+    let fixture = Fixture::new_gnu();
+    executor::run(&fixture.request(), &CancellationToken::default()).unwrap();
+
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let published = fixture.root.join("output/toolchain");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    fs::rename(&published, &staging).unwrap();
+    fs::remove_file(lifecycle.join("receipts/publish.json")).unwrap();
+    fs::remove_file(lifecycle.join("receipts/collector.json")).unwrap();
+
+    // Reconstruct the exact pre-collector compiler outputs. The two legacy
+    // collector paths are compiler-owned destinations which the GNU collector
+    // installer replaces; the three new contract files did not exist yet.
+    let tuple_directory = staging.join("riscv64-aros/bin");
+    write_executable(&tuple_directory.join("collect-aros"), "legacy-collector");
+    write_executable(
+        &staging.join("riscv64-aros-collect-aros"),
+        "legacy-collector",
+    );
+    for path in [
+        tuple_directory.join("aros-collector-tools.json"),
+        staging.join("aros-collector-tools.json"),
+        staging.join("toolchain-tools.json"),
+    ] {
+        fs::remove_file(path).unwrap();
+    }
+
+    let mut request = fixture.request();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let result = executor::run(&request, &CancellationToken::default()).unwrap();
+    assert_eq!(result.commit_state, "committed");
+    assert_eq!(result.outputs.len(), 5);
+    assert!(fixture
+        .root
+        .join("output/toolchain/toolchain-tools.json")
+        .is_file());
+    assert!(!staging.exists());
+    assert!(lifecycle.join("receipts/collector.json").is_file());
+    assert!(lifecycle
+        .join("logs/collector-resume-1.stdout.log")
+        .is_file());
+    assert!(lifecycle.join("rust-target-resume-1").is_dir());
 }
 
 #[test]

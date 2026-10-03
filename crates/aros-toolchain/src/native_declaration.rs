@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::profiles::{Profile, Profiles};
 use crate::recipe::{safe_relative_path, GitObjectId};
-use crate::source_lock::{CompilerFamily, SourceLock};
+use crate::source_lock::SourceLock;
 use crate::{ContractError, Recipe};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -137,11 +137,6 @@ impl NativeExecutorDeclaration {
                 "native source lock and profiles select different compiler families",
             ));
         }
-        if source_lock.family() != CompilerFamily::Llvm {
-            return Err(ContractError::invalid(
-                "GNU inputs are supported for cache and recipe binding only; native GNU execution is not implemented",
-            ));
-        }
         let selected_profile = profiles.select(preset)?.clone();
         Ok(NativeInputContract {
             declaration: self.clone(),
@@ -210,6 +205,7 @@ fn producer_input_path(path: &str, suffix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::source_lock::SourceLock;
     use aros_common::sha256_bytes;
     use serde_json::json;
 
@@ -253,7 +249,9 @@ mod tests {
             "tools_commit": "5".repeat(40), "tools_tree": "6".repeat(40),
             "source_date_epoch": 0,
             "source_lock_sha256": sha256_bytes(lock), "profiles_sha256": sha256_bytes(profiles),
-            "patches": [{"path": "tools/crosstools/llvm/llvm-11.0.0.src-aros.diff", "sha256": "e".repeat(64)}]
+            "patches": SourceLock::parse(lock).unwrap().source_patch_paths().map(|path| {
+                json!({"path": path, "sha256": "e".repeat(64)})
+            }).collect::<Vec<_>>()
         });
         value["recipe_sha256"] = json!(sha256_bytes(&canonical::bytes(&value).unwrap()));
         Recipe::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -278,6 +276,45 @@ mod tests {
             "x86_64-unknown-aros"
         );
         assert_eq!(bound.source_lock().sources().len(), 1);
+    }
+
+    #[test]
+    fn binds_gnu_without_substituting_llvm_identity_or_runtime() {
+        let lock = include_bytes!("../tests/fixtures/gnu-source-lock-v3.json");
+        let profiles = serde_json::to_vec(&json!({
+            "schema":"aros-toolchain-profiles-v2", "family":"gnu",
+            "upstream_commit":"d".repeat(40), "profiles":[{
+                "name":"rv64-reference", "configure_target":"opensbi-riscv64",
+                "upstream_output_target":"opensbi-riscv64", "target_triple":"riscv64-aros",
+                "cpu":"riscv64", "platform":"opensbi", "float_abi":"lp64d",
+                "capabilities":["c", "libgcc", "standalone-collector"],
+                "target":{"schema":"aros-riscv-target-v1", "isa":"rva22u64", "abi":"lp64d",
+                    "code_model":"medany", "architecture":"rv64i2p1_m2p0_a2p1_f2p2_d2p2_c2p0",
+                    "unaligned_access":false, "atomic_abi":0, "x3_reg_usage":0}
+            }]
+        }))
+        .unwrap();
+        let recipe = recipe(lock, &profiles);
+        let contract = b"contract";
+        let declaration = format!(
+            "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"toolchains/gnu.sources.json\"\nprofiles = \"toolchains/profiles-v2.json\"\n",
+            sha256_bytes(contract), recipe.tools().0.as_str()
+        );
+        let bound = NativeExecutorDeclaration::parse(declaration.as_bytes())
+            .unwrap()
+            .bind(&recipe, contract, lock, &profiles, "rv64-reference")
+            .unwrap();
+        assert_eq!(
+            bound.source_lock().family(),
+            crate::source_lock::CompilerFamily::Gnu
+        );
+        assert_eq!(bound.selected_profile().target_triple(), "riscv64-aros");
+        assert_eq!(bound.selected_profile().target().unwrap().abi(), "lp64d");
+        assert!(!bound
+            .selected_profile()
+            .capabilities()
+            .iter()
+            .any(|value| value == "libcxx"));
     }
 
     #[test]

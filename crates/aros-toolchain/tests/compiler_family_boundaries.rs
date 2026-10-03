@@ -56,7 +56,7 @@ fn recipe(profiles: &[u8]) -> Recipe {
 }
 
 #[test]
-fn native_binding_rejects_gnu_before_any_llvm_phase() {
+fn native_binding_selects_gnu_without_substituting_llvm_identity() {
     let profiles = gnu_profiles();
     let recipe = recipe(&profiles);
     let contract = b"contract";
@@ -64,13 +64,17 @@ fn native_binding_rejects_gnu_before_any_llvm_phase() {
         "schema_version = 1\ncontract_id = \"aros-toolchain-producer-v1\"\ncontract_path = \"contracts/toolchain-producer-v1.toml\"\ncontract_sha256 = \"{}\"\ntools_commit = \"{}\"\nsource_lock = \"toolchains/gnu.sources.json\"\nprofiles = \"toolchains/profiles-v1.json\"\n",
         sha256_bytes(contract), recipe.tools().0.as_str()
     );
-    let error = NativeExecutorDeclaration::parse(declaration.as_bytes())
+    let bound = NativeExecutorDeclaration::parse(declaration.as_bytes())
         .unwrap()
         .bind(&recipe, contract, LOCK, &profiles, "rv32-aros")
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("native GNU execution is not implemented"));
+        .unwrap();
+    assert_eq!(
+        bound.source_lock().family(),
+        aros_toolchain::source_lock::CompilerFamily::Gnu
+    );
+    assert_eq!(bound.source_lock().version(), "16.2.0");
+    assert_eq!(bound.selected_profile().target_triple(), "riscv-aros");
+    assert_eq!(bound.selected_profile().target().unwrap().abi(), "ilp32f");
 }
 
 #[test]
