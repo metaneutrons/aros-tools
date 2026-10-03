@@ -28,6 +28,7 @@ mod native_family;
 mod native_gnu_collector;
 #[cfg(unix)]
 mod native_lifecycle;
+mod native_make;
 pub mod package;
 #[cfg(unix)]
 pub mod package_extract;

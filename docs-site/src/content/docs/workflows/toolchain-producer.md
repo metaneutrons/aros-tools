@@ -168,6 +168,9 @@ For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
 The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
 owns the target ISA flags, which must not reach host-built Binutils or GCC.
 LLVM builds retain their existing compiler environment.
+GNU configure and MetaMake also resolve recursive `make` through a private
+alias to the exact preflight-selected GNU Make, rather than a second executable
+found elsewhere on the host PATH.
 
 The v3 source lock can declare source-owned patches for target build
 dependencies outside the compiler directory. Recipe creation reads each patch

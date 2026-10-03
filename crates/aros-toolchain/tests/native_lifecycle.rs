@@ -66,6 +66,11 @@ test -x "$CC"
 test -x "$CXX"
 case "$CFLAGS" in *-ffile-prefix-map=*) ;; *) exit 1 ;; esac
 case "$CXXFLAGS" in *-ffile-prefix-map=*) ;; *) exit 1 ;; esac
+recursive_make="$(command -v make)"
+test -L "$recursive_make"
+readlink "$recursive_make" > configure-recursive-make
+printf 'probe:\n\t@printf "%%s\\n" "$(MAKE_VERSION)" > recursive-make-version\n' > recursive-make.mk
+make -f recursive-make.mk
 printf '%s\n' "$@" > configure.args
 printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
 printf '%s\n' "$CC" > configure-cc
@@ -554,6 +559,7 @@ fn native_lifecycle_runs_configure_compiler_and_collector_with_receipt_chain() {
             .trim(),
         "1"
     );
+
     assert_eq!(
         fs::read_to_string(build.join("native-cmake-jobs"))
             .unwrap()
@@ -680,6 +686,21 @@ fn native_gnu_lifecycle_builds_locked_rv64_tools_and_binds_collector_layout() {
             .trim(),
         "1"
     );
+
+    assert_eq!(
+        fs::read_to_string(build.join("configure-recursive-make"))
+            .unwrap()
+            .trim(),
+        which::which("gmake")
+            .or_else(|_| which::which("make"))
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    assert!(fs::read_to_string(build.join("recursive-make-version"))
+        .unwrap()
+        .trim()
+        .starts_with('4'));
 
     // These LLVM-shaped producer markers prove the GNU collector branch does
     // not apply LLVM's producer-only cleanup.

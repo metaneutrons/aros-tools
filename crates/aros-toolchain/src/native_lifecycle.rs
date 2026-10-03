@@ -152,6 +152,11 @@ fn run_owned(
     // source between preflight and the actual `%fetch` invocation.
     let source_cache = open_prepared_cache(&request.cache_dir, &cache_request)?;
     let cache = source_cache.verification();
+    let tool_directories = crate::native_make::tool_directories(
+        bound.source_lock().family(),
+        &host,
+        lifecycle.work_root(),
+    )?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -160,7 +165,7 @@ fn run_owned(
             work: lifecycle.work_root().to_owned(),
             source_cache: request.cache_dir.clone(),
         },
-        &host.tool_directories(),
+        &tool_directories,
         recipe.source_date_epoch(),
         request.jobs,
     )?;
