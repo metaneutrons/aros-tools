@@ -187,6 +187,8 @@ struct ManifestSummary {
     target_triple: String,
     tree_sha256: String,
     llvm_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compiler: Option<aros_common::ArosCompilerIdentity>,
     source_commit: String,
     producer_commit: String,
     tools_commit: String,
@@ -729,6 +731,7 @@ fn manifest_summary(manifest: &ArosToolchainManifest) -> ManifestSummary {
         target_triple: manifest.target_triple.clone(),
         tree_sha256: manifest.tree_sha256.clone(),
         llvm_version: manifest.llvm_version.clone(),
+        compiler: manifest.compiler.clone(),
         source_commit: manifest.source_commit.clone(),
         producer_commit: manifest.producer_commit.clone(),
         tools_commit: manifest.tools_commit.clone(),
@@ -1586,7 +1589,7 @@ mod tests {
         validate_candidate_payload, MarkerState, MetadataState, MANAGED_IMPORTS_DIRECTORY,
         MANAGED_PAYLOAD_DIRECTORY, MANAGEMENT_DIRECTORY,
     };
-    use crate::toolchain::{ResolvedToolchain, ToolchainPaths, ToolchainSource};
+    use crate::toolchain::{get_toolchain_paths, ResolvedToolchain, ToolchainSource};
     use aros_common::{
         toolchain_tree_inventory, ArosToolchainManifest, ArosToolchainManifestEntry,
         AROS_TOOLCHAIN_MANIFEST_FILE,
@@ -1658,16 +1661,7 @@ mod tests {
     fn resolved_local(root: &Path) -> ResolvedToolchain {
         let root = root.to_path_buf();
         ResolvedToolchain {
-            paths: ToolchainPaths {
-                clang: root.join("bin/clang"),
-                clangxx: root.join("bin/clang++"),
-                lld: root.join("bin/ld.lld"),
-                llvm_ar: root.join("bin/llvm-ar"),
-                aros_collect: root.join("bin/aros-collect"),
-                collect_aros: root.join("bin/collect-aros"),
-                collect_aros32: root.join("bin/collect-aros32"),
-                root,
-            },
+            paths: get_toolchain_paths(&root),
             target_triple: "x86_64-unknown-aros".into(),
             release_id: None,
             source: ToolchainSource::LocalManifest,

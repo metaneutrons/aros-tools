@@ -102,6 +102,18 @@ pub fn package(request: &PackageRequest) -> Result<PackageOutput, ContractError>
     let staged_root = candidate_stage.path().join(ARCHIVE_ROOT);
     copy_candidate(&request.candidate_root, &staged_root)?;
     remove_embedded_manifest(&staged_root)?;
+    if request.source_lock.family() == CompilerFamily::Gnu {
+        let identity =
+            crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
+        crate::package_layout::validate_root(
+            &staged_root,
+            &identity,
+            request.profile.target_triple(),
+        )
+        .map_err(|error| {
+            ContractError::package(format!("staged GNU toolchain layout is invalid: {error}"))
+        })?;
+    }
     scan_prefixes(&staged_root, &request.forbidden_prefixes)?;
 
     let (tree_sha256, files) = toolchain_tree_inventory(&staged_root).map_err(|error| {
@@ -178,7 +190,8 @@ pub fn canonical_asset_name(
 }
 
 fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
-    let _ = crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
+    let identity =
+        crate::package_identity::compiler_identity(&request.source_lock, &request.profile)?;
     crate::package_identity::require_gnu_recipe_binding(
         &request.recipe,
         &request.source_lock,
@@ -195,6 +208,16 @@ fn validate_request(request: &PackageRequest) -> Result<(), ContractError> {
         return Err(ContractError::package(
             "candidate root must be a real directory, not a symbolic link",
         ));
+    }
+    if request.source_lock.family() == CompilerFamily::Gnu {
+        crate::package_layout::validate_root(
+            &request.candidate_root,
+            &identity,
+            request.profile.target_triple(),
+        )
+        .map_err(|error| {
+            ContractError::package(format!("GNU toolchain layout is invalid: {error}"))
+        })?;
     }
     if request.output_dir.exists() {
         return Err(ContractError::package(
@@ -1203,6 +1226,57 @@ mod tests {
         assert!(canonical_asset_name("11.0", "linux-x86_64", "pc-x86_64").is_err());
         assert!(canonical_asset_name("11.0.0", "freebsd-x86_64", "pc-x86_64").is_err());
         assert!(canonical_asset_name("11.0.0", "linux-x86_64", "unknown").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llvm_auxiliary_file_named_like_gnu_layout_keeps_legacy_contract() {
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate");
+        fs::create_dir(&candidate).unwrap();
+        let content = vec![b'x'; 32 * 1024];
+        fs::write(
+            candidate.join(aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE),
+            &content,
+        )
+        .unwrap();
+        let request = PackageRequest {
+            candidate_root: candidate,
+            output_dir: temporary.path().join("package"),
+            release_id: "fixture-release".into(),
+            host: "linux-x86_64".into(),
+            recipe: signed_recipe(),
+            source_lock: source_lock(),
+            profile: profile(),
+            build_environment: Map::new(),
+            forbidden_prefixes: vec![],
+        };
+        package(&request).unwrap();
+        let extracted = crate::package_extract::verify_and_extract(
+            &crate::package_extract::PackageExtractionRequest {
+                verification: crate::package_verify::PackageVerificationRequest {
+                    package_dir: request.output_dir,
+                    release_id: request.release_id,
+                    host: request.host,
+                    recipe: request.recipe,
+                    source_lock: request.source_lock,
+                    profile: request.profile,
+                    build_environment: request.build_environment,
+                    forbidden_prefixes: request.forbidden_prefixes,
+                },
+                output_root: temporary.path().join("extracted"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(
+                extracted
+                    .root
+                    .join(aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE)
+            )
+            .unwrap(),
+            content
+        );
     }
 
     #[cfg(unix)]

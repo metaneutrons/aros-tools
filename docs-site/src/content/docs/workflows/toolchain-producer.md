@@ -15,11 +15,13 @@ checkouts and absent work/output leaves.
 
 ## What you need
 
-The native CLI build and package workflow currently supports LLVM only. GNU
+The native CLI build currently supports LLVM only. GNU
 source-lock v3 and profiles v2 documents bind cache, recipe, compiler family
 and explicit RISC-V ISA/ABI expectations; their families must agree. They
-cannot yet execute a native GNU producer. A separate schema-2 GNU package
-contract is under development; it is not a qualified native CLI workflow. RISC-V
+cannot yet execute a native GNU producer. Development CLI package and
+verify-package stages accept already-built GNU candidates with a schema-2
+manifest and an inventory-bound executable layout. That is not qualification
+of a fresh GNU compiler build. RISC-V
 compiler probes are development evidence, not an available compiler release
 or board-support claim.
 
