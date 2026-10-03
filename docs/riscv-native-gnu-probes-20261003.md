@@ -179,7 +179,58 @@ change executable code and tests, so the earlier workspace runs below are
 historical, not acceptance of the updated executable tree. Final same-candidate
 Linux/Darwin gates and reviewed deliveries are tracked on #321.
 
+Separate test-only [#337](https://github.com/metaneutrons/aros-tools/pull/337)
+keeps the early-QEMU-exit fixture's startup delay explicit and separates it
+from a deadline probe. A controlled 1.2-second startup fails the former
+one-second budget; ten seconds reaches exit 42 and preserves every no-PASS,
+retained-evidence and diagnostic assertion. Production timeouts are unchanged.
+
+## Current CLI consumption of the actual package
+
+On clean Tools `4ba7a2f60e84cdbaebc365ea320c2fb94195026d`, the current debug
+CLI verified and selected the actual extracted package through
+`toolchain verify`, `setup --local --offline` and `toolchain path`.
+No payload was copied and no cache/store was created. An isolated metadata
+profile matches the measured package's `rv64-reference`, GNU and lp64d
+identity; a separate intentionally wrong lp64 profile fails with exit 1 and
+AR0401/tool_resolution. The actual AROS source and valid payload were untouched.
+
+Executed CLI SHA-256:
+`618347d779364513769485a7f090ee16acdc096ca9e2734d421fb2554ed8b48a`.
+Extracted manifest SHA-256:
+`ebd4048b5b0963d7ab1c22a8de69c5758aaecb11420ec1783bf9b7f3368c2cb8`.
+Complete probe-log SHA-256:
+`e6a339021330cd506045ecfd716d6ffce5ee96d63fd44b254e849f48f2219796`.
+This is current CLI installation/identity evidence, not native BSP, source-build
+or hardware qualification from the metadata fixture.
+
 ## Existing-target workspace coverage
+
+### Final reviewed-code Darwin gate
+
+Exact Tools `4ba7a2f60e84cdbaebc365ea320c2fb94195026d`, tree
+`bedeb4630fc2c9550c082db860d583a4d7139a24`, passed the Darwin ARM64 canonical
+`scripts/check-workspace.sh all` gate with exit zero: quality, Astro,
+1,691 Rust tests across 89 summaries, and all 45 CMake fixtures, including
+actual PC/EFI64/EFI32 GRUB. No host-qualified fixture was omitted.
+Full log SHA-256:
+`b02a52c3d049c04edfb40d8d625a9e82b189629b8a78c9b44daa01250615b08b`.
+Integration source `0cae0b0116b6246b2175c3b8b97719a81f40dcfd` and separate
+Mesa 20 oracle `cb6974f1c3de43c6f1168d69039af7c32e56153c` were clean and
+recursively initialized before and after the gate.
+
+Same-candidate Linux quality/integration
+[37146480596](https://github.com/metaneutrons/aros-tools/actions/runs/37146480596)
+completed successfully on exact `4ba7a2f`: quality, 1,692 Rust tests across
+89 summaries, 44 executed CMake fixtures and one explicit Darwin-only GRUB
+omission, 45 discovered. Both immutable source identities above were checked
+by the workflow. Complete run-log SHA-256:
+`f6c861454a3c915df39f2170326118864c7c7226a2c205ba28943d87fdf38256`.
+Linux quality/full `test` combined with Darwin quality/docs/integration supplies
+the required same-code two-host coverage. It is not Linux GRUB or a complete
+RISC-V compiler-release matrix. Final reviewed deliveries remain on #321.
+
+### Earlier candidate — retained historical results
 
 On exact Tools tree `2291b885aab1b63547bd1285b55bdf943cf6bf52`, the Darwin
 ARM64 `scripts/check-workspace.sh all` gate passed quality, Astro, 1,686 Rust
