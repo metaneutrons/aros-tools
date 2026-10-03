@@ -67,6 +67,10 @@ inventory-bound `toolchain-tools.json`. The selected checkout must declare
 roles come from that document, not LLVM filenames or `PATH`. Frontend target
 and GCC-version probes must match the manifest.
 
+Executable-layout v1 declares eight core tools. Layout v2 also declares exact
+`nm` and `objcopy` paths; both formats remain readable. Utility selection does
+not supply a compiler runtime or a Developer sysroot.
+
 No GNU/RISC-V compiler distribution is published yet. These installation
 checks do not qualify target runtimes, host relocation, an AROS build or a
 board. Native GNU production remains separate work.

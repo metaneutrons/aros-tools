@@ -107,6 +107,20 @@ impl Fixture {
         .unwrap();
     }
 
+    fn add_native_utilities(&mut self) {
+        let script = fs::read(self.payload.join(format!("{}-gcc", self.triple))).unwrap();
+        self.layout["schema"] = json!("aros-toolchain-tools-v2");
+        for role in ["nm", "objcopy"] {
+            let relative = format!("{}-{role}", self.triple);
+            self.layout["tools"][role] = json!(relative);
+            let executable = self.payload.join(&relative);
+            fs::write(&executable, &script).unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        self.write_layout();
+        self.write_manifest();
+    }
+
     fn write_manifest(&self) -> ArosToolchainManifest {
         let (tree_sha256, files) = toolchain_tree_inventory(&self.payload).unwrap();
         let compiler: ArosCompilerIdentity =
@@ -255,6 +269,74 @@ fn local_rv32_and_rv64_resolve_declared_flat_tools_without_llvm_filenames() {
         let output = fixture.local("path");
         success(&output);
         assert!(String::from_utf8_lossy(&output.stdout).contains(fixture.payload.to_str().unwrap()));
+    }
+}
+
+#[test]
+fn native_utility_layout_installs_and_verifies_all_ten_declared_tools() {
+    for width in [32, 64] {
+        let mut fixture = Fixture::new(width);
+        fixture.add_native_utilities();
+        success(&fixture.local("verify"));
+        assert_eq!(fs::read(&fixture.marker).unwrap().len(), 14);
+        fs::remove_file(&fixture.marker).unwrap();
+        fixture.seed_locked_archive();
+        success(
+            &fixture
+                .command("install")
+                .arg("--offline")
+                .output()
+                .unwrap(),
+        );
+        // Installation probes both the staged payload before publication and
+        // the completed content-addressed payload after publication.
+        assert_eq!(fs::read(&fixture.marker).unwrap().len(), 28);
+        fs::remove_file(&fixture.marker).unwrap();
+        success(
+            &fixture
+                .base_command()
+                .args(["list", "--format", "json"])
+                .output()
+                .unwrap(),
+        );
+        assert!(!fixture.marker.exists());
+        success(&fixture.command("verify").output().unwrap());
+        assert_eq!(fs::read(&fixture.marker).unwrap().len(), 14);
+    }
+}
+
+#[test]
+fn locked_native_utility_layout_cannot_omit_a_declared_utility() {
+    for role in ["nm", "objcopy"] {
+        let mut fixture = Fixture::new(64);
+        fixture.add_native_utilities();
+        let mut lock = fixture.seed_locked_archive();
+        let declared = fixture.layout["tools"][role].as_str().unwrap();
+        lock.artifacts[0]
+            .required_paths
+            .retain(|path| path != declared);
+        fs::write(
+            fixture.project.join("aros-toolchains.lock.toml"),
+            toml::to_string(&lock).unwrap(),
+        )
+        .unwrap();
+        failure(
+            &fixture
+                .command("install")
+                .arg("--offline")
+                .output()
+                .unwrap(),
+            "GNU lock omits",
+        );
+        assert!(!fixture.marker.exists());
+        let artifact = &lock.artifacts[0];
+        let envelope = fixture
+            .store
+            .join(&lock.release_id)
+            .join(&artifact.host)
+            .join(&artifact.target_profile)
+            .join(&artifact.sha256);
+        assert!(!envelope.exists());
     }
 }
 
