@@ -142,6 +142,83 @@ fn verification(request: &PackageRequest) -> PackageVerificationRequest {
     }
 }
 
+fn add_native_utilities(root: &std::path::Path) {
+    let path = root.join("toolchain-tools.json");
+    let mut layout: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    layout["schema"] = json!("aros-toolchain-tools-v2");
+    for (role, relative) in [("nm", "bin/fixture-nm"), ("objcopy", "bin/fixture-objcopy")] {
+        layout["tools"][role] = json!(relative);
+        let executable = root.join(relative);
+        std::fs::write(&executable, b"synthetic native utility; never execute\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(path, serde_json::to_vec(&layout).unwrap()).unwrap();
+}
+
+#[test]
+fn native_utility_layout_packages_reads_back_and_extracts_both_widths() {
+    for width in [32, 64] {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = request(temporary.path(), width);
+        add_native_utilities(&request.candidate_root);
+        let original_layout =
+            std::fs::read(request.candidate_root.join("toolchain-tools.json")).unwrap();
+        package(&request).unwrap();
+        let verified = verify(&verification(&request)).unwrap();
+        for relative in ["bin/fixture-nm", "bin/fixture-objcopy"] {
+            assert!(verified.manifest.files.iter().any(|entry| {
+                entry.path == relative && entry.kind == "file" && entry.mode == "0755"
+            }));
+        }
+        let extraction = verify_and_extract(&PackageExtractionRequest {
+            verification: verification(&request),
+            output_root: temporary.path().join("relocated"),
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(extraction.root.join("toolchain-tools.json")).unwrap(),
+            original_layout
+        );
+        let resolved = aros_common::toolchain_layout::ToolchainToolLayout::load(&extraction.root)
+            .unwrap()
+            .resolve_tools(&extraction.root)
+            .unwrap();
+        assert_eq!(resolved.len(), 10);
+        for role in ["nm", "objcopy"] {
+            assert!(resolved.iter().any(|(name, _)| *name == role));
+        }
+    }
+}
+
+#[test]
+fn native_utility_paths_fail_before_package_output_mutation() {
+    for role in ["nm", "objcopy"] {
+        for mutation in ["missing", "outside", "nonexecutable"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let mut request = request(temporary.path(), 64);
+            add_native_utilities(&request.candidate_root);
+            let executable = request.candidate_root.join(format!("bin/fixture-{role}"));
+            match mutation {
+                "missing" => std::fs::remove_file(&executable).unwrap(),
+                "outside" => {
+                    let outside = temporary.path().join("outside-utility");
+                    std::fs::write(&outside, b"outside utility; never execute\n").unwrap();
+                    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    std::fs::remove_file(&executable).unwrap();
+                    symlink(&outside, &executable).unwrap();
+                }
+                _ => std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644))
+                    .unwrap(),
+            }
+            let parent = temporary.path().join("must-remain-absent");
+            request.output_dir = parent.join("package");
+            assert!(package(&request).is_err(), "{role}: {mutation}");
+            assert!(!parent.exists(), "{role}: {mutation}");
+        }
+    }
+}
+
 #[test]
 fn both_widths_package_verify_extract_with_exact_family_and_target_identity() {
     for width in [32, 64] {
