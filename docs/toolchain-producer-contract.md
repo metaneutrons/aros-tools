@@ -120,8 +120,10 @@ committed snapshots, it rebinds the producer declaration, checks exact cached
 sources, prepares the locked Python and Cargo environments, then invokes AROS
 `configure` and its `crosstools-release` target. The only MetaMake download
 entry is a hidden Rust bridge in the same `aros` binary; it resolves a declared
-cache payload, records it in the durable source-use ledger, and only then calls
-the unchanged upstream helper. The lifecycle builds the declared vendored
+cache payload, seals a private verified copy and calls the unchanged upstream
+helper with mandatory offline/checksum policy. It records source use in the
+durable ledger only after successful helper execution and revalidation of the
+original cache and snapshot. The lifecycle builds the declared vendored
 `aros-collect`, installs family-selected collector invocations and writes an
 ordered canonical receipt chain. LLVM removes its producer-only configuration
 inputs; GNU replaces the source-owned tuple and prefixed collectors by atomic

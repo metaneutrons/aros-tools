@@ -33,9 +33,12 @@ The Cargo
 vendor input is copied through no-follow descriptors into a fresh private tree,
 validated against every `.cargo-checksum.json` and the selected tools
 `Cargo.lock` closure, and supplied only by a generated offline Cargo home.
-The private MetaMake adapter accepts one source-lock archive
-from an explicitly identical cache root, records it once in a durable ledger,
-and rejects every other candidate before an upstream fetch script could run.
+The private MetaMake adapter selects one source-lock archive from the explicit
+verified cache. GNU suffix lists resolve to one locked format; bounded cache
+subdirectories are stamp namespaces, not alternate payload sources. The helper
+consumes a private verified copy under mandatory offline/checksum policy.
+Source use is recorded once in the durable ledger only after successful helper
+execution and cache/snapshot revalidation.
 The environment builder clears inherited variables, retains only explicitly
 selected host tool directories plus an explicit POSIX utility baseline, and
 applies deterministic locale/time/archive/CMake
