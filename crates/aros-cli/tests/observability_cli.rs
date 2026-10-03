@@ -754,9 +754,12 @@ fn boot_test_rejects_an_early_qemu_exit_without_positive_evidence() {
 
     let tools = tempfile::tempdir().unwrap();
     let qemu = tools.path().join("qemu-system-x86_64");
+    // This proves an exit before the requested deadline, not a one-second
+    // launch/scheduling budget. Keep startup deliberately slower than that
+    // former budget; deadline behavior has its own process/boot fixtures.
     fs::write(
         &qemu,
-        "#!/bin/sh\nif test -f module.elf; then exit 42; fi\nexit 43\n",
+        "#!/bin/sh\n/bin/sleep 1.2\nif test -f module.elf; then exit 42; fi\nexit 43\n",
     )
     .unwrap();
     fs::set_permissions(&qemu, fs::Permissions::from_mode(0o755)).unwrap();
@@ -771,7 +774,7 @@ fn boot_test_rejects_an_early_qemu_exit_without_positive_evidence() {
             "--preset",
             "pc-x86_64",
             "--timeout",
-            "1",
+            "10",
             "--module",
             "module.elf",
             "--evidence",
@@ -786,7 +789,10 @@ fn boot_test_rejects_an_early_qemu_exit_without_positive_evidence() {
     assert_eq!(value["diagnostics"][0]["code"], "AR0701");
     assert_eq!(value["diagnostics"][0]["stage"], "boot_validation");
     let message = value["diagnostics"][0]["message"].as_str().unwrap();
-    assert!(message.contains("retained evidence"), "{message}");
+    assert!(
+        message.contains("retained evidence"),
+        "diagnostic={value}; stdout={stdout}"
+    );
     assert_eq!(value["diagnostics"][0]["context"]["exit_code"], 42);
     assert!(value["diagnostics"][0]["context"]["tool"]
         .as_str()
