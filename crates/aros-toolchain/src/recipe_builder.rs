@@ -32,9 +32,9 @@ pub struct RecipeBuildRequest {
     pub producer_root: PathBuf,
     /// Exact aros-tools checkout selected as the producer executor.
     pub tools_root: PathBuf,
-    /// Producer-root-relative source-lock-v2 document.
+    /// Producer-root-relative source lock (LLVM v2 or GNU v3).
     pub source_lock: PathBuf,
-    /// Producer-root-relative profiles-v1 document.
+    /// Producer-root-relative profiles matrix (LLVM v1 or GNU v2).
     pub profiles: PathBuf,
     /// Absent output file for the closed recipe-v2 document.
     pub output: PathBuf,

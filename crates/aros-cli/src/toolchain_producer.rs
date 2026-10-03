@@ -128,10 +128,10 @@ struct RecipeArgs {
     /// Exact aros-tools checkout selected as the producer executor
     #[arg(long)]
     tools_dir: PathBuf,
-    /// Producer-root-relative source-lock-v2 document
+    /// Producer-root-relative source lock (LLVM v2 or GNU v3)
     #[arg(long)]
     source_lock: PathBuf,
-    /// Producer-root-relative profiles-v1 document
+    /// Producer-root-relative profiles matrix (LLVM v1 or GNU v2)
     #[arg(long)]
     profiles: PathBuf,
     /// Absent recipe-v2 output file; an existing file is never replaced
@@ -162,7 +162,7 @@ struct ProfileArgs {
     /// Self-digesting recipe-v2 JSON document
     #[arg(long)]
     recipe: PathBuf,
-    /// Profiles-v1 document bound by the selected recipe
+    /// Family-selected profiles matrix bound by the selected recipe
     #[arg(long)]
     profiles: PathBuf,
     /// Exact profile from the recipe-bound profiles matrix
@@ -196,10 +196,10 @@ struct PackageContextArgs {
     /// Self-digesting recipe-v2 JSON document
     #[arg(long)]
     recipe: PathBuf,
-    /// Source-lock-v2 document bound by the selected recipe
+    /// Family-selected source lock bound by the selected recipe
     #[arg(long)]
     source_lock: PathBuf,
-    /// Profiles-v1 document bound by the selected recipe
+    /// Family-selected profiles matrix bound by the selected recipe
     #[arg(long)]
     profiles: PathBuf,
     /// Exact profile from the recipe-bound profiles matrix
