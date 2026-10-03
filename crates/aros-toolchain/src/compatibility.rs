@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
+#[cfg(test)]
+mod deadline_tests;
 mod environment;
 mod execution;
 mod host_tools;
@@ -1558,29 +1560,92 @@ mod tests {
         let error = run_probe(&stale_retry, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
-        let deadline_root = tempfile::tempdir().unwrap();
-        let deadline_request = request(deadline_root.path());
-        let mut deadline = probe_request(
-            deadline_root.path(),
-            prepare(&deadline_request).unwrap(),
-            CompatibilityPhase::StandaloneC,
-            script(
+        // Each short command fits individually, but their combined runtime
+        // exceeds two seconds. Resetting the budget per command must fail this test.
+        for first_delay in ["1", "30"] {
+            let deadline_root = tempfile::tempdir().unwrap();
+            let deadline_request = request(deadline_root.path());
+            let mut deadline = probe_request(
                 deadline_root.path(),
-                "deadline-first",
-                "exec /bin/sleep 0.5",
-            ),
-            Duration::from_secs(2),
-        );
-        deadline.commands.push(CompatibilityCommand {
-            program: script(deadline_root.path(), "deadline-second", "exec /bin/sleep 2"),
-            arguments: Vec::new(),
-        });
-        let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
-        assert_compatibility(&error);
-        assert!(deadline
-            .reports_root
-            .join("standalone-c.2.stdout.log")
-            .is_file());
+                prepare(&deadline_request).unwrap(),
+                CompatibilityPhase::StandaloneC,
+                script(
+                    deadline_root.path(),
+                    "deadline-first",
+                    &format!("exec /bin/sleep {first_delay}"),
+                ),
+                Duration::from_secs(2),
+            );
+            deadline.commands.push(CompatibilityCommand {
+                program: script(
+                    deadline_root.path(),
+                    "deadline-second",
+                    "exec /bin/sleep 1.5",
+                ),
+                arguments: Vec::new(),
+            });
+            let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
+            assert_compatibility(&error);
+            let diagnostics = error.diagnostics();
+            let diagnostic = &diagnostics.diagnostics[0];
+            if let Some(tool) = diagnostic
+                .context
+                .as_ref()
+                .and_then(|context| context.tool.as_deref())
+            {
+                let index = match tool {
+                    "standalone-c-1" => 1,
+                    "standalone-c-2" => 2,
+                    _ => panic!("unexpected deadline command: {tool}"),
+                };
+                assert_eq!(diagnostic.context.as_ref().unwrap().timed_out, Some(true));
+                // The whole-phase deadline can expire before command two is
+                // launched. Assert retention only for processes that started.
+                for started in 1..=index {
+                    for stream in ["stdout", "stderr"] {
+                        assert!(deadline
+                            .reports_root
+                            .join(format!("standalone-c.{started}.{stream}.log"))
+                            .is_file());
+                    }
+                }
+                if index == 1 {
+                    for stream in ["stdout", "stderr"] {
+                        assert!(!deadline
+                            .reports_root
+                            .join(format!("standalone-c.2.{stream}.log"))
+                            .exists());
+                    }
+                }
+            } else {
+                assert!(diagnostic
+                    .message
+                    .contains("exhausted its explicit deadline before starting the next command"));
+                // Expiry during preparation must not invent command-two logs.
+                for stream in ["stdout", "stderr"] {
+                    assert!(!deadline
+                        .reports_root
+                        .join(format!("standalone-c.2.{stream}.log"))
+                        .exists());
+                }
+                // Command one may not have started either. If it did, retain
+                // both streams instead of requiring logs for an unstarted job.
+                assert_eq!(
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stdout.log")
+                        .is_file(),
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stderr.log")
+                        .is_file(),
+                );
+            }
+            assert!(!deadline
+                .reports_root
+                .join("standalone-c.report.json")
+                .exists());
+        }
 
         let changed_root = tempfile::tempdir().unwrap();
         let changed_request = request(changed_root.path());
