@@ -16,7 +16,6 @@ use crate::{sha256_bytes, Sha256Digest};
 /// File embedded at the root of a GNU toolchain payload tree.
 pub const TOOLCHAIN_TOOLS_FILE: &str = "toolchain-tools.json";
 
-const TOOLCHAIN_TOOLS_SCHEMA: &str = "aros-toolchain-tools-v1";
 const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
 const MAX_TOOL_PATH_LENGTH: usize = 1024;
 const MAX_TOOL_PATH_SEGMENTS: usize = 32;
@@ -32,22 +31,26 @@ pub struct ToolRoles {
     ranlib: String,
     strip: String,
     collector: String,
+    nm: Option<String>,
+    objcopy: Option<String>,
 }
 
 impl ToolRoles {
     /// Return every declared role and its payload-relative executable path.
-    #[must_use]
-    pub fn entries(&self) -> [(&'static str, &str); 8] {
+    pub fn entries(&self) -> impl Iterator<Item = (&'static str, &str)> + '_ {
         [
-            ("c", &self.c),
-            ("cxx", &self.cxx),
-            ("assembler", &self.assembler),
-            ("linker", &self.linker),
-            ("archive", &self.archive),
-            ("ranlib", &self.ranlib),
-            ("strip", &self.strip),
-            ("collector", &self.collector),
+            ("c", self.c.as_str()),
+            ("cxx", self.cxx.as_str()),
+            ("assembler", self.assembler.as_str()),
+            ("linker", self.linker.as_str()),
+            ("archive", self.archive.as_str()),
+            ("ranlib", self.ranlib.as_str()),
+            ("strip", self.strip.as_str()),
+            ("collector", self.collector.as_str()),
         ]
+        .into_iter()
+        .chain(self.nm.as_deref().map(|path| ("nm", path)))
+        .chain(self.objcopy.as_deref().map(|path| ("objcopy", path)))
     }
 }
 
@@ -55,24 +58,39 @@ impl ToolRoles {
 /// exact target triple.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainToolLayout {
+    schema_version: ToolchainToolsSchemaVersion,
     compiler: ArosCompilerIdentity,
     target_triple: String,
     tools: ToolRoles,
     sha256: Sha256Digest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolchainToolsSchemaVersion {
+    V1,
+    V2,
+}
+
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ToolchainToolLayoutRecord {
-    schema: String,
-    compiler: ArosCompilerIdentity,
-    target_triple: String,
-    tools: ToolRolesRecord,
+#[serde(tag = "schema", deny_unknown_fields)]
+enum ToolchainToolLayoutRecord {
+    #[serde(rename = "aros-toolchain-tools-v1")]
+    V1 {
+        compiler: ArosCompilerIdentity,
+        target_triple: String,
+        tools: ToolRolesV1Record,
+    },
+    #[serde(rename = "aros-toolchain-tools-v2")]
+    V2 {
+        compiler: ArosCompilerIdentity,
+        target_triple: String,
+        tools: ToolRolesV2Record,
+    },
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ToolRolesRecord {
+struct ToolRolesV1Record {
     c: String,
     cxx: String,
     assembler: String,
@@ -81,6 +99,21 @@ struct ToolRolesRecord {
     ranlib: String,
     strip: String,
     collector: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolRolesV2Record {
+    c: String,
+    cxx: String,
+    assembler: String,
+    linker: String,
+    archive: String,
+    ranlib: String,
+    strip: String,
+    collector: String,
+    nm: String,
+    objcopy: String,
 }
 
 impl ToolchainToolLayout {
@@ -96,38 +129,66 @@ impl ToolchainToolLayout {
         }
         let record: ToolchainToolLayoutRecord = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid toolchain tools contract: {error}"))?;
-        if record.schema != TOOLCHAIN_TOOLS_SCHEMA {
-            return Err(format!(
-                "unsupported toolchain tools schema '{}'",
-                record.schema
-            ));
-        }
-        if !matches!(record.compiler, ArosCompilerIdentity::Gnu { .. }) {
+        let (schema_version, compiler, target_triple, tools) = match record {
+            ToolchainToolLayoutRecord::V1 {
+                compiler,
+                target_triple,
+                tools,
+            } => (
+                ToolchainToolsSchemaVersion::V1,
+                compiler,
+                target_triple,
+                ToolRoles {
+                    c: tools.c,
+                    cxx: tools.cxx,
+                    assembler: tools.assembler,
+                    linker: tools.linker,
+                    archive: tools.archive,
+                    ranlib: tools.ranlib,
+                    strip: tools.strip,
+                    collector: tools.collector,
+                    nm: None,
+                    objcopy: None,
+                },
+            ),
+            ToolchainToolLayoutRecord::V2 {
+                compiler,
+                target_triple,
+                tools,
+            } => (
+                ToolchainToolsSchemaVersion::V2,
+                compiler,
+                target_triple,
+                ToolRoles {
+                    c: tools.c,
+                    cxx: tools.cxx,
+                    assembler: tools.assembler,
+                    linker: tools.linker,
+                    archive: tools.archive,
+                    ranlib: tools.ranlib,
+                    strip: tools.strip,
+                    collector: tools.collector,
+                    nm: Some(tools.nm),
+                    objcopy: Some(tools.objcopy),
+                },
+            ),
+        };
+        if !matches!(compiler, ArosCompilerIdentity::Gnu { .. }) {
             return Err("toolchain tools contract requires a GNU compiler identity".into());
         }
-        record
-            .compiler
-            .validate_for_target(&record.target_triple)
+        compiler
+            .validate_for_target(&target_triple)
             .map_err(|error| format!("invalid GNU compiler target binding: {error}"))?;
 
-        let tools = ToolRoles {
-            c: record.tools.c,
-            cxx: record.tools.cxx,
-            assembler: record.tools.assembler,
-            linker: record.tools.linker,
-            archive: record.tools.archive,
-            ranlib: record.tools.ranlib,
-            strip: record.tools.strip,
-            collector: record.tools.collector,
-        };
         for (role, path) in tools.entries() {
             validate_tool_path(path)
                 .map_err(|error| format!("invalid {role} executable path: {error}"))?;
         }
 
         Ok(Self {
-            compiler: record.compiler,
-            target_triple: record.target_triple,
+            schema_version,
+            compiler,
+            target_triple,
             tools,
             sha256: sha256_bytes(bytes),
         })
@@ -190,6 +251,12 @@ impl ToolchainToolLayout {
         &self.tools
     }
 
+    /// Whether the contract declares the v2 `nm` and `objcopy` roles.
+    #[must_use]
+    pub const fn has_native_utilities(&self) -> bool {
+        matches!(self.schema_version, ToolchainToolsSchemaVersion::V2)
+    }
+
     /// SHA-256 digest of the exact parsed contract bytes.
     #[must_use]
     pub const fn sha256(&self) -> &Sha256Digest {
@@ -211,7 +278,7 @@ impl ToolchainToolLayout {
                 root.display()
             )
         })?;
-        let mut resolved = Vec::with_capacity(8);
+        let mut resolved = Vec::with_capacity(if self.has_native_utilities() { 10 } else { 8 });
         for (role, relative) in self.tools.entries() {
             let declared_path = root.join(relative);
             let target = declared_path.canonicalize().map_err(|error| {
@@ -364,34 +431,55 @@ mod tests {
     }
 
     fn paths(layout: &str) -> Value {
+        paths_for(layout, "riscv64")
+    }
+
+    fn paths_for(layout: &str, arch: &str) -> Value {
         if layout == "flat" {
             json!({
-                "c": "riscv64-aros-gcc",
-                "cxx": "riscv64-aros-g++",
-                "assembler": "riscv64-aros-as",
-                "linker": "riscv64-aros-ld",
-                "archive": "riscv64-aros-ar",
-                "ranlib": "riscv64-aros-ranlib",
-                "strip": "riscv64-aros-strip",
-                "collector": "riscv64-aros/bin/collect-aros"
+                "c": format!("{arch}-aros-gcc"),
+                "cxx": format!("{arch}-aros-g++"),
+                "assembler": format!("{arch}-aros-as"),
+                "linker": format!("{arch}-aros-ld"),
+                "archive": format!("{arch}-aros-ar"),
+                "ranlib": format!("{arch}-aros-ranlib"),
+                "strip": format!("{arch}-aros-strip"),
+                "collector": format!("{arch}-aros/bin/collect-aros")
             })
         } else {
             json!({
-                "c": "bin/riscv64-aros-gcc",
-                "cxx": "bin/riscv64-aros-g++",
-                "assembler": "bin/riscv64-aros-as",
-                "linker": "bin/riscv64-aros-ld",
-                "archive": "bin/riscv64-aros-ar",
-                "ranlib": "bin/riscv64-aros-ranlib",
-                "strip": "bin/riscv64-aros-strip",
-                "collector": "riscv64-aros/bin/collect-aros"
+                "c": format!("bin/{arch}-aros-gcc"),
+                "cxx": format!("bin/{arch}-aros-g++"),
+                "assembler": format!("bin/{arch}-aros-as"),
+                "linker": format!("bin/{arch}-aros-ld"),
+                "archive": format!("bin/{arch}-aros-ar"),
+                "ranlib": format!("bin/{arch}-aros-ranlib"),
+                "strip": format!("bin/{arch}-aros-strip"),
+                "collector": format!("{arch}-aros/bin/collect-aros")
             })
         }
     }
 
+    fn paths_v2(layout: &str, arch: &str) -> Value {
+        let mut tools = paths_for(layout, arch);
+        tools["nm"] = json!(format!("{arch}-aros-nm"));
+        tools["objcopy"] = json!(format!("{arch}-aros-objcopy"));
+        tools
+    }
+
     fn document(compiler: &ArosCompilerIdentity, triple: &str, tools: &Value) -> Vec<u8> {
         serde_json::to_vec(&json!({
-            "schema": TOOLCHAIN_TOOLS_SCHEMA,
+            "schema": "aros-toolchain-tools-v1",
+            "compiler": compiler,
+            "target_triple": triple,
+            "tools": tools
+        }))
+        .unwrap()
+    }
+
+    fn document_v2(compiler: &ArosCompilerIdentity, triple: &str, tools: &Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "schema": "aros-toolchain-tools-v2",
             "compiler": compiler,
             "target_triple": triple,
             "tools": tools
@@ -424,9 +512,62 @@ mod tests {
         .unwrap();
         rv32.validate_binding(&rv32_identity, "riscv-unknown-aros")
             .unwrap();
+        assert!(!rv32.has_native_utilities());
+        assert_eq!(
+            rv32.tools().entries().collect::<Vec<_>>(),
+            vec![
+                ("c", "riscv-aros-gcc"),
+                ("cxx", "riscv-aros-g++"),
+                ("assembler", "riscv-aros-as"),
+                ("linker", "riscv-aros-ld"),
+                ("archive", "riscv-aros-ar"),
+                ("ranlib", "riscv-aros-ranlib"),
+                ("strip", "riscv-aros-strip"),
+                ("collector", "riscv-aros/bin/collect-aros"),
+            ]
+        );
         let rv64 = parse_valid("bin", "lp64d", "riscv64-unknown-aros");
         rv64.validate_binding(&compiler("lp64d"), "riscv64-unknown-aros")
             .unwrap();
+        assert!(!rv64.has_native_utilities());
+        assert_eq!(rv64.tools().entries().count(), 8);
+    }
+
+    #[test]
+    fn parses_v2_rv32_and_rv64_layouts_with_native_utilities() {
+        for (abi, arch, triple) in [
+            ("ilp32d", "riscv32", "riscv-unknown-aros"),
+            ("lp64d", "riscv64", "riscv64-unknown-aros"),
+        ] {
+            let identity = compiler(abi);
+            let layout = ToolchainToolLayout::parse(&document_v2(
+                &identity,
+                triple,
+                &paths_v2("flat", arch),
+            ))
+            .unwrap();
+            layout.validate_binding(&identity, triple).unwrap();
+            assert!(layout.has_native_utilities());
+            let entries = layout
+                .tools()
+                .entries()
+                .map(|(role, path)| (role.to_owned(), path.to_owned()))
+                .collect::<Vec<_>>();
+            let expected = [
+                ("c", format!("{arch}-aros-gcc")),
+                ("cxx", format!("{arch}-aros-g++")),
+                ("assembler", format!("{arch}-aros-as")),
+                ("linker", format!("{arch}-aros-ld")),
+                ("archive", format!("{arch}-aros-ar")),
+                ("ranlib", format!("{arch}-aros-ranlib")),
+                ("strip", format!("{arch}-aros-strip")),
+                ("collector", format!("{arch}-aros/bin/collect-aros")),
+                ("nm", format!("{arch}-aros-nm")),
+                ("objcopy", format!("{arch}-aros-objcopy")),
+            ]
+            .map(|(role, path)| (role.to_owned(), path));
+            assert_eq!(entries, expected);
+        }
     }
 
     #[test]
@@ -437,7 +578,13 @@ mod tests {
         value["boards"] = json!(["rpi3", "rpi5"]);
         assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
         value = serde_json::from_slice(&valid).unwrap();
-        value["schema"] = json!("aros-toolchain-tools-v2");
+        value["tools"]["nm"] = json!("riscv64-aros-nm");
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["tools"].as_object_mut().unwrap().remove("nm");
+        value["tools"]["objcopy"] = json!("riscv64-aros-objcopy");
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        value = serde_json::from_slice(&valid).unwrap();
+        value["schema"] = json!("aros-toolchain-tools-v3");
         assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
 
         let duplicate_schema = String::from_utf8(valid.clone()).unwrap().replacen(
@@ -458,6 +605,63 @@ mod tests {
         assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
         value = serde_json::from_slice(&valid).unwrap();
         value["tools"].as_object_mut().unwrap().remove("strip");
+        assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_null_duplicate_unknown_and_unsafe_v2_native_roles() {
+        let identity = compiler("lp64d");
+        let valid = document_v2(
+            &identity,
+            "riscv64-unknown-aros",
+            &paths_v2("flat", "riscv64"),
+        );
+        for role in ["nm", "objcopy"] {
+            let mut value: Value = serde_json::from_slice(&valid).unwrap();
+            value["tools"].as_object_mut().unwrap().remove(role);
+            assert!(
+                ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "accepted missing v2 role {role}"
+            );
+
+            value = serde_json::from_slice(&valid).unwrap();
+            value["tools"][role] = Value::Null;
+            assert!(
+                ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "accepted null v2 role {role}"
+            );
+        }
+
+        let valid_text = String::from_utf8(valid.clone()).unwrap();
+        for role in ["nm", "objcopy"] {
+            let path = format!("riscv64-aros-{role}");
+            let duplicate = valid_text.replacen(
+                &format!("\"{role}\":\"{path}\""),
+                &format!("\"{role}\":\"{path}\",\"{role}\":\"{path}\""),
+                1,
+            );
+            assert!(
+                ToolchainToolLayout::parse(duplicate.as_bytes()).is_err(),
+                "accepted duplicate v2 role {role}"
+            );
+
+            for unsafe_path in ["../tool", "/usr/bin/tool", "bin/-tool"] {
+                let mut tool_paths = paths_v2("flat", "riscv64");
+                tool_paths[role] = json!(unsafe_path);
+                assert!(
+                    ToolchainToolLayout::parse(&document_v2(
+                        &identity,
+                        "riscv64-unknown-aros",
+                        &tool_paths,
+                    ))
+                    .is_err(),
+                    "accepted unsafe {role} path {unsafe_path:?}"
+                );
+            }
+        }
+
+        let mut value: Value = serde_json::from_slice(&valid).unwrap();
+        value["tools"]["objdump"] = json!("riscv64-aros-objdump");
         assert!(ToolchainToolLayout::parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
@@ -555,17 +759,34 @@ mod tests {
     }
 
     #[test]
-    fn raw_document_digest_survives_clone_and_distinguishes_whitespace() {
+    fn raw_document_digest_survives_clone_and_distinguishes_substitution_and_whitespace() {
         let identity = compiler("lp64d");
-        let bytes = document(&identity, "riscv64-unknown-aros", &paths("flat"));
+        let bytes = document_v2(
+            &identity,
+            "riscv64-unknown-aros",
+            &paths_v2("flat", "riscv64"),
+        );
         let layout = ToolchainToolLayout::parse(&bytes).unwrap();
-        assert_eq!(layout.sha256(), &sha256_bytes(&bytes));
-        assert_eq!(layout.clone().sha256(), layout.sha256());
+        let legacy_bytes = document(&identity, "riscv64-unknown-aros", &paths("flat"));
+        for raw in [&legacy_bytes, &bytes] {
+            let parsed = ToolchainToolLayout::parse(raw).unwrap();
+            assert_eq!(parsed.sha256(), &sha256_bytes(raw));
+            assert_eq!(parsed.clone().sha256(), parsed.sha256());
+            let mut whitespace_variant = b" \n".to_vec();
+            whitespace_variant.extend_from_slice(raw);
+            let reformatted = ToolchainToolLayout::parse(&whitespace_variant).unwrap();
+            assert_ne!(reformatted.sha256(), parsed.sha256());
+        }
 
-        let mut whitespace_variant = b" \n".to_vec();
-        whitespace_variant.extend_from_slice(&bytes);
-        let reformatted = ToolchainToolLayout::parse(&whitespace_variant).unwrap();
-        assert_ne!(reformatted.sha256(), layout.sha256());
+        let mut substituted_paths = paths_v2("flat", "riscv64");
+        substituted_paths["nm"] = json!("riscv64-aros-nm-substituted");
+        let substituted = ToolchainToolLayout::parse(&document_v2(
+            &identity,
+            "riscv64-unknown-aros",
+            &substituted_paths,
+        ))
+        .unwrap();
+        assert_ne!(substituted.sha256(), layout.sha256());
     }
 
     fn create_executable(root: &Path, path: &str) {
@@ -637,6 +858,51 @@ mod tests {
             fs::Permissions::from_mode(0o644),
         )
         .unwrap();
+        assert!(layout.resolve_tools(root.path()).is_err());
+    }
+
+    #[test]
+    fn resolves_v2_native_utility_aliases_and_rejects_unsafe_targets() {
+        let identity = compiler("lp64d");
+        let layout = ToolchainToolLayout::parse(&document_v2(
+            &identity,
+            "riscv64-unknown-aros",
+            &paths_v2("flat", "riscv64"),
+        ))
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        create_tools(root.path(), layout.tools());
+
+        let nm = root.path().join("riscv64-aros-nm");
+        fs::remove_file(&nm).unwrap();
+        let nm_target = root.path().join("libexec/nm-driver");
+        create_executable(root.path(), "libexec/nm-driver");
+        symlink(&nm_target, &nm).unwrap();
+
+        let objcopy = root.path().join("riscv64-aros-objcopy");
+        fs::remove_file(&objcopy).unwrap();
+        let objcopy_target = root.path().join("libexec/objcopy-driver");
+        create_executable(root.path(), "libexec/objcopy-driver");
+        symlink(&objcopy_target, &objcopy).unwrap();
+
+        let resolved = layout.resolve_tools(root.path()).unwrap();
+        assert_eq!(resolved.len(), 10);
+        assert_eq!(resolved[8], ("nm", nm.clone()));
+        assert_eq!(resolved[9], ("objcopy", objcopy.clone()));
+
+        let outside = tempfile::tempdir().unwrap();
+        create_executable(outside.path(), "nm-driver");
+        fs::remove_file(&nm).unwrap();
+        symlink(outside.path().join("nm-driver"), &nm).unwrap();
+        assert!(layout.resolve_tools(root.path()).is_err());
+
+        fs::remove_file(&nm).unwrap();
+        create_executable(root.path(), "riscv64-aros-nm");
+        fs::remove_file(&objcopy).unwrap();
+        let non_executable = root.path().join("libexec/objcopy-noexec");
+        fs::write(&non_executable, b"not executable").unwrap();
+        fs::set_permissions(&non_executable, fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&non_executable, &objcopy).unwrap();
         assert!(layout.resolve_tools(root.path()).is_err());
     }
 

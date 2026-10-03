@@ -60,6 +60,14 @@ payload root; flat GNU prefixes and nested target-tool directories are both
 valid. Internal executable aliases retain their declared invocation name.
 Missing roles, non-executable files and links outside the payload are rejected.
 
+The closed `aros-toolchain-tools-v2` extension requires the same eight roles
+plus `nm` and `objcopy` for native symbol inspection and binary image steps.
+Version 1 remains readable with exactly its original role set; it rejects the
+additional fields. Version 2 does not discover utilities by a sibling name or
+host search path. All ten declared executables receive the same inventory,
+confinement and alias checks. Neither layout format declares compiler-runtime
+headers or archives, or substitutes for the source-produced Developer sysroot.
+
 Writer, archive read-back, extracted-tree and consumer checks bind the layout
 to the compiler identity and inventory. A GNU release lock must require both
 the layout document and every declared role path. Consumers require explicit
