@@ -5,6 +5,14 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Mutex;
+
+// A child created by another test inherits this process's writable executable
+// descriptors until exec closes them. Even after the copying thread closes its
+// descriptor, that inherited writer can make Linux reject exec with ETXTBSY.
+// Protect executable publication and spawning with the same lock; unique paths
+// and O_CLOEXEC alone do not prevent this cross-test descriptor inheritance.
+static EXECUTABLE_PUBLICATION: Mutex<()> = Mutex::new(());
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -58,11 +66,13 @@ fn quote(path: &Path) -> String {
 }
 
 fn make_executable(path: &Path, body: &str) {
+    let _publication = EXECUTABLE_PUBLICATION.lock().unwrap();
     fs::write(path, body).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn copy_driver(directory: &Path, filename: &str) -> PathBuf {
+    let _publication = EXECUTABLE_PUBLICATION.lock().unwrap();
     let destination = directory.join(filename);
     fs::copy(env!("CARGO_BIN_EXE_aros-collect"), &destination).unwrap();
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
@@ -116,6 +126,7 @@ fn run(driver: &Path, path: &Path, output: &Path) -> Output {
 }
 
 fn run_args(driver: &Path, path: &Path, args: &[&str], current_dir: Option<&Path>) -> Output {
+    let _publication = EXECUTABLE_PUBLICATION.lock().unwrap();
     let mut command = Command::new(driver);
     command.args(args).env_clear().env("PATH", path);
     if let Some(current_dir) = current_dir {
