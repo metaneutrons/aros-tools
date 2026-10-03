@@ -2,9 +2,9 @@
 //!
 //! This command is deliberately hidden from the public CLI. The native
 //! lifecycle passes it to `make` through the controlled `FETCH` variable. It
-//! authorizes one lock-selected cache object, durably records that use, then
-//! invokes the unchanged source-owned fetch helper. GNU suffix lists are
-//! narrowed to the unique lock-selected archive; no format fallback reaches
+//! authorizes one lock-selected cache object, invokes the unchanged source-owned
+//! fetch helper offline, revalidates the payload, then durably records its use.
+//! GNU suffix lists are narrowed to the unique lock-selected archive; no format fallback reaches
 //! that helper. The bridge never downloads or invokes Python.
 
 use std::env;
