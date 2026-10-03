@@ -120,10 +120,16 @@ committed snapshots, it rebinds the producer declaration, checks exact cached
 sources, prepares the locked Python and Cargo environments, then invokes AROS
 `configure` and its `crosstools-release` target. The only MetaMake download
 entry is a hidden Rust bridge in the same `aros` binary; it resolves a declared
-cache payload, records it in the durable source-use ledger, and only then calls
-the unchanged upstream helper. The lifecycle builds the declared vendored
-`aros-collect`, installs the collector aliases, removes producer-only LLVM
-configuration inputs and writes an ordered canonical receipt chain. Child
+cache payload, seals a private verified copy and calls the unchanged upstream
+helper with mandatory offline/checksum policy. It records source use in the
+durable ledger only after successful helper execution and revalidation of the
+original cache and snapshot. The lifecycle builds the declared vendored
+`aros-collect`, installs family-selected collector invocations and writes an
+ordered canonical receipt chain. LLVM removes its producer-only configuration
+inputs; GNU replaces the source-owned tuple and prefixed collectors by atomic
+rename, installs adjacent driver manifests and a ten-role
+`aros-toolchain-tools-v2` layout, and measures all five collector/contract files
+in its collector and publication receipts. Child
 processes use the one whole-operation deadline and process-group cancellation;
 phase logs and all owned material are retained on failure. It has no package,
 publication, attestation or release authority.
@@ -147,13 +153,32 @@ The MetaMake fetch bridge must use an implemented private entry point of the
 same executable or an equivalent in-process integration; its quoting/protocol
 is an M2 design gate, not an extra user-facing command promised here.
 For the qualified LLVM-11 closure each upstream `%fetch` selects one `tar.xz`
-candidate. The bridge therefore rejects fallback suffix lists before the
-unchanged upstream helper can choose a cache object; a future multi-format
-source contract requires a reviewed lock/schema extension and native update.
+candidate. The bridge retains that single-format LLVM contract. GNU source
+rules may declare a bounded list of distinct safe suffixes. Exactly one must
+match the selected source lock; the bridge verifies its bytes and narrows the
+list to that suffix before invoking the unchanged helper. Missing, ambiguous
+or corrupt matches fail; an earlier ambient cache object cannot win by list order.
+GNU rules may request a bounded cache subdirectory for their `.fetched` stamps.
+The bridge verifies the uniquely selected flat-cache payload before creating
+that directory through no-follow traversal; it never selects another payload
+from that namespace. For both families the helper consumes a private exact-name
+copy of the retained verified snapshot, with `AROS_FETCH_OFFLINE=1`, mandatory
+checksums and the lock-selected SHA-256. The original cache and snapshot are
+revalidated after the helper succeeds; only then is source use recorded.
 The selected Rust vendor tree must match the exact external closure of the
 tools snapshot's `Cargo.lock`, including registry package checksums. A private
 host-Python environment records its interpreter and every lock-verified package
-identity; it never inherits site packages or invokes `pip`.
+identity; it never inherits site packages or invokes `pip`. It requires Mako
+and MarkupSafe. GNU admits an optional explicitly locked `yaml` import for
+source trees that need PyYAML; LLVM retains its exact two-package contract.
+The private import probe validates the version
+and origin of every declared module, not only the mandatory pair.
+
+Native GNU execution selects both GCC and binutils versions from the bound
+lock and uses the observed host C/C++ invocation paths. Its preflight rejects
+GNU Make older than 4.0 and observes bison, flex, patch, pkg-config and Ninja.
+These are local producer contracts, not evidence that the selected source
+runtime, all native hosts, GNU CMake consumer or a board has been qualified.
 
 ## 3. Versioned JSON documents
 

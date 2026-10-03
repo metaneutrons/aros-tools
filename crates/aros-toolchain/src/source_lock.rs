@@ -408,8 +408,10 @@ fn validate(record: &Record) -> Result<(), ContractError> {
                 CompilerFamily::Llvm => "tools/crosstools/llvm/",
                 CompilerFamily::Gnu => "tools/crosstools/gnu/",
             };
+            let source_owned_dependency = record.schema == Schema::V3
+                && source.purpose == SourcePurpose::TargetBuildDependency;
             if !safe_relative_path(patch)
-                || !patch.starts_with(patch_namespace)
+                || (!source_owned_dependency && !patch.starts_with(patch_namespace))
                 || !patch.ends_with("-aros.diff")
                 || !patches.insert(patch)
             {

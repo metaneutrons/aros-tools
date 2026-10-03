@@ -89,9 +89,13 @@ identity-substitution rejection. They are deliberately not compiler binaries.
 Real compile/link, fresh compiler/runtime production, self-contained host
 relocation and target-runtime verification remain separate requirements.
 
-The native GNU CLI producer, compatibility runner and release-index rollout
-are not complete. Managed GNU installation accepts a bound schema-2 payload;
-it does not create one or supply a missing compiler release. Schema-1 release
-assembly rejects GNU matrices instead of silently publishing LLVM metadata.
-No new compiler release, Developer SDK, board boot or device deployment follows
-from accepting schema-2 metadata.
+The native GNU CLI producer builds local candidates through the bound lifecycle;
+package and verify-package produce and check schema-2 artifacts. The
+[native GNU evidence](riscv-native-gnu-probes-20261003.md) records the real
+one-host build, package and extracted-prefix relocation, their exact identities
+and the failed optional strict-prefix scan. These local results do not qualify
+a compiler-release matrix or the release-index rollout. Managed GNU installation
+accepts a bound schema-2 payload; it does not supply a missing compiler release.
+Schema-1 release assembly rejects GNU matrices instead of silently publishing
+LLVM metadata. No complete Developer SDK, board boot or device deployment
+follows from accepting schema-2 metadata.

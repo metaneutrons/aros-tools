@@ -152,6 +152,11 @@ fn run_owned(
     // source between preflight and the actual `%fetch` invocation.
     let source_cache = open_prepared_cache(&request.cache_dir, &cache_request)?;
     let cache = source_cache.verification();
+    let tool_directories = crate::native_make::tool_directories(
+        bound.source_lock().family(),
+        &host,
+        lifecycle.work_root(),
+    )?;
     let environment = ProducerEnvironment::prepare(
         &ReproducibilityRoots {
             source: source.root().to_owned(),
@@ -160,7 +165,7 @@ fn run_owned(
             work: lifecycle.work_root().to_owned(),
             source_cache: request.cache_dir.clone(),
         },
-        &host.tool_directories(),
+        &tool_directories,
         recipe.source_date_epoch(),
         request.jobs,
     )?;
@@ -239,11 +244,10 @@ fn run_owned(
             "--target={}",
             bound.selected_profile().configure_target()
         ))
-        .arg("--with-toolchain=llvm")
-        .arg(format!(
-            "--with-llvm-version={}",
-            bound.source_lock().version()
-        ))
+        .args(crate::native_family::configure_arguments(
+            bound.source_lock(),
+            bound.selected_profile(),
+        )?)
         .arg("--enable-toolchain-release")
         .arg(format!(
             "--with-portssources={}",
@@ -254,6 +258,11 @@ fn run_owned(
             prefix.display()
         ));
     apply_child_environment(&mut configure, &environment, &python, &lifecycle);
+    if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
+        configure
+            .env("CC", host_tool(&host, "cc")?)
+            .env("CXX", host_tool(&host, "c++")?);
+    }
     run_phase(
         "configure",
         &mut configure,
@@ -287,6 +296,12 @@ fn run_owned(
         .arg("AROS_TOOLCHAIN_DEFAULT_SYSROOT=")
         .arg(format!("FETCH={fetch}"));
     apply_child_environment(&mut compiler, &environment, &python, &lifecycle);
+    if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
+        // Configure has already bound the host prefix maps in HOST_*FLAGS.
+        // Importing CFLAGS/CXXFLAGS into make retains their export attribute:
+        // source-owned target assignments then leak ISA flags into host tools.
+        compiler.env_remove("CFLAGS").env_remove("CXXFLAGS");
+    }
     compiler
         .env(
             "AROS_TOOLCHAIN_FETCH_LOCK",
@@ -362,10 +377,8 @@ fn run_owned(
         deadline,
         cancellation,
     )?;
-    install_collector(&lifecycle.rust_target, &prefix, &request.preset)?;
-    remove_producer_only_llvm_inputs(&prefix)?;
-    let collector_path = prefix.join("bin/aros-collect");
-    let collector_output = measure_file(&collector_path, "toolchain/bin/aros-collect")?;
+    install_family_collector(&lifecycle.rust_target, &prefix, &bound)?;
+    let collector_outputs = measure_collectors(&prefix, bound.selected_profile())?;
     let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;
     let collector_receipt = persist_receipt(
         &lifecycle,
@@ -373,15 +386,13 @@ fn run_owned(
         &plan.identity,
         &collector_input,
         &prefix,
-        std::slice::from_ref(&collector_output),
+        &collector_outputs,
         Some(&compiler_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
     publish_candidate(&prefix, &lifecycle.published_prefix())?;
-    let published_collector = measure_file(
-        &lifecycle.published_prefix().join("bin/aros-collect"),
-        "toolchain/bin/aros-collect",
-    )?;
+    let published_collectors =
+        measure_collectors(&lifecycle.published_prefix(), bound.selected_profile())?;
     let publish_input = phase_input("publish", &execution_context, Some(&collector_receipt))?;
     let publish_receipt = persist_publish_receipt(
         &lifecycle,
@@ -389,7 +400,7 @@ fn run_owned(
         &plan.identity,
         &publish_input,
         &lifecycle.published_prefix(),
-        std::slice::from_ref(&published_collector),
+        &published_collectors,
         Some(&collector_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
@@ -400,7 +411,7 @@ fn run_owned(
         operation: "build",
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
-        outputs: vec![published_collector],
+        outputs: published_collectors,
         evidence: vec![
             receipt_evidence("preflight", preflight_receipt),
             receipt_evidence("environment", environment_receipt),
@@ -565,12 +576,14 @@ fn resume_after_compiler(
     )?;
     let prefix = lifecycle.staging_prefix();
     require_real_directory(&prefix, "retained native candidate prefix")?;
-    require_real_directory(&prefix.join("bin"), "retained compiler bin directory")?;
-    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
-        reject_existing_path(
-            &prefix.join("bin").join(name),
-            "retained collector destination",
-        )?;
+    if bound.source_lock().family() == crate::source_lock::CompilerFamily::Llvm {
+        require_real_directory(&prefix.join("bin"), "retained compiler bin directory")?;
+        for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+            reject_existing_path(
+                &prefix.join("bin").join(name),
+                "retained collector destination",
+            )?;
+        }
     }
     let cargo_program = host_tool(&host, "cargo")?;
     let rust_target = lifecycle.fresh_resume_rust_target()?;
@@ -616,12 +629,8 @@ fn resume_after_compiler(
         deadline,
         cancellation,
     )?;
-    install_collector(&rust_target, &prefix, &request.preset)?;
-    remove_producer_only_llvm_inputs(&prefix)?;
-    let collector_output = measure_file(
-        &prefix.join("bin/aros-collect"),
-        "toolchain/bin/aros-collect",
-    )?;
+    install_family_collector(&rust_target, &prefix, &bound)?;
+    let collector_outputs = measure_collectors(&prefix, bound.selected_profile())?;
     let collector_input = phase_input("collector", &execution_context, Some(&compiler_receipt))?;
     let collector_receipt = persist_receipt(
         &lifecycle,
@@ -629,15 +638,13 @@ fn resume_after_compiler(
         &plan.identity,
         &collector_input,
         &prefix,
-        std::slice::from_ref(&collector_output),
+        &collector_outputs,
         Some(&compiler_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
     publish_candidate(&prefix, &lifecycle.published_prefix())?;
-    let published_collector = measure_file(
-        &lifecycle.published_prefix().join("bin/aros-collect"),
-        "toolchain/bin/aros-collect",
-    )?;
+    let published_collectors =
+        measure_collectors(&lifecycle.published_prefix(), bound.selected_profile())?;
     let publish_input = phase_input("publish", &execution_context, Some(&collector_receipt))?;
     let publish_receipt = persist_publish_receipt(
         &lifecycle,
@@ -645,7 +652,7 @@ fn resume_after_compiler(
         &plan.identity,
         &publish_input,
         &lifecycle.published_prefix(),
-        std::slice::from_ref(&published_collector),
+        &published_collectors,
         Some(&collector_receipt),
     )?;
     run_dirs.revalidate(cancellation)?;
@@ -655,7 +662,7 @@ fn resume_after_compiler(
         operation: "build",
         identity: plan.identity,
         output_root: lifecycle.output_root().to_owned(),
-        outputs: vec![published_collector],
+        outputs: published_collectors,
         evidence: vec![
             receipt_evidence("preflight", preflight_receipt),
             receipt_evidence("environment", environment_receipt),
@@ -1190,6 +1197,38 @@ fn shell_fetch_command(bridge: &Path) -> Result<String, ContractError> {
         "'{}' toolchain __metamake-fetch",
         bridge.replace('\'', "'\\\"'\\\"'")
     ))
+}
+
+fn measure_collectors(
+    prefix: &Path,
+    profile: &crate::profiles::Profile,
+) -> Result<Vec<Output>, ContractError> {
+    crate::native_family::collector_outputs(profile)
+        .iter()
+        .map(|path| measure_file(&prefix.join(path), &format!("toolchain/{path}")))
+        .collect()
+}
+
+fn install_family_collector(
+    target: &Path,
+    prefix: &Path,
+    bound: &crate::native_declaration::NativeInputContract,
+) -> Result<(), ContractError> {
+    match bound.source_lock().family() {
+        crate::source_lock::CompilerFamily::Llvm => {
+            install_collector(target, prefix, bound.selected_profile().name())?;
+            remove_producer_only_llvm_inputs(prefix)
+        }
+        crate::source_lock::CompilerFamily::Gnu => {
+            crate::native_gnu_collector::install(
+                target,
+                prefix,
+                bound.source_lock(),
+                bound.selected_profile(),
+            )?;
+            Ok(())
+        }
+    }
 }
 
 fn install_collector(target: &Path, prefix: &Path, profile: &str) -> Result<(), ContractError> {

@@ -23,8 +23,9 @@ The accepted TCP-M2 library boundary owns closed
 `aros-toolchain-source-lock-v2` parsing, recipe/lock patch-closure binding,
 no-follow verification of every direct source-cache payload through
 `aros-fetch`, exact source-use ledgers and preparation of a fresh private host
-Python import tree.  The environment accepts only the source-contract's locked
-Mako and MarkupSafe source archives, never invokes `pip`, and proves module
+Python import tree. The environment requires the source-contract's locked Mako
+and MarkupSafe source archives and admits an optional locked `yaml` import for
+source trees that require PyYAML. It never invokes `pip`, and proves every module's
 version and private import origin with the selected host Python 3 interpreter.
 It retains the interpreter plus lock-verified package filename/hash/version/size
 observations for a later receipt rather than treating host site packages as proof.
@@ -32,9 +33,12 @@ The Cargo
 vendor input is copied through no-follow descriptors into a fresh private tree,
 validated against every `.cargo-checksum.json` and the selected tools
 `Cargo.lock` closure, and supplied only by a generated offline Cargo home.
-The private MetaMake adapter accepts one source-lock archive
-from an explicitly identical cache root, records it once in a durable ledger,
-and rejects every other candidate before an upstream fetch script could run.
+The private MetaMake adapter selects one source-lock archive from the explicit
+verified cache. GNU suffix lists resolve to one locked format; bounded cache
+subdirectories are stamp namespaces, not alternate payload sources. The helper
+consumes a private verified copy under mandatory offline/checksum policy.
+Source use is recorded once in the durable ledger only after successful helper
+execution and cache/snapshot revalidation.
 The environment builder clears inherited variables, retains only explicitly
 selected host tool directories plus an explicit POSIX utility baseline, and
 applies deterministic locale/time/archive/CMake
@@ -199,8 +203,14 @@ explicit jobs/deadline. It has no online mode. It invokes unchanged AROS `config
 source-owned `crosstools-release` target and a hidden Rust fetch bridge that
 serves only declared cache payloads, then builds the exact vendored
 `aros-collect`. Every phase writes a canonical self-verifying receipt and the
-candidate removes producer-only LLVM configuration inputs before returning a
-measured collector. There is no legacy execution adapter. No extra executable
+candidate selects configure arguments and collector layout from its bound
+compiler family. LLVM removes producer-only configuration inputs; GNU selects
+its locked GCC/binutils versions, atomically replaces both legacy collector
+invocations and measures the adjacent manifests plus ten-role tool layout.
+GNU's source-declared format lists are narrowed to one verified lock entry;
+they cannot select an ambient archive or transport fallback. GNU execution
+requires GNU Make 4.0 or newer and its additional measured host prerequisites.
+There is no legacy execution adapter. No extra executable
 is exposed. `--resume-from compiler` is the sole local recovery boundary: it
 remeasures the retained snapshots and
 compiler output, revalidates every predecessor receipt and starts the collector

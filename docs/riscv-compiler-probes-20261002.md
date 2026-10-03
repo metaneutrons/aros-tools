@@ -4,6 +4,11 @@ This is a partial RV2 measurement record, not milestone acceptance. Requirements
 remain in the [reviewed plan](riscv-board-integration-plan.md#rv2-compiler-and-producer-contracts);
 [issue #321](https://github.com/metaneutrons/aros-tools/issues/321) owns execution status.
 
+The [2026-10-03 native GNU report](riscv-native-gnu-probes-20261003.md)
+records later source-bound RV64 production, packaging and extracted relocation.
+The limitations below describe the retained reference at this report's date;
+they are not substituted for the later candidate's measured evidence.
+
 ## Inputs and scope
 
 Host: Darwin/ARM64. Reference port source:

@@ -18,6 +18,10 @@ actionlint, ShellCheck, `jq`, GnuPG (`gpg` and `gpgv`), `dpkg-deb`, `gzip`,
 `tar`, `ar`, curl and a SHA-256 implementation as well. The quality gate checks
 these prerequisites before starting an expensive build; versions live in
 `contracts/development-runtimes-v1.toml`, not in this prose.
+Native GNU lifecycle fixtures also require GNU Make 4.0 or newer, bison, flex,
+patch and pkg-config. On macOS, Homebrew's `make` formula provides `gmake`;
+Apple's Make 3.81 is rejected. CI installs these test prerequisites explicitly
+rather than relying on a particular runner image.
 Source-contract tests need the immutable AROS-NX revision named in
 `contracts/aros-source-v1.toml`; do not substitute a moving branch or infer a
 neighboring checkout.

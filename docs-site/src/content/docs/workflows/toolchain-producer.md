@@ -15,15 +15,14 @@ checkouts and absent work/output leaves.
 
 ## What you need
 
-The native CLI build currently supports LLVM only. GNU
-source-lock v3 and profiles v2 documents bind cache, recipe, compiler family
-and explicit RISC-V ISA/ABI expectations; their families must agree. They
-cannot yet execute a native GNU producer. Development CLI package and
-verify-package stages accept already-built GNU candidates with a schema-2
-manifest and an inventory-bound executable layout. That is not qualification
-of a fresh GNU compiler build. RISC-V
-compiler probes are development evidence, not an available compiler release
-or board-support claim.
+The native lifecycle selects LLVM or GNU from the bound source lock and
+profile. GNU uses source-lock v3, profiles v2 and explicit RISC-V ISA/ABI
+contracts; all selected identities must agree. It selects the locked GCC and
+binutils versions and installs the Rust collector with measured GNU tool roles.
+Package and verify-package accept these candidates with a schema-2 manifest
+and an inventory-bound executable layout. These are local development paths,
+not a published RISC-V compiler, native board-build qualification or boot claim.
+The examples below retain the existing PC/LLVM selection.
 
 - A clean AROS source checkout, an `aros-toolchains` producer checkout, and an
   `aros-tools` checkout at the commits selected by the producer declaration.
@@ -37,6 +36,17 @@ The [prerequisites](/aros-tools/getting-started/prerequisites/#local-native-prod
 page records measured storage from the current PC proof. Treat those values as
 an observed floor, not a reservation guarantee.
 
+GNU candidates additionally require GNU Make 4.0 or newer, bison, flex, patch,
+pkg-config and Ninja. On macOS select `gmake`; Apple's Make 3.81 cannot execute
+the source's generated rules. Mako and MarkupSafe are mandatory locked Python
+imports. A selected source that also needs PyYAML must declare its `yaml` import
+and exact archive/version in the lock; ambient Python packages are not accepted.
+GCC's format lists are narrowed to exactly one hash-verified lock entry before
+the source-owned fetch helper runs, never used as transport fallbacks. GNU
+cache subdirectories are stamp namespaces, not alternative source locations.
+Both compiler families hand the helper a private verified source copy and
+enforce offline checksum validation. LLVM keeps its two-package Python closure.
+
 ## Prepare exact inputs
 
 Set paths outside all three checkouts. The example names only locations; obtain
@@ -47,7 +57,8 @@ moving branch name.
 export AROS_SOURCE=/absolute/path/to/AROS-NX
 export PRODUCER=/absolute/path/to/aros-toolchains
 export TOOLS=/absolute/path/to/aros-tools
-export AROS="$TOOLS/target/release/aros"
+export TOOLS_TARGET=/absolute/path/to/producer-tools-target
+export AROS="$TOOLS_TARGET/release/aros"
 export CACHE=/absolute/path/to/producer-cache
 export WORK=/absolute/path/to/pc-candidate-work
 export OUTPUT=/absolute/path/to/pc-candidate-output
@@ -55,15 +66,17 @@ export RECIPE=/absolute/path/to/pc-candidate.recipe.json
 
 (
   cd "$TOOLS"
-  cargo build --locked --release -p aros-cli
+  cargo build --locked --release -p aros-cli --target-dir "$TOOLS_TARGET"
 )
 git -C "$AROS_SOURCE" status --short
 git -C "$PRODUCER" status --short
 git -C "$TOOLS" status --short
 ```
 
-Each status command must print nothing. Do not place `CACHE`, `WORK`, `OUTPUT`,
-or `RECIPE` below one of the checked-out roots.
+Each status command must print nothing. Do not place `TOOLS_TARGET`, `CACHE`,
+`WORK`, `OUTPUT`, or `RECIPE` below one of the checked-out roots. The native
+input audit also rejects ignored build artifacts; `git status --short` alone
+does not prove a clean raw checkout.
 
 ## Bootstrap and verify the cache
 
@@ -110,14 +123,15 @@ repair a missing generation during an offline build; use `cache cargo fetch
 
 ## Construct the recipe and inspect readiness
 
-The source lock and profile paths are producer-root-relative inputs. Recipe
-creation never replaces an existing file.
+Select source lock and profile files inside the producer checkout using absolute
+paths. The recipe records their producer-relative identities. Recipe creation
+never replaces an existing file.
 
 ```sh
 "$AROS" toolchain producer recipe \
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
-  --source-lock toolchains/llvm-11.0.0.sources.json \
-  --profiles toolchains/profiles-v1.json --output "$RECIPE" --format json
+  --source-lock "$PRODUCER/toolchains/llvm-11.0.0.sources.json" \
+  --profiles "$PRODUCER/toolchains/profiles-v1.json" --output "$RECIPE" --format json
 
 "$AROS" toolchain plan --preset pc-x86_64 --recipe "$RECIPE" \
   --source-dir "$AROS_SOURCE" --producer-dir "$PRODUCER" --tools-dir "$TOOLS" \
@@ -145,8 +159,24 @@ cd "$AROS_SOURCE"
 
 The result and its six lifecycle receipts bind the source, producer, tools,
 executor, host, target, and cache inputs. The prefix may be used explicitly by
-an AROS build with `--toolchain-dir`, but remains local-only. It has no release
-provenance and cannot be promoted by copying it into a consumer lock.
+an AROS build with `--toolchain-dir` where its compiler family is supported by
+that consumer; producer acceptance alone does not qualify a native GNU board
+build. It remains local-only, has no release provenance, and cannot be promoted
+by copying it into a consumer lock.
+
+For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
+The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
+owns the target ISA flags, which must not reach host-built Binutils or GCC.
+LLVM builds retain their existing compiler environment.
+GNU configure and MetaMake also resolve recursive `make` through a private
+alias to the exact preflight-selected GNU Make, rather than a second executable
+found elsewhere on the host PATH.
+
+The v3 source lock can declare source-owned patches for target build
+dependencies outside the compiler directory. Recipe creation reads each patch
+from the exact clean source commit and binds its SHA-256; missing, unsafe or
+duplicate paths and an incomplete recipe patch set are rejected. Compiler
+component patches remain restricted to their selected family directory.
 
 ## Failure and recovery boundary
 

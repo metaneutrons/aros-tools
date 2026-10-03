@@ -303,3 +303,50 @@ fn rejects_a_recipe_with_a_different_patch_closure() {
     let recipe = recipe(&patches);
     assert!(parsed.verify_recipe_patches(&recipe).is_err());
 }
+
+#[test]
+fn v3_binds_source_owned_dependency_patches_without_a_compiler_namespace() {
+    for mut document in [gnu_lock(), v3_llvm_lock()] {
+        let dependency = json!({
+            "component": "fixture-runtime", "version": "1.0",
+            "purpose": "target-build-dependency",
+            "patch": "workbench/libs/fixture-runtime/1.0-aros.diff",
+            "filename": "fixture-runtime.tar.gz", "url": "https://example.invalid/runtime.tar.gz",
+            "sha256": "e".repeat(64), "size": 7
+        });
+        document["sources"].as_array_mut().unwrap().push(dependency);
+        let parsed = SourceLock::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        let mut patches = parsed
+            .source_patch_paths()
+            .map(|path| json!({"path": path, "sha256": "f".repeat(64)}))
+            .collect::<Vec<_>>();
+        patches.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        parsed
+            .verify_recipe_patches(&recipe(&json!(patches)))
+            .unwrap();
+        let mut missing = patches;
+        missing.pop();
+        assert!(parsed
+            .verify_recipe_patches(&recipe(&json!(missing)))
+            .is_err());
+
+        let index = document["sources"].as_array().unwrap().len() - 1;
+        for invalid in [
+            "../outside-aros.diff",
+            "/outside-aros.diff",
+            "workbench//bad-aros.diff",
+            "workbench/plain.diff",
+        ] {
+            let mut wrong = document.clone();
+            wrong["sources"][index]["patch"] = json!(invalid);
+            assert!(SourceLock::parse(&serde_json::to_vec(&wrong).unwrap()).is_err());
+        }
+        let mut duplicate = document.clone();
+        duplicate["sources"][index]["patch"] = document["sources"][0]["patch"].clone();
+        assert!(SourceLock::parse(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+        if document["family"] == "llvm" {
+            document["schema"] = json!("aros-toolchain-source-lock-v2");
+            assert!(SourceLock::parse(&serde_json::to_vec(&document).unwrap()).is_err());
+        }
+    }
+}

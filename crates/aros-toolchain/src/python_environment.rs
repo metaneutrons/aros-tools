@@ -18,7 +18,7 @@ use flate2::read::GzDecoder;
 use serde::Serialize;
 use tar::{Archive, EntryType};
 
-use crate::source_lock::{HostPythonPackage, SourceLock};
+use crate::source_lock::{CompilerFamily, HostPythonPackage, SourceLock};
 use crate::ContractError;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -280,9 +280,14 @@ fn verify_selected_package_contract(lock: &SourceLock) -> Result<(), ContractErr
         .iter()
         .map(HostPythonPackage::name)
         .collect::<BTreeSet<_>>();
-    if packages != BTreeSet::from(["mako", "markupsafe"]) {
+    let required = BTreeSet::from(["mako", "markupsafe"]);
+    let mut allowed = required.clone();
+    if lock.family() == CompilerFamily::Gnu {
+        allowed.insert("yaml");
+    }
+    if !required.is_subset(&packages) || !packages.is_subset(&allowed) {
         return Err(ContractError::environment(
-            "selected AROS source contract requires exactly the locked mako and markupsafe modules",
+            "selected AROS source contract requires mako and markupsafe; only GNU permits optional yaml",
         ));
     }
     if !lock
@@ -598,6 +603,16 @@ from pathlib import Path
 import sys
 
 expected = json.loads(sys.argv[1])
+module_names = {item["name"] for item in expected}
+required_modules = {"mako", "markupsafe"}
+allowed_modules = required_modules | {"yaml"}
+if (
+    not required_modules.issubset(module_names)
+    or not module_names.issubset(allowed_modules)
+):
+    raise SystemExit(
+        "current AROS source contract requires mako and markupsafe; only yaml is optional"
+    )
 for item in expected:
     module = importlib.import_module(item["name"])
     if getattr(module, "__version__", None) != item["version"]:
@@ -608,8 +623,6 @@ for item in expected:
         module_path.relative_to(root)
     except ValueError:
         raise SystemExit("locked module origin mismatch")
-if {item["name"] for item in expected} != {"mako", "markupsafe"}:
-    raise SystemExit("current AROS source contract requires exactly mako and markupsafe")
 from mako.template import Template
 if Template("locked runtime").render() != "locked runtime":
     raise SystemExit("Mako template validation failed")
