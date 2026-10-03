@@ -597,3 +597,121 @@ fn legacy_symlink_alias_to_canonical_executable_keeps_llvm_fallback() {
     );
     assert!(output.is_file());
 }
+
+#[test]
+fn gnu_implicit_output_uses_two_staged_passes_and_response_file_arguments() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = copy_driver(directory.path(), "collect-aros");
+    let fixture = directory.path().join("fixture.o");
+    let log = directory.path().join("tools.log");
+    fs::write(&fixture, elf64_fixture()).unwrap();
+    make_executable(
+        &directory.path().join("ld"),
+        &logger_script(&log, Some(&fixture)),
+    );
+    make_executable(&directory.path().join("strip"), &logger_script(&log, None));
+    fs::write(
+        directory.path().join("aros-collector-tools.json"),
+        manifest("collect-aros", "ld", "strip", Some("riscv64elf_aros")),
+    )
+    .unwrap();
+    fs::write(directory.path().join("input.rsp"), "input.o").unwrap();
+    fs::write(directory.path().join("a.out"), b"previous good output").unwrap();
+    let result = run_args(
+        &driver,
+        directory.path(),
+        &["@input.rsp"],
+        Some(directory.path()),
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let bytes = fs::read(directory.path().join("a.out")).unwrap();
+    assert_eq!(bytes[7], 15);
+    let arguments = fs::read_to_string(&log).unwrap();
+    assert!(arguments.contains("ARG=a.out.collect-pre\n"));
+    assert!(arguments.contains("ARG=a.out.collect-final\n"));
+    assert!(!arguments.contains("ARG=a.out\n"));
+    assert!(!directory.path().join("a.out.collect-pre").exists());
+    assert!(!directory.path().join("a.out.collect-final").exists());
+}
+
+#[test]
+fn failed_gnu_default_link_preserves_existing_output_and_cleans_staging() {
+    for fail_second in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let driver = copy_driver(directory.path(), "collect-aros");
+        let fixture = directory.path().join("fixture.o");
+        let log = directory.path().join("tools.log");
+        fs::write(&fixture, elf64_fixture()).unwrap();
+        let mut body = String::from("#!/bin/sh\n");
+        if fail_second {
+            body.push_str("for arg do case $arg in *.collect-final) exit 27;; esac; done\n");
+            body.push_str(&logger_script(&log, Some(&fixture)));
+        } else {
+            body.push_str("exit 27\n");
+        }
+        make_executable(&directory.path().join("ld"), &body);
+        make_executable(&directory.path().join("strip"), &logger_script(&log, None));
+        fs::write(
+            directory.path().join("aros-collector-tools.json"),
+            manifest("collect-aros", "ld", "strip", Some("riscv64elf_aros")),
+        )
+        .unwrap();
+        fs::write(directory.path().join("a.out"), b"previous good output").unwrap();
+        let result = run_args(
+            &driver,
+            directory.path(),
+            &["input.o"],
+            Some(directory.path()),
+        );
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(if fail_second {
+                "AC0302"
+            } else {
+                "AC0301"
+            })
+        );
+        assert_eq!(
+            fs::read(directory.path().join("a.out")).unwrap(),
+            b"previous good output"
+        );
+        assert!(!directory.path().join("a.out.collect-pre").exists());
+        assert!(!directory.path().join("a.out.collect-final").exists());
+    }
+}
+
+#[test]
+fn llvm_manifest_and_legacy_alias_never_infer_gnu_default_output() {
+    for configured in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let driver = copy_driver(directory.path(), "collect-aros");
+        let log = directory.path().join("tools.log");
+        make_executable(&directory.path().join("ld.lld"), &logger_script(&log, None));
+        make_executable(
+            &directory.path().join("llvm-strip"),
+            &logger_script(&log, None),
+        );
+        if configured {
+            fs::write(directory.path().join("aros-collector-tools.json"),
+                r#"{"schema":"aros-collector-tools-v1","family":"llvm","invocation":"collect-aros","linker":"ld.lld","strip":"llvm-strip"}"#).unwrap();
+        }
+        fs::write(directory.path().join("a.out"), b"previous good output").unwrap();
+        let result = run_args(
+            &driver,
+            directory.path(),
+            &["input.o"],
+            Some(directory.path()),
+        );
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("AC0001"));
+        assert!(!log.exists());
+        assert_eq!(
+            fs::read(directory.path().join("a.out")).unwrap(),
+            b"previous good output"
+        );
+    }
+}

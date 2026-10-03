@@ -22,7 +22,7 @@ const POLICY: ObservabilityPolicy = ObservabilityPolicy {
     hint: "pass --log-file PATH or set AROS_COLLECT_LOG_FILE, or disable logging",
 };
 
-const INVOCATION_HINT: &str = "run 'aros-collect --help' for direct mode; collector aliases require linker arguments including --sysroot=DIR and -o FILE";
+const INVOCATION_HINT: &str = "run 'aros-collect --help' for direct mode; pass an explicit -o FILE and any required --sysroot=DIR; configured GNU drivers default to a.out when output is omitted";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {

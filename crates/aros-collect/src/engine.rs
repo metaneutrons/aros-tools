@@ -16,6 +16,8 @@ use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage
 use crate::observability::{failure, CollectorFailure, CollectorResult, LogLevel, Logger};
 use crate::{extra, libreq, sets};
 
+#[cfg(test)]
+mod driver_output_tests;
 mod driver_tools;
 
 use driver_tools::{resolve_driver_tools, validate_emulation, TOOL_MANIFEST_NAME};
@@ -121,6 +123,7 @@ pub fn run_entry(
             "{name}: AROS linker collector\n\
              usage: {name} [collector observability options] \
              [linker arguments including --sysroot=DIR and -o FILE]\n\
+             configured GNU drivers default to a.out when -o is omitted\n\
              observability:\n  \
              --diagnostic-format human|json\n  \
              --log-level off|error|warn|info|debug|trace\n  \
@@ -225,6 +228,7 @@ pub fn run_entry(
         tools.strip,
         tools.emulation,
         tools.driver_emulation.as_deref(),
+        tools.default_output.as_deref(),
         args,
     )
     .map_err(|error| {
@@ -281,7 +285,7 @@ fn parse(
     emulation: Option<String>,
     args: Vec<OsString>,
 ) -> Result<EngineRequest> {
-    parse_configured(name, linker, strip, emulation, None, args)
+    parse_configured(name, linker, strip, emulation, None, None, args)
 }
 
 fn parse_configured(
@@ -290,6 +294,7 @@ fn parse_configured(
     strip: PathBuf,
     emulation: Option<String>,
     driver_emulation: Option<&str>,
+    default_output: Option<&Path>,
     mut args: Vec<OsString>,
 ) -> Result<EngineRequest> {
     if let Some(emulation) = &emulation {
@@ -340,10 +345,13 @@ fn parse_configured(
             if output.is_some() {
                 bail!("linker command line specifies output more than once");
             }
-            output =
-                Some(PathBuf::from(args.get(index + 1).with_context(|| {
-                    format!("linker command line ends after {text}")
-                })?));
+            let value = args
+                .get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
+            if value.is_empty() {
+                bail!("{text} must not be empty");
+            }
+            output = Some(PathBuf::from(value));
             index += 2;
             continue;
         }
@@ -389,19 +397,34 @@ fn parse_configured(
             // Configured emulation selections have already been normalized at
             // the start of the argument list. Unconfigured legacy invocations
             // still pass their user's selection through to the linker.
+            args.get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
             index += 2;
             continue;
         } else if text.starts_with("--emulation=") {
             // See the separated spelling above; this option has no collector
             // interpretation beyond emulation validation.
         } else if takes_separate_value(&text) {
+            args.get(index + 1)
+                .with_context(|| format!("linker command line ends after {text}"))?;
             index += 2;
             continue;
         }
         index += 1;
     }
 
-    let output = output.context("linker command line has no -o FILE")?;
+    let output = if let Some(output) = output {
+        output
+    } else {
+        let output = default_output.context("linker command line has no -o FILE")?;
+        // Normalize GNU ld's standard default before the operand boundary.
+        // Every pass must still use an explicit adjacent staging path.
+        args.splice(
+            index..index,
+            [OsString::from("-o"), output.as_os_str().to_owned()],
+        );
+        output.to_path_buf()
+    };
     Ok(EngineRequest {
         name,
         linker,
@@ -1626,6 +1649,7 @@ mod tests {
             "strip".into(),
             Some("riscvelf_aros".into()),
             Some("elf32lriscv"),
+            None,
             strings(&["-melf32lriscv", "-m", "riscvelf_aros", "-o", "output.o"]),
         )
         .unwrap();
@@ -1645,6 +1669,7 @@ mod tests {
             "strip".into(),
             Some("riscvelf_aros".into()),
             None,
+            None,
             strings(&["-melf32lriscv", "-o", "output.o"]),
         )
         .unwrap_err();
@@ -1656,6 +1681,7 @@ mod tests {
             "strip".into(),
             Some("riscvelf_aros".into()),
             Some("elf32lriscv"),
+            None,
             strings(&["-melf64lriscv", "-o", "output.o"]),
         )
         .unwrap_err();
@@ -1695,6 +1721,7 @@ mod tests {
                 "collect-aros".into(),
                 "ld".into(),
                 "strip".into(),
+                None,
                 None,
                 None,
                 args,

@@ -86,6 +86,10 @@ ABI-marking, stripping and executable-mode policy. They belong to the
 cross-toolchain layout, not the eight-file tools archive.
 Direct mode does not automatically enable those driver policies.
 
+A GNU compiler-driver manifest permits the standard `a.out` output when
+`-o` is omitted. Direct mode, LLVM drivers and manifest-free aliases require
+an explicit output. Failed links preserve an existing output in either mode.
+
 Source: [collector modes and diagnostics](https://github.com/metaneutrons/aros-tools/blob/main/crates/aros-collect/README.md).
 
 ## aros-fetch

@@ -74,6 +74,16 @@ argument. LLVM manifests may omit `emulation`; if one is supplied, it follows
 the same explicit validation and forwarding rules. `driver_emulation` is
 rejected for LLVM manifests.
 
+A configured GNU driver follows GNU ld's standard output convention: when no
+output option is supplied, the result is `a.out` in the invocation directory.
+The collector inserts an explicit output option before linking, so both passes
+still write adjacent temporary files and publish only a successful final ELF.
+Explicit `-o`/`--output` selections take precedence; empty, missing or duplicate
+output values fail before linking. Response files and the `--` operand boundary
+retain their normal parsing rules. Direct mode, LLVM manifests and aliases
+without a manifest still require an explicit output; tool names or host PATH
+contents never enable the GNU default.
+
 ## Diagnostics
 
 Human-readable diagnostics are the default. Machine consumers can request one
