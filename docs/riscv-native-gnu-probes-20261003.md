@@ -152,6 +152,33 @@ qualification. Existing PC/ARM/AArch64 release identities remain unchanged.
 The accompanying issue records final workspace checks and reviewed deliveries;
 neither synthetic metadata nor this report alone closes RV2.
 
+## Independent review follow-up
+
+The compiler build, archive and ELF measurements above remain bound to their
+recorded Tools input, not to a later executable. Independent reviews then added
+two boundary corrections, delivered separately in
+[#335](https://github.com/metaneutrons/aros-tools/pull/335) and
+[#336](https://github.com/metaneutrons/aros-tools/pull/336):
+
+- Delayed pipe readers now distinguish finite buffered output after all writers
+  close from a still-open writer. A zero-timeout Unix HUP probe permits only
+  the former to drain beyond the cleanup deadline. Empty/buffered positive
+  fixtures, open-writer counterprobes and a real anonymous-pipe check pass.
+  Removing the HUP exception makes the buffered regression fail with exit 101.
+- The private MetaMake fetch boundary rejects explicit offline/checksum policy
+  overrides before invoking its source-owned helper. Both compiler families
+  have parser probes; actual CLI probes leave the helper uncalled and ledger
+  empty for overrides. A real helper exit 7 also leaves the ledger empty.
+  Removing the argument guard makes its counterprobe fail with exit 101.
+
+The pinned source helper already rejects unknown long options; no bypass on
+that helper was observed. The argument guard makes this invariant independent
+of a future helper's forwarding behavior. Neither correction changes the
+compiler flags, source lock, collector layout or measured archive. They do
+change executable code and tests, so the earlier workspace runs below are
+historical, not acceptance of the updated executable tree. Final same-candidate
+Linux/Darwin gates and reviewed deliveries are tracked on #321.
+
 ## Existing-target workspace coverage
 
 On exact Tools tree `2291b885aab1b63547bd1285b55bdf943cf6bf52`, the Darwin
