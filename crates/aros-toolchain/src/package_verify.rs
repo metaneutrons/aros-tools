@@ -16,6 +16,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt as _};
 
+use aros_common::toolchain_layout::TOOLCHAIN_TOOLS_FILE;
 use aros_common::{
     finish_sha256, open_regular_file_nofollow, payload_casefold_path_key, sha256_reader,
     toolchain_inventory_sha256, ArosToolchainManifest, ArosToolchainManifestEntry, Sha256Digest,
@@ -36,6 +37,7 @@ const MAX_ARCHIVE_ENTRIES: u64 = 500_000;
 const MAX_EXPANDED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_XZ_DECODER_MEMORY: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TOOLCHAIN_TOOLS_BYTES: u64 = 16 * 1024;
 const SCAN_BUFFER_BYTES: usize = 128 * 1024;
 
 /// Closed expected identity for one package-set read-back verification.
@@ -178,6 +180,23 @@ fn verify_members_validated(
         return Err(ContractError::verification(
             "package archive payload inventory does not match its manifest",
         ));
+    }
+    if request.source_lock.family() == CompilerFamily::Gnu {
+        let compiler = manifest.compiler.as_ref().ok_or_else(|| {
+            ContractError::verification("GNU package manifest omits its compiler identity")
+        })?;
+        let toolchain_tools = archive_result.toolchain_tools.as_deref().ok_or_else(|| {
+            ContractError::verification("GNU package archive omits its toolchain tools contract")
+        })?;
+        crate::package_layout::validate_archive(
+            toolchain_tools,
+            compiler,
+            &manifest.target_triple,
+            &archive_result.entries,
+        )
+        .map_err(|error| {
+            ContractError::verification(format!("GNU package tool layout is invalid: {error}"))
+        })?;
     }
     Ok(VerifiedPackage {
         manifest,
@@ -360,6 +379,7 @@ struct ArchiveTree {
     embedded_manifest: Vec<u8>,
     entries: Vec<ArosToolchainManifestEntry>,
     tree_sha256: String,
+    toolchain_tools: Option<Vec<u8>>,
 }
 
 fn verify_archive_tree(
@@ -406,6 +426,7 @@ fn scan_archive<C: ArchiveConsumer>(
     let mut seen = BTreeSet::new();
     let mut previous = None;
     let mut embedded_manifest = None;
+    let mut toolchain_tools = None;
     let mut budget = ArchiveBudget::default();
     for (index, entry) in archive
         .entries()
@@ -507,8 +528,30 @@ fn scan_archive<C: ArchiveConsumer>(
                         ContractError::verification("package tar entry has an invalid mode")
                     })?;
                     let mode = if mode & 0o111 == 0 { "0644" } else { "0755" };
-                    let sha256 =
-                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?;
+                    let sha256 = if matches!(
+                        manifest.compiler,
+                        Some(aros_common::ArosCompilerIdentity::Gnu { .. })
+                    ) && relative == Path::new(TOOLCHAIN_TOOLS_FILE)
+                    {
+                        if size > MAX_TOOLCHAIN_TOOLS_BYTES || toolchain_tools.is_some() {
+                            return Err(ContractError::verification(
+                                "package tar toolchain tools contract is duplicated or too large",
+                            ));
+                        }
+                        let bytes = read_exact_entry(&mut entry, size)?;
+                        let mut cursor = io::Cursor::new(bytes.as_slice());
+                        let sha256 = consumer.regular(
+                            &relative,
+                            mode,
+                            &mut cursor,
+                            size,
+                            forbidden_prefixes,
+                        )?;
+                        toolchain_tools = Some(bytes);
+                        sha256
+                    } else {
+                        consumer.regular(&relative, mode, &mut entry, size, forbidden_prefixes)?
+                    };
                     entries.push(ArosToolchainManifestEntry {
                         path: relative_text,
                         mode: mode.into(),
@@ -537,6 +580,7 @@ fn scan_archive<C: ArchiveConsumer>(
         embedded_manifest,
         entries,
         tree_sha256,
+        toolchain_tools,
     })
 }
 

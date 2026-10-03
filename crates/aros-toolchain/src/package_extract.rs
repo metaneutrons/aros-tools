@@ -149,5 +149,14 @@ fn verify_extracted_tree(
             "extracted package payload differs from the verified package inventory",
         ));
     }
+    if let Some(compiler) = manifest.compiler.as_ref() {
+        crate::package_layout::validate_root(root, compiler, &manifest.target_triple).map_err(
+            |error| {
+                ContractError::verification(format!(
+                    "extracted GNU package tool layout is invalid: {error}"
+                ))
+            },
+        )?;
+    }
     Ok(())
 }

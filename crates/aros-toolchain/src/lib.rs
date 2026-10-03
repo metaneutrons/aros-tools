@@ -29,6 +29,7 @@ pub mod package;
 #[cfg(unix)]
 pub mod package_extract;
 mod package_identity;
+mod package_layout;
 pub mod package_verify;
 pub mod plan;
 pub mod preflight;

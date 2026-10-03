@@ -11,6 +11,7 @@ use aros_toolchain::{
     Recipe,
 };
 use serde_json::{json, Value};
+use std::os::unix::fs::{symlink, PermissionsExt};
 
 const LOCK: &[u8] = include_bytes!("fixtures/gnu-source-lock-v3.json");
 
@@ -65,6 +66,12 @@ fn request(temporary: &std::path::Path, width: u8) -> PackageRequest {
     std::fs::create_dir(&candidate).unwrap();
     std::fs::write(candidate.join("fixture-input"), b"not an actual compiler\n").unwrap();
     let document = profiles(width);
+    let profile = Profiles::parse(&document)
+        .unwrap()
+        .select(&format!("rv{width}-aros"))
+        .unwrap()
+        .clone();
+    write_fake_tool_layout(&candidate, &profile);
     PackageRequest {
         candidate_root: candidate,
         output_dir: temporary.join("package-a"),
@@ -72,14 +79,54 @@ fn request(temporary: &std::path::Path, width: u8) -> PackageRequest {
         host: "macos-aarch64".into(),
         recipe: recipe(&document),
         source_lock: SourceLock::parse(LOCK).unwrap(),
-        profile: Profiles::parse(&document)
-            .unwrap()
-            .select(&format!("rv{width}-aros"))
-            .unwrap()
-            .clone(),
+        profile,
         build_environment: serde_json::Map::default(),
         forbidden_prefixes: vec![],
     }
+}
+
+fn write_fake_tool_layout(root: &std::path::Path, profile: &aros_toolchain::profiles::Profile) {
+    let bin = root.join("bin");
+    let libexec = root.join("libexec");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&libexec).unwrap();
+    let roles = json!({
+        "c": "bin/fixture-c",
+        "cxx": "bin/fixture-cxx",
+        "assembler": "bin/fixture-as",
+        "linker": "bin/fixture-ld",
+        "archive": "bin/fixture-ar",
+        "ranlib": "bin/fixture-ranlib",
+        "strip": "bin/fixture-strip",
+        "collector": "libexec/fixture-collect"
+    });
+    for path in [
+        "bin/fixture-c",
+        "bin/fixture-cxx",
+        "bin/fixture-ld",
+        "bin/fixture-ar",
+        "bin/fixture-ranlib",
+        "bin/fixture-strip",
+        "libexec/fixture-collect",
+    ] {
+        let path = root.join(path);
+        std::fs::write(&path, b"AROS GNU package fixture executable; never run\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    symlink("fixture-c", bin.join("fixture-as")).unwrap();
+    let identity = ArosCompilerIdentity::Gnu {
+        gcc_version: "16.2.0".into(),
+        binutils_version: "2.47".into(),
+        target: profile.target().unwrap().clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&json!({
+        "schema": "aros-toolchain-tools-v1",
+        "compiler": identity,
+        "target_triple": profile.target_triple(),
+        "tools": roles
+    }))
+    .unwrap();
+    std::fs::write(root.join("toolchain-tools.json"), bytes).unwrap();
 }
 
 fn verification(request: &PackageRequest) -> PackageVerificationRequest {
@@ -205,4 +252,59 @@ fn readback_rejects_changed_compiler_version_and_target_contract() {
     }
     std::fs::write(&output.manifest, bytes).unwrap();
     verify(&verification(&request)).unwrap();
+}
+
+#[test]
+fn writer_rejects_missing_or_unbound_gnu_layout_before_output_parent_mutation() {
+    for mutation in ["missing", "family", "target", "compiler"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut request = request(temporary.path(), 32);
+        let tools_path = request.candidate_root.join("toolchain-tools.json");
+        if mutation == "missing" {
+            std::fs::remove_file(&tools_path).unwrap();
+        } else {
+            let mut tools: Value =
+                serde_json::from_slice(&std::fs::read(&tools_path).unwrap()).unwrap();
+            match mutation {
+                "family" => tools["compiler"] = json!({"family": "llvm", "version": "16.2.0"}),
+                "target" => tools["target_triple"] = json!("riscv-substitute-aros"),
+                _ => tools["compiler"]["gcc_version"] = json!("16.3.0"),
+            }
+            std::fs::write(&tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+        }
+        let parent = temporary.path().join("must-remain-absent");
+        request.output_dir = parent.join("package");
+        assert!(package(&request).is_err(), "mutation={mutation}");
+        assert!(!parent.exists(), "mutation={mutation}");
+    }
+}
+
+#[test]
+fn writer_rejects_missing_outside_dangling_and_nonexecutable_roles_before_mutation() {
+    for mutation in ["missing", "outside", "dangling", "nonexecutable"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut request = request(temporary.path(), 64);
+        let role = request.candidate_root.join("bin/fixture-ranlib");
+        match mutation {
+            "missing" => std::fs::remove_file(&role).unwrap(),
+            "outside" => {
+                let outside = temporary.path().join("outside");
+                std::fs::create_dir(&outside).unwrap();
+                let target = outside.join("fixture-ranlib");
+                std::fs::write(&target, b"outside fixture executable\n").unwrap();
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::remove_file(&role).unwrap();
+                symlink("../../outside/fixture-ranlib", &role).unwrap();
+            }
+            "dangling" => {
+                std::fs::remove_file(&role).unwrap();
+                symlink("../missing-ranlib", &role).unwrap();
+            }
+            _ => std::fs::set_permissions(&role, std::fs::Permissions::from_mode(0o644)).unwrap(),
+        }
+        let parent = temporary.path().join("must-remain-absent");
+        request.output_dir = parent.join("package");
+        assert!(package(&request).is_err(), "mutation={mutation}");
+        assert!(!parent.exists(), "mutation={mutation}");
+    }
 }

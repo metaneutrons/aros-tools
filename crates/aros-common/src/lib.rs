@@ -40,6 +40,7 @@ pub mod target;
 pub mod text;
 pub mod toolchain;
 pub mod toolchain_inventory;
+pub mod toolchain_layout;
 pub mod toolchain_manifest;
 
 pub use arch::Architecture;
