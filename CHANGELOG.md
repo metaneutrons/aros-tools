@@ -4,6 +4,25 @@ All notable user-visible changes to `aros-tools` are recorded here. Versions
 follow [Semantic Versioning](https://semver.org/), and release entries are
 maintained by Release Please from Conventional Commit history.
 
+## [0.3.20](https://github.com/metaneutrons/aros-tools/compare/v0.3.19...v0.3.20) (2026-10-03)
+
+
+### Features
+
+* add reviewed portable board registry contracts ([#326](https://github.com/metaneutrons/aros-tools/issues/326)) ([8a58f21](https://github.com/metaneutrons/aros-tools/commit/8a58f2198872a0c00c44d2e306c5607fa07ec83a))
+* **toolchain:** add bounded RISC-V compiler and artifact contracts ([0b70bf8](https://github.com/metaneutrons/aros-tools/commit/0b70bf8c0332b1966d3c4b6e0f42ce8727ba3f16)), closes [#321](https://github.com/metaneutrons/aros-tools/issues/321)
+* **toolchain:** declare native GNU symbol and image utilities ([#331](https://github.com/metaneutrons/aros-tools/issues/331)) ([7387364](https://github.com/metaneutrons/aros-tools/commit/7387364bef28ad4551e823a59b5843c39349dad7))
+* **toolchain:** execute source-bound native GNU candidates ([#338](https://github.com/metaneutrons/aros-tools/issues/338)) ([719beb9](https://github.com/metaneutrons/aros-tools/commit/719beb99f55bf7cec75ce8d67a5f96472e9cd32e))
+* **toolchain:** resolve GNU executable roles from verified payloads ([f47f176](https://github.com/metaneutrons/aros-tools/commit/f47f176475cf78a550f5df7dedb30c185d80e783))
+
+
+### Bug Fixes
+
+* **ci:** bound docs audit and serialize executable fixtures ([#332](https://github.com/metaneutrons/aros-tools/issues/332)) ([6cf4d58](https://github.com/metaneutrons/aros-tools/commit/6cf4d587d3d9dbe8f40eefa9c9661c49c09d835d))
+* **collect:** preserve GNU driver default output semantics ([#334](https://github.com/metaneutrons/aros-tools/issues/334)) ([dbb106b](https://github.com/metaneutrons/aros-tools/commit/dbb106b1f6b701718f8a7cc6ac446354b1c9351a))
+* **process:** observe pipe EOF before the cleanup deadline ([#335](https://github.com/metaneutrons/aros-tools/issues/335)) ([f4800d4](https://github.com/metaneutrons/aros-tools/commit/f4800d40d0736869ee9da2bc466e380908610891))
+* **toolchain:** seal offline MetaMake source consumption ([#336](https://github.com/metaneutrons/aros-tools/issues/336)) ([42596fb](https://github.com/metaneutrons/aros-tools/commit/42596fb9645894aa5bf391bb7fa0bb98419e1bba))
+
 ## [0.3.19](https://github.com/metaneutrons/aros-tools/compare/v0.3.18...v0.3.19) (2026-10-02)
 
 
