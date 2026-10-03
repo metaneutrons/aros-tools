@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use crate::filesystem::open_directory;
 use crate::ContractError;
 
+#[cfg(test)]
+mod deadline_tests;
 mod environment;
 mod execution;
 mod host_tools;
@@ -1611,6 +1613,25 @@ mod tests {
                 assert!(diagnostic
                     .message
                     .contains("exhausted its explicit deadline before starting the next command"));
+                // Expiry during preparation must not invent command-two logs.
+                for stream in ["stdout", "stderr"] {
+                    assert!(!deadline
+                        .reports_root
+                        .join(format!("standalone-c.2.{stream}.log"))
+                        .exists());
+                }
+                // Command one may not have started either. If it did, retain
+                // both streams instead of requiring logs for an unstarted job.
+                assert_eq!(
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stdout.log")
+                        .is_file(),
+                    deadline
+                        .reports_root
+                        .join("standalone-c.1.stderr.log")
+                        .is_file(),
+                );
             }
             assert!(!deadline
                 .reports_root
