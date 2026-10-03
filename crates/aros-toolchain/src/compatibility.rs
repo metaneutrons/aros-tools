@@ -1560,7 +1560,9 @@ mod tests {
         let error = run_probe(&stale_retry, &CancellationToken::default()).unwrap_err();
         assert_compatibility(&error);
 
-        for first_delay in ["0.5", "30"] {
+        // Each short command fits individually, but their combined runtime
+        // exceeds two seconds. Resetting the budget per command must fail this test.
+        for first_delay in ["1", "30"] {
             let deadline_root = tempfile::tempdir().unwrap();
             let deadline_request = request(deadline_root.path());
             let mut deadline = probe_request(
@@ -1575,7 +1577,11 @@ mod tests {
                 Duration::from_secs(2),
             );
             deadline.commands.push(CompatibilityCommand {
-                program: script(deadline_root.path(), "deadline-second", "exec /bin/sleep 2"),
+                program: script(
+                    deadline_root.path(),
+                    "deadline-second",
+                    "exec /bin/sleep 1.5",
+                ),
                 arguments: Vec::new(),
             });
             let error = run_probe(&deadline, &CancellationToken::default()).unwrap_err();
@@ -1604,10 +1610,12 @@ mod tests {
                     }
                 }
                 if index == 1 {
-                    assert!(!deadline
-                        .reports_root
-                        .join("standalone-c.2.stdout.log")
-                        .exists());
+                    for stream in ["stdout", "stderr"] {
+                        assert!(!deadline
+                            .reports_root
+                            .join(format!("standalone-c.2.{stream}.log"))
+                            .exists());
+                    }
                 }
             } else {
                 assert!(diagnostic
