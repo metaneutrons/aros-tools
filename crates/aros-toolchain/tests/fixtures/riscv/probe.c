@@ -6,7 +6,7 @@
 #endif
 _Static_assert(sizeof(APTR) == RV2_POINTER_BYTES, "selected AROS pointer ABI");
 extern ULONG rv2_cxx(ULONG value);
-extern ULONG rv2_assembly(ULONG value);
+extern IPTR rv2_assembly(IPTR value);
 #if RV2_POINTER_BYTES == 8
 typedef unsigned __int128 probe_integer;
 #elif RV2_POINTER_BYTES == 4
