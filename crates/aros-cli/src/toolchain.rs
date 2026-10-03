@@ -813,8 +813,8 @@ fn manifest_tool_paths(
             &manifest.target_triple,
         )
         .map_err(|error| miette::miette!("{error}"))?;
-    for required in std::iter::once(TOOLCHAIN_TOOLS_FILE)
-        .chain(layout.tools().entries().into_iter().map(|(_, path)| path))
+    for required in
+        std::iter::once(TOOLCHAIN_TOOLS_FILE).chain(layout.tools().entries().map(|(_, path)| path))
     {
         if !manifest.files.iter().any(|entry| entry.path == required) {
             bail!("GNU manifest omits declared tool path '{required}'");
