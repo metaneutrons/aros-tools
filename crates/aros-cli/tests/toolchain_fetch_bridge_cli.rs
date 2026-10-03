@@ -222,3 +222,68 @@ fn gnu_bridge_narrows_formats_and_rejects_a_corrupt_selected_payload() {
         b"ambient earlier candidate"
     );
 }
+
+#[test]
+fn bridge_rejects_policy_overrides_and_never_records_a_failed_helper() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cache = temporary.path().join("cache");
+    fs::create_dir(&cache).unwrap();
+    let payload = b"locked GNU payload\n";
+    fs::write(cache.join("gcc.tar.xz"), payload).unwrap();
+    let mut document: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../aros-toolchain/tests/fixtures/gnu-source-lock-v3.json"
+    ))
+    .unwrap();
+    document["sources"][0]["sha256"] = json!(sha256_bytes(payload));
+    document["sources"][0]["size"] = json!(payload.len());
+    let lock = temporary.path().join("sources.json");
+    fs::write(&lock, serde_json::to_vec(&document).unwrap()).unwrap();
+    let upstream = temporary.path().join("fetch.sh");
+    write_executable(
+        &upstream,
+        "#!/bin/sh\nset -eu\ntest \"$AROS_FETCH_OFFLINE\" = 1\ntest \"$AROS_FETCH_REQUIRE_CHECKSUMS\" = 1\nprintf called > \"$AROS_BRIDGE_MARKER\"\nexit 7\n",
+    );
+    for (index, policy) in [
+        Some("--offline=false"),
+        Some("--offline"),
+        Some("--require-checksums=false"),
+        Some("--require-checksums"),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ledger = temporary.path().join(format!("usage-{index}.log"));
+        SourceUseLedger::create(&ledger).unwrap();
+        let marker = temporary.path().join(format!("called-{index}"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
+        command
+            .current_dir(temporary.path())
+            .env("AROS_TOOLCHAIN_FETCH_LOCK", &lock)
+            .env("AROS_TOOLCHAIN_FETCH_CACHE", &cache)
+            .env("AROS_TOOLCHAIN_FETCH_LEDGER", &ledger)
+            .env("AROS_TOOLCHAIN_FETCH_UPSTREAM", &upstream)
+            .env("AROS_BRIDGE_MARKER", &marker)
+            .args([
+                "toolchain",
+                "__metamake-fetch",
+                "-a",
+                "gcc",
+                "-s",
+                "tar.xz",
+                "-l",
+                cache.to_str().unwrap(),
+            ]);
+        if let Some(policy) = policy {
+            command.arg(policy);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(&ledger).unwrap(), "");
+        assert_eq!(marker.exists(), policy.is_none());
+        if policy.is_some() {
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("mandatory offline/checksum policy"));
+        }
+    }
+}

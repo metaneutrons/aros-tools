@@ -43,8 +43,9 @@ impl MetaMakeFetchInvocation {
     /// Parse only the source-selection fields relevant to the offline bridge.
     ///
     /// Unknown arguments remain opaque and are preserved for the selected
-    /// upstream script. Shell metacharacters are not interpreted here or by
-    /// this library.
+    /// upstream script, except transport-policy overrides: offline fetching
+    /// and checksum validation are mandatory at this boundary. Shell
+    /// metacharacters are not interpreted here or by this library.
     ///
     /// # Errors
     ///
@@ -74,6 +75,14 @@ impl MetaMakeFetchInvocation {
         let mut index = 0;
         while index < arguments.len() {
             let argument = os_text(&arguments[index])?;
+            if matches!(argument, "--offline" | "--require-checksums")
+                || argument.starts_with("--offline=")
+                || argument.starts_with("--require-checksums=")
+            {
+                return Err(ContractError::source_use(
+                    "MetaMake fetch request cannot override mandatory offline/checksum policy",
+                ));
+            }
             match argument {
                 "-a" => {
                     let value = next_value(arguments, &mut index, "archive")?;
@@ -727,6 +736,31 @@ mod tests {
             location.as_os_str().to_owned(),
         ];
         MetaMakeFetchInvocation::parse_for_lock(&arguments, lock).unwrap()
+    }
+
+    #[test]
+    fn transport_policy_cannot_be_overridden_by_opaque_arguments() {
+        let mut arguments = vec!["-a".into(), "payload".into(), "-l".into(), "cache".into()];
+        assert!(MetaMakeFetchInvocation::parse(&arguments).is_ok());
+        for policy in [
+            "--offline=false",
+            "--offline",
+            "--require-checksums=false",
+            "--require-checksums",
+        ] {
+            arguments.push(policy.into());
+            let error = MetaMakeFetchInvocation::parse(&arguments).unwrap_err();
+            assert_eq!(
+                error.diagnostics().diagnostics[0].code,
+                DiagnosticCode::ProducerSourceUse
+            );
+            assert!(error
+                .to_string()
+                .contains("mandatory offline/checksum policy"));
+            let gnu = gnu_lock(b"payload", "gcc.tar.xz");
+            assert!(MetaMakeFetchInvocation::parse_for_lock(&arguments, &gnu).is_err());
+            arguments.pop();
+        }
     }
 
     #[test]
