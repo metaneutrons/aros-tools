@@ -778,6 +778,11 @@ fn prepare_capture_pipe<T>(_stream: &T) -> io::Result<()> {
 /// wait still gives escaped pipes regular opportunities to observe cleanup.
 trait PipeReadiness {
     fn wait_for_io(&self, writing: bool) -> io::Result<()>;
+
+    /// A closed writer set leaves only the pipe's finite buffered output.
+    fn writers_closed(&self) -> io::Result<bool> {
+        Ok(false)
+    }
 }
 
 #[cfg(unix)]
@@ -798,6 +803,17 @@ impl<T: std::os::fd::AsFd> PipeReadiness for T {
             Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn writers_closed(&self) -> io::Result<bool> {
+        use rustix::event::{poll, PollFd, PollFlags, Timespec};
+        let mut descriptors = [PollFd::new(self, PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut descriptors, Some(&timeout))?;
+        Ok(descriptors[0].revents().contains(PollFlags::HUP))
     }
 }
 
@@ -841,7 +857,7 @@ fn drain_bounded(
         if read == 0 {
             break;
         }
-        check_pipe_deadline(finished, &mut finished_at)?;
+        check_capture_deadline(&stream, finished, &mut finished_at)?;
         total_bytes = total_bytes
             .checked_add(u64::try_from(read).map_err(io::Error::other)?)
             .ok_or_else(|| io::Error::other("captured byte count overflowed"))?;
@@ -892,6 +908,26 @@ fn check_pipe_deadline(finished: &AtomicBool, finished_at: &mut Option<Instant>)
         }
     }
     Ok(())
+}
+
+fn check_capture_deadline(
+    stream: &impl PipeReadiness,
+    finished: &AtomicBool,
+    finished_at: &mut Option<Instant>,
+) -> io::Result<()> {
+    match check_pipe_deadline(finished, finished_at) {
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            // EOF may follow buffered output after a scheduling delay. HUP
+            // proves there are no remaining writers; draining that finite
+            // buffer cannot turn into an unbounded escaped-writer stream.
+            if stream.writers_closed()? {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    }
 }
 
 fn write_complete(
@@ -1066,15 +1102,24 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    static DELAYED_PIPE_OUTPUT: [u8; 3 * 8192] = [b'x'; 3 * 8192];
+
+    #[cfg(unix)]
     struct DelayedPipeReader {
         eof_after_wait: bool,
         waited: bool,
+        buffered: &'static [u8],
     }
 
     #[cfg(unix)]
     impl Read for DelayedPipeReader {
-        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            if self.waited && self.eof_after_wait {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.waited && !self.buffered.is_empty() {
+                let read = buffer.len().min(self.buffered.len());
+                buffer[..read].copy_from_slice(&self.buffered[..read]);
+                self.buffered = &self.buffered[read..];
+                Ok(read)
+            } else if self.waited && self.eof_after_wait {
                 Ok(0)
             } else {
                 self.waited = true;
@@ -1090,6 +1135,10 @@ mod tests {
             thread::sleep(Duration::from_millis(1100));
             Ok(())
         }
+
+        fn writers_closed(&self) -> io::Result<bool> {
+            Ok(self.waited && self.eof_after_wait)
+        }
     }
 
     #[cfg(unix)]
@@ -1099,6 +1148,7 @@ mod tests {
         let reader = DelayedPipeReader {
             eof_after_wait: true,
             waited: false,
+            buffered: &[],
         };
         let captured = drain_bounded(reader, 1024, &finished).expect("closed pipe is EOF");
         assert_eq!(captured.total_bytes(), 0);
@@ -1111,9 +1161,62 @@ mod tests {
         let reader = DelayedPipeReader {
             eof_after_wait: false,
             waited: false,
+            buffered: &[],
         };
         let error = drain_bounded(reader, 1024, &finished).expect_err("live pipe stays bounded");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_closed_pipe_drains_buffered_output_before_eof() {
+        let finished = AtomicBool::new(true);
+        let reader = DelayedPipeReader {
+            eof_after_wait: true,
+            waited: false,
+            buffered: &DELAYED_PIPE_OUTPUT,
+        };
+        let captured = drain_bounded(reader, 1024, &finished).expect("closed buffer reaches EOF");
+        assert_eq!(captured.total_bytes(), 3 * 8192);
+        assert_eq!(captured.bytes.len(), 1024);
+        assert_eq!(captured.omitted_bytes(), 3 * 8192 - 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_open_pipe_with_readable_output_still_times_out() {
+        let finished = AtomicBool::new(true);
+        let reader = DelayedPipeReader {
+            eof_after_wait: false,
+            waited: false,
+            buffered: &DELAYED_PIPE_OUTPUT,
+        };
+        let error = drain_bounded(reader, 1024, &finished).expect_err("live output stays bounded");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_pipe_hangup_distinguishes_closed_buffer_from_live_writer() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf BUFFER; read value"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn pipe fixture");
+        let mut stdout = child.stdout.take().expect("fixture stdout");
+        prepare_capture_pipe(&stdout).expect("nonblocking fixture pipe");
+        let live = stdout.writers_closed();
+        drop(child.stdin.take());
+        child.wait().expect("reap fixture");
+        let closed = stdout.writers_closed();
+        let mut buffered = Vec::new();
+        stdout
+            .read_to_end(&mut buffered)
+            .expect("drain closed pipe");
+        assert!(!live.expect("observe live writer"));
+        assert!(closed.expect("observe closed writer"));
+        assert_eq!(buffered, b"BUFFER");
     }
 
     #[cfg(unix)]
