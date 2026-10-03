@@ -291,6 +291,12 @@ fn run_owned(
         .arg("AROS_TOOLCHAIN_DEFAULT_SYSROOT=")
         .arg(format!("FETCH={fetch}"));
     apply_child_environment(&mut compiler, &environment, &python, &lifecycle);
+    if bound.source_lock().family() == crate::source_lock::CompilerFamily::Gnu {
+        // Configure has already bound the host prefix maps in HOST_*FLAGS.
+        // Importing CFLAGS/CXXFLAGS into make retains their export attribute:
+        // source-owned target assignments then leak ISA flags into host tools.
+        compiler.env_remove("CFLAGS").env_remove("CXXFLAGS");
+    }
     compiler
         .env(
             "AROS_TOOLCHAIN_FETCH_LOCK",

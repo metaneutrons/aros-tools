@@ -34,9 +34,11 @@ for arg in "$@"; do
 done
 test -n "$prefix"
 test -n "$cache"
+test "${CFLAGS+set}" = set
+test "${CXXFLAGS+set}" = set
 printf '%s\n' "$@" > configure.args
 printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
-printf 'crosstools-release:\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@printf "%%s\\n" "$${CMAKE_BUILD_PARALLEL_LEVEL}" > native-cmake-jobs\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
+printf 'crosstools-release:\n\t@test "$${CFLAGS+set}" = set\n\t@test "$${CXXFLAGS+set}" = set\n\t@$(FETCH) -a llvm-11.0.0.src -s tar.xz -l %s\n\t@printf "%%s\\n" "$${CMAKE_BUILD_PARALLEL_LEVEL}" > native-cmake-jobs\n\t@mkdir -p %s/bin %s/lib/cmake/llvm\n\t@printf compiler > %s/bin/clang\n\t@chmod 755 %s/bin/clang\n\t@printf producer-only > %s/bin/llvm-config\n' "$cache" "$prefix" "$prefix" "$prefix" "$prefix" "$prefix" > Makefile
 "#;
 
 const GNU_FIXTURE_CONFIGURE: &str = r#"#!/bin/sh
@@ -62,11 +64,13 @@ test "$gcc_version" = 16.2.0
 test "$binutils_version" = 2.47
 test -x "$CC"
 test -x "$CXX"
+case "$CFLAGS" in *-ffile-prefix-map=*) ;; *) exit 1 ;; esac
+case "$CXXFLAGS" in *-ffile-prefix-map=*) ;; *) exit 1 ;; esac
 printf '%s\n' "$@" > configure.args
 printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
 printf '%s\n' "$CC" > configure-cc
 printf '%s\n' "$CXX" > configure-cxx
-printf 'PREFIX := %s\nCACHE := %s\ncrosstools-release:\n\t@$(FETCH) -a gcc-16.2.0 -s tar.xz -l $(CACHE)\n\t@$(FETCH) -a binutils-2.47 -s tar.bz2 -l $(CACHE)\n\t@mkdir -p $(PREFIX)/riscv64-aros/bin $(PREFIX)/bin $(PREFIX)/lib/cmake/llvm\n\t@for tool in gcc g++ as ld ar ranlib strip nm objcopy; do printf root-tool > $(PREFIX)/riscv64-aros-$$tool; chmod 755 $(PREFIX)/riscv64-aros-$$tool; done\n\t@for tool in ld strip; do printf tuple-tool > $(PREFIX)/riscv64-aros/bin/$$tool; chmod 755 $(PREFIX)/riscv64-aros/bin/$$tool; done\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros-collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros-collect-aros\n\t@printf producer-only > $(PREFIX)/bin/llvm-config\n\t@printf retained-by-gnu > $(PREFIX)/lib/cmake/llvm/producer.marker\n' "$prefix" "$cache" > Makefile
+printf 'PREFIX := %s\nCACHE := %s\nCFLAGS := -march=rva22u64\nCXXFLAGS := -mabi=lp64d\ncrosstools-release:\n\t@test "$${CFLAGS+set}" != set\n\t@test "$${CXXFLAGS+set}" != set\n\t@$(FETCH) -a gcc-16.2.0 -s tar.xz -l $(CACHE)\n\t@$(FETCH) -a binutils-2.47 -s tar.bz2 -l $(CACHE)\n\t@mkdir -p $(PREFIX)/riscv64-aros/bin $(PREFIX)/bin $(PREFIX)/lib/cmake/llvm\n\t@for tool in gcc g++ as ld ar ranlib strip nm objcopy; do printf root-tool > $(PREFIX)/riscv64-aros-$$tool; chmod 755 $(PREFIX)/riscv64-aros-$$tool; done\n\t@for tool in ld strip; do printf tuple-tool > $(PREFIX)/riscv64-aros/bin/$$tool; chmod 755 $(PREFIX)/riscv64-aros/bin/$$tool; done\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros-collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros-collect-aros\n\t@printf producer-only > $(PREFIX)/bin/llvm-config\n\t@printf retained-by-gnu > $(PREFIX)/lib/cmake/llvm/producer.marker\n' "$prefix" "$cache" > Makefile
 "#;
 
 const GNU_FIXTURE_BRIDGE: &str = r#"#!/bin/bash

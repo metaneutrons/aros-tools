@@ -163,6 +163,11 @@ that consumer; producer acceptance alone does not qualify a native GNU board
 build. It remains local-only, has no release provenance, and cannot be promoted
 by copying it into a consumer lock.
 
+For GNU builds, configure records host compiler prefix maps in `HOST_*FLAGS`.
+The compiler-build process does not export `CFLAGS` or `CXXFLAGS`: MetaMake
+owns the target ISA flags, which must not reach host-built Binutils or GCC.
+LLVM builds retain their existing compiler environment.
+
 ## Failure and recovery boundary
 
 The producer preserves owned work/output roots on failure, cancellation, and
