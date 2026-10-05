@@ -72,6 +72,10 @@ constraints and wheel-document digest. Both use schema version `1` and
 release provenance. The typed schemas are maintained in
 [`aros-toolchain`](https://github.com/metaneutrons/aros-tools/tree/main/crates/aros-toolchain/src).
 
+A CPython prefix mismatch reports the expected and measured whole-tree digests.
+Preserve the original lock and inspect or restore the runtime before preparing
+new inputs; the command never updates a mismatched pin automatically.
+
 ## Native build configuration
 
 An experimental source-native build contract may declare `make_include_bindings`:
