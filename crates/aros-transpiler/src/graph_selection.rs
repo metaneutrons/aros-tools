@@ -24,6 +24,85 @@ fn inventory_archive_failure(owner: &str, name: &str, candidates: usize) -> Diag
 }
 
 impl DependencyGraph {
+    /// Existing native endpoint identities, not a claim of capability support.
+    pub(crate) fn native_metadata_endpoint_names(
+        &self,
+        context: &TargetContext,
+    ) -> BTreeSet<String> {
+        self.selection_edges(&[], true, context)
+            .edges
+            .into_keys()
+            .filter_map(|name| endpoint(&name, context).ok())
+            .collect()
+    }
+
+    /// Required reachability after cutting only independently contracted
+    /// selector edges. Includes concrete native/link prerequisites: an alias
+    /// reached through such a path cannot inherit another path's optionality.
+    pub(crate) fn native_required_metadata_reachability(
+        &self,
+        roots: &[String],
+        context: &TargetContext,
+        cuts: &BTreeSet<(String, String)>,
+    ) -> std::result::Result<BTreeSet<String>, String> {
+        let mut edges = BTreeMap::<String, BTreeSet<String>>::new();
+        let concrete_edges: BTreeSet<_> = self
+            .selection_edges(&[], false, context)
+            .edges
+            .into_iter()
+            .flat_map(|(parent, children)| {
+                let parent = endpoint(&parent, context).ok();
+                children.into_iter().filter_map(move |child| {
+                    Some((parent.clone()?, endpoint(&child, context).ok()?))
+                })
+            })
+            .collect();
+        // Keep unresolved children until traversal: unrelated recipes cannot
+        // veto scope, but a reachable unresolved endpoint cannot prove a cut.
+        for (parent, children) in self.selection_edges(&[], true, context).edges {
+            if let Ok(parent) = endpoint(&parent, context) {
+                edges.entry(parent).or_default().extend(children);
+            }
+        }
+        let mut pending: BTreeSet<_> = roots.iter().cloned().collect();
+        let mut reached = BTreeSet::new();
+        while let Some(name) = pending.pop_first() {
+            if !reached.insert(name.clone()) {
+                continue;
+            }
+            if let Some(children) = edges.get(&name) {
+                for child in children {
+                    let child = endpoint(child, context).map_err(|e| e.to_string())?;
+                    let edge = (name.clone(), child.clone());
+                    if !cuts.contains(&edge) || concrete_edges.contains(&edge) {
+                        pending.insert(child);
+                    }
+                }
+            }
+        }
+        Ok(reached)
+    }
+
+    /// Remove only the exact metadata edge established as an absent source
+    /// selector hook. Concrete compile/link prerequisites are untouched.
+    pub(crate) fn remove_native_meta_edge(
+        &mut self,
+        target: &str,
+        dependency: &str,
+        context: &TargetContext,
+    ) {
+        for (name, dependencies) in &mut self.meta_targets {
+            if endpoint(name, context).ok().as_deref() == Some(target) {
+                dependencies
+                    .retain(|name| endpoint(name, context).ok().as_deref() != Some(dependency));
+            }
+        }
+        self.explicit_meta_edges.retain(|(name, child)| {
+            endpoint(name, context).ok().as_deref() != Some(target)
+                || endpoint(child, context).ok().as_deref() != Some(dependency)
+        });
+    }
+
     /// Bind typed archive names during preparation using declaration metadata,
     /// not fabricated compilation targets. Full export retains its ordinary
     /// linker resolver and cannot use this projection.
@@ -2289,6 +2368,36 @@ mod tests {
     use crate::ast::{GenmoduleLinklibs, MetaTargetRule, TargetDefinition};
     use crate::fetch::FetchDecl;
     use aros_common::{DiagnosticCode, DiagnosticContext, DiagnosticStage};
+
+    #[test]
+    fn optional_cut_cannot_hide_an_independent_required_alias_ingress() {
+        let mut graph = DependencyGraph::new();
+        for (name, dependency) in [
+            ("optional", "alias"),
+            ("required", "alias"),
+            ("alias", "missing"),
+        ] {
+            graph.add_meta_rule(MetaTargetRule {
+                name: name.into(),
+                dependencies: vec![dependency.into()],
+            });
+        }
+        let cuts = BTreeSet::from([("optional".into(), "alias".into())]);
+        let context = TargetContext::default();
+        let optional_only = graph
+            .native_required_metadata_reachability(&["optional".into()], &context, &cuts)
+            .unwrap();
+        assert!(!optional_only.contains("alias"));
+        let shared = graph
+            .native_required_metadata_reachability(
+                &["optional".into(), "required".into()],
+                &context,
+                &cuts,
+            )
+            .unwrap();
+        assert!(shared.contains("alias"));
+        assert!(shared.contains("missing"));
+    }
 
     #[test]
     fn writefiles_stamp_rejects_selected_python_and_flexcat_owner_collisions() {

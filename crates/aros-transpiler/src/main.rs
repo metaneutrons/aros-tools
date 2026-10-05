@@ -548,6 +548,8 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         std::collections::BTreeMap::<Diagnostic, std::collections::BTreeSet<String>>::new();
     let mut native_parser_origins =
         std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut native_meta_edge_origins =
+        std::collections::BTreeMap::<(String, String), std::collections::BTreeSet<String>>::new();
     let mut native_script_origins = std::collections::BTreeMap::<
         aros_transpiler::native_parser_origins::ScriptInputIdentity,
         std::collections::BTreeSet<String>,
@@ -573,6 +575,14 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .insert(origin.clone());
                 }
                 if let Some(context) = target.as_ref().filter(|_| native_contract.is_some()) {
+                    for rule in parsed.meta_rules.iter().chain(&parsed.explicit_meta_rules) {
+                        for dependency in &rule.dependencies {
+                            native_meta_edge_origins
+                                .entry((rule.name.clone(), dependency.clone()))
+                                .or_default()
+                                .insert(origin.clone());
+                        }
+                    }
                     for identity in
                         aros_transpiler::native_parser_origins::script_input_identities(&parsed)
                     {
@@ -1086,7 +1096,14 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // GNU Make drops a circular phony prerequisite during traversal; CMake
     // rejects utility-target cycles outright. Collapse each meta-only SCC to
     // its shared external prerequisite closure and make that visible.
-    let flattened_meta_cycles = graph.flatten_meta_cycles();
+    // Native source-edge proofs must see the original metadata prerequisites,
+    // not dependencies rewritten by SCC flattening. Flatten native routes
+    // together after source aliases and explicit hooks have been verified.
+    let mut flattened_meta_cycles = if native_contract.is_none() {
+        graph.flatten_meta_cycles()
+    } else {
+        Vec::new()
+    };
     if let Some(contract) = &native_contract {
         let context = target.as_ref().ok_or_else(|| {
             native_selection_input_error(ArosError::Configuration {
@@ -1142,6 +1159,34 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 }
                 Err(error) => return Err(error),
             };
+        let source_meta_semantics = native_owner_projection
+            .as_ref()
+            .filter(|_| root_resolution_error.is_none() && !roots.is_empty())
+            .map(|projection| {
+                projection.bind_native_meta_semantics(
+                    &args.source_dir,
+                    &mut graph,
+                    aros_transpiler::native_owner_projection::NativeMetaSemanticsSelection {
+                        context,
+                        roots: &roots,
+                        declarations: &contract.contract.optional_meta_dependencies,
+                        diagnostics: &capability_errors,
+                        meta_edge_origins: &native_meta_edge_origins,
+                    },
+                    &mut native_parser_origins,
+                )
+            })
+            .transpose()
+            .map_err(|message| {
+                native_selection_input_error(ArosError::Configuration {
+                    file: "native source metadata semantics".into(),
+                    message,
+                })
+            })?;
+        // Imported source aliases can add metadata-only cycles. Flatten only
+        // after exact optional hook edges have been independently evidenced.
+        let imported_meta_cycles = graph.flatten_meta_cycles();
+        flattened_meta_cycles.extend(imported_meta_cycles.iter().cloned());
         // Keep full parsing, provider resolution and global failure checks.
         // Only a reverified source invocation can establish that an unowned
         // parser failure belongs to a recipe that this profile never calls.
@@ -1193,6 +1238,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     "native_contract_sha256": contract.sha256,
                     "native_owner_projection": evidence,
                     "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
+                    "source_meta_semantics": source_meta_semantics,
                 }))
                 .map_err(|error| ArosError::Configuration {
                     file: "native invocation report".into(),
@@ -1203,8 +1249,19 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         // A diagnostic-only audit retains source errors alongside every other
         // graph failure. It cannot publish a build graph or grant admission.
         // Malformed/unbound declarations remain fatal even in audit mode.
+        let remaining_meta_declarations: Vec<_> = contract
+            .contract
+            .optional_meta_dependencies
+            .iter()
+            .filter(|edge| {
+                !source_meta_semantics
+                    .as_ref()
+                    .is_some_and(|proof| proof.verifies(edge))
+            })
+            .cloned()
+            .collect();
         let source_dependency_validation_error = match graph.omit_absent_optional_meta_dependencies(
-            &contract.contract.optional_meta_dependencies,
+            &remaining_meta_declarations,
             context,
             &capability_errors,
         ) {
@@ -1266,6 +1323,8 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 "source_declared_optional_omissions": native_optional_omissions,
                 "native_owner_projection": native_owner_evidence,
                 "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
+                "source_meta_semantics": source_meta_semantics,
+                "imported_meta_cycles": imported_meta_cycles,
                 "root_resolution_error": root_resolution_error,
                 "source_dependency_validation_error": source_dependency_validation_error,
                 "coverage_limits": [

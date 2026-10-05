@@ -3,7 +3,7 @@
 //! A policy explicitly selects a closed native context. It is not a claim that
 //! configure was executed or that generated classic global files were read.
 
-use crate::genmf_projection::{expand_files, Limits as GenmfLimits};
+use crate::genmf_projection::{expand_bytes, Limits as GenmfLimits};
 use crate::metamake_owner_graph::{Limits, MetaMakeOwnerGraph, Selection};
 use crate::metamake_project::{ConfiguredProject, ProjectGlobals};
 use crate::parser::TargetContext;
@@ -15,6 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+#[path = "native_meta_semantics.rs"]
+mod meta_semantics;
+pub use meta_semantics::{NativeMetaSemanticsEvidence, NativeMetaSemanticsSelection};
 
 const MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 
@@ -705,8 +709,9 @@ fn expand_owners(
             .file_name()
             .is_some_and(|name| name == "mmakefile.src")
         {
-            let expansion = expand_files(&root.join(source), template, GenmfLimits::default())
-                .map_err(|error| error.to_string())?;
+            let expansion =
+                expand_bytes(&bytes, &root.join(source), template, GenmfLimits::default())
+                    .map_err(|error| error.to_string())?;
             retain_template_snapshots(root, expansion.template_snapshots, sealed, snapshots)?;
             expansion.text
         } else {
