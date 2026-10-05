@@ -7,6 +7,28 @@ use crate::source_archive_rules::ArchiveMembers;
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage, SourceLocation};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Stable internal endpoint shared by graph binding and provenance indexing.
+pub fn private_source_object_owner(
+    group: &crate::source_compile_rules::SourceCompileGroupDecl,
+) -> String {
+    let identity = format!(
+        "{}\n{}\n{}\n{}",
+        group.file,
+        group.owner,
+        group.line,
+        group
+            .objects
+            .iter()
+            .map(|object| object.output.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    format!(
+        "aros-source-objects-{}",
+        aros_common::sha256_bytes(identity.as_bytes())
+    )
+}
+
 impl DependencyGraph {
     fn source_archive_owner_conflicts(&self, name: &str) -> bool {
         self.writefiles_has_other_producer(name)
@@ -144,22 +166,7 @@ impl DependencyGraph {
                 .iter()
                 .filter(|group| group.parent.is_none())
             {
-                let identity = format!(
-                    "{}\n{}\n{}\n{}",
-                    group.file,
-                    group.owner,
-                    group.line,
-                    group
-                        .objects
-                        .iter()
-                        .map(|object| object.output.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                let private_owner = format!(
-                    "aros-source-objects-{}",
-                    aros_common::sha256_bytes(identity.as_bytes())
-                );
+                let private_owner = private_source_object_owner(group);
                 dependencies.insert(private_owner.clone());
                 self.literal_object_groups.push(LiteralObjectGroupDecl {
                     owner: private_owner,

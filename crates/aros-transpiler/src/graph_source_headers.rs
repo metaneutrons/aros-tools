@@ -8,6 +8,14 @@ use crate::source_header_pipeline::{SourceHeaderPipelineDecl, SourceHeaderPipeli
 use aros_common::{Diagnostic, DiagnosticCode, DiagnosticContext, DiagnosticStage, SourceLocation};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Stable internal endpoint shared by graph binding and provenance indexing.
+pub fn private_source_directory_owner(file: &str, prerequisite: &str) -> String {
+    format!(
+        "aros-source-dirs-{}",
+        aros_common::sha256_bytes(format!("{file}\n{prerequisite}").as_bytes())
+    )
+}
+
 /// Normalise only the root aliases emitted by the typed producers below.
 /// This is deliberately not a Make/CMake path evaluator.
 fn canonical_path(path: &str) -> String {
@@ -889,12 +897,7 @@ impl DependencyGraph {
                     .source_directory_groups
                     .get(&(aggregate.file.clone(), prerequisite.clone()))
                 {
-                    let owner = format!(
-                        "aros-source-dirs-{}",
-                        aros_common::sha256_bytes(
-                            format!("{}\n{}", aggregate.file, prerequisite).as_bytes()
-                        )
-                    );
+                    let owner = private_source_directory_owner(&aggregate.file, prerequisite);
                     if staged_directory_owners.insert(owner.clone()) {
                         directories.push(DirectorySetupDecl {
                             owner: owner.clone(),

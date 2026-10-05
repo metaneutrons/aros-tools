@@ -365,7 +365,10 @@ fn failure(message: impl Into<String>) -> ArosError {
 
 /// Resolve only the concrete selector expressions admitted by the parser.
 /// Unknown or absent selector values must not silently lose an edge.
-fn endpoint(raw: &str, context: &TargetContext) -> Result<String> {
+///
+/// # Errors
+/// Rejects unresolved selectors and unsafe or empty endpoint names.
+pub fn endpoint(raw: &str, context: &TargetContext) -> Result<String> {
     let mut value = raw.to_owned();
     let legacy = context
         .platform
