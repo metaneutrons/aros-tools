@@ -5,6 +5,16 @@
 # `aros-cli` passes AROS_CROSS_TOOLCHAIN_ROOT explicitly. Direct CMake users
 # may provide the same cache variable or environment variable.
 
+# GNU toolchains have an inventory-bound executable layout and a RISC-V
+# target contract. Keep that consumer separate from the legacy LLVM prefix
+# contract below: selecting by family before the CPU mapping is what lets
+# multiple GNU profiles share one architecture without inheriting an LLVM
+# profile's board, triple, or runtime assumptions.
+if(AROS_TOOLCHAIN STREQUAL "gnu")
+    include("${CMAKE_CURRENT_LIST_DIR}/GnuAROS.cmake")
+    return()
+endif()
+
 if(NOT AROS_CROSS_TOOLCHAIN_ROOT AND
    DEFINED ENV{AROS_CROSS_TOOLCHAIN_ROOT} AND
    NOT "$ENV{AROS_CROSS_TOOLCHAIN_ROOT}" STREQUAL "")

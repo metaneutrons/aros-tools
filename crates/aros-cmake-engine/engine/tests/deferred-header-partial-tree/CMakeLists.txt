@@ -27,6 +27,12 @@ set_property(TARGET fixture-fetch PROPERTY AROS_FETCH_DESTINATION "${_port}")
 set_property(TARGET fixture-fetch PROPERTY AROS_FETCH_COMPLETION_STAMP "${_stamp}")
 set_property(GLOBAL APPEND PROPERTY AROS_FETCH_TARGETS fixture-fetch)
 
+if(AMBIGUOUS_FETCH_OWNER)
+    add_custom_target(fixture-fetch-duplicate)
+    set_property(TARGET fixture-fetch-duplicate PROPERTY AROS_FETCH_DESTINATION "${_port}/")
+    set_property(GLOBAL APPEND PROPERTY AROS_FETCH_TARGETS fixture-fetch-duplicate)
+endif()
+
 aros_copy_includes(
     NAME fixture-headers DEST "." SOURCE "${_port}" PATTERNS "zlib.h")
 add_library(consumer STATIC "${CMAKE_CURRENT_LIST_DIR}/consumer.c")

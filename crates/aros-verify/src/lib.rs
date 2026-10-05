@@ -47,6 +47,8 @@ use coverage_io::{
 };
 mod genmf;
 pub mod genmf_cache;
+mod native_core;
+mod native_residency;
 use genmf::{expand_all, ExpansionFailure};
 #[cfg(test)]
 mod genmf_cache_tests;
@@ -675,6 +677,12 @@ struct RefShape {
 /// Parse, execute, log, and render one verifier invocation.
 #[must_use]
 pub fn entry(arguments: Vec<OsString>) -> ExitCode {
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "native-core")
+    {
+        return native_core::entry(arguments);
+    }
     let requested_format = requested_diagnostic_format(&arguments, "AROS_VERIFY_DIAGNOSTIC_FORMAT");
     let matches = match Args::command().try_get_matches_from(arguments) {
         Ok(matches) => matches,
@@ -1942,6 +1950,9 @@ fn collect_ours(generated: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Independent verification of the unsigned ESP32 image format.
+pub mod esp_image;
+pub mod esp_partition;
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

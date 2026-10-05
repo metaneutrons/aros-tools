@@ -5,6 +5,16 @@ foreach(_name IN ITEMS PACKAGE_OUTPUT PACKAGE_ROMTOOL)
         message(FATAL_ERROR "package publication requires ${_name}")
     endif()
 endforeach()
+if(DEFINED PACKAGE_MAXIMUM_BYTES)
+    string(LENGTH "${PACKAGE_MAXIMUM_BYTES}" _package_maximum_length)
+    if(NOT "${PACKAGE_MAXIMUM_BYTES}" MATCHES "^[1-9][0-9]*$" OR
+       _package_maximum_length GREATER 19 OR
+       (_package_maximum_length EQUAL 19 AND
+        "${PACKAGE_MAXIMUM_BYTES}" STRGREATER "9223372036854775807"))
+        message(FATAL_ERROR
+            "package publication PACKAGE_MAXIMUM_BYTES must be a positive safe unsigned integer")
+    endif()
+endif()
 if(NOT EXISTS "${PACKAGE_ROMTOOL}" OR IS_DIRECTORY "${PACKAGE_ROMTOOL}")
     message(FATAL_ERROR "package publication requires a regular romtool executable")
 endif()
@@ -59,6 +69,10 @@ endif()
 file(SIZE "${_pending}" _size)
 if(_size EQUAL 0)
     message(FATAL_ERROR "romtool created an empty package")
+endif()
+if(DEFINED PACKAGE_MAXIMUM_BYTES AND _size GREATER PACKAGE_MAXIMUM_BYTES)
+    message(FATAL_ERROR
+        "package is ${_size} bytes, above PACKAGE_MAXIMUM_BYTES=${PACKAGE_MAXIMUM_BYTES}")
 endif()
 execute_process(
     COMMAND "${PACKAGE_ROMTOOL}" pkg list "${_pending}"

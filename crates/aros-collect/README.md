@@ -25,6 +25,33 @@ therefore leaves an existing good output untouched. Temporary files are
 removed unless `COLLECT_AROS_DEBUG` is set; an explicitly requested retained
 script is never treated as temporary.
 
+## KOBJ symbol localization
+
+After a collected partial link, the native engine can apply the source
+macro's separate KOBJ localization step without Python or a shell pipeline:
+
+```sh
+aros-collect --localize-kobj member.o --nm /selected/target-nm \
+  --objcopy /selected/target-objcopy
+```
+
+Both tools must be selected explicitly. This operation does not link objects
+or infer their order. It reads plain `nm` output and reproduces the source's
+field-three selection for `__*_LIST__`, `__*_END__` and `__aros_lib*` symbols,
+in addition to its nine fixed library bases. `SysBase` is not in that fixed
+set. Undefined two-field records and suppressed file symbols are not selected.
+Truncated output, unsafe files and failed tools are rejected. Localization
+uses a private adjacent copy; the original is replaced only after successful
+processing and publication checks. Precommit failures leave the original
+unchanged. A post-rename durability failure can leave the new object installed;
+the error reports uncertain commit state and retains a recovery journal. This
+mode excludes linker arguments,
+`--ld`, `--report` and `--keep-script`.
+
+The caller remains responsible for source-derived KOBJ object groups,
+archives, linker flags and the selected tools' provenance. A localized object
+alone is not evidence of a complete native core build.
+
 ## Compiler-driver tool family
 
 The legacy `collect-aros` and `collect-aros32` names use the adjacent
