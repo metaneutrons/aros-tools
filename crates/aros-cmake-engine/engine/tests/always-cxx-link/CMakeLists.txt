@@ -5,6 +5,9 @@ list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
+if(TEST_NATIVE_SDK_OBJECTS)
+    set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED ON)
+endif()
 if(TEST_LOCKED_TOOLCHAIN)
     set(AROS_CROSS_TOOLCHAIN_ROOT "${CMAKE_BINARY_DIR}/release-toolchain")
     set(AROS_TARGET_PROFILE pc-x86_64)
@@ -19,11 +22,37 @@ if(TEST_LOCKED_TOOLCHAIN)
         ${_expected_cxx_runtime_libraries})
     list(GET _expected_cxx_runtime_libraries 3
         AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE)
+    if(TEST_GNU_TOOLCHAIN)
+        # This is a link-template fixture, not GNU native execution evidence.
+        # Use declared names which intentionally have no LLVM aliases.
+        set(AROS_TOOLCHAIN gnu)
+        set(AROS_LINKER_BIN "${AROS_CROSS_TOOLCHAIN_ROOT}/bin/declared-gnu-ld")
+        file(MAKE_DIRECTORY "${AROS_CROSS_TOOLCHAIN_ROOT}/bin")
+        file(WRITE "${AROS_LINKER_BIN}" "link-template fixture\n")
+        set(_expected_cxx_runtime_libraries
+            "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libstdc++.a"
+            "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libsupc++.a"
+            "${AROS_CROSS_TOOLCHAIN_ROOT}/lib/libgcc.a")
+        set(AROS_CROSS_TOOLCHAIN_CXX_RUNTIME_LIBRARIES
+            ${_expected_cxx_runtime_libraries})
+        list(GET _expected_cxx_runtime_libraries 2
+            AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE)
+        file(MAKE_DIRECTORY "${AROS_CROSS_TOOLCHAIN_ROOT}/lib")
+        foreach(_runtime IN LISTS _expected_cxx_runtime_libraries)
+            file(WRITE "${_runtime}" "GNU runtime template fixture\n")
+        endforeach()
+        if(TEST_ESCAPED_GNU_LINKER)
+            set(AROS_LINKER_BIN "${CMAKE_BINARY_DIR}/outside-gnu-ld")
+            file(WRITE "${AROS_LINKER_BIN}" "escaped fixture\n")
+        endif()
+    endif()
     get_filename_component(_builtins_dir
         "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" DIRECTORY)
     file(MAKE_DIRECTORY "${_builtins_dir}")
     file(WRITE "${AROS_CROSS_TOOLCHAIN_BUILTINS_ARCHIVE}" "fixture\n")
-    add_custom_target(linklibs-startup)
+    if(NOT TEST_NATIVE_SDK_OBJECTS)
+        add_custom_target(linklibs-startup)
+    endif()
 elseif(TEST_DEVELOPMENT_LLD)
     # Select a known executable without depending on which LLVM packages the
     # host image happens to install. The fixture inspects the generated link
@@ -36,6 +65,80 @@ else()
     set(AROS_LLD_BIN FALSE)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/../../AROS.cmake")
+
+if(TEST_NATIVE_SDK_OBJECTS)
+    set(_native_role_stems startup detach cxx-startup)
+    if(TEST_NATIVE_MISSING_ROLE)
+        if(TEST_NATIVE_MISSING_ROLE STREQUAL "C_STARTUP")
+            set(_missing_native_role_stem startup)
+        elseif(TEST_NATIVE_MISSING_ROLE STREQUAL "C_DETACH")
+            set(_missing_native_role_stem detach)
+        elseif(TEST_NATIVE_MISSING_ROLE STREQUAL "CXX_STARTUP")
+            set(_missing_native_role_stem cxx-startup)
+        else()
+            message(FATAL_ERROR
+                "unknown TEST_NATIVE_MISSING_ROLE '${TEST_NATIVE_MISSING_ROLE}'")
+        endif()
+        list(REMOVE_ITEM _native_role_stems "${_missing_native_role_stem}")
+    endif()
+    set(_native_role_outputs)
+    foreach(stem IN LISTS _native_role_stems)
+        if(TARGET "aros-c-${stem}-objects" OR TARGET aros-cxx-startup-objects)
+            message(FATAL_ERROR "native SDK inherited a legacy bootstrap owner")
+        endif()
+        aros_compile_sdk_object(
+            NAME "source-${stem}"
+            SOURCE "${AROS_SOURCE_DIR}/compiler/startup/${stem}.c"
+            INTERMEDIATE "${AROS_BUILD_DIR}/gen/compiler/startup/${stem}.o"
+            OUTPUT "${AROS_DEVELOPER_LIB_DIR}/${stem}.o"
+            LANGUAGE C)
+        list(APPEND _native_role_outputs
+            "${AROS_DEVELOPER_LIB_DIR}/${stem}.o")
+    endforeach()
+    aros_sdk_object_group(NAME linklibs-startup
+        OBJECTS ${_native_role_outputs})
+    aros_bind_source_sdk_program_inputs()
+    if(TEST_NATIVE_MISSING_ROLE STREQUAL "C_STARTUP")
+        aros_add_program(
+            TARGET missing-c-startup-consumer
+            MMAKE_ID missing-c-startup-consumer
+            DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+            SOURCES module)
+        message(FATAL_ERROR
+            "native C startup consumer accepted a missing source-owned startup.o")
+    elseif(TEST_NATIVE_MISSING_ROLE STREQUAL "C_DETACH")
+        aros_add_program(
+            TARGET missing-detach-consumer
+            MMAKE_ID missing-detach-consumer
+            DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+            DETACH
+            SOURCES module)
+        message(FATAL_ERROR
+            "native detached program accepted a missing source-owned detach.o")
+    elseif(TEST_NATIVE_MISSING_ROLE STREQUAL "CXX_STARTUP")
+        aros_add_module_simple(
+            TARGET missing-cxx-module
+            MMAKE_ID missing-cxx-module
+            DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+            MODTYPE library
+            CXX_SOURCES module)
+        message(FATAL_ERROR
+            "native C++ module accepted a missing source-owned cxx-startup.o")
+    endif()
+    add_custom_target(source-declared-includes)
+    set_property(TARGET source-declared-includes PROPERTY
+        AROS_GENERATED_INCLUDE_DIRECTORY "${AROS_BUILD_DIR}/generated-sdk-quote")
+    aros_add_target_dependency(linklibs-startup source-declared-includes)
+    foreach(stem startup detach cxx-startup)
+        get_target_property(dependencies "source-${stem}-compile" MANUALLY_ADDED_DEPENDENCIES)
+        get_target_property(options "source-${stem}-compile" COMPILE_OPTIONS)
+        if(NOT "source-declared-includes" IN_LIST dependencies OR
+           NOT options MATCHES "generated-sdk-quote")
+            message(FATAL_ERROR "source SDK object lost its declared header dependency/quote path")
+        endif()
+    endforeach()
+    aros_bind_c_startup_target(linklibs-startup)
+endif()
 
 # Header selection comes from compile flags, not a declaration's link policy.
 foreach(_header_target IN ITEMS default-headers standard-headers explicit-headers)
@@ -72,7 +175,9 @@ endif()
 if(TEST_LOCKED_TOOLCHAIN)
     # The fixture uses the host compiler just to prove the custom output rule.
     # It separately checks the release-only direct-link template below.
-    set_property(TARGET aros-cxx-startup-objects PROPERTY COMPILE_OPTIONS "")
+    if(NOT TEST_NATIVE_SDK_OBJECTS)
+        set_property(TARGET aros-cxx-startup-objects PROPERTY COMPILE_OPTIONS "")
+    endif()
     aros_bind_cxx_startup_target("linklibs-startup")
     # Every link goes through aros-collect, which runs the prefix-owned ld.lld
     # twice; the second pass is what turns the .aros.set.* sections into the
@@ -83,6 +188,15 @@ if(TEST_LOCKED_TOOLCHAIN)
     # sysroot, partially.
     set(_expected_link_prefix
         "^\"[^\"]*/aros-collect\" --ld \"${AROS_CROSS_TOOLCHAIN_ROOT}/bin/ld[.]lld\" -- -r")
+    if(TEST_GNU_TOOLCHAIN)
+        set(_expected_link_prefix
+            "^\"[^\"]*/aros-collect\" --ld \"${AROS_LINKER_BIN}\" -- -r")
+        get_directory_property(_gnu_compile_options COMPILE_OPTIONS)
+        if("${_gnu_compile_options}" MATCHES "--target=" OR
+           "${CMAKE_CXX_LINK_EXECUTABLE}" MATCHES "libc[+][+]|libunwind|compiler-rt")
+            message(FATAL_ERROR "GNU native consumer retained an LLVM-only compile/link contract")
+        endif()
+    endif()
     if(NOT CMAKE_C_LINK_EXECUTABLE MATCHES "${_expected_link_prefix}" OR
        NOT CMAKE_C_LINK_EXECUTABLE MATCHES
             "--sysroot=.*/SYS/Developer" OR
@@ -250,7 +364,7 @@ foreach(_program IN ITEMS detached-program detached-programs-module detached-pro
         message(FATAL_ERROR "${_program} lost declared detach.o: ${_libraries}")
     endif()
     get_target_property(_dependencies "${_program}" MANUALLY_ADDED_DEPENDENCIES)
-    if(NOT "aros-c-detach" IN_LIST _dependencies)
+    if(NOT "${AROS_C_DETACH_TARGET}" IN_LIST _dependencies)
         message(FATAL_ERROR "${_program} lacks the detach.o producer dependency")
     endif()
 endforeach()
@@ -451,15 +565,20 @@ foreach(_target IN ITEMS
 endforeach()
 _assert_linker_language(hidd-c-default C)
 
-if(NOT TARGET aros-c-startup OR NOT TARGET aros-c-startup-objects)
+if(TEST_NATIVE_SDK_OBJECTS)
+    set(_c_startup_compile "${AROS_C_STARTUP_TARGET}-compile")
+else()
+    set(_c_startup_compile aros-c-startup-objects)
+endif()
+if(NOT TARGET "${AROS_C_STARTUP_TARGET}" OR NOT TARGET "${_c_startup_compile}")
     message(FATAL_ERROR "AROS program startup producer targets are missing")
 endif()
-get_target_property(_c_startup_sources aros-c-startup-objects SOURCES)
+get_target_property(_c_startup_sources "${_c_startup_compile}" SOURCES)
 if(NOT "${_c_startup_sources}" MATCHES "compiler/startup/startup[.]c")
     message(FATAL_ERROR "AROS program startup uses the wrong source: ${_c_startup_sources}")
 endif()
 foreach(_program IN ITEMS c-program cxx-program c-programs-module)
-    _assert_manual_dependency("${_program}" aros-c-startup TRUE)
+    _assert_manual_dependency("${_program}" "${AROS_C_STARTUP_TARGET}" TRUE)
     get_target_property(_program_libraries "${_program}" LINK_LIBRARIES)
     if(NOT "${_aros_c_startup_output}" IN_LIST _program_libraries)
         message(FATAL_ERROR "${_program} did not link explicit startup.o")
@@ -467,7 +586,7 @@ foreach(_program IN ITEMS c-program cxx-program c-programs-module)
 endforeach()
 foreach(_no_startup IN ITEMS hidd-c-default no-startup-program
         no-startup-programs-module)
-    _assert_manual_dependency("${_no_startup}" aros-c-startup FALSE)
+    _assert_manual_dependency("${_no_startup}" "${AROS_C_STARTUP_TARGET}" FALSE)
     get_target_property(_libraries "${_no_startup}" LINK_LIBRARIES)
     if("${_aros_c_startup_output}" IN_LIST _libraries)
         message(FATAL_ERROR "${_no_startup} unexpectedly links startup.o")
@@ -475,12 +594,17 @@ foreach(_no_startup IN ITEMS hidd-c-default no-startup-program
 endforeach()
 
 if(TEST_LOCKED_TOOLCHAIN)
-    if(NOT TARGET aros-cxx-startup OR
-       NOT TARGET aros-cxx-startup-objects)
+    if(TEST_NATIVE_SDK_OBJECTS)
+        set(_cxx_startup_compile "${AROS_CXX_STARTUP_TARGET}-compile")
+    else()
+        set(_cxx_startup_compile aros-cxx-startup-objects)
+    endif()
+    if(NOT TARGET "${AROS_CXX_STARTUP_TARGET}" OR
+       NOT TARGET "${_cxx_startup_compile}")
         message(FATAL_ERROR
             "locked release did not create the cxx-startup producer targets")
     endif()
-    get_target_property(_cxx_startup_sources aros-cxx-startup-objects SOURCES)
+    get_target_property(_cxx_startup_sources "${_cxx_startup_compile}" SOURCES)
     if(NOT "${_cxx_startup_sources}" MATCHES
             "compiler/startup/cxx-startup[.]c")
         message(FATAL_ERROR
@@ -491,7 +615,7 @@ if(TEST_LOCKED_TOOLCHAIN)
             hidd-softpipe hidd-nouveau mesa-module device-module resource-module
             custom-module simple-module hidd-cxx-default cxx-program
             cxx-programs-module linklibs-startup)
-        _assert_manual_dependency("${_cxx_target}" aros-cxx-startup TRUE)
+        _assert_manual_dependency("${_cxx_target}" "${AROS_CXX_STARTUP_TARGET}" TRUE)
     endforeach()
-    _assert_manual_dependency(hidd-c-default aros-cxx-startup FALSE)
+    _assert_manual_dependency(hidd-c-default "${AROS_CXX_STARTUP_TARGET}" FALSE)
 endif()

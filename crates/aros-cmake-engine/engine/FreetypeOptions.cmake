@@ -1,5 +1,5 @@
 # The upstream FreeType MetaMake rule deliberately does not publish the
-# archive's default `ftoption.h`: it rewrites five option-bearing source lines
+# archive's default `ftoption.h`: it rewrites four option-bearing source lines
 # into the AROS SDK configuration first.  Keep that as a real, fetch-dependent
 # output instead of exposing the port source directory as an include path.
 # CONSUMERS names targets whose compilation may include the staged header; the
@@ -38,6 +38,28 @@ function(aros_stage_freetype_options)
         message(FATAL_ERROR
             "${FTO_NAME}: FreeType option output must be below the SDK include root: "
             "${_output}")
+    endif()
+
+    # A source-derived text aggregate may already own the exact header. Do
+    # not add a second command for that output. Preserve the direct consumer
+    # ordering, using the complete aggregate (including its host tool).
+    string(SHA256 _output_key "${_output}")
+    get_property(_source_owner GLOBAL PROPERTY "AROS_SOURCE_TEXT_OUTPUT_${_output_key}")
+    if(_source_owner)
+        if(NOT _source_owner STREQUAL FTO_OWNER)
+            message(FATAL_ERROR
+                "${FTO_NAME}: FreeType options output is owned by ${_source_owner}, not ${FTO_OWNER}")
+        endif()
+        add_custom_target("${FTO_NAME}")
+        add_dependencies("${FTO_NAME}" "${FTO_OWNER}")
+        foreach(_consumer IN LISTS FTO_CONSUMERS)
+            if(NOT TARGET "${_consumer}")
+                message(FATAL_ERROR
+                    "${FTO_NAME}: FreeType option consumer does not exist: ${_consumer}")
+            endif()
+            add_dependencies("${_consumer}" "${FTO_OWNER}")
+        endforeach()
+        return()
     endif()
 
     get_property(_fetch_stamp TARGET "${FTO_FETCH_TARGET}" PROPERTY

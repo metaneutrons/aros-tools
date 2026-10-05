@@ -14,6 +14,213 @@ set(AROS_TARGET_CPU x86_64)
 set(AROS_TARGET_PLATFORM pc)
 include("${AROS_TEST_ENGINE_DIR}/AROS.cmake")
 
+# Keep archive-selection counterprobes in this fixture project so they load the
+# same production AROS.cmake as the main genmodule ABI test. The driver starts
+# each mode in a fresh build tree: generated headers and CMake archive claims
+# therefore cannot hide collisions between cases.
+if(AROS_ARCHIVE_PROBE)
+    set(_tiff_dir "${AROS_SOURCE_DIR}/workbench/libs/tiff")
+    set(_tiff_source "${_tiff_dir}/tif_aros.c")
+    set(_tiff_config "${_tiff_dir}/tiff.conf")
+    if(NOT EXISTS "${_tiff_source}" OR NOT EXISTS "${_tiff_config}")
+        message(FATAL_ERROR "archive probe requires the source-owned TIFF module")
+    endif()
+
+    if(AROS_ARCHIVE_PROBE MATCHES
+       "^reject-(no-contract|genmodule-only)-(all|normal|relative)$")
+        set(_rejection_kind "${CMAKE_MATCH_1}")
+        set(_archive_kind "${CMAKE_MATCH_2}")
+        if(_archive_kind STREQUAL "all")
+            set(_archive_flags NO_CLIENT_ARCHIVES)
+        elseif(_archive_kind STREQUAL "normal")
+            set(_archive_flags NO_NORMAL_CLIENT_ARCHIVE)
+        else()
+            set(_archive_flags NO_RELATIVE_CLIENT_ARCHIVE)
+        endif()
+
+        if(_rejection_kind STREQUAL "no-contract")
+            set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED FALSE)
+            aros_add_library(
+                TARGET tiff
+                MMAKE_ID archive-rejection
+                DIRECTORY "${_tiff_dir}"
+                GENMODULE_LINKLIBS
+                SOURCES "${_tiff_source}"
+                ${_archive_flags})
+        else()
+            set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+            aros_add_library(
+                TARGET tiff
+                MMAKE_ID archive-rejection
+                DIRECTORY "${_tiff_dir}"
+                GENMODULE_ONLY
+                ${_archive_flags})
+        endif()
+        message(FATAL_ERROR
+            "${AROS_ARCHIVE_PROBE} unexpectedly accepted an unsupported archive mode")
+    endif()
+
+    if(AROS_ARCHIVE_PROBE MATCHES
+       "^collision-(primary|relative|alias|alias-relative)-(client-first|implementation-first)$")
+        set(_collision_kind "${CMAKE_MATCH_1}")
+        set(_collision_order "${CMAKE_MATCH_2}")
+        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        set(_client_linklib_name "")
+        if(_collision_kind STREQUAL "primary")
+            set(_implementation_name tiff)
+            set(_collision_archive libtiff.a)
+        elseif(_collision_kind STREQUAL "relative")
+            set(_implementation_name tiff_rel)
+            set(_collision_archive libtiff_rel.a)
+        elseif(_collision_kind STREQUAL "alias")
+            set(_client_linklib_name archive-probe-alias)
+            set(_implementation_name "${_client_linklib_name}")
+            set(_collision_archive "lib${_client_linklib_name}.a")
+        else()
+            set(_client_linklib_name archive-probe-alias)
+            set(_implementation_name "${_client_linklib_name}_rel")
+            set(_collision_archive "lib${_client_linklib_name}_rel.a")
+        endif()
+
+        set(_client_arguments
+            TARGET tiff
+            MMAKE_ID archive-client
+            DIRECTORY "${_tiff_dir}"
+            GENMODULE_LINKLIBS
+            SOURCES "${_tiff_source}")
+        if(_client_linklib_name)
+            list(APPEND _client_arguments LINKLIB_NAME "${_client_linklib_name}")
+        endif()
+        set(_implementation_arguments
+            TARGET "${_implementation_name}"
+            MMAKE_ID archive-implementation
+            DIRECTORY "${_tiff_dir}"
+            CANONICAL_OUTPUT
+            SOURCES "${_tiff_source}")
+
+        if(_collision_order STREQUAL "client-first")
+            aros_add_library(${_client_arguments})
+            aros_add_linklib(${_implementation_arguments})
+        else()
+            aros_add_linklib(${_implementation_arguments})
+            aros_add_library(${_client_arguments})
+        endif()
+        message(FATAL_ERROR
+            "${AROS_ARCHIVE_PROBE} failed to reject canonical archive collision ${_collision_archive}")
+    endif()
+
+    if(AROS_ARCHIVE_PROBE MATCHES
+       "^positive-(all|normal-suppressed|relative-suppressed)$")
+        set(_suppression_kind "${CMAKE_MATCH_1}")
+        set(AROS_NATIVE_BUILD_CONTRACT_VALIDATED TRUE)
+        aros_genmodule_writefiles_manifest(_archive_manifest
+            CONFIG "${_tiff_config}"
+            MODULE tiff
+            MODTYPE library
+            GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/manifest/gen"
+            STUB_DIR "${CMAKE_CURRENT_BINARY_DIR}/manifest/linklib")
+        if(NOT _archive_manifest_HAS_REL_LINKLIB OR
+           NOT _archive_manifest_HAS_FUNCTIONS OR
+           NOT _archive_manifest_HAS_INCLUDES)
+            message(FATAL_ERROR
+                "TIFF fixture no longer owns relative linklib, function and include outputs")
+        endif()
+
+        set(_archive_arguments
+            TARGET tiff
+            MMAKE_ID archive-native
+            DIRECTORY "${_tiff_dir}"
+            GENMODULE_LINKLIBS
+            LINKLIB_NAME archive-probe-alias
+            SOURCES "${_tiff_source}")
+        if(_suppression_kind STREQUAL "all")
+            list(APPEND _archive_arguments NO_CLIENT_ARCHIVES)
+        elseif(_suppression_kind STREQUAL "normal-suppressed")
+            list(APPEND _archive_arguments NO_NORMAL_CLIENT_ARCHIVE)
+        else()
+            list(APPEND _archive_arguments NO_RELATIVE_CLIENT_ARCHIVE)
+        endif()
+        aros_add_library(${_archive_arguments})
+
+        foreach(_required_target archive-native archive-native-includes
+                archive-native-fd archive-native-genmodfiles)
+            if(NOT TARGET "${_required_target}")
+                message(FATAL_ERROR
+                    "${_suppression_kind} suppression lost ABI/runtime target ${_required_target}")
+            endif()
+        endforeach()
+        get_target_property(_runtime_dependencies archive-native
+            MANUALLY_ADDED_DEPENDENCIES)
+        foreach(_required_dependency archive-native-includes archive-native-fd)
+            if(NOT _required_dependency IN_LIST _runtime_dependencies)
+                message(FATAL_ERROR
+                    "runtime lost ${_required_dependency} dependency under ${_suppression_kind} suppression: ${_runtime_dependencies}")
+            endif()
+        endforeach()
+        set(_absent_archive_dependencies "")
+        set(_required_archive_dependencies "")
+        if(_suppression_kind STREQUAL "all")
+            set(_absent_archive_dependencies
+                archive-native-linklib archive-native-linklib-rel)
+        elseif(_suppression_kind STREQUAL "normal-suppressed")
+            set(_absent_archive_dependencies archive-native-linklib)
+            set(_required_archive_dependencies archive-native-linklib-rel)
+        else()
+            set(_absent_archive_dependencies archive-native-linklib-rel)
+            set(_required_archive_dependencies archive-native-linklib)
+        endif()
+        foreach(_absent_dependency IN LISTS _absent_archive_dependencies)
+            if(_absent_dependency IN_LIST _runtime_dependencies)
+                message(FATAL_ERROR
+                    "runtime retains suppressed archive dependency ${_absent_dependency}")
+            endif()
+        endforeach()
+        foreach(_required_dependency IN LISTS _required_archive_dependencies)
+            if(NOT _required_dependency IN_LIST _runtime_dependencies)
+                message(FATAL_ERROR
+                    "runtime lost enabled archive dependency ${_required_dependency}")
+            endif()
+        endforeach()
+
+        if(_suppression_kind STREQUAL "all" OR
+           _suppression_kind STREQUAL "normal-suppressed")
+            if(TARGET archive-native-linklib OR TARGET linklibs-tiff OR
+               TARGET linklibs-archive-probe-alias)
+                message(FATAL_ERROR
+                    "normal client archive or alias exists under ${_suppression_kind} suppression")
+            endif()
+        else()
+            foreach(_required_target archive-native-linklib linklibs-tiff
+                    linklibs-archive-probe-alias)
+                if(NOT TARGET "${_required_target}")
+                    message(FATAL_ERROR
+                        "normal client archive or alias ${_required_target} missing under relative-only suppression")
+                endif()
+            endforeach()
+        endif()
+
+        if(_suppression_kind STREQUAL "all" OR
+           _suppression_kind STREQUAL "relative-suppressed")
+            if(TARGET archive-native-linklib-rel OR TARGET linklibs-tiff_rel OR
+               TARGET linklibs-archive-probe-alias_rel)
+                message(FATAL_ERROR
+                    "relative client archive or alias exists under ${_suppression_kind} suppression")
+            endif()
+        else()
+            foreach(_required_target archive-native-linklib-rel linklibs-tiff_rel
+                    linklibs-archive-probe-alias_rel)
+                if(NOT TARGET "${_required_target}")
+                    message(FATAL_ERROR
+                        "relative client archive or alias ${_required_target} missing under normal-only suppression")
+                endif()
+            endforeach()
+        endif()
+        return()
+    endif()
+
+    message(FATAL_ERROR "unknown genmodule archive probe: ${AROS_ARCHIVE_PROBE}")
+endif()
+
 set(_includes_stamp "${CMAKE_CURRENT_BINARY_DIR}/includes.stamp")
 set(_fd_stamp "${CMAKE_CURRENT_BINARY_DIR}/fd.stamp")
 add_custom_command(

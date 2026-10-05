@@ -9,13 +9,15 @@ endif()
 string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _suffix)
 set(_root "${_temp_root}/aros-freetype-options-${_suffix}")
 set(_source "${CMAKE_CURRENT_LIST_DIR}/freetype-options")
-set(_build "${_root}/build")
+foreach(_source_text_owner IN ITEMS OFF ON)
+set(_build "${_root}/build-${_source_text_owner}")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_build}" -G Ninja
         "-DAROS_SOURCE_DIR=${AROS_TEST_TREE}"
         "-DAROS_RUST_TOOLS_DIR=${AROS_TEST_TOOLS_DIR}"
         ${AROS_TEST_TOOL_ARGS}
+        "-DTEST_SOURCE_TEXT_OWNER=${_source_text_owner}"
     RESULT_VARIABLE _configure_result
     OUTPUT_VARIABLE _configure_stdout
     ERROR_VARIABLE _configure_stderr)
@@ -48,6 +50,8 @@ foreach(_expected IN ITEMS
     if(_expected_at EQUAL -1)
         message(FATAL_ERROR "FreeType options output omitted ${_expected}")
     endif()
+endforeach()
+
 endforeach()
 
 file(REMOVE_RECURSE "${_root}")

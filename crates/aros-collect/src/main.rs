@@ -8,6 +8,7 @@
 
 mod engine;
 mod extra;
+mod kobj_localize;
 mod libreq;
 mod observability;
 mod sets;
@@ -28,14 +29,30 @@ use observability::{
 #[command(
     author,
     version,
-    about = "Link an AROS relocatable object and collect its symbol sets",
+    about = "Collect AROS symbol sets or localize a completed KOBJ",
     propagate_version = true,
     after_help = "OBSERVABILITY:\n  --diagnostic-format human|json\n  --log-level off|error|warn|info|debug|trace\n  --log-format human|jsonl\n  --log-file PATH\n\nThe same settings are available through AROS_COLLECT_DIAGNOSTIC_FORMAT,\nAROS_COLLECT_LOG_LEVEL, AROS_COLLECT_LOG_FORMAT, and AROS_COLLECT_LOG_FILE.\nLogging is off by default. A selected file without a selected level uses info;\nexplicit off creates no sink, and a non-off level requires a local file."
 )]
 struct Cli {
     /// The real linker to drive.
-    #[arg(long)]
-    ld: PathBuf,
+    #[arg(
+        long,
+        required_unless_present = "localize_kobj",
+        conflicts_with = "localize_kobj"
+    )]
+    ld: Option<PathBuf>,
+
+    /// Localize a completed KOBJ using the source macro's plain-nm rules.
+    #[arg(long, requires_all = ["nm", "objcopy"], conflicts_with_all = ["ld", "keep_script", "report", "args"])]
+    localize_kobj: Option<PathBuf>,
+
+    /// Selected target's plain nm executable; used only with --localize-kobj.
+    #[arg(long, requires = "localize_kobj")]
+    nm: Option<PathBuf>,
+
+    /// Selected target's objcopy executable; used only with --localize-kobj.
+    #[arg(long, requires = "localize_kobj")]
+    objcopy: Option<PathBuf>,
 
     /// Keep the generated linker script at this path instead of removing it.
     #[arg(long)]
@@ -208,6 +225,26 @@ fn run_direct(
             ));
         }
     };
+    if let Some(object) = cli.localize_kobj {
+        // Clap requires both tool roles and rejects linker-mode options before
+        // any file or process mutation. Do not discover substitutes in PATH.
+        let nm = cli.nm.expect("clap requires --nm for KOBJ localization");
+        let objcopy = cli
+            .objcopy
+            .expect("clap requires --objcopy for KOBJ localization");
+        return kobj_localize::localize(&object, &nm, &objcopy).map_err(|error| {
+            failure(
+                DiagnosticCode::CollectorPublication,
+                DiagnosticStage::Publication,
+                format!("KOBJ localization failed: {error:#}"),
+                DiagnosticContext {
+                    output: Some(object.display().to_string()),
+                    mode: Some("kobj-localization".into()),
+                    ..DiagnosticContext::default()
+                },
+            )
+        });
+    }
     if cli.args.is_empty() {
         return Err(failure(
             DiagnosticCode::CollectorInvocation,
@@ -225,7 +262,7 @@ fn run_direct(
         )
     })?;
     engine::run_direct(
-        cli.ld,
+        cli.ld.expect("clap requires --ld for direct linking"),
         cli.args,
         output,
         cli.report,
@@ -262,5 +299,39 @@ mod tests {
     #[test]
     fn a_command_line_without_an_output_is_refused() {
         assert!(output_argument(&args(&["-r", "a.o"])).is_err());
+    }
+
+    #[test]
+    fn localization_requires_exact_tools_and_excludes_link_options() {
+        let valid = args(&[
+            "aros-collect",
+            "--localize-kobj",
+            "out.o",
+            "--nm",
+            "target-nm",
+            "--objcopy",
+            "target-objcopy",
+        ]);
+        let parsed = Cli::try_parse_from(valid.clone()).unwrap();
+        assert!(parsed.ld.is_none());
+        assert_eq!(parsed.localize_kobj, Some(PathBuf::from("out.o")));
+        for suffix in [
+            vec!["--ld", "ld"],
+            vec!["--report", "report"],
+            vec!["--keep-script", "script"],
+            vec!["--", "-r", "-o", "out.o"],
+        ] {
+            let mut command = valid.clone();
+            command.extend(suffix.into_iter().map(OsString::from));
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+        for command in [
+            args(&["aros-collect", "--localize-kobj", "out.o"]),
+            args(&["aros-collect", "--localize-kobj", "out.o", "--nm", "nm"]),
+            args(&["aros-collect", "--nm", "nm", "--objcopy", "objcopy"]),
+            args(&["aros-collect"]),
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
     }
 }
