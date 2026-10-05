@@ -41,6 +41,48 @@ pub(crate) fn is_explicit_genmodule_only(invocation: &str, args: &str, mod_type:
             .all(|key| macro_arg(args, key).is_none())
 }
 
+/// Only the source ABI include graph, without any runtime/client-archive alias.
+pub(crate) fn implicit_module_header_meta_rules(
+    mmake: &str,
+    modname: &str,
+    include_set: &str,
+) -> Vec<MetaTargetRule> {
+    let includes = format!("{mmake}-includes");
+    let mut rules = [
+        "-makefile",
+        "-genmakefile",
+        "-includes-dirs",
+        "-set-archincludes",
+    ]
+    .into_iter()
+    .map(|suffix| MetaTargetRule {
+        name: format!("{mmake}{suffix}"),
+        dependencies: Vec::new(),
+    })
+    .collect::<Vec<_>>();
+    rules.push(MetaTargetRule {
+        name: includes.clone(),
+        dependencies: vec![
+            format!("{mmake}-makefile"),
+            format!("{mmake}-includes-dirs"),
+            format!("{mmake}-set-archincludes"),
+            "includes-generate-deps".to_owned(),
+        ],
+    });
+    for name in [
+        format!("includes-{modname}"),
+        format!("includes-{modname}_rel"),
+        include_set.to_owned(),
+        format!("{mmake}-includes-quick"),
+    ] {
+        rules.push(MetaTargetRule {
+            name,
+            dependencies: vec![includes.clone()],
+        });
+    }
+    rules
+}
+
 pub(crate) fn implicit_module_meta_rules(
     mmake: &str,
     modname: &str,

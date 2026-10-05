@@ -122,7 +122,7 @@ fn normalize_relative_copy_directory_path(raw: &str, relative_dir: &Path) -> Opt
 }
 
 /// Renders a `%copy_dir_recursive` path at the declaration site.
-fn render_copy_directory_path(
+pub(crate) fn render_copy_directory_path(
     raw: &str,
     context: &MakeExprContext<'_>,
     relative_dir: &Path,

@@ -1,11 +1,12 @@
 use super::{
-    capability_diagnostic, collect_vars, collect_vars_impl, evaluate_macro_sources,
+    capability_diagnostic, capability_diagnostic_for_target, capability_diagnostics_for_targets,
+    collect_vars, collect_vars_impl, evaluate_macro_sources, exact_mmake_target,
     implicit_module_meta_rules, is_explicit_genmodule_only, join_continuations,
     join_mm_continuations, macro_arg, macro_argument_names, macro_invocations, render_meta_token,
     resolve_module_suffix, resolve_module_target_dir, sanitize_ident, select_target_invocations,
-    MakeExprContext, TargetContext, META_RULE_RE,
+    unique_mmake_owners, MakeExprContext, TargetContext, META_RULE_RE,
 };
-use crate::ast::ModuleType;
+use crate::ast::{ModuleMacroForm, ModuleType};
 use crate::capability::external_cmake::{self, AOM_COMMON_OPTIONS};
 use crate::dirs::DirVars;
 use crate::make_vars::collect_vars_with_context;
@@ -15,6 +16,73 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use walkdir::WalkDir;
+
+#[test]
+fn source_bound_empty_header_macro_has_a_real_local_endpoint() {
+    let tree = TempTree::new();
+    let directory = tree.0.join("fixture");
+    fs::create_dir_all(&directory).unwrap();
+    fs::create_dir_all(tree.0.join("config")).unwrap();
+    fs::write(
+        tree.0.join("config/aros.cfg"),
+        "INCLUDE_FILES := original.h\n",
+    )
+    .unwrap();
+    fs::write(tree.0.join("native.mk"), "INCLUDE_FILES :=\n").unwrap();
+    let file = directory.join("mmakefile.src");
+    fs::write(
+        &file,
+        "include $(SRCDIR)/config/aros.cfg\n#MM includes-copy\n%copy_includes\n",
+    )
+    .unwrap();
+    let mut context = target_context("riscv", "esp32p4", "ilp32f");
+    context
+        .make_include_bindings
+        .insert("config/aros.cfg".to_owned(), "native.mk".to_owned());
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(parsed.copy_includes.len(), 1, "{parsed:#?}");
+    assert!(parsed.copy_includes[0].proven_empty);
+    assert!(parsed.skipped_copy_includes.is_empty());
+    assert!(
+        !parsed.native_graph_errors.iter().any(|error| error
+            .context
+            .as_ref()
+            .is_some_and(|context| context.target.as_deref() == Some("includes-copy"))),
+        "{parsed:#?}"
+    );
+}
+
+#[test]
+fn unbound_import_cannot_prove_empty_headers_from_a_target_fallback() {
+    let tree = TempTree::new();
+    let directory = tree.0.join("fixture");
+    fs::create_dir_all(&directory).unwrap();
+    let file = directory.join("mmakefile.src");
+    fs::write(
+        &file,
+        "include $(SRCDIR)/config/aros.cfg\n#MM includes-copy\n%copy_includes\n",
+    )
+    .unwrap();
+    let mut context = target_context("riscv", "esp32p4", "ilp32f");
+    context
+        .make_variables
+        .insert("INCLUDE_FILES".to_owned(), String::new());
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &context,
+    )
+    .unwrap();
+    assert!(parsed.copy_includes.is_empty(), "{parsed:#?}");
+    assert!(!parsed.native_graph_errors.is_empty());
+}
 
 #[test]
 fn capability_drift_is_typed_without_inspecting_failure_text() {
@@ -28,6 +96,129 @@ fn capability_drift_is_typed_without_inspecting_failure_text() {
     let location = diagnostic.location.unwrap();
     assert_eq!(location.path, "workbench/example/mmakefile.src");
     assert_eq!(location.line, Some(17));
+}
+
+#[test]
+fn capability_diagnostic_records_only_a_concrete_mmake_owner() {
+    let owned = capability_diagnostic_for_target(
+        Path::new("arch/example/mmakefile.src"),
+        Some(23),
+        "kernel-core",
+        "opaque failure",
+    );
+    assert_eq!(
+        owned.context.unwrap().target.as_deref(),
+        Some("kernel-core")
+    );
+
+    assert_eq!(exact_mmake_target("$(CPU)-kernel"), None);
+    assert_eq!(exact_mmake_target("kernel/core"), None);
+    assert_eq!(
+        exact_mmake_target("kernel-core"),
+        Some("kernel-core".to_owned())
+    );
+    let unresolved = capability_diagnostic_for_target(
+        Path::new("arch/example/mmakefile.src"),
+        Some(24),
+        "$(CPU)-kernel",
+        "opaque failure",
+    );
+    assert!(unresolved.context.is_none());
+
+    // The legacy helper remains unowned for capability failures that have no
+    // provable target root.
+    let unowned = capability_diagnostic(
+        Path::new("arch/example/mmakefile.src"),
+        None,
+        "unowned failure",
+    );
+    assert!(unowned.context.is_none());
+
+    let multiple = capability_diagnostics_for_targets(
+        Path::new("arch/example/mmakefile.src"),
+        None,
+        ["kernel-exec".to_owned(), "kernel-debug".to_owned()],
+        "multi-owner failure",
+    );
+    let owners = multiple
+        .iter()
+        .map(|diagnostic| {
+            diagnostic
+                .context
+                .as_ref()
+                .and_then(|context| context.target.as_deref())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owners, ["kernel-debug", "kernel-exec"]);
+
+    let no_concrete_owners = capability_diagnostics_for_targets(
+        Path::new("arch/example/mmakefile.src"),
+        None,
+        ["$(CPU)-kernel".to_owned(), "kernel/core".to_owned()],
+        "unresolved multi-owner failure",
+    );
+    assert_eq!(no_concrete_owners.len(), 1);
+    assert!(no_concrete_owners[0].context.is_none());
+}
+
+#[test]
+fn invocation_owner_registry_survives_rejection_and_fails_closed_on_ambiguity() {
+    let root = Path::new(".");
+    let dirs = DirVars::load(root);
+    let registry_for = |source: &str| {
+        let joined = join_continuations(source);
+        let scope = collect_vars(&joined);
+        let invocations = macro_invocations(&joined);
+        super::pipeline::invocation_owner_registry(
+            &invocations,
+            &scope,
+            &dirs,
+            root,
+            Path::new("workbench/libs/mesa/libglapi"),
+        )
+    };
+
+    let registry = registry_for(
+        "OWNER := mesa3d-linklib-glapi\n%build_linklib mmake=$(OWNER) libname=glapi files=glapi.c\n",
+    );
+    assert_eq!(registry.get("mesa3d-linklib-glapi"), Some(&1));
+
+    // Simulate capability admission having rejected and removed its target;
+    // ownership still comes from the earlier concrete source invocation.
+    let parsed_targets_after_rejection: Vec<String> = Vec::new();
+    assert!(parsed_targets_after_rejection.is_empty());
+    let owners = unique_mmake_owners(&registry, &["mesa3d-linklib-glapi"]).unwrap();
+    let diagnostics = capability_diagnostics_for_targets(
+        Path::new("workbench/libs/mesa/libglapi/mmakefile.src"),
+        None,
+        owners,
+        "generator rejected after module admission",
+    );
+    assert_eq!(
+        diagnostics[0]
+            .context
+            .as_ref()
+            .and_then(|context| context.target.as_deref()),
+        Some("mesa3d-linklib-glapi")
+    );
+
+    let unresolved =
+        registry_for("%build_linklib mmake=$(MISSING_OWNER) libname=glapi files=glapi.c\n");
+    assert!(unique_mmake_owners(&unresolved, &["mesa3d-linklib-glapi"]).is_none());
+
+    let ambiguous = registry_for(
+        "%build_linklib mmake=mesa3d-linklib-glapi libname=glapi files=one.c\n%build_linklib mmake=mesa3d-linklib-glapi libname=glapi files=two.c\n",
+    );
+    assert_eq!(ambiguous.get("mesa3d-linklib-glapi"), Some(&2));
+    assert!(unique_mmake_owners(&ambiguous, &["mesa3d-linklib-glapi"]).is_none());
+    let unowned = capability_diagnostics_for_targets(
+        Path::new("workbench/libs/mesa/libglapi/mmakefile.src"),
+        None,
+        unique_mmake_owners(&ambiguous, &["mesa3d-linklib-glapi"]).unwrap_or_default(),
+        "ambiguous declarations are unowned",
+    );
+    assert!(unowned[0].context.is_none());
 }
 
 #[test]
@@ -173,6 +364,191 @@ fn only_a_literal_empty_library_file_list_is_genmodule_only() {
 }
 
 #[test]
+fn module_macro_form_preserves_invocation_spelling_and_defaults_for_legacy_json() {
+    let tree = TempTree::new();
+    let module = tree.0.join("arch/all-pc/module-forms");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(
+        module.join("fixture.conf"),
+        "##begin config\nbasename Fixture\n##end config\n",
+    )
+    .unwrap();
+    for source in ["full", "runtime", "simple", "program"] {
+        fs::write(module.join(format!("{source}.c")), "").unwrap();
+    }
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "%build_module mmake=full modname=full modtype=library conffile=fixture.conf files=full\n\
+         %build_module_library mmake=runtime modname=runtime modtype=library conffile=fixture.conf files=runtime\n\
+         %build_module_abi mmake=abi modname=abi modtype=library conffile=fixture.conf\n\
+         %build_module_simple mmake=simple modname=simple modtype=library files=simple\n\
+         %build_prog mmake=program progname=program files=program\n",
+    )
+    .unwrap();
+
+    let parsed = super::parse_mmakefile_with_dirs(&file, &tree.0, &DirVars::load(&tree.0)).unwrap();
+    assert!(
+        parsed.skipped_programs.is_empty(),
+        "{:?}",
+        parsed.skipped_programs
+    );
+    let find = |name: &str| {
+        parsed
+            .targets
+            .iter()
+            .find(|target| target.mmake_name == name)
+            .unwrap_or_else(|| panic!("missing parsed target {name}"))
+    };
+    for (name, expected) in [
+        ("full", Some(ModuleMacroForm::Full)),
+        ("runtime", Some(ModuleMacroForm::RuntimeOnly)),
+        ("abi", Some(ModuleMacroForm::AbiOnly)),
+        ("simple", Some(ModuleMacroForm::Simple)),
+        ("program", None),
+    ] {
+        assert_eq!(find(name).module_macro, expected, "{name}");
+    }
+
+    // A config is not the source of this classification. The full and ABI
+    // invocations both retain their own spelling even though both expose the
+    // config-derived genmodule fact; the runtime-only form does not.
+    assert!(find("full").genmodule_abi);
+    assert!(find("abi").genmodule_abi);
+    assert!(!find("runtime").genmodule_abi);
+
+    let mut legacy_json = serde_json::to_value(find("full")).unwrap();
+    assert!(legacy_json
+        .as_object_mut()
+        .unwrap()
+        .remove("module_macro")
+        .is_some());
+    let legacy: crate::ast::TargetDefinition = serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(legacy.module_macro, None);
+    assert!(legacy.kobj_scoped_inputs.is_none());
+}
+
+#[test]
+fn native_kobj_inputs_retain_declaration_scope_and_computed_defname() {
+    use crate::kobj_scoped_inputs::ScopedMakeWords;
+    let tree = TempTree::new();
+    let module = tree.0.join("module");
+    let opts = tree.0.join("arch/all-pc/module");
+    fs::create_dir_all(&module).unwrap();
+    fs::create_dir_all(&opts).unwrap();
+    fs::write(module.join("body.c"), "int body;\n").unwrap();
+    fs::write(opts.join("make.opts"), "USER_LDFLAGS += -static\n").unwrap();
+    let file = module.join("mmakefile.src");
+    fs::write(
+        &file,
+        "USER_LDFLAGS := -first\n\
+         -include $(SRCDIR)/arch/all-$(ARCH)/module/make.opts\n\
+         -include $(SRCDIR)/arch/all-$(ARCH)/module/make.opts\n\
+         USER_OBJS := first.o first.o\n\
+         module_debug_LIBS := repeated repeated\n\
+         %build_module_library mmake=first modname=module flavour=debug modtype=library files=body uselibs=\"stdc.static stdc.static\" funcinstr=no\n\
+         USER_LDFLAGS :=\nUSER_OBJS :=\n\
+         %build_module_simple mmake=second modname=simple modtype=library files=body\n\
+         %build_module_abi mmake=abi modname=abi modtype=library\n",
+    ).unwrap();
+    let context = target_context("x86_64", "pc", "");
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &context,
+    )
+    .unwrap();
+    let first = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "first")
+        .unwrap();
+    let inputs = first.kobj_scoped_inputs.as_ref().unwrap();
+    assert_eq!(inputs.defname, "module_debug");
+    assert_eq!(inputs.included_make_opts.len(), 2);
+    assert!(
+        matches!(&inputs.use_libs, ScopedMakeWords::Exact { words, .. }
+        if words == &["stdc.static", "stdc.static"])
+    );
+    assert!(
+        matches!(&inputs.function_instrumentation, ScopedMakeWords::Exact { words, .. }
+        if words == &["no"])
+    );
+    assert!(
+        matches!(&inputs.user_ldflags, ScopedMakeWords::Exact { words, .. }
+        if words == &["-first", "-static", "-static"])
+    );
+    assert!(
+        matches!(&inputs.user_objects, ScopedMakeWords::Exact { words, .. }
+        if words == &["first.o", "first.o"])
+    );
+    assert!(
+        matches!(&inputs.defname_libs, ScopedMakeWords::Exact { words, .. }
+        if words == &["repeated", "repeated"])
+    );
+    let second = parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "second")
+        .unwrap();
+    let inputs = second.kobj_scoped_inputs.as_ref().unwrap();
+    assert!(matches!(
+        &inputs.use_libs,
+        ScopedMakeWords::KnownEmpty { .. }
+    ));
+    assert!(matches!(
+        &inputs.function_instrumentation,
+        ScopedMakeWords::Unresolved { .. }
+    ));
+    assert!(matches!(
+        &inputs.user_ldflags,
+        ScopedMakeWords::KnownEmpty { .. }
+    ));
+    assert!(matches!(
+        &inputs.user_objects,
+        ScopedMakeWords::KnownEmpty { .. }
+    ));
+    assert!(parsed
+        .targets
+        .iter()
+        .find(|target| target.mmake_name == "abi")
+        .unwrap()
+        .kobj_scoped_inputs
+        .is_none());
+}
+
+#[test]
+fn native_kobj_inputs_do_not_convert_unknown_assignments_to_empty() {
+    use crate::kobj_scoped_inputs::ScopedMakeWords;
+    let tree = TempTree::new();
+    let file = tree.0.join("mmakefile.src");
+    fs::write(tree.0.join("body.c"), "int body;\n").unwrap();
+    fs::write(
+        &file,
+        "ifeq ($(UNKNOWN_LINK_SELECTION),1)\nUSER_OBJS := hidden.o\nendif\n\
+         %build_module_simple mmake=unknown modname=unknown modtype=library files=body\n",
+    )
+    .unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    let inputs = parsed.targets[0].kobj_scoped_inputs.as_ref().unwrap();
+    assert!(matches!(
+        inputs.user_objects,
+        ScopedMakeWords::Unresolved { .. }
+    ));
+    assert!(matches!(
+        inputs.user_ldflags,
+        ScopedMakeWords::KnownEmpty { .. }
+    ));
+}
+
+#[test]
 fn generated_module_meta_rules_keep_aliases_and_every_arch_endpoint() {
     let rules = implicit_module_meta_rules(
         "module-id",
@@ -239,8 +615,8 @@ fn generated_module_meta_rules_keep_aliases_and_every_arch_endpoint() {
         "-quick",
     ] {
         let leaf = format!(
-                "module-id-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
-            );
+            "module-id-${{AROS_TARGET_PLATFORM}}-${{AROS_TARGET_CPU}}-${{AROS_TARGET_VARIANT}}{suffix}"
+        );
         assert!(metas.contains_key(&leaf), "missing {leaf}");
     }
     assert!(metas
@@ -1006,7 +1382,9 @@ fn known_dynamic_meta_target_variables_become_cmake_references() {
 fn an_empty_meta_rule_does_not_consume_the_next_make_rule() {
     let source = "#MM setup-ppc :\nsetup-ppc : preplink\n";
     let joined = join_mm_continuations(source);
-    assert!(META_RULE_RE.captures_iter(&joined).next().is_none());
+    let captured = META_RULE_RE.captures_iter(&joined).next().unwrap();
+    assert_eq!(&captured[1], "setup-ppc");
+    assert_eq!(captured[2].trim(), "");
 }
 
 #[test]
@@ -1073,11 +1451,11 @@ fn strict_expression_fallback_keeps_language_lanes_and_rejects_conditions() {
     let root = root();
     let dirs = dirs();
     let joined = join_continuations(
-            "PORTROOT := $(PORTSDIR)/fixture\n\
+        "PORTROOT := $(PORTSDIR)/fixture\n\
              CFILES := one two\n\
              CXXFILES := three four\n\
              %build_linklib mmake=ok libname=ok \\\n+                 files=\"$(addprefix $(PORTROOT)/,$(CFILES))\" \\\n+                 cxxfiles=\"$(addprefix $(PORTROOT)/,$(CXXFILES))\"\n",
-        );
+    );
     let scope = collect_vars(&joined);
     let invocation = macro_invocations(&joined).remove(0);
     let legacy = scope.snapshot(invocation.line);
@@ -1099,12 +1477,12 @@ fn strict_expression_fallback_keeps_language_lanes_and_rejects_conditions() {
     );
 
     let conditional = join_continuations(
-            "FILES := common\n\
+        "FILES := common\n\
              ifeq ($(ARCH),pc)\n\
              FILES += pc-only\n\
              endif\n\
              %build_linklib mmake=unsafe libname=unsafe \\\n+                 files=\"$(addprefix source/,$(FILES))\"\n",
-        );
+    );
     let scope = collect_vars(&conditional);
     let invocation = macro_invocations(&conditional).remove(0);
     let legacy = scope.snapshot(invocation.line);
@@ -1113,14 +1491,14 @@ fn strict_expression_fallback_keeps_language_lanes_and_rejects_conditions() {
     assert!(error.contains("unevaluated Make conditional"), "{error}");
 
     let partial = join_continuations(
-            "FILES := common\n\
+        "FILES := common\n\
              ifeq ($(ARCH),pc)\n\
              FILES += pc-only\n\
              else\n\
              FILES += arm-only\n\
              endif\n\
              %build_linklib mmake=legacy libname=legacy \\\n+                 files=$(FILES) cxxfiles=$(UNKNOWN_CXX)\n",
-        );
+    );
     let scope = collect_vars(&partial);
     let invocation = macro_invocations(&partial).remove(0);
     let legacy = scope.snapshot(invocation.line);
@@ -1129,9 +1507,9 @@ fn strict_expression_fallback_keeps_language_lanes_and_rejects_conditions() {
     assert!(error.contains("unevaluated Make conditional"), "{error}");
 
     let mixed = join_continuations(
-            "FILES := common\n\
+        "FILES := common\n\
              %build_linklib mmake=legacy libname=legacy \\\n+                 files=$(FILES) cxxfiles=$(UNKNOWN_CXX)\n",
-        );
+    );
     let scope = collect_vars(&mixed);
     let invocation = macro_invocations(&mixed).remove(0);
     let legacy = scope.snapshot(invocation.line);
@@ -1262,29 +1640,29 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
         assert!(fetch.origins.ends_with("older-versions/26.x"));
         assert_eq!(fetch.patches, "mesa-26.0.0-aros.diff:mesa-26.0.0:-p1");
         for (name, archive, origin) in [
-                (
-                    "mesa3d-mako-fetch",
-                    "mako-1.3.10",
-                    "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535",
-                ),
-                (
-                    "mesa3d-markupsafe-fetch",
-                    "markupsafe-3.0.2",
-                    "https://files.pythonhosted.org/packages/b2/97/5d42485e71dfc078108a86d6de8fa46db44a1a9295e89c5d6d4a06e23a62",
-                ),
-            ] {
-                let package = parsed
-                    .fetches
-                    .iter()
-                    .find(|fetch| fetch.name == name)
-                    .unwrap();
-                assert_eq!(package.archive, archive);
-                assert_eq!(package.suffixes, "tar.gz");
-                assert_eq!(package.origins, origin);
-                assert_eq!(package.destination, "${AROS_PORTS_DIR}/mesa-python");
-                assert_eq!(package.location, "${AROS_PORTS_SOURCE_DIR}");
-                assert_eq!(package.patches, "::");
-            }
+            (
+                "mesa3d-mako-fetch",
+                "mako-1.3.10",
+                "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535",
+            ),
+            (
+                "mesa3d-markupsafe-fetch",
+                "markupsafe-3.0.2",
+                "https://files.pythonhosted.org/packages/b2/97/5d42485e71dfc078108a86d6de8fa46db44a1a9295e89c5d6d4a06e23a62",
+            ),
+        ] {
+            let package = parsed
+                .fetches
+                .iter()
+                .find(|fetch| fetch.name == name)
+                .unwrap();
+            assert_eq!(package.archive, archive);
+            assert_eq!(package.suffixes, "tar.gz");
+            assert_eq!(package.origins, origin);
+            assert_eq!(package.destination, "${AROS_PORTS_DIR}/mesa-python");
+            assert_eq!(package.location, "${AROS_PORTS_SOURCE_DIR}");
+            assert_eq!(package.patches, "::");
+        }
 
         let pyyaml = parsed
             .fetches
@@ -1352,9 +1730,10 @@ fn mesa_included_config_resolves_fetch_and_public_headers_for_all_profiles() {
                 .sum::<usize>(),
             24
         );
-        assert!(parsed.copy_includes.iter().all(|copy| copy
-            .source_dir
-            .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/")));
+        assert!(parsed.copy_includes.iter().all(|copy| {
+            copy.source_dir
+                .starts_with("${AROS_PORTS_DIR}/mesa/mesa-26.0.0/include/")
+        }));
     }
 }
 
@@ -1503,11 +1882,13 @@ fn real_tree_e1_resolves_exactly_48_targets_without_merging_cxx_sources() {
         })
         .count();
     assert_eq!(port_targets, 46);
-    assert!(targets.values().all(|target| target
-        .source_files
-        .iter()
-        .chain(&target.cxx_source_files)
-        .all(|source| !source.contains("/Volumes/Dev/"))));
+    assert!(targets.values().all(|target| {
+        target
+            .source_files
+            .iter()
+            .chain(&target.cxx_source_files)
+            .all(|source| !source.contains("/Volumes/Dev/"))
+    }));
 }
 
 #[test]
@@ -2002,6 +2383,57 @@ fn literal_define_header_adoption_rejects_output_traversal() {
 }
 
 #[test]
+fn literal_define_owned_scope_binds_the_recorded_include_site() {
+    use std::fmt::Write as _;
+    let tree = TempTree::new();
+    let relative = "workbench/devs/networks/atheros5000/hal";
+    let directory = tree.0.join(relative);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("one.c"), "int one;\n").unwrap();
+    let mut fragment = String::new();
+    for name in crate::capability::literal_defines::ATHEROS_HAL_LITERAL_DEFINE_VARIABLES {
+        let value = match *name {
+            "HAL_OBJS" => "one.o",
+            "OPT_AH_PATH" => "$(TOP)/$(CURDIR)/opt_ah.h",
+            _ => "1",
+        };
+        writeln!(fragment, "{name} := {value}").unwrap();
+    }
+    fragment.push_str("$(OPT_AH_PATH):\n\techo \"#define BASE 1\" >opt_ah.h\n");
+    for name in crate::capability::literal_defines::ATHEROS_HAL_LITERAL_DEFINE_VARIABLES {
+        if !matches!(*name, "HAL_OBJS" | "OPT_AH_PATH") {
+            writeln!(
+                fragment,
+                "ifdef {name}\n\techo \"#define {name} 1\" >>opt_ah.h\nendif"
+            )
+            .unwrap();
+        }
+    }
+    fs::write(directory.join("Makefile.inc"), fragment).unwrap();
+    let prefix = "# prefix\n".repeat(90);
+    fs::write(directory.join("mmakefile.src"), format!(
+        "{prefix}UNRELATED := one \\\n two\ninclude $(SRCDIR)/$(CURDIR)/Makefile.inc\nAH_ASSERT :=\n%build_linklib mmake=workbench-devs-networks-atheros5000-hal libname=athhal files=\"$(basename $(HAL_OBJS))\"\n#MM\nworkbench-devs-networks-atheros5000-hal-opts : $(TOP)/$(CURDIR)/opt_ah.h\n"
+    )).unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &directory.join("mmakefile.src"),
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("x86_64", "pc", ""),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.define_headers.len(),
+        1,
+        "{:#?}",
+        parsed.skipped_local_make_includes
+    );
+    assert!(parsed.define_headers[0]
+        .definitions
+        .contains(&"AH_ASSERT 1".to_owned()));
+    assert_eq!(parsed.targets[0].source_files, ["one"]);
+}
+
+#[test]
 fn literal_define_fragment_cannot_change_non_source_build_properties() {
     for escaped_use in [
         "USER_CFLAGS += -DFRAGMENT_MODE=$(MODE)\n",
@@ -2268,9 +2700,11 @@ fn zlib_port_scope_is_declaration_owned_and_profile_exact() {
 
         let minigzip = targets["workbench-libs-z-minigzip"];
         assert_eq!(
-                minigzip.source_files,
-                ["${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/test/minigzip"]
-            );
+            minigzip.source_files,
+            [
+                "${AROS_PORTS_DIR}/zlib/chromium-da752eb2a3660cf1bf8dac620f6380b89dd953a7/test/minigzip"
+            ]
+        );
         assert!(minigzip.defines.iter().any(|value| value == "NO_GZIP"));
         assert_eq!(minigzip.link_options, ["-lpthread"]);
         assert!(!minigzip.canonical_linklib_output);
@@ -2451,29 +2885,29 @@ fn generated_linklib_wildcards_are_exact_manifests_in_all_current_profiles() {
     let root = root();
     let dirs = dirs();
     let expected = BTreeMap::from([
-            (
-                "compiler-posixc-lfa-linklib",
-                vec!["@AROS_GENMODULE|normal|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
-            ),
-            (
-                "compiler-posixc-lfa-linklib-rel",
-                vec!["@AROS_GENMODULE|rel|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
-            ),
-            (
-                "workbench-libs-gl-linklib",
-                vec![
-                    "gl_funcs",
-                    "@AROS_GENMODULE|normal|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
-                ],
-            ),
-            (
-                "workbench-libs-gl-linklib-rel",
-                vec![
-                    "gl_funcs",
-                    "@AROS_GENMODULE|rel|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
-                ],
-            ),
-        ]);
+        (
+            "compiler-posixc-lfa-linklib",
+            vec!["@AROS_GENMODULE|normal|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
+        ),
+        (
+            "compiler-posixc-lfa-linklib-rel",
+            vec!["@AROS_GENMODULE|rel|stackstubs,regcallstubs|posixc|library|posixc_lfa.conf"],
+        ),
+        (
+            "workbench-libs-gl-linklib",
+            vec![
+                "gl_funcs",
+                "@AROS_GENMODULE|normal|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
+            ],
+        ),
+        (
+            "workbench-libs-gl-linklib-rel",
+            vec![
+                "gl_funcs",
+                "@AROS_GENMODULE|rel|stackstubs,regcallstubs,autoinit,getlibbase|gl|library|gl.conf",
+            ],
+        ),
+    ]);
 
     for (cpu, platform, float_abi) in [
         ("x86_64", "pc", ""),
@@ -2645,6 +3079,44 @@ fn every_library_module_materialises_its_client_archive() {
     assert!(genmodule.enabled);
     assert!(genmodule.source_files.is_empty());
     assert!(parsed.skipped_client_archives.is_empty(), "{parsed:#?}");
+}
+
+#[test]
+fn handwritten_meta_edges_keep_their_origin_when_macro_aliases_duplicate_them() {
+    let tree = TempTree::new();
+    let file = tree.0.join("mmakefile.src");
+    fs::write(tree.0.join("probe.c"), "int probe;\n").unwrap();
+    fs::write(
+        &file,
+        "%build_module_library mmake=fixture modname=fixture modtype=library files=probe uselibs=stdc.static\n\
+         #MM- fixture-kobj : linklibs-stdc.static\n",
+    )
+    .unwrap();
+    let parsed = super::parse_mmakefile_with_dirs_and_context(
+        &file,
+        &tree.0,
+        &DirVars::load(&tree.0),
+        &target_context("riscv", "esp32p4", ""),
+    )
+    .unwrap();
+    let duplicate_edges = parsed
+        .meta_rules
+        .iter()
+        .filter(|rule| {
+            rule.name == "fixture-kobj"
+                && rule
+                    .dependencies
+                    .iter()
+                    .any(|dep| dep == "linklibs-stdc.static")
+        })
+        .count();
+    assert_eq!(duplicate_edges, 2, "{parsed:#?}");
+    assert_eq!(parsed.explicit_meta_rules.len(), 1);
+    assert_eq!(parsed.explicit_meta_rules[0].name, "fixture-kobj");
+    assert_eq!(
+        parsed.explicit_meta_rules[0].dependencies,
+        ["linklibs-stdc.static"]
+    );
 }
 
 #[test]
@@ -3082,6 +3554,9 @@ fn real_tree_retains_exactly_three_abi_skeletons_and_zero_source_version() {
 fn sourceful_module_forms_keep_their_noncyclic_implicit_metamake_graph() {
     let root = root();
     let dirs = dirs();
+    // stdc freezes a CPU-selected math inventory through :=. A context-free
+    // parse must not manufacture the objects of an unknown long-double lane.
+    let target = target_context("x86_64", "pc", "");
     for (file, mmake, modname, has_abi) in [
         (
             "compiler/crt/stdc/mmakefile.src",
@@ -3096,8 +3571,9 @@ fn sourceful_module_forms_keep_their_noncyclic_implicit_metamake_graph() {
             false,
         ),
     ] {
-        let parsed = super::parse_mmakefile_with_dirs(&root.join(file), &root, &dirs)
-            .unwrap_or_else(|error| panic!("{file}: {error}"));
+        let parsed =
+            super::parse_mmakefile_with_dirs_and_context(&root.join(file), &root, &dirs, &target)
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
         let mut metas: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for rule in &parsed.meta_rules {
             metas
@@ -3128,6 +3604,25 @@ fn sourceful_module_forms_keep_their_noncyclic_implicit_metamake_graph() {
             assert!(!metas.contains_key(includes_alias.as_str()), "{file}");
         }
     }
+}
+
+#[test]
+fn context_free_stdc_does_not_reuse_a_frozen_uncertain_math_inventory() {
+    let root = root();
+    let parsed = super::parse_mmakefile_with_dirs(
+        &root.join("compiler/crt/stdc/mmakefile.src"),
+        &root,
+        &dirs(),
+    )
+    .unwrap();
+    assert!(!parsed
+        .targets
+        .iter()
+        .any(|target| target.mmake_name == "compiler-stdc"));
+    assert!(parsed
+        .skipped_programs
+        .iter()
+        .any(|reason| reason.contains("STDC_FILES") && reason.contains("unsafe Make variable")));
 }
 
 #[test]

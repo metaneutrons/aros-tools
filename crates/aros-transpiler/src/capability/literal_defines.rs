@@ -320,6 +320,7 @@ pub(crate) fn collect_active_literal_defines(
     content: &str,
     scope: &VarScope,
     target: &TargetContext,
+    scope_offset: usize,
 ) -> std::result::Result<(usize, String, String, Vec<String>), String> {
     let mut rule: Option<(usize, String)> = None;
     let mut destination: Option<String> = None;
@@ -327,7 +328,22 @@ pub(crate) fn collect_active_literal_defines(
     let mut definition_names = HashSet::new();
     let mut stack: Vec<ConditionalFrame> = Vec::new();
 
-    for (index, raw_line) in content.lines().enumerate() {
+    // Scope history uses continuation-joined parent coordinates, while the
+    // diagnostic must retain physical fragment coordinates. Neither a parent
+    // prefix nor a continued assignment may shift the condition's snapshot.
+    let joined = join_continuations(content);
+    let mut physical_starts = Vec::new();
+    let mut continued = false;
+    for (index, chunk) in content.split_inclusive('\n').enumerate() {
+        if !continued {
+            physical_starts.push(index);
+        }
+        continued = chunk
+            .strip_suffix('\n')
+            .is_some_and(|line| line.trim_end_matches([' ', '\t', '\r']).ends_with('\\'));
+    }
+    for ((logical_index, raw_line), index) in joined.lines().enumerate().zip(physical_starts) {
+        let scope_line = scope_offset + logical_index;
         let trimmed = raw_line.trim();
         if rule.is_none() {
             if raw_line.starts_with('\t') || trimmed.starts_with('#') || trimmed.is_empty() {
@@ -349,7 +365,7 @@ pub(crate) fn collect_active_literal_defines(
             let parent = stack
                 .last()
                 .map_or(ConditionalTruth::True, |frame| frame.current);
-            let condition = evaluate_conditional(directive, args, scope, target);
+            let condition = evaluate_conditional(directive, args, scope, target, scope_line);
             stack.push(ConditionalFrame::new(parent, condition));
             continue;
         }
@@ -368,7 +384,9 @@ pub(crate) fn collect_active_literal_defines(
                 .into_iter()
                 .find_map(|word| directive_tail(tail, word).map(|args| (word, args)))
             {
-                frame.else_if(evaluate_conditional(directive, args, scope, target));
+                frame.else_if(evaluate_conditional(
+                    directive, args, scope, target, scope_line,
+                ));
             } else {
                 return Err(format!(
                     "line {} has an unsupported else directive",
@@ -602,8 +620,29 @@ pub(crate) fn owned_scope(
     let (provider, declaration_line, provider_files) = provider?;
 
     let fragment_content = read_source(&root.join(&fragment.path)).ok()?;
+    // This capability admits exactly one top-level fragment. Expansion keeps
+    // the include directive and inserts the fragment immediately after it.
+    // Derive the offset from that recorded include site, not a substring search
+    // which could bind identical parent text to the wrong assignment history.
+    let parent_prefix: String = original_content
+        .split_inclusive('\n')
+        .take(fragment.include_line)
+        .collect();
+    let joined_prefix = join_continuations(&parent_prefix);
+    let joined_fragment = join_continuations(&fragment_content);
+    let scope_offset = joined_prefix.lines().count();
+    if !candidate_joined.starts_with(&joined_prefix)
+        || !candidate_joined
+            .lines()
+            .skip(scope_offset)
+            .take(joined_fragment.lines().count())
+            .eq(joined_fragment.lines())
+    {
+        return None;
+    }
     let (rule_line, raw_output, recipe_destination, definitions) =
-        collect_active_literal_defines(&fragment_content, &candidate_scope, target).ok()?;
+        collect_active_literal_defines(&fragment_content, &candidate_scope, target, scope_offset)
+            .ok()?;
     let context =
         MakeExprContext::new(&candidate_scope, dirs, declaration_line, root, relative_dir);
     let output = evaluate_make_expr(&raw_output, &context).ok()?;
@@ -685,6 +724,23 @@ pub(crate) fn owned_scope(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn literal_header_conditions_use_joined_parent_coordinates() {
+        let fragment = "FEATURE := yes\\ \r\n  yes\nOPT := opt.h\n$(OPT):\n\techo \"#define BASE 1\" >opt.h\nifdef FEATURE\n\techo \"#define ENABLED 1\" >>opt.h\nendif\n";
+        // The later reset must not alter the earlier header condition, even
+        // when enough parent lines put the raw fragment index before FEATURE.
+        let prefix = "# parent\n# parent\n# parent\n# parent\n# parent\n# parent\n# parent\n# parent\ninclude options.mk\n";
+        let parent = format!("{prefix}{fragment}FEATURE :=\n");
+        let context = TargetContext::default();
+        let (scope, _) = collect_vars_impl(&join_continuations(&parent), Some(&context));
+        let offset = join_continuations(prefix).lines().count();
+        let (line, _, _, definitions) =
+            collect_active_literal_defines(fragment, &scope, &context, offset).unwrap();
+        assert_eq!(line, 4, "diagnostics retain physical fragment lines");
+        assert_eq!(definitions, ["BASE 1", "ENABLED 1"]);
+        assert!(collect_active_literal_defines(fragment, &scope, &context, 0).is_err());
+    }
 
     #[test]
     fn literal_define_capability_is_an_exact_path_provider_and_variable_manifest() {

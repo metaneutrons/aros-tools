@@ -2,30 +2,314 @@
 
 use super::{
     all_sources_are_fetch_owned, apply_mesa_compile_contract, capability_diagnostic,
-    collect_arch_decls, collect_arch_sources, collect_copy_includes_with_scope,
-    collect_fetches_with_scope_and_context, collect_flags, collect_flexcat_source_rules,
-    collect_ilbm_sources, collect_includes, collect_includes_at, collect_make_opts, collect_vars,
-    collect_vars_impl, collect_vars_impl_with_forward_locals, collector_forward_local_prelude,
-    copy_directories, current_profile, declaration_flags_at, declaration_global_link_options,
+    capability_diagnostic_for_target, capability_diagnostics_for_targets, collect_arch_decls,
+    collect_arch_sources, collect_copy_includes_with_scope, collect_fetches_with_scope_and_context,
+    collect_flags, collect_flexcat_source_rules, collect_ilbm_sources, collect_includes,
+    collect_includes_at, collect_make_opts, collect_vars, collect_vars_impl,
+    collect_vars_impl_with_forward_locals, collector_forward_local_prelude, copy_directories,
+    current_profile, declaration_flags_at, declaration_global_link_options,
     declaration_owned_port_scope, evaluate_linklib_list, evaluate_macro_sources,
     evaluate_macro_sources_with_files, evaluate_make_expr, evaluate_name,
-    evaluate_output_directory, expand_file_list, expected_ahi_profile_exclusion,
-    expected_grub_profile_exclusion, external_cmake, generators, implicit_module_meta_rules,
-    inline_collector_make_includes, inline_local_make_includes, is_explicit_genmodule_only,
-    join_continuations, literal_defines, macro_arg, map_linklib_object_sources,
-    merge_named_link_flags, read_genmodule_linklib_config, read_genmodule_linklib_config_files,
-    read_source, record_partial_source_lists, remaining_linklib_sources, render_meta_token,
-    resolve_generated_linklib_sources, resolve_module_suffix, resolve_module_target_dir,
-    resolve_no_argument, resolve_yes_argument, safe_build_tree_output_directory, sanitize_ident,
-    select_target_invocations, sse41, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
-    GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, LocalMakeFragmentPolicy,
+    evaluate_output_directory, exact_mmake_target, expand_file_list,
+    expected_ahi_profile_exclusion, expected_grub_profile_exclusion, external_cmake, generators,
+    implicit_module_meta_rules, inline_collector_make_includes, inline_local_make_includes,
+    is_concrete_build_invocation, is_explicit_genmodule_only, join_continuations, literal_defines,
+    macro_arg, map_linklib_object_sources, merge_named_link_flags, read_genmodule_linklib_config,
+    read_genmodule_linklib_config_files, read_source, record_partial_source_lists,
+    remaining_linklib_sources, render_meta_token, resolve_generated_linklib_sources,
+    resolve_module_suffix, resolve_module_target_dir, resolve_no_argument, resolve_yes_argument,
+    safe_build_tree_output_directory, sanitize_ident, select_target_invocations, sse41,
+    unique_mmake_owners, wildcard_c_sources, Diagnostic, EvaluatedSources, FetchDecl,
+    GenmoduleConfigFacts, GenmoduleLinklibs, HashSet, Invocation, LocalMakeFragmentPolicy,
     LocalMakeIncludeLimits, MakeExprContext, MetaTargetRule, ModuleType, ParsedMmakefile, Path,
     Regex, Result, TargetContext, TargetDefinition, PRIVATE_LIBDIR,
 };
+use crate::ast::ModuleMacroForm;
 use crate::capability::mesa::mesa26;
+use crate::module_paths::implicit_module_header_meta_rules;
 
 #[path = "parser_pipeline/post_processing.rs"]
 mod post_processing;
+
+fn capability_diagnostic_with_owner(
+    relative_path: &Path,
+    line: Option<usize>,
+    owner: Option<&str>,
+    message: impl Into<String>,
+) -> Diagnostic {
+    match owner {
+        Some(owner) => capability_diagnostic_for_target(relative_path, line, owner, message),
+        None => capability_diagnostic(relative_path, line, message),
+    }
+}
+
+/// A rejected source-written MetaMake provider may retain its already
+/// rendered selector spelling. This proves ownership, not executability;
+/// graph selection must still bind every selector or reject the endpoint.
+fn source_meta_provider_diagnostic(
+    relative_path: &Path,
+    owner: &str,
+    reason: String,
+) -> Diagnostic {
+    let mut residual = owner.to_owned();
+    for selector in [
+        "AROS_TARGET_CPU",
+        "AROS_TARGET_PLATFORM",
+        "AROS_TARGET_LEGACY_PLATFORM",
+        "AROS_TARGET_FAMILY",
+        "AROS_TARGET_VARIANT",
+        "AROS_TARGET_CPU32",
+    ] {
+        residual = residual.replace(&format!("${{{selector}}}"), "selector");
+    }
+    let mut diagnostic = capability_diagnostic(relative_path, None, reason);
+    if !residual.is_empty()
+        && residual
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        diagnostic = diagnostic.with_context(aros_common::DiagnosticContext {
+            target: Some(owner.to_owned()),
+            ..Default::default()
+        });
+    }
+    diagnostic
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiteralObjectSourceAnchor {
+    source: std::path::PathBuf,
+    line: usize,
+}
+
+fn rejection_source_location<'a>(
+    fallback: &'a Path,
+    anchors: Option<&'a [Option<LiteralObjectSourceAnchor>]>,
+    joined_line: usize,
+) -> (&'a Path, Option<usize>) {
+    joined_line
+        .checked_sub(1)
+        .and_then(|index| anchors.and_then(|anchors| anchors.get(index)))
+        .and_then(Option::as_ref)
+        .map_or((fallback, None), |anchor| {
+            (anchor.source.as_path(), Some(anchor.line))
+        })
+}
+
+fn source_rejection_diagnostics(
+    path: &Path,
+    line: Option<usize>,
+    fallback_owner: Option<&str>,
+    message: String,
+    proofs: Option<Vec<crate::source_rule_ownership::SourceRuleOwnership>>,
+) -> Vec<Diagnostic> {
+    match proofs {
+        Some(proofs) if !proofs.is_empty() => proofs
+            .into_iter()
+            .map(|proof| {
+                capability_diagnostic_with_owner(
+                    path,
+                    line,
+                    Some(&proof.owner),
+                    format!(
+                        "{message}; exact source consumer chain: {}",
+                        proof.chain.join(" -> ")
+                    ),
+                )
+            })
+            .collect(),
+        _ => vec![capability_diagnostic_with_owner(
+            path,
+            line,
+            fallback_owner,
+            message,
+        )],
+    }
+}
+
+#[derive(Default)]
+struct ReconstructedLiteralSource {
+    text: String,
+    physical_anchors: Vec<Option<LiteralObjectSourceAnchor>>,
+}
+
+/// Reconstructs the exact native-configuration expansion while retaining the
+/// original file and physical line for every emitted line. A mismatch means
+/// the include provenance cannot safely support a source location.
+fn literal_object_source_anchors(
+    root: &Path,
+    source: &Path,
+    source_text: &str,
+    scan: &crate::local_make_includes::LocalMakeIncludeScan,
+    joined_snapshot: &str,
+) -> Option<Vec<Option<LiteralObjectSourceAnchor>>> {
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let mut next_fragment = 0;
+    let reconstructed = reconstruct_literal_source(
+        &canonical_root,
+        source,
+        source_text,
+        &scan.fragments,
+        &mut next_fragment,
+    )?;
+    if next_fragment != scan.fragments.len() || reconstructed.text != scan.expanded {
+        return None;
+    }
+
+    let joined = join_continuations(&reconstructed.text);
+    if joined != joined_snapshot {
+        return None;
+    }
+
+    let physical_lines = reconstructed.text.split_inclusive('\n').collect::<Vec<_>>();
+    if physical_lines.len() != reconstructed.physical_anchors.len() {
+        return None;
+    }
+
+    // Keep this expression in lockstep with parser::join_continuations. It
+    // tells us which adjacent physical lines became one parser line; the
+    // joined bytes themselves are independently checked above.
+    let continuation = Regex::new(r"\\[ \t]*\r?\n[ \t]*").ok()?;
+    let mut logical_anchors = Vec::new();
+    for (index, physical_line) in physical_lines.iter().enumerate() {
+        if index == 0 {
+            logical_anchors.push(reconstructed.physical_anchors[index].clone());
+            continue;
+        }
+        let previous_line = physical_lines[index - 1];
+        let boundary = previous_line.len();
+        let mut pair = String::with_capacity(boundary + physical_line.len());
+        pair.push_str(previous_line);
+        pair.push_str(physical_line);
+        let is_continuation = continuation
+            .find_iter(&pair)
+            .any(|matched| matched.start() < boundary && matched.end() >= boundary);
+        if !is_continuation {
+            logical_anchors.push(reconstructed.physical_anchors[index].clone());
+        }
+    }
+    if logical_anchors.len() != joined_snapshot.lines().count() {
+        return None;
+    }
+    Some(logical_anchors)
+}
+
+fn reconstruct_literal_source(
+    root: &Path,
+    source: &Path,
+    source_text: &str,
+    fragments: &[crate::local_make_includes::IncludedLocalMakeFragment],
+    next_fragment: &mut usize,
+) -> Option<ReconstructedLiteralSource> {
+    let mut reconstructed = ReconstructedLiteralSource::default();
+    for (index, chunk) in source_text.split_inclusive('\n').enumerate() {
+        let line = index + 1;
+        let fragment = fragments.get(*next_fragment);
+        if let Some(fragment) = fragment {
+            if fragment.included_from == source && fragment.include_line < line {
+                return None;
+            }
+            if fragment.included_from == source && fragment.include_line == line {
+                if fragment.path.is_absolute()
+                    || fragment
+                        .path
+                        .components()
+                        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    return None;
+                }
+                let fragment_path = fragment.path.clone();
+                *next_fragment += 1;
+                let resolved_fragment_path = root.join(&fragment_path);
+                if std::fs::canonicalize(&resolved_fragment_path)
+                    .ok()
+                    .as_deref()
+                    != Some(resolved_fragment_path.as_path())
+                    || !std::fs::metadata(&resolved_fragment_path).ok()?.is_file()
+                {
+                    return None;
+                }
+                reconstructed
+                    .text
+                    .push_str(if fragment.generated_output.is_some() {
+                        "# Verified source configuration template\n"
+                    } else {
+                        "# Verified source configuration include\n"
+                    });
+                reconstructed.physical_anchors.push(None);
+
+                let mut fragment_text = std::fs::read_to_string(&resolved_fragment_path).ok()?;
+                if let Some(substitutions) = &fragment.template_substitutions {
+                    fragment.generated_output.as_ref()?;
+                    for (token, value) in substitutions {
+                        if token.is_empty() || !fragment_text.contains(token) {
+                            return None;
+                        }
+                        fragment_text = fragment_text.replace(token, value);
+                    }
+                }
+                let expanded = reconstruct_literal_source(
+                    root,
+                    &fragment_path,
+                    &fragment_text,
+                    fragments,
+                    next_fragment,
+                )?;
+                let has_text = !expanded.text.is_empty();
+                let ends_with_newline = expanded.text.ends_with('\n');
+                reconstructed.text.push_str(&expanded.text);
+                reconstructed
+                    .physical_anchors
+                    .extend(expanded.physical_anchors);
+                if has_text && !ends_with_newline {
+                    reconstructed.text.push('\n');
+                }
+                continue;
+            }
+        }
+        reconstructed.text.push_str(chunk);
+        reconstructed
+            .physical_anchors
+            .push(Some(LiteralObjectSourceAnchor {
+                source: source.to_path_buf(),
+                line,
+            }));
+    }
+    if fragments
+        .get(*next_fragment)
+        .is_some_and(|fragment| fragment.included_from == source)
+    {
+        return None;
+    }
+    Some(reconstructed)
+}
+
+pub(super) fn invocation_owner_registry(
+    invocations: &[Invocation],
+    scope: &crate::make_vars::VarScope,
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+    rel_dir: &Path,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut owners = std::collections::BTreeMap::new();
+    for invocation in invocations
+        .iter()
+        .filter(|invocation| is_concrete_build_invocation(&invocation.name))
+    {
+        let Some(raw) = macro_arg(&invocation.args, "mmake") else {
+            continue;
+        };
+        let expression_context = MakeExprContext::new(scope, dirs, invocation.line, root, rel_dir);
+        let Some(owner) = evaluate_name(&raw, &expression_context)
+            .ok()
+            .and_then(|name| exact_mmake_target(&name))
+        else {
+            continue;
+        };
+        *owners.entry(owner).or_insert(0) += 1;
+    }
+    owners
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -38,7 +322,8 @@ pub(super) fn parse_mmakefile_impl(
     target: Option<&TargetContext>,
     known_fetches: &[FetchDecl],
 ) -> Result<ParsedMmakefile> {
-    let content = read_source(path)?;
+    let (content, source_sha256) = aros_common::text::read_source_with_sha256(path)?;
+    let disabled_meta_owners = crate::native_meta_providers::disabled_owners(&content);
     let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let rel_dir = parent_dir
         .strip_prefix(root)
@@ -174,7 +459,21 @@ pub(super) fn parse_mmakefile_impl(
     // USER_CPPFLAGS / USER_CFLAGS apply to every rule in the mmakefile, so the
     // same set is attached to each target parsed out of it.
     let mut flag_set = collect_flags(&content);
-    let (packages, skipped_packages) = crate::packages::collect_packages(&content, &rel_dir);
+    let fallback_package_states = conditional_line_states
+        .is_none()
+        .then(|| collect_vars_impl(&joined, None).1);
+    let package_line_states = conditional_line_states
+        .as_deref()
+        .or(fallback_package_states.as_deref())
+        .expect("package scan has selected or conservative conditional states");
+    let (packages, skipped_packages) = crate::packages::collect_packages_with_scope(
+        &joined,
+        &rel_dir,
+        &scope,
+        dirs,
+        root,
+        package_line_states,
+    );
     // Collected from `joined`, not from `content`: the declaration line has to
     // be in the same coordinate system as `scope`, which is built from the
     // joined and locally-included text. Read against the raw file the line
@@ -283,6 +582,9 @@ pub(super) fn parse_mmakefile_impl(
         &rel_dir,
         &mut skipped_programs,
     );
+    // Preserve source-declared owners before capability checks can reject and
+    // remove their TargetDefinition from the translated graph.
+    let invocation_owners = invocation_owner_registry(&invocations, &scope, dirs, root, &rel_dir);
     // `%copy_dir_recursive` owns filesystem output, so unlike a generic
     // auxiliary macro it must not survive an inactive or unknown conditional.
     // Non-profiled parser callers still get a line-state scan: only their
@@ -293,6 +595,586 @@ pub(super) fn parse_mmakefile_impl(
     let copy_directory_line_states = conditional_line_states
         .as_deref()
         .or(fallback_copy_directory_states.as_deref());
+    let (literal_header_copies, literal_header_copy_rejections) =
+        crate::literal_header_copies::collect(
+            &invocations,
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            copy_directory_line_states,
+        );
+    let mut native_graph_errors = Vec::new();
+    copy_scan.transforms.extend(literal_header_copies);
+    for rejection in literal_header_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            rejection.owner.as_deref(),
+            format!(
+                "literal header copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (static_header_copies, static_header_copy_rejections) =
+        crate::static_header_copies::collect(
+            &joined,
+            &scope,
+            dirs,
+            root,
+            &rel_dir,
+            copy_directory_line_states,
+        );
+    copy_scan.transforms.extend(static_header_copies);
+    for rejection in static_header_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            rejection.owner.as_deref(),
+            format!(
+                "static header copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (directory_setups, directory_setup_rejections) =
+        crate::directory_setup::collect_directory_setups_with_context(
+            &joined,
+            &rel_dir,
+            &scope,
+            dirs,
+            root,
+            copy_directory_line_states,
+        );
+    for rejection in directory_setup_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "directory setup recipe is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let genmodule_header_scan =
+        crate::genmodule_header_rules::collect_genmodule_header_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in genmodule_header_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "genmodule header stamp is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let genmodule_writefiles_scan =
+        crate::genmodule_writefiles_rules::collect_genmodule_writefiles_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in genmodule_writefiles_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "genmodule writefiles stamp is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (host_header_rules, host_header_rule_rejections) =
+        crate::host_header_rules::collect_host_header_rules(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in host_header_rule_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "host-C header rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (mut sdk_text_rules, sdk_text_rejections) =
+        crate::sdk_text_rules::collect_sdk_text_rules_with_physical_source(
+            &joined,
+            &local_make_scan.expanded,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rule in &mut sdk_text_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    let sdk_text_anchors = (!sdk_text_rejections.is_empty())
+        .then(|| literal_object_source_anchors(root, path, &content, &local_make_scan, &joined))
+        .flatten();
+    for rejection in sdk_text_rejections {
+        let (diagnostic_path, diagnostic_line) =
+            rejection_source_location(&relative_path, sdk_text_anchors.as_deref(), rejection.line);
+        let mut diagnostic = capability_diagnostic_with_owner(
+            diagnostic_path,
+            diagnostic_line,
+            Some(&rejection.owner),
+            format!(
+                "SDK text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        );
+        if rejection.disabled_owner_only {
+            diagnostic.context.get_or_insert_with(Default::default).mode =
+                Some(crate::sdk_text_rules::DISABLED_OWNER_DIAGNOSTIC_MODE.to_owned());
+        }
+        native_graph_errors.push(diagnostic);
+    }
+    let (source_text_rules, source_text_rejections) =
+        crate::source_text_rules::collect_source_text_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rejection in source_text_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "source text rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (mut source_value_rules, source_value_rejections) =
+        crate::source_value_rules::collect_source_value_rules_with_context(
+            &joined,
+            root,
+            &rel_dir,
+            &scope,
+            dirs,
+            copy_directory_line_states,
+        );
+    for rule in &mut source_value_rules {
+        source_sha256.as_str().clone_into(&mut rule.file_sha256);
+    }
+    for rejection in source_value_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "source value rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_file_copies, sdk_file_copy_rejections) = crate::sdk_file_copies::collect_from_snapshot(
+        &invocations,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+        &fetches,
+        &joined,
+    );
+    for rejection in sdk_file_copy_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK file copy is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_asset_rules, sdk_asset_rejections) = crate::sdk_asset_rules::collect_from_snapshot(
+        &joined,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+    );
+    for rejection in sdk_asset_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK asset rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    let (sdk_object_groups, sdk_object_rejections) = crate::sdk_objects::collect_from_snapshot(
+        &invocations,
+        &scope,
+        dirs,
+        root,
+        &rel_dir,
+        copy_directory_line_states,
+        &joined,
+    );
+    // Literal recipes execute after all source assignments have been read.
+    // Their native configuration is a separate, explicitly bound scope; it
+    // must not silently expand the global configuration of unrelated macros.
+    let literal_configuration =
+        crate::local_make_includes::inline_native_make_configuration_with_templates(
+            &content,
+            root,
+            &relative_path,
+            LocalMakeIncludeLimits::default(),
+            &target.map_or_else(std::collections::BTreeMap::new, |target| {
+                target.make_include_bindings.clone()
+            }),
+            &target.map_or_else(std::collections::BTreeMap::new, |target| {
+                target.generated_make_templates.clone()
+            }),
+        );
+    let literal_joined = join_continuations(&literal_configuration.expanded);
+    let (literal_scope, literal_states) = collect_vars_impl(&literal_joined, target);
+    // A complete source-bound configuration can prove a copy macro's list
+    // empty. Do not turn unknown variables or failed include expansion into
+    // empty providers; the ordinary unresolved diagnostic remains otherwise.
+    if literal_configuration.issues.is_empty() {
+        let empty_copies = crate::copy_includes::collect_proven_empty(
+            &literal_joined,
+            &literal_scope,
+            &literal_states,
+            target,
+            &rel_dir,
+        );
+        if !empty_copies.is_empty()
+            && empty_copies.len()
+                == super::macro_invocations(&literal_joined)
+                    .iter()
+                    .filter(|invocation| invocation.name == "copy_includes")
+                    .count()
+        {
+            // Every source copy macro is now accounted for by this stronger
+            // proof; retain skipped diagnostics whenever any other call exists.
+            copy_scan.skipped.clear();
+        }
+        for declaration in empty_copies {
+            // The closed scope proves the value at macro expansion time;
+            // never let the legacy fallback borrow a later assignment.
+            copy_scan
+                .decls
+                .retain(|existing| existing.name != declaration.name);
+            copy_scan.decls.push(declaration);
+        }
+    }
+    let (literal_object_groups, literal_object_rejections) =
+        crate::literal_objects::collect_from_snapshot(
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+            &literal_joined,
+        );
+    let literal_object_anchors = literal_object_source_anchors(
+        root,
+        &relative_path,
+        &content,
+        &literal_configuration,
+        &literal_joined,
+    );
+    // Keep partial capabilities visible without laundering them into real
+    // providers. Only the explicitly bound native scope may project roles.
+    let mut source_archive_projections = Vec::new();
+    let mut source_archive_commands = std::collections::BTreeMap::new();
+    let mut source_compile_projections = Vec::new();
+    let mut layered_header_projections = Vec::new();
+    let mut source_header_pipelines = Vec::new();
+    let mut source_directory_groups = std::collections::BTreeMap::new();
+    if let Some(context) = target.filter(|context| {
+        !context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty()
+    }) {
+        let (archives, archive_rejections) = crate::source_archive_rules::collect_from_snapshot(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+        );
+        let (compiles, compile_rejections) = crate::source_compile_rules::collect_from_snapshot(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+            &archives,
+        );
+        source_archive_projections = archives;
+        if !source_archive_projections.is_empty() {
+            match crate::source_archive_command::prove(&literal_joined, &literal_scope, dirs, root)
+            {
+                Ok(command) => {
+                    for archive in &source_archive_projections {
+                        source_archive_commands.insert(
+                            (archive.file.clone(), archive.owner.clone()),
+                            command.clone(),
+                        );
+                    }
+                }
+                Err(reason) => {
+                    for archive in &source_archive_projections {
+                        native_graph_errors.push(capability_diagnostic_with_owner(
+                            &relative_path,
+                            None,
+                            Some(&archive.owner),
+                            format!("Source archive command is unproven: {reason}"),
+                        ));
+                    }
+                }
+            }
+        }
+        source_compile_projections = compiles;
+        let (headers, header_rejections) = crate::layered_header_copies::collect(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            context,
+            Some(&literal_states),
+        );
+        layered_header_projections = headers;
+        let (mut pipelines, pipeline_rejections) = crate::source_header_pipeline::collect(
+            &literal_joined,
+            &literal_scope,
+            dirs,
+            root,
+            &rel_dir,
+            Some(&literal_states),
+        );
+        for pipeline in &mut pipelines {
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                pipeline.line,
+            );
+            pipeline.diagnostic_location = Some(aros_common::SourceLocation {
+                path: path.to_string_lossy().into_owned(),
+                line,
+                column: None,
+            });
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                pipeline.sdk_rule_line,
+            );
+            pipeline.sdk_rule_location = Some(aros_common::SourceLocation {
+                path: path.to_string_lossy().into_owned(),
+                line,
+                column: None,
+            });
+        }
+        source_header_pipelines = pipelines;
+        let (directory_groups, directory_rejections) =
+            crate::source_directory_rules::collect_source_directory_groups(
+                &literal_joined,
+                &literal_scope,
+                dirs,
+                root,
+                &rel_dir,
+                &literal_states,
+            );
+        for group in directory_groups {
+            source_directory_groups.insert(
+                (
+                    relative_path.to_string_lossy().into_owned(),
+                    group.owner.clone(),
+                ),
+                group,
+            );
+        }
+        for rejection in pipeline_rejections {
+            let (path, line) = rejection_source_location(
+                &relative_path,
+                literal_object_anchors.as_deref(),
+                rejection.line,
+            );
+            native_graph_errors.push(capability_diagnostic_with_owner(
+                path,
+                line,
+                rejection.owner.as_deref(),
+                format!("Source header pipeline is unproven: {}", rejection.reason),
+            ));
+        }
+        // A local directory group is not a global `setup` target. Report
+        // refusal against its proven aggregate consumer, if one exists.
+        for rejection in directory_rejections {
+            for aggregate in &layered_header_projections {
+                if aggregate
+                    .unresolved_prerequisites
+                    .contains(&rejection.owner)
+                {
+                    let (path, line) = rejection_source_location(
+                        &relative_path,
+                        literal_object_anchors.as_deref(),
+                        rejection.source_line,
+                    );
+                    native_graph_errors.push(capability_diagnostic_with_owner(
+                        path,
+                        line,
+                        Some(&aggregate.owner),
+                        format!(
+                            "Source-local directory prerequisite {} is unproven: {}",
+                            rejection.owner, rejection.reason
+                        ),
+                    ));
+                }
+            }
+        }
+        let rejections = archive_rejections
+            .into_iter()
+            .map(|rejection| {
+                (
+                    Some(rejection.owner),
+                    rejection.line,
+                    format!(
+                        "Source archive is outside its closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            })
+            .chain(compile_rejections.into_iter().map(|rejection| {
+                (
+                    Some(rejection.owner),
+                    rejection.line,
+                    format!(
+                        "Source compile is outside its closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            }))
+            .chain(header_rejections.into_iter().map(|rejection| {
+                (
+                    rejection.owner,
+                    rejection.line,
+                    format!(
+                        "Layered header copies are outside their closed capability: {}",
+                        rejection.reason
+                    ),
+                )
+            }));
+        for (owner, line, message) in rejections {
+            let proofs = (owner.as_deref().is_none_or(|owner| owner == "<unknown>")
+                && literal_configuration.issues.is_empty())
+            .then(|| {
+                crate::source_rule_ownership::attribute_rejected_rule_owners(
+                    &literal_joined,
+                    &literal_scope,
+                    dirs,
+                    root,
+                    &rel_dir,
+                    Some(&literal_states),
+                    line,
+                )
+            })
+            .flatten();
+            let (path, line) =
+                rejection_source_location(&relative_path, literal_object_anchors.as_deref(), line);
+            native_graph_errors.extend(source_rejection_diagnostics(
+                path,
+                line,
+                owner.as_deref(),
+                message,
+                proofs,
+            ));
+        }
+    }
+    let literal_owners: std::collections::BTreeSet<_> = literal_object_groups
+        .iter()
+        .map(|group| group.owner.as_str())
+        .chain(
+            literal_object_rejections
+                .iter()
+                .map(|rejection| rejection.owner.as_str()),
+        )
+        .collect();
+    for rejection in sdk_object_rejections {
+        // A literal compiler recipe is a distinct capability, not a failed
+        // SDK compile/stage pair. Retain that capability's precise diagnostic.
+        if literal_owners.contains(rejection.owner.as_str()) {
+            continue;
+        }
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SDK object producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
+    for rejection in literal_object_rejections {
+        // Diagnostic ownership is not producer admission. Preserve unknown
+        // identity unless the same complete source snapshot proves all owners
+        // and excludes unknown/dynamic alternative consumers.
+        let ownership = (rejection.owner == "<unknown>" && literal_configuration.issues.is_empty())
+            .then(|| {
+                crate::source_rule_ownership::attribute_rejected_rule_owners(
+                    &literal_joined,
+                    &literal_scope,
+                    dirs,
+                    root,
+                    &rel_dir,
+                    Some(&literal_states),
+                    rejection.line,
+                )
+            })
+            .flatten();
+        let (diagnostic_path, diagnostic_line) = rejection_source_location(
+            &relative_path,
+            literal_object_anchors.as_deref(),
+            rejection.line,
+        );
+        native_graph_errors.extend(source_rejection_diagnostics(
+            diagnostic_path,
+            diagnostic_line,
+            Some(&rejection.owner),
+            format!(
+                "literal object producer is outside its closed capability: {}",
+                rejection.reason
+            ),
+            ownership,
+        ));
+    }
     let (copy_directories, skipped_copy_directories) = copy_directories::collect(
         &invocations,
         &scope,
@@ -326,15 +1208,22 @@ pub(super) fn parse_mmakefile_impl(
         ) {
             Ok(declaration) => external_cmake.push(declaration),
             Err(reason) => {
-                let mmake = macro_arg(&invocation.args, "mmake")
+                let mmake_raw = macro_arg(&invocation.args, "mmake");
+                let mmake = mmake_raw
+                    .as_ref()
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
+                let mmake_owner = mmake_raw
+                    .as_deref()
+                    .and_then(|raw| evaluate_name(raw, &expression_context).ok())
+                    .and_then(|name| exact_mmake_target(&name));
                 if matches!(
                     rel_dir.to_str(),
                     Some("compiler/cunit" | "workbench/classes/datatypes/heic")
                 ) {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(invocation.line + 1),
+                        mmake_owner.as_deref(),
                         format!("%build_with_cmake{mmake} no longer matches its closed capability: {reason}"),
                     ));
                 }
@@ -353,6 +1242,12 @@ pub(super) fn parse_mmakefile_impl(
         .iter()
         .filter(|invocation| invocation.name == "build_with_configure")
     {
+        let expression_context =
+            MakeExprContext::new(&scope, dirs, invocation.line, root, &rel_dir);
+        let mmake_owner = macro_arg(&invocation.args, "mmake")
+            .as_deref()
+            .and_then(|raw| evaluate_name(raw, &expression_context).ok())
+            .and_then(|name| exact_mmake_target(&name));
         match crate::capability::ahi::parse(root, invocation, &rel_dir, target) {
             Ok(Some(declaration)) => ahi_builds.push(declaration),
             Ok(None) => match crate::capability::grub2::parse(root, invocation, &rel_dir, target) {
@@ -370,9 +1265,10 @@ pub(super) fn parse_mmakefile_impl(
                                         | "workbench/network/WirelessManager/wpa_supplicant"
                                 )
                             ) {
-                                capability_errors.push(capability_diagnostic(
+                                capability_errors.push(capability_diagnostic_with_owner(
                                     &relative_path,
                                     Some(invocation.line + 1),
+                                    mmake_owner.as_deref(),
                                     format!("%build_with_configure{mmake} no longer matches its closed capability: {reason}"),
                                 ));
                             }
@@ -388,9 +1284,10 @@ pub(super) fn parse_mmakefile_impl(
                     let mmake = macro_arg(&invocation.args, "mmake")
                         .map_or_else(String::new, |name| format!(" mmake={name}"));
                     if !expected_grub_profile_exclusion(target) {
-                        capability_errors.push(capability_diagnostic(
+                        capability_errors.push(capability_diagnostic_with_owner(
                             &relative_path,
                             Some(invocation.line + 1),
+                            mmake_owner.as_deref(),
                             format!("%build_with_configure{mmake} no longer matches the closed GRUB2 capability: {reason}"),
                         ));
                     }
@@ -405,9 +1302,10 @@ pub(super) fn parse_mmakefile_impl(
                 let mmake = macro_arg(&invocation.args, "mmake")
                     .map_or_else(String::new, |name| format!(" mmake={name}"));
                 if !expected_ahi_profile_exclusion(target) {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(invocation.line + 1),
+                        mmake_owner.as_deref(),
                         format!("%build_with_configure{mmake} no longer matches the closed AHI capability: {reason}"),
                     ));
                 }
@@ -421,6 +1319,8 @@ pub(super) fn parse_mmakefile_impl(
     }
     let mut partial_source_lists: Vec<String> = Vec::new();
     let mut source_inventory_patterns: Vec<String> = Vec::new();
+    let mut source_inventory_needs = Vec::new();
+    let mut source_inventory_targets: Vec<crate::ast::InventoryTargetIdentity> = Vec::new();
     let mut skipped_client_archives: Vec<String> = Vec::new();
     let mut unresolved_output_paths: Vec<String> = Vec::new();
     let re_libs = Regex::new(r#"uselibs=(?:"([^"]+)"|([^\s\\]+))"#).map_err(|error| {
@@ -429,6 +1329,77 @@ pub(super) fn parse_mmakefile_impl(
             format!("internal uselibs matcher is invalid: {error}"),
         )
     })?;
+
+    let capture_kobj_inputs = |inv: &Invocation, fallback_name: &str| {
+        target.map(|target| {
+            let expression_scope = MakeExprContext::new(&scope, dirs, inv.line, root, &rel_dir);
+            let name = macro_arg(&inv.args, "modname")
+                .ok_or_else(|| "missing source modname".to_owned())
+                .and_then(|raw| {
+                    evaluate_make_expr(&raw, &expression_scope).map_err(|error| error.to_string())
+                });
+            let flavour = macro_arg(&inv.args, "flavour")
+                .map(|raw| {
+                    evaluate_make_expr(&raw, &expression_scope).map_err(|error| error.to_string())
+                })
+                .transpose();
+            let raw_uselibs = macro_arg(&inv.args, "uselibs");
+            let raw_funcinstr = macro_arg(&inv.args, "funcinstr");
+            let mut captured = crate::kobj_scoped_inputs::capture_kobj_scoped_inputs_for_module(
+                &joined,
+                inv.line,
+                crate::kobj_scoped_inputs::KobjModuleArgs {
+                    module_name: name.as_deref().unwrap_or(fallback_name),
+                    flavour: flavour.as_ref().ok().and_then(|value| value.as_deref()),
+                    raw_uselibs: raw_uselibs.as_deref(),
+                    raw_funcinstr: raw_funcinstr.as_deref(),
+                },
+                root,
+                &relative_path,
+                dirs,
+                target,
+                &[],
+            );
+            let issue = name.err().or_else(|| flavour.err()).or_else(|| {
+                (!skipped_local_make_includes.is_empty()).then(|| {
+                    format!(
+                        "unresolved local Make fragments: {}",
+                        skipped_local_make_includes.join("; ")
+                    )
+                })
+            });
+            if let Some(reason) = issue {
+                for input in [
+                    &mut captured.user_objects,
+                    &mut captured.defname_libs,
+                    &mut captured.user_ldflags,
+                    &mut captured.use_libs,
+                    &mut captured.kobj_ldflags,
+                    &mut captured.kernel_kobj_ldscript,
+                    &mut captured.funcinstr_libs,
+                    &mut captured.function_instrumentation,
+                ] {
+                    let (raw, source) = match input {
+                        crate::kobj_scoped_inputs::ScopedMakeWords::KnownEmpty { raw, source }
+                        | crate::kobj_scoped_inputs::ScopedMakeWords::Unresolved {
+                            raw,
+                            source,
+                            ..
+                        } => (raw.clone(), source.clone()),
+                        crate::kobj_scoped_inputs::ScopedMakeWords::Exact {
+                            raw, source, ..
+                        } => (Some(raw.clone()), source.clone()),
+                    };
+                    *input = crate::kobj_scoped_inputs::ScopedMakeWords::Unresolved {
+                        raw,
+                        reason: format!("KOBJ declaration scope is incomplete: {reason}"),
+                        source,
+                    };
+                }
+            }
+            captured
+        })
+    };
 
     // 1. Extract module definitions
     for inv in invocations.iter().filter(|i| {
@@ -470,16 +1441,22 @@ pub(super) fn parse_mmakefile_impl(
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
         );
         let mmake_name = sanitize_ident(&mmake_raw);
-        if let Err(reason) = apply_mesa_compile_contract(
-            &rel_dir,
-            &mmake_name,
-            target,
-            &mut declaration_flags,
-            &mut declaration_includes,
-        ) {
-            capability_errors.push(capability_diagnostic(
+        let mmake_owner = exact_mmake_target(&mmake_raw);
+        let headers_projection = if let Err(reason) = if inv.name == "build_module_abi" {
+            Ok(false)
+        } else {
+            apply_mesa_compile_contract(
+                &rel_dir,
+                &mmake_name,
+                target,
+                &mut declaration_flags,
+                &mut declaration_includes,
+            )
+        } {
+            capability_errors.push(capability_diagnostic_with_owner(
                 &relative_path,
                 Some(inv.line + 1),
+                mmake_owner.as_deref(),
                 format!(
                     "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
                     inv.name
@@ -491,16 +1468,22 @@ pub(super) fn parse_mmakefile_impl(
                 inv.line + 1,
                 inv.name
             ));
-            continue;
-        }
+            if inv.name != "build_module" {
+                continue;
+            }
+            true
+        } else {
+            false
+        };
         let mod_name =
             match mesa26::runtime_module_name(root, &rel_dir, &mmake_name, &mod_raw, target) {
                 Ok(Some(name)) => name,
                 Ok(None) => sanitize_ident(&mod_raw),
                 Err(reason) => {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(inv.line + 1),
+                        mmake_owner.as_deref(),
                         format!("Mesa runtime identity: {reason}"),
                     ));
                     continue;
@@ -511,7 +1494,9 @@ pub(super) fn parse_mmakefile_impl(
         let rest = inv.args.as_str();
         let is_abi = inv.name == "build_module_abi";
 
-        let module_type = if is_abi {
+        let module_type = if headers_projection {
+            ModuleType::ModuleHeaders
+        } else if is_abi {
             ModuleType::Abi
         } else {
             match mod_type_str {
@@ -525,7 +1510,8 @@ pub(super) fn parse_mmakefile_impl(
                 _ => ModuleType::Custom,
             }
         };
-        let genmodule_only = is_explicit_genmodule_only(&inv.name, rest, mod_type_str);
+        let genmodule_only =
+            !headers_projection && is_explicit_genmodule_only(&inv.name, rest, mod_type_str);
         let linklib_name = match macro_arg(rest, "linklibname") {
             Some(raw) if !raw.is_empty() => match evaluate_name(&raw, &expression_context) {
                 Ok(name) => Some(name),
@@ -604,8 +1590,8 @@ pub(super) fn parse_mmakefile_impl(
         // genmodule-only library is implemented entirely by generated start/end
         // files. Every other empty result keeps the existing strict source-list
         // handling: unresolved lists may never turn into generated-only modules.
-        let sources = if is_abi || genmodule_only {
-            EvaluatedSources::default()
+        let (sources, source_inventory_only) = if is_abi || genmodule_only || headers_projection {
+            (EvaluatedSources::default(), false)
         } else {
             let mut sources = match mesa26::module_sources(root, &rel_dir, &mmake_name, target) {
                 Ok(Some(sources)) => sources,
@@ -622,9 +1608,10 @@ pub(super) fn parse_mmakefile_impl(
                     }
                 },
                 Err(reason) => {
-                    capability_errors.push(capability_diagnostic(
+                    capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(inv.line + 1),
+                        mmake_owner.as_deref(),
                         format!("Mesa 26 module source closure: {reason}"),
                     ));
                     skipped_programs.push(format!(
@@ -639,12 +1626,15 @@ pub(super) fn parse_mmakefile_impl(
             record_partial_source_lists(
                 &mut partial_source_lists,
                 &mut source_inventory_patterns,
+                &mut source_inventory_needs,
                 &sources,
-                &rel_dir,
+                &relative_path,
                 inv,
                 &mmake_raw,
             );
-            if sources.is_empty() {
+            let source_inventory_only =
+                sources.is_empty() && !sources.deferred_wildcards.is_empty();
+            if sources.is_empty() && !source_inventory_only {
                 if sources.declared {
                     skipped_programs.push(format!(
                         "{}: %{} mmake={mmake_raw} modname={mod_raw} has an unresolved file list",
@@ -663,7 +1653,7 @@ pub(super) fn parse_mmakefile_impl(
                     continue;
                 }
             }
-            sources
+            (sources, source_inventory_only)
         };
 
         let use_libs: Vec<String> = re_libs.captures(rest).map_or_else(Vec::new, |lcap| {
@@ -673,8 +1663,11 @@ pub(super) fn parse_mmakefile_impl(
                 .map_or("", |m| m.as_str());
             expand_file_list(libs_str, &vars)
         });
-        let declared_mod_type = matches!(module_type, ModuleType::Abi | ModuleType::Custom)
-            .then(|| mod_type_owned.clone());
+        let declared_mod_type = matches!(
+            module_type,
+            ModuleType::Abi | ModuleType::Custom | ModuleType::ModuleHeaders
+        )
+        .then(|| mod_type_owned.clone());
 
         // `conffile=` names the genmodule config, and 81 of the 83 declarations
         // that state one give a file whose stem is not modname:
@@ -682,7 +1675,8 @@ pub(super) fn parse_mmakefile_impl(
         // Without carrying it, CMake derives `<modname>.conf`, finds nothing and
         // generates no scaffolding at all -- silently, because a module with no
         // config is a legitimate hand-written one.
-        let config_file = macro_arg(&inv.args, "conffile").and_then(|raw| {
+        let config_arg = macro_arg(&inv.args, "conffile");
+        let config_file = config_arg.as_ref().and_then(|raw| {
             let raw = raw.trim().trim_matches('"');
             match evaluate_make_expr(raw, &expression_context) {
                 Ok(value) => {
@@ -715,6 +1709,9 @@ pub(super) fn parse_mmakefile_impl(
                 }
             }
         });
+        if headers_projection && config_arg.is_some() && config_file.is_none() {
+            continue;
+        }
         let config_override_arg = macro_arg(&inv.args, "confoverride");
         let config_override_file = config_override_arg.as_ref().and_then(|raw| {
             let raw = raw.trim().trim_matches('"');
@@ -797,11 +1794,18 @@ pub(super) fn parse_mmakefile_impl(
                 read_genmodule_linklib_config_files(&config_path, override_path.as_deref())
             },
         );
+        // Only readable, exact source paths can enter the header projection.
+        // Genmodule still validates their complete syntax and exported products;
+        // this is not proof that the runtime or a client archive is buildable.
+        if headers_projection && config_facts.is_none() {
+            continue;
+        }
         let config_relative_libraries = config_facts
             .as_ref()
             .map(|facts| facts.relative_libraries.clone())
             .unwrap_or_default();
-        if module_type != ModuleType::Library {
+        let genmodule_abi = inv.name != "build_module_library" && config_facts.is_some();
+        if !matches!(module_type, ModuleType::Library | ModuleType::ModuleHeaders) {
             if let Some(facts) = config_facts.as_ref() {
                 if facts.forces_client_archive {
                     skipped_client_archives.push(format!(
@@ -909,21 +1913,40 @@ pub(super) fn parse_mmakefile_impl(
             }
             None => "includes-all".to_owned(),
         };
-        meta_rules.extend(implicit_module_meta_rules(
-            &mmake_name,
-            &mod_name,
-            &include_set,
-            &use_libs,
-            inv.name != "build_module_library",
-            inv.name != "build_module_abi",
-            is_abi || genmodule_only,
-        ));
+        if headers_projection {
+            meta_rules.extend(implicit_module_header_meta_rules(
+                &mmake_name,
+                &mod_name,
+                &include_set,
+            ));
+        } else {
+            meta_rules.extend(implicit_module_meta_rules(
+                &mmake_name,
+                &mod_name,
+                &include_set,
+                &use_libs,
+                inv.name != "build_module_library",
+                inv.name != "build_module_abi",
+                is_abi || genmodule_only,
+            ));
+        }
 
-        targets.push(TargetDefinition {
+        let kobj_scoped_inputs = (!is_abi && !headers_projection)
+            .then(|| capture_kobj_inputs(inv, &mod_name))
+            .flatten();
+        let parsed_target = TargetDefinition {
             mmake_name,
             target_name: mod_name,
             module_type,
+            module_macro: Some(match inv.name.as_str() {
+                "build_module" => ModuleMacroForm::Full,
+                "build_module_library" => ModuleMacroForm::RuntimeOnly,
+                "build_module_abi" => ModuleMacroForm::AbiOnly,
+                _ => unreachable!("filtered to module-producing macro spellings"),
+            }),
+            kobj_scoped_inputs,
             genmodule_only,
+            genmodule_abi,
             empty_archive: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
@@ -932,7 +1955,11 @@ pub(super) fn parse_mmakefile_impl(
             detach: false,
             objc_source_files: sources.objc,
             asm_source_files: sources.asm,
-            use_libs,
+            use_libs: if headers_projection {
+                Vec::new()
+            } else {
+                use_libs
+            },
             dependencies: Vec::new(),
             dir_path: rel_dir.clone(),
             target_dir,
@@ -944,7 +1971,11 @@ pub(super) fn parse_mmakefile_impl(
             config_file,
             config_override_file,
             genmodule_linklibs,
-            config_relative_libraries,
+            config_relative_libraries: if headers_projection {
+                Vec::new()
+            } else {
+                config_relative_libraries
+            },
             canonical_linklib_output: false,
             canonical_linklib_eligible: false,
             linklib_output_dir: None,
@@ -967,7 +1998,12 @@ pub(super) fn parse_mmakefile_impl(
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
             arch_source_options: Vec::new(),
-        });
+        };
+        if source_inventory_only {
+            source_inventory_targets.push((&parsed_target).into());
+        } else {
+            targets.push(parsed_target);
+        }
     }
 
     // 2. Extract program definitions
@@ -1045,12 +2081,14 @@ pub(super) fn parse_mmakefile_impl(
         record_partial_source_lists(
             &mut partial_source_lists,
             &mut source_inventory_patterns,
+            &mut source_inventory_needs,
             &sources,
-            &rel_dir,
+            &relative_path,
             inv,
             &mmake_raw,
         );
-        if sources.is_empty() {
+        let source_inventory_only = sources.is_empty() && !sources.deferred_wildcards.is_empty();
+        if sources.is_empty() && !source_inventory_only {
             if sources.declared {
                 // A list was given but its Make variables are unresolved.
                 // Falling back to the program name here would compile the
@@ -1113,11 +2151,14 @@ pub(super) fn parse_mmakefile_impl(
             }
         };
 
-        targets.push(TargetDefinition {
+        let parsed_target = TargetDefinition {
             mmake_name,
             target_name: prog_name,
             module_type: ModuleType::Program,
+            module_macro: None,
+            kobj_scoped_inputs: None,
             genmodule_only: false,
+            genmodule_abi: false,
             empty_archive: false,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
@@ -1161,7 +2202,12 @@ pub(super) fn parse_mmakefile_impl(
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
             arch_source_options: Vec::new(),
-        });
+        };
+        if source_inventory_only {
+            source_inventory_targets.push((&parsed_target).into());
+        } else {
+            targets.push(parsed_target);
+        }
     }
 
     // 2b. The remaining build macros.
@@ -1206,6 +2252,7 @@ pub(super) fn parse_mmakefile_impl(
             |_| collect_includes_at(&joined, &scope, inv.line, &rel_dir),
         );
         let mmake_name = sanitize_ident(&mmake_raw);
+        let mmake_owner = exact_mmake_target(&mmake_raw);
         let mesa20_capability_sources = match remaining_linklib_sources(
             root,
             &rel_dir,
@@ -1214,9 +2261,10 @@ pub(super) fn parse_mmakefile_impl(
         ) {
             Ok(sources) => sources,
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(inv.line + 1),
+                        mmake_owner.as_deref(),
                         format!(
                             "%{} mmake={mmake_raw} no longer matches the Mesa archive capability: {reason}",
                             inv.name
@@ -1235,9 +2283,10 @@ pub(super) fn parse_mmakefile_impl(
         let mesa26_sources = match mesa26::archive_sources(root, &rel_dir, &mmake_name, target) {
             Ok(sources) => sources,
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                     &relative_path,
                     Some(inv.line + 1),
+                    mmake_owner.as_deref(),
                     format!("Mesa 26 glapi capability: {reason}"),
                 ));
                 skipped_programs.push(format!(
@@ -1257,9 +2306,10 @@ pub(super) fn parse_mmakefile_impl(
         ) {
             Ok(sources) => sources,
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                         &relative_path,
                         Some(inv.line + 1),
+                        mmake_owner.as_deref(),
                         format!(
                             "%{} mmake={mmake_raw} no longer matches the Nouveau DRM archive capability: {reason}",
                             inv.name
@@ -1283,9 +2333,10 @@ pub(super) fn parse_mmakefile_impl(
         ) {
             Ok(sources) => sources,
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                     &relative_path,
                     Some(inv.line + 1),
+                    mmake_owner.as_deref(),
                     format!(
                         "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium archive capability: {reason}",
                         inv.name
@@ -1308,9 +2359,10 @@ pub(super) fn parse_mmakefile_impl(
             &mut declaration_flags,
             &mut declaration_includes,
         ) {
-            capability_errors.push(capability_diagnostic(
+            capability_errors.push(capability_diagnostic_with_owner(
                 &relative_path,
                 Some(inv.line + 1),
+                mmake_owner.as_deref(),
                 format!(
                     "%{} mmake={mmake_raw} no longer matches the Mesa compile capability: {reason}",
                     inv.name
@@ -1335,9 +2387,10 @@ pub(super) fn parse_mmakefile_impl(
             }
             Ok(None) => {}
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                     &relative_path,
                     Some(inv.line + 1),
+                    mmake_owner.as_deref(),
                     format!(
                         "%{} mmake={mmake_raw} no longer matches the Nouveau DRM compile capability: {reason}",
                         inv.name
@@ -1363,9 +2416,10 @@ pub(super) fn parse_mmakefile_impl(
             }
             Ok(None) => {}
             Err(reason) => {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                     &relative_path,
                     Some(inv.line + 1),
+                    mmake_owner.as_deref(),
                     format!(
                         "%{} mmake={mmake_raw} no longer matches the Nouveau Gallium compile capability: {reason}",
                         inv.name
@@ -1391,9 +2445,10 @@ pub(super) fn parse_mmakefile_impl(
         let empty_archive = mesa26_empty_sse41 || mesa_sse41_profile == Some(false);
         if mesa26_empty_sse41 {
             let Ok(Some(contract)) = mesa26::compile_contract(&rel_dir, &mmake_name, target) else {
-                capability_errors.push(capability_diagnostic(
+                capability_errors.push(capability_diagnostic_with_owner(
                     &relative_path,
                     Some(inv.line + 1),
+                    mmake_owner.as_deref(),
                     "Mesa 26 empty SSE4.1 compile contract is absent".to_owned(),
                 ));
                 continue;
@@ -1518,12 +2573,14 @@ pub(super) fn parse_mmakefile_impl(
         record_partial_source_lists(
             &mut partial_source_lists,
             &mut source_inventory_patterns,
+            &mut source_inventory_needs,
             &sources,
-            &rel_dir,
+            &relative_path,
             inv,
             &mmake_raw,
         );
-        if sources.is_empty() && !empty_archive {
+        let source_inventory_only = sources.is_empty() && !sources.deferred_wildcards.is_empty();
+        if sources.is_empty() && !empty_archive && !source_inventory_only {
             if sources.declared {
                 skipped_programs.push(format!(
                     "{}: %{} mmake={mmake_raw} has an unresolved file list",
@@ -1712,11 +2769,17 @@ pub(super) fn parse_mmakefile_impl(
             None
         };
 
-        targets.push(TargetDefinition {
+        let kobj_scoped_inputs = is_simple_module
+            .then(|| capture_kobj_inputs(inv, &target_name))
+            .flatten();
+        let parsed_target = TargetDefinition {
             mmake_name,
             target_name,
             module_type,
+            module_macro: is_simple_module.then_some(ModuleMacroForm::Simple),
+            kobj_scoped_inputs,
             genmodule_only: false,
+            genmodule_abi: false,
             empty_archive,
             source_files: sources.c,
             cxx_source_files: sources.cxx,
@@ -1760,7 +2823,12 @@ pub(super) fn parse_mmakefile_impl(
             arch_defines: arch_defines.clone(),
             arch_compile_options: arch_compile_options.clone(),
             arch_source_options: Vec::new(),
-        });
+        };
+        if source_inventory_only {
+            source_inventory_targets.push((&parsed_target).into());
+        } else {
+            targets.push(parsed_target);
+        }
     }
 
     // %build_module_macro is invoked five times but defined nowhere in the
@@ -1796,10 +2864,12 @@ pub(super) fn parse_mmakefile_impl(
         // The ordinary parser may have resolved part of this declaration, but
         // executable empty-archive support and the target-only ISA flag are
         // admitted as one atomic capability. Any drift removes the target.
+        let owners = unique_mmake_owners(&invocation_owners, &[sse41::MMAKE]).unwrap_or_default();
         targets.retain(|candidate| candidate.mmake_name != sse41::MMAKE);
-        capability_errors.push(capability_diagnostic(
+        capability_errors.extend(capability_diagnostics_for_targets(
             &relative_path,
             None,
+            owners,
             format!("Mesa SSE4.1 link library no longer matches its closed capability: {reason}"),
         ));
         skipped_programs.push(format!(
@@ -1819,11 +2889,17 @@ pub(super) fn parse_mmakefile_impl(
             // closed capability.  Do not leave a partially inferred target in
             // the graph when its recipe, inventory or canonical archive proof
             // has drifted.
+            let owners = targets
+                .iter()
+                .filter(|candidate| candidate.mmake_name == crate::capability::nouveau::DRM_MMAKE)
+                .map(|candidate| candidate.mmake_name.clone())
+                .collect::<Vec<_>>();
             targets
                 .retain(|candidate| candidate.mmake_name != crate::capability::nouveau::DRM_MMAKE);
-            capability_errors.push(capability_diagnostic(
+            capability_errors.extend(capability_diagnostics_for_targets(
                 &relative_path,
                 None,
+                owners,
                 format!(
                     "Nouveau DRM link library no longer matches its closed capability: {reason}"
                 ),
@@ -1846,12 +2922,20 @@ pub(super) fn parse_mmakefile_impl(
             // atomic with its checked source and flag contract rather than
             // leaving an inferred C-only or private-output approximation in
             // the graph.
+            let owners = targets
+                .iter()
+                .filter(|candidate| {
+                    candidate.mmake_name == crate::capability::nouveau::GALLIUM_MMAKE
+                })
+                .map(|candidate| candidate.mmake_name.clone())
+                .collect::<Vec<_>>();
             targets.retain(|candidate| {
                 candidate.mmake_name != crate::capability::nouveau::GALLIUM_MMAKE
             });
-            capability_errors.push(capability_diagnostic(
+            capability_errors.extend(capability_diagnostics_for_targets(
                 &relative_path,
                 None,
+                owners,
                 format!(
                     "Nouveau Gallium link library no longer matches its closed capability: {reason}"
                 ),
@@ -1870,6 +2954,7 @@ pub(super) fn parse_mmakefile_impl(
             relative_path: &relative_path,
             target,
             content: &content,
+            invocation_owners: &invocation_owners,
             targets: &mut targets,
             ownership_fetches: &ownership_fetches,
             capability_errors: &mut capability_errors,
@@ -1882,14 +2967,40 @@ pub(super) fn parse_mmakefile_impl(
     let flexcat_scan = collect_flexcat_source_rules(&content, root, &rel_dir, &scope, dirs);
     let ilbm_scan = collect_ilbm_sources(&content, root, &rel_dir, &scope, dirs);
 
-    post_processing::collect_meta_rules_and_apply_llvm(
+    let mut make_meta_providers = Vec::new();
+    let implicit_meta_rule_count = meta_rules.len();
+    native_graph_errors.extend(post_processing::collect_meta_rules_and_apply_llvm(
         &content,
         &rel_dir,
         target,
         &mut targets,
         &mut meta_rules,
         &mut skipped_meta_rules,
+        &mut make_meta_providers,
+    ));
+    // This pass appends only handwritten #MM/#MM- declarations. Keep their
+    // edge origin even when their dependencies duplicate generated aliases.
+    let explicit_meta_rules = meta_rules[implicit_meta_rule_count..].to_vec();
+    let sfd_header_scan = crate::sfd_header_rules::collect_sfd_header_rules_with_context(
+        &joined,
+        root,
+        &rel_dir,
+        &scope,
+        dirs,
+        copy_directory_line_states,
+        &make_meta_providers,
     );
+    for rejection in sfd_header_scan.rejected {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            Some(rejection.line),
+            Some(&rejection.owner),
+            format!(
+                "SFD header rule is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
 
     // %rule_link_binary needs the file's targets, to check an explicit mmake=,
     // and the %build_archspecific object roots, which is how the reference
@@ -1909,6 +3020,26 @@ pub(super) fn parse_mmakefile_impl(
         .collect();
     let (host_generated_headers, skipped_host_generated_headers) =
         crate::host_generated_headers::collect_host_generated_headers(&content, &rel_dir);
+    let (host_header_aggregates, host_aggregate_rejections) =
+        crate::host_header_aggregates::collect(
+            &joined,
+            &rel_dir,
+            &scope,
+            dirs,
+            root,
+            copy_directory_line_states,
+        );
+    for rejection in host_aggregate_rejections {
+        native_graph_errors.push(capability_diagnostic_with_owner(
+            &relative_path,
+            None,
+            Some(&rejection.owner),
+            format!(
+                "host-header aggregate is outside its closed capability: {}",
+                rejection.reason
+            ),
+        ));
+    }
     let (hidd_stubs, skipped_hidd_stubs) =
         crate::hidd_stubs::collect_hidd_stubs(&content, &scope, dirs, root, &rel_dir);
     let (binary_objects, skipped_binary_objects) = crate::binary_objects::collect_binary_objects(
@@ -1926,8 +3057,63 @@ pub(super) fn parse_mmakefile_impl(
         &python_outputs,
     );
 
-    Ok(ParsedMmakefile {
+    let sdk_program_outputs = dirs
+        .expand("$(AROS_DEVELOPER)/bin")
+        .map(|bin| {
+            let mut outputs = Vec::new();
+            for target in &targets {
+                if target.module_type == ModuleType::Program
+                    && target.target_dir.as_ref() == Some(&bin)
+                {
+                    outputs.push(crate::graph::SdkProgramOutput {
+                        owner: target.mmake_name.clone(),
+                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                        directory: target.dir_path.clone(),
+                    });
+                }
+            }
+            for target in &source_inventory_targets {
+                if target.module_type == ModuleType::Program
+                    && target.target_dir.as_ref() == Some(&bin)
+                {
+                    outputs.push(crate::graph::SdkProgramOutput {
+                        owner: target.mmake_name.clone(),
+                        output: format!("${{AROS_DEVELOPER_BIN_DIR}}/{}", target.target_name),
+                        directory: target.dir_path.clone(),
+                    });
+                }
+            }
+            outputs.sort_by(|a, b| (&a.owner, &a.output).cmp(&(&b.owner, &b.output)));
+            outputs.dedup();
+            outputs
+        })
+        .unwrap_or_default();
+    let mut parsed = ParsedMmakefile {
+        source_sha256: Some(source_sha256.as_str().to_owned()),
+        disabled_meta_owners,
+        host_header_aggregates,
+        directory_setups,
+        genmodule_header_rules: genmodule_header_scan.declarations,
+        genmodule_writefiles_rules: genmodule_writefiles_scan.declarations,
+        host_file_generators: Vec::new(),
+        host_header_rules,
+        sdk_text_rules,
+        sfd_header_rules: sfd_header_scan.declarations,
+        source_text_rules,
+        source_value_rules,
+        sdk_file_copies,
+        sdk_asset_rules,
+        sdk_program_outputs,
+        sdk_object_groups,
+        literal_object_groups,
+        source_archive_projections,
+        source_archive_commands,
+        source_compile_projections,
+        layered_header_projections,
+        source_header_pipelines,
+        source_directory_groups,
         capability_errors,
+        native_graph_errors,
         targets,
         external_cmake,
         configure_builds,
@@ -1940,6 +3126,8 @@ pub(super) fn parse_mmakefile_impl(
         ilbm_sources: ilbm_scan.declarations,
         skipped_ilbm_sources: ilbm_scan.skipped,
         meta_rules,
+        explicit_meta_rules,
+        make_meta_providers,
         icon_targets: icon_scan.targets,
         icons: icon_scan.sets,
         skipped_icons: icon_scan.skipped,
@@ -1976,9 +3164,269 @@ pub(super) fn parse_mmakefile_impl(
         skipped_programs,
         partial_source_lists,
         source_inventory_patterns,
+        source_inventory_needs,
+        source_inventory_targets,
         skipped_client_archives,
         unresolved_output_paths,
         packages,
         skipped_packages,
-    })
+    };
+    if let Some(target) = target {
+        for declaration in target
+            .host_file_generators
+            .iter()
+            .filter(|declaration| Path::new(&declaration.recipe) == relative_path)
+        {
+            match crate::host_c_file_rules::validate_source_rule(
+                &joined, root, &rel_dir, declaration, copy_directory_line_states,
+            ) {
+                Ok(()) => parsed.host_file_generators.push(declaration.clone()),
+                Err(reason) => parsed.native_graph_errors.push(capability_diagnostic_with_owner(
+                    &relative_path, None, Some(&declaration.owner),
+                    format!("source-owned host-C file generator is outside its closed capability: {reason}"),
+                )),
+            }
+        }
+    }
+    for rejection in crate::native_meta_providers::validate(&parsed) {
+        parsed
+            .native_graph_errors
+            .push(source_meta_provider_diagnostic(
+                &relative_path,
+                &rejection.owner,
+                rejection.reason,
+            ));
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod literal_object_source_span_tests {
+    #[test]
+    fn all_proven_owners_get_diagnostics_and_unknown_proof_is_not_suppressed() {
+        let path = std::path::Path::new("arch/example/mmakefile.src");
+        let proofs = ["owner-a", "owner-b"]
+            .into_iter()
+            .map(|owner| crate::source_rule_ownership::SourceRuleOwnership {
+                owner: owner.into(),
+                chain: vec!["output.o".into(), owner.into()],
+            })
+            .collect();
+        let diagnostics = super::source_rejection_diagnostics(
+            path,
+            Some(7),
+            None,
+            "unimplemented producer".into(),
+            Some(proofs),
+        );
+        assert_eq!(diagnostics.len(), 2);
+        for (diagnostic, owner) in diagnostics.iter().zip(["owner-a", "owner-b"]) {
+            assert_eq!(
+                diagnostic.context.as_ref().unwrap().target.as_deref(),
+                Some(owner)
+            );
+            assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(7));
+            assert!(diagnostic.message.contains(&format!("output.o -> {owner}")));
+        }
+        for proofs in [None, Some(Vec::new())] {
+            let diagnostics = super::source_rejection_diagnostics(
+                path,
+                None,
+                None,
+                "unimplemented producer".into(),
+                proofs,
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert!(diagnostics[0].context.is_none());
+        }
+    }
+
+    #[test]
+    fn rejected_source_meta_provider_keeps_only_known_selector_ownership() {
+        let path = std::path::Path::new("compiler/include/mmakefile.src");
+        for owner in ["plain-owner", "includes-asm_h-${AROS_TARGET_CPU}"] {
+            let diagnostic =
+                super::source_meta_provider_diagnostic(path, owner, "unimplemented".into());
+            assert_eq!(diagnostic.context.unwrap().target.as_deref(), Some(owner));
+        }
+        for owner in [
+            "",
+            "${ARBITRARY}-owner",
+            "$(shell command)",
+            "../owner",
+            "name;other",
+        ] {
+            let diagnostic =
+                super::source_meta_provider_diagnostic(path, owner, "unimplemented".into());
+            assert!(diagnostic.context.is_none(), "unsafe selector {owner}");
+        }
+    }
+    use super::{join_continuations, literal_object_source_anchors};
+    use crate::local_make_includes::{inline_native_make_configuration, LocalMakeIncludeLimits};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    #[test]
+    fn continuation_rejection_anchor_uses_first_physical_line() {
+        let tree = tempfile::tempdir().unwrap();
+        let source = Path::new("arch/example/mmakefile.src");
+        let text = "before := value\noutput.o: first.o \\\n  second.o\nafter := value\n";
+        let scan = inline_native_make_configuration(
+            text,
+            tree.path(),
+            source,
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+        );
+        let joined = join_continuations(&scan.expanded);
+        let anchors = literal_object_source_anchors(tree.path(), source, text, &scan, &joined)
+            .expect("unmodified source must have an exact line map");
+
+        assert_eq!(anchors.len(), 3);
+        assert_eq!(anchors[0].as_ref().unwrap().line, 1);
+        assert_eq!(anchors[1].as_ref().unwrap().line, 2);
+        assert_eq!(anchors[2].as_ref().unwrap().line, 4);
+    }
+
+    #[test]
+    fn generated_template_lines_keep_source_template_locations_and_reject_drift() {
+        let tree = tempfile::tempdir().unwrap();
+        let source = Path::new("compiler/include/mmakefile.src");
+        let template = Path::new("compiler/include/geninc.cfg.in");
+        std::fs::create_dir_all(tree.path().join("compiler/include")).unwrap();
+        std::fs::write(
+            tree.path().join(template),
+            "%common\nEXECSMP=\"@ENABLE_EXECSMP@\"\n",
+        )
+        .unwrap();
+        let templates = BTreeMap::from([(
+            "compiler/include/geninc.cfg".into(),
+            aros_common::native_make_template::ResolvedGeneratedMakeTemplate {
+                template_relative: template.to_string_lossy().into_owned(),
+                expanded_text: "%common\nEXECSMP=\"\"\n".into(),
+                substitutions: BTreeMap::from([("@ENABLE_EXECSMP@".into(), String::new())]),
+            },
+        )]);
+        let text = "include $(TOP)/$(CURDIR)/geninc.cfg\noutput.o: input.c\n";
+        let scan = crate::local_make_includes::inline_native_make_configuration_with_templates(
+            text,
+            tree.path(),
+            source,
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+            &templates,
+        );
+        assert!(scan.issues.is_empty(), "{:?}", scan.issues);
+        let joined = join_continuations(&scan.expanded);
+        let anchors =
+            literal_object_source_anchors(tree.path(), source, text, &scan, &joined).unwrap();
+        assert!(anchors[0].is_none());
+        assert_eq!(anchors[1].as_ref().unwrap().source, template);
+        assert_eq!(anchors[2].as_ref().unwrap().line, 2);
+        assert_eq!(anchors[3].as_ref().unwrap().source, source);
+        assert_eq!(anchors[3].as_ref().unwrap().line, 2);
+        assert_eq!(
+            super::rejection_source_location(source, Some(&anchors), 4),
+            (source, Some(2)),
+            "header/directory rejections must use physical source lines after expansion"
+        );
+        assert_eq!(
+            super::rejection_source_location(source, Some(&anchors), 1),
+            (source, None)
+        );
+        assert_eq!(
+            super::rejection_source_location(source, Some(&anchors), 0),
+            (source, None)
+        );
+        assert_eq!(
+            super::rejection_source_location(source, None, 4),
+            (source, None)
+        );
+        std::fs::write(tree.path().join(template), "%common\nEXECSMP=\"changed\"\n").unwrap();
+        assert!(literal_object_source_anchors(tree.path(), source, text, &scan, &joined).is_none());
+    }
+
+    #[test]
+    fn included_configuration_lines_keep_fragment_and_parent_origins() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tree.path().join("arch/example")).unwrap();
+        let source = Path::new("arch/example/mmakefile.src");
+        let fragment = Path::new("arch/example/native.mk");
+        let text = "before := value\ninclude $(SRCDIR)/config/aros.cfg\nafter := value\n";
+        std::fs::create_dir_all(tree.path().join("config")).unwrap();
+        std::fs::write(tree.path().join("config/aros.cfg"), "ORIGINAL := config\n").unwrap();
+        std::fs::write(
+            tree.path().join(fragment),
+            "# fragment comment\nFRAGMENT_FLAGS := one \\\n  two\n",
+        )
+        .unwrap();
+        let bindings = BTreeMap::from([(
+            "config/aros.cfg".to_owned(),
+            fragment.to_string_lossy().into_owned(),
+        )]);
+        let scan = inline_native_make_configuration(
+            text,
+            tree.path(),
+            source,
+            LocalMakeIncludeLimits::default(),
+            &bindings,
+        );
+        assert!(scan.issues.is_empty(), "{:?}", scan.issues);
+        let joined = join_continuations(&scan.expanded);
+        let anchors = literal_object_source_anchors(tree.path(), source, text, &scan, &joined)
+            .expect("included source must reconstruct byte-for-byte");
+
+        assert_eq!(anchors[0].as_ref().unwrap().source, source);
+        assert_eq!(anchors[0].as_ref().unwrap().line, 1);
+        assert!(
+            anchors[1].is_none(),
+            "include placeholder has no source line"
+        );
+        assert_eq!(anchors[2].as_ref().unwrap().source, fragment);
+        assert_eq!(anchors[2].as_ref().unwrap().line, 1);
+        assert_eq!(anchors[3].as_ref().unwrap().source, fragment);
+        assert_eq!(anchors[3].as_ref().unwrap().line, 2);
+        assert_eq!(anchors[4].as_ref().unwrap().source, source);
+        assert_eq!(anchors[4].as_ref().unwrap().line, 3);
+
+        std::fs::write(tree.path().join(fragment), "FRAGMENT_FLAGS := changed\n").unwrap();
+        assert!(
+            literal_object_source_anchors(tree.path(), source, text, &scan, &joined,).is_none(),
+            "changed include bytes must suppress physical locations"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires AROS_P4_SOURCE_ROOT to point at the P4 source checkout"]
+    fn actual_p4_sifive_rule_maps_to_its_physical_source_line() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("AROS_P4_SOURCE_ROOT").expect("set P4 source root"),
+        );
+        let source = Path::new("arch/riscv-native/sifive_u/boot/mmakefile.src");
+        let text = std::fs::read_to_string(root.join(source)).unwrap();
+        let bindings = BTreeMap::from([(
+            "config/aros.cfg".to_owned(),
+            "arch/riscv-esp32p4/native-kobj-config.mk".to_owned(),
+        )]);
+        let scan = inline_native_make_configuration(
+            &text,
+            &root,
+            source,
+            LocalMakeIncludeLimits::default(),
+            &bindings,
+        );
+        assert!(scan.issues.is_empty(), "{:?}", scan.issues);
+        let joined = join_continuations(&scan.expanded);
+        let anchors = literal_object_source_anchors(&root, source, &text, &scan, &joined)
+            .expect("actual P4 source must reconstruct exactly");
+        let matching = joined
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("$(TARGETDIR)/core.bin.o:"))
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        let anchor = anchors[matching[0].0].as_ref().unwrap();
+        assert_eq!(anchor.source, source);
+        assert_eq!(anchor.line, 61);
+    }
 }

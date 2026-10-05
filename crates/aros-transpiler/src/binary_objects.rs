@@ -41,6 +41,20 @@ pub struct BinaryObjectDecl {
     pub arch_tag: String,
 }
 
+impl BinaryObjectDecl {
+    /// Match the same source-declared architecture tags as BinaryObjects.cmake.
+    /// A foreign architecture's same-named image is not a native dependency.
+    #[must_use]
+    pub fn applies_to(&self, context: &crate::TargetContext) -> bool {
+        self.arch_tag.is_empty()
+            || crate::make_opts::active_arch_tags(
+                context.platform.as_deref(),
+                context.cpu.as_deref(),
+            )
+            .contains(&self.arch_tag)
+    }
+}
+
 fn arg(body: &str, key: &str) -> Option<String> {
     crate::includes::arg_value_quoted(body, key).or_else(|| crate::includes::arg_value(body, key))
 }

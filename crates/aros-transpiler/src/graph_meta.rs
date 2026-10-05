@@ -114,6 +114,16 @@ impl DependencyGraph {
             .extend(rule.dependencies);
     }
 
+    /// Retain handwritten prerequisite provenance before unioning aliases.
+    pub fn add_explicit_meta_rule(&mut self, rule: MetaTargetRule) {
+        self.explicit_meta_edges.extend(
+            rule.dependencies
+                .iter()
+                .map(|dependency| (rule.name.clone(), dependency.clone())),
+        );
+        self.add_meta_rule(rule);
+    }
+
     /// Flattens strongly connected groups of pure #MM targets.
     ///
     /// GNU Make tolerates a circular prerequisite by dropping an edge during

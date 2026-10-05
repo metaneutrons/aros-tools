@@ -354,6 +354,205 @@ $(AROS_INCLUDES)/x.h : input.h
 }
 
 #[test]
+fn promotes_literal_whole_line_sed_with_shell_and_sed_escapes() {
+    let src = r#"
+header-generated : $(AROS_INCLUDES)/generated.h
+$(AROS_INCLUDES)/generated.h : $(PORTSDIR)/example/source.h
+	$(SED) "s|.*LITERAL_TOKEN.*|#define FIRST\\n#define SECOND;\\n\\\\literal|g" $< > $@
+"#;
+    let scan = collect_copy_includes(src, &PathBuf::from("workbench/libs/example"));
+    assert!(scan.adhoc.is_empty(), "adhoc: {:?}", scan.adhoc);
+    assert_eq!(
+        scan.transforms.len(),
+        1,
+        "transforms: {:?}",
+        scan.transforms
+    );
+    let transform = &scan.transforms[0];
+    assert_eq!(transform.name, "header-generated");
+    assert_eq!(transform.input, "${AROS_PORTS_DIR}/example/source.h");
+    assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/generated.h");
+    assert_eq!(transform.match_text, "LITERAL_TOKEN");
+    assert_eq!(
+        transform.replacement,
+        "#define FIRST\n#define SECOND;\n\\literal"
+    );
+    assert!(transform.replace_whole_line_containing);
+    assert!(!transform.copy_only);
+    assert!(transform.substitutions.is_empty());
+}
+
+#[test]
+fn actual_png_source_declares_the_bounded_whole_line_transform() {
+    let Some(source_root) = std::env::var_os("AROS_TEST_SOURCE_ROOT") else {
+        return;
+    };
+    let source_root = PathBuf::from(source_root);
+    let relative = PathBuf::from("workbench/libs/png");
+    let source = std::fs::read_to_string(source_root.join(&relative).join("mmakefile.src"))
+        .expect("read PNG mmakefile from AROS_TEST_SOURCE_ROOT");
+    let scan = collect_copy_includes(&source, &relative);
+    let transform = scan
+        .transforms
+        .iter()
+        .find(|transform| transform.output.ends_with("/pnglibconf.h"))
+        .unwrap_or_else(|| {
+            panic!(
+                "PNG source transform was not promoted; transforms={:?}, adhoc={:?}",
+                scan.transforms, scan.adhoc
+            )
+        });
+    assert_eq!(transform.name, "workbench-libs-png-generated");
+    assert_eq!(transform.match_text, "PNG_ERROR_NUMBERS_SUPPORTED");
+    assert_eq!(
+        transform.replacement,
+        "#if defined(__AROS__)\n#define PNG_ERROR_NUMBERS_SUPPORTED\n#else\n/*#undef PNG_ERROR_NUMBERS_SUPPORTED*/\n#endif"
+    );
+    assert!(transform.replace_whole_line_containing);
+    assert_eq!(
+        transform.input,
+        "${AROS_PORTS_DIR}/libpng/libpng-1.6.58/scripts/pnglibconf.h.prebuilt"
+    );
+    assert_eq!(transform.output, "${AROS_SDK_INCLUDE_DIR}/pnglibconf.h");
+
+    let (Some(input), Some(gnu_sed)) = (
+        std::env::var_os("AROS_TEST_LIBPNG_PREBUILT"),
+        std::env::var_os("AROS_TEST_GNU_SED"),
+    ) else {
+        return;
+    };
+    let input = PathBuf::from(input);
+    let gnu_sed = PathBuf::from(gnu_sed);
+    let temp = tempfile::tempdir().expect("create isolated PNG transform fixture");
+    let binary_root = std::fs::canonicalize(temp.path()).expect("canonicalize fixture root");
+    let output_root = binary_root.join("SDK/include");
+    std::fs::create_dir_all(&output_root).expect("create output root");
+    let replacement_file = binary_root.join("replacement.txt");
+    std::fs::write(&replacement_file, &transform.replacement)
+        .expect("write decoded replacement data");
+
+    let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory")
+        .join("aros-cmake-engine/engine/ReplaceHeaderLine.cmake");
+    let cmake = std::process::Command::new("cmake")
+        .arg(format!("-DINPUT={}", input.display()))
+        .arg(format!(
+            "-DOUTPUT={}",
+            output_root.join("pnglibconf.h").display()
+        ))
+        .arg(format!("-DTOKEN={}", transform.match_text))
+        .arg(format!("-DREPLACEMENT_FILE={}", replacement_file.display()))
+        .arg(format!(
+            "-DINPUT_ROOT={}",
+            input.parent().expect("input parent").display()
+        ))
+        .arg(format!("-DOUTPUT_ROOT={}", output_root.display()))
+        .arg(format!("-DBINARY_ROOT={}", binary_root.display()))
+        .arg("-P")
+        .arg(&runner)
+        .output()
+        .expect("run the bounded CMake transform runner");
+    assert!(
+        cmake.status.success(),
+        "runner failed: {}\n{}",
+        String::from_utf8_lossy(&cmake.stdout),
+        String::from_utf8_lossy(&cmake.stderr)
+    );
+
+    let mut sed_replacement = String::new();
+    for character in transform.replacement.chars() {
+        match character {
+            '\\' => sed_replacement.push_str("\\\\"),
+            '\n' => sed_replacement.push_str("\\n"),
+            '|' => sed_replacement.push_str("\\|"),
+            '&' => sed_replacement.push_str("\\&"),
+            other => sed_replacement.push(other),
+        }
+    }
+    let expression = format!("s|.*{}.*|{}|g", transform.match_text, sed_replacement);
+    let oracle = std::process::Command::new(gnu_sed)
+        .arg(expression)
+        .arg(&input)
+        .output()
+        .expect("run configured GNU sed oracle");
+    assert!(
+        oracle.status.success(),
+        "GNU sed oracle failed: {}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let generated =
+        std::fs::read(output_root.join("pnglibconf.h")).expect("read generated PNG header");
+    assert_eq!(
+        generated, oracle.stdout,
+        "CMake transform differs from GNU sed"
+    );
+}
+
+#[test]
+fn whole_line_sed_rejects_regex_shell_and_extra_input_semantics() {
+    let cases = [
+        ("input.h", r#"$(SED) "s|.*LITERAL.*|prefix-&|g" $< > $@"#),
+        (
+            "input.h",
+            r#"$(SED) "s|.*LITERAL.*|$(TOUCH) marker|g" $< > $@"#,
+        ),
+        (
+            "input.h",
+            r#"$(SED) "s|.*LITERAL.*|`touch marker`|g" $< > $@"#,
+        ),
+        ("input.h", r#"$(SED) "s|.*LITERAL.*|bad\\1|g" $< > $@"#),
+        ("input.h", r#"$(SED) "s|.*LITERAL.*|bad\\t|g" $< > $@"#),
+        ("input.h", r#"$(SED) "s|.*LIT.*ERAL.*|safe|g" $< > $@"#),
+        (
+            "input.h other.h",
+            r#"$(SED) "s|.*LITERAL.*|safe|g" $< > $@"#,
+        ),
+        (
+            "input.h",
+            r#"$(SED) "s|.*LITERAL.*|safe|g" $< > $@ ; $(TOUCH) marker"#,
+        ),
+    ];
+    for (prerequisites, recipe) in cases {
+        let source = format!(
+            "whole-line-owner : $(AROS_INCLUDES)/out.h\n\
+             $(AROS_INCLUDES)/out.h : {prerequisites}\n\
+             \t{recipe}\n"
+        );
+        let scan = collect_copy_includes(&source, &PathBuf::from("workbench/libs/example"));
+        assert!(
+            scan.transforms.is_empty(),
+            "unsafe recipe promoted: {recipe}"
+        );
+        assert_eq!(scan.adhoc.len(), 1, "unsafe recipe disappeared: {recipe}");
+    }
+}
+
+#[test]
+fn whole_line_runner_passes_custom_command_and_boundary_regressions() {
+    let driver = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory")
+        .join("aros-cmake-engine/engine/tests/LiteralHeaderTransformTest.cmake");
+    let result = std::process::Command::new("cmake")
+        .arg("-P")
+        .arg(&driver)
+        .output()
+        .expect("run CMake whole-line transform regression");
+    assert!(
+        result.status.success(),
+        "CMake whole-line test failed: {}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains("literal whole-line transform passed"),
+        "CMake test omitted success evidence: {}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+}
+
+#[test]
 fn sed_transform_rejects_extra_commands_suffixes_and_special_replacements() {
     let recipes = [
         "\t@$(NOP)\n\t@$(SED) -e 's/^literal/changed/' $< > $@",

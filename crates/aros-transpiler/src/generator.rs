@@ -17,6 +17,16 @@ fn cmake_arg(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// SDK text operations contain literal pkg-config `${...}` references, not
+/// CMake path expressions. Preserve dollars through configure evaluation.
+fn cmake_literal_arg(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$");
+    format!("\"{escaped}\"")
+}
+
 /// Writes one `aros_build_configure` block.
 ///
 /// Called twice from `generate_cmake` with disjoint halves of the same list: a
@@ -113,6 +123,12 @@ fn copy_includes_allows_foreign_arch(decl: &crate::copy_includes::CopyIncludesDe
 }
 
 /// Generates modern CMake code from the parsed dependency graph.
+///
+/// # Panics
+///
+/// Panics if JSON serialization of a source-text operation fails. The closed
+/// operation model contains only tagged enum variants and strings, without
+/// fallible custom serializers or non-finite numeric values.
 #[must_use]
 #[expect(
     clippy::too_many_lines,
@@ -139,98 +155,171 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
-    let mut all_targets: HashSet<String> = graph
-        .targets
-        .keys()
-        .chain(graph.icon_targets.keys())
-        .cloned()
-        .chain(graph.catalogs.iter().map(|catalog| catalog.mmake.clone()))
-        .chain(
-            graph
-                .flexcat_sources
-                .iter()
-                .map(|declaration| declaration.owner.clone()),
-        )
-        .chain(
-            graph
-                .flexcat_headers
-                .iter()
-                .map(|declaration| declaration.owner.clone()),
-        )
-        .chain(
-            graph
-                .ilbm_sources
-                .iter()
-                .map(|declaration| declaration.owner.clone()),
-        )
-        .chain(
-            graph
-                .header_transforms
-                .iter()
-                .map(|transform| transform.name.clone()),
-        )
-        .chain(
-            graph
-                .define_headers
-                .iter()
-                .map(|header| header.owner.clone()),
-        )
-        .chain(
-            graph
-                .copy_directories
-                .iter()
-                .map(|declaration| declaration.name.clone()),
-        )
-        .chain(
-            graph
-                .python_outputs
-                .iter()
-                .map(|declaration| declaration.owner.clone()),
-        )
-        .chain(
-            graph
-                .script_outputs
-                .iter()
-                .map(|declaration| declaration.owner.clone()),
-        )
-        .chain(graph.fetches.iter().map(|fetch| fetch.name.clone()))
-        .chain(
-            graph
-                .external_cmake
-                .iter()
-                .map(|declaration| declaration.mmake_name.clone()),
-        )
-        .chain(
-            graph
-                .external_cmake
-                .iter()
-                .map(|declaration| declaration.provider_target.clone()),
-        )
-        .chain(
-            graph
-                .configure_builds
-                .iter()
-                .map(|declaration| declaration.mmake_name.clone()),
-        )
-        .chain(
-            graph
-                .configure_builds
-                .iter()
-                .filter_map(|declaration| declaration.provider_target.clone()),
-        )
-        .chain(
-            graph
-                .grub_builds
-                .iter()
-                .map(|declaration| declaration.mmake_name.clone()),
-        )
-        .chain(
-            graph
-                .ahi_builds
-                .iter()
-                .map(|declaration| declaration.mmake_name.clone()),
-        )
-        .collect();
+    let mut all_targets: HashSet<String> =
+        graph
+            .targets
+            .iter()
+            .filter(|(_, target)| target.module_type != ModuleType::ModuleHeaders)
+            .map(|(name, _)| name)
+            .chain(graph.icon_targets.keys())
+            .cloned()
+            .chain(graph.catalogs.iter().map(|catalog| catalog.mmake.clone()))
+            .chain(
+                graph
+                    .sdk_text_rules
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(graph.host_header_rules.iter().flat_map(|declaration| {
+                [declaration.owner.clone(), declaration.setup_owner.clone()]
+            }))
+            .chain(
+                graph
+                    .host_file_generators
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph
+                    .source_text_rules
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(graph.sdk_file_copies.iter().map(|rule| rule.owner.clone()))
+            .chain(graph.sdk_asset_rules.iter().map(|rule| rule.owner.clone()))
+            .chain(
+                graph
+                    .source_value_rules
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph
+                    .literal_object_groups
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph.source_archives.iter().flat_map(|archive| {
+                    [archive.declaration.owner.clone(), archive.provider_target()]
+                }),
+            )
+            .chain(
+                graph
+                    .sdk_object_groups
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph
+                    .host_header_aggregates
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph
+                    .genmodule_header_rules
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .directory_setups
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .genmodule_writefiles_rules
+                    .iter()
+                    .map(|rule| rule.owner.clone()),
+            )
+            .chain(
+                graph
+                    .flexcat_sources
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .flexcat_headers
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .ilbm_sources
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .header_transforms
+                    .iter()
+                    .map(|transform| transform.name.clone()),
+            )
+            .chain(
+                graph
+                    .define_headers
+                    .iter()
+                    .map(|header| header.owner.clone()),
+            )
+            .chain(
+                graph
+                    .copy_directories
+                    .iter()
+                    .map(|declaration| declaration.name.clone()),
+            )
+            .chain(
+                graph
+                    .python_outputs
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(
+                graph
+                    .script_outputs
+                    .iter()
+                    .map(|declaration| declaration.owner.clone()),
+            )
+            .chain(graph.fetches.iter().map(|fetch| fetch.name.clone()))
+            .chain(
+                graph
+                    .external_cmake
+                    .iter()
+                    .map(|declaration| declaration.mmake_name.clone()),
+            )
+            .chain(
+                graph
+                    .external_cmake
+                    .iter()
+                    .map(|declaration| declaration.provider_target.clone()),
+            )
+            .chain(
+                graph
+                    .configure_builds
+                    .iter()
+                    .map(|declaration| declaration.mmake_name.clone()),
+            )
+            .chain(
+                graph
+                    .configure_builds
+                    .iter()
+                    .filter_map(|declaration| declaration.provider_target.clone()),
+            )
+            .chain(
+                graph
+                    .grub_builds
+                    .iter()
+                    .map(|declaration| declaration.mmake_name.clone()),
+            )
+            .chain(
+                graph
+                    .ahi_builds
+                    .iter()
+                    .map(|declaration| declaration.mmake_name.clone()),
+            )
+            .collect();
 
     // The closed GRUB2 helper creates one shared source-fetch endpoint and
     // exposes the legacy alias itself.  Keep both names in the endpoint
@@ -267,10 +356,11 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                         .is_some_and(|metadata| metadata.enabled) =>
             {
                 all_targets.insert(format!("{mmake}-linklib"));
-                if target
-                    .genmodule_linklibs
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
+                if !target.genmodule_only
+                    && target
+                        .genmodule_linklibs
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.enabled && metadata.has_relative)
                 {
                     all_targets.insert(format!("{mmake}-linklib-rel"));
                 }
@@ -534,6 +624,21 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // Full macro ABI production is source-owned and independent of modtype.
+    // Register it before builders consult the generic scaffolding helper.
+    {
+        let mut abi_owners: Vec<_> = graph
+            .targets
+            .values()
+            .filter(|target| target.genmodule_abi)
+            .map(|target| &target.mmake_name)
+            .collect();
+        abi_owners.sort();
+        for owner in abi_owners {
+            writeln!(out, "aros_set_module_abi({})", cmake_arg(owner)).unwrap();
+            all_targets.insert(format!("{owner}-includes"));
+        }
+    }
     // Reference genmodule must receive the same override as MetaMake. HPET's
     // clocksource base type and resident priority live only in that file.
     {
@@ -750,11 +855,15 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             let excludes: Vec<String> = decl.excludes.iter().map(|p| cmake_arg(p)).collect();
             writeln!(
                 out,
-                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\" PATTERNS {}{}{}{})",
+                "aros_copy_includes(NAME \"{}\" DEST \"{}\" SOURCE \"{}\"{}{}{}{})",
                 decl.name,
                 decl.dest,
                 decl.source_dir,
-                patterns.join(" "),
+                if decl.proven_empty {
+                    " PROVEN_EMPTY".to_owned()
+                } else {
+                    format!(" PATTERNS {}", patterns.join(" "))
+                },
                 if excludes.is_empty() {
                     String::new()
                 } else {
@@ -993,6 +1102,156 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    // Object owners must precede program/module consumers. Shared ordinary
+    // aggregates reference the same declaration, not duplicate Ninja outputs.
+    let mut sdk_objects = std::collections::BTreeMap::new();
+    let mut sdk_paths = std::collections::BTreeMap::new();
+    for group in &graph.sdk_object_groups {
+        for object in &group.objects {
+            for path in [&object.output, &object.intermediate] {
+                let key = path.to_ascii_lowercase();
+                if let Some(previous) = sdk_paths.insert(key, object) {
+                    if previous != object {
+                        // Public generation can be called without selection.
+                        // Never silently choose the first conflicting owner.
+                        return format!(
+                            "message(FATAL_ERROR {})\n",
+                            cmake_arg(&format!("Conflicting SDK object ownership: {path}"))
+                        );
+                    }
+                }
+            }
+            sdk_objects.entry(object.output.as_str()).or_insert(object);
+        }
+    }
+    for object in sdk_objects.values() {
+        let digest = aros_common::sha256_bytes(object.output.as_bytes());
+        let name = format!("aros-sdk-object-{}", digest.as_str());
+        writeln!(out, "aros_compile_sdk_object(").unwrap();
+        let source = if object.source.starts_with("${AROS_SOURCE_DIR}/") {
+            object.source.clone()
+        } else {
+            format!("${{AROS_SOURCE_DIR}}/{}", object.source)
+        };
+        for (key, value) in [
+            ("NAME", name.as_str()),
+            ("SOURCE", source.as_str()),
+            ("INTERMEDIATE", object.intermediate.as_str()),
+            ("OUTPUT", object.output.as_str()),
+            ("LANGUAGE", object.language.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        for (key, values) in [
+            ("DEFINES", &object.defines),
+            ("UNDEFINES", &object.undefines),
+            ("OPTIONS", &object.options),
+            ("INCLUDES", &object.includes),
+        ] {
+            if !values.is_empty() {
+                writeln!(out, "    {key}").unwrap();
+                for value in values {
+                    writeln!(out, "        {}", cmake_arg(value)).unwrap();
+                }
+            }
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+    let mut sdk_groups: Vec<_> = graph.sdk_object_groups.iter().collect();
+    sdk_groups.sort_by(|left, right| left.owner.cmp(&right.owner));
+    for group in sdk_groups {
+        writeln!(out, "aros_sdk_object_group(").unwrap();
+        writeln!(out, "    NAME {}", cmake_arg(&group.owner)).unwrap();
+        writeln!(out, "    OBJECTS").unwrap();
+        for object in &group.objects {
+            writeln!(out, "        {}", cmake_arg(&object.output)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+    if !graph.sdk_object_groups.is_empty() {
+        writeln!(out, "if(AROS_NATIVE_BUILD_CONTRACT_VALIDATED)\n    aros_bind_source_sdk_program_inputs()\nendif()\n").unwrap();
+    }
+
+    let mut literal_objects = std::collections::BTreeMap::new();
+    for group in &graph.literal_object_groups {
+        for object in &group.objects {
+            let key = object.output.to_ascii_lowercase();
+            if sdk_paths.contains_key(&key) {
+                return format!(
+                    "message(FATAL_ERROR {})\n",
+                    cmake_arg(&format!(
+                        "Literal and SDK object ownership conflict: {}",
+                        object.output
+                    ))
+                );
+            }
+            if let Some(previous) = literal_objects.insert(key, object) {
+                if previous != object {
+                    return format!(
+                        "message(FATAL_ERROR {})\n",
+                        cmake_arg(&format!(
+                            "Conflicting literal object ownership: {}",
+                            object.output
+                        ))
+                    );
+                }
+            }
+        }
+    }
+    for object in literal_objects.values() {
+        let digest = aros_common::sha256_bytes(object.output.as_bytes());
+        let name = format!("aros-literal-object-{}", digest.as_str());
+        writeln!(out, "aros_compile_literal_object(").unwrap();
+        for (key, value) in [
+            ("NAME", name.as_str()),
+            ("SOURCE", object.source.as_str()),
+            ("OUTPUT", object.output.as_str()),
+            ("LANGUAGE", object.language.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        if !object.arguments.is_empty() {
+            writeln!(out, "    ARGUMENTS").unwrap();
+            for value in &object.arguments {
+                writeln!(out, "        {}", cmake_arg(value)).unwrap();
+            }
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+    let mut literal_groups: Vec<_> = graph.literal_object_groups.iter().collect();
+    literal_groups.sort_by(|left, right| left.owner.cmp(&right.owner));
+    for group in literal_groups {
+        writeln!(
+            out,
+            "aros_literal_object_group(\n    NAME {}\n    OBJECTS",
+            cmake_arg(&group.owner)
+        )
+        .unwrap();
+        for object in &group.objects {
+            writeln!(out, "        {}", cmake_arg(&object.output)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    let mut source_archives: Vec<_> = graph.source_archives.iter().collect();
+    source_archives.sort_by(|left, right| left.declaration.owner.cmp(&right.declaration.owner));
+    for archive in source_archives {
+        writeln!(out, "aros_source_archive(").unwrap();
+        writeln!(out, "    NAME {}", cmake_arg(&archive.declaration.owner)).unwrap();
+        writeln!(out, "    OUTPUT {}", cmake_arg(&archive.declaration.output)).unwrap();
+        writeln!(
+            out,
+            "    AR_FLAGS {}",
+            cmake_arg(&archive.command.flags.join(" "))
+        )
+        .unwrap();
+        writeln!(out, "    OBJECTS").unwrap();
+        for object in &archive.members {
+            writeln!(out, "        {}", cmake_arg(object)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
     // 1. Concrete Module Targets. HashMap iteration is deliberately avoided:
     // reproducible generated CMake is required for meaningful comparisons,
     // and declaration order can decide which producer claims an output first.
@@ -1002,6 +1261,7 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         let macro_name = match target.module_type {
             ModuleType::Library => "aros_add_library",
             ModuleType::Abi => "aros_add_module_abi",
+            ModuleType::ModuleHeaders => "aros_add_module_headers",
             ModuleType::Device => "aros_add_device",
             ModuleType::Resource => "aros_add_resource",
             ModuleType::Hidd => "aros_add_hidd",
@@ -1027,6 +1287,37 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         // than the four spelled out here, and it excludes the target from `all`
         // while keeping it nameable, which is what makes it possible to ask
         // whether a foreign-architecture target would build.
+        if let Some(form) = target.module_macro {
+            writeln!(
+                out,
+                "aros_record_module_macro(OWNER {} FORM {})",
+                target.mmake_name,
+                form.cmake_form()
+            )
+            .unwrap();
+        }
+        if target.module_type == ModuleType::ModuleHeaders {
+            writeln!(out, "{macro_name}(").unwrap();
+            writeln!(out, "    TARGET {}", cmake_arg(&target.target_name)).unwrap();
+            writeln!(out, "    MMAKE_ID {}", cmake_arg(&target.mmake_name)).unwrap();
+            writeln!(
+                out,
+                "    DIRECTORY {}",
+                cmake_arg(&format!(
+                    "${{AROS_SOURCE_DIR}}/{}",
+                    target.dir_path.display()
+                ))
+            )
+            .unwrap();
+            if let Some(kind) = target.declared_mod_type.as_deref() {
+                writeln!(out, "    MODTYPE {}", cmake_arg(kind)).unwrap();
+            }
+            if let Some(suffix) = target.mod_suffix.as_deref() {
+                writeln!(out, "    MODSUFFIX {}", cmake_arg(suffix)).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+            continue;
+        }
         writeln!(out, "{macro_name}(").unwrap();
         writeln!(out, "    TARGET {}", target.target_name).unwrap();
         writeln!(out, "    MMAKE_ID {}", target.mmake_name).unwrap();
@@ -1057,6 +1348,23 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
         if let Some(linklib_name) = &target.linklib_name {
             writeln!(out, "    LINKLIB_NAME {}", cmake_arg(linklib_name)).unwrap();
+        }
+        if let Some(selected) = graph
+            .native_selected_client_archives
+            .as_ref()
+            .filter(|_| target.module_type == ModuleType::Library && !target.genmodule_only)
+        {
+            // Public ABI headers are still needed by the runtime. Native
+            // selection must not publish an unrequested client archive into
+            // the same namespace as a selected implementation archive.
+            let normal = selected.contains(&format!("{}-linklib", target.mmake_name));
+            let relative = selected.contains(&format!("{}-linklib-rel", target.mmake_name));
+            match (normal, relative) {
+                (false, false) => writeln!(out, "    NO_CLIENT_ARCHIVES").unwrap(),
+                (false, true) => writeln!(out, "    NO_NORMAL_CLIENT_ARCHIVE").unwrap(),
+                (true, false) => writeln!(out, "    NO_RELATIVE_CLIENT_ARCHIVE").unwrap(),
+                (true, true) => {}
+            }
         }
         if let Some(genmodule) = target
             .genmodule_linklibs
@@ -1227,6 +1535,60 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
 
         writeln!(out, ")").unwrap();
+        for product in graph
+            .sdk_program_outputs
+            .iter()
+            .filter(|product| product.owner == target.mmake_name)
+        {
+            writeln!(
+                out,
+                "aros_register_sdk_program_file(NAME {} OUTPUT {})",
+                cmake_arg(&product.owner),
+                cmake_arg(&product.output)
+            )
+            .unwrap();
+        }
+        if target
+            .module_macro
+            .is_some_and(|form| form != crate::ast::ModuleMacroForm::AbiOnly)
+        {
+            writeln!(out, "aros_record_module_kobj_sources(").unwrap();
+            writeln!(out, "    OWNER {}", target.mmake_name).unwrap();
+            writeln!(
+                out,
+                "    DIRECTORY \"${{AROS_SOURCE_DIR}}/{}\"",
+                target.dir_path.display()
+            )
+            .unwrap();
+            for (keyword, sources) in [
+                ("SOURCES", &target.source_files),
+                ("CXX_SOURCES", &target.cxx_source_files),
+                ("OBJC_SOURCES", &target.objc_source_files),
+                ("ASM_SOURCES", &target.asm_source_files),
+            ] {
+                if !sources.is_empty() {
+                    let quoted: Vec<_> = sources.iter().map(|source| cmake_arg(source)).collect();
+                    writeln!(out, "    {keyword} {}", quoted.join(" ")).unwrap();
+                }
+            }
+            if !target.arch_sources.is_empty() {
+                let entries: Vec<_> = target
+                    .arch_sources
+                    .iter()
+                    .map(|(tag, dir, files)| cmake_arg(&format!("{tag}|{dir}|{}", files.join(","))))
+                    .collect();
+                writeln!(out, "    ARCH_SOURCES {}", entries.join(" ")).unwrap();
+            }
+            writeln!(out, ")").unwrap();
+            if let Some(inputs) = &target.kobj_scoped_inputs {
+                let json = serde_json::to_string(inputs)
+                    .expect("KOBJ input metadata contains only serializable source facts");
+                writeln!(out, "aros_record_module_kobj_inputs(").unwrap();
+                writeln!(out, "    OWNER {}", target.mmake_name).unwrap();
+                writeln!(out, "    JSON {}", cmake_literal_arg(&json)).unwrap();
+                writeln!(out, ")").unwrap();
+            }
+        }
         writeln!(out).unwrap();
     }
 
@@ -1445,6 +1807,353 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
 
+    for declaration in &graph.directory_setups {
+        writeln!(out, "aros_prepare_directories(").unwrap();
+        writeln!(out, "    NAME {}", cmake_arg(&declaration.owner)).unwrap();
+        let directories = declaration
+            .directories
+            .iter()
+            .map(|directory| cmake_arg(directory))
+            .collect::<Vec<_>>();
+        writeln!(out, "    DIRECTORIES {}", directories.join(" ")).unwrap();
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.genmodule_header_rules {
+        writeln!(out, "aros_genmodule_header_stamp(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("LAYOUT", declaration.layout.as_str()),
+            ("DECLARING_DIR", declaration.declaring_dir.as_str()),
+            ("CONFIG", declaration.config.as_str()),
+            ("MODULE", declaration.module.as_str()),
+            ("MODTYPE", declaration.modtype.as_str()),
+            ("INCLUDE_NAME", declaration.include_name.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.genmodule_writefiles_rules {
+        writeln!(out, "aros_genmodule_writefiles_stamp(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("CONFIG", declaration.config.as_str()),
+            ("MODULE", declaration.module.as_str()),
+            ("MODTYPE", declaration.modtype.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.sfd_header_rules {
+        writeln!(out, "aros_generate_sfd_headers(").unwrap();
+        writeln!(out, "    NAME {}", cmake_arg(&declaration.owner)).unwrap();
+        writeln!(out, "    FILE {}", cmake_arg(&declaration.file)).unwrap();
+        writeln!(
+            out,
+            "    FILE_SHA256 {}",
+            cmake_arg(&declaration.file_sha256)
+        )
+        .unwrap();
+        writeln!(out, "    JOBS").unwrap();
+        for job in &declaration.jobs {
+            let encoded = format!(
+                "{}|{}|{}|{}|{}",
+                job.mode, job.target, job.input, job.input_sha256, job.sdk_output
+            );
+            writeln!(out, "        {}", cmake_arg(&encoded)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.sdk_text_rules {
+        writeln!(out, "aros_transform_sdk_text(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("INPUT", declaration.input.as_str()),
+            ("OUTPUT", declaration.output.as_str()),
+            ("FETCH", declaration.fetch_owner.as_str()),
+            ("FILE", declaration.file.as_str()),
+            ("FILE_SHA256", declaration.file_sha256.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        writeln!(out, "    OPERATIONS").unwrap();
+        for operation in &declaration.operations {
+            writeln!(
+                out,
+                "        {}",
+                cmake_literal_arg(&operation.cmake_argument())
+            )
+            .unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.source_text_rules {
+        for product in &declaration.outputs {
+            writeln!(out, "aros_transform_source_text(").unwrap();
+            for (key, value) in [
+                ("NAME", declaration.owner.as_str()),
+                ("INPUT", product.input.as_str()),
+                ("OUTPUT", product.output.as_str()),
+                ("FETCH", declaration.fetch_owner.as_str()),
+            ] {
+                writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+            }
+            let operations = serde_json::to_string(&product.operations)
+                .expect("closed source text operations serialize as JSON");
+            // The closed scanner reserves this deferred root for source Make
+            // directory expressions. Other dollars (for example pkg-config
+            // ${prefix}) remain literal; never expose arbitrary CMake names.
+            let operations_argument = cmake_literal_arg(&operations)
+                .replace("\\${AROS_BUILD_DIR}", "${AROS_BUILD_DIR}")
+                .replace("\\${AROS_SDK_INCLUDE_DIR}", "${AROS_SDK_INCLUDE_DIR}")
+                .replace("\\${AROS_GENINC_DIR}", "${AROS_GENINC_DIR}");
+            writeln!(out, "    OPERATIONS_JSON {operations_argument}").unwrap();
+            if let Some(mode) = &product.mode {
+                writeln!(out, "    MODE {}", cmake_arg(mode)).unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    for declaration in &graph.source_value_rules {
+        writeln!(out, "aros_extract_source_value(").unwrap();
+        let mut marker_hex = String::with_capacity(declaration.marker.len() * 2);
+        for byte in declaration.marker.as_bytes() {
+            write!(marker_hex, "{byte:02x}").unwrap();
+        }
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("INPUT", declaration.input.as_str()),
+            ("OUTPUT", declaration.output.as_str()),
+            ("MARKER_HEX", marker_hex.as_str()),
+            ("FILE", declaration.file.as_str()),
+            ("FILE_SHA256", declaration.file_sha256.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+    for declaration in &graph.sdk_file_copies {
+        writeln!(out, "aros_stage_sdk_files(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("SOURCE", declaration.source_dir.as_str()),
+            ("DESTINATION", declaration.destination.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        if let Some(fetch) = &declaration.fetch_owner {
+            writeln!(out, "    FETCH {}", cmake_arg(fetch)).unwrap();
+        }
+        writeln!(out, "    FILES").unwrap();
+        for file in &declaration.files {
+            writeln!(out, "        {}", cmake_literal_arg(file)).unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    let mut pending_assets: Vec<_> = graph.sdk_asset_rules.iter().collect();
+    pending_assets.sort_by(|a, b| a.owner.cmp(&b.owner));
+    let asset_owners: std::collections::BTreeSet<_> = pending_assets
+        .iter()
+        .map(|rule| rule.owner.as_str())
+        .collect();
+    let mut emitted_assets = std::collections::BTreeSet::new();
+    while !pending_assets.is_empty() {
+        let next = pending_assets.iter().position(|rule| {
+            graph
+                .sdk_asset_dependencies(&rule.owner, None)
+                .is_ok_and(|dependencies| {
+                    dependencies.iter().all(|owner| {
+                        !asset_owners.contains(owner.as_str()) || emitted_assets.contains(owner)
+                    })
+                })
+        });
+        let Some(index) = next else {
+            writeln!(out, "message(FATAL_ERROR \"SDK assets require unique concrete input producers and an acyclic file graph\")").unwrap();
+            break;
+        };
+        let declaration = pending_assets.remove(index);
+        for operation in &declaration.operations {
+            writeln!(out, "aros_sdk_asset_rule(").unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&declaration.owner)).unwrap();
+            match &operation.operation {
+                crate::sdk_asset_rules::SdkAssetOperation::Copy { input, output } => {
+                    let producers = graph.sdk_asset_producers(None);
+                    let producer = producers[&input.to_ascii_lowercase()]
+                        .iter()
+                        .next()
+                        .unwrap();
+                    writeln!(out, "    INPUT {}", cmake_arg(input)).unwrap();
+                    writeln!(out, "    OUTPUT {}", cmake_arg(output)).unwrap();
+                    writeln!(out, "    PRODUCER {}", cmake_arg(producer)).unwrap();
+                }
+                crate::sdk_asset_rules::SdkAssetOperation::WriteText { output, text } => {
+                    let mut hex = String::new();
+                    for byte in text.as_bytes() {
+                        write!(hex, "{byte:02x}").unwrap();
+                    }
+                    writeln!(out, "    OUTPUT {}", cmake_arg(output)).unwrap();
+                    writeln!(out, "    TEXT_HEX {}", cmake_literal_arg(&hex)).unwrap();
+                }
+            }
+            writeln!(out, ")\n").unwrap();
+        }
+        emitted_assets.insert(declaration.owner.clone());
+    }
+
+    for declaration in &graph.host_header_aggregates {
+        writeln!(out, "aros_host_header_aggregate(").unwrap();
+        writeln!(out, "    NAME {}", cmake_arg(&declaration.owner)).unwrap();
+        writeln!(out, "    TOOL {}", cmake_arg(&declaration.tool)).unwrap();
+        writeln!(
+            out,
+            "    SOURCE {}",
+            cmake_arg(&format!("${{AROS_SOURCE_DIR}}/{}", declaration.tool_source))
+        )
+        .unwrap();
+        if !declaration.host_compile_flags.is_empty() {
+            writeln!(
+                out,
+                "    COMPILE_FLAGS {}",
+                declaration
+                    .host_compile_flags
+                    .iter()
+                    .map(|flag| cmake_literal_arg(flag))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+            .unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+        for header in &declaration.headers {
+            writeln!(out, "aros_host_header_aggregate_output(").unwrap();
+            writeln!(out, "    NAME {}", cmake_arg(&declaration.owner)).unwrap();
+            writeln!(out, "    HEADER {}", cmake_literal_arg(&header.header)).unwrap();
+            if header.generated_mirror {
+                writeln!(out, "    GENERATED_MIRROR").unwrap();
+            }
+            if !header.arguments.is_empty() {
+                writeln!(
+                    out,
+                    "    ARGUMENTS {}",
+                    header
+                        .arguments
+                        .iter()
+                        .map(|argument| cmake_literal_arg(argument))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .unwrap();
+            }
+            writeln!(out, ")\n").unwrap();
+        }
+    }
+
+    for declaration in &graph.host_header_rules {
+        writeln!(out, "aros_host_header_rule(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.as_str()),
+            ("SETUP_NAME", declaration.setup_owner.as_str()),
+            ("TOOL_SOURCE", declaration.tool_source.as_str()),
+            ("TOOL_OUTPUT", declaration.tool_output.as_str()),
+            ("SOURCE_WORKDIR", declaration.source_workdir.as_str()),
+            ("HEADER", declaration.header.as_str()),
+            ("PRIMARY_OUTPUT", declaration.primary_output.as_str()),
+            ("SDK_OUTPUT", declaration.sdk_output.as_str()),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(value)).unwrap();
+        }
+        if declaration.use_configured_host_cflags {
+            writeln!(out, "    USE_CONFIGURED_HOST_CFLAGS").unwrap();
+        }
+        for (key, values) in [
+            ("COMPILE_FLAGS", &declaration.host_compile_flags),
+            ("SOURCE_PREREQUISITES", &declaration.source_prerequisites),
+            ("SETUP_DIRECTORIES", &declaration.setup_directories),
+        ] {
+            if !values.is_empty() {
+                let values = values
+                    .iter()
+                    .map(|value| cmake_arg(value))
+                    .collect::<Vec<_>>();
+                writeln!(out, "    {key} {}", values.join(" ")).unwrap();
+            }
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
+    for declaration in &graph.host_file_generators {
+        let manifest = serde_json::to_string(&declaration.inputs.iter().map(|input| {
+            serde_json::json!({"filename": input.filename, "sha256": input.sha256, "size": input.size})
+        }).collect::<Vec<_>>()).expect("host inputs serialize");
+        let source_manifest = serde_json::to_string(
+            &graph
+                .host_file_generator_source_digests
+                .iter()
+                .map(|(path, sha256)| serde_json::json!({"path": path, "sha256": sha256}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("source inputs serialize");
+        let tool_sha = graph
+            .host_file_generator_source_digests
+            .get(&declaration.tool_source)
+            .expect("admitted source-owned host tool must have its sealed digest");
+        writeln!(out, "aros_host_c_file_generator(").unwrap();
+        for (key, value) in [
+            ("NAME", declaration.owner.clone()),
+            (
+                "TOOL_SOURCE",
+                format!("${{AROS_SOURCE_DIR}}/{}", declaration.tool_source),
+            ),
+            ("TOOL_SHA256", tool_sha.clone()),
+            (
+                "OUTPUT",
+                format!("${{AROS_BUILD_DIR}}/{}", declaration.output),
+            ),
+            (
+                "INPUT_DIRECTORY",
+                "${AROS_NATIVE_HOST_INPUT_DIRECTORY}".into(),
+            ),
+        ] {
+            writeln!(out, "    {key} {}", cmake_arg(&value)).unwrap();
+        }
+        writeln!(
+            out,
+            "    INPUT_MANIFEST_JSON {}",
+            cmake_literal_arg(&manifest)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    SOURCE_MANIFEST_JSON {}",
+            cmake_literal_arg(&source_manifest)
+        )
+        .unwrap();
+        for (key, values) in [
+            ("COMPILE_FLAGS", &declaration.compile_flags),
+            ("ARGUMENTS", &declaration.arguments),
+        ] {
+            writeln!(
+                out,
+                "    {key} {}",
+                values
+                    .iter()
+                    .map(|value| cmake_literal_arg(value))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+            .unwrap();
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+
     // Safe hand-written header transforms.  Concrete consumers have already
     // been declared, while fetch targets were emitted first, so CMake can bind
     // both sides directly without deferred target-name guessing.
@@ -1468,6 +2177,9 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
             writeln!(out, "    NAME {}", cmake_arg(&transform.name)).unwrap();
             writeln!(out, "    INPUT {}", cmake_arg(&transform.input)).unwrap();
             writeln!(out, "    OUTPUT {}", cmake_arg(&transform.output)).unwrap();
+            if let Some(owner) = &transform.generated_input_owner {
+                writeln!(out, "    GENERATED_INPUT_OWNER {}", cmake_arg(owner)).unwrap();
+            }
             if transform.copy_only {
                 writeln!(out, "    COPY_ONLY").unwrap();
             } else if !transform.substitutions.is_empty() {
@@ -1478,8 +2190,16 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .collect();
                 writeln!(out, "    SUBSTITUTIONS {}", substitutions.join(" ")).unwrap();
             } else {
+                if transform.replace_whole_line_containing {
+                    writeln!(out, "    WHOLE_LINE_CONTAINING").unwrap();
+                }
                 writeln!(out, "    MATCH {}", cmake_arg(&transform.match_text)).unwrap();
-                writeln!(out, "    REPLACEMENT {}", cmake_arg(&transform.replacement)).unwrap();
+                writeln!(
+                    out,
+                    "    REPLACEMENT {}",
+                    cmake_literal_arg(&transform.replacement)
+                )
+                .unwrap();
             }
             if !transform.dependencies.is_empty() {
                 let dependencies: Vec<_> = transform
