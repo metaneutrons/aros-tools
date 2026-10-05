@@ -42,6 +42,13 @@ The report distinguishes selected failures from diagnostics without proven
 owners and lists every typed producer family. Native discovery honors only
 literal directory exclusions from the contract-bound `mmake.config.in`;
 unresolved configure substitutions do not exclude source directories.
+`source_meta_semantics` records imported source-generated virtual aliases,
+verified optional selector contracts and omitted absent architecture-hook
+edges. A sealed invocation policy and exact source declaration are required;
+uncontracted, literal, independently required and known-provider edges remain
+mandatory. These metadata routes do not create executable producers or prove
+a build. See [native inputs](/aros-tools/reference/native-media-inputs/) for the
+admission rules.
 Diagnostic ownership follows only complete, source-proven consumer chains.
 If an alternative consumer is unresolved, the diagnostic stays unowned.
 Macro evidence verifies the reachable helper definitions, not just the outer
