@@ -36,6 +36,10 @@ const DOCUMENTED_AROS_EXAMPLE_PAGES: &[(&str, &str)] = &[
         "public_cli_semantics.rs, toolchain_plan_cli.rs, observability_cli.rs",
     ),
     (
+        "reference/native-media-inputs.md",
+        "native_media_prepare_cli.rs",
+    ),
+    (
         "reference/diagnostics.md",
         "observability_cli.rs::invalid_invocation_is_one_versioned_json_diagnostic",
     ),
@@ -94,6 +98,43 @@ fn help(arguments: &[String]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("public command help must be UTF-8")
+}
+
+#[test]
+fn build_compiler_cache_help_matches_managed_offline_selection() {
+    let commands = [
+        vec!["build".to_owned()],
+        vec!["board".to_owned(), "build".to_owned()],
+        vec!["toolchain".to_owned(), "build".to_owned()],
+    ];
+
+    for command in commands {
+        let output = help(&command);
+        assert!(
+            output.contains("Use prepared local backends in order")
+                && output.contains("prepared AROS-owned local namespace")
+                && output.contains("sccache, then ccache")
+                && output.contains("works offline"),
+            "`aros {}` must describe automatic managed offline selection:\n{output}",
+            command.join(" ")
+        );
+        assert!(
+            output.contains("Require a prepared AROS-owned local namespace")
+                && output.contains("works offline"),
+            "`aros {}` must describe explicit managed offline selection:\n{output}",
+            command.join(" ")
+        );
+        assert!(
+            !output.contains("offline builds disable automatic caching")
+                && !output.contains("offline build rejects an unverified storage scope"),
+            "`aros {}` must not expose obsolete compiler-cache offline wording:\n{output}",
+            command.join(" ")
+        );
+        if command == ["toolchain", "build"] {
+            assert!(output.contains("[default: off]"));
+            assert!(output.contains("--compiler-cache-dir"));
+        }
+    }
 }
 
 fn subcommands(help: &str) -> Vec<String> {
@@ -436,7 +477,14 @@ fn published_aros_examples_parse_and_have_a_semantic_fixture_owner() {
         );
         observed_pages.insert(relative.clone());
 
-        for invocation in invocations {
+        for mut invocation in invocations {
+            // Documentation names the caller's independently reviewed digest;
+            // --help checks syntax, never executes the example or trusts a pin.
+            for argument in &mut invocation {
+                if argument == "REVIEWED_SHA256" {
+                    *argument = "0".repeat(64);
+                }
+            }
             let output = if invocation.len() == 2 && invocation[1] == "--version" {
                 Command::new(aros()).arg("--version").output()
             } else {

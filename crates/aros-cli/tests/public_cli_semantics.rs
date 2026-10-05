@@ -1838,6 +1838,7 @@ fn write_complete_build_tool_suite(root: &Path) {
         "aros-collect",
         "aros-ahi-runner",
         "aros-fetch",
+        "aros-verify",
     ] {
         write_executable(
             &root.join(tool),
