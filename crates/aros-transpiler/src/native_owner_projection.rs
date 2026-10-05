@@ -67,6 +67,10 @@ pub struct NativeOwnerProjection {
     graph: MetaMakeOwnerGraph,
     /// Canonical generated MetaMake owner -> actual source input.
     owners: BTreeMap<String, String>,
+    /// Complete discovered inputs at load time, excluding project-ignored directories.
+    discovered_inputs: BTreeSet<String>,
+    /// Project discovery policy applied to both the original and current walks.
+    ignored_directories: BTreeSet<String>,
     /// Exact original bytes; checked against the main parser and recaptured.
     pub snapshots: BTreeMap<String, String>,
     pub policy_sha256: String,
@@ -111,7 +115,7 @@ impl NativeOwnerProjection {
         let (globals, absent) = load_globals(&policy, &project, host, context)?;
         let discovered = verify_complete_discovery(root, files, &project.ignored_directories)?;
         let template = load_template(root, &policy, &sealed, &mut snapshots)?;
-        let owners = build_owner_map(discovered);
+        let owners = build_owner_map(discovered.clone());
         let (expanded, expanded_bytes) =
             expand_owners(root, &owners, &template, &sealed, &mut snapshots)?;
         let limits = Limits {
@@ -128,6 +132,8 @@ impl NativeOwnerProjection {
         let projection = Self {
             graph,
             owners,
+            discovered_inputs: discovered,
+            ignored_directories: project.ignored_directories,
             snapshots,
             policy_sha256: aros_common::sha256_bytes(&bytes).to_string(),
             expanded_bytes,
@@ -168,11 +174,21 @@ impl NativeOwnerProjection {
         })
     }
 
-    /// Recheck every captured policy, recipe and imported template before use.
+    /// Effective source inputs for the native parser. As in source-owned
+    /// generation, `.src` supersedes its generated sibling; direct MetaMake
+    /// fragments with no `.src` remain inputs. Discovery still binds both.
+    pub fn effective_inputs(&self) -> impl Iterator<Item = &str> {
+        self.owners.values().map(String::as_str)
+    }
+
+    /// Recheck complete discovery and every captured policy, recipe and
+    /// imported template before use.
     ///
     /// # Errors
-    /// Returns an error if any captured input is unreadable or changed.
+    /// Returns an error if discovery changed or any captured input is
+    /// unreadable or changed.
     pub fn verify(&self, root: &Path) -> Result<(), String> {
+        verify_captured_discovery(root, &self.discovered_inputs, &self.ignored_directories)?;
         verify_snapshot_digests(root, &self.snapshots)
     }
 }
@@ -422,14 +438,31 @@ fn verify_complete_discovery(
         }
     }
     let expected = discover_meta_files(root, ignored_directories)?;
-    if expected != supplied {
-        let missing: Vec<_> = expected.difference(&supplied).take(5).cloned().collect();
-        let extra: Vec<_> = supplied.difference(&expected).take(5).cloned().collect();
+    compare_discovered_inputs(&expected, &supplied)?;
+    Ok(expected)
+}
+
+fn verify_captured_discovery(
+    root: &Path,
+    discovered_inputs: &BTreeSet<String>,
+    ignored_directories: &BTreeSet<String>,
+) -> Result<(), String> {
+    let current = discover_meta_files(root, ignored_directories)?;
+    compare_discovered_inputs(discovered_inputs, &current)
+}
+
+fn compare_discovered_inputs(
+    expected: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+) -> Result<(), String> {
+    if expected != current {
+        let missing: Vec<_> = expected.difference(current).take(5).cloned().collect();
+        let extra: Vec<_> = current.difference(expected).take(5).cloned().collect();
         return Err(format!(
-            "MetaMake input discovery is incomplete; omitted={missing:?}, unexpected={extra:?}"
+            "MetaMake input discovery changed; omitted={missing:?}, unexpected={extra:?}"
         ));
     }
-    Ok(expected)
+    Ok(())
 }
 
 fn discover_meta_files(
@@ -452,13 +485,12 @@ fn discover_meta_files(
         let entry = entry.map_err(|error| format!("cannot verify MetaMake discovery: {error}"))?;
         if entry.file_type().is_symlink()
             && !is_ignored_name(entry.file_name(), ignored_directories)
+            && fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir())
         {
-            if fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()) {
-                return Err(format!(
-                    "MetaMake discovery cannot follow source directory symlink: {}",
-                    entry.path().display()
-                ));
-            }
+            return Err(format!(
+                "MetaMake discovery cannot follow source directory symlink: {}",
+                entry.path().display()
+            ));
         }
         if is_meta_make_name(entry.file_name()) {
             let name = meta_relative_name(root, entry.path())?.to_owned();
@@ -517,7 +549,10 @@ fn expand_owners(
     let mut expanded_bytes = 0usize;
     for (owner, source) in owners {
         let bytes = read_snapshot(root, source, 1024 * 1024, snapshots)?;
-        let text = if source.ends_with(".src") {
+        let text = if Path::new(source)
+            .file_name()
+            .is_some_and(|name| name == "mmakefile.src")
+        {
             let expansion = expand_files(&root.join(source), template, GenmfLimits::default())
                 .map_err(|error| error.to_string())?;
             retain_template_snapshots(root, expansion.template_snapshots, sealed, snapshots)?;
@@ -677,6 +712,34 @@ mod tests {
         }
     }
 
+    fn projection_for_discovery(
+        root: &Path,
+        ignored_directories: BTreeSet<String>,
+    ) -> NativeOwnerProjection {
+        let discovered_inputs = discover_meta_files(root, &ignored_directories).unwrap();
+        let owners = build_owner_map(discovered_inputs.clone());
+        let metadata = owners
+            .keys()
+            .map(|owner| (owner.clone(), "#MM root\n".to_owned()))
+            .collect();
+        let graph = MetaMakeOwnerGraph::parse_with_declared_absence(
+            &metadata,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        NativeOwnerProjection {
+            graph,
+            owners,
+            discovered_inputs,
+            ignored_directories,
+            snapshots: BTreeMap::new(),
+            policy_sha256: String::new(),
+            expanded_bytes: 0,
+        }
+    }
+
     #[test]
     fn global_snapshots_bind_exact_configured_paths_in_order() {
         let configured = vec!["host.cfg".into(), "target.cfg".into()];
@@ -784,16 +847,102 @@ mod tests {
                 aros_common::sha256_bytes(b"source-v1").to_string(),
             ),
         ]);
-        assert!(verify_snapshot_digests(root.path(), &expected).is_ok());
+        let mut projection = projection_for_discovery(root.path(), BTreeSet::new());
+        projection.snapshots = expected;
+        assert!(projection.verify(root.path()).is_ok());
         fs::write(root.path().join("module/mmakefile.src"), "source-v2").unwrap();
-        assert!(verify_snapshot_digests(root.path(), &expected)
+        assert!(projection
+            .verify(root.path())
             .unwrap_err()
             .contains("module/mmakefile.src"));
         fs::write(root.path().join("module/mmakefile.src"), "source-v1").unwrap();
         fs::write(root.path().join("config/make.tmpl"), "template-v2").unwrap();
-        assert!(verify_snapshot_digests(root.path(), &expected)
+        assert!(projection
+            .verify(root.path())
             .unwrap_err()
             .contains("config/make.tmpl"));
+    }
+
+    #[test]
+    fn verify_rejects_added_recipe_after_projection_load() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("original")).unwrap();
+        fs::write(root.path().join("original/mmakefile.src"), "#MM root\n").unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+
+        fs::create_dir_all(root.path().join("added")).unwrap();
+        fs::write(root.path().join("added/mmakefile"), "#MM added\n").unwrap();
+        let error = projection.verify(root.path()).unwrap_err();
+        assert!(error.contains("added/mmakefile"));
+        assert!(error.contains("unexpected"));
+    }
+
+    #[test]
+    fn verify_rejects_removed_recipe_after_projection_load() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("original")).unwrap();
+        let recipe = root.path().join("original/mmakefile.src");
+        fs::write(&recipe, "#MM root\n").unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+
+        fs::remove_file(recipe).unwrap();
+        let error = projection.verify(root.path()).unwrap_err();
+        assert!(error.contains("original/mmakefile.src"));
+        assert!(error.contains("omitted"));
+    }
+
+    #[test]
+    fn verify_rejects_generated_recipe_added_beside_source_recipe() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("module")).unwrap();
+        fs::write(root.path().join("module/mmakefile.src"), "#MM source\n").unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+        assert_eq!(
+            projection.owners.get("module/mmakefile"),
+            Some(&"module/mmakefile.src".to_owned())
+        );
+
+        fs::write(root.path().join("module/mmakefile"), "#MM generated\n").unwrap();
+        let error = projection.verify(root.path()).unwrap_err();
+        assert!(error.contains("module/mmakefile"));
+        assert!(error.contains("unexpected"));
+    }
+
+    #[test]
+    fn effective_inputs_prefer_source_and_retain_direct_fragments() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, contents) in [
+            ("module/mmakefile.src", "#MM source\n"),
+            ("module/mmakefile", "#MM stale-generated\n"),
+            ("direct/mmakefile", "#MM direct\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+        assert_eq!(
+            projection.effective_inputs().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["direct/mmakefile", "module/mmakefile.src"])
+        );
+        assert_eq!(projection.discovered_inputs.len(), 3);
+        assert!(projection.verify(root.path()).is_ok());
+    }
+
+    #[test]
+    fn verify_accepts_recipes_added_under_project_ignored_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("live")).unwrap();
+        fs::write(root.path().join("live/mmakefile.src"), "#MM root\n").unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::from(["vendor".into()]));
+
+        fs::create_dir_all(root.path().join("vendor/nested")).unwrap();
+        fs::write(
+            root.path().join("vendor/nested/mmakefile.src"),
+            "#MM ignored\n",
+        )
+        .unwrap();
+        assert!(projection.verify(root.path()).is_ok());
     }
 
     #[test]

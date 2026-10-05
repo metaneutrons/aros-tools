@@ -451,6 +451,16 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         })
         .transpose()?
         .flatten();
+    if let Some(projection) = &native_owner_projection {
+        // Owner metadata and native parsing must consume the same inputs.
+        // A stale generated sibling cannot contribute edges or diagnostics
+        // after its `.src` has superseded it in source-owned generation.
+        files = projection
+            .effective_inputs()
+            .map(|relative| args.source_dir.join(relative))
+            .collect();
+        files.sort();
+    }
     aros_common::outputln!(
         "📦 Found {} MetaMake input files. Parsing in parallel...",
         files.len()
@@ -630,7 +640,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     if projection
                         .snapshots
                         .get(&relative)
-                        .is_some_and(|digest| parsed.source_sha256.as_ref() != Some(digest))
+                        .is_none_or(|digest| parsed.source_sha256.as_ref() != Some(digest))
                     {
                         return Err(native_selection_input_error(ArosError::Configuration {
                             file: relative, message: "MetaMake source changed between owner projection and native parsing".into(),
@@ -1100,11 +1110,23 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                     })
             })
             .transpose()?;
-        native_optional_omissions = graph.omit_absent_optional_meta_dependencies(
+        // A diagnostic-only audit retains source errors alongside every other
+        // graph failure. It cannot publish a build graph or grant admission.
+        // Malformed/unbound declarations remain fatal even in audit mode.
+        let source_dependency_validation_error = match graph.omit_absent_optional_meta_dependencies(
             &contract.contract.optional_meta_dependencies,
             context,
             &capability_errors,
-        )?;
+        ) {
+            Ok(omissions) => {
+                native_optional_omissions = omissions;
+                None
+            }
+            Err(error @ ArosError::Diagnostics(_)) if args.native_graph_audit.is_some() => {
+                Some(error.to_string())
+            }
+            Err(error) => return Err(error),
+        };
         for omission in &native_optional_omissions {
             aros_common::outputln!("Source-declared absent optional MetaMake edge: {omission}");
         }
@@ -1127,6 +1149,14 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             if let Some(error) = &root_resolution_error {
                 audit.strict_validation_error = Some(error.clone());
             }
+            if let Some(error) = &source_dependency_validation_error {
+                audit.strict_validation_error = Some(
+                    audit
+                        .strict_validation_error
+                        .take()
+                        .map_or_else(|| error.clone(), |existing| format!("{existing}\n{error}")),
+                );
+            }
             let report_json = serde_json::to_string_pretty(&serde_json::json!({
                 "native_profile": args.native_profile,
                 "native_contract_sha256": contract.sha256,
@@ -1138,6 +1168,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 "source_declared_optional_omissions": native_optional_omissions,
                 "native_owner_projection": native_owner_evidence,
                 "root_resolution_error": root_resolution_error,
+                "source_dependency_validation_error": source_dependency_validation_error,
                 "coverage_limits": [
                     "If root resolution fails, reachability is unavailable; no substitute roots are invented.",
                     "Traverses every known reachable declaration, including sibling failures; does not infer prerequisites hidden by rejected declarations.",

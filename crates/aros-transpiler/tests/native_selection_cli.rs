@@ -726,6 +726,64 @@ fn native_disabled_metadata_dependency_fails_upstream_without_publishing() {
 }
 
 #[test]
+fn diagnostic_graph_audit_retains_disabled_owner_failure_and_sibling_evidence() {
+    let mut fixture = Fixture::new();
+    fixture.append("#MM- fixture-kernel : optional-aggregate\n#MM- optional-aggregate : optional-pkgconfig audit-required-sibling\n##MM\n#optional-pkgconfig : $(AROS_LIB)/pkgconfig/optional.pc\n");
+    bind_disabled_owner(&mut fixture, "mmakefile.src");
+    let path = fixture.root.path().join("disabled-owner-audit.json");
+    let result = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        report["audit"]["qualification"],
+        "diagnostic-only-not-build-proof"
+    );
+    let error = report["source_dependency_validation_error"]
+        .as_str()
+        .unwrap();
+    for expected in [
+        "fix upstream",
+        "optional-pkgconfig",
+        "commented out",
+        "mmakefile.src",
+    ] {
+        assert!(error.contains(expected), "{report}");
+    }
+    assert!(report["audit"]["strict_validation_error"]
+        .as_str()
+        .unwrap()
+        .contains(error));
+    let missing = report["audit"]["missing_endpoints"].as_array().unwrap();
+    for expected in ["optional-pkgconfig", "audit-required-sibling"] {
+        assert!(
+            missing.iter().any(|entry| entry["name"] == expected),
+            "{report}"
+        );
+    }
+    assert!(!fixture.output().exists());
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+    assert!(!fixture
+        .invoke(true, &["--source-inventory-only"])
+        .status
+        .success());
+    assert!(!fixture.output().exists());
+}
+
+#[test]
 fn native_disabled_owner_requires_exact_bound_comment_not_a_plain_missing_dependency() {
     for comment in [
         "",

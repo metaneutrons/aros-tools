@@ -144,6 +144,12 @@ review; classic MetaMake's tolerance of unknown targets is not an absence proof.
 Unsupported translation capabilities are reported separately and do not, by
 themselves, imply an upstream source defect.
 
+Native owner projection and parsing consume the same recipe inputs:
+`mmakefile.src` takes precedence over a generated `mmakefile`; direct fragments
+remain inputs. Before admission, the tool rechecks recipe discovery and captured
+bytes against the source-owned ignore policy. A diagnostic graph audit retains
+source failures and sibling evidence but publishes no build graph or inventory.
+
 Directory-only producers support finite `%mkdirs_q` recipes and explicit
 `%rule_makedirs dirs=... setuptarget=...` declarations. They create directories
 under the configured generated, include or Developer-library roots; they do
