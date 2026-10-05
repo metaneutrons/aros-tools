@@ -12,6 +12,14 @@ fn explicit_path(variable: &str) -> PathBuf {
     std::env::var_os(variable).map_or_else(|| panic!("set {variable}"), PathBuf::from)
 }
 
+fn explicit_sha256(
+    variable: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<Sha256Digest, String> {
+    let value = value.map_err(|_| format!("set {variable}"))?;
+    Sha256Digest::parse(&value).map_err(|_| format!("{variable} must be a valid SHA-256"))
+}
+
 fn bounded_read(path: &Path, maximum: u64) -> Vec<u8> {
     let mut file = open_regular_file_nofollow(path).unwrap();
     assert!(file.metadata().unwrap().len() <= maximum);
@@ -25,9 +33,29 @@ fn bounded_read(path: &Path, maximum: u64) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "requires explicit P4 source, pinned bootloader SHA-256 and fresh locked IDF bootloader/table outputs"]
+fn explicit_sha256_requires_a_present_valid_value() {
+    let variable = "AROS_TEST_NATIVE_MEDIA_CONTRACT_SHA256";
+    let expected = "1".repeat(64);
+
+    assert_eq!(
+        explicit_sha256(variable, Ok(expected.clone()))
+            .unwrap()
+            .as_str(),
+        expected
+    );
+    assert!(explicit_sha256(variable, Err(std::env::VarError::NotPresent)).is_err());
+    assert!(explicit_sha256(variable, Ok("not-a-sha256".to_owned())).is_err());
+}
+
+#[test]
+#[ignore = "requires explicit P4 source, fresh locked IDF bootloader/table outputs, and contract/bootloader SHA-256 pins"]
 fn source_resolved_geometry_verifies_actual_external_bootloader_and_both_tables() {
     let root = explicit_path("AROS_TEST_NATIVE_MEDIA_SOURCE");
+    let expected_contract_sha256 = explicit_sha256(
+        "AROS_TEST_NATIVE_MEDIA_CONTRACT_SHA256",
+        std::env::var("AROS_TEST_NATIVE_MEDIA_CONTRACT_SHA256"),
+    )
+    .expect("explicit native media contract pin is a valid SHA-256");
     let profiles = TargetProfile::load_from_file(&root.join("aros-targets.toml")).unwrap();
     let profile = profiles
         .iter()
@@ -37,8 +65,7 @@ fn source_resolved_geometry_verifies_actual_external_bootloader_and_both_tables(
         &root,
         Path::new(profile.native_build_contract.as_deref().unwrap()),
         profile,
-        &Sha256Digest::parse("201bcf7de54ea000da99e38aa4d13225bd695cee00ebb1745465de0c3fc618eb")
-            .unwrap(),
+        &expected_contract_sha256,
     )
     .unwrap();
     let geometry = &media.binding.geometry;
