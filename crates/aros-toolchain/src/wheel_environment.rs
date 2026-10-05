@@ -251,13 +251,7 @@ pub fn prepare_wheel_environment(
         .ok_or_else(|| ContractError::environment("wheel deadline overflow"))?;
     verify_interpreter(&interpreter, &request.lock.lock.runtime)?;
     let runtime_before = measure_runtime(&runtime_prefix)?;
-    if runtime_before.payload_digest_excluding(None).to_string()
-        != request.lock.lock.runtime.prefix_tree_sha256
-    {
-        return Err(ContractError::environment(
-            "CPython prefix content differs from the lock",
-        ));
-    }
+    verify_runtime_prefix_pin(&runtime_before, &request.lock.lock.runtime)?;
     // Verify every cache object before reserving an executable output root.
     let snapshots = request
         .lock
@@ -856,6 +850,20 @@ fn measure_runtime(root: &Path) -> Result<TreeContentCas, ContractError> {
     measure_tree_content_cas_bounded(root, limits).map_err(io_error)
 }
 
+fn verify_runtime_prefix_pin(
+    observed: &TreeContentCas,
+    pin: &WheelRuntimePin,
+) -> Result<(), ContractError> {
+    let measured = observed.payload_digest_excluding(None);
+    if measured.as_str() != pin.prefix_tree_sha256 {
+        return Err(ContractError::environment(format!(
+            "CPython prefix content differs from the lock: expected SHA-256 {}, measured SHA-256 {}; preserve the lock and review or restore the exact runtime before preparing new inputs",
+            pin.prefix_tree_sha256, measured
+        )));
+    }
+    Ok(())
+}
+
 fn verify_interpreter(path: &Path, pin: &WheelRuntimePin) -> Result<(), ContractError> {
     if regular_digest(path, MAX_WHEEL_BYTES)?.to_string() != pin.executable_sha256 {
         return Err(ContractError::environment(
@@ -963,6 +971,31 @@ mod tests {
                 size_bytes: 100,
             }],
         }
+    }
+
+    #[test]
+    fn runtime_prefix_mismatch_reports_both_digests_without_updating_the_pin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let file = root.join("stdlib.py");
+        fs::write(&file, b"original runtime\n").unwrap();
+        let before = measure_runtime(&root).unwrap();
+        let mut pin = lock().runtime;
+        pin.prefix_tree_sha256 = before.payload_digest_excluding(None).to_string();
+        verify_runtime_prefix_pin(&before, &pin).unwrap();
+
+        fs::write(&file, b"changed runtime\n").unwrap();
+        let after = measure_runtime(&root).unwrap();
+        let expected = pin.prefix_tree_sha256.clone();
+        let measured = after.payload_digest_excluding(None).to_string();
+        assert_ne!(expected, measured);
+        let error = verify_runtime_prefix_pin(&after, &pin)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("expected SHA-256 {expected}")));
+        assert!(error.contains(&format!("measured SHA-256 {measured}")));
+        assert!(error.contains("preserve the lock"));
+        assert_eq!(pin.prefix_tree_sha256, expected);
     }
 
     #[test]
