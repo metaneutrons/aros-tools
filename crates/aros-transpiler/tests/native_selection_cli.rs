@@ -11,19 +11,63 @@ use std::{
 };
 
 fn bind_optional_meta_edge(fixture: &mut Fixture, recipe: &str) {
+    bind_optional_meta_contract_edge(
+        fixture,
+        recipe,
+        "optional-aggregate",
+        "optional-headers-${AROS_TARGET_PLATFORM}-${AROS_TARGET_VARIANT}",
+        false,
+    );
+}
+
+fn bind_optional_meta_contract_edge(
+    fixture: &mut Fixture,
+    recipe: &str,
+    target: &str,
+    dependency: &str,
+    explicit_selector: bool,
+) {
     let bytes = fs::read(fixture.root.path().join(recipe)).unwrap();
-    fixture.contract["inputs"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({
+    let inputs = fixture.contract["inputs"].as_array_mut().unwrap();
+    if !inputs.iter().any(|input| input["path"] == recipe) {
+        inputs.push(json!({
             "path": recipe, "sha256": aros_common::sha256_bytes(&bytes),
         }));
-    fixture.contract["optional_meta_dependencies"] = json!([{
+    }
+    let mut edge = json!({
         "recipe": recipe,
-        "target": "optional-aggregate",
-        "dependency": "optional-headers-${AROS_TARGET_PLATFORM}-${AROS_TARGET_VARIANT}",
-    }]);
+        "target": target,
+        "dependency": dependency,
+    });
+    if explicit_selector {
+        edge["absence"] = json!("selector");
+    }
+    fixture.contract["optional_meta_dependencies"] = json!([edge]);
     fixture.write_contract();
+}
+
+fn install_native_metamake_projection_with_generated_selector_route(
+    fixture: &mut Fixture,
+    recipe_inputs: &[&str],
+) {
+    install_native_metamake_projection(fixture, recipe_inputs);
+    let template_path = fixture.root.path().join("meta/root.tmpl");
+    let original = fs::read_to_string(&template_path).unwrap();
+    let updated = original.replacen(
+        "#MM %(mmake) :\n%end\n",
+        "#MM %(mmake) :\n#MM- %(mmake)-selector-route : optional-aggregate\n%end\n",
+        1,
+    );
+    assert_ne!(updated, original, "module template was not extended");
+    fs::write(template_path, updated).unwrap();
+    rebind_native_fixture_input(fixture, "meta/root.tmpl");
+}
+
+fn append_optional_variant_route(fixture: &Fixture) {
+    fixture.append(
+        "#MM- fixture-kernel : optional-aggregate\n\
+         #MM- optional-aggregate : optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT)\n",
+    );
 }
 
 fn rewrite_fixture_exec(fixture: &Fixture, declaration: &str) {
@@ -951,6 +995,339 @@ fn native_source_bound_optional_selector_fails_without_erasing_the_source_edge()
     assert!(stderr.contains("fix upstream"), "{stderr}");
     assert!(stderr.contains("optional-headers-fixture-"), "{stderr}");
     assert!(!fixture.output().exists());
+}
+
+#[test]
+fn native_source_meta_selector_receipt_seals_genmf_routes_without_leaf_producers() {
+    let mut fixture = Fixture::new();
+    fixture.append(
+        "#MM- fixture-kernel : fixture-kernel-selector-route\n\
+         #MM- optional-aggregate : optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT)\n",
+    );
+    install_native_metamake_projection_with_generated_selector_route(
+        &mut fixture,
+        &["mmakefile.src"],
+    );
+    bind_optional_meta_contract_edge(
+        &mut fixture,
+        "mmakefile.src",
+        "optional-aggregate",
+        "optional-headers-${AROS_TARGET_PLATFORM}-${AROS_TARGET_VARIANT}",
+        true,
+    );
+
+    let prepared = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    assert!(!fixture.output().exists());
+    let inventory_path = fixture.output().with_extension("source-inventory.cmake");
+    let inventory = fs::read_to_string(&inventory_path).unwrap();
+    assert!(inventory.contains("FETCH_COUNT 0)"), "{inventory}");
+
+    let receipt_path = fixture.output().with_extension("native-invocation.json");
+    let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+    let semantics = &receipt["source_meta_semantics"];
+    let aliases = semantics["virtual_aliases"].as_array().unwrap();
+    assert!(
+        aliases.iter().any(|alias| {
+            alias["name"] == "fixture-kernel-selector-route"
+                && alias["dependencies"]
+                    .as_array()
+                    .is_some_and(|dependencies| {
+                        dependencies
+                            .iter()
+                            .any(|dependency| dependency == "optional-aggregate")
+                    })
+                && alias["recipes"]
+                    .as_array()
+                    .is_some_and(|recipes| recipes.iter().any(|recipe| recipe == "mmakefile.src"))
+        }),
+        "{receipt}"
+    );
+    assert!(
+        semantics["verified_selector_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| {
+                contract["recipe"] == "mmakefile.src"
+                    && contract["target"] == "optional-aggregate"
+                    && contract["expression"]
+                        == "optional-headers-${AROS_TARGET_PLATFORM}-${AROS_TARGET_VARIANT}"
+            }),
+        "{receipt}"
+    );
+    assert!(
+        semantics["architecture_hook_omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| {
+                omission["target"] == "optional-aggregate"
+                    && omission["dependency"] == "optional-headers-fixture-"
+                    && omission["recipes"].as_array().is_some_and(|recipes| {
+                        recipes.iter().any(|recipe| recipe == "mmakefile.src")
+                    })
+            }),
+        "{receipt}"
+    );
+
+    let built = fixture.invoke(true, &[]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let generated = fs::read_to_string(fixture.output()).unwrap();
+    assert!(generated.contains("MMAKE_ID fixture-kernel"), "{generated}");
+    assert!(
+        generated.contains("add_custom_target(\"fixture-kernel-selector-route\")"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("MMAKE_ID fixture-kernel-selector-route"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("optional-headers-fixture-"),
+        "{generated}"
+    );
+}
+
+#[test]
+fn contracted_known_native_alias_keeps_its_generated_required_descendant() {
+    let mut fixture = Fixture::new();
+    fixture.append("#MM- fixture-kernel : existing-route-$(CPU)\n#MM- existing-route-$(CPU) : known-sibling\n#MM- known-sibling :\n");
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src"]);
+    let template = fixture.root.path().join("meta/root.tmpl");
+    let original = fs::read_to_string(&template).unwrap();
+    let updated = original.replacen(
+        "#MM %(mmake) :\n%end\n",
+        "#MM %(mmake) :\n#MM- existing-route-$(CPU) : generated-required-literal\n%end\n",
+        1,
+    );
+    assert_ne!(updated, original);
+    fs::write(&template, updated).unwrap();
+    rebind_native_fixture_input(&mut fixture, "meta/root.tmpl");
+    bind_optional_meta_contract_edge(
+        &mut fixture,
+        "mmakefile.src",
+        "fixture-kernel",
+        "existing-route-${AROS_TARGET_CPU}",
+        true,
+    );
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("generated-required-literal"));
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+}
+
+#[test]
+fn uncontracted_known_native_alias_keeps_its_generated_required_descendant() {
+    let mut fixture = Fixture::new();
+    fixture.append("#MM- fixture-kernel : existing-route-$(CPU)\n#MM- existing-route-$(CPU) : known-sibling\n#MM- known-sibling :\n");
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src"]);
+    let template = fixture.root.path().join("meta/root.tmpl");
+    let original = fs::read_to_string(&template).unwrap();
+    let updated = original.replacen(
+        "#MM %(mmake) :\n%end\n",
+        "#MM %(mmake) :\n#MM- existing-route-$(CPU) : generated-required-literal\n%end\n",
+        1,
+    );
+    assert_ne!(updated, original);
+    fs::write(&template, updated).unwrap();
+    rebind_native_fixture_input(&mut fixture, "meta/root.tmpl");
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("generated-required-literal"));
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+}
+
+#[test]
+fn native_source_meta_selector_without_optional_contract_remains_required() {
+    let mut fixture = Fixture::new();
+    append_optional_variant_route(&fixture);
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src"]);
+
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("optional-headers-fixture-"), "{stderr}");
+    assert!(!fixture.output().exists());
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+}
+
+#[test]
+fn native_source_meta_selector_cannot_hide_a_real_override_with_an_unmodelled_owner() {
+    let mut fixture = Fixture::new();
+    fixture.append(
+        "#MM- fixture-kernel : fixture-kernel-selector-route\n\
+         #MM- optional-aggregate : optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT)\n",
+    );
+    let other = fixture.root.path().join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(
+        other.join("mmakefile.src"),
+        "#MM fixture-kernel-selector-route : optional-aggregate\n\
+         fixture-kernel-selector-route:\n\
+         \t@$(ECHO) unmodelled\n",
+    )
+    .unwrap();
+    install_native_metamake_projection_with_generated_selector_route(
+        &mut fixture,
+        &["mmakefile.src", "other/mmakefile.src"],
+    );
+    bind_optional_meta_edge(&mut fixture, "mmakefile.src");
+
+    assert_failure_at_stage(
+        &fixture.invoke(true, &["--source-inventory-only"]),
+        &fixture.output(),
+        "nonvirtual Make provider",
+        "capability_validation",
+    );
+}
+
+#[test]
+fn native_source_meta_selector_cannot_omit_a_known_unsupported_endpoint() {
+    let mut fixture = Fixture::new();
+    append_optional_variant_route(&fixture);
+    fixture.append(
+        "#MM optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT) :\n\
+         optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT):\n\
+         \t@$(ECHO) unmodelled\n",
+    );
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src"]);
+    bind_optional_meta_edge(&mut fixture, "mmakefile.src");
+
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("nonvirtual Make provider optional-headers-"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("has no concrete producer"), "{stderr}");
+    assert!(!fixture.output().exists());
+}
+
+#[test]
+fn native_source_meta_selector_cannot_omit_a_colliding_literal_edge() {
+    let mut fixture = Fixture::new();
+    fixture.append(
+        "#MM- fixture-kernel : optional-aggregate\n\
+         #MM- optional-aggregate : optional-headers-$(AROS_TARGET_ARCH)-$(AROS_TARGET_VARIANT)\n",
+    );
+    let other = fixture.root.path().join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(
+        other.join("mmakefile.src"),
+        "#MM- optional-aggregate : optional-headers-fixture-\n",
+    )
+    .unwrap();
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "other/mmakefile.src"]);
+    bind_optional_meta_edge(&mut fixture, "mmakefile.src");
+
+    let audit_path = fixture.root.path().join("literal-selector-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            audit_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(audit_path).unwrap()).unwrap();
+    let omissions = report["source_meta_semantics"]["architecture_hook_omissions"]
+        .as_array()
+        .unwrap();
+    assert!(!omissions.iter().any(|omission| {
+        omission["target"] == "optional-aggregate"
+            && omission["dependency"] == "optional-headers-fixture-"
+    }));
+    assert!(report["audit"]["missing_endpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|endpoint| endpoint["name"] == "optional-headers-fixture-"));
+
+    let result = fixture.invoke(true, &[]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("optional-headers-fixture-"));
+    assert!(!fixture.output().exists());
+}
+
+#[test]
+fn native_source_meta_descendant_selector_stays_required_through_a_second_root() {
+    let mut fixture = Fixture::new();
+    fixture.append(
+        "#MM- fixture-kernel : optional-root required-root\n\
+         #MM- optional-root : shared-route-$(AROS_TARGET_CPU)\n\
+         #MM- required-root : shared-route-$(AROS_TARGET_CPU)\n\
+         #MM- shared-route-$(AROS_TARGET_CPU) : missing-$(CPU)\n",
+    );
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src"]);
+    bind_optional_meta_contract_edge(
+        &mut fixture,
+        "mmakefile.src",
+        "optional-root",
+        "shared-route-${AROS_TARGET_CPU}",
+        true,
+    );
+
+    let audit_path = fixture.root.path().join("shared-route-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            audit_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(audit_path).unwrap()).unwrap();
+    let omissions = report["source_meta_semantics"]["architecture_hook_omissions"]
+        .as_array()
+        .unwrap();
+    assert!(!omissions.iter().any(|omission| {
+        omission["target"] == "optional-root" && omission["dependency"] == "shared-route-riscv"
+    }));
+    assert!(!omissions.iter().any(|omission| {
+        omission["target"] == "shared-route-riscv" && omission["dependency"] == "missing-riscv"
+    }));
+    assert!(report["audit"]["missing_endpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|endpoint| endpoint["name"] == "missing-riscv"));
+
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("missing-riscv"));
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
 }
 
 fn bind_disabled_owner(fixture: &mut Fixture, recipe: &str) {
