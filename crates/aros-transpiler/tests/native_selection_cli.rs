@@ -1,8 +1,10 @@
 //! Process-boundary probes for source-bound native graph selection.
 //! These synthetic graphs verify selection, not a P4 kernel or hardware boot.
 
+use aros_transpiler::parser::TargetContext;
 use serde_json::{json, Value};
 use std::{
+    fmt::Write as _,
     fs,
     path::Path,
     process::{Command, Output},
@@ -36,6 +38,201 @@ fn rewrite_fixture_exec(fixture: &Fixture, declaration: &str) {
         "fixture exec declaration was not replaced"
     );
     fs::write(recipe, updated).unwrap();
+}
+
+fn bind_fixture_input(fixture: &mut Fixture, path: &str) {
+    let bytes = fs::read(fixture.root.path().join(path)).unwrap();
+    fixture.contract["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "path": path,
+            "sha256": aros_common::sha256_bytes(&bytes),
+        }));
+}
+
+fn fixture_native_selector_context() -> TargetContext {
+    TargetContext {
+        cpu: Some("riscv".into()),
+        platform: Some("fixture".into()),
+        family: Some(String::new()),
+        variant: Some(String::new()),
+        toolchain: Some("gnu".into()),
+        cpu32: Some(String::new()),
+        use_mmu: Some("0".into()),
+        float_abi: Some("ilp32f".into()),
+        ..TargetContext::default()
+    }
+}
+
+fn fixture_native_selector_globals(context: &TargetContext) -> String {
+    const SELECTORS: &[&str] = &[
+        "AROS_TARGET_CPU",
+        "CPU",
+        "AROS_TARGET_ARCH",
+        "ARCH",
+        "AROS_TARGET_PLATFORM",
+        "FAMILY",
+        "AROS_TARGET_VARIANT",
+        "AROS_TOOLCHAIN",
+        "AROS_TARGET_CPU32",
+    ];
+    SELECTORS.iter().fold(String::new(), |mut globals, name| {
+        writeln!(
+            globals,
+            "{name} := {}",
+            context
+                .value_of(name)
+                .expect("fixture defines every required native selector")
+        )
+        .unwrap();
+        globals
+    })
+}
+
+#[test]
+fn native_metamake_projection_prefers_src_and_keeps_direct_fragment_at_process_boundary() {
+    let mut fixture = Fixture::new();
+    let selector_context = fixture_native_selector_context();
+    let globals = fixture_native_selector_globals(&selector_context);
+    let source = fixture.root.path().join("mmakefile.src");
+    let original = fs::read_to_string(&source).unwrap();
+    fs::write(
+        &source,
+        format!("{original}#MM- fixture-kernel : source-edge\n"),
+    )
+    .unwrap();
+
+    fs::create_dir(fixture.root.path().join("direct")).unwrap();
+    fs::write(
+        fixture.root.path().join("direct/mmakefile"),
+        "#MM fixture-kernel : direct-edge\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("mmakefile"),
+        "#MM- fixture-kernel : stale-extraedge\n",
+    )
+    .unwrap();
+
+    fs::create_dir(fixture.root.path().join("meta")).unwrap();
+    fs::write(
+        fixture.root.path().join("meta/project.conf"),
+        "[fixture]\ndefaultmakefilename mmakefile\nglobalvarfile native.globals\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("meta/root.tmpl"),
+        concat!(
+            "%define build_module_simple mmake=/A modname=/A modtype=/A files=/A\n",
+            "#MM %(mmake) :\n",
+            "%end\n",
+            "%define build_linklib mmake=/A libname=/A files=/A\n",
+            "#MM %(mmake) :\n",
+            "%end\n",
+            "%define make_package mmake=/A file=/A res=/A libs=/A devs=/A\n",
+            "#MM %(mmake) :\n",
+            "%end\n",
+        ),
+    )
+    .unwrap();
+    fs::write(fixture.root.path().join("meta/globals.snapshot"), &globals).unwrap();
+
+    let host = aros_common::target::native_host_key().unwrap_or("");
+    let policy = json!({
+        "schema_version": 1,
+        "kind": "native-metamake-policy-v1",
+        "profile": "fixture-native",
+        "project": "fixture",
+        "configuration_source": "meta/project.conf",
+        "template": "meta/root.tmpl",
+        "substitutions": [],
+        "global_snapshots": [{
+            "source": "meta/globals.snapshot",
+            "configured_path": "native.globals",
+            "text": globals,
+        }],
+        "environment": [],
+        "host_environment": [{"host": host, "bindings": []}],
+        "declared_absent": [],
+        "evidence_sources": ["meta/globals.snapshot"],
+        "closed_environment": true,
+        "out_of_source": true,
+    });
+    fs::write(
+        fixture.root.path().join("meta/policy.json"),
+        serde_json::to_vec_pretty(&policy).unwrap(),
+    )
+    .unwrap();
+
+    fixture.contract["metamake_projection"] = json!("meta/policy.json");
+    for path in [
+        "mmakefile.src",
+        "direct/mmakefile",
+        "meta/project.conf",
+        "meta/root.tmpl",
+        "meta/globals.snapshot",
+        "meta/policy.json",
+    ] {
+        bind_fixture_input(&mut fixture, path);
+    }
+    fixture.write_contract();
+
+    let report_path = fixture.root.path().join("metamake-audit.json");
+    let result = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    let source_owners = report["native_owner_projection"]["selected_source_files"]
+        .as_array()
+        .unwrap();
+    for path in ["mmakefile.src", "direct/mmakefile"] {
+        assert!(
+            source_owners
+                .iter()
+                .any(|entry| entry.as_str() == Some(path)),
+            "{report}"
+        );
+    }
+    assert!(!source_owners
+        .iter()
+        .any(|entry| entry.as_str() == Some("mmakefile")));
+
+    let projected_missing = report["native_owner_projection"]["missing_endpoints"]
+        .as_array()
+        .unwrap();
+    for name in ["source-edge", "direct-edge"] {
+        assert!(
+            projected_missing
+                .iter()
+                .any(|entry| entry.as_str() == Some(name)),
+            "{report}"
+        );
+    }
+    assert!(!projected_missing
+        .iter()
+        .any(|entry| entry.as_str() == Some("stale-extraedge")));
+
+    let audit_missing = report["audit"]["missing_endpoints"].as_array().unwrap();
+    assert!(!audit_missing
+        .iter()
+        .any(|entry| entry["name"] == "stale-extraedge"));
+    assert!(!report.to_string().contains("stale-extraedge"));
+    assert!(!fixture.output().exists());
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
 }
 
 #[test]
@@ -2991,7 +3188,10 @@ fn native_host_header_aggregate_rejects_partial_or_unmodelled_producers_before_o
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        // macOS exposes its temporary directory through /var -> /private/var.
+        // Native projection deliberately rejects aliases in source input paths.
+        let temporary_root = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::tempdir_in(temporary_root).unwrap();
         fs::create_dir(root.path().join("config")).unwrap();
         fs::write(
             root.path().join("config/make.cfg.in"),
