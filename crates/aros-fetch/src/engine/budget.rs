@@ -32,6 +32,17 @@ impl ExtractionBudget {
                 format!("archive exceeds the {MAX_ARCHIVE_ENTRIES}-entry safety limit"),
             ));
         }
+        self.account_expanded_size(size, archive, path)
+    }
+
+    /// Include a deferred hardlink's independent file-copy expansion without
+    /// counting its already visited archive header a second time.
+    pub(super) fn account_expanded_size(
+        &mut self,
+        size: u64,
+        archive: &str,
+        path: &Path,
+    ) -> FetchResult<()> {
         if size > MAX_ARCHIVE_ENTRY_BYTES {
             return Err(extraction_failure(
                 archive,
