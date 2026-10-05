@@ -146,12 +146,21 @@ set mirrors the existing CMake consumers, not every file in an external SDK.
 These checks do not claim isolation from a hostile concurrent filesystem
 replacement, a complete environment attestation or successful P4 compilation.
 
-An active MetaMake dependency needs a real source-owned producer. A selector
-or a commented-out owner does not make the edge optional. Legacy
-`optional_meta_dependencies` declarations remain validated against their exact
-hash-bound recipes, but cannot remove edges. Missing endpoints fail with the
-recipe and `fix upstream`; supported siblings and unsupported active providers
-retain their normal selection checks. A diagnostic-only graph audit retains
+Native selection preserves missing source-generated virtual routes without
+fabricating producers. Additional virtual prerequisites of existing native
+aggregates remain required unless separately justified; alias import can expose
+further missing endpoints and unsupported capabilities. With a sealed MetaMake policy, source-owned
+`optional_meta_dependencies` Selector records can authorize absent architecture
+hooks only after exact recipe/expression/edge validation. Contracted virtual
+descendants also require unanimous selector provenance and no independent
+required ingress. The contract is explicit policy, not an inferred exception
+for a board. Real/rejected providers, literal collisions and concrete native
+prerequisites remain checked. `DisabledOwner` entries cannot waive an active
+consumer or activate commented-out TIFF declarations. Audit and invocation
+receipts record aliases, contracts and omitted edges in `source_meta_semantics`.
+Missing required endpoints fail with the recipe and `fix upstream`; supported
+siblings and unsupported active providers retain their normal selection checks.
+A diagnostic-only graph audit retains
 these failures and sibling evidence without publishing a graph or inventory.
 Rejected rules are attributed only through an exact source consumer chain;
 unmodeled Make includes and unknown conditional consumers retain unowned

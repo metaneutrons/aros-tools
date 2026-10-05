@@ -140,11 +140,26 @@ Explicit expressions also require stable variable origins: ambient `?=`
 assignments, later overrides and unproved GenMF or Make effects are refused.
 Recognizing the archive recipe does not prove its object producers.
 
-Active MetaMake dependencies are not removed by native optionality declarations.
-A selector or a commented-out owner does not establish an optional edge.
-Missing endpoints fail export and source preparation with the declaring recipe
-and a `fix upstream` hint. Architecture dispatch hooks require source-level
-review; classic MetaMake's tolerance of unknown targets is not an absence proof.
+With a sealed MetaMake invocation policy, native selection preserves reachable
+GenMF virtual aliases and their exact source dependencies. Aliases are metadata
+routes, not executable producers. Existing real providers remain mandatory.
+An already-known native aggregate cannot hide additional source virtual edges:
+they are unioned as prerequisites, including uncontracted required edges.
+The source-owned `optional_meta_dependencies` contract is the explicit authority
+for optional architecture hooks: each `Selector` record must match its captured
+recipe, original selector expression and bound native edge. A selector spelling
+alone grants no omission. Absent selector leaves below a contracted virtual
+route can be omitted only when every declaration agrees and no independent
+required path reaches that route. Literal collisions, native prerequisites,
+known providers and rejected capabilities cannot borrow another edge's proof.
+The audit and invocation sidecar record `source_meta_semantics`: imported
+aliases, verified contracts and exact omitted hook edges.
+
+Without that sealed proof, active dependencies remain required. A commented-out
+owner never establishes an optional edge; `DisabledOwner` declarations cannot
+enable it or waive its consumers. Missing required endpoints fail export and
+source preparation with the declaring recipe and a `fix upstream` hint.
+Classic MetaMake's tolerance of unknown targets is not an absence proof.
 Unsupported translation capabilities are reported separately and do not, by
 themselves, imply an upstream source defect.
 Rejected rules need an exact source consumer chain to establish a MetaMake
