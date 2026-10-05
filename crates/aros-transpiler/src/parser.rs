@@ -454,6 +454,31 @@ pub fn join_continuations(content: &str) -> String {
     CONTINUATION_RE.replace_all(content, " ").into_owned()
 }
 
+/// Joins like [`join_continuations`] and also returns, for every joined line,
+/// the zero-based physical line on which it starts.
+///
+/// The text is produced by [`join_continuations`] itself, so both views are
+/// byte-identical and positional lookups agree.
+pub(crate) fn join_continuations_with_origins(content: &str) -> (String, Vec<usize>) {
+    let joined = join_continuations(content);
+    let continued_newlines = CONTINUATION_RE
+        .find_iter(content)
+        .filter_map(|matched| {
+            content[matched.range()]
+                .find('\n')
+                .map(|offset| matched.start() + offset)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut origins = vec![0];
+    for (physical, (offset, _)) in content.match_indices('\n').enumerate() {
+        if !continued_newlines.contains(&offset) {
+            origins.push(physical + 1);
+        }
+    }
+    origins.truncate(joined.lines().count());
+    (joined, origins)
+}
+
 /// Concrete target values available while scanning Make conditionals.
 ///
 /// Every field is optional on purpose.  An omitted value is not the same as an
@@ -463,6 +488,13 @@ pub fn join_continuations(content: &str) -> String {
 /// context retain the conservative, target-agnostic parser behaviour.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TargetContext {
+    /// Source-derived architecture flag files for native header compilation.
+    /// The native owner projection independently seals and replays these;
+    /// neither generated flag files nor environment values are admitted.
+    pub native_arch_include_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
+    /// Selected architecture flag producers that could not be proved. A
+    /// consumer must not silently use only the successful subset.
+    pub native_arch_include_errors: Vec<String>,
     /// Hash-bound source exports; admitted only after matching their recipes.
     pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
     /// Source configuration fallback values, never board-name-specific logic.
@@ -991,6 +1023,7 @@ fn expected_ahi_profile_exclusion(target: Option<&TargetContext>) -> bool {
 
 #[path = "parser_pipeline.rs"]
 mod pipeline;
+pub(crate) use pipeline::architecture_scope_positions;
 use pipeline::parse_mmakefile_impl;
 
 #[cfg(test)]

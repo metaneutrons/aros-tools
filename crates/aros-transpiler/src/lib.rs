@@ -1,4 +1,6 @@
+pub mod arch_endpoint_effects;
 pub mod arch_sources;
+pub mod assembly_headers;
 pub mod ast;
 pub mod binary_objects;
 pub mod capability;

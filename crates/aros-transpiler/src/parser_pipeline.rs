@@ -217,6 +217,29 @@ fn literal_object_source_anchors(
     Some(logical_anchors)
 }
 
+/// Map physical declaration starts to an independently reconstructed, inlined
+/// scope. Continuation tails and inserted configuration lines never acquire
+/// the identity of a physical declaration in the invoking recipe.
+pub fn architecture_scope_positions(
+    root: &Path,
+    source: &Path,
+    source_text: &str,
+    scan: &crate::local_make_includes::LocalMakeIncludeScan,
+    joined: &str,
+) -> Option<Vec<Option<usize>>> {
+    let anchors = literal_object_source_anchors(root, source, source_text, scan, joined)?;
+    let mut positions = vec![None; source_text.lines().count()];
+    for (position, anchor) in anchors.into_iter().enumerate() {
+        if let Some(anchor) = anchor.filter(|anchor| anchor.source == source) {
+            let slot = positions.get_mut(anchor.line.checked_sub(1)?)?;
+            if slot.replace(position).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(positions)
+}
+
 fn reconstruct_literal_source(
     root: &Path,
     source: &Path,
@@ -502,8 +525,92 @@ pub(super) fn parse_mmakefile_impl(
     // joined and locally-included text. Read against the raw file the line
     // numbers drift with every continuation and every inlined fragment, so the
     // positional flag lookup below would read some other declaration's flags.
-    let (mut arch_sources, skipped_arch_sources) = collect_arch_sources(&joined, &rel_dir, target);
-    crate::arch_sources::bind_declaration_context(&mut arch_sources, &joined, &scope, &rel_dir)?;
+    let native_arch_context = target.filter(|context| {
+        !context.make_include_bindings.is_empty() || !context.generated_make_templates.is_empty()
+    });
+    let (arch_sources, skipped_arch_sources) = if let Some(context) =
+        native_arch_context.filter(|_| content.contains("%build_archspecific"))
+    {
+        match crate::assembly_headers::native_configuration_snapshot(
+            &content,
+            context,
+            dirs,
+            root,
+            &relative_path,
+        ) {
+            Ok(snapshot) => {
+                let native_joined = snapshot.joined;
+                let (native_scope, native_states) =
+                    collect_vars_impl(&native_joined, Some(context));
+                let (mut declarations, mut rejected) =
+                    crate::arch_sources::collect_arch_sources_with_scope(
+                        &native_joined,
+                        &rel_dir,
+                        Some(context),
+                        &native_scope,
+                        &native_states,
+                        dirs,
+                        root,
+                    );
+                crate::arch_sources::bind_declaration_context(
+                    &mut declarations,
+                    &native_joined,
+                    &native_scope,
+                    &rel_dir,
+                )?;
+                // Configuration insertion changes offsets, never ownership. A
+                // declaration that does not start on a physical recipe line
+                // (inserted configuration or a continuation tail) has no owner;
+                // the file's architecture lanes are then rejected as a whole.
+                let unowned = declarations
+                    .iter()
+                    .filter(|declaration| {
+                        snapshot
+                            .physical_owner_lines
+                            .get(declaration.line)
+                            .copied()
+                            .flatten()
+                            .is_none()
+                    })
+                    .map(|declaration| declaration.line + 1)
+                    .collect::<Vec<_>>();
+                if unowned.is_empty() {
+                    for declaration in &mut declarations {
+                        declaration.line = snapshot.physical_owner_lines[declaration.line]
+                            .expect("ownership was checked above");
+                    }
+                    (declarations, rejected)
+                } else {
+                    rejected.push(format!(
+                        "{}: %build_archspecific at native scope line(s) {} has no physical source owner; included configuration cannot declare architecture sources, fix upstream by moving the declaration into the recipe",
+                        relative_path.display(),
+                        unowned
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    (Vec::new(), rejected)
+                }
+            }
+            Err(reason) => (
+                Vec::new(),
+                vec![format!(
+                    "{}: native architecture context is unproven: {reason}",
+                    relative_path.display()
+                )],
+            ),
+        }
+    } else {
+        let (mut declarations, rejected) = collect_arch_sources(&joined, &rel_dir, target);
+        crate::arch_sources::bind_declaration_context(
+            &mut declarations,
+            &joined,
+            &scope,
+            &rel_dir,
+        )?;
+        (declarations, rejected)
+    };
     // Architecture option files. Their contents are tagged with the
     // architecture they belong to, so CMake can keep the ones that apply; the
     // transpiler itself stays target-agnostic.
@@ -3109,7 +3216,32 @@ pub(super) fn parse_mmakefile_impl(
             outputs
         })
         .unwrap_or_default();
+    // The scope joins logical values but retains physical source line ids.
+    // Neither inlined input positions nor ambient values qualify an effect.
+    let effect_scan = crate::arch_endpoint_effects::collect_source_arch_endpoint_effects(
+        &content,
+        &relative_path,
+        root,
+        target,
+    )
+    .map_err(|message| aros_common::ArosError::Configuration {
+        file: relative_path.display().to_string(),
+        message,
+    })?;
+    let (assembly_headers, assembly_header_rejections) = target
+        .filter(|context| {
+            !context.make_include_bindings.is_empty()
+                || !context.generated_make_templates.is_empty()
+        })
+        .map(|context| {
+            crate::assembly_headers::collect_from_snapshot(&content, context, dirs, root, &rel_dir)
+        })
+        .unwrap_or_default();
     let mut parsed = ParsedMmakefile {
+        assembly_headers,
+        assembly_header_rejections,
+        arch_endpoint_effects: effect_scan.effects,
+        arch_endpoint_rejections: effect_scan.rejected,
         source_sha256: Some(source_sha256.as_str().to_owned()),
         disabled_meta_owners,
         host_header_aggregates,

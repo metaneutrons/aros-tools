@@ -248,6 +248,9 @@ mod tests {
             graph.audit_native_dependency_graph(&["root".into()], &TargetContext::default(), &[]);
         let expected: std::collections::BTreeSet<_> = [
             "compilation",
+            "architecture-metadata",
+            "assembly-header",
+            "architecture-objects",
             "make-meta-provider",
             "fetch",
             "host-c-file",

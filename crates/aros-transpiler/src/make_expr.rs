@@ -48,6 +48,7 @@ pub struct MakeExprContext<'a> {
     relative_dir: &'a Path,
     lookup: Option<&'a MakeVariableLookup<'a>>,
     guard: Option<&'a MakeVariableGuard<'a>>,
+    filesystem_enabled: bool,
 }
 
 impl<'a> MakeExprContext<'a> {
@@ -72,6 +73,7 @@ impl<'a> MakeExprContext<'a> {
             relative_dir,
             lookup: None,
             guard: None,
+            filesystem_enabled: true,
         }
     }
 
@@ -95,6 +97,18 @@ impl<'a> MakeExprContext<'a> {
     #[must_use]
     pub const fn with_guard(mut self, guard: &'a MakeVariableGuard<'a>) -> Self {
         self.guard = Some(guard);
+        self
+    }
+
+    /// Disables filesystem enumeration by Make's `wildcard` functions.
+    ///
+    /// This mode is suitable for evaluating expressions against sealed scopes
+    /// whose values are already available in memory. Reached `wildcard` and
+    /// `call WILDCARD` functions return [`MakeExprError::FilesystemAccessDisabled`];
+    /// lazy branches which are not selected are not evaluated.
+    #[must_use]
+    pub const fn without_filesystem(mut self) -> Self {
+        self.filesystem_enabled = false;
         self
     }
 
@@ -149,6 +163,8 @@ pub enum MakeExprError {
     DeferredWildcard { pattern: String },
     /// A glob pattern or one of its filesystem results was invalid.
     Wildcard { pattern: String, detail: String },
+    /// Filesystem enumeration was requested in a context which disabled it.
+    FilesystemAccessDisabled { function: String },
 }
 
 impl fmt::Display for MakeExprError {
@@ -211,6 +227,10 @@ impl fmt::Display for MakeExprError {
             Self::Wildcard { pattern, detail } => {
                 write!(f, "cannot evaluate wildcard `{pattern}`: {detail}")
             }
+            Self::FilesystemAccessDisabled { function } => write!(
+                f,
+                "filesystem access is disabled for Make function `{function}`"
+            ),
         }
     }
 }
@@ -260,6 +280,7 @@ struct Evaluator<'a> {
     wildcard_root: PathBuf,
     lookup: Option<&'a MakeVariableLookup<'a>>,
     guard: Option<&'a MakeVariableGuard<'a>>,
+    filesystem_enabled: bool,
     expansion_chain: Vec<String>,
     /// Innermost-last bindings of `$(foreach var,...)` loop variables. Make
     /// gives the loop variable a temporary value that shadows any global of
@@ -299,6 +320,7 @@ impl<'a> Evaluator<'a> {
             wildcard_root: context.source_dir.join(context.relative_dir),
             lookup: context.lookup,
             guard: context.guard,
+            filesystem_enabled: context.filesystem_enabled,
             expansion_chain: Vec::new(),
             loop_vars: Vec::new(),
             budget: EvaluationBudget::default(),
@@ -1150,6 +1172,15 @@ impl<'a> Evaluator<'a> {
         expanded_patterns: &str,
         regular_files_only: bool,
     ) -> Result<Vec<String>, MakeExprError> {
+        if !self.filesystem_enabled {
+            return Err(MakeExprError::FilesystemAccessDisabled {
+                function: if regular_files_only {
+                    "call WILDCARD".to_owned()
+                } else {
+                    "wildcard".to_owned()
+                },
+            });
+        }
         self.charge_scanned(expanded_patterns.len())?;
         reject_unsupported_references(expanded_patterns)?;
         let patterns = self.make_words(expanded_patterns)?;
@@ -1625,6 +1656,68 @@ mod tests {
             Path::new("fixture"),
         );
         evaluate_make_expr(expression, &context)
+    }
+
+    fn evaluate_without_filesystem(src: &str, expression: &str) -> Result<String, MakeExprError> {
+        let scope = collect_vars(src);
+        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
+        let context = MakeExprContext::new(
+            &scope,
+            &dirs,
+            usize::MAX,
+            Path::new("."),
+            Path::new("fixture"),
+        )
+        .without_filesystem();
+        evaluate_make_expr(expression, &context)
+    }
+
+    #[test]
+    fn filesystem_disabled_context_evaluates_nested_pure_functions() {
+        assert_eq!(
+            evaluate_without_filesystem(
+                "MODE := enabled\nFILES := src/a.c src/b.h src/c.c\n",
+                "$(if $(filter enabled,$(MODE)),$(strip $(if $(filter %.c,$(FILES)),yes $(filter %.c,$(FILES)),no)),disabled)",
+            ),
+            Ok("yes src/a.c src/c.c".to_owned())
+        );
+    }
+
+    #[test]
+    fn filesystem_disabled_context_rejects_both_wildcard_forms() {
+        let scope = collect_vars("");
+        let dirs = DirVars::load(Path::new("/path/which/does/not/exist"));
+        let context = MakeExprContext::new(
+            &scope,
+            &dirs,
+            usize::MAX,
+            Path::new("."),
+            Path::new("fixture"),
+        )
+        .without_filesystem();
+
+        for expression in [
+            "$(wildcard this-file-does-not-exist-*.c)",
+            "$(call WILDCARD,this-file-does-not-exist-*.c)",
+        ] {
+            let error = evaluate_make_expr(expression, &context).unwrap_err();
+            assert!(matches!(
+                &error,
+                MakeExprError::FilesystemAccessDisabled { .. }
+            ));
+            assert!(error.to_string().contains("filesystem access is disabled"));
+        }
+    }
+
+    #[test]
+    fn filesystem_disabled_context_skips_unselected_wildcard_branch() {
+        assert_eq!(
+            evaluate_without_filesystem(
+                "MODE := enabled\nFILES := src/a.c src/b.h\n",
+                "$(if $(filter enabled,$(MODE)),$(strip $(filter %.c,$(FILES))),$(wildcard this-file-does-not-exist-*.c))",
+            ),
+            Ok("src/a.c".to_owned())
+        );
     }
 
     #[test]

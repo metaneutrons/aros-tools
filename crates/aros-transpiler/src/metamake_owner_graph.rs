@@ -87,6 +87,9 @@ pub struct DependencyProvenance {
 /// separate records, in file-map and source order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetDeclarationProvenance {
+    /// One-based physical line of the expanded #MM directive. This binds
+    /// identical declarations to their individual GenMF expansion origins.
+    pub expanded_line: usize,
     /// Generated Makefile key supplied to `parse_expanded_files`.
     pub file: String,
     /// Exact target token returned by the `#MM` tokenizer.
@@ -441,6 +444,7 @@ fn parse_file_lines(
         bump(work, limits.max_work, "parse work")?;
         let line = &lines[line_index];
         line_index += 1;
+        let expanded_line = line_index;
         if !line.as_bytes().starts_with(b"#MM") {
             continue;
         }
@@ -504,6 +508,7 @@ fn parse_file_lines(
                 "target name copy for provenance",
             )?;
             declarations.push(TargetDeclarationProvenance {
+                expanded_line,
                 file: path.to_owned(),
                 raw_target,
                 target: name.clone(),
@@ -637,6 +642,7 @@ fn parse_file_lines(
             )?;
             let local_name = name.clone();
             declarations.push(TargetDeclarationProvenance {
+                expanded_line,
                 file: path.to_owned(),
                 raw_target,
                 target: name,
@@ -658,6 +664,30 @@ fn parse_file_lines(
         targets,
         declarations,
     })
+}
+
+/// Reconstruct one source declaration with the same bounded continuation
+/// semantics used when capturing its MetaMake provenance.
+pub(crate) fn source_declaration_at(
+    source: &str,
+    source_line: usize,
+    path: &str,
+) -> ParseResult<String> {
+    let lines: Vec<_> = source.lines().map(str::to_owned).collect();
+    let index = source_line
+        .checked_sub(1)
+        .ok_or("invalid #MM source line")?;
+    let first = lines.get(index).ok_or("missing #MM source line")?;
+    if !first.starts_with("#MM") {
+        return Err("source line is not a column-zero #MM declaration".into());
+    }
+    let limits = Limits::default();
+    if lines.len() > limits.max_total_lines || first.len() > limits.max_line_bytes {
+        return Err("source #MM declaration exceeds its parsing limits".into());
+    }
+    let mut cursor = index + 1;
+    let mut work = 0;
+    collect_continuations(first, &lines, &mut cursor, path, limits, &mut work)
 }
 
 fn collect_continuations(
@@ -1409,7 +1439,11 @@ bare-$(CPU) : ignored-prereq
         assert_eq!(declarations[1].file, "b/real.mk");
         assert!(!declarations[1].virtual_target);
         assert!(declarations[1].claims_make_owner);
-        assert_eq!(declarations[1], declarations[2]);
+        assert_eq!(declarations[1].expanded_line, 1);
+        assert_eq!(declarations[2].expanded_line, 2);
+        let mut repeated = declarations[2].clone();
+        repeated.expanded_line = declarations[1].expanded_line;
+        assert_eq!(declarations[1], repeated);
         assert_eq!(
             graph.owner_files("alias-arm").unwrap(),
             &BTreeSet::from(["b/real.mk".into()])

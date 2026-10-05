@@ -319,7 +319,17 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
                     .iter()
                     .map(|declaration| declaration.mmake_name.clone()),
             )
+            .chain(
+                graph
+                    .arch_endpoint_effects
+                    .iter()
+                    .map(|effect| effect.endpoint.clone()),
+            )
             .collect();
+    for header in &graph.assembly_headers {
+        all_targets.insert(header.owner.clone());
+        all_targets.insert(header.aggregate_owner.clone());
+    }
 
     // The closed GRUB2 helper creates one shared source-fetch endpoint and
     // exposes the legacy alias itself.  Keep both names in the endpoint
@@ -2397,6 +2407,123 @@ pub fn generate_cmake(graph: &DependencyGraph) -> String {
         }
     }
     writeln!(out).unwrap();
+
+    for header in &graph.assembly_headers {
+        writeln!(
+            out,
+            "# Source assembly header from {}:{}",
+            header.file, header.line
+        )
+        .unwrap();
+        writeln!(out, "aros_generate_assembly_header(").unwrap();
+        for (field, value) in [
+            ("NAME", &header.owner),
+            ("AGGREGATE", &header.aggregate_owner),
+            ("SOURCE", &header.source),
+            ("ASSEMBLY", &header.assembly_output),
+            ("OUTPUT", &header.header_output),
+            ("HEADER_ROOT", &header.header_root),
+            ("TOKEN", &header.token),
+        ] {
+            writeln!(out, "    {field} {}", cmake_arg(value)).unwrap();
+        }
+        if !header.arguments.is_empty() {
+            writeln!(out, "    ARGUMENTS").unwrap();
+            for argument in &header.arguments {
+                writeln!(out, "        {}", cmake_arg(argument)).unwrap();
+            }
+        }
+        let dependencies: Vec<_> = header
+            .aggregate_dependencies
+            .iter()
+            .filter(|dependency| {
+                !graph
+                    .assembly_headers
+                    .iter()
+                    .any(|candidate| &candidate.owner == *dependency)
+            })
+            .collect();
+        if !dependencies.is_empty() {
+            writeln!(out, "    DEPENDS").unwrap();
+            for dependency in dependencies {
+                writeln!(out, "        {}", cmake_arg(dependency)).unwrap();
+            }
+        }
+        writeln!(out, ")\n").unwrap();
+    }
+    // Physical architecture metadata effects are not virtual aliases. Their
+    // prerequisite aliases now exist, but their own names were deliberately
+    // excluded from phase one's empty-target declarations.
+    let mut arch_effects: Vec<_> = graph.arch_endpoint_effects.iter().collect();
+    arch_effects.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+    for effect in arch_effects {
+        use crate::arch_endpoint_effects::ArchEndpointEffectData;
+        writeln!(
+            out,
+            "# Architecture effect from {}:{}",
+            effect.recipe, effect.line
+        )
+        .unwrap();
+        match &effect.data {
+            ArchEndpointEffectData::ArchModuleObjects {
+                mainmmake,
+                module_sources,
+                directory,
+                ..
+            } => {
+                writeln!(out, "aros_bind_arch_source_endpoint(\n    ENDPOINT {}\n    OWNER {}\n    INCLUDE_OWNER {}\n    DIRECTORY \"${{AROS_SOURCE_DIR}}/{}\"\n    BASENAMES {}\n)",
+                    cmake_arg(&effect.endpoint), cmake_arg(mainmmake), cmake_arg(&effect.dependencies[0]), directory,
+                    module_sources.iter().map(|name| cmake_arg(name)).collect::<Vec<_>>().join(" ")).unwrap();
+            }
+            ArchEndpointEffectData::EmptyLinklibAggregate { .. } => {
+                writeln!(
+                    out,
+                    "aros_empty_arch_linklib(NAME {} INCLUDE_TARGET {})",
+                    cmake_arg(&effect.endpoint),
+                    cmake_arg(&effect.dependencies[0])
+                )
+                .unwrap();
+            }
+            ArchEndpointEffectData::SetArchIncludes {
+                tag,
+                modname,
+                maindir,
+                priority_token,
+                include_dirs,
+                definitions,
+                ..
+            } => {
+                writeln!(out, "aros_set_archincludes_endpoint(\n    NAME {}\n    MODNAME {}\n    MAINDIR {}\n    PRIORITY {}\n    TAG {}",
+                    cmake_arg(&effect.endpoint), cmake_arg(modname), cmake_arg(maindir),
+                    cmake_arg(priority_token), cmake_arg(tag)).unwrap();
+                if !include_dirs.is_empty() {
+                    writeln!(
+                        out,
+                        "    INCLUDE_DIRS {}",
+                        include_dirs
+                            .iter()
+                            .map(|path| cmake_arg(path))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                    .unwrap();
+                }
+                if !definitions.is_empty() {
+                    writeln!(
+                        out,
+                        "    DEFINITIONS {}",
+                        definitions
+                            .iter()
+                            .map(|value| cmake_arg(value))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                    .unwrap();
+                }
+                writeln!(out, ")").unwrap();
+            }
+        }
+    }
 
     // Phase two attaches edges after every possible endpoint exists. This also
     // runs for a meta name that is already a concrete/icon target: fourteen

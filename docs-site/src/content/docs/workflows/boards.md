@@ -77,6 +77,21 @@ Optional MetaMake selector edges must be declared in the source contract and
 proven in their hash-bound recipe. Only absent providers are omitted and
 recorded. Literal dependencies, unknown selectors and rejected real producers
 still stop native selection.
+The source-owned MetaMake policy can also select the supported `module`,
+`linklib` and `set-archincludes` template-hook families. Each omission requires
+the sealed macro definition and exact source callsite, not a target-name
+allowlist. The base `module` family includes the reviewed module, archive and
+program callers; it does not admit their quick or other suffix-specific hooks.
+Physical architecture objects and include-flag files retain their
+own producers and prerequisites; a missing source implementation is not an
+optional hook. Unsupported declarations retain source-line diagnostics.
+Continued `#MM` declarations use the same grammar for parsing and source
+verification; their required prerequisites are preserved.
+Architecture effects use the profile's explicit Make configuration and replay
+with the same captured values. CLI selectors must match the source profile;
+a declared Mesa version cannot be overridden. Unknown feature switches remain
+errors, not implicit defaults. A verified physical architecture producer can have an
+optional generated variant hook; the producer and its required edges remain.
 KOBJ integration preserves the source macro form and separates partial linking
 from GNU symbol localization. Source groups retain Make's architecture-object
 ordering, including fetched-source proxies, and copy the module's compilation
@@ -89,12 +104,36 @@ libraries, global partial-link values and instrumentation selector. Missing
 configuration proof and unsupported instrumentation stop configuration. Global
 configuration and a fresh P4 core remain unqualified. These are host-only
 contracts, not a complete P4 build.
+An empty module `uselibs` list can leave the literal prefix `linklibs-` in
+GenMF metadata. Native selection normalizes this only with an exact sealed
+module-template definition, an empty resolved argument and matching callsite
+provenance for every claim. Handwritten collisions, independent required
+edges, declared endpoints and nonempty or unresolved lists remain required.
+Imported metadata records provenance per dependency: another recipe declaring
+a different prerequisite on the same target does not become its origin.
+Classic MetaMake's general tolerance of missing targets is not reproduced.
+`uselibs` names library interfaces, not necessarily Make targets. A generated
+prerequisite can bind to a different archive target only when its sealed
+callsite, typed consumer and unique source-owned `%build_linklib` agree.
+Handwritten dependencies, name collisions and ambiguous providers still fail.
+
 The source contract's optional `make_variables` object supplies literal
 configuration defaults. An explicit empty value is known; an omitted variable
 remains unknown. Local Make assignments can replace these defaults. Unknown
 conditional writes still prevent publishing a partial native graph.
 Uninstantiated GNU `define` bodies cannot supply live assignments. An opaque
 definition also prevents reuse of an older value or configuration default.
+Architecture declarations use bounded Make expressions and source-bound
+include scopes at their declaration positions. They preserve ordered include
+paths and `-D` definitions; filesystem enumeration is not allowed in this
+proof. A configured value with an unknown Make assignment flavor cannot
+justify a later append.
+
+A source-defined C-to-assembly header pipeline requires exact compiler-role,
+sysroot, flags and include metadata. Its generated file is not producer proof.
+Unsupported recipes remain diagnostics; native selection does not replace
+them with an empty target or borrow a bootstrap output. The current P4 source
+profile is not yet sufficient to qualify that complete pipeline.
 
 Local compiler admission uses byte-verified metadata, not release provenance.
 CLI and CMake admission are tested with a real RV32 compiler; they do not

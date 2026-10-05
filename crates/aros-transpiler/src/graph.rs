@@ -51,6 +51,8 @@ pub struct ResolvedScriptOutput {
 /// Dependency Graph for parallel target building and cycle detection.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
+    pub assembly_headers: Vec<crate::assembly_headers::AssemblyHeaderDecl>,
+    pub arch_endpoint_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
     /// Selected client archive endpoints in their source declaration spelling,
     /// after concrete selector resolution. None keeps whole-tree export unchanged.
     pub native_selected_client_archives: Option<BTreeSet<String>>,

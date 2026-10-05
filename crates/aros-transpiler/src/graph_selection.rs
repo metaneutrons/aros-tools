@@ -677,6 +677,16 @@ impl DependencyGraph {
         }
         family!("compilation", self.targets.keys().map(String::as_str));
         family!(
+            "assembly-header",
+            self.assembly_headers
+                .iter()
+                .flat_map(|header| [header.owner.as_str(), header.aggregate_owner.as_str()])
+        );
+        family!("architecture-metadata", self.arch_endpoint_effects.iter()
+            .filter(|effect| effect.applies_to(context) && !matches!(effect.data, crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects { .. })).map(|effect| effect.endpoint.as_str()));
+        family!("architecture-objects", self.arch_endpoint_effects.iter()
+            .filter(|effect| effect.applies_to(context) && matches!(effect.data, crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects { .. })).map(|effect| effect.endpoint.as_str()));
+        family!(
             "make-meta-provider",
             self.make_meta_providers.iter().map(String::as_str)
         );
@@ -1182,6 +1192,36 @@ impl DependencyGraph {
     ) -> SelectionEdges {
         let mut edges = Edges::new();
         let mut ambiguous_copy_includes = BTreeMap::new();
+        for header in &self.assembly_headers {
+            add(
+                &mut edges,
+                &header.owner,
+                header
+                    .aggregate_dependencies
+                    .iter()
+                    .filter(|dependency| {
+                        !self
+                            .assembly_headers
+                            .iter()
+                            .any(|candidate| &candidate.owner == *dependency)
+                    })
+                    .cloned(),
+            );
+            add(
+                &mut edges,
+                &header.aggregate_owner,
+                header.aggregate_dependencies.iter().cloned(),
+            );
+        }
+        for effect in &self.arch_endpoint_effects {
+            if effect.applies_to(context) {
+                add(
+                    &mut edges,
+                    &effect.endpoint,
+                    effect.dependencies.iter().cloned(),
+                );
+            }
+        }
         // A pending identity supplies declaration reachability only. It is
         // admitted exclusively for source preparation and never emitted as a
         // compile producer by the full export.
@@ -1645,6 +1685,59 @@ impl DependencyGraph {
             || self.copy_includes.iter().any(|rule| rule.name == name)
     }
 
+    fn validate_selected_assembly_owner(&self, name: &str) -> Result<()> {
+        let owners = self
+            .assembly_headers
+            .iter()
+            .filter(|header| header.owner == name)
+            .count();
+        let aggregate = self
+            .assembly_headers
+            .iter()
+            .any(|header| header.aggregate_owner == name);
+        if owners > 1
+            || owners != 0 && aggregate
+            || (owners == 1 || aggregate)
+                && (self.writefiles_has_other_producer(name)
+                    || self
+                        .genmodule_writefiles_rules
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .host_file_generators
+                        .iter()
+                        .any(|rule| rule.owner == name)
+                    || self
+                        .arch_endpoint_effects
+                        .iter()
+                        .any(|effect| effect.endpoint == name))
+        {
+            return Err(failure(format!(
+                "selected assembly header {name} has conflicting concrete producers"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_selected_assembly_outputs(&self, selected: &BTreeSet<String>) -> Result<()> {
+        let mut outputs = BTreeMap::<String, String>::new();
+        for header in self.assembly_headers.iter().filter(|header| {
+            selected.contains(&header.owner) || selected.contains(&header.aggregate_owner)
+        }) {
+            for output in [&header.assembly_output, &header.header_output] {
+                if let Some(previous) =
+                    outputs.insert(output.to_ascii_lowercase(), header.owner.clone())
+                {
+                    return Err(failure(format!(
+                        "selected assembly headers {previous} and {} both produce {output}",
+                        header.owner
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_file_stamp_owners(&self, name: &str) -> Result<()> {
         let writefiles = self
             .genmodule_writefiles_rules
@@ -1730,6 +1823,7 @@ impl DependencyGraph {
         let mut parents = BTreeMap::new();
         while let Some(raw) = pending.pop() {
             let name = endpoint(&raw, context)?;
+            self.validate_selected_assembly_owner(&name)?;
             if let Some((owner, _)) = self.targets.iter().find(|(owner, target)| {
                 target.module_type == ModuleType::ModuleHeaders
                     && [
@@ -2099,6 +2193,7 @@ impl DependencyGraph {
             }
         }
         let mut source_value_outputs = BTreeMap::<String, String>::new();
+        self.validate_selected_assembly_outputs(&selected)?;
         for declaration in self
             .source_value_rules
             .iter()
@@ -2209,8 +2304,24 @@ impl DependencyGraph {
     ) -> Result<()> {
         let is_selected =
             |name: &str| endpoint(name, context).is_ok_and(|name| selected.contains(&name));
+        // An object endpoint owns a real subset of its module's compilation
+        // state. Keep that declaration without introducing a dependency back
+        // to the module (which could create a module/architecture cycle).
+        let architecture_owners: BTreeSet<_> = self
+            .arch_endpoint_effects
+            .iter()
+            .filter(|effect| effect.applies_to(context) && is_selected(&effect.endpoint))
+            .filter_map(|effect| match &effect.data {
+                crate::arch_endpoint_effects::ArchEndpointEffectData::ArchModuleObjects {
+                    mainmmake,
+                    ..
+                } => Some(mainmmake.clone()),
+                _ => None,
+            })
+            .collect();
         let declaration_needed = |name: &str| {
             is_selected(name)
+                || architecture_owners.contains(name)
                 || ["-linklib", "-linklib-rel", "-includes", "-fd", "-kobj"]
                     .iter()
                     .any(|suffix| is_selected(&format!("{name}{suffix}")))
@@ -2278,6 +2389,10 @@ impl DependencyGraph {
             .retain(|declaration| is_selected(&declaration.owner));
         self.directory_setups
             .retain(|declaration| is_selected(&declaration.owner));
+        self.arch_endpoint_effects
+            .retain(|effect| effect.applies_to(context) && is_selected(&effect.endpoint));
+        self.assembly_headers
+            .retain(|header| is_selected(&header.owner) || is_selected(&header.aggregate_owner));
         self.genmodule_header_rules
             .retain(|declaration| is_selected(&declaration.owner));
         self.genmodule_writefiles_rules
@@ -2525,6 +2640,142 @@ mod tests {
         graph.retain_native_selection(&selected, &context).unwrap();
         assert_eq!(graph.literal_object_groups.len(), 1);
         assert_eq!(graph.literal_object_groups[0].owner, "literal-selected");
+    }
+
+    #[test]
+    fn assembly_header_selection_keeps_its_source_prerequisites_and_emits_real_producers() {
+        let mut graph = DependencyGraph::new();
+        graph
+            .assembly_headers
+            .push(crate::assembly_headers::AssemblyHeaderDecl {
+                owner: "provider-riscv".into(),
+                aggregate_owner: "headers".into(),
+                aggregate_dependencies: vec!["prep".into(), "provider-riscv".into()],
+                file: "compiler/include/mmakefile.src".into(),
+                line: 15,
+                source: "${AROS_SOURCE_DIR}/compiler/include/asm.c".into(),
+                assembly_output: "${AROS_BUILD_DIR}/gen/include/asm.s".into(),
+                header_output: "${AROS_BUILD_DIR}/GENINCDIR/aros/riscv/asm.h".into(),
+                header_root: "${AROS_BUILD_DIR}/GENINCDIR".into(),
+                arguments: vec!["-DX=1".into(), "-UX".into(), "-DX=2".into()],
+                token: ".asciz".into(),
+            });
+        graph.add_meta_rule(MetaTargetRule {
+            name: "prep".into(),
+            dependencies: vec![],
+        });
+        let context = TargetContext::default();
+        let selected = graph
+            .selected_dependency_closure(&["provider-riscv".into()], &context, &[])
+            .unwrap();
+        assert!(selected.contains("prep"));
+        graph.retain_native_selection(&selected, &context).unwrap();
+        assert_eq!(graph.assembly_headers.len(), 1);
+        let cmake = crate::generator::generate_cmake(&graph);
+        assert!(cmake.contains("aros_generate_assembly_header("));
+        assert!(cmake.contains("TOKEN \".asciz\""));
+        assert!(cmake.find("-DX=1").unwrap() < cmake.find("-UX").unwrap());
+        assert!(cmake.find("-UX").unwrap() < cmake.find("-DX=2").unwrap());
+        assert!(!cmake.contains("if(NOT TARGET \"provider-riscv\")"));
+        graph.targets.insert(
+            "provider-riscv".into(),
+            target("provider-riscv", ModuleType::Program),
+        );
+        assert!(graph
+            .selected_dependency_closure(&["provider-riscv".into()], &context, &[])
+            .is_err());
+    }
+
+    #[test]
+    fn assembly_headers_share_aggregates_without_sibling_dependency_cycles() {
+        let mut graph = DependencyGraph::new();
+        for name in ["first", "second"] {
+            graph
+                .assembly_headers
+                .push(crate::assembly_headers::AssemblyHeaderDecl {
+                    owner: name.into(),
+                    aggregate_owner: "headers".into(),
+                    aggregate_dependencies: vec!["prep".into(), "first".into(), "second".into()],
+                    file: "compiler/include/mmakefile.src".into(),
+                    line: 15,
+                    source: format!("${{AROS_SOURCE_DIR}}/compiler/include/{name}.c"),
+                    assembly_output: format!("${{AROS_BUILD_DIR}}/gen/include/{name}.s"),
+                    header_output: format!("${{AROS_BUILD_DIR}}/GENINCDIR/aros/{name}.h"),
+                    header_root: "${AROS_BUILD_DIR}/GENINCDIR".into(),
+                    arguments: vec![],
+                    token: ".ascii".into(),
+                });
+        }
+        graph.add_meta_rule(MetaTargetRule {
+            name: "prep".into(),
+            dependencies: vec![],
+        });
+        let context = TargetContext::default();
+        let selected = graph
+            .selected_dependency_closure(&["headers".into()], &context, &[])
+            .unwrap();
+        for name in ["headers", "first", "second", "prep"] {
+            assert!(selected.contains(name));
+        }
+        let first = graph
+            .selected_dependency_closure(&["first".into()], &context, &[])
+            .unwrap();
+        assert!(!first.contains("second"));
+        graph.retain_native_selection(&selected, &context).unwrap();
+        let cmake = crate::generator::generate_cmake(&graph);
+        assert_eq!(cmake.matches("aros_generate_assembly_header(").count(), 2);
+        for declaration in cmake.split("aros_generate_assembly_header(").skip(1) {
+            let declaration = declaration.split_once("\n)").unwrap().0;
+            assert!(declaration.contains("prep"));
+            assert!(!declaration.contains("DEPENDS \"first\""));
+            assert!(!declaration.contains("DEPENDS \"second\""));
+        }
+        graph.assembly_headers[1].header_output = graph.assembly_headers[0].header_output.clone();
+        assert!(graph
+            .selected_dependency_closure(&["headers".into()], &context, &[])
+            .is_err());
+    }
+
+    #[test]
+    fn selected_architecture_objects_retain_their_module_declaration_without_a_back_edge() {
+        use crate::arch_endpoint_effects::{ArchEndpointEffect, ArchEndpointEffectData};
+        let mut graph = DependencyGraph::new();
+        let context = TargetContext {
+            cpu: Some("riscv".into()),
+            platform: Some("esp32p4".into()),
+            ..TargetContext::default()
+        };
+        // Inventory preparation uses the same declaration retention contract
+        // as a full compile graph, without fabricating compile targets.
+        graph
+            .arch_sources
+            .insert("kernel-example".into(), Vec::new());
+        graph.arch_sources.insert("unrelated".into(), Vec::new());
+        graph.arch_endpoint_effects.push(ArchEndpointEffect {
+            recipe: "arch/riscv-all/example/mmakefile.src".into(),
+            line: 1,
+            endpoint: "kernel-example-riscv".into(),
+            dependencies: vec!["kernel-example-riscv-includes".into()],
+            data: ArchEndpointEffectData::ArchModuleObjects {
+                mainmmake: "kernel-example".into(),
+                tag: "riscv".into(),
+                module_sources: vec!["entry".into()],
+                directory: "arch/riscv-all/example".into(),
+            },
+        });
+        let selected = BTreeSet::from([
+            "kernel-example-riscv".into(),
+            "kernel-example-riscv-includes".into(),
+        ]);
+        let edges = graph.selection_edges(&[], false, &context).edges;
+        assert_eq!(
+            edges["kernel-example-riscv"],
+            BTreeSet::from(["kernel-example-riscv-includes".into()])
+        );
+        graph.retain_native_selection(&selected, &context).unwrap();
+        assert!(graph.arch_sources.contains_key("kernel-example"));
+        assert!(!graph.arch_sources.contains_key("unrelated"));
+        assert_eq!(graph.arch_endpoint_effects.len(), 1);
     }
 
     #[test]

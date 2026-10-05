@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    /// Keep origins only for MetaMake directive starts, without changing text
+    /// expansion or any byte/work budget. Native graph admission uses this.
+    pub metadata_provenance_only: bool,
     pub max_source_bytes: usize,
     pub max_template_bytes: usize,
     pub max_template_files: usize,
@@ -26,6 +29,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
+            metadata_provenance_only: false,
             max_source_bytes: 1024 * 1024,
             max_template_bytes: 8 * 1024 * 1024,
             max_template_files: 256,
@@ -66,6 +70,57 @@ impl StdError for GenmfError {}
 pub struct ExpandedText {
     pub text: String,
     pub template_snapshots: Vec<TemplateSnapshot>,
+    /// Exact emitted-text provenance, in output order. Byte ranges are
+    /// half-open UTF-8 offsets into `text`; output lines are one-based.
+    pub provenance: Vec<ExpandedLineProvenance>,
+}
+
+/// Provenance for one physical output-line fragment.
+///
+/// Usually a span is one complete emitted line. It can be only a fragment
+/// when the source's final line has no newline and synthetic output follows.
+/// Repeated identical text remains distinguishable by byte range, source line,
+/// and macro invocation stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpandedLineProvenance {
+    pub output_start_byte: usize,
+    pub output_end_byte: usize,
+    pub output_line: usize,
+    /// Physical input line that emitted this text; absent only for synthetic
+    /// separators such as the newline before an implicit `common` expansion.
+    pub source_path: Option<PathBuf>,
+    pub source_line: Option<usize>,
+    /// Definition identity when the emitted line came from a template body.
+    /// `source_path`/`source_line` then identify the exact body line.
+    pub template_path: Option<PathBuf>,
+    pub template_definition_line: Option<usize>,
+    /// Outermost-to-innermost macro expansion frames.
+    pub macro_stack: Vec<MacroExpansionFrame>,
+    /// The top-level invocation in the source file, if this expansion began
+    /// there. Automatically appended `common` has no such invocation.
+    pub top_level_source_invocation: Option<SourceLineLocation>,
+}
+
+/// File and one-based physical line for a GenMF invocation or emitted line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceLineLocation {
+    pub path: PathBuf,
+    pub line: usize,
+}
+
+/// One exact frame in a recursively expanded GenMF call stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MacroExpansionFrame {
+    pub name: String,
+    pub template_path: PathBuf,
+    pub definition_line: usize,
+    /// `None` only for an automatically appended template such as `common`.
+    pub invocation: Option<SourceLineLocation>,
+    /// Values as parsed from this call, preserving omitted versus explicit
+    /// empty values and applying GenMF's quote removal.
+    pub arguments: BTreeMap<String, Option<String>>,
+    /// Effective values used by substitutions after template defaults.
+    pub resolved_arguments: BTreeMap<String, String>,
 }
 
 /// Raw bytes and canonical path for one loaded template file.
@@ -89,6 +144,7 @@ struct Template {
     body: Vec<String>,
     source: PathBuf,
     line: usize,
+    body_start_line: usize,
     byte_size: usize,
 }
 
@@ -197,6 +253,7 @@ pub fn expand_text(
 
     let mut runtime = ExpansionRuntime {
         budget: loader.budget,
+        output_line: 1,
         ..ExpansionRuntime::default()
     };
     let mut output = String::new();
@@ -209,9 +266,21 @@ pub fn expand_text(
         limits,
         &mut output,
         Some(source_file),
+        1,
+        None,
     )?;
     if !runtime.saw_common {
-        append_output(&mut output, "\n", &mut runtime.budget, limits)?;
+        append_output(
+            &mut output,
+            "\n",
+            &mut runtime,
+            limits,
+            LineOrigin {
+                path: None,
+                line: None,
+                template: None,
+            },
+        )?;
         if loader.templates.contains_key("common") {
             expand_template(
                 "common",
@@ -227,6 +296,7 @@ pub fn expand_text(
     Ok(ExpandedText {
         text: output,
         template_snapshots: loader.snapshots,
+        provenance: runtime.provenance,
     })
 }
 
@@ -267,8 +337,23 @@ pub(crate) fn expand_bytes(
 #[derive(Default)]
 struct ExpansionRuntime {
     saw_common: bool,
-    stack: Vec<String>,
+    stack: Vec<MacroExpansionFrame>,
     budget: Budget,
+    provenance: Vec<ExpandedLineProvenance>,
+    output_line: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TemplateDefinitionOrigin<'a> {
+    path: &'a Path,
+    definition_line: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LineOrigin<'a> {
+    path: Option<&'a Path>,
+    line: Option<usize>,
+    template: Option<TemplateDefinitionOrigin<'a>>,
 }
 
 impl TemplateLoader {
@@ -450,6 +535,7 @@ impl TemplateLoader {
                             body,
                             source: file.to_path_buf(),
                             line: header_line,
+                            body_start_line: body_start + 1,
                             byte_size,
                         },
                     );
@@ -695,16 +781,16 @@ fn expand_template(
     runtime: &mut ExpansionRuntime,
     limits: Limits,
     output: &mut String,
-    invoking_file: Option<&Path>,
+    invocation: Option<SourceLineLocation>,
 ) -> Result<(), GenmfError> {
     let template = templates.get(name).ok_or_else(|| {
         error(
-            invoking_file.map(Path::to_path_buf),
-            None,
+            invocation.as_ref().map(|site| site.path.clone()),
+            invocation.as_ref().map(|site| site.line),
             format!("unknown GenMF template `{name}`"),
         )
     })?;
-    if runtime.stack.iter().any(|active| active == name) {
+    if runtime.stack.iter().any(|active| active.name == name) {
         return Err(error(
             Some(template.source.clone()),
             Some(template.line),
@@ -721,20 +807,28 @@ fn expand_template(
     runtime.budget.charge_work(template.byte_size, limits)?;
     let values = parse_invocation(template, argument_text).map_err(|detail| {
         error(
-            invoking_file
-                .map(Path::to_path_buf)
+            invocation
+                .as_ref()
+                .map(|site| site.path.clone())
                 .or_else(|| Some(template.source.clone())),
-            invoking_file.map(|_| 1).or(Some(template.line)),
+            invocation
+                .as_ref()
+                .map(|site| site.line)
+                .or(Some(template.line)),
             format!("template `{name}`: {detail}"),
         )
     })?;
     for (argument_name, argument) in &template.arguments {
         if argument.required && values.get(argument_name).and_then(Option::as_ref).is_none() {
             return Err(error(
-                invoking_file
-                    .map(Path::to_path_buf)
+                invocation
+                    .as_ref()
+                    .map(|site| site.path.clone())
                     .or_else(|| Some(template.source.clone())),
-                invoking_file.map(|_| 1).or(Some(template.line)),
+                invocation
+                    .as_ref()
+                    .map(|site| site.line)
+                    .or(Some(template.line)),
                 format!("template `{name}`: required argument `{argument_name}` was not specified"),
             ));
         }
@@ -780,7 +874,26 @@ fn expand_template(
         substituted.push(value);
     }
 
-    runtime.stack.push(name.to_owned());
+    let resolved_arguments = template
+        .arguments
+        .iter()
+        .map(|(argument_name, argument)| {
+            let value = values
+                .get(argument_name)
+                .and_then(Option::as_deref)
+                .or(argument.default.as_deref())
+                .unwrap_or_default();
+            (argument_name.clone(), value.to_owned())
+        })
+        .collect();
+    runtime.stack.push(MacroExpansionFrame {
+        name: name.to_owned(),
+        template_path: template.source.clone(),
+        definition_line: template.line,
+        invocation,
+        arguments: values,
+        resolved_arguments,
+    });
     // GenMF discovers nested invocations in the original body, before it
     // substitutes argument values. A placeholder that expands to `%name`
     // therefore remains literal unless that original line already had a
@@ -794,6 +907,11 @@ fn expand_template(
         limits,
         output,
         Some(&template.source),
+        template.body_start_line,
+        Some(TemplateDefinitionOrigin {
+            path: &template.source,
+            definition_line: template.line,
+        }),
     );
     runtime.stack.pop();
     result
@@ -988,6 +1106,7 @@ fn generate_template_references(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit expansion context includes source/template origins.
 fn write_lines(
     lines: &[String],
     references: &[TemplateReference],
@@ -996,12 +1115,36 @@ fn write_lines(
     limits: Limits,
     output: &mut String,
     source: Option<&Path>,
+    source_line_start: usize,
+    template_origin: Option<TemplateDefinitionOrigin<'_>>,
 ) -> Result<(), GenmfError> {
     let mut start = 0usize;
     for reference in references {
         if start < reference.line_index {
-            for line in &lines[start..reference.line_index] {
-                append_output(output, line, &mut runtime.budget, limits)?;
+            for (line_index, line) in lines
+                .iter()
+                .enumerate()
+                .take(reference.line_index)
+                .skip(start)
+            {
+                let source_line = source_line_start.checked_add(line_index).ok_or_else(|| {
+                    error(
+                        source.map(Path::to_path_buf),
+                        None,
+                        "source line accounting overflow",
+                    )
+                })?;
+                append_output(
+                    output,
+                    line,
+                    runtime,
+                    limits,
+                    LineOrigin {
+                        path: source,
+                        line: source.map(|_| source_line),
+                        template: template_origin,
+                    },
+                )?;
             }
         }
         // This deliberately follows GenMF's cursor behavior even when a
@@ -1011,7 +1154,15 @@ fn write_lines(
         let line = &lines[reference.line_index];
         runtime.budget.charge_work(line.len(), limits)?;
         let mut expanded_call = line.clone();
-        let call_start_line = reference.line_index + 1;
+        let call_start_line = source_line_start
+            .checked_add(reference.line_index)
+            .ok_or_else(|| {
+                error(
+                    source.map(Path::to_path_buf),
+                    None,
+                    "call line accounting overflow",
+                )
+            })?;
         while has_genmf_continuation(&expanded_call) && start < lines.len() {
             let new_len = expanded_call
                 .len()
@@ -1050,7 +1201,10 @@ fn write_lines(
             runtime,
             limits,
             output,
-            source,
+            source.map(|path| SourceLineLocation {
+                path: path.to_path_buf(),
+                line: call_start_line,
+            }),
         )
         .map_err(|mut failure| {
             if failure.line.is_none() {
@@ -1063,8 +1217,25 @@ fn write_lines(
         })?;
     }
     if start < lines.len() {
-        for line in &lines[start..] {
-            append_output(output, line, &mut runtime.budget, limits)?;
+        for (line_index, line) in lines.iter().enumerate().skip(start) {
+            let source_line = source_line_start.checked_add(line_index).ok_or_else(|| {
+                error(
+                    source.map(Path::to_path_buf),
+                    None,
+                    "source line accounting overflow",
+                )
+            })?;
+            append_output(
+                output,
+                line,
+                runtime,
+                limits,
+                LineOrigin {
+                    path: source,
+                    line: source.map(|_| source_line),
+                    template: template_origin,
+                },
+            )?;
         }
     }
     Ok(())
@@ -1115,13 +1286,122 @@ fn find_template_reference(
 fn append_output(
     output: &mut String,
     text: &str,
-    budget: &mut Budget,
+    runtime: &mut ExpansionRuntime,
     limits: Limits,
+    origin: LineOrigin<'_>,
 ) -> Result<(), GenmfError> {
-    budget.charge_output(text.len(), limits)?;
-    budget.charge_work(text.len(), limits)?;
+    runtime.budget.charge_output(text.len(), limits)?;
+    runtime.budget.charge_work(text.len(), limits)?;
+    let mut byte_offset = 0usize;
+    let mut line_offset = 0usize;
+    for segment in text.split_inclusive('\n') {
+        let source_line = origin
+            .line
+            .map(|line| {
+                line.checked_add(line_offset).ok_or_else(|| {
+                    error(
+                        origin.path.map(Path::to_path_buf),
+                        None,
+                        "source line accounting overflow",
+                    )
+                })
+            })
+            .transpose()?;
+        let output_start_byte = output
+            .len()
+            .checked_add(byte_offset)
+            .ok_or_else(|| error(None, None, "output byte accounting overflow"))?;
+        let output_end_byte = output_start_byte
+            .checked_add(segment.len())
+            .ok_or_else(|| error(None, None, "output byte accounting overflow"))?;
+        if !limits.metadata_provenance_only || segment.starts_with("#MM") {
+            let template_path = origin.template.map(|template| template.path.to_path_buf());
+            let top_level_source_invocation = runtime
+                .stack
+                .first()
+                .and_then(|frame| frame.invocation.clone());
+            let cost = provenance_work_cost(
+                origin.path,
+                origin.template,
+                &runtime.stack,
+                top_level_source_invocation.as_ref(),
+            )?;
+            runtime.budget.charge_work(cost, limits)?;
+            runtime.provenance.push(ExpandedLineProvenance {
+                output_start_byte,
+                output_end_byte,
+                output_line: runtime.output_line,
+                source_path: origin.path.map(Path::to_path_buf),
+                source_line,
+                template_path,
+                template_definition_line: origin.template.map(|template| template.definition_line),
+                macro_stack: runtime.stack.clone(),
+                top_level_source_invocation,
+            });
+        }
+        byte_offset = byte_offset
+            .checked_add(segment.len())
+            .ok_or_else(|| error(None, None, "output byte accounting overflow"))?;
+        if segment.ends_with('\n') {
+            line_offset = line_offset
+                .checked_add(1)
+                .ok_or_else(|| error(None, None, "source line accounting overflow"))?;
+            runtime.output_line = runtime
+                .output_line
+                .checked_add(1)
+                .ok_or_else(|| error(None, None, "output line accounting overflow"))?;
+        }
+    }
     output.push_str(text);
     Ok(())
+}
+
+fn provenance_work_cost(
+    source_path: Option<&Path>,
+    template: Option<TemplateDefinitionOrigin<'_>>,
+    stack: &[MacroExpansionFrame],
+    top_level_source_invocation: Option<&SourceLineLocation>,
+) -> Result<usize, GenmfError> {
+    let mut cost = std::mem::size_of::<ExpandedLineProvenance>();
+    add_provenance_cost(&mut cost, source_path.map_or(0, path_storage_bytes))?;
+    if let Some(template) = template {
+        add_provenance_cost(&mut cost, path_storage_bytes(template.path))?;
+    }
+    if let Some(invocation) = top_level_source_invocation {
+        add_provenance_cost(&mut cost, std::mem::size_of::<SourceLineLocation>())?;
+        add_provenance_cost(&mut cost, path_storage_bytes(&invocation.path))?;
+    }
+    for frame in stack {
+        add_provenance_cost(&mut cost, std::mem::size_of::<MacroExpansionFrame>())?;
+        add_provenance_cost(&mut cost, frame.name.len())?;
+        add_provenance_cost(&mut cost, path_storage_bytes(&frame.template_path))?;
+        if let Some(invocation) = &frame.invocation {
+            add_provenance_cost(&mut cost, std::mem::size_of::<SourceLineLocation>())?;
+            add_provenance_cost(&mut cost, path_storage_bytes(&invocation.path))?;
+        }
+        for (name, value) in &frame.arguments {
+            add_provenance_cost(&mut cost, name.len())?;
+            if let Some(value) = value {
+                add_provenance_cost(&mut cost, value.len())?;
+            }
+        }
+        for (name, value) in &frame.resolved_arguments {
+            add_provenance_cost(&mut cost, name.len())?;
+            add_provenance_cost(&mut cost, value.len())?;
+        }
+    }
+    Ok(cost)
+}
+
+fn add_provenance_cost(total: &mut usize, amount: usize) -> Result<(), GenmfError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or_else(|| error(None, None, "GenMF provenance accounting overflow"))?;
+    Ok(())
+}
+
+fn path_storage_bytes(path: &Path) -> usize {
+    path.to_string_lossy().len()
 }
 
 fn append_temporary(output: &mut String, text: &str, limits: Limits) -> Result<(), GenmfError> {
@@ -1442,6 +1722,166 @@ mod tests {
         );
         assert!(!output.text.contains("%build_module "));
         assert!(!output.text.contains("%make_hidd_stubs "));
+    }
+
+    #[test]
+    fn metadata_only_origins_preserve_text_and_physical_line_identity_with_bounded_work() {
+        let tree = TestTree::new();
+        let template = format!(
+            "%define module payload=\n{}#MM- module : child\n%end\n",
+            "ordinary-recipe-text\n".repeat(100)
+        );
+        let template_path = tree.write("config/make.tmpl", template.as_bytes());
+        let source = format!(
+            "%module payload={}\n#MM- handwritten : child\n",
+            "x".repeat(1024)
+        );
+        let full = expand_text(
+            &source,
+            Path::new("input.mm"),
+            &template_path,
+            Limits::default(),
+        )
+        .unwrap();
+        let limits = Limits {
+            max_work_bytes: 50_000,
+            ..Limits::default()
+        };
+        assert!(expand_text(&source, Path::new("input.mm"), &template_path, limits).is_err());
+        let limited = expand_text(
+            &source,
+            Path::new("input.mm"),
+            &template_path,
+            Limits {
+                metadata_provenance_only: true,
+                ..limits
+            },
+        )
+        .unwrap();
+        assert_eq!(limited.text, full.text);
+        assert_eq!(limited.provenance.len(), 2);
+        assert_eq!(limited.provenance[0].output_line, 101);
+        assert_eq!(limited.provenance[1].output_line, 102);
+        assert_eq!(limited.provenance[0].macro_stack.len(), 1);
+        assert!(limited.provenance[1].macro_stack.is_empty());
+    }
+
+    #[test]
+    fn records_nested_macro_provenance_without_rewriting_emitted_text() {
+        let tree = TestTree::new();
+        let template = concat!(
+            "%define gen_archspecificrules target= subtarget=\n",
+            "#MM- hook-%(target)%(subtarget) : missing-%(target)%(subtarget)\n",
+            "%end\n",
+            "%define build_module target= subtarget=\n",
+            "%gen_archspecificrules target=%(target) subtarget=%(subtarget)\n",
+            "%end\n",
+            "%define common\n",
+            "#MM- common-extension : no-owner\n",
+            "%end\n",
+        );
+        let template_path = tree.write("config/make.tmpl", template.as_bytes());
+        let canonical_template = template_path.canonicalize().unwrap();
+        let generated = "#MM- hook--set-archincludes-variant : missing--set-archincludes-variant\n";
+        let source = concat!(
+            "%build_module target=-set-archincludes \\\n",
+            "    subtarget=-variant\n",
+            "%build_module target=-set-archincludes subtarget=-variant\n",
+            "#MM- hook--set-archincludes-variant : missing--set-archincludes-variant\n",
+        );
+        let source_path = Path::new("input.mm");
+        let output = expand_text(source, source_path, &template_path, Limits::default()).unwrap();
+        let expected = concat!(
+            "#MM- hook--set-archincludes-variant : missing--set-archincludes-variant\n",
+            "#MM- hook--set-archincludes-variant : missing--set-archincludes-variant\n",
+            "#MM- hook--set-archincludes-variant : missing--set-archincludes-variant\n",
+            "\n",
+            "#MM- common-extension : no-owner\n",
+        );
+        assert_eq!(output.text, expected);
+
+        let matching = output
+            .provenance
+            .iter()
+            .filter(|span| {
+                output
+                    .text
+                    .get(span.output_start_byte..span.output_end_byte)
+                    == Some(generated)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 3);
+        for (span, invocation_line) in matching.iter().take(2).zip([1, 3]) {
+            assert_eq!(
+                span.template_path.as_deref(),
+                Some(canonical_template.as_path())
+            );
+            assert_eq!(span.template_definition_line, Some(1));
+            assert_eq!(span.source_line, Some(2));
+            assert_eq!(span.macro_stack.len(), 2);
+            assert_eq!(span.macro_stack[0].name, "build_module");
+            assert_eq!(span.macro_stack[1].name, "gen_archspecificrules");
+            assert_eq!(span.macro_stack[1].definition_line, 1);
+            assert_eq!(span.macro_stack[1].template_path, canonical_template);
+            assert_eq!(
+                span.top_level_source_invocation
+                    .as_ref()
+                    .unwrap()
+                    .path
+                    .as_path(),
+                source_path
+            );
+            assert_eq!(
+                span.top_level_source_invocation.as_ref().unwrap().line,
+                invocation_line
+            );
+            assert_eq!(
+                span.macro_stack[0].resolved_arguments["target"],
+                "-set-archincludes"
+            );
+            assert_eq!(
+                span.macro_stack[1].resolved_arguments["target"],
+                "-set-archincludes"
+            );
+            assert_eq!(
+                span.macro_stack[1].resolved_arguments["subtarget"],
+                "-variant"
+            );
+        }
+        assert_eq!(matching[0].output_line, 1);
+        assert_eq!(matching[1].output_line, 2);
+
+        // Same emitted #MM bytes, but this line is a handwritten source claim,
+        // not output from a template hook.
+        let handwritten = matching[2];
+        assert_eq!(handwritten.output_line, 3);
+        assert_eq!(handwritten.source_path.as_deref(), Some(source_path));
+        assert_eq!(handwritten.source_line, Some(4));
+        assert!(handwritten.template_path.is_none());
+        assert!(handwritten.template_definition_line.is_none());
+        assert!(handwritten.macro_stack.is_empty());
+        assert!(handwritten.top_level_source_invocation.is_none());
+
+        let common = output
+            .provenance
+            .iter()
+            .find(|span| {
+                output
+                    .text
+                    .get(span.output_start_byte..span.output_end_byte)
+                    == Some("#MM- common-extension : no-owner\n")
+            })
+            .unwrap();
+        assert_eq!(
+            common.template_path.as_deref(),
+            Some(canonical_template.as_path())
+        );
+        assert_eq!(common.template_definition_line, Some(7));
+        assert_eq!(common.source_line, Some(8));
+        assert_eq!(common.macro_stack.len(), 1);
+        assert_eq!(common.macro_stack[0].name, "common");
+        assert!(common.macro_stack[0].invocation.is_none());
+        assert!(common.top_level_source_invocation.is_none());
     }
 
     #[test]
