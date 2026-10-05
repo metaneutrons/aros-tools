@@ -153,6 +153,9 @@ hash-bound recipes, but cannot remove edges. Missing endpoints fail with the
 recipe and `fix upstream`; supported siblings and unsupported active providers
 retain their normal selection checks. A diagnostic-only graph audit retains
 these failures and sibling evidence without publishing a graph or inventory.
+Rejected rules are attributed only through an exact source consumer chain;
+unmodeled Make includes and unknown conditional consumers retain unowned
+capability failures. These are translation limits, not source-defect proofs.
 
 Native owner projection and parsing use the same effective inputs:
 `mmakefile.src` supersedes its generated `mmakefile`, while direct fragments

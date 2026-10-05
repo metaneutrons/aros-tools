@@ -127,6 +127,29 @@ fn source_rejection_diagnostics(
     }
 }
 
+fn rejected_rule_owner_proofs(
+    owner: &str,
+    configuration_is_complete: bool,
+    snapshot: (&str, Option<&[crate::make_vars::ConditionalTruth]>),
+    scope: &crate::make_vars::VarScope,
+    dirs: &crate::dirs::DirVars,
+    source_location: (&Path, &Path),
+    line: usize,
+) -> Option<Vec<crate::source_rule_ownership::SourceRuleOwnership>> {
+    if !configuration_is_complete || exact_mmake_target(owner).is_some() {
+        return None;
+    }
+    crate::source_rule_ownership::attribute_rejected_rule_owners(
+        snapshot.0,
+        scope,
+        dirs,
+        source_location.0,
+        source_location.1,
+        snapshot.1,
+        line,
+    )
+}
+
 #[derive(Default)]
 struct ReconstructedLiteralSource {
     text: String,
@@ -1145,20 +1168,18 @@ pub(super) fn parse_mmakefile_impl(
     for rejection in literal_object_rejections {
         // Diagnostic ownership is not producer admission. Preserve unknown
         // identity unless the same complete source snapshot proves all owners
-        // and excludes unknown/dynamic alternative consumers.
-        let ownership = (rejection.owner == "<unknown>" && literal_configuration.issues.is_empty())
-            .then(|| {
-                crate::source_rule_ownership::attribute_rejected_rule_owners(
-                    &literal_joined,
-                    &literal_scope,
-                    dirs,
-                    root,
-                    &rel_dir,
-                    Some(&literal_states),
-                    rejection.line,
-                )
-            })
-            .flatten();
+        // and excludes unknown/dynamic alternative consumers. A resolved
+        // filesystem path is still not a MetaMake owner; try the same bounded
+        // source-consumer proof for every non-canonical owner spelling.
+        let ownership = rejected_rule_owner_proofs(
+            &rejection.owner,
+            literal_configuration.issues.is_empty(),
+            (&literal_joined, Some(&literal_states)),
+            &literal_scope,
+            dirs,
+            (root, &rel_dir),
+            rejection.line,
+        );
         let (diagnostic_path, diagnostic_line) = rejection_source_location(
             &relative_path,
             literal_object_anchors.as_deref(),
@@ -3261,6 +3282,128 @@ mod literal_object_source_span_tests {
             assert!(diagnostic.context.is_none(), "unsafe selector {owner}");
         }
     }
+
+    #[test]
+    fn path_valued_rejected_rule_owner_uses_exact_source_chain_proof() {
+        let tree = tempfile::tempdir().unwrap();
+        let source = Path::new("arch/example/mmakefile.src");
+        let snapshot = "build/objects/unit.o: src/unit.c\nbuild/tools/helper: build/objects/unit.o\n#MM canonical-owner : build/tools/helper\n";
+        let (scope, line_states) = crate::make_vars::collect_vars_impl(
+            snapshot,
+            Some(&crate::parser::TargetContext::default()),
+        );
+        let dirs = crate::dirs::DirVars::load(tree.path());
+        let proofs = super::rejected_rule_owner_proofs(
+            "build/tools/helper",
+            true,
+            (snapshot, Some(&line_states)),
+            &scope,
+            &dirs,
+            (tree.path(), Path::new("arch/example")),
+            2,
+        )
+        .expect("path-valued Make target must be attributed through its exact #MM chain");
+
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(proofs[0].owner, "canonical-owner");
+        assert_eq!(
+            proofs[0].chain,
+            vec![
+                "build/tools/helper".to_owned(),
+                "canonical-owner".to_owned()
+            ]
+        );
+        let diagnostics = super::source_rejection_diagnostics(
+            source,
+            Some(2),
+            Some("build/tools/helper"),
+            "rejected producer".into(),
+            Some(proofs),
+        );
+        assert_eq!(
+            diagnostics[0]
+                .context
+                .as_ref()
+                .and_then(|context| context.target.as_deref()),
+            Some("canonical-owner")
+        );
+        assert!(diagnostics[0]
+            .message
+            .contains("exact source consumer chain: build/tools/helper -> canonical-owner"));
+
+        assert!(super::rejected_rule_owner_proofs(
+            "canonical-owner",
+            true,
+            (snapshot, Some(&line_states)),
+            &scope,
+            &dirs,
+            (tree.path(), Path::new("arch/example")),
+            2,
+        )
+        .is_none());
+        let canonical = super::source_rejection_diagnostics(
+            source,
+            Some(2),
+            Some("canonical-owner"),
+            "existing diagnostic".into(),
+            None,
+        );
+        assert_eq!(
+            canonical[0]
+                .context
+                .as_ref()
+                .and_then(|context| context.target.as_deref()),
+            Some("canonical-owner")
+        );
+    }
+
+    #[test]
+    fn rejected_rule_owner_proof_keeps_incomplete_and_unknown_snapshots_unowned() {
+        let tree = tempfile::tempdir().unwrap();
+        let snapshot = "build/objects/unit.o: src/unit.c\nbuild/tools/helper: build/objects/unit.o\n#MM canonical-owner : build/tools/helper\nifeq ($(UNKNOWN),yes)\nconditional-consumer: build/tools/helper\nendif\n";
+        let (scope, line_states) = crate::make_vars::collect_vars_impl(
+            snapshot,
+            Some(&crate::parser::TargetContext::default()),
+        );
+        let dirs = crate::dirs::DirVars::load(tree.path());
+        for configuration_is_complete in [false, true] {
+            assert!(super::rejected_rule_owner_proofs(
+                "build/tools/helper",
+                configuration_is_complete,
+                (snapshot, Some(&line_states)),
+                &scope,
+                &dirs,
+                (tree.path(), Path::new("arch/example")),
+                2,
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn rejected_rule_owner_proof_cannot_ignore_optional_generated_dependency_includes() {
+        let tree = tempfile::tempdir().unwrap();
+        let snapshot = "build/objects/unit.o: src/unit.c\nbuild/tools/helper: build/objects/unit.o\n#MM canonical-owner : build/tools/helper\n-include build/objects/unit.d\n";
+        let (scope, line_states) = crate::make_vars::collect_vars_impl(
+            snapshot,
+            Some(&crate::parser::TargetContext::default()),
+        );
+        let dirs = crate::dirs::DirVars::load(tree.path());
+        assert!(
+            super::rejected_rule_owner_proofs(
+                "build/tools/helper",
+                true,
+                (snapshot, Some(&line_states)),
+                &scope,
+                &dirs,
+                (tree.path(), Path::new("arch/example")),
+                2,
+            )
+            .is_none(),
+            "an optional .d include still has unmodeled future Make semantics"
+        );
+    }
+
     use super::{join_continuations, literal_object_source_anchors};
     use crate::local_make_includes::{inline_native_make_configuration, LocalMakeIncludeLimits};
     use std::collections::BTreeMap;
