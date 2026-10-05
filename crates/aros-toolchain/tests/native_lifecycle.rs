@@ -75,7 +75,7 @@ printf '%s\n' "$@" > configure.args
 printf '%s\n' "$CMAKE_BUILD_PARALLEL_LEVEL" > configure-cmake-jobs
 printf '%s\n' "$CC" > configure-cc
 printf '%s\n' "$CXX" > configure-cxx
-printf 'PREFIX := %s\nCACHE := %s\nCFLAGS := -march=rva22u64\nCXXFLAGS := -mabi=lp64d\ncrosstools-release:\n\t@test "$${CFLAGS+set}" != set\n\t@test "$${CXXFLAGS+set}" != set\n\t@$(FETCH) -a gcc-16.2.0 -s tar.xz -l $(CACHE)\n\t@$(FETCH) -a binutils-2.47 -s tar.bz2 -l $(CACHE)\n\t@mkdir -p $(PREFIX)/riscv64-aros/bin $(PREFIX)/bin $(PREFIX)/lib/cmake/llvm\n\t@for tool in gcc g++ as ld ar ranlib strip nm objcopy; do printf root-tool > $(PREFIX)/riscv64-aros-$$tool; chmod 755 $(PREFIX)/riscv64-aros-$$tool; done\n\t@for tool in ld strip; do printf tuple-tool > $(PREFIX)/riscv64-aros/bin/$$tool; chmod 755 $(PREFIX)/riscv64-aros/bin/$$tool; done\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros-collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros-collect-aros\n\t@printf producer-only > $(PREFIX)/bin/llvm-config\n\t@printf retained-by-gnu > $(PREFIX)/lib/cmake/llvm/producer.marker\n' "$prefix" "$cache" > Makefile
+printf 'PREFIX := %s\nCACHE := %s\nCFLAGS := -march=rva22u64\nCXXFLAGS := -mabi=lp64d\ncrosstools-release:\n\t@test "$${CFLAGS+set}" != set\n\t@test "$${CXXFLAGS+set}" != set\n\t@$(FETCH) -a gcc-16.2.0 -s tar.xz -l $(CACHE)\n\t@$(FETCH) -a binutils-2.47 -s tar.bz2 -l $(CACHE)\n\t@mkdir -p $(PREFIX)/riscv64-aros/bin $(PREFIX)/bin $(PREFIX)/lib/cmake/llvm\n\t@for tool in gcc g++ as ld ar ranlib strip nm objcopy objdump; do printf root-tool > $(PREFIX)/riscv64-aros-$$tool; chmod 755 $(PREFIX)/riscv64-aros-$$tool; done\n\t@for tool in ld strip; do printf tuple-tool > $(PREFIX)/riscv64-aros/bin/$$tool; chmod 755 $(PREFIX)/riscv64-aros/bin/$$tool; done\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros/bin/collect-aros\n\t@printf legacy-collector > $(PREFIX)/riscv64-aros-collect-aros\n\t@chmod 755 $(PREFIX)/riscv64-aros-collect-aros\n\t@printf producer-only > $(PREFIX)/bin/llvm-config\n\t@printf retained-by-gnu > $(PREFIX)/lib/cmake/llvm/producer.marker\n' "$prefix" "$cache" > Makefile
 "#;
 
 const GNU_FIXTURE_BRIDGE: &str = r#"#!/bin/bash
@@ -129,6 +129,18 @@ impl Fixture {
 
     fn new_inner_for_family(cold_vendor_generation: bool, gnu: bool) -> Self {
         let temporary = tempfile::tempdir().unwrap();
+        Self::new_with_temporary_root(cold_vendor_generation, gnu, temporary)
+    }
+
+    fn new_short() -> Self {
+        Self::new_with_temporary_root(false, false, tempfile::tempdir_in("/tmp").unwrap())
+    }
+
+    fn new_with_temporary_root(
+        cold_vendor_generation: bool,
+        gnu: bool,
+        temporary: tempfile::TempDir,
+    ) -> Self {
         let root = temporary
             .path()
             .canonicalize()
@@ -430,6 +442,8 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
             work_dir: self.root.join("work"),
             output_dir: self.root.join("output"),
             cache_dir: self.root.join("cache"),
+            compiler_cache: aros_cache::CompilerBackendChoice::Off,
+            compiler_cache_dir: None,
             jobs: 1,
             timeout_seconds: 120,
             release_id: "native-fixture".into(),
@@ -491,6 +505,181 @@ exec /bin/bash "$AROS_TOOLCHAIN_FETCH_UPSTREAM" "$@"
         recipe.as_object_mut().unwrap().remove("recipe_sha256");
         recipe["recipe_sha256"] = json!(sha256_bytes(&canonical::bytes(&recipe).unwrap()));
         fs::write(&self.recipe, serde_json::to_vec(&recipe).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn native_compiler_cache_refuses_unprepared_root_before_reservation() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request();
+    request.compiler_cache = aros_cache::CompilerBackendChoice::Ccache;
+    request.compiler_cache_dir = Some(fixture.root.join("unprepared-compiler-cache"));
+    let error = executor::run(&request, &CancellationToken::default()).unwrap_err();
+    assert!(error.to_string().contains("compiler-cache selection"));
+    assert!(!request.work_dir.exists());
+    assert!(!request.output_dir.exists());
+}
+
+#[test]
+fn native_compiler_cache_off_refuses_a_namespace_before_reservation() {
+    let fixture = Fixture::new();
+    let mut request = fixture.request();
+    request.compiler_cache_dir = Some(fixture.root.join("compiler-cache"));
+    assert!(executor::run(&request, &CancellationToken::default()).is_err());
+    assert!(!request.work_dir.exists());
+    assert!(!request.output_dir.exists());
+}
+
+#[test]
+fn native_compiler_cache_is_bound_to_configure_and_compiler_receipts() {
+    real_native_compiler_cache(aros_cache::CompilerBackend::Ccache);
+}
+
+#[test]
+fn native_compiler_cache_sccache_has_real_hits_and_safe_resume() {
+    real_native_compiler_cache(aros_cache::CompilerBackend::Sccache);
+}
+
+fn real_native_compiler_cache(backend: aros_cache::CompilerBackend) {
+    if which::which(backend.program()).is_err() {
+        eprintln!(
+            "real {} integration requires its executable on PATH",
+            backend.program()
+        );
+        return;
+    }
+    let fixture = Fixture::new_short();
+    // Exercise a real host compilation through the source-owned configure
+    // process, not only an argv recorder. The remaining producer is synthetic.
+    let configure = LLVM_FIXTURE_CONFIGURE.replace(
+        "printf '%s\\n' \"$@\" > configure.args",
+        "test -x \"$CC\"\ntest -x \"$CXX\"\nprintf 'int cache_probe(void) { return 42; }\\n' > probe.c\n\"$CC\" -c probe.c -o probe.o\n\"$CC\" -c probe.c -o probe.o\nprintf '%s\\n' \"$CC\" > configure-cc\nprintf '%s\\n' \"$@\" > configure.args",
+    );
+    // Source-owned build rules retain the selected C++ wrapper and invoke it
+    // in the compiler phase, after the configure process has exited.
+    fixture.replace_source_configure(&format!("{configure}\ncommand cp probe.c probe.cpp\nprintf '\\t@%s -c probe.cpp -o probe-cxx.o\\n\\t@%s -c probe.cpp -o probe-cxx.o\\n' \"$CXX\" \"$CXX\" >> Makefile\n"));
+    // macOS's default temporary path is too long for the managed sccache
+    // Unix socket. This explicit short, private root also models --dir.
+    let cache_owner = tempfile::tempdir_in("/tmp").unwrap();
+    let cache = cache_owner.path().join("cache");
+    aros_cache::prepare_managed_compiler_cache(backend, cache.clone()).unwrap();
+    let managed = aros_cache::load_managed_compiler_cache(backend, cache.clone()).unwrap();
+    let _stop_server = StopTestSccache {
+        executable: (backend == aros_cache::CompilerBackend::Sccache)
+            .then(|| managed.executable().unwrap()),
+        environment: aros_cache::compiler_cache_environment(&managed).unwrap(),
+    };
+    let mut request = fixture.request();
+    request.compiler_cache = match backend {
+        aros_cache::CompilerBackend::Ccache => aros_cache::CompilerBackendChoice::Ccache,
+        aros_cache::CompilerBackend::Sccache => aros_cache::CompilerBackendChoice::Sccache,
+    };
+    request.compiler_cache_dir = Some(cache.clone());
+    executor::run(&request, &CancellationToken::default()).unwrap_or_else(|error| {
+        let logs = ["configure", "compiler"]
+            .into_iter()
+            .map(|phase| {
+                let path = fixture
+                    .root
+                    .join(format!("work/native-lifecycle/logs/{phase}.stderr.log"));
+                format!("{phase}: {}", fs::read_to_string(path).unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!("{error}\n{logs}");
+    });
+    let build = fixture.root.join("work/native-lifecycle/build");
+    let cc = fs::read_to_string(build.join("configure-cc")).unwrap();
+    assert!(cc.contains("compiler-launchers/cc"));
+    assert!(build.join("probe.o").is_file());
+    assert!(build.join("probe-cxx.o").is_file());
+    let root = aros_cache::load_managed_compiler_cache(backend, cache).unwrap();
+    let mut stats = Command::new(backend.program());
+    aros_cache::compiler_cache_environment(&root)
+        .unwrap()
+        .apply_to(&mut stats);
+    let stats = match backend {
+        aros_cache::CompilerBackend::Ccache => stats.arg("--print-stats"),
+        aros_cache::CompilerBackend::Sccache => stats.args(["--show-stats", "--stats-format=json"]),
+    }
+    .output()
+    .unwrap();
+    assert!(stats.status.success());
+    let stats = String::from_utf8(stats.stdout).unwrap();
+    if backend == aros_cache::CompilerBackend::Ccache {
+        assert!(
+            stats.lines().any(|line| line
+                .split_whitespace()
+                .next()
+                .is_some_and(|name| matches!(name, "direct_cache_hit" | "preprocessed_cache_hit"))
+                && line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some_and(|value| value > 0)),
+            "{stats}"
+        );
+    } else {
+        let stats: serde_json::Value = serde_json::from_str(&stats).unwrap();
+        assert!(
+            stats["stats"]["cache_hits"]["counts"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|value| value.as_u64().is_some_and(|hits| hits > 0)),
+            "{stats}"
+        );
+        let mut stop = Command::new(backend.program());
+        aros_cache::compiler_cache_environment(&root)
+            .unwrap()
+            .apply_to(&mut stop);
+        assert!(stop.arg("--stop-server").output().unwrap().status.success());
+    }
+    let lifecycle = fixture.root.join("work/native-lifecycle");
+    let staging = fixture.root.join("output/.aros-native-toolchain-stage");
+    fs::rename(fixture.root.join("output/toolchain"), &staging).unwrap();
+    for phase in ["collector", "publish"] {
+        fs::remove_file(lifecycle.join(format!("receipts/{phase}.json"))).unwrap();
+    }
+    for name in ["aros-collect", "collect-aros", "collect-aros32"] {
+        fs::remove_file(staging.join("bin").join(name)).unwrap();
+    }
+    fs::write(staging.join("bin/llvm-config"), b"producer-only").unwrap();
+    request.resume_from = Some(ResumePhase::Compiler);
+    let mut changed = request.clone();
+    changed.compiler_cache = aros_cache::CompilerBackendChoice::Off;
+    changed.compiler_cache_dir = None;
+    assert!(executor::run(&changed, &CancellationToken::default())
+        .unwrap_err()
+        .to_string()
+        .contains("preflight receipt"));
+    let launcher = lifecycle.join("compiler-launchers/cc");
+    let original = fs::read(&launcher).unwrap();
+    fs::write(&launcher, "#!/bin/sh\nexit 1\n").unwrap();
+    assert!(executor::run(&request, &CancellationToken::default())
+        .unwrap_err()
+        .to_string()
+        .contains("launcher changed"));
+    fs::write(&launcher, original).unwrap();
+    executor::run(&request, &CancellationToken::default()).unwrap();
+    assert!(fixture
+        .root
+        .join("output/toolchain/bin/aros-collect")
+        .is_file());
+}
+
+struct StopTestSccache {
+    executable: Option<PathBuf>,
+    environment: aros_cache::CompilerCacheEnvironment,
+}
+
+impl Drop for StopTestSccache {
+    fn drop(&mut self) {
+        if let Some(executable) = &self.executable {
+            let mut command = Command::new(executable);
+            self.environment.apply_to(&mut command);
+            let _ = command.arg("--stop-server").output();
+        }
     }
 }
 
@@ -772,9 +961,11 @@ fn native_gnu_lifecycle_builds_locked_rv64_tools_and_binds_collector_layout() {
             ("collector", "riscv64-aros/bin/collect-aros"),
             ("nm", "riscv64-aros-nm"),
             ("objcopy", "riscv64-aros-objcopy"),
+            ("objdump", "riscv64-aros-objdump"),
         ]
     );
-    assert_eq!(layout.resolve_tools(&prefix).unwrap().len(), 10);
+    assert!(layout.has_objdump_role());
+    assert_eq!(layout.resolve_tools(&prefix).unwrap().len(), 11);
 
     let usage = fs::read_to_string(
         fixture

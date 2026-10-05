@@ -1,9 +1,9 @@
 //! Private validated input bridge for upstream MetaMake `%fetch` calls.
 //!
 //! This is deliberately a library boundary, not a second `fetch` executable.
-//! A later native lifecycle invokes it from the existing frontend before
-//! handing the unchanged, source-owned arguments to the selected upstream
-//! script. The bridge has no transport capability: a request resolves only to
+//! The native lifecycle invokes it from the existing frontend before
+//! translating source-owned arguments into the existing Rust fetch contract.
+//! The bridge has no transport capability: a request resolves only to
 //! one exact, already-verified source-lock archive in the explicit cache.
 
 use std::ffi::{OsStr, OsString};
@@ -43,7 +43,7 @@ impl MetaMakeFetchInvocation {
     /// Parse only the source-selection fields relevant to the offline bridge.
     ///
     /// Unknown arguments remain opaque and are preserved for the selected
-    /// upstream script, except transport-policy overrides: offline fetching
+    /// native fetch frontend, except transport-policy overrides: offline fetching
     /// and checksum validation are mandatory at this boundary. Shell
     /// metacharacters are not interpreted here or by this library.
     ///
@@ -57,7 +57,7 @@ impl MetaMakeFetchInvocation {
 
     /// Parse the selected family's source request without admitting an
     /// upstream format fallback. GNU lists are narrowed by [`Self::resolve`]
-    /// to one exact lock-selected archive before any source helper runs.
+    /// to one exact lock-selected archive before any extraction runs.
     ///
     /// # Errors
     /// Returns AX0302 for unsafe, repeated or unbounded source selectors.
@@ -142,7 +142,7 @@ impl MetaMakeFetchInvocation {
             ));
         }
         // Legacy/LLVM callers retain the single-format contract. GNU source
-        // rules declare format lists, but no list reaches the upstream helper:
+        // rules declare format lists, but no list reaches the Rust fetcher:
         // resolve proves a unique lock match and rewrites -s to that suffix.
         if candidates.len() > 16 || (!allow_gnu_list && candidates.len() != 1) {
             return Err(ContractError::source_use(
@@ -354,7 +354,7 @@ fn ensure_gnu_cache_namespace(
     Ok(())
 }
 
-/// One exact source selection authorized for the unchanged upstream script.
+/// One exact source selection authorized for the controlled native Rust fetcher.
 #[derive(Clone)]
 pub struct ResolvedMetaMakeSource {
     arguments: Vec<OsString>,

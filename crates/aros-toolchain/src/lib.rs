@@ -20,8 +20,12 @@ mod error;
 pub mod executor;
 #[cfg(unix)]
 mod filesystem;
+#[cfg(unix)]
+pub mod idf_bootloader;
 mod inspection;
 pub mod metamake_fetch;
+#[cfg(unix)]
+mod native_compiler_cache;
 pub mod native_declaration;
 mod native_family;
 #[cfg(unix)]
@@ -29,6 +33,8 @@ mod native_gnu_collector;
 #[cfg(unix)]
 mod native_lifecycle;
 mod native_make;
+#[cfg(unix)]
+pub mod native_media_preparation;
 pub mod package;
 #[cfg(unix)]
 pub mod package_extract;
@@ -55,6 +61,8 @@ pub mod source_cache;
 pub mod source_cache_request;
 pub mod source_lock;
 pub mod source_usage;
+#[cfg(unix)]
+pub mod wheel_environment;
 pub mod workspace;
 
 pub use error::ContractError;

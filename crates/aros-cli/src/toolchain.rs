@@ -6,6 +6,7 @@ use crate::artifact::{
 };
 use crate::host_compiler::host_platform_key;
 use crate::toolchain_management::ResultFormat;
+use aros_common::local_toolchain::{LocalToolchainDescriptor, LOCAL_TOOLCHAIN_DESCRIPTOR_FILE};
 use aros_common::target::TargetProfile;
 use aros_common::toolchain_layout::{ToolchainToolLayout, TOOLCHAIN_TOOLS_FILE};
 use aros_common::toolchain_manifest::{
@@ -61,6 +62,8 @@ pub enum ToolchainSource {
     LocalManifest,
     /// Explicit legacy AROS-built prefix accepted by its markers.
     LegacyLocal,
+    /// Explicit local GNU compiler-only prefix with byte-verified metadata.
+    LocalCompilerOnly,
 }
 
 /// Verified toolchain selection used by one build.
@@ -188,13 +191,7 @@ pub fn target_triple_for_profile(profile: &TargetProfile) -> String {
         .as_ref()
         .is_some_and(|selectors| selectors.toolchain == "gnu")
     {
-        let cpu = if profile.arch == aros_common::Architecture::Riscv32 {
-            // AROS's GNU CPU spelling is riscv, while the public architecture
-            // selector names its width explicitly as riscv32.
-            "riscv".to_owned()
-        } else {
-            profile.arch.to_string()
-        };
+        let cpu = profile.arch.source_cpu();
         format!("{cpu}-aros")
     } else {
         format!("{}-unknown-aros", profile.arch)
@@ -221,7 +218,7 @@ pub fn validate_artifact_profile(
     )
 }
 
-fn validate_profile_compiler(
+pub fn validate_profile_compiler(
     profile: &TargetProfile,
     compiler: &ArosCompilerIdentity,
     triple: &str,
@@ -281,8 +278,9 @@ pub fn select_locked_artifact<'a>(
     preset: &str,
 ) -> Result<&'a ArosToolchainArtifact> {
     let profile = target_profile(repo_root, preset)?;
-    let artifact = lock.resolve(host, preset).ok_or_else(|| {
-        miette::miette!("no locked AROS toolchain for host '{host}' and preset '{preset}'")
+    let compiler_profile = profile.toolchain_profile();
+    let artifact = lock.resolve(host, compiler_profile).ok_or_else(|| {
+        miette::miette!("no locked AROS toolchain for host '{host}' and compiler profile '{compiler_profile}' selected by preset '{preset}'")
     })?;
     validate_artifact_profile(&profile, artifact)?;
     if !artifact.enabled {
@@ -626,6 +624,75 @@ enum ListVerification {
 }
 
 fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<ResolvedToolchain> {
+    // Reject a linked root before canonicalization. In the compiler-only case,
+    // `LocalToolchainDescriptor::load` additionally validates every inherited
+    // ancestor before it reads the descriptor.
+    let original_metadata = fs::symlink_metadata(root)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("local toolchain '{}' does not exist", root.display()))?;
+    if !original_metadata.is_dir() || original_metadata.file_type().is_symlink() {
+        bail!(
+            "local toolchain root '{}' is not a real directory",
+            root.display()
+        );
+    }
+    let local_descriptor_path = root.join(LOCAL_TOOLCHAIN_DESCRIPTOR_FILE);
+    let has_local_descriptor = path_entry_present(&local_descriptor_path)?;
+    if has_local_descriptor {
+        let descriptor_metadata = fs::symlink_metadata(&local_descriptor_path)
+            .into_diagnostic()
+            .wrap_err("cannot inspect local toolchain descriptor")?;
+        if !descriptor_metadata.is_file() || descriptor_metadata.file_type().is_symlink() {
+            bail!("local toolchain descriptor is not a regular file");
+        }
+        let descriptor = LocalToolchainDescriptor::load(root)
+            .map_err(|error| miette::miette!("invalid local compiler-only descriptor: {error}"))?;
+        let layout = descriptor.verify(root).map_err(|error| {
+            miette::miette!("local compiler-only toolchain verification failed: {error}")
+        })?;
+        let profile = target_profile(repo_root, preset)?;
+        let host = host_platform_key()?;
+        let expected_profile = profile.toolchain_profile();
+        let expected_triple = target_triple_for_profile(&profile);
+        if descriptor.host != host
+            || descriptor.target_profile != expected_profile
+            || descriptor.target_triple != expected_triple
+        {
+            bail!(
+                "local compiler descriptor is for {}/{}/{}; expected {}/{}/{}",
+                descriptor.host,
+                descriptor.target_profile,
+                descriptor.target_triple,
+                host,
+                expected_profile,
+                expected_triple
+            );
+        }
+        validate_profile_compiler(&profile, &descriptor.compiler, &descriptor.target_triple)?;
+        let canonical_root = root
+            .canonicalize()
+            .into_diagnostic()
+            .wrap_err("cannot canonicalize verified local compiler-only root")?;
+        let paths = ToolchainPaths {
+            root: canonical_root.clone(),
+            executable_roles: layout
+                .resolve_tools(&canonical_root)
+                .map_err(|error| miette::miette!("cannot resolve local GNU tool roles: {error}"))?,
+        };
+        verify_gnu_compiler_drivers(&paths, &descriptor.compiler, &descriptor.target_triple)?;
+        smoke_toolchain_tools_with_timeout(
+            &paths,
+            collector_contract_for_profile(&descriptor.target_profile),
+            TOOLCHAIN_PROBE_TIMEOUT,
+        )?;
+        return Ok(ResolvedToolchain {
+            paths,
+            target_triple: descriptor.target_triple,
+            release_id: None,
+            source: ToolchainSource::LocalCompilerOnly,
+        });
+    }
+
     let root = root
         .canonicalize()
         .into_diagnostic()
@@ -633,11 +700,11 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
     let profile = target_profile(repo_root, preset)?;
     let expected_triple = target_triple_for_profile(&profile);
     let manifest_path = root.join(AROS_TOOLCHAIN_MANIFEST_FILE);
-    if manifest_path.exists() {
+    if path_entry_present(&manifest_path)? {
         let manifest = ArosToolchainManifest::load(&root).into_diagnostic()?;
         let host = host_platform_key()?;
         if manifest.host != host
-            || manifest.target_profile != preset
+            || manifest.target_profile != profile.toolchain_profile()
             || manifest.target_triple != expected_triple
         {
             bail!(
@@ -646,7 +713,7 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
                 manifest.target_profile,
                 manifest.target_triple,
                 host,
-                preset,
+                profile.toolchain_profile(),
                 expected_triple
             );
         }
@@ -691,6 +758,17 @@ fn resolve_local(repo_root: &Path, root: &Path, preset: &str) -> Result<Resolved
         release_id: None,
         source: ToolchainSource::LegacyLocal,
     })
+}
+
+fn path_entry_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(miette::miette!(
+            "cannot inspect local toolchain path '{}': {error}",
+            path.display()
+        )),
+    }
 }
 
 fn verify_locked_install(
@@ -839,31 +917,10 @@ fn verified_manifest_tools(
     artifact: Option<&ArosToolchainArtifact>,
 ) -> Result<ToolchainPaths> {
     let paths = manifest_tool_paths(root, manifest, artifact)?;
-    if let ArosCompilerIdentity::Gnu { gcc_version, .. } = manifest
+    let compiler = manifest
         .compiler_identity()
-        .map_err(|error| miette::miette!("{error}"))?
-    {
-        for role in ["c", "cxx"] {
-            let (_, path) = paths
-                .executable_roles
-                .iter()
-                .find(|(name, _)| *name == role)
-                .ok_or_else(|| miette::miette!("GNU layout omits required driver role '{role}'"))?;
-            for (argument, expected) in [
-                ("-dumpmachine", manifest.target_triple.as_str()),
-                ("-dumpfullversion", gcc_version.as_str()),
-            ] {
-                let observed = crate::observability::capture_stdout_with_timeout(
-                    Command::new(path).arg(argument),
-                    &format!("GNU {role} {argument} at '{}'", path.display()),
-                    TOOLCHAIN_PROBE_TIMEOUT,
-                )?;
-                if observed != expected {
-                    bail!("GNU {role} {argument} returned '{observed}', expected '{expected}'");
-                }
-            }
-        }
-    }
+        .map_err(|error| miette::miette!("{error}"))?;
+    verify_gnu_compiler_drivers(&paths, &compiler, &manifest.target_triple)?;
     smoke_toolchain_tools_with_timeout(
         &paths,
         CollectorContract {
@@ -872,6 +929,37 @@ fn verified_manifest_tools(
         TOOLCHAIN_PROBE_TIMEOUT,
     )?;
     Ok(paths)
+}
+
+fn verify_gnu_compiler_drivers(
+    paths: &ToolchainPaths,
+    compiler: &ArosCompilerIdentity,
+    target_triple: &str,
+) -> Result<()> {
+    let ArosCompilerIdentity::Gnu { gcc_version, .. } = compiler else {
+        return Ok(());
+    };
+    for role in ["c", "cxx"] {
+        let (_, path) = paths
+            .executable_roles
+            .iter()
+            .find(|(name, _)| *name == role)
+            .ok_or_else(|| miette::miette!("GNU layout omits required driver role '{role}'"))?;
+        for (argument, expected) in [
+            ("-dumpmachine", target_triple),
+            ("-dumpfullversion", gcc_version.as_str()),
+        ] {
+            let observed = crate::observability::capture_stdout_with_timeout(
+                Command::new(path).arg(argument),
+                &format!("GNU {role} {argument} at '{}'", path.display()),
+                TOOLCHAIN_PROBE_TIMEOUT,
+            )?;
+            if observed != expected {
+                bail!("GNU {role} {argument} returned '{observed}', expected '{expected}'");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1023,6 +1111,7 @@ mod tests {
     use aros_common::toolchain_manifest::{
         ArosToolchainManifestEntry, AROS_TOOLCHAIN_MANIFEST_SCHEMA,
     };
+    use serde_json::json;
     use std::ffi::{OsStr, OsString};
 
     static ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1117,6 +1206,83 @@ mod tests {
         get_toolchain_paths(root)
     }
 
+    #[cfg(unix)]
+    fn write_local_compiler_prefix(root: &Path, target_profile: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let triple = "riscv-aros";
+        let compiler: ArosCompilerIdentity = serde_json::from_value(json!({
+            "family": "gnu", "gcc_version": "16.2.0", "binutils_version": "2.47",
+            "target": {
+                "schema": "aros-riscv-target-v1",
+                "isa": "rv32imafc_zicsr_zifencei_zaamo_zalrsc",
+                "abi": "ilp32f", "code_model": "medany",
+                "architecture": "rv32i2p1_m2p0_a2p1_f2p2_c2p0_zicsr2p0_zifencei2p0_zaamo1p0_zalrsc1p0",
+                "unaligned_access": false, "atomic_abi": 0, "x3_reg_usage": 0
+            }
+        }))
+        .unwrap();
+        let tools = json!({
+            "c": "bin/gcc", "cxx": "bin/g++", "assembler": "bin/as",
+            "linker": "bin/ld", "archive": "bin/ar", "ranlib": "bin/ranlib",
+            "strip": "bin/strip", "collector": "bin/collect-aros", "nm": "bin/nm",
+            "objcopy": "bin/objcopy", "objdump": "bin/objdump"
+        });
+        let layout = json!({
+            "schema": "aros-toolchain-tools-v3", "compiler": compiler,
+            "target_triple": triple, "tools": tools
+        });
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' fixture;;\n-dumpmachine) printf '%s\\n' '{triple}';;\n-dumpfullversion) printf '%s\\n' '16.2.0';;\n*) exit 0;;\nesac\n"
+        );
+        for path in [
+            "bin/gcc",
+            "bin/g++",
+            "bin/as",
+            "bin/ld",
+            "bin/ar",
+            "bin/ranlib",
+            "bin/strip",
+            "bin/collect-aros",
+            "bin/nm",
+            "bin/objcopy",
+            "bin/objdump",
+        ] {
+            fs::write(root.join(path), &script).unwrap();
+            fs::set_permissions(root.join(path), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(
+            root.join(TOOLCHAIN_TOOLS_FILE),
+            serde_json::to_vec(&layout).unwrap(),
+        )
+        .unwrap();
+        let descriptor = LocalToolchainDescriptor::capture(
+            root,
+            host_platform_key().unwrap(),
+            target_profile,
+            triple,
+            serde_json::from_value(layout["compiler"].clone()).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(LOCAL_TOOLCHAIN_DESCRIPTOR_FILE),
+            serde_json::to_vec(&descriptor).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn local_gnu_checkout() -> tempfile::TempDir {
+        let checkout = tempfile::tempdir().unwrap();
+        fs::write(
+            checkout.path().join("aros-targets.toml"),
+            "[[targets]]\nname='fixture-target'\narch='riscv32'\nplatform='fixture'\nbsp='fixture'\nfloat_abi='ilp32f'\n[targets.transpiler]\nfamily=''\nvariant=''\ntoolchain='gnu'\ncpu32=''\nuse_mmu=false\n",
+        )
+        .unwrap();
+        checkout
+    }
+
     #[test]
     fn store_path_is_content_addressed() {
         let lock = ArosToolchainLock {
@@ -1159,6 +1325,79 @@ mod tests {
             explicit_local_override(Some(Path::new("/opt/aros-local"))),
             Some(PathBuf::from("/opt/aros-local"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_local_compiler_only_resolution_smokes_tools_without_release_identity() {
+        let checkout = local_gnu_checkout();
+        let prefix = tempfile::tempdir().unwrap();
+        write_local_compiler_prefix(prefix.path(), "fixture-target");
+
+        let resolved = resolve_local(checkout.path(), prefix.path(), "fixture-target").unwrap();
+        assert_eq!(resolved.source, ToolchainSource::LocalCompilerOnly);
+        assert_eq!(resolved.target_triple, "riscv-aros");
+        assert_eq!(resolved.release_id, None);
+        assert!(resolved
+            .paths
+            .executable_roles
+            .iter()
+            .any(|(role, _)| *role == "objdump"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_compiler_only_resolution_rejects_profile_and_payload_digest_mismatches() {
+        let checkout = local_gnu_checkout();
+        let mismatched_profile = tempfile::tempdir().unwrap();
+        write_local_compiler_prefix(mismatched_profile.path(), "other-profile");
+        assert!(
+            resolve_local(checkout.path(), mismatched_profile.path(), "fixture-target").is_err()
+        );
+
+        let changed_payload = tempfile::tempdir().unwrap();
+        write_local_compiler_prefix(changed_payload.path(), "fixture-target");
+        fs::write(
+            changed_payload.path().join("bin/gcc"),
+            b"changed compiler\n",
+        )
+        .unwrap();
+        let error =
+            resolve_local(checkout.path(), changed_payload.path(), "fixture-target").unwrap_err();
+        assert!(error.to_string().contains("payload differs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_compiler_only_resolution_rejects_release_coexistence_and_links() {
+        use std::os::unix::fs::symlink;
+
+        let checkout = local_gnu_checkout();
+        let coexisting = tempfile::tempdir().unwrap();
+        write_local_compiler_prefix(coexisting.path(), "fixture-target");
+        fs::write(
+            coexisting.path().join(AROS_TOOLCHAIN_MANIFEST_FILE),
+            b"invalid release manifest",
+        )
+        .unwrap();
+        assert!(resolve_local(checkout.path(), coexisting.path(), "fixture-target").is_err());
+
+        let linked_descriptor = tempfile::tempdir().unwrap();
+        write_local_compiler_prefix(linked_descriptor.path(), "fixture-target");
+        let descriptor_path = linked_descriptor
+            .path()
+            .join(LOCAL_TOOLCHAIN_DESCRIPTOR_FILE);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), fs::read(&descriptor_path).unwrap()).unwrap();
+        fs::remove_file(&descriptor_path).unwrap();
+        symlink(outside.path(), &descriptor_path).unwrap();
+        assert!(
+            resolve_local(checkout.path(), linked_descriptor.path(), "fixture-target").is_err()
+        );
+
+        let linked_root = linked_descriptor.path().with_extension("root-link");
+        symlink(linked_descriptor.path(), &linked_root).unwrap();
+        assert!(resolve_local(checkout.path(), &linked_root, "fixture-target").is_err());
     }
 
     #[cfg(unix)]
@@ -1236,6 +1475,9 @@ mod tests {
                 float_abi: None,
                 transpiler: None,
                 bootloader: None,
+                bootstrap_abi: None,
+                native_build_contract: None,
+                toolchain_profile: None,
             };
             assert_eq!(target_triple_for_profile(&profile), triple);
         }
