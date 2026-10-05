@@ -242,7 +242,25 @@ pub fn expand_files(
 ) -> Result<ExpandedText, GenmfError> {
     let checked_source = reject_symlink_components(source_file)?;
     let bytes = read_limited(&checked_source, limits.max_source_bytes)?;
-    let source = decode_iso_8859_15(&bytes);
+    expand_bytes(&bytes, source_file, template_file, limits)
+}
+
+/// Expand the caller's captured source bytes, rather than rereading a path
+/// after its digest was recorded. Template inputs retain their raw snapshots.
+pub(crate) fn expand_bytes(
+    bytes: &[u8],
+    source_file: &Path,
+    template_file: &Path,
+    limits: Limits,
+) -> Result<ExpandedText, GenmfError> {
+    if bytes.len() > limits.max_source_bytes {
+        return Err(error(
+            Some(source_file.to_path_buf()),
+            None,
+            "source exceeds byte budget",
+        ));
+    }
+    let source = decode_iso_8859_15(bytes);
     expand_text(&source, source_file, template_file, limits)
 }
 
@@ -1252,7 +1270,7 @@ fn error(file: Option<PathBuf>, line: Option<usize>, detail: impl Into<String>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_files, expand_text, Limits};
+    use super::{expand_bytes, expand_files, expand_text, Limits};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -1284,6 +1302,22 @@ mod tests {
             fs::write(&path, bytes).expect("write fixture");
             path
         }
+    }
+
+    #[test]
+    fn expands_captured_bytes_without_rereading_source_path() {
+        let tree = TestTree::new();
+        let template = tree.write("root.tmpl", b"%define common\n%end\n");
+        let source = tree.write("input.src", b"changed-path-content\n");
+        let captured = b"captured-\xA4\n";
+        let result = expand_bytes(captured, &source, &template, Limits::default()).unwrap();
+        assert!(result.text.contains("captured-\u{20ac}"));
+        assert!(!result.text.contains("changed-path-content"));
+        let limits = Limits {
+            max_source_bytes: captured.len() - 1,
+            ..Limits::default()
+        };
+        assert!(expand_bytes(captured, &source, &template, limits).is_err());
     }
 
     #[test]

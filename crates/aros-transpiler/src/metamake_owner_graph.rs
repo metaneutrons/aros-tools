@@ -64,6 +64,52 @@ struct LocalTarget {
     dependencies: BTreeSet<String>,
 }
 
+#[derive(Debug, Default)]
+struct LocalFileParse {
+    targets: BTreeMap<String, LocalTarget>,
+    declarations: Vec<TargetDeclarationProvenance>,
+}
+
+/// One dependency token as parsed from a `#MM` declaration, before and after
+/// the parser's single project-global substitution pass.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyProvenance {
+    /// The exact token returned by the `#MM` tokenizer.
+    pub raw_expression: String,
+    /// The endpoint after substituting explicitly bound project globals once.
+    pub concrete: String,
+}
+
+/// Source-token provenance for one named target token in an expanded Makefile.
+///
+/// A rule with multiple targets yields one record per target token, with its
+/// dependency tokens repeated on each record. Repeated declarations remain
+/// separate records, in file-map and source order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetDeclarationProvenance {
+    /// Generated Makefile key supplied to `parse_expanded_files`.
+    pub file: String,
+    /// Exact target token returned by the `#MM` tokenizer.
+    pub raw_target: String,
+    /// Target identity after substituting explicitly bound project globals once.
+    pub target: String,
+    /// Whether this directive used the `#MM-` marker.
+    ///
+    /// For a bare marker followed by a target line, this preserves the source
+    /// directive even though MetaMake treats the declaration as nonvirtual.
+    pub virtual_target: bool,
+    /// Whether this target came from a bare `#MM` / `#MM-` marker and the next
+    /// physical line, rather than a target token on the directive itself.
+    pub bare_marker: bool,
+    /// Whether MetaMake treats this declaration as a Makefile owner claim.
+    /// Bare-marker declarations claim ownership even when their marker is
+    /// `#MM-`, matching the parser's existing reference behavior.
+    pub claims_make_owner: bool,
+    /// Dependency tokens from the same declaration, preserving duplicates and
+    /// token order. Bare-marker declarations have no dependencies.
+    pub dependencies: Vec<DependencyProvenance>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MetaMakeOwnerGraph {
     known_targets: BTreeSet<String>,
@@ -71,6 +117,7 @@ pub struct MetaMakeOwnerGraph {
     // Only nonvirtual Makefile refs are owners that `maketarget()` passes to
     // `callmake()`. Virtual declarations still contribute dependencies.
     owners: BTreeMap<String, BTreeSet<String>>,
+    declarations: Vec<TargetDeclarationProvenance>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -139,6 +186,7 @@ impl MetaMakeOwnerGraph {
         let mut total_bytes = 0usize;
         let mut total_lines = 0usize;
         let mut tokens_seen = 0usize;
+        let mut provenance_edges_seen = 0usize;
         let mut work = 0usize;
         let mut identity_copy_bytes = 0usize;
         let mut parsed_files = Vec::with_capacity(files.len());
@@ -173,9 +221,12 @@ impl MetaMakeOwnerGraph {
                 path,
                 globals,
                 limits,
-                &mut tokens_seen,
-                &mut work,
-                &mut identity_copy_bytes,
+                FileParseBudget {
+                    tokens_seen: &mut tokens_seen,
+                    provenance_edges_seen: &mut provenance_edges_seen,
+                    work: &mut work,
+                    identity_copy_bytes: &mut identity_copy_bytes,
+                },
             )?;
             charge_identity_copy(
                 &mut identity_copy_bytes,
@@ -188,8 +239,16 @@ impl MetaMakeOwnerGraph {
 
         let mut graph = Self::default();
         let mut global_edge_count = 0usize;
-        for (path, local_targets) in parsed_files {
-            for (name, target) in local_targets {
+        for (path, local) in parsed_files {
+            let declaration_count = local.declarations.len();
+            work = checked_add(
+                work,
+                declaration_count,
+                limits.max_work,
+                "provenance merge work",
+            )?;
+            graph.declarations.extend(local.declarations);
+            for (name, target) in local.targets {
                 bump(&mut work, limits.max_work, "graph merge work")?;
                 charge_identity_copy(
                     &mut identity_copy_bytes,
@@ -243,6 +302,13 @@ impl MetaMakeOwnerGraph {
     #[must_use]
     pub fn dependencies(&self, target: &str) -> Option<&BTreeSet<String>> {
         self.dependencies.get(target)
+    }
+
+    /// Return every parsed named-target declaration in generated-file and
+    /// source order, including virtual declarations and repeated tokens.
+    #[must_use]
+    pub fn declarations(&self) -> &[TargetDeclarationProvenance] {
+        &self.declarations
     }
 
     /// Return owner files reachable from command-line roots, and report every
@@ -347,16 +413,28 @@ fn validate_global_limits(globals: &BTreeMap<String, String>, limits: Limits) ->
     Ok(())
 }
 
+struct FileParseBudget<'a> {
+    tokens_seen: &'a mut usize,
+    provenance_edges_seen: &'a mut usize,
+    work: &'a mut usize,
+    identity_copy_bytes: &'a mut usize,
+}
+
 fn parse_file_lines(
     lines: &[String],
     path: &str,
     globals: &BTreeMap<String, String>,
     limits: Limits,
-    tokens_seen: &mut usize,
-    work: &mut usize,
-    identity_copy_bytes: &mut usize,
-) -> ParseResult<BTreeMap<String, LocalTarget>> {
+    budget: FileParseBudget<'_>,
+) -> ParseResult<LocalFileParse> {
+    let FileParseBudget {
+        tokens_seen,
+        provenance_edges_seen,
+        work,
+        identity_copy_bytes,
+    } = budget;
     let mut targets = BTreeMap::<String, LocalTarget>::new();
+    let mut declarations = Vec::new();
     let mut line_index = 0usize;
     let mut local_edge_pairs = 0usize;
     while line_index < lines.len() {
@@ -403,13 +481,37 @@ fn parse_file_lines(
                     "bare #MM must have exactly one target token in {path}: {next}"
                 ));
             }
-            let name = substitute_identity(
-                &parsed.remove(0),
-                globals,
-                path,
-                limits,
+            let raw_target = parsed.remove(0);
+            let name =
+                substitute_identity(&raw_target, globals, path, limits, identity_copy_bytes)?;
+            bump(work, limits.max_work, "provenance declaration work")?;
+            charge_identity_copy(
                 identity_copy_bytes,
+                path.len(),
+                limits,
+                "provenance makefile path copy",
             )?;
+            charge_identity_copy(
+                identity_copy_bytes,
+                raw_target.len(),
+                limits,
+                "provenance raw target copy",
+            )?;
+            charge_identity_copy(
+                identity_copy_bytes,
+                name.len(),
+                limits,
+                "target name copy for provenance",
+            )?;
+            declarations.push(TargetDeclarationProvenance {
+                file: path.to_owned(),
+                raw_target,
+                target: name.clone(),
+                virtual_target,
+                bare_marker: true,
+                claims_make_owner: true,
+                dependencies: Vec::new(),
+            });
             merge_local_target(&mut targets, name, false, BTreeSet::new(), limits)?;
             continue;
         }
@@ -432,44 +534,58 @@ fn parse_file_lines(
             ));
         }
 
-        let mut target_names = Vec::with_capacity(raw_targets.len());
+        let mut target_tokens = Vec::with_capacity(raw_targets.len());
         for raw in raw_targets {
-            target_names.push(substitute_identity(
-                &raw,
-                globals,
-                path,
-                limits,
-                identity_copy_bytes,
-            )?);
+            let name = substitute_identity(&raw, globals, path, limits, identity_copy_bytes)?;
+            target_tokens.push((raw, name));
         }
         let mut dependency_names = BTreeSet::new();
+        let mut dependency_tokens = Vec::with_capacity(raw_dependencies.len());
         for raw in raw_dependencies {
-            dependency_names.insert(substitute_identity(
-                &raw,
-                globals,
-                path,
-                limits,
+            let endpoint = substitute_identity(&raw, globals, path, limits, identity_copy_bytes)?;
+            charge_identity_copy(
                 identity_copy_bytes,
-            )?);
+                endpoint.len(),
+                limits,
+                "dependency identity copy for graph set",
+            )?;
+            dependency_names.insert(endpoint.clone());
+            dependency_tokens.push((raw, endpoint));
         }
         if dependency_names.len() > limits.max_edges {
             return Err(format!("per-rule edge limit exceeded in {path}"));
         }
-        let edge_pairs = target_names
+        let edge_pairs = target_tokens
             .len()
             .checked_mul(dependency_names.len())
             .ok_or_else(|| format!("per-file edge counter overflow in {path}"))?;
+        let provenance_edge_pairs = target_tokens
+            .len()
+            .checked_mul(dependency_tokens.len())
+            .ok_or_else(|| format!("per-file provenance edge counter overflow in {path}"))?;
         local_edge_pairs = checked_add(
             local_edge_pairs,
             edge_pairs,
             limits.max_edges,
             "per-file declared edge",
         )?;
+        *provenance_edges_seen = checked_add(
+            *provenance_edges_seen,
+            provenance_edge_pairs,
+            limits.max_edges,
+            "global provenance edge",
+        )?;
         // Charge fan-out before cloning dependency identities into local target
         // records; otherwise a finite but wide rule can allocate far more
         // edges than its token count suggests.
         *work = checked_add(*work, edge_pairs, limits.max_work, "parse work")?;
-        for _ in 0..target_names.len() {
+        *work = checked_add(
+            *work,
+            provenance_edge_pairs,
+            limits.max_work,
+            "provenance parse work",
+        )?;
+        for _ in 0..target_tokens.len() {
             for dependency in &dependency_names {
                 charge_identity_copy(
                     identity_copy_bytes,
@@ -480,18 +596,68 @@ fn parse_file_lines(
             }
         }
 
-        for name in target_names {
+        for (raw_target, name) in target_tokens {
             bump(work, limits.max_work, "parse work")?;
+            let mut provenance_dependencies = Vec::with_capacity(dependency_tokens.len());
+            for (raw_expression, concrete) in &dependency_tokens {
+                charge_identity_copy(
+                    identity_copy_bytes,
+                    raw_expression.len(),
+                    limits,
+                    "provenance raw dependency copy",
+                )?;
+                charge_identity_copy(
+                    identity_copy_bytes,
+                    concrete.len(),
+                    limits,
+                    "provenance dependency endpoint copy",
+                )?;
+                provenance_dependencies.push(DependencyProvenance {
+                    raw_expression: raw_expression.clone(),
+                    concrete: concrete.clone(),
+                });
+            }
+            charge_identity_copy(
+                identity_copy_bytes,
+                path.len(),
+                limits,
+                "provenance makefile path copy",
+            )?;
+            charge_identity_copy(
+                identity_copy_bytes,
+                raw_target.len(),
+                limits,
+                "provenance raw target copy",
+            )?;
+            charge_identity_copy(
+                identity_copy_bytes,
+                name.len(),
+                limits,
+                "local target name copy for merged map",
+            )?;
+            let local_name = name.clone();
+            declarations.push(TargetDeclarationProvenance {
+                file: path.to_owned(),
+                raw_target,
+                target: name,
+                virtual_target,
+                bare_marker: false,
+                claims_make_owner: !virtual_target,
+                dependencies: provenance_dependencies,
+            });
             merge_local_target(
                 &mut targets,
-                name,
+                local_name,
                 virtual_target,
                 dependency_names.clone(),
                 limits,
             )?;
         }
     }
-    Ok(targets)
+    Ok(LocalFileParse {
+        targets,
+        declarations,
+    })
 }
 
 fn collect_continuations(
@@ -1187,6 +1353,12 @@ bare-$(CPU) : ignored-prereq
     #[test]
     fn bare_virtual_marker_matches_dirnode_hardcoded_real_owner_behavior() {
         let graph = parse(&[("x", "#MM-\nbare\n")], &[]).unwrap();
+        let declaration = &graph.declarations()[0];
+        assert!(declaration.bare_marker);
+        assert!(declaration.virtual_target);
+        assert!(declaration.claims_make_owner);
+        assert_eq!(declaration.raw_target, "bare");
+        assert_eq!(declaration.target, "bare");
         assert_eq!(
             graph.owner_files("bare").unwrap(),
             &BTreeSet::from(["x".into()])
@@ -1209,6 +1381,96 @@ bare-$(CPU) : ignored-prereq
             BTreeSet::from(["real".into()])
         );
         assert!(selected.reached_targets.contains("alias"));
+    }
+
+    #[test]
+    fn declaration_provenance_keeps_virtual_real_and_repeated_origins() {
+        let graph = parse(
+            &[
+                ("a/virtual.mk", "#MM- alias-$(CPU) : concrete\n"),
+                (
+                    "b/real.mk",
+                    "#MM alias-arm : concrete\n#MM alias-arm : concrete\n#MM concrete\n",
+                ),
+            ],
+            &[("CPU", "arm")],
+        )
+        .unwrap();
+        let declarations = graph.declarations();
+        assert_eq!(declarations.len(), 4);
+        assert_eq!(declarations[0].file, "a/virtual.mk");
+        assert_eq!(declarations[0].raw_target, "alias-$(CPU)");
+        assert_eq!(declarations[0].target, "alias-arm");
+        assert!(declarations[0].virtual_target);
+        assert!(!declarations[0].claims_make_owner);
+        assert_eq!(declarations[0].dependencies[0].raw_expression, "concrete");
+        assert_eq!(declarations[0].dependencies[0].concrete, "concrete");
+
+        assert_eq!(declarations[1].file, "b/real.mk");
+        assert!(!declarations[1].virtual_target);
+        assert!(declarations[1].claims_make_owner);
+        assert_eq!(declarations[1], declarations[2]);
+        assert_eq!(
+            graph.owner_files("alias-arm").unwrap(),
+            &BTreeSet::from(["b/real.mk".into()])
+        );
+    }
+
+    #[test]
+    fn declaration_provenance_keeps_empty_selectors_and_unknown_roots_missing() {
+        let files = file_map(&[
+            (
+                "one/Makefile",
+                "#MM- root-$(CPU) : child-$(VARIANT) $(VARIANT)\n",
+            ),
+            ("two/Makefile", "#MM $(VARIANT)\n"),
+        ]);
+        let globals = globals(&[("CPU", "arm"), ("VARIANT", "")]);
+        let limits = Limits {
+            preserve_empty_endpoints: true,
+            ..Limits::default()
+        };
+        let graph = MetaMakeOwnerGraph::parse_expanded_files(&files, &globals, limits).unwrap();
+        let declarations = graph.declarations();
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations[0].file, "one/Makefile");
+        assert_eq!(declarations[0].raw_target, "root-$(CPU)");
+        assert_eq!(declarations[0].target, "root-arm");
+        assert_eq!(
+            declarations[0].dependencies[0].raw_expression,
+            "child-$(VARIANT)"
+        );
+        assert_eq!(declarations[0].dependencies[0].concrete, "child-");
+        assert_eq!(declarations[0].dependencies[1].raw_expression, "$(VARIANT)");
+        assert_eq!(declarations[0].dependencies[1].concrete, "");
+        assert_eq!(declarations[1].raw_target, "$(VARIANT)");
+        assert_eq!(declarations[1].target, "");
+
+        let unknown = graph.select(&["not-declared".into()], limits).unwrap();
+        assert_eq!(
+            unknown.missing_endpoints,
+            BTreeSet::from(["not-declared".into()])
+        );
+        assert!(unknown.selected_owner_files.is_empty());
+        let empty_root = graph.select(&[String::new()], limits).unwrap();
+        assert_eq!(
+            empty_root.missing_endpoints,
+            BTreeSet::from([String::new()])
+        );
+    }
+
+    #[test]
+    fn repeated_provenance_edges_are_bounded_by_edge_limit() {
+        let limits = Limits {
+            max_edges: 1,
+            ..Limits::default()
+        };
+        let result = MetaMakeOwnerGraph::parse_expanded_files(
+            &file_map(&[("rules", "#MM root : dep dep\n")]),
+            &BTreeMap::new(),
+            limits,
+        );
+        assert!(result.unwrap_err().contains("provenance edge limit"));
     }
 
     #[test]
