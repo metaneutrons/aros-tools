@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use aros_common::{
-    exchange_prepared_tree_if_unchanged, measure_regular_file, measure_tree_content_cas,
+    exchange_prepared_source_tree_if_unchanged, measure_regular_file, measure_tree_content_cas,
     publication_failure_class, publish_atomic_file, publish_flat_tree_noclobber, run_status,
     sha256_bytes, AtomicFilePolicy, CommitState, DiagnosticContext, LogLevel, PortableOutputName,
     PublicationFailureClass, Sha256Digest,
@@ -29,6 +29,9 @@ use budget::{ExtractionBudget, MAX_ARCHIVE_ENTRIES};
 /// Safe snapshotting of an already-downloaded, verified cache payload.
 pub mod cache;
 mod diagnostics;
+pub mod source_receipt;
+mod tar_links;
+mod zip_links;
 use diagnostics::{
     cache_failure, context, contract_failure, extraction_failure, integrity_failure,
     network_failure, patch_failure, publication_failure, publication_failure_with_state,
@@ -1003,9 +1006,11 @@ fn publish_source_transaction_inner(
         patch.payload.revalidate()?;
     }
 
-    if let Err(error) =
-        exchange_prepared_tree_if_unchanged(staging.path(), &destination, &destination_before)
-    {
+    if let Err(error) = exchange_prepared_source_tree_if_unchanged(
+        staging.path(),
+        &destination,
+        &destination_before,
+    ) {
         let preserved = staging.keep();
         let state = match publication_failure_class(&error) {
             PublicationFailureClass::CommitStateUncertain => CommitState::Indeterminate,
@@ -1326,19 +1331,26 @@ fn stage_or_defer_marker<'a>(
             .map_err(|error| cache_failure(format!("cannot resolve marker path: {error}")))?
             .join(marker)
     };
-    if let Ok(relative) = absolute_marker.strip_prefix(destination) {
+    // Resolve the existing parent, not the marker leaf: `/tmp` and other
+    // host aliases must not misclassify an in-tree marker as advisory, while
+    // an archive-controlled leaf symlink must remain visible to no-follow I/O.
+    let marker_parent = absolute_marker
+        .parent()
+        .ok_or_else(|| cache_failure("marker has no parent"))?;
+    let resolved_marker = marker_parent
+        .canonicalize()
+        .map_err(|error| cache_failure(format!("cannot resolve marker parent: {error}")))?
+        .join(
+            absolute_marker
+                .file_name()
+                .ok_or_else(|| cache_failure("marker has no filename"))?,
+        );
+    if let Ok(relative) = resolved_marker.strip_prefix(destination) {
         let staged = staging.join(relative);
         if let Some(parent) = staged.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                cache_failure(format!("cannot stage marker directory: {error}"))
-            })?;
+            create_real_directory_chain(staging, parent, "marker")?;
         }
-        fs::write(&staged, format!("{value}\n")).map_err(|error| {
-            cache_failure(format!(
-                "cannot stage marker '{}': {error}",
-                staged.display()
-            ))
-        })?;
+        write_marker(&staged, value)?;
     } else {
         deferred.push((marker.to_path_buf(), value));
     }
@@ -1387,6 +1399,8 @@ fn unpack_tar(reader: impl Read, name: &str, staging: &Path) -> FetchResult<()> 
         .entries()
         .map_err(|error| extraction_failure(name, format!("cannot read archive index: {error}")))?;
     let mut budget = ExtractionBudget::default();
+    let mut hard_links = Vec::new();
+    let mut paths = std::collections::BTreeSet::new();
     for entry in entries {
         let mut entry = entry.map_err(|error| {
             extraction_failure(name, format!("cannot read archive entry: {error}"))
@@ -1396,15 +1410,31 @@ fn unpack_tar(reader: impl Read, name: &str, staging: &Path) -> FetchResult<()> 
             .map_err(|error| extraction_failure(name, format!("invalid entry path: {error}")))?
             .into_owned();
         validate_archive_path(&path, name)?;
-        budget.account(entry.size(), name, &path)?;
-        if entry.header().entry_type().is_hard_link() {
+        let path: PathBuf = path.components().collect();
+        if !paths.insert(path.clone()) {
             return Err(extraction_failure(
                 name,
-                format!(
-                    "TAR hard link '{}' is rejected because its logical expansion cannot be independently budgeted",
-                    path.display()
-                ),
+                format!("duplicate TAR path '{}'", path.display()),
             ));
+        }
+        budget.account(entry.size(), name, &path)?;
+        if entry.header().entry_type().is_hard_link() {
+            let target = entry
+                .link_name()
+                .map_err(|error| {
+                    extraction_failure(name, format!("invalid TAR hard link target: {error}"))
+                })?
+                .ok_or_else(|| extraction_failure(name, "TAR hard link has no target"))?
+                .into_owned();
+            if entry.size() != 0 {
+                return Err(extraction_failure(
+                    name,
+                    "TAR hard link contains unexpected payload bytes",
+                ));
+            }
+            validate_archive_path(&target, name)?;
+            hard_links.push((path, target));
+            continue;
         }
         if let Some(link) = entry
             .link_name()
@@ -1427,6 +1457,7 @@ fn unpack_tar(reader: impl Read, name: &str, staging: &Path) -> FetchResult<()> 
     if budget.entries == 0 {
         return Err(extraction_failure(name, "archive contains no entries"));
     }
+    tar_links::materialize(staging, &hard_links, &mut budget, name)?;
     Ok(())
 }
 
@@ -1443,6 +1474,8 @@ fn unpack_zip(file: File, name: &str, staging: &Path) -> FetchResult<()> {
         ));
     }
     let mut budget = ExtractionBudget::default();
+    let mut paths = std::collections::BTreeSet::new();
+    let mut links = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -1454,20 +1487,39 @@ fn unpack_zip(file: File, name: &str, staging: &Path) -> FetchResult<()> {
             )
         })?;
         validate_archive_path(&enclosed, name)?;
+        let enclosed: PathBuf = enclosed.components().collect();
+        if !paths.insert(enclosed.clone()) {
+            return Err(extraction_failure(
+                name,
+                format!("duplicate ZIP path '{}'", enclosed.display()),
+            ));
+        }
         let output_probe_limit = budget
             .output_probe_limit()
             .min(entry.size().saturating_add(1));
         budget.account(entry.size(), name, &enclosed)?;
+        let kind = entry.unix_mode().map_or(0, |mode| mode & 0o170_000);
+        if (kind == 0o040_000 && !entry.is_dir())
+            || (matches!(kind, 0o100_000 | 0o120_000) && entry.is_dir())
+            || (entry.is_dir() && entry.size() != 0)
+        {
+            return Err(extraction_failure(
+                name,
+                "ZIP mode, directory name or directory payload disagree",
+            ));
+        }
         if entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
         {
+            let target = zip_links::read_target(&mut entry, &enclosed, name)?;
+            links.push((enclosed, target));
+            continue;
+        }
+        if !matches!(kind, 0 | 0o040_000 | 0o100_000) {
             return Err(extraction_failure(
                 name,
-                format!(
-                    "ZIP symlink '{}' is rejected by the safe extractor",
-                    entry.name()
-                ),
+                format!("ZIP special entry '{}' is rejected", enclosed.display()),
             ));
         }
         let output = staging.join(enclosed);
@@ -1515,8 +1567,21 @@ fn unpack_zip(file: File, name: &str, staging: &Path) -> FetchResult<()> {
                     ),
                 ));
             }
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                target
+                    .set_permissions(fs::Permissions::from_mode(mode & 0o777))
+                    .map_err(|error| {
+                        extraction_failure(
+                            name,
+                            format!("cannot set ZIP file permissions: {error}"),
+                        )
+                    })?;
+            }
         }
     }
+    zip_links::materialize(staging, &links, name)?;
     Ok(())
 }
 
