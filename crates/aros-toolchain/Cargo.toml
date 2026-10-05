@@ -19,6 +19,7 @@ aros-cache.workspace = true
 aros-cmake-engine.workspace = true
 aros-common.workspace = true
 aros-fetch.workspace = true
+aros-verify.workspace = true
 flate2.workspace = true
 fs2.workspace = true
 serde.workspace = true

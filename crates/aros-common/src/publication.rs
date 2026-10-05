@@ -583,6 +583,74 @@ pub fn measure_tree_content_cas(path: &Path) -> std::io::Result<TreeContentCas> 
     }
 }
 
+/// Measure a source tree while excluding Git metadata and one exact generated
+/// subtree.
+///
+/// The walk is descriptor-bound, rejects special filesystem objects and
+/// source-name collisions, and is limited to 128 path components, the supplied
+/// entry ceiling, and the supplied regular-file byte ceiling. A symlink is
+/// accepted only when its relative target resolves through the measured
+/// inventory without leaving the closure or entering an excluded path.
+///
+/// `generated_subtree`, when present, must be a non-empty relative UTF-8 path
+/// made of normal components. Its exact path and descendants are omitted;
+/// other files below its parent remain part of the measurement. Any existing
+/// prefix before the excluded leaf must be a real directory.
+///
+/// # Errors
+///
+/// Returns an I/O, invalid-path, unsafe-tree, concurrent-mutation,
+/// resource-limit, unsupported-host, or unsupported-filesystem error.
+pub fn measure_source_tree_content_cas_bounded(
+    path: &Path,
+    generated_subtree: Option<&str>,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<TreeContentCas> {
+    validate_target_leaf(path)?;
+    let generated_components = validate_generated_subtree(generated_subtree)?;
+    #[cfg(unix)]
+    {
+        unix::measure_source_tree_content_cas_bounded(
+            &absolute_path(path)?,
+            generated_components.as_deref(),
+            limits,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, generated_components, limits);
+        Err(unsupported_durability())
+    }
+}
+
+fn validate_generated_subtree(path: Option<&str>) -> std::io::Result<Option<Vec<Vec<u8>>>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let invalid = path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .as_bytes()
+            .get(1)
+            .is_some_and(|colon| *colon == b':' && path.as_bytes()[0].is_ascii_alphabetic())
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."));
+    if invalid {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "generated subtree must be a relative UTF-8 path of normal components",
+        ));
+    }
+    Ok(Some(
+        path.split('/')
+            .map(|component| component.as_bytes().to_vec())
+            .collect(),
+    ))
+}
+
 /// Exchange a prepared tree only if the complete destination still matches
 /// the supplied snapshot immediately before the atomic exchange.
 ///
@@ -600,6 +668,39 @@ pub fn exchange_prepared_tree_if_unchanged(
     #[cfg(unix)]
     {
         unix::exchange_prepared_tree_if_unchanged(
+            &absolute_path(staging)?,
+            &absolute_path(destination)?,
+            expected_destination,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (staging, destination, expected_destination);
+        Err(unsupported_durability())
+    }
+}
+
+/// Exchange a prepared source tree while preserving safe source entry names.
+///
+/// This uses the complete content/identity compare-and-swap, no-follow and
+/// durability guarantees of [`exchange_prepared_tree_if_unchanged`]. Only the
+/// entry-name policy differs: source-controlled Unicode names are preserved,
+/// while unsafe components and case-folded sibling collisions remain rejected.
+/// Generated output publication continues to require portable output names.
+///
+/// # Errors
+/// Returns an I/O, unsafe-tree, content/identity conflict, durability,
+/// unsupported-host, or unsupported-filesystem error.
+pub fn exchange_prepared_source_tree_if_unchanged(
+    staging: &Path,
+    destination: &Path,
+    expected_destination: &TreeContentCas,
+) -> std::io::Result<PublicationReceipt> {
+    validate_target_leaf(staging)?;
+    validate_target_leaf(destination)?;
+    #[cfg(unix)]
+    {
+        unix::exchange_prepared_source_tree_if_unchanged(
             &absolute_path(staging)?,
             &absolute_path(destination)?,
             expected_destination,
@@ -749,3 +850,6 @@ mod unix;
 
 #[cfg(test)]
 mod publication_tests;
+
+#[cfg(all(test, unix))]
+mod source_tree_tests;
