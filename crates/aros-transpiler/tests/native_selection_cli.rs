@@ -1192,6 +1192,109 @@ fn literal_object_recipe(flags: &str) -> String {
     )
 }
 
+fn write_path_valued_literal_object_rejection(fixture: &Fixture, consumer: &str) {
+    let directory = fixture.root.path().join("literal");
+    fs::create_dir(&directory).unwrap();
+    fs::write(
+        directory.join("mmakefile.src"),
+        format!(
+            "$(GENDIR)/objects/unit.o : $(SRCDIR)/entry.c\n\
+        \t@$(TARGET_CC) -c $< -o $@\n\
+        build/tools/helper : $(GENDIR)/objects/unit.o\n\
+        \t@$(ECHO) unmodelled\n\
+        {consumer}\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_literal_path_owner_uses_only_complete_exact_consumer_proofs() {
+    let unrelated = Fixture::new();
+    fs::write(unrelated.root.path().join("entry.c"), "int unit;\n").unwrap();
+    write_path_valued_literal_object_rejection(
+        &unrelated,
+        "#MM- unrelated-literal-consumer : build/tools/helper",
+    );
+    let result = unrelated.invoke(true, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let generated = fs::read_to_string(unrelated.output()).unwrap();
+    assert!(
+        !generated.contains("unrelated-literal-consumer"),
+        "{generated}"
+    );
+
+    let selected = Fixture::new();
+    fs::write(selected.root.path().join("entry.c"), "int unit;\n").unwrap();
+    write_path_valued_literal_object_rejection(
+        &selected,
+        "#MM- fixture-kernel : build/tools/helper",
+    );
+    let result = selected.invoke(true, &[]);
+    assert!(!result.status.success());
+    assert!(!selected.output().exists());
+    let report_path = selected.root.path().join("selected-literal-audit.json");
+    let audit = selected.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let diagnostic: Value = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let failures = diagnostic["audit"]["selected_capability_failures"]
+        .as_array()
+        .unwrap();
+    assert!(
+        failures.iter().any(|failure| {
+            failure["context"]["target"] == "fixture-kernel"
+                && failure["message"].as_str().is_some_and(|message| {
+                    message.contains("literal object producer")
+                        && message.contains(
+                            "exact source consumer chain: build/tools/helper -> fixture-kernel",
+                        )
+                })
+        }),
+        "{diagnostic}"
+    );
+    assert!(!selected.output().exists());
+
+    let conditional = Fixture::new();
+    fs::write(conditional.root.path().join("entry.c"), "int unit;\n").unwrap();
+    write_path_valued_literal_object_rejection(
+        &conditional,
+        "#MM- unrelated-literal-consumer : build/tools/helper\n\
+         ifeq ($(UNKNOWN),yes)\n\
+         conditional-consumer : build/tools/helper\n\
+         endif",
+    );
+    let result = conditional.invoke(true, &[]);
+    assert!(!result.status.success());
+    let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
+    let failures = diagnostic["diagnostics"].as_array().unwrap();
+    assert!(
+        failures.iter().any(|failure| {
+            failure["context"]["target"].is_null()
+                && failure["message"].as_str().is_some_and(|message| {
+                    message.contains("literal object producer")
+                        && !message.contains("exact source consumer chain")
+                })
+        }),
+        "conditional consumer must veto owner attribution: {diagnostic}"
+    );
+    assert!(!conditional.output().exists());
+}
+
 #[test]
 fn native_literal_compile_has_a_real_owner_and_preserves_order() {
     let fixture = Fixture::new();

@@ -143,6 +143,9 @@ and a `fix upstream` hint. Architecture dispatch hooks require source-level
 review; classic MetaMake's tolerance of unknown targets is not an absence proof.
 Unsupported translation capabilities are reported separately and do not, by
 themselves, imply an upstream source defect.
+Rejected rules need an exact source consumer chain to establish a MetaMake
+owner. Unmodeled includes (including optional generated `.d` files) and unknown
+conditional consumers keep ownership unresolved; a path alone is not proof.
 
 Native owner projection and parsing consume the same recipe inputs:
 `mmakefile.src` takes precedence over a generated `mmakefile`; direct fragments
