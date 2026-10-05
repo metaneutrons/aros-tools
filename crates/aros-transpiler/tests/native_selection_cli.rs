@@ -90,52 +90,43 @@ fn fixture_native_selector_globals(context: &TargetContext) -> String {
     })
 }
 
-#[test]
-fn native_metamake_projection_prefers_src_and_keeps_direct_fragment_at_process_boundary() {
-    let mut fixture = Fixture::new();
+fn install_native_metamake_projection(fixture: &mut Fixture, recipe_inputs: &[&str]) {
+    install_native_metamake_projection_with_linklib_metadata(fixture, recipe_inputs, true);
+}
+
+fn install_native_metamake_projection_with_linklib_metadata(
+    fixture: &mut Fixture,
+    recipe_inputs: &[&str],
+    include_linklib_metadata: bool,
+) {
     let selector_context = fixture_native_selector_context();
     let globals = fixture_native_selector_globals(&selector_context);
-    let source = fixture.root.path().join("mmakefile.src");
-    let original = fs::read_to_string(&source).unwrap();
-    fs::write(
-        &source,
-        format!("{original}#MM- fixture-kernel : source-edge\n"),
-    )
-    .unwrap();
-
-    fs::create_dir(fixture.root.path().join("direct")).unwrap();
-    fs::write(
-        fixture.root.path().join("direct/mmakefile"),
-        "#MM fixture-kernel : direct-edge\n",
-    )
-    .unwrap();
-    fs::write(
-        fixture.root.path().join("mmakefile"),
-        "#MM- fixture-kernel : stale-extraedge\n",
-    )
-    .unwrap();
-
-    fs::create_dir(fixture.root.path().join("meta")).unwrap();
+    fs::create_dir_all(fixture.root.path().join("meta")).unwrap();
     fs::write(
         fixture.root.path().join("meta/project.conf"),
         "[fixture]\ndefaultmakefilename mmakefile\nglobalvarfile native.globals\n",
     )
     .unwrap();
-    fs::write(
-        fixture.root.path().join("meta/root.tmpl"),
+    let linklib_metadata = if include_linklib_metadata {
+        "#MM %(mmake) :\n"
+    } else {
+        ""
+    };
+    let root_template = format!(
         concat!(
-            "%define build_module_simple mmake=/A modname=/A modtype=/A files=/A\n",
+            "%define build_module_simple mmake=/A modname=/A modtype=/A files=/A uselibs=\n",
             "#MM %(mmake) :\n",
             "%end\n",
             "%define build_linklib mmake=/A libname=/A files=/A\n",
-            "#MM %(mmake) :\n",
+            "{linklib_metadata}",
             "%end\n",
             "%define make_package mmake=/A file=/A res=/A libs=/A devs=/A\n",
             "#MM %(mmake) :\n",
             "%end\n",
         ),
-    )
-    .unwrap();
+        linklib_metadata = linklib_metadata,
+    );
+    fs::write(fixture.root.path().join("meta/root.tmpl"), root_template).unwrap();
     fs::write(fixture.root.path().join("meta/globals.snapshot"), &globals).unwrap();
 
     let host = aros_common::target::native_host_key().unwrap_or("");
@@ -166,17 +157,89 @@ fn native_metamake_projection_prefers_src_and_keeps_direct_fragment_at_process_b
     .unwrap();
 
     fixture.contract["metamake_projection"] = json!("meta/policy.json");
-    for path in [
-        "mmakefile.src",
-        "direct/mmakefile",
+    for path in recipe_inputs.iter().copied().chain([
         "meta/project.conf",
         "meta/root.tmpl",
         "meta/globals.snapshot",
         "meta/policy.json",
-    ] {
-        bind_fixture_input(&mut fixture, path);
+    ]) {
+        bind_fixture_input(fixture, path);
     }
     fixture.write_contract();
+}
+
+fn add_unowned_literal_object_failure(fixture: &Fixture, additional_owner: Option<&str>) {
+    let directory = fixture.root.path().join("extra");
+    fs::create_dir_all(&directory).unwrap();
+    let mut recipe = String::from("#MM uninvoked-owner :\n");
+    if let Some(owner) = additional_owner {
+        fs::write(
+            directory.join("probe.c"),
+            "int extra_fixture(void) { return 0; }\n",
+        )
+        .unwrap();
+        writeln!(
+            recipe,
+            "%build_module_simple mmake={owner} modname=extra modtype=library files=probe"
+        )
+        .unwrap();
+    }
+    recipe.push_str(
+        "$(GENDIR)/$(CURDIR)/broken.o: $(SRCDIR)/$(CURDIR)/first.c $(SRCDIR)/$(CURDIR)/second.c\n",
+    );
+    fs::write(directory.join("mmakefile.src"), recipe).unwrap();
+}
+
+fn add_implicit_uselib_provider(fixture: &Fixture, recipe_name: &str) {
+    const LIBNAME: &str = "implicit-uselib";
+    const OWNER: &str = "implicit-uselib-provider";
+    rewrite_fixture_exec(
+        fixture,
+        "%build_module_simple mmake=fixture-exec modname=exec modtype=library files=probe uselibs=implicit-uselib",
+    );
+
+    let directory = fixture.root.path().join("extra");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("probe.c"),
+        "int implicit_uselib_fixture(void) { return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join(recipe_name),
+        format!(
+            "%build_linklib mmake={OWNER} libname={LIBNAME} files=probe\n\
+             #MM uninvoked-object-owner :\n\
+             $(GENDIR)/$(CURDIR)/broken.o: $(SRCDIR)/$(CURDIR)/first.c $(SRCDIR)/$(CURDIR)/second.c\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_metamake_projection_prefers_src_and_keeps_direct_fragment_at_process_boundary() {
+    let mut fixture = Fixture::new();
+    let source = fixture.root.path().join("mmakefile.src");
+    let original = fs::read_to_string(&source).unwrap();
+    fs::write(
+        &source,
+        format!("{original}#MM- fixture-kernel : source-edge\n"),
+    )
+    .unwrap();
+
+    fs::create_dir(fixture.root.path().join("direct")).unwrap();
+    fs::write(
+        fixture.root.path().join("direct/mmakefile"),
+        "#MM fixture-kernel : direct-edge\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.path().join("mmakefile"),
+        "#MM- fixture-kernel : stale-extraedge\n",
+    )
+    .unwrap();
+
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "direct/mmakefile"]);
 
     let report_path = fixture.root.path().join("metamake-audit.json");
     let result = fixture.invoke(
@@ -3684,7 +3747,373 @@ fn unselected_mode_retains_the_full_tree_failure_contract() {
 }
 
 #[test]
-fn unowned_capability_failure_cannot_be_hidden_by_native_selection() {
+fn uninvoked_literal_object_failure_is_audited_and_native_outputs_are_fresh() {
+    let mut fixture = Fixture::new();
+    add_unowned_literal_object_failure(&fixture, None);
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "extra/mmakefile.src"]);
+
+    let report_path = fixture.root.path().join("uninvoked-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    assert!(!report["native_owner_projection"]["selected_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(!report["native_owner_projection"]["reached_targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("uninvoked-owner")));
+    let excluded = report["source_uninvoked_capability_failures"]
+        .as_array()
+        .unwrap();
+    assert_eq!(excluded.len(), 1, "{report}");
+    assert!(excluded[0]["diagnostic"]
+        .to_string()
+        .contains("exactly one source prerequisite"));
+    assert!(excluded[0]["invoking_recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(!fixture.output().exists());
+
+    let preparation = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(
+        preparation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preparation.stderr)
+    );
+    assert!(fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+    let invocation = fixture.output().with_extension("native-invocation.json");
+    assert!(invocation.exists());
+
+    let export = fixture.invoke(true, &[]);
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert!(fixture.output().exists());
+    let evidence = fs::read(&invocation).unwrap();
+    let invocation_report: Value = serde_json::from_slice(&evidence).unwrap();
+    assert_eq!(
+        invocation_report["qualification"],
+        "source-invocation-scope-not-build-proof"
+    );
+    assert!(
+        !invocation_report["native_owner_projection"]["selected_source_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.as_str() == Some("extra/mmakefile.src"))
+    );
+
+    let generated = fs::read(fixture.output()).unwrap();
+    let rejected_audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            invocation.to_str().unwrap(),
+        ],
+    );
+    assert!(!rejected_audit.status.success());
+    assert_eq!(fs::read(invocation).unwrap(), evidence);
+    assert_eq!(fs::read(fixture.output()).unwrap(), generated);
+}
+
+#[test]
+fn selected_recipe_keeps_its_unowned_literal_object_failure_fatal() {
+    let fixture = Fixture::new();
+    fixture.append("#MM- fixture-kernel : invoked-owner");
+    add_unowned_literal_object_failure(&fixture, Some("invoked-owner"));
+    let mut fixture = fixture;
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "extra/mmakefile.src"]);
+
+    let report_path = fixture.root.path().join("selected-owner-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let evidence = &report["native_owner_projection"];
+    assert!(evidence["selected_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(evidence["reached_targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("invoked-owner")));
+    assert!(!evidence["reached_targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("uninvoked-owner")));
+    assert!(report["source_uninvoked_capability_failures"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let result = fixture.invoke(true, &[]);
+    assert!(!result.status.success());
+    let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(
+        diagnostic["diagnostics"][0]["stage"], "capability_validation",
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic["diagnostics"]
+            .to_string()
+            .contains("exactly one source prerequisite"),
+        "{diagnostic}"
+    );
+    assert!(!fixture.output().exists());
+    assert!(!fixture
+        .output()
+        .with_extension("native-invocation.json")
+        .exists());
+}
+
+#[test]
+fn native_uselib_closure_protects_unowned_provider_recipe_failures() {
+    let mut fixture = Fixture::new();
+    add_implicit_uselib_provider(&fixture, "mmakefile.src");
+    install_native_metamake_projection(&mut fixture, &["mmakefile.src", "extra/mmakefile.src"]);
+
+    let report_path = fixture.root.path().join("implicit-uselib-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let evidence = &report["native_owner_projection"];
+    assert!(!evidence["selected_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(evidence["additional_native_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(report["source_uninvoked_capability_failures"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(
+        report["audit"]["unowned_capability_failures"]
+            .to_string()
+            .contains("exactly one source prerequisite"),
+        "{report}"
+    );
+    assert!(report["audit"]["reachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("implicit-uselib-provider")));
+
+    for overrides in [&["--source-inventory-only"][..], &[][..]] {
+        let result = fixture.invoke(true, overrides);
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("exactly one source prerequisite"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!fixture.output().exists());
+        assert!(!fixture
+            .output()
+            .with_extension("source-inventory.cmake")
+            .exists());
+        assert!(!fixture
+            .output()
+            .with_extension("native-invocation.json")
+            .exists());
+    }
+}
+
+#[test]
+fn native_uselib_failure_remains_fatal_when_provider_has_no_meta_owner() {
+    let mut fixture = Fixture::new();
+    add_implicit_uselib_provider(&fixture, "mmakefile.src");
+    install_native_metamake_projection_with_linklib_metadata(
+        &mut fixture,
+        &["mmakefile.src", "extra/mmakefile.src"],
+        false,
+    );
+
+    let report_path = fixture
+        .root
+        .path()
+        .join("implicit-uselib-unowned-audit.json");
+    let audit = fixture.invoke(
+        true,
+        &[
+            "--source-inventory-only",
+            "--native-graph-audit",
+            report_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let report: Value = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+    let evidence = &report["native_owner_projection"];
+    assert!(!evidence["selected_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(!evidence["additional_native_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(evidence["native_parser_source_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("extra/mmakefile.src")));
+    assert!(report["source_uninvoked_capability_failures"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(
+        report["audit"]["unowned_capability_failures"]
+            .to_string()
+            .contains("exactly one source prerequisite"),
+        "{report}"
+    );
+    assert!(report["audit"]["reachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.as_str() == Some("implicit-uselib-provider")));
+
+    let result = fixture.invoke(true, &["--source-inventory-only"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("exactly one source prerequisite"));
+    assert!(!fixture
+        .output()
+        .with_extension("source-inventory.cmake")
+        .exists());
+    assert!(!fixture
+        .output()
+        .with_extension("native-invocation.json")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn native_invocation_sidecar_alias_is_rejected_before_overwriting_output() {
+    use std::os::unix::fs::symlink;
+
+    for native in [false, true] {
+        let fixture = Fixture::new();
+        let output = fixture.root.path().join("foo.native-invocation.json");
+        let sidecar = output.with_extension("native-invocation.json");
+        fs::write(&output, b"existing output sentinel\n").unwrap();
+        symlink(&output, &sidecar).unwrap();
+
+        let result = fixture.invoke_at(native, &[], &output);
+        assert!(!result.status.success());
+        assert_eq!(fs::read(&output).unwrap(), b"existing output sentinel\n");
+        assert!(fs::symlink_metadata(&sidecar)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+}
+
+#[test]
+fn native_owner_policy_and_recipe_seals_are_checked_before_publication() {
+    for changed_path in ["meta/policy.json", "extra/mmakefile.src"] {
+        let mut fixture = Fixture::new();
+        add_unowned_literal_object_failure(&fixture, None);
+        install_native_metamake_projection(&mut fixture, &["mmakefile.src", "extra/mmakefile.src"]);
+        let path = fixture.root.path().join(changed_path);
+        let original = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{original}\n")).unwrap();
+
+        let result = fixture.invoke(true, &[]);
+        assert!(
+            !result.status.success(),
+            "accepted changed source-bound input {changed_path}"
+        );
+        let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
+        assert_eq!(
+            diagnostic["diagnostics"][0]["stage"], "graph_validation",
+            "{diagnostic}"
+        );
+        assert!(!fixture.output().exists());
+        assert!(!fixture
+            .output()
+            .with_extension("native-invocation.json")
+            .exists());
+    }
+}
+
+#[test]
+fn unowned_capability_failures_without_projection_remain_fail_closed() {
+    let fixture = Fixture::new();
+    add_unowned_literal_object_failure(&fixture, None);
+    let result = fixture.invoke(true, &[]);
+    assert!(!result.status.success());
+    let diagnostic: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(
+        diagnostic["diagnostics"][0]["stage"], "capability_validation",
+        "{diagnostic}"
+    );
+    assert!(diagnostic["diagnostics"]
+        .to_string()
+        .contains("exactly one source prerequisite"));
+    assert!(!fixture.output().exists());
+    assert!(!fixture
+        .output()
+        .with_extension("native-invocation.json")
+        .exists());
+
     let fixture = Fixture::new();
     fixture.rejected_capability("%build_with_cmake");
     let result = fixture.invoke(true, &[]);
