@@ -398,6 +398,216 @@ pub fn collect_arch_sources(
     (out, skipped)
 }
 
+/// Parses `%build_archspecific` declarations against the Make configuration
+/// and variable scope at each declaration. `content`, `scope`, and `states`
+/// must all describe the same continuation-joined, configuration-inlined text.
+///
+/// Unlike the legacy collector above, this path does not reconstruct file
+/// variables from the final textual assignments. It uses the shared
+/// declaration-position evaluator, and rejects a declaration as a whole if
+/// any language lane is incomplete or depends on an unresolved selector.
+pub(crate) fn collect_arch_sources_with_scope(
+    content: &str,
+    rel_dir: &Path,
+    target: Option<&TargetContext>,
+    scope: &crate::make_vars::VarScope,
+    states: &[crate::make_vars::ConditionalTruth],
+    dirs: &crate::dirs::DirVars,
+    root: &Path,
+) -> (Vec<ArchSourceDecl>, Vec<String>) {
+    use crate::make_vars::ConditionalTruth;
+
+    let dir = rel_dir.to_string_lossy().replace('\\', "/");
+    let mut declarations = Vec::new();
+    let mut rejected = Vec::new();
+    let no_legacy_fallback = HashMap::new();
+
+    for (line, body) in crate::includes::directive_bodies_at(content, "%build_archspecific") {
+        match states
+            .get(line)
+            .copied()
+            .unwrap_or(ConditionalTruth::Unknown)
+        {
+            ConditionalTruth::False => continue,
+            ConditionalTruth::Unknown => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    "declaration is guarded by an unresolved Make conditional",
+                    target,
+                ));
+                continue;
+            }
+            ConditionalTruth::True => {}
+        }
+
+        let Some(mainmmake) = crate::includes::arg_value(&body, "mainmmake") else {
+            rejected.push(arch_source_rejection(
+                &dir,
+                line,
+                "declaration has no mainmmake= target",
+                target,
+            ));
+            continue;
+        };
+        let Some(tag) = crate::includes::arg_value(&body, "arch") else {
+            rejected.push(arch_source_rejection(
+                &dir,
+                line,
+                &format!("mainmmake={mainmmake} declaration has no arch= tag"),
+                target,
+            ));
+            continue;
+        };
+
+        let guard = |name: &str| scope.flavor_uncertainty_reason_at(name, line);
+        let expr_context = crate::make_expr::MakeExprContext::new(scope, dirs, line, root, rel_dir)
+            .with_guard(&guard)
+            .without_filesystem();
+        let evaluated =
+            match crate::sources::evaluate_macro_sources(&body, &no_legacy_fallback, &expr_context)
+            {
+                Ok(evaluated) => evaluated,
+                Err(error) => {
+                    rejected.push(arch_source_rejection(
+                        &dir,
+                        line,
+                        &format!("mainmmake={mainmmake} arch={tag}: {error}"),
+                        target,
+                    ));
+                    continue;
+                }
+            };
+
+        // evaluate_macro_sources deliberately preserves useful partial
+        // diagnostics for other consumers. Architecture overrides change the
+        // selected implementation, so accepting one lane while another is
+        // unresolved would silently produce a different module.
+        if !evaluated.diagnostics.is_empty() || !evaluated.deferred_wildcards.is_empty() {
+            let mut details = evaluated.diagnostics;
+            details.extend(
+                evaluated
+                    .deferred_wildcards
+                    .into_iter()
+                    .map(|pattern| format!("deferred source wildcard `{pattern}`")),
+            );
+            rejected.push(arch_source_rejection(
+                &dir,
+                line,
+                &format!(
+                    "mainmmake={mainmmake} arch={tag}: incomplete source declaration: {}",
+                    details.join("; ")
+                ),
+                target,
+            ));
+            continue;
+        }
+
+        // Keep the same stable lane order as the legacy collector while
+        // evaluating each lane with its correct Make and language semantics.
+        let mut files = Vec::new();
+        for lane in [evaluated.c, evaluated.cxx, evaluated.asm, evaluated.objc] {
+            for file in lane {
+                if !files.contains(&file) {
+                    files.push(file);
+                }
+            }
+        }
+        if files.is_empty() {
+            rejected.push(arch_source_rejection(
+                &dir,
+                line,
+                &format!("mainmmake={mainmmake} arch={tag}: source list resolved empty"),
+                target,
+            ));
+            continue;
+        }
+
+        let maindir = match resolve_arch_source_scalar(&body, "maindir", &expr_context) {
+            Ok(value) => value,
+            Err(error) => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    &format!("mainmmake={mainmmake} arch={tag}: {error}"),
+                    target,
+                ));
+                continue;
+            }
+        };
+        let modname = match resolve_arch_source_scalar(&body, "modname", &expr_context) {
+            Ok(value) => value,
+            Err(error) => {
+                rejected.push(arch_source_rejection(
+                    &dir,
+                    line,
+                    &format!("mainmmake={mainmmake} arch={tag}: {error}"),
+                    target,
+                ));
+                continue;
+            }
+        };
+
+        declarations.push(ArchSourceDecl {
+            mainmmake,
+            maindir,
+            modname,
+            tag,
+            dir: dir.clone(),
+            files,
+            extra_quote_include: crate::includes::arg_value_quoted(&body, "incextra")
+                .or_else(|| crate::includes::arg_value(&body, "incextra")),
+            // The parser pipeline binds these from the very same declaration
+            // position after this complete source declaration is accepted.
+            include_dirs: Vec::new(),
+            defines: Vec::new(),
+            compile_options: Vec::new(),
+            line,
+        });
+    }
+
+    (declarations, rejected)
+}
+
+fn resolve_arch_source_scalar(
+    body: &str,
+    key: &str,
+    context: &crate::make_expr::MakeExprContext<'_>,
+) -> std::result::Result<Option<String>, String> {
+    let Some(raw) = crate::parser::macro_arg(body, key) else {
+        return Ok(None);
+    };
+    let value = crate::make_expr::evaluate_make_expr(&raw, context)
+        .map_err(|error| format!("cannot resolve {key}={raw}: {error}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.contains('$') || value.contains(char::is_whitespace) {
+        return Err(format!(
+            "{key}={raw} did not resolve to one literal path component"
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn arch_source_rejection(
+    dir: &str,
+    line: usize,
+    reason: &str,
+    target: Option<&TargetContext>,
+) -> String {
+    let contract = if target.is_some() {
+        "selected native source contract"
+    } else {
+        "explicit source configuration"
+    };
+    format!(
+        "{dir}/mmakefile.src:{}: %build_archspecific was rejected: {reason}; fix the {contract} by binding every selector that affects this declaration explicitly (including known-empty values)",
+        line + 1
+    )
+}
+
 /// Bind architecture flags and paths where the declaration stands, not from
 /// the final assignments in a multi-lane file. The input must be the same
 /// joined/inlined text used to construct `scope` and the declaration lines.
@@ -577,5 +787,102 @@ FILES := one two
         let (decls, _) = collect_arch_sources(src, &PathBuf::from("arch/all-pc/x"), None);
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].files, vec!["one", "two"]);
+    }
+
+    fn collect_scoped(
+        content: &str,
+        target: Option<&TargetContext>,
+    ) -> (Vec<ArchSourceDecl>, Vec<String>) {
+        let rel_dir = PathBuf::from("arch/test/kernel");
+        let joined = crate::parser::join_continuations(content);
+        let (scope, states) = crate::make_vars::collect_vars_impl(&joined, target);
+        let root = Path::new("/");
+        let dirs = crate::dirs::DirVars::load(Path::new("/no-arch-source-config-for-test"));
+        collect_arch_sources_with_scope(&joined, &rel_dir, target, &scope, &states, &dirs, root)
+    }
+
+    #[test]
+    fn scoped_sources_use_known_empty_selector_and_make_conditional_stack() {
+        let content = "\
+FILES := baseline
+ifeq ($(FEATURE),1)
+  ifeq ($(UNBOUND_NESTED),yes)
+    FILES += nested-wrong
+  endif
+  FILES += feature-only
+else ifeq ($(FEATURE),0)
+  FILES += zero-only
+else
+endif
+define UNUSED_TEMPLATE
+FILES += from-define-body
+endef
+%build_archspecific mainmmake=kernel-kernel arch=test files=$(FILES) maindir=rom/kernel modname=kernel
+";
+        let mut target = TargetContext::default();
+        // Presence with an empty value is a proven Make value, not an omitted
+        // target selector. The false branch must not add its optional source.
+        target
+            .make_variables
+            .insert("FEATURE".into(), String::new());
+        let (declarations, rejected) = collect_scoped(content, Some(&target));
+
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].files, vec!["baseline".to_owned()]);
+        assert_eq!(declarations[0].maindir.as_deref(), Some("rom/kernel"));
+        assert_eq!(declarations[0].modname.as_deref(), Some("kernel"));
+    }
+
+    #[test]
+    fn scoped_sources_reject_the_whole_declaration_for_an_unbound_feature() {
+        let content = "\
+FILES := baseline
+ifeq ($(OPTIONAL_RUNTIME),1)
+FILES += optional-runtime
+endif
+%build_archspecific mainmmake=kernel-kernel arch=test files=$(FILES) cxxfiles=certain-cxx
+";
+        let (declarations, rejected) = collect_scoped(content, Some(&TargetContext::default()));
+
+        assert!(declarations.is_empty());
+        assert_eq!(rejected.len(), 1);
+        assert!(
+            rejected[0].contains("unevaluated Make conditional"),
+            "{rejected:?}"
+        );
+        assert!(rejected[0].contains("selected native source contract"));
+        assert!(rejected[0].contains("binding every selector"));
+    }
+
+    #[test]
+    fn scoped_sources_preserve_position_and_evaluate_all_language_lanes() {
+        let content = "\
+BASE := first second
+CXXFILES := before
+OBJCFILES := objective
+AFILES := assembler
+%build_archspecific mainmmake=kernel-kernel arch=test files=\"$(addsuffix .c,$(BASE))\" cxxfiles=$(CXXFILES) objcfiles=$(OBJCFILES) asmfiles=$(AFILES)
+CXXFILES := after
+%build_archspecific mainmmake=kernel-kernel arch=test files=$(BASE) cxxfiles=$(CXXFILES)
+";
+        let (declarations, rejected) = collect_scoped(content, None);
+
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(declarations.len(), 2);
+        assert_eq!(
+            declarations[0].files,
+            vec![
+                "first.c".to_owned(),
+                "second.c".to_owned(),
+                "before".to_owned(),
+                "assembler".to_owned(),
+                "objective".to_owned()
+            ]
+        );
+        assert_eq!(
+            declarations[1].files,
+            vec!["first".to_owned(), "second".to_owned(), "after".to_owned()]
+        );
     }
 }

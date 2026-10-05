@@ -129,6 +129,18 @@ endforeach()
 if(NOT DEFINED ARGUMENTS)
     set(ARGUMENTS)
 endif()
+if(NOT DEFINED OUTPUT_MODE)
+    set(OUTPUT_MODE OBJECT)
+endif()
+if(OUTPUT_MODE STREQUAL "OBJECT")
+    set(output_extension "o")
+    set(compile_mode "-c")
+elseif(OUTPUT_MODE STREQUAL "ASSEMBLY" AND LANGUAGE STREQUAL "C")
+    set(output_extension "s")
+    set(compile_mode "-S")
+else()
+    message(FATAL_ERROR "Literal object runner received invalid output mode")
+endif()
 
 _aros_literal_runner_assert_root("${SOURCE_ROOT}" "source root")
 _aros_literal_runner_assert_root("${BUILD_ROOT}" "build root")
@@ -157,7 +169,7 @@ if(NOT source_inside OR SOURCE STREQUAL SOURCE_ROOT OR NOT workdir_inside OR
    NOT SOURCE_DIRECTORY STREQUAL source_parent OR
    NOT source_name MATCHES "\.(c|cpp)$" OR
    NOT output_in_build OR NOT output_in_gen OR OUTPUT STREQUAL gen_root OR
-   NOT output_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*\.o$" OR
+   NOT output_name MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*\.${output_extension}$" OR
    NOT depfile_in_build OR NOT DEPFILE STREQUAL "${OUTPUT}.d")
     message(FATAL_ERROR "Literal object runner received invalid source/output roles")
 endif()
@@ -210,7 +222,7 @@ endif()
 execute_process(
     COMMAND "${COMPILER}" ${ARGUMENTS}
         -MD -MF "${temporary_depfile}" -MT "${OUTPUT}"
-        -c "${SOURCE}" -o "${temporary_object}"
+        ${compile_mode} "${SOURCE}" -o "${temporary_object}"
     WORKING_DIRECTORY "${SOURCE_DIRECTORY}"
     RESULT_VARIABLE compiler_result
     OUTPUT_VARIABLE compiler_stdout

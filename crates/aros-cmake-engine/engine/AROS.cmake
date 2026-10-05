@@ -8,6 +8,8 @@ endif()
 # Modern Multi-Platform Build System for AROS
 
 include(CMakeParseArguments)
+include("${CMAKE_CURRENT_LIST_DIR}/ArchitectureMetadata.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ArchitectureEndpoints.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ModuleMacroContract.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ModuleSourceGroups.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ModuleKobjInputs.cmake")
@@ -30,6 +32,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/SdkFileCopies.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkAssetRules.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SdkObjects.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/LiteralObjects.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/AssemblyHeaders.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/SourceArchives.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/PythonGenerators.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/Mesa26GalliumCoreAPI.cmake")
@@ -1551,13 +1554,17 @@ if(NOT DEFINED AROS_TARGET_FAMILY)
 endif()
 
 # Tag forms used by %set_archincludes across the tree, most specific first:
-# "<platform>-<cpu>", "<platform>", "<cpu>", then the bare-metal group "native".
+# "<platform>-<cpu>", "<platform>", "<cpu>", an explicit nonempty FAMILY,
+# then the bare-metal group "native".
 set(AROS_ARCH_INCLUDE_TAGS
     "${AROS_TARGET_PLATFORM}-${AROS_TARGET_CPU}"
     "${AROS_TARGET_PLATFORM}"
     "${AROS_TARGET_CPU}"
-    "native"
 )
+if(NOT "${AROS_TARGET_FAMILY}" STREQUAL "")
+    list(APPEND AROS_ARCH_INCLUDE_TAGS "${AROS_TARGET_FAMILY}")
+endif()
+list(APPEND AROS_ARCH_INCLUDE_TAGS "native")
 
 
 # aros_gate_arch(<target> <directory>)

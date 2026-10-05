@@ -25,6 +25,16 @@ use std::path::Path;
 #[must_use]
 pub fn endpoints(parsed: &ParsedMmakefile, context: &TargetContext) -> BTreeSet<String> {
     let mut endpoints = BTreeSet::new();
+    for header in &parsed.assembly_headers {
+        endpoints.insert(header.owner.clone());
+        endpoints.insert(header.aggregate_owner.clone());
+    }
+    endpoints.extend(
+        parsed
+            .arch_endpoint_effects
+            .iter()
+            .map(|effect| effect.endpoint.clone()),
+    );
 
     for target in &parsed.targets {
         add_target_endpoints(target, &mut endpoints);

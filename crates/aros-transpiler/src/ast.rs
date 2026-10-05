@@ -637,6 +637,12 @@ pub struct PythonOutputsDecl {
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
+    pub assembly_headers: Vec<crate::assembly_headers::AssemblyHeaderDecl>,
+    pub assembly_header_rejections: Vec<crate::assembly_headers::AssemblyHeaderRejection>,
+    /// Positively proved architecture metadata effects, not module objects.
+    pub arch_endpoint_effects: Vec<crate::arch_endpoint_effects::ArchEndpointEffect>,
+    /// Unsupported source invocations remain visible, not absent producers.
+    pub arch_endpoint_rejections: Vec<crate::arch_endpoint_effects::RejectedArchEndpointEffect>,
     /// Digest of the original byte snapshot used to parse this recipe. It is
     /// not a later filesystem measurement or the re-encoded legacy text.
     pub source_sha256: Option<String>,

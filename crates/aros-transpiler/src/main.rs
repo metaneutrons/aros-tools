@@ -25,6 +25,75 @@ mod source_discovery;
 
 use publication::Publication;
 
+fn bind_architecture_effects(
+    projection: &aros_transpiler::native_owner_projection::NativeOwnerProjection,
+    root: &Path,
+    context: &TargetContext,
+    graph: &mut DependencyGraph,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    use aros_transpiler::arch_endpoint_effects::ArchEndpointEffectData;
+    let candidates = std::mem::take(&mut graph.arch_endpoint_effects);
+    for effect in candidates
+        .iter()
+        .filter(|effect| effect.applies_to(context))
+    {
+        let mut proof = vec![effect.clone()];
+        if let ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, .. } = &effect.data {
+            proof.extend(candidates.iter().filter(|candidate| {
+                candidate.recipe == effect.recipe && candidate.line == effect.line
+                    && matches!(&candidate.data, ArchEndpointEffectData::EmptyLinklibAggregate {
+                        mainmmake: owner, tag: candidate_tag, ..
+                    } if owner == mainmmake && candidate_tag == tag)
+            }).cloned());
+        }
+        let verified = projection.verify_arch_endpoint_effects(root, &proof).and_then(|()| {
+            if let ArchEndpointEffectData::ArchModuleObjects { mainmmake, tag, directory, module_sources } = &effect.data {
+                let base = graph.targets.contains_key(mainmmake)
+                    || graph.inventory_targets.iter().any(|target| &target.mmake_name == mainmmake);
+                let expected: std::collections::BTreeSet<_> = module_sources.iter().collect();
+                let paired = graph.arch_sources.get(mainmmake).is_some_and(|sources| sources.iter().any(|source| {
+                    &source.tag == tag && &source.dir == directory
+                        && source.files.iter().collect::<std::collections::BTreeSet<_>>() == expected
+                }));
+                if !base || !paired {
+                    return Err("architecture objects lack their exact module/source compilation binding".into());
+                }
+            }
+            Ok(())
+        });
+        match verified {
+            Ok(()) => graph.arch_endpoint_effects.push(effect.clone()),
+            Err(message) => diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticCode::CapabilityDrift,
+                    DiagnosticStage::CapabilityValidation,
+                    format!(
+                        "architecture endpoint {} is outside its closed capability: {message}",
+                        effect.endpoint
+                    ),
+                )
+                .with_context(DiagnosticContext {
+                    target: Some(effect.endpoint.clone()),
+                    ..Default::default()
+                })
+                .with_location(SourceLocation {
+                    path: effect.recipe.clone(),
+                    line: Some(effect.line),
+                    column: None,
+                })
+                .with_hint("review this source/template declaration and update the proven transpiler capability; no architecture producer or optionality is inferred"),
+            ),
+        }
+    }
+    projection.verify(root).map_err(|message| {
+        native_selection_input_error(ArosError::Configuration {
+            file: "architecture endpoint inputs".into(),
+            message,
+        })
+    })
+}
+
 // Resolve existing ancestors as well as the final entry. Reports may be new
 // files, but a symlinked parent must not make them alias a protected output.
 fn resolved_publication_path(path: &Path) -> std::io::Result<PathBuf> {
@@ -352,6 +421,8 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     .iter()
     .any(|value| value.is_some())
     .then(|| TargetContext {
+        native_arch_include_effects: Vec::new(),
+        native_arch_include_errors: Vec::new(),
         host_file_generators: Vec::new(),
         make_variables: std::collections::BTreeMap::new(),
         make_include_bindings: std::collections::BTreeMap::new(),
@@ -460,6 +531,16 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         .transpose()?
         .flatten();
     if let Some(projection) = &native_owner_projection {
+        target = Some(
+            projection
+                .native_header_context(&args.source_dir)
+                .map_err(|message| {
+                    native_selection_input_error(ArosError::Configuration {
+                        file: "native architecture include context".into(),
+                        message,
+                    })
+                })?,
+        );
         // Owner metadata and native parsing must consume the same inputs.
         // A stale generated sibling cannot contribute edges or diagnostics
         // after its `.src` has superseded it in source-owned generation.
@@ -811,6 +892,31 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         graph.sdk_asset_rules.extend(parsed.sdk_asset_rules);
         graph.sdk_program_outputs.extend(parsed.sdk_program_outputs);
         if native_contract.is_some() {
+            capability_errors.extend(parsed.assembly_header_rejections.into_iter().map(|rejection| {
+                Diagnostic::error(DiagnosticCode::CapabilityDrift, DiagnosticStage::CapabilityValidation,
+                    format!("assembly header {} is not proved: {}", rejection.owner, rejection.reason))
+                    .with_context(DiagnosticContext { target: Some(rejection.owner), ..Default::default() })
+                    .with_location(SourceLocation { path: rejection.file, line: Some(rejection.line), column: None })
+                    .with_hint("resolve the source-owned compiler/sysroot/include contract; existing output files never establish producer support")
+            }));
+            graph.assembly_headers.extend(parsed.assembly_headers);
+            capability_errors.extend(parsed.arch_endpoint_rejections.into_iter().map(|rejection| {
+                Diagnostic::error(
+                    DiagnosticCode::CapabilityDrift,
+                    DiagnosticStage::CapabilityValidation,
+                    format!("{} architecture effect is not proved: {}", rejection.directive, rejection.reason),
+                )
+                .with_context(DiagnosticContext { target: rejection.endpoint, ..Default::default() })
+                .with_location(SourceLocation {
+                    path: rejection.recipe,
+                    line: Some(rejection.line),
+                    column: None,
+                })
+                .with_hint("review the source declaration and the unsupported transpiler capability; a rejected architecture effect is not an optional hook")
+            }));
+            graph
+                .arch_endpoint_effects
+                .extend(parsed.arch_endpoint_effects);
             graph.sdk_object_groups.extend(parsed.sdk_object_groups);
             graph
                 .source_archive_projections
@@ -1144,6 +1250,32 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 &mut unscoped_diagnostics,
                 graph.resolve_inventory_link_edges(context)?,
             );
+        }
+        if let Some(projection) = &native_owner_projection {
+            let headers = std::mem::take(&mut graph.assembly_headers);
+            for header in headers {
+                match projection.verify_assembly_headers(&args.source_dir, std::slice::from_ref(&header)) {
+                    Ok(()) => graph.assembly_headers.push(header),
+                    Err(message) => capability_errors.push(Diagnostic::error(
+                        DiagnosticCode::CapabilityDrift, DiagnosticStage::CapabilityValidation,
+                        format!("assembly header source proof failed: {message}"))
+                        .with_context(DiagnosticContext { target: Some(header.owner), ..Default::default() })
+                        .with_location(SourceLocation { path: header.file, line: Some(header.line), column: None })
+                        .with_hint("fix the source contract or unsupported transpiler capability; no generated header is accepted as proof")),
+                }
+            }
+            bind_architecture_effects(
+                projection,
+                &args.source_dir,
+                context,
+                &mut graph,
+                &mut capability_errors,
+            )?;
+        } else if !graph.arch_endpoint_effects.is_empty() || !graph.assembly_headers.is_empty() {
+            return Err(native_selection_input_error(ArosError::Configuration {
+                file: "architecture endpoint effects".into(),
+                message: "architecture effects require sealed source projection".into(),
+            }));
         }
         let plain_archive_header_omissions = graph.omit_native_plain_linklib_headers(context);
         for omission in &plain_archive_header_omissions {
@@ -1914,6 +2046,10 @@ fn load_native_selection(
         || context.cpu32.as_deref() != Some(selectors.cpu32.as_str())
         || context.use_mmu.as_deref() != Some(if selectors.use_mmu { "1" } else { "0" })
         || context.float_abi != profile.float_abi
+        || selectors
+            .mesa_version
+            .as_ref()
+            .is_some_and(|version| context.mesa_version.as_ref() != Some(version))
     {
         return Err(invalid(
             "native profile and supplied MetaMake selectors disagree",

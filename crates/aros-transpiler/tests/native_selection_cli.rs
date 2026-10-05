@@ -3360,6 +3360,57 @@ struct Fixture {
     contract: Value,
 }
 
+fn declare_fixture_mesa_version(fixture: &Fixture) {
+    let path = fixture.root.path().join("aros-targets.toml");
+    let original = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        original.replace(
+            "use_mmu = false",
+            "use_mmu = false\nmesa_version = \"26.1.0\"",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_selection_accepts_profile_owned_mesa_version() {
+    let fixture = Fixture::new();
+    declare_fixture_mesa_version(&fixture);
+    let result = fixture.invoke(true, &["--mesa-version", "26.1.0"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fixture.output().exists());
+}
+
+#[test]
+fn native_selection_rejects_missing_or_mismatched_profile_owned_mesa_version() {
+    for overrides in [&[][..], &["--mesa-version", "20.0.8"][..]] {
+        let fixture = Fixture::new();
+        declare_fixture_mesa_version(&fixture);
+        let result = fixture.invoke(true, overrides);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("native profile and supplied MetaMake selectors disagree"));
+        assert!(!fixture.output().exists());
+    }
+}
+
+#[test]
+fn native_selection_accepts_an_explicit_mesa_version_when_profile_leaves_it_unbound() {
+    let fixture = Fixture::new();
+    let result = fixture.invoke(true, &["--mesa-version", "26.1.0"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fixture.output().exists());
+}
+
 fn add_resource_abi_fixture(fixture: &Fixture, macro_form: &str, with_config: bool) {
     let path = fixture.root.path().join("mmakefile.src");
     let original = fs::read_to_string(&path).unwrap();

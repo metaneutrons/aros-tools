@@ -1,0 +1,174 @@
+%define build_archspecific files= cxxfiles= asmfiles= linklibfiles= linklibobjs= mainmmake=/A maindir=/A arch=/A \
+ cppflags="$(CPPFLAGS)" cflags= dflags= aflags="$(AFLAGS)" compiler=target objdir= modname= incextra=
+
+ifeq (%(files) %(linklibfiles) %(linklibobjs) %(asmfiles),)
+    $(error no files or asmfiles given)
+endif
+
+ifneq (%(cxxfiles),)
+    $(error cxx support is TODO)
+endif
+
+%buildid targets="%(mainmmake)-%(arch)"
+
+#MM %(mainmmake)-%(arch) : %(mainmmake)-%(arch)-includes
+#MM %(mainmmake)-%(arch)-linklib : %(mainmmake)-%(arch)-includes
+#MM- %(mainmmake)-%(arch)-includes : %(mainmmake)-includes
+
+ifneq (%(incextra),)
+    BD_INCEXTRA$(BDID)  := "%(incextra)"
+else
+    BD_INCEXTRA$(BDID)  :=  "$(TOP)/%(maindir)"
+endif
+ifneq (%(objdir),)
+    BD_OBJROOT$(BDID)  := %(objdir)
+else
+ifneq (%(modname),)
+    BD_OBJROOT$(BDID)  := $(GENDIR)/%(maindir)/%(modname)
+else
+    BD_OBJROOT$(BDID)  := $(GENDIR)/%(maindir)
+endif
+endif
+BD_OBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/arch
+BD_LIBOBJDIR$(BDID)  := $(BD_OBJROOT$(BDID))/linklib/arch
+BD_FILEOBJS$(BDID)   := $(addsuffix .o,$(addprefix $(BD_OBJDIR$(BDID))/,$(notdir %(files)))) $(addsuffix .o,$(addprefix $(BD_OBJDIR$(BDID))/,$(notdir %(cxxfiles))))
+BD_LINKLIBOBJS$(BDID)   := $(addsuffix .o,$(addprefix $(BD_LIBOBJDIR$(BDID))/,$(notdir %(linklibfiles))))
+BD_LINKLIBARCHOBJS$(BDID)   := $(addprefix $(BD_LIBOBJDIR$(BDID))/,$(notdir %(linklibobjs)))
+BD_ASMOBJS$(BDID) := $(addsuffix .o,$(addprefix $(BD_OBJDIR$(BDID))/,$(notdir %(asmfiles))))
+BD_OBJS$(BDID)    := $(BD_FILEOBJS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) $(BD_ASMOBJS$(BDID))
+BD_DEPS$(BDID)    := $(addsuffix .d,$(addprefix $(BD_OBJDIR$(BDID))/,$(notdir %(files)))) $(addsuffix .d,$(addprefix $(BD_LIBOBJDIR$(BDID))/,$(notdir %(linklibfiles))))
+
+ifneq (%(modname),)
+BD_DEFLIBDEFSINC$(BDID) := -include $(BD_OBJROOT$(BDID))/include/%(modname)_deflibdefs.h
+endif
+
+ifeq ($(TARGET),%(mainmmake)-%(arch)-quick)
+    BD_TARGET := %(mainmmake)-%(arch)-quick
+else
+ifeq ($(TARGET),%(mainmmake)-%(arch)-linklib)
+    BD_TARGET := %(mainmmake)-%(arch)-linklib
+else
+    BD_TARGET := %(mainmmake)-%(arch)
+endif
+endif
+
+ifeq ($(TARGET),$(BD_TARGET))
+TMP_SRCDIR := $(shell $(ECHO) $(SRCDIR) | sed 's/^\(.\):\//\/\1\//')
+vpath %.c $(addprefix $(TMP_SRCDIR)/$(CURDIR)/,$(dir %(files)))
+vpath %.c $(addprefix $(TMP_SRCDIR)/$(CURDIR)/,$(dir %(linklibfiles)))
+vpath %.s $(addprefix $(TMP_SRCDIR)/$(CURDIR)/,$(dir %(asmfiles)))
+vpath %.S $(addprefix $(TMP_SRCDIR)/$(CURDIR)/,$(dir %(asmfiles)))
+endif
+
+ifneq ($(BD_LINKLIBARCHOBJS$(BDID))$(BD_LINKLIBOBJS$(BDID)),)
+BD_GENDIR$(BDID) := $(BD_OBJDIR$(BDID)) $(BD_LIBOBJDIR$(BDID))
+else
+BD_GENDIR$(BDID) := $(BD_OBJDIR$(BDID))
+endif
+
+%rule_makedirs dirs="$(BD_GENDIR$(BDID))" setuptarget="$(BD_OBJS$(BDID))"
+
+#MM
+%(mainmmake)-%(arch) :: $(BD_OBJS$(BDID))
+
+#MM
+%(mainmmake)-%(arch)-quick :: $(BD_OBJS$(BDID))
+
+# Build ONLY the arch-specific linklib objects (no file/asm module objects and no
+# cross-module deps of the bare arch target). This is the leaf of the -linklib
+# arch chain, so building %(mainmmake)-linklib produces these objects (into
+# linklib/arch/) before the main module archives them, without dragging in the
+# full arch module build.
+#MM
+%(mainmmake)-%(arch)-linklib :: $(BD_LINKLIBOBJS$(BDID)) $(BD_LINKLIBARCHOBJS$(BDID))
+
+ifeq ($(findstring %(compiler),host kernel target),)
+    $(error unknown compiler %(compiler))
+endif
+
+ifneq (%(modname),)
+$(BD_FILEOBJS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CPPFLAGS:=$(strip %(cppflags) -I$(BD_OBJROOT$(BDID)) $(BD_DEFLIBDEFSINC$(BDID)))
+else
+$(BD_FILEOBJS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CPPFLAGS:=%(cppflags)
+endif
+
+ifeq (%(compiler),target)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CMD:=$(strip $(TARGET_CC) $(TARGET_SYSROOT))
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CPPFLAGS:=$(TMP_CPPFLAGS)
+ifeq ("%(cflags)","")
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip $(CFLAGS) $(SAFETY_CFLAGS))
+else
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip %(cflags) $(SAFETY_CFLAGS))
+endif
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE:=$(CFLAGS_IQUOTE)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE_END:=$(CFLAGS_IQUOTE_END)
+endif
+ifeq (%(compiler),host)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CMD:=$(HOST_CC)
+ifeq ("%(cflags)","")
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip $(HOST_CFLAGS))
+else
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip %(cflags))
+endif
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE:=$(HOST_IQUOTE)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE_END:=$(HOST_IQUOTE_END)
+endif
+ifeq (%(compiler),kernel)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CMD:=$(strip $(KERNEL_CC) $(KERNEL_SYSROOT))
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CPPFLAGS:=$(strip $(KERNEL_CPPFLAGS) $(TMP_CPPFLAGS))
+ifeq ("%(cflags)","")
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip $(KERNEL_ISA_CFLAGS) $(KERNEL_CFLAGS))
+else
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_CFLAGS:=$(strip %(cflags))
+endif
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE:=$(KERNEL_IQUOTE)
+$(BD_FILEOBJS$(BDID)) $(BD_DEPS$(BDID)) $(BD_LINKLIBOBJS$(BDID)) : TMP_IQUOTE_END:=$(KERNEL_IQUOTE_END)
+endif
+
+ifeq ($(TARGET),$(BD_TARGET))
+$(BD_LIBOBJDIR$(BDID))/%.o : $(SRCDIR)/$(CURDIR)/%.c
+	%compile_q cmd="$(TMP_CMD)" opt="$(strip $(TMP_CFLAGS) $(TMP_CPPFLAGS))" iquote="$(TMP_IQUOTE)" iquote_end="$(TMP_IQUOTE_END)" incextra="$(BD_INCEXTRA$(BDID))"
+$(BD_OBJDIR$(BDID))/%.o : $(SRCDIR)/$(CURDIR)/%.c
+	%compile_q cmd="$(TMP_CMD)" opt="$(strip $(TMP_CFLAGS) $(TMP_CPPFLAGS))" iquote="$(TMP_IQUOTE)" iquote_end="$(TMP_IQUOTE_END)" incextra="$(BD_INCEXTRA$(BDID))"
+endif
+
+ifeq (%(dflags),)
+$(BD_DEPS$(BDID)) : TMP_CPPFLAGS:=$(strip %(cppflags) $(BD_DEFLIBDEFSINC$(BDID)))
+ifeq ("%(cflags)","")
+ifeq (%(compiler),host)
+$(BD_DEPS$(BDID)) : TMP_DFLAGS:=$(strip $(HOST_CFLAGS))
+endif
+ifeq (%(compiler),kernel)
+$(BD_DEPS$(BDID)) : TMP_DFLAGS:=$(strip $(KERNEL_ISA_CFLAGS) $(KERNEL_CFLAGS))
+endif
+ifeq (%(compiler),target)
+$(BD_DEPS$(BDID)) : TMP_DFLAGS:=$(strip $(CFLAGS) $(SAFETY_CFLAGS))
+endif
+else
+$(BD_DEPS$(BDID)) : TMP_DFLAGS:=%(cflags)
+endif
+else
+$(BD_DEPS$(BDID)) : TMP_CPPFLAGS:=%(cppflags)
+$(BD_DEPS$(BDID)) : TMP_DFLAGS:=%(dflags)
+endif
+ifeq ($(TARGET),$(BD_TARGET))
+$(BD_LIBOBJDIR$(BDID))/%.d : $(SRCDIR)/$(CURDIR)/%.c
+	%mkdepend_q cc="$(TMP_CMD)" flags="$(strip $(TMP_DFLAGS) $(TMP_CPPFLAGS))"
+
+$(BD_OBJDIR$(BDID))/%.d : $(SRCDIR)/$(CURDIR)/%.c
+	%mkdepend_q cc="$(TMP_CMD)" flags="$(strip $(TMP_DFLAGS) $(TMP_CPPFLAGS))"
+endif
+
+$(BD_ASMOBJS$(BDID)) : CPPFLAGS:=%(cppflags)
+$(BD_ASMOBJS$(BDID)) : AFLAGS:=%(aflags)
+
+ifeq ($(TARGET),$(BD_TARGET))
+$(BD_OBJDIR$(BDID))/%.o : %.s
+	%assemble_q
+$(BD_OBJDIR$(BDID))/%.o : %.S
+	%assemble_q
+endif
+
+%include_deps depstargets="%(mainmmake)-%(arch) %(mainmmake)-%(arch)-quick %(mainmmake)-%(arch)-linklib" deps="$(BD_DEPS$(BDID))"
+
+%end

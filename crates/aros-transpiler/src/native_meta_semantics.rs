@@ -16,6 +16,35 @@ use std::path::Path;
 const MAX_WORK: usize = 4_000_000;
 const MAX_ALIASES: usize = 20_000;
 
+#[path = "native_empty_library_lists.rs"]
+mod empty_library_lists;
+pub use empty_library_lists::VerifiedEmptyLibraryList;
+
+#[path = "native_library_aliases.rs"]
+mod library_aliases;
+pub use library_aliases::VerifiedNativeLibraryAlias;
+
+// Reviewed full GenMF definition-block fingerprints from the audited P4
+// config/make.tmpl. Hashing the complete block makes added calls or side effects
+// invalidate the caller-chain proof, not only edits to the visible callsite.
+const GEN_ARCHSPECIFICRULES_SHA256: &str =
+    "fc50253aa57b06aac5fdd739e2e871391d4e9a78d84989f83e52af71b162a062";
+const BUILD_MODULE_CORE_SHA256: &str =
+    "b98d01e189affeb9f09c965bb42816719e5faf55f156332ffeb810a402526b53";
+const BUILD_MODULE_SHA256: &str =
+    "8201f536deaec8ae141a7e66cbfda2665a21664bccab9437d7723f08a8b48705";
+const BUILD_MODULE_ABI_SHA256: &str =
+    "f2f9879bc5af8ecf68745a9878eb8efbb6f3a9d4e48752393bb528fe1bd367e3";
+const BUILD_MODULE_LIBRARY_SHA256: &str =
+    "b9d589d7528b09d17c187eae39c7bcce5df16e0a3575166b98489040d0b9ced5";
+const BUILD_LINKLIB_SHA256: &str =
+    "5cca7ef8788eb0fb09fdcd5e72def0b05e5a2e0b9cb00c7052858aee62ac357c";
+const BUILD_PROG_SHA256: &str = "e276e953080db3a15e844057a5d2454c0c537da800904c9544c0c106566d375e";
+const BUILD_PROGS_SHA256: &str = "4c0bbfa21ec9c3d27dbb2724d7b67f37db5326d1c814973389907f1269b32b5b";
+// Exact small direct-caller fixture used by this module's adversarial tests.
+const DIRECT_FIXTURE_BUILD_MODULE_SHA256: &str =
+    "a6cd9dca47f203a9727e57048a155b0e1400f8fbdb4b2104d4887964a85d2715";
+
 #[derive(Debug, Serialize)]
 pub struct SourceVirtualAlias {
     pub name: String,
@@ -37,12 +66,31 @@ pub struct VerifiedSelectorContract {
     pub expression: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct VerifiedTemplateHook {
+    pub recipe: String,
+    pub target: String,
+    pub expression: String,
+    pub expanded_line: usize,
+    pub family: String,
+    pub source_invocation_line: usize,
+}
+
 /// Source-backed metadata routing, never executable producer qualification.
 #[derive(Debug, Default, Serialize)]
 pub struct NativeMetaSemanticsEvidence {
     pub virtual_aliases: Vec<SourceVirtualAlias>,
     pub architecture_hook_omissions: Vec<SourceArchitectureHookOmission>,
     pub verified_selector_contracts: BTreeSet<VerifiedSelectorContract>,
+    /// Exact callsites selected by the sealed source policy. This is not a
+    /// target-name allowlist or an executable producer declaration.
+    pub verified_template_hooks: BTreeSet<VerifiedTemplateHook>,
+    /// Empty GenMF library-list substitutions proved at their exact callsite.
+    /// Handwritten or nonempty missing library dependencies remain errors.
+    pub empty_library_list_omissions: Vec<VerifiedEmptyLibraryList>,
+    /// Generated library-interface spellings redirected to the independently
+    /// source-bound typed archive producer, retaining the prerequisite.
+    pub library_alias_bindings: Vec<VerifiedNativeLibraryAlias>,
 }
 
 /// Exact inputs of the native selection, with no ambient fallback.
@@ -145,18 +193,22 @@ impl NativeOwnerProjection {
                 })?;
                 let mut recipes = BTreeSet::new();
                 let mut dependencies = BTreeSet::new();
+                let mut dependency_recipes = BTreeMap::<String, BTreeSet<String>>::new();
                 for declaration in source_declarations {
                     charge(&mut work)?;
                     if !declaration.virtual_target || declaration.claims_make_owner {
                         continue;
                     }
-                    recipes.insert(self.bound_recipe(&declaration.file)?);
-                    dependencies.extend(
-                        declaration
-                            .dependencies
-                            .iter()
-                            .map(|edge| edge.concrete.clone()),
-                    );
+                    let recipe = self.bound_recipe(&declaration.file)?;
+                    recipes.insert(recipe.clone());
+                    for edge in &declaration.dependencies {
+                        charge(&mut work)?;
+                        dependencies.insert(edge.concrete.clone());
+                        dependency_recipes
+                            .entry(edge.concrete.clone())
+                            .or_default()
+                            .insert(recipe.clone());
+                    }
                 }
                 if recipes.is_empty() {
                     imported.insert(name);
@@ -172,7 +224,7 @@ impl NativeOwnerProjection {
                         edge_origins
                             .entry((name.clone(), dependency.clone()))
                             .or_default()
-                            .extend(recipes.iter().cloned());
+                            .extend(dependency_recipes[dependency].iter().cloned());
                     }
                 }
                 require_concrete(&name, context)?;
@@ -219,7 +271,45 @@ impl NativeOwnerProjection {
         let selected = graph
             .audit_native_dependency_graph(roots, context, diagnostics)
             .reachable;
+        // A concrete parent does not make its independently generated
+        // variant extension mandatory. Permit that proof only for actual
+        // architecture effects reverified against the sealed source; a bare
+        // owner, arbitrary native alias or rejected producer is insufficient.
+        self.verify_arch_endpoint_effects(root, &graph.arch_endpoint_effects)?;
+        let qualified_physical_parents: BTreeSet<_> = graph
+            .arch_endpoint_effects
+            .iter()
+            .map(|effect| effect.endpoint.clone())
+            .collect();
         let mut seeds = BTreeMap::<(String, String), BTreeSet<String>>::new();
+        let mut template_definitions = BTreeSet::new();
+        for (target, source_declarations) in &by_target {
+            if !selected.contains(target) {
+                continue;
+            }
+            for declaration in source_declarations {
+                for source_edge in &declaration.dependencies {
+                    charge(&mut work)?;
+                    if let Some(proof) = self.template_variant_hook(
+                        root,
+                        declaration,
+                        source_edge,
+                        &qualified_physical_parents,
+                        &mut template_definitions,
+                    )? {
+                        if native_meta_edges
+                            .contains(&(target.clone(), source_edge.concrete.clone()))
+                        {
+                            seeds
+                                .entry((target.clone(), source_edge.concrete.clone()))
+                                .or_default()
+                                .insert(proof.recipe.clone());
+                            evidence.verified_template_hooks.insert(proof);
+                        }
+                    }
+                }
+            }
+        }
         for edge in declarations
             .iter()
             .filter(|edge| edge.absence == NativeMetaAbsence::Selector)
@@ -318,6 +408,11 @@ impl NativeOwnerProjection {
                                 target: target.clone(),
                                 expression: expression.clone(),
                             },
+                        ) || template_hook_verified(
+                            &evidence,
+                            declaration,
+                            &recipe,
+                            &expression,
                         );
                         expressions.insert(expression);
                     } else {
@@ -384,6 +479,7 @@ impl NativeOwnerProjection {
                                 target: target.clone(),
                                 expression: expression.clone(),
                             })
+                            || template_hook_verified(&evidence, declaration, &recipe, expression)
                     });
                     // Every source declaration of this unioned edge must
                     // agree. A colliding literal or nonvirtual route cannot
@@ -428,10 +524,219 @@ impl NativeOwnerProjection {
             graph.remove_native_meta_edge(&omission.target, &omission.dependency, context);
         }
         evidence.architecture_hook_omissions = omissions;
+        evidence.library_alias_bindings = self.bind_library_aliases(
+            root,
+            graph,
+            NativeMetaSemanticsSelection {
+                context,
+                roots,
+                declarations,
+                diagnostics,
+                meta_edge_origins: &edge_origins,
+            },
+        )?;
+        evidence.empty_library_list_omissions = self.bind_empty_library_lists(
+            root,
+            graph,
+            NativeMetaSemanticsSelection {
+                context,
+                roots,
+                declarations,
+                diagnostics,
+                // Include exact provenance of virtual source edges imported
+                // above; they have no earlier raw-parser origin. Existing
+                // native edges retain their independently supplied origins.
+                meta_edge_origins: &edge_origins,
+            },
+        )?;
         Ok(evidence)
     }
 
-    fn bound_recipe(&self, file: &str) -> Result<String, String> {
+    /// Only the variant slot of the independently pinned template is optional.
+    fn template_variant_hook(
+        &self,
+        root: &Path,
+        declaration: &crate::metamake_owner_graph::TargetDeclarationProvenance,
+        edge: &crate::metamake_owner_graph::DependencyProvenance,
+        qualified_physical_parents: &BTreeSet<String>,
+        verified_definitions: &mut BTreeSet<(std::path::PathBuf, usize, usize, String, usize)>,
+    ) -> Result<Option<VerifiedTemplateHook>, String> {
+        if self.architecture_hook_families.is_empty()
+            || !declaration.virtual_target
+            || declaration.bare_marker
+            || declaration.claims_make_owner
+            || (self.graph.owner_files(&declaration.target).is_some()
+                && !qualified_physical_parents.contains(&declaration.target))
+            || !edge.raw_expression.contains("$(AROS_TARGET_VARIANT)")
+        {
+            return Ok(None);
+        }
+        let Some(origin) = self
+            .expansion_origins
+            .get(&(declaration.file.clone(), declaration.expanded_line))
+        else {
+            return Ok(None);
+        };
+        let Some(frame) = origin
+            .macro_stack
+            .last()
+            .filter(|frame| frame.name == "gen_archspecificrules")
+        else {
+            return Ok(None);
+        };
+        let Some(caller) = origin.macro_stack.iter().rev().nth(1).filter(|frame| {
+            matches!(
+                frame.name.as_str(),
+                "build_module"
+                    | "build_module_core"
+                    | "build_linklib"
+                    | "build_prog"
+                    | "build_progs"
+            )
+        }) else {
+            return Ok(None);
+        };
+        if caller.template_path != frame.template_path {
+            return Ok(None);
+        }
+        let wrapper = if caller.name == "build_module_core" {
+            let Some(wrapper) = origin.macro_stack.iter().rev().nth(2).filter(|frame| {
+                matches!(
+                    frame.name.as_str(),
+                    "build_module" | "build_module_abi" | "build_module_library"
+                )
+            }) else {
+                return Ok(None);
+            };
+            if wrapper.template_path != frame.template_path {
+                return Ok(None);
+            }
+            wrapper
+        } else {
+            caller
+        };
+        let args = &frame.resolved_arguments;
+        let Some(main) = args.get("mainmmake") else {
+            return Ok(None);
+        };
+        let Some(suffix) = args.get("target") else {
+            return Ok(None);
+        };
+        if args.get("subtarget").is_none_or(|value| !value.is_empty())
+            || main.is_empty()
+            || !main.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+')
+            })
+        {
+            return Ok(None);
+        }
+        let family = match suffix.as_str() {
+            "" => "module",
+            "-linklib" => "linklib",
+            "-set-archincludes" => "set-archincludes",
+            _ => return Ok(None),
+        };
+        // Archives and programs declare only the base architecture slot. Their
+        // quick or suffix-specific routes are not admitted by this proof.
+        if matches!(
+            caller.name.as_str(),
+            "build_linklib" | "build_prog" | "build_progs"
+        ) && !suffix.is_empty()
+        {
+            return Ok(None);
+        }
+        if !self.architecture_hook_families.contains(family)
+            || declaration.raw_target != format!("{main}-$(ARCH)-$(CPU){suffix}")
+            || edge.raw_expression
+                != format!("{main}-$(ARCH)-$(CPU)-$(AROS_TARGET_VARIANT){suffix}")
+        {
+            return Ok(None);
+        }
+        let Some(invocation) = &origin.top_level_source_invocation else {
+            return Ok(None);
+        };
+        let recipe = self.bound_recipe(&declaration.file)?;
+        let canonical_recipe = aros_common::canonical_source_file(root, Path::new(&recipe))
+            .map_err(|error| error.to_string())?;
+        if invocation.path != root.join(&recipe) && invocation.path != canonical_recipe {
+            return Err("template hook invocation is not bound to its source recipe".into());
+        }
+        let identity = (
+            frame.template_path.clone(),
+            frame.definition_line,
+            caller.definition_line,
+            wrapper.name.clone(),
+            wrapper.definition_line,
+        );
+        if verified_definitions.insert(identity) {
+            let relative = frame
+                .template_path
+                .strip_prefix(root)
+                .map_err(|_| "template hook definition is outside source")?;
+            if !self.snapshots.contains_key(
+                relative
+                    .to_str()
+                    .ok_or("non-UTF8 template hook definition")?,
+            ) {
+                return Err("template hook definition is not sealed".into());
+            }
+            let template =
+                std::fs::read_to_string(&frame.template_path).map_err(|error| error.to_string())?;
+            verify_variant_template(&template, frame.definition_line)?;
+            if caller.name == "build_module_core" {
+                verify_reviewed_template_macro(
+                    &template,
+                    "build_module_core",
+                    caller.definition_line,
+                    BUILD_MODULE_CORE_SHA256,
+                )?;
+                let wrapper_digest = match wrapper.name.as_str() {
+                    "build_module" => BUILD_MODULE_SHA256,
+                    "build_module_abi" => BUILD_MODULE_ABI_SHA256,
+                    "build_module_library" => BUILD_MODULE_LIBRARY_SHA256,
+                    _ => unreachable!("wrapper name was filtered above"),
+                };
+                verify_reviewed_template_macro(
+                    &template,
+                    &wrapper.name,
+                    wrapper.definition_line,
+                    wrapper_digest,
+                )?;
+            } else if let Some(digest) = match caller.name.as_str() {
+                "build_linklib" => Some(BUILD_LINKLIB_SHA256),
+                "build_prog" => Some(BUILD_PROG_SHA256),
+                "build_progs" => Some(BUILD_PROGS_SHA256),
+                _ => None,
+            } {
+                verify_reviewed_template_macro(
+                    &template,
+                    &caller.name,
+                    caller.definition_line,
+                    digest,
+                )?;
+            } else {
+                // The small direct-call chain exists only as an exact closed
+                // fixture contract; name equality alone never admits it.
+                verify_reviewed_template_macro(
+                    &template,
+                    "build_module",
+                    caller.definition_line,
+                    DIRECT_FIXTURE_BUILD_MODULE_SHA256,
+                )?;
+            }
+        }
+        Ok(Some(VerifiedTemplateHook {
+            recipe,
+            target: declaration.target.clone(),
+            expression: architecture_expression(&edge.raw_expression)
+                .ok_or("unsafe template selector expression")?,
+            expanded_line: declaration.expanded_line,
+            family: family.into(),
+            source_invocation_line: invocation.line,
+        }))
+    }
+
+    pub(super) fn bound_recipe(&self, file: &str) -> Result<String, String> {
         let recipe = self
             .owners
             .get(file)
@@ -443,6 +748,66 @@ impl NativeOwnerProjection {
         }
         Ok(recipe.clone())
     }
+}
+
+fn template_hook_verified(
+    evidence: &NativeMetaSemanticsEvidence,
+    declaration: &crate::metamake_owner_graph::TargetDeclarationProvenance,
+    recipe: &str,
+    expression: &str,
+) -> bool {
+    evidence.verified_template_hooks.iter().any(|proof| {
+        proof.recipe == recipe
+            && proof.target == declaration.target
+            && proof.expression == expression
+            && proof.expanded_line == declaration.expanded_line
+    })
+}
+
+fn verify_variant_template(template: &str, definition_line: usize) -> Result<(), String> {
+    verify_reviewed_template_macro(
+        template,
+        "gen_archspecificrules",
+        definition_line,
+        GEN_ARCHSPECIFICRULES_SHA256,
+    )
+}
+
+/// Fingerprint an entire reviewed GenMF definition block, including its
+/// declaration and terminator. Invocation provenance supplies the line id.
+fn verify_reviewed_template_macro(
+    template: &str,
+    name: &str,
+    definition_line: usize,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let lines: Vec<_> = template.lines().collect();
+    let starts: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let mut words = line.split_whitespace();
+            words.next() == Some("%define") && words.next() == Some(name)
+        })
+        .map(|(line, _)| line)
+        .collect();
+    if starts.len() != 1 || starts[0] + 1 != definition_line {
+        return Err(format!(
+            "template macro {name} definition is not unique/exact"
+        ));
+    }
+    let start = starts[0];
+    let end = (start + 1..lines.len())
+        .find(|index| lines[*index].starts_with("%end"))
+        .ok_or_else(|| format!("template macro {name} is unterminated"))?;
+    if aros_common::sha256_bytes(lines[start..=end].join("\n").as_bytes()).as_str()
+        != expected_sha256
+    {
+        return Err(format!(
+            "template macro {name} differs from its supported semantics"
+        ));
+    }
+    Ok(())
 }
 
 fn charge(work: &mut usize) -> Result<(), String> {

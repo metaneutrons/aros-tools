@@ -64,6 +64,16 @@ pub struct RejectedProvider {
 #[must_use]
 pub fn validate(parsed: &ParsedMmakefile) -> Vec<RejectedProvider> {
     let mut local_producers = BTreeSet::new();
+    for header in &parsed.assembly_headers {
+        local_producers.insert(header.owner.clone());
+        local_producers.insert(header.aggregate_owner.clone());
+    }
+    local_producers.extend(
+        parsed
+            .arch_endpoint_effects
+            .iter()
+            .map(|effect| effect.endpoint.clone()),
+    );
     local_producers.extend(
         parsed
             .host_header_aggregates

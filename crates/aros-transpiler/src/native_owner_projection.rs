@@ -16,9 +16,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+#[path = "native_arch_endpoint_effects.rs"]
+mod arch_endpoint_effects;
+#[path = "native_assembly_headers.rs"]
+mod assembly_headers;
 #[path = "native_meta_semantics.rs"]
 mod meta_semantics;
 pub use meta_semantics::{NativeMetaSemanticsEvidence, NativeMetaSemanticsSelection};
+
+#[cfg(test)]
+#[path = "native_template_hook_tests.rs"]
+mod template_hook_tests;
+
+#[cfg(test)]
+#[path = "native_meta_edge_origin_tests.rs"]
+mod meta_edge_origin_tests;
 
 const MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
 
@@ -42,6 +54,10 @@ struct Policy {
     evidence_sources: Vec<String>,
     closed_environment: bool,
     out_of_source: bool,
+    /// Closed source-owned permission for template-generated extension slots.
+    /// This never applies to handwritten edges or concrete source owners.
+    #[serde(default)]
+    architecture_hook_families: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +85,15 @@ struct HostEnvironment {
 /// Snapshots and complete metadata graph of one explicit native invocation.
 #[derive(Debug)]
 pub struct NativeOwnerProjection {
+    /// Configuration captured from the validated native source contract.
+    /// Architecture effects replay with this exact context, not an arbitrary
+    /// caller-provided or ambient configuration.
+    architecture_context: TargetContext,
     graph: MetaMakeOwnerGraph,
+    /// Expansion origins keyed by generated owner and directive-start line.
+    /// A direct Make fragment intentionally has no template origin.
+    expansion_origins: BTreeMap<(String, usize), crate::genmf_projection::ExpandedLineProvenance>,
+    architecture_hook_families: BTreeSet<String>,
     /// Canonical generated MetaMake owner -> actual source input.
     owners: BTreeMap<String, String>,
     /// Complete discovered inputs at load time, excluding project-ignored directories.
@@ -78,6 +102,8 @@ pub struct NativeOwnerProjection {
     ignored_directories: BTreeSet<String>,
     /// Exact original bytes; checked against the main parser and recaptured.
     pub snapshots: BTreeMap<String, String>,
+    /// Source contract inputs available to configuration include replay.
+    sealed_configuration_inputs: BTreeMap<String, String>,
     pub policy_sha256: String,
     pub expanded_bytes: usize,
 }
@@ -124,6 +150,22 @@ pub struct NativeInvocationSelection<'a> {
 }
 
 impl NativeOwnerProjection {
+    /// Exact text-expansion evidence for a declaration in this captured
+    /// corpus. This is provenance only, never permission to omit an edge or
+    /// to manufacture a producer. Direct source fragments have an empty macro
+    /// stack; inputs not expanded by GenMF have no expansion record.
+    #[must_use]
+    pub fn expansion_origin(
+        &self,
+        declaration: &crate::metamake_owner_graph::TargetDeclarationProvenance,
+    ) -> Option<&crate::genmf_projection::ExpandedLineProvenance> {
+        if !self.graph.declarations().contains(declaration) {
+            return None;
+        }
+        self.expansion_origins
+            .get(&(declaration.file.clone(), declaration.expanded_line))
+    }
+
     /// Load sealed policy/config/templates and verify supplied discovery against
     /// a fresh MetaMake walk. Source `.src` regenerates its owner instead of
     /// trusting an old generated mmakefile. No command or ambient variable runs.
@@ -151,7 +193,7 @@ impl NativeOwnerProjection {
         let discovered = verify_complete_discovery(root, files, &project.ignored_directories)?;
         let template = load_template(root, &policy, &sealed, &mut snapshots)?;
         let owners = build_owner_map(discovered.clone());
-        let (expanded, expanded_bytes) =
+        let (expanded, expanded_bytes, expansion_origins) =
             expand_owners(root, &owners, &template, &sealed, &mut snapshots)?;
         let limits = Limits {
             preserve_empty_endpoints: true,
@@ -165,7 +207,11 @@ impl NativeOwnerProjection {
             limits,
         )?;
         let projection = Self {
+            architecture_context: context.clone(),
+            sealed_configuration_inputs: sealed,
             graph,
+            expansion_origins,
+            architecture_hook_families: policy.architecture_hook_families.into_iter().collect(),
             owners,
             discovered_inputs: discovered,
             ignored_directories: project.ignored_directories,
@@ -394,6 +440,18 @@ fn validate_policy_identity(
     let unique: BTreeSet<_> = policy.evidence_sources.iter().collect();
     if unique.len() != policy.evidence_sources.len() {
         return Err("duplicate native MetaMake evidence source".into());
+    }
+    validate_architecture_hook_families(&policy.architecture_hook_families)
+}
+
+fn validate_architecture_hook_families(names: &[String]) -> Result<(), String> {
+    let families: BTreeSet<_> = names.iter().collect();
+    if families.len() != names.len()
+        || families
+            .iter()
+            .any(|family| !matches!(family.as_str(), "module" | "linklib" | "set-archincludes"))
+    {
+        return Err("native architecture hooks require unique closed template families".into());
     }
     Ok(())
 }
@@ -694,24 +752,45 @@ fn load_template(
         .map_err(|error| error.to_string())
 }
 
+type ExpansionOrigins = BTreeMap<(String, usize), crate::genmf_projection::ExpandedLineProvenance>;
+
 fn expand_owners(
     root: &Path,
     owners: &BTreeMap<String, String>,
     template: &Path,
     sealed: &BTreeMap<String, String>,
     snapshots: &mut BTreeMap<String, String>,
-) -> Result<(BTreeMap<String, String>, usize), String> {
+) -> Result<(BTreeMap<String, String>, usize, ExpansionOrigins), String> {
     let mut expanded = BTreeMap::new();
     let mut expanded_bytes = 0usize;
+    let mut expansion_origins = ExpansionOrigins::new();
     for (owner, source) in owners {
         let bytes = read_snapshot(root, source, 1024 * 1024, snapshots)?;
         let text = if Path::new(source)
             .file_name()
             .is_some_and(|name| name == "mmakefile.src")
         {
-            let expansion =
-                expand_bytes(&bytes, &root.join(source), template, GenmfLimits::default())
-                    .map_err(|error| error.to_string())?;
+            let expansion = expand_bytes(
+                &bytes,
+                &root.join(source),
+                template,
+                GenmfLimits {
+                    metadata_provenance_only: true,
+                    ..GenmfLimits::default()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            // Keep only complete directive starts. Provenance of generated
+            // commands never serves as a metadata admission shortcut.
+            for origin in expansion.provenance {
+                let fragment = &expansion.text[origin.output_start_byte..origin.output_end_byte];
+                if fragment.starts_with("#MM") {
+                    let key = (owner.clone(), origin.output_line);
+                    if expansion_origins.insert(key, origin).is_some() {
+                        return Err("ambiguous GenMF metadata line provenance".into());
+                    }
+                }
+            }
             retain_template_snapshots(root, expansion.template_snapshots, sealed, snapshots)?;
             expansion.text
         } else {
@@ -724,7 +803,7 @@ fn expand_owners(
             .ok_or("native MetaMake expanded corpus exceeds 128 MiB")?;
         expanded.insert(owner.clone(), text);
     }
-    Ok((expanded, expanded_bytes))
+    Ok((expanded, expanded_bytes, expansion_origins))
 }
 
 fn retain_template_snapshots(
@@ -842,6 +921,24 @@ fn require_seal(path: &str, bytes: &[u8], seals: &BTreeMap<String, String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn architecture_families_are_closed_unique_and_opt_in() {
+        assert!(validate_architecture_hook_families(&[]).is_ok());
+        assert!(validate_architecture_hook_families(&[
+            "module".into(),
+            "linklib".into(),
+            "set-archincludes".into()
+        ])
+        .is_ok());
+        for names in [
+            vec!["module".into(), "module".into()],
+            vec!["unknown".into()],
+            vec!["kernel-exec-riscv".into()],
+        ] {
+            assert!(validate_architecture_hook_families(&names).is_err());
+        }
+    }
 
     fn unowned_failure() -> Diagnostic {
         Diagnostic::error(
@@ -1118,7 +1215,11 @@ mod tests {
         )
         .unwrap();
         NativeOwnerProjection {
+            architecture_context: TargetContext::default(),
+            sealed_configuration_inputs: BTreeMap::new(),
             graph,
+            expansion_origins: BTreeMap::new(),
+            architecture_hook_families: BTreeSet::new(),
             owners,
             discovered_inputs,
             ignored_directories,
@@ -1149,6 +1250,132 @@ mod tests {
             &snapshots.into_iter().rev().collect::<Vec<_>>()
         )
         .is_err());
+    }
+
+    #[test]
+    fn assembly_header_proof_replays_sealed_source_and_concrete_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("hardware/header");
+        fs::create_dir_all(&directory).unwrap();
+        let recipe = "hardware/header/mmakefile.src";
+        let owner = "hardware/header/mmakefile";
+        let source = r#"OBJDIR := $(GENDIR)/header
+GENINCDIR := $(GENDIR)/include
+#MM
+provider : $(GENINCDIR)/generated/table.h
+#MM aggregate : prep provider
+#MM
+aggregate:
+	@$(NOP)
+GREPTOKEN := ".asciz"
+$(OBJDIR)/table.s : $(SRCDIR)/$(CURDIR)/table.c | $(OBJDIR)
+	@$(ECHO) "Compiling  $<..."
+	@$(TARGET_CC) $(TARGET_SYSROOT) $(CFLAGS) $(PRIV_EXEC_INCLUDES) -S $< -o $@
+$(GENINCDIR)/generated/table.h : $(OBJDIR)/table.s | $(GENINCDIR)/generated
+	@$(ECHO) Generating $@...
+	@grep $(GREPTOKEN) $< | cut -d'"' -f2 | sed 's/\$$//g' >$@
+"#;
+        fs::write(directory.join("mmakefile.src"), source).unwrap();
+        fs::write(directory.join("table.c"), "int table;\n").unwrap();
+        let context = TargetContext {
+            toolchain: Some("gnu".into()),
+            make_variables: BTreeMap::from([
+                ("TARGET_CC".into(), "$(NATIVE_TARGET_CC)".into()),
+                ("TARGET_SYSROOT".into(), String::new()),
+                ("CFLAGS".into(), "-O2".into()),
+                ("PRIV_EXEC_INCLUDES".into(), String::new()),
+            ]),
+            ..TargetContext::default()
+        };
+        let mut projection = projection_for_discovery(root.path(), BTreeSet::new());
+        projection.architecture_context = context.clone();
+        projection.snapshots.insert(
+            recipe.into(),
+            aros_common::sha256_bytes(source.as_bytes()).to_string(),
+        );
+        let metadata = BTreeMap::from([(
+            owner.into(),
+            "#MM provider\n#MM aggregate : prep provider\n".into(),
+        )]);
+        projection.graph = MetaMakeOwnerGraph::parse_with_declared_absence(
+            &metadata,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let mut dirs = crate::dirs::DirVars::load(root.path());
+        dirs.bind_native_target_tool_roles();
+        let (headers, rejections) = crate::assembly_headers::collect_from_snapshot(
+            source,
+            &context,
+            &dirs,
+            root.path(),
+            Path::new("hardware/header"),
+        );
+        assert!(rejections.is_empty(), "{rejections:?}");
+        assert_eq!(headers.len(), 1);
+        projection
+            .verify_assembly_headers(root.path(), &headers)
+            .unwrap();
+        fs::create_dir(root.path().join("config")).unwrap();
+        let configuration = "AROS_DEVELOPER = $(TARGETDIR)/SYS/Developer\n";
+        fs::write(root.path().join("config/make.cfg.in"), configuration).unwrap();
+        assert!(projection
+            .verify_assembly_headers(root.path(), &headers)
+            .is_err());
+        projection.sealed_configuration_inputs.insert(
+            "config/make.cfg.in".into(),
+            aros_common::sha256_bytes(configuration.as_bytes()).to_string(),
+        );
+        projection
+            .verify_assembly_headers(root.path(), &headers)
+            .unwrap();
+        fs::write(
+            root.path().join("config/make.cfg.in"),
+            "AROS_DEVELOPER = changed\n",
+        )
+        .unwrap();
+        assert!(projection
+            .verify_assembly_headers(root.path(), &headers)
+            .is_err());
+        fs::write(root.path().join("config/make.cfg.in"), configuration).unwrap();
+        let mut changed = headers.clone();
+        changed[0].arguments.push("-O3".into());
+        assert!(projection
+            .verify_assembly_headers(root.path(), &changed)
+            .is_err());
+        let duplicates = vec![headers[0].clone(), headers[0].clone()];
+        assert!(projection
+            .verify_assembly_headers(root.path(), &duplicates)
+            .is_err());
+        let mut ambiguous = metadata.clone();
+        ambiguous.insert("other/mmakefile".into(), "#MM provider\n".into());
+        projection.graph = MetaMakeOwnerGraph::parse_with_declared_absence(
+            &ambiguous,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert!(projection
+            .verify_assembly_headers(root.path(), &headers)
+            .is_err());
+        projection.graph = MetaMakeOwnerGraph::parse_with_declared_absence(
+            &metadata,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("mmakefile.src"),
+            format!("{source}# changed\n"),
+        )
+        .unwrap();
+        assert!(projection
+            .verify_assembly_headers(root.path(), &headers)
+            .is_err());
     }
 
     #[test]

@@ -149,6 +149,7 @@ const SEEDS: &[(&str, &str)] = &[
 ];
 
 /// Directory variables resolved to CMake expressions.
+#[derive(Default)]
 pub struct DirVars {
     resolved: HashMap<String, String>,
     /// Physical configure-time counterparts for selected deferred CMake
