@@ -146,13 +146,19 @@ set mirrors the existing CMake consumers, not every file in an external SDK.
 These checks do not claim isolation from a hostile concurrent filesystem
 replacement, a complete environment attestation or successful P4 compilation.
 
-Source contracts can explicitly mark a metadata edge `absence: disabled-owner`.
-The translator requires the exact edge and a literal commented `##MM` owner in
-the same hash-bound recipe snapshot. It records an omission only if no active
-provider exists; supported siblings remain selected and unsupported active
-providers still fail. This matches classic MetaMake's missing-child behavior
-without activating commented source or globally ignoring missing dependencies.
-Selector-derived optional edges retain their existing closed proof contract.
+An active MetaMake dependency needs a real source-owned producer. A selector
+or a commented-out owner does not make the edge optional. Legacy
+`optional_meta_dependencies` declarations remain validated against their exact
+hash-bound recipes, but cannot remove edges. Missing endpoints fail with the
+recipe and `fix upstream`; supported siblings and unsupported active providers
+retain their normal selection checks. A diagnostic-only graph audit retains
+these failures and sibling evidence without publishing a graph or inventory.
+
+Native owner projection and parsing use the same effective inputs:
+`mmakefile.src` supersedes its generated `mmakefile`, while direct fragments
+remain inputs. The complete discovery set, project ignore policy and captured
+bytes are rechecked before admission. Added or removed recipes require a new
+projection; a stale generated sibling cannot add edges to the selected graph.
 
 Flash-image planning validates exact chip/silicon compatibility, partition
 ranges, capacity, required roles and output identity before mutation. Wrong
