@@ -586,12 +586,14 @@ deterministic invocation. `off` also removes stale launcher settings from an
 existing CMake build tree on the next configure.
 
 `auto` selects the first available prepared AROS-owned namespace in stable
-order: sccache, then ccache. If neither has been prepared, it selects `off`
-without starting a backend. An explicit backend requires its default managed
-root to be prepared; use `--compiler-cache-dir DIR` only with an explicit
-backend to select another prepared root. Both explicit and automatic managed
-selection work offline because ambient compiler-cache configuration is removed
-and the generated namespace is local-only.
+order: sccache, then ccache. If neither backend has a prepared namespace, or
+all prepared backends are unavailable, it selects `off` without starting a
+backend. An explicit backend requires its default managed root to be prepared;
+use `--compiler-cache-dir DIR` only with an explicit backend to select another
+prepared root. Both explicit and automatic managed selection work offline
+because ambient compiler-cache configuration is removed and the generated
+namespace is local-only. Offline mode does not turn `auto` off when a prepared
+namespace is available.
 
 For every other state path and precedence rule, see
 [configuration](/aros-tools/reference/configuration/). For a toolchain install

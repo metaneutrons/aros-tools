@@ -152,11 +152,18 @@ the safe entry stages and explains the required checkout/cache separation.
 | Command | Effect |
 | --- | --- |
 | `aros image build` | Plan a reviewed FAT32 or BIOS ISO profile; compose into a new artifact directory with `--apply` |
+| `aros image prepare` | Build and independently verify source-selected external bootloader and partition-table inputs offline; no complete flash image or device write |
 | `aros image receipt` | Measure CMake-produced files and complete trees against a clean source checkout and installed toolchain |
 | `aros image inspect` | Read back a composed image from `--artifact DIR` and show measured facts |
 | `aros image verify` | Check the artifact inventory, SHA256SUMS, image filesystem, embedded files and boot metadata |
 
-These commands work without an AROS checkout and accept `--format human|json`.
+All image commands accept `--format human|json`. `prepare` requires an explicit
+source root and native preset plus a closed, SHA-256-bound local input document.
+It creates a fresh retained preparation below a private `--work-parent`, never
+adopts an old vendor build, and does not fetch inputs. See
+[native media inputs](/aros-tools/reference/native-media-inputs/).
+The composition and artifact-inspection commands can run without a current
+AROS working directory; source-bound receipts still require their checkout.
 `build` requires `--profile ID --build-root DIR --receipt FILE --output DIR`.
 It selects an exact ID from the built-in reviewed registry and requires a
 versioned CMake or legacy build receipt. Where the profile declares external
@@ -551,14 +558,16 @@ aros board build --profile rpi4-usb --compiler-cache ccache \
 ```
 
 `auto` selects the first available prepared AROS-owned namespace: `sccache`,
-then `ccache`. If neither namespace is prepared, it selects `off` without
-starting a backend. An explicit backend requires a prepared default namespace;
-`--compiler-cache-dir DIR` selects another prepared namespace and is valid only
-with `sccache` or `ccache`. The frontend removes every ambient `SCCACHE_*` and
-`CCACHE_*` setting, then passes the exact absolute launcher and generated local
-environment to CMake for C and C++. CMake never performs a second `PATH`
-search. CMake has no supported language-specific compiler-launcher interface
-for ASM, so assembly remains a direct deterministic invocation.
+then `ccache`. If no prepared namespace has an available backend, it selects
+`off` without starting a backend. This selection also applies with `--offline`:
+a prepared local namespace remains eligible. An explicit backend requires a
+prepared default namespace. `--compiler-cache-dir DIR` selects another prepared
+namespace and is valid only with `sccache` or `ccache`. The frontend removes
+every ambient `SCCACHE_*` and `CCACHE_*` setting, then passes the exact absolute
+launcher and generated local environment to CMake for C and C++. CMake never
+performs a second `PATH` search. CMake has no supported language-specific
+compiler-launcher interface for ASM, so assembly remains a direct deterministic
+invocation.
 
 `build` options:
 

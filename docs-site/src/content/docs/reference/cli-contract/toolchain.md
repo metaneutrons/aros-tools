@@ -15,6 +15,8 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros toolchain build` | work_dir | --work-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain build` | output_dir | --output-dir | — | required | 1 |  |  | — |  |
 | `aros toolchain build` | cache_dir | --cache-dir | — | required | 1 |  |  | — |  |
+| `aros toolchain build` | compiler_cache | --compiler-cache | — | optional | 1 | off | auto, off, sccache, ccache | — |  |
+| `aros toolchain build` | compiler_cache_dir | --compiler-cache-dir | — | optional | 1 |  |  | — |  |
 | `aros toolchain build` | jobs | --jobs | — | required | 1 |  |  | — |  |
 | `aros toolchain build` | timeout_seconds | --timeout-seconds | — | required | 1 |  |  | — |  |
 | `aros toolchain build` | release_id | --release-id | — | required | 1 |  |  | — |  |
