@@ -1255,10 +1255,9 @@ mod tests {
     use super::{expand_files, expand_text, Limits};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestTree {
-        root: PathBuf,
+        root: tempfile::TempDir,
     }
 
     impl TestTree {
@@ -1266,17 +1265,15 @@ mod tests {
             let base = std::env::temp_dir()
                 .canonicalize()
                 .expect("temporary directory resolves without aliases");
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let root = base.join(format!("genmf-projection-{}-{nonce}", std::process::id()));
-            fs::create_dir(&root).expect("create unique temporary tree");
+            let root = tempfile::Builder::new()
+                .prefix("genmf-projection-")
+                .tempdir_in(base)
+                .expect("create unique temporary tree");
             Self { root }
         }
 
         fn path(&self, relative: &str) -> PathBuf {
-            self.root.join(relative)
+            self.root.path().join(relative)
         }
 
         fn write(&self, relative: &str, bytes: &[u8]) -> PathBuf {
@@ -1286,12 +1283,6 @@ mod tests {
             }
             fs::write(&path, bytes).expect("write fixture");
             path
-        }
-    }
-
-    impl Drop for TestTree {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
