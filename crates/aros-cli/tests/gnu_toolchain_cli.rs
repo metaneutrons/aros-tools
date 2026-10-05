@@ -121,6 +121,81 @@ impl Fixture {
         self.write_manifest();
     }
 
+    fn add_native_source_contract(&mut self) -> Value {
+        self.layout["schema"] = json!("aros-toolchain-tools-v3");
+        let relative = format!("{}-objdump", self.triple);
+        self.layout["tools"]["objdump"] = json!(relative);
+        let executable = self.payload.join(&relative);
+        fs::write(
+            &executable,
+            fs::read(self.payload.join(format!("{}-gcc", self.triple))).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o755)).unwrap();
+        self.write_layout();
+        self.write_manifest();
+        let declared = [
+            "native/core.src",
+            "native/linker.lds",
+            "native/check.sh",
+            "native/package.src",
+            "native/board.mk",
+            "native/partitions.csv",
+            "native/sdkconfig",
+            "native/bootloader.diff",
+        ];
+        let inputs = declared
+            .iter()
+            .map(|relative| {
+                let path = self.project.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, format!("synthetic source: {relative}\n")).unwrap();
+                json!({"path": relative, "sha256": sha256_file(&path).unwrap().digest})
+            })
+            .collect::<Vec<_>>();
+        let document = json!({
+            "schema_version": 1, "profile": "fixture-target", "board": "fixture",
+            "source_baseline": "1".repeat(40), "qualification": "experimental-unqualified",
+            "inputs": inputs,
+            "abi": {"source_cpu": "riscv", "target_triple": "riscv-aros",
+                "isa": "rv32imafc", "abi": "ilp32f", "code_model": "medany",
+                "flavour": "standalone", "platform_smp": false, "use_mmu": false},
+            "core": {"recipe": "native/core.src", "linker_script": "native/linker.lds",
+                "residency_check": "native/check.sh", "resources": ["kernel"],
+                "residency_policy": {
+                    "algorithm": "riscv32-xip-v1", "section": ".sramtext",
+                    "flash_start": 1_073_741_824, "flash_end": 1_140_850_688,
+                    "sram_start": 1_341_128_704, "sram_end": 1_341_652_992
+                },
+                "libraries": ["exec"], "devices": ["timer"], "link_libraries": ["exec"],
+                "compiler_runtime_role": "libgcc"},
+            "package": {"recipe": "native/package.src", "format": "aros-pkg-v1",
+                "target": "synthetic-package", "limit_from_board": "BOARD_LIMIT"},
+            "media": {"chip": "synthetic-chip", "board_rules": "native/board.mk",
+                "partition_table": "native/partitions.csv", "core_partition": "core",
+                "package_partition": "bsp", "development_volume_offset_from_board": "BOARD_VOLUME",
+                "bootloader_configuration": "native/sdkconfig", "bootloader_patch": "native/bootloader.diff",
+                "idf_version": "6.0.1"}
+        });
+        fs::write(
+            self.project.join("native-build-v1.json"),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let profile = fs::read_to_string(self.project.join("aros-targets.toml"))
+            .unwrap()
+            .replace(
+                "[targets.transpiler]",
+                "native_build_contract='native-build-v1.json'\n[targets.transpiler]",
+            );
+        fs::write(
+            self.project.join("aros-targets.toml"),
+            format!("{profile}[targets.bootstrap_abi]\nflavour='standalone'\nplatform_smp=false\n"),
+        )
+        .unwrap();
+        document
+    }
+
     fn write_manifest(&self) -> ArosToolchainManifest {
         let (tree_sha256, files) = toolchain_tree_inventory(&self.payload).unwrap();
         let compiler: ArosCompilerIdentity =
@@ -154,7 +229,7 @@ impl Fixture {
         manifest
     }
 
-    fn base_command(&self) -> Command {
+    fn cli_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aros"));
         command
             .current_dir(&self.project)
@@ -164,7 +239,13 @@ impl Fixture {
             .env_remove("AROS_LOG_FILE")
             .env_remove("AROS_LOG_LEVEL")
             .env_remove("AROS_LOG_FORMAT")
-            .args(["--diagnostic-format", "json", "toolchain"]);
+            .args(["--diagnostic-format", "json"]);
+        command
+    }
+
+    fn base_command(&self) -> Command {
+        let mut command = self.cli_command();
+        command.arg("toolchain");
         command
     }
 
@@ -234,6 +315,448 @@ impl Fixture {
     }
 }
 
+/// The child CMake is a recorder, not a compiler: this proves that the public
+/// build command forwards the verified GNU contract across its process boundary.
+#[test]
+fn native_build_forwards_declared_gnu_roles_without_llvm_or_host_fallback() {
+    let mut fixture = Fixture::new(32);
+    fixture.add_native_utilities();
+    let mut contract = fixture.add_native_source_contract();
+    contract["profile"] = json!("fixture-board");
+    fs::write(
+        fixture.project.join("native-build-v1.json"),
+        serde_json::to_vec(&contract).unwrap(),
+    )
+    .unwrap();
+    let profiles = fixture.project.join("aros-targets.toml");
+    let profile_text = fs::read_to_string(&profiles).unwrap();
+    fs::write(
+        profiles,
+        profile_text.replace(
+            "name='fixture-target'",
+            "name='fixture-board'\ntoolchain_profile='fixture-target'",
+        ),
+    )
+    .unwrap();
+    let tools = fixture.temporary.path().join("suite");
+    fs::create_dir(&tools).unwrap();
+    for name in [
+        "aros-transpiler",
+        "aros-genmodule",
+        "aros-romtool",
+        "aros-collect",
+        "aros-ahi-runner",
+        "aros-fetch",
+        "aros-verify",
+    ] {
+        let path = tools.join(name);
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ \"${{1:-}}\" = --version ] || exit 99\nprintf '%s\\n' '{name} {}'\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let recorder = fixture.temporary.path().join("cmake-arguments");
+    let cmake = tools.join("cmake");
+    fs::write(
+        &cmake,
+        "#!/bin/sh\nprintf '%s\\n' invocation \"$@\" >> \"$AROS_TEST_CMAKE_ARGUMENTS\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(cmake, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = vec![tools.clone()];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let run = |fixture: &Fixture| {
+        fixture
+            .cli_command()
+            .env("AROS_BUILD_TOOLS_DIR", &tools)
+            .env("AROS_TEST_CMAKE_ARGUMENTS", &recorder)
+            .env("PATH", std::env::join_paths(&path).unwrap())
+            .args([
+                "build",
+                "--preset",
+                "fixture-board",
+                "--offline",
+                "--compiler-cache",
+                "off",
+                "--toolchain-dir",
+            ])
+            .arg(&fixture.payload)
+            .output()
+            .unwrap()
+    };
+    success(&run(&fixture));
+    let observed = fs::read_to_string(&recorder).unwrap();
+    for value in [
+        "-DAROS_TOOLCHAIN=gnu",
+        "-DAROS_TARGET_CPU=riscv",
+        "-DAROS_TARGET_PROFILE=fixture-board",
+        "-DAROS_CROSS_TOOLCHAIN_PROFILE=fixture-target",
+        "-DAROS_TARGET_TRIPLE=riscv-aros",
+        "-DAROS_ENABLE_MMU=OFF",
+        "-DAROS_TARGET_VARIANT=",
+        "-DAROS_TARGET_CPU32=",
+        "-DAROS_ABI_FLAVOUR=standalone",
+        "-DAROS_ABI_PLATFORM_SMP=OFF",
+    ] {
+        assert!(
+            observed.lines().any(|line| line == value),
+            "{value}: {observed}"
+        );
+    }
+    for (variable, role) in [
+        ("CMAKE_C_COMPILER", "c"),
+        ("CMAKE_CXX_COMPILER", "cxx"),
+        ("CMAKE_ASM_COMPILER", "c"),
+        ("AROS_AS_BIN", "assembler"),
+        ("AROS_LINKER_BIN", "linker"),
+        ("AROS_COLLECT_BIN", "collector"),
+        ("CMAKE_NM", "nm"),
+        ("CMAKE_OBJCOPY", "objcopy"),
+        ("CMAKE_OBJDUMP", "objdump"),
+    ] {
+        let expected = format!(
+            "-D{variable}={}",
+            fixture
+                .payload
+                .canonicalize()
+                .unwrap()
+                .join(fixture.layout["tools"][role].as_str().unwrap())
+                .display()
+        );
+        assert!(
+            observed.lines().any(|line| line == expected),
+            "{expected}: {observed}"
+        );
+    }
+    assert!(!observed.contains("clang"));
+    assert!(!observed.contains("AROS_LLD_BIN"));
+    for expected in [
+        format!(
+            "-DAROS_NATIVE_BUILD_CONTRACT={}",
+            fixture
+                .project
+                .join("native-build-v1.json")
+                .canonicalize()
+                .unwrap()
+                .display()
+        ),
+        format!(
+            "-DAROS_NATIVE_BUILD_CONTRACT_SHA256={}",
+            sha256_file(&fixture.project.join("native-build-v1.json"))
+                .unwrap()
+                .digest
+        ),
+    ] {
+        assert!(
+            observed.lines().any(|line| line == expected),
+            "{expected}: {observed}"
+        );
+    }
+    assert_eq!(
+        observed
+            .lines()
+            .filter(|line| *line == "invocation")
+            .count(),
+        2
+    );
+
+    // A same-width but different source ISA is not a compatible compiler.
+    let mut changed = contract.clone();
+    changed["abi"]["isa"] = json!("rv32imafdc");
+    fs::write(
+        fixture.project.join("native-build-v1.json"),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    failure(&run(&fixture), "differs from the verified compiler target");
+    assert_eq!(fs::read_to_string(&recorder).unwrap(), observed);
+    fs::write(
+        fixture.project.join("native-build-v1.json"),
+        serde_json::to_vec(&contract).unwrap(),
+    )
+    .unwrap();
+
+    // Altered source input fails before even a toolchain probe executes.
+    let probes = fs::read(&fixture.marker).unwrap();
+    let source = fixture.project.join("native/linker.lds");
+    let original = fs::read(&source).unwrap();
+    fs::write(&source, b"corrupted source input\n").unwrap();
+    failure(&run(&fixture), "SHA-256 differs");
+    assert_eq!(fs::read(&fixture.marker).unwrap(), probes);
+    assert_eq!(fs::read_to_string(&recorder).unwrap(), observed);
+    fs::write(source, original).unwrap();
+
+    // An installation-compatible v1 layout is not a complete native GNU build
+    // contract. Missing utilities fail before either CMake child can run.
+    fixture.layout["schema"] = json!("aros-toolchain-tools-v1");
+    fixture.layout["tools"]
+        .as_object_mut()
+        .unwrap()
+        .remove("nm");
+    fixture.layout["tools"]
+        .as_object_mut()
+        .unwrap()
+        .remove("objcopy");
+    fixture.layout["tools"]
+        .as_object_mut()
+        .unwrap()
+        .remove("objdump");
+    fixture.write_layout();
+    fixture.write_manifest();
+    let rejected = run(&fixture);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("one verified objdump role"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert_eq!(fs::read_to_string(recorder).unwrap(), observed);
+}
+
+fn local_native_fixture() -> (Fixture, PathBuf, PathBuf) {
+    let mut fixture = Fixture::new(32);
+    fixture.add_native_utilities();
+    fixture.add_native_source_contract();
+    fs::remove_file(fixture.payload.join(AROS_TOOLCHAIN_MANIFEST_FILE)).unwrap();
+    let compiler = serde_json::from_value(fixture.layout["compiler"].clone()).unwrap();
+    let descriptor = aros_common::local_toolchain::LocalToolchainDescriptor::capture(
+        &fixture.payload,
+        native_host_key().unwrap(),
+        "fixture-target",
+        &fixture.triple,
+        compiler,
+    )
+    .unwrap();
+    fs::write(
+        fixture.payload.join("toolchain-local.json"),
+        serde_json::to_vec(&descriptor).unwrap(),
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Native input fixture"],
+        vec!["config", "user.email", "native-input@example.invalid"],
+        vec!["add", "."],
+        vec!["commit", "-qm", "Initial native input fixture"],
+    ] {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&fixture.project)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let tools = fixture.temporary.path().join("suite");
+    fs::create_dir(&tools).unwrap();
+    for name in [
+        "aros-transpiler",
+        "aros-genmodule",
+        "aros-romtool",
+        "aros-collect",
+        "aros-ahi-runner",
+        "aros-fetch",
+        "aros-verify",
+    ] {
+        let path = tools.join(name);
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n[ \"${{1:-}}\" = --version ] || exit 99\nprintf '%s\\n' '{name} {}'\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let recorder = fixture.temporary.path().join("cmake-invocations");
+    let cmake = tools.join("cmake");
+    fs::write(&cmake, "#!/bin/sh\nprintf '%s\\n' invocation \"$@\" >> \"$AROS_TEST_CMAKE_ARGUMENTS\"\nif [ \"$1\" != --build ]; then mkdir -p \"$AROS_TEST_CMAKE_BUILD_ROOT/CMakeFiles\"; for file in CMakeCache.txt build.ninja CMakeFiles/rules.ninja; do printf '%s' 'synthetic configured rule' > \"$AROS_TEST_CMAKE_BUILD_ROOT/$file\"; done; fi\nif [ -n \"$AROS_TEST_LOCAL_INPUT\" ]; then printf '%s' 'modified during configure' > \"$AROS_TEST_LOCAL_INPUT\"; fi\n").unwrap();
+    fs::set_permissions(cmake, fs::Permissions::from_mode(0o755)).unwrap();
+    (fixture, tools, recorder)
+}
+
+fn local_native_command(
+    fixture: &Fixture,
+    tools: &std::path::Path,
+    recorder: &std::path::Path,
+) -> Command {
+    let mut path = vec![tools.to_path_buf()];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let mut command = fixture.cli_command();
+    command
+        .env("AROS_BUILD_TOOLS_DIR", tools)
+        .env("AROS_TEST_CMAKE_ARGUMENTS", recorder)
+        .env(
+            "AROS_TEST_CMAKE_BUILD_ROOT",
+            fixture.project.join("build/fixture-target"),
+        )
+        .env("PATH", std::env::join_paths(path).unwrap())
+        .args([
+            "build",
+            "--preset",
+            "fixture-target",
+            "--offline",
+            "--compiler-cache",
+            "off",
+            "--toolchain-dir",
+        ])
+        .arg(&fixture.payload);
+    command
+}
+
+#[test]
+fn local_native_cli_binds_source_and_refuses_drift_without_adopting_outputs() {
+    let (fixture, tools, recorder) = local_native_fixture();
+    success(
+        &local_native_command(&fixture, &tools, &recorder)
+            .output()
+            .unwrap(),
+    );
+    let build = fixture.project.join("build/fixture-target");
+    let stamp_path = build.join(".aros-local-native-inputs.json");
+    let stamp = fs::read(&stamp_path).unwrap();
+    let document: Value = serde_json::from_slice(&stamp).unwrap();
+    assert_eq!(document["schema"], "aros-local-native-inputs-v1");
+    assert_eq!(document["source"]["schema"], "aros-local-source-v1");
+    assert!(document.get("release_id").is_none());
+    assert!(document.get("build_succeeded").is_none());
+    assert_eq!(document["executable_sha256"].as_object().unwrap().len(), 10);
+    let invocations = fs::read(&recorder).unwrap();
+    let dirty = fixture.project.join("untracked-source.c");
+    fs::write(&dirty, b"new local source").unwrap();
+    failure(
+        &local_native_command(&fixture, &tools, &recorder)
+            .output()
+            .unwrap(),
+        "local native inputs changed",
+    );
+    assert_eq!(fs::read(&stamp_path).unwrap(), stamp);
+    assert_eq!(fs::read(&recorder).unwrap(), invocations);
+    fs::remove_file(dirty).unwrap();
+
+    // Same source and stamp do not authorize a changed persistent build graph.
+    let cache_path = build.join("CMakeCache.txt");
+    let cache = fs::read(&cache_path).unwrap();
+    fs::write(&cache_path, b"CMAKE_C_FLAGS:STRING=-DUNREVIEWED=1").unwrap();
+    failure(
+        &local_native_command(&fixture, &tools, &recorder)
+            .output()
+            .unwrap(),
+        "cache/Ninja rules differ",
+    );
+    assert_eq!(fs::read(&recorder).unwrap(), invocations);
+    fs::write(&cache_path, cache).unwrap();
+
+    // A contract beneath --clean's namespace must be rejected before deletion.
+    fs::copy(
+        fixture.project.join("native-build-v1.json"),
+        build.join("native-contract.json"),
+    )
+    .unwrap();
+    let target_path = fixture.project.join("aros-targets.toml");
+    let targets = fs::read_to_string(&target_path).unwrap().replace(
+        "native-build-v1.json",
+        "build/fixture-target/native-contract.json",
+    );
+    fs::write(&target_path, targets).unwrap();
+    let preserved = fs::read(build.join("native-contract.json")).unwrap();
+    failure(
+        &local_native_command(&fixture, &tools, &recorder)
+            .arg("--clean")
+            .output()
+            .unwrap(),
+        "generated build namespace",
+    );
+    assert_eq!(
+        fs::read(build.join("native-contract.json")).unwrap(),
+        preserved
+    );
+    assert_eq!(fs::read(&stamp_path).unwrap(), stamp);
+    assert_eq!(fs::read(&recorder).unwrap(), invocations);
+}
+
+#[test]
+fn local_native_cli_refuses_input_changes_during_configure_before_build() {
+    let (fixture, tools, recorder) = local_native_fixture();
+    let output = local_native_command(&fixture, &tools, &recorder)
+        .env(
+            "AROS_TEST_LOCAL_INPUT",
+            fixture.project.join("untracked-source.c"),
+        )
+        .output()
+        .unwrap();
+    failure(&output, "inputs changed during execution");
+    let arguments = fs::read_to_string(recorder).unwrap();
+    assert_eq!(
+        arguments
+            .lines()
+            .filter(|line| *line == "invocation")
+            .count(),
+        1
+    );
+    assert!(!arguments.lines().any(|line| line == "--build"));
+    assert!(fixture
+        .project
+        .join("build/fixture-target/.aros-local-native-inputs.json")
+        .is_file());
+}
+
+#[test]
+fn local_native_cli_refuses_engine_links_before_configure() {
+    let (fixture, tools, recorder) = local_native_fixture();
+    let engine = fixture.temporary.path().join("engine");
+    fs::create_dir_all(engine.join("toolchains")).unwrap();
+    fs::write(engine.join("AROS.cmake"), b"synthetic engine").unwrap();
+    fs::write(engine.join("toolchains/AROS.cmake"), b"synthetic toolchain").unwrap();
+    let outside = fixture.temporary.path().join("outside.cmake");
+    fs::write(&outside, b"unbound engine input").unwrap();
+    symlink(&outside, engine.join("linked.cmake")).unwrap();
+    failure(
+        &local_native_command(&fixture, &tools, &recorder)
+            .arg("--engine-dir")
+            .arg(engine)
+            .output()
+            .unwrap(),
+        "only regular files and directories",
+    );
+    assert!(!recorder.exists());
+    assert_eq!(fs::read(outside).unwrap(), b"unbound engine input");
+}
+
+#[test]
+fn local_native_cli_clean_refuses_symlinked_build_parent() {
+    let (fixture, tools, recorder) = local_native_fixture();
+    let outside = fixture.temporary.path().join("outside-build");
+    fs::create_dir_all(outside.join("fixture-target")).unwrap();
+    let sentinel = outside.join("fixture-target/preserved");
+    fs::write(&sentinel, b"must survive cleanup refusal").unwrap();
+    symlink(&outside, fixture.project.join("build")).unwrap();
+    let output = local_native_command(&fixture, &tools, &recorder)
+        .arg("--clean")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "cleanup must reject a linked parent"
+    );
+    assert!(!recorder.exists());
+    assert_eq!(fs::read(sentinel).unwrap(), b"must survive cleanup refusal");
+}
+
 fn success(output: &Output) {
     assert!(
         output.status.success(),
@@ -270,6 +793,53 @@ fn local_rv32_and_rv64_resolve_declared_flat_tools_without_llvm_filenames() {
         success(&output);
         assert!(String::from_utf8_lossy(&output.stdout).contains(fixture.payload.to_str().unwrap()));
     }
+}
+
+#[test]
+fn board_alias_selects_an_explicit_shared_compiler_for_local_and_locked_installs() {
+    let fixture = Fixture::new(32);
+    fixture.seed_locked_archive();
+    let config = fs::read_to_string(fixture.project.join("aros-targets.toml")).unwrap();
+    let config = config.replace(
+        "name='fixture-target'",
+        "name='board-a'\ntoolchain_profile='fixture-target'",
+    );
+    fs::write(fixture.project.join("aros-targets.toml"), &config).unwrap();
+    let command = || {
+        let mut command = fixture.cli_command();
+        command.args(["toolchain", "install", "--preset", "board-a"]);
+        command
+    };
+    success(
+        &command()
+            .arg("--local")
+            .arg(&fixture.payload)
+            .output()
+            .unwrap(),
+    );
+    success(&command().arg("--offline").output().unwrap());
+    // A similar name is not a compatible compiler identity and must never
+    // silently select the first lock entry or mutate the measured manifest.
+    fs::write(
+        fixture.project.join("aros-targets.toml"),
+        config.replace(
+            "toolchain_profile='fixture-target'",
+            "toolchain_profile='other-compiler'",
+        ),
+    )
+    .unwrap();
+    failure(
+        &command()
+            .arg("--local")
+            .arg(&fixture.payload)
+            .output()
+            .unwrap(),
+        "local manifest is for",
+    );
+    failure(
+        &command().arg("--offline").output().unwrap(),
+        "no locked AROS toolchain",
+    );
 }
 
 #[test]

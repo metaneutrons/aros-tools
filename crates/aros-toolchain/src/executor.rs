@@ -31,6 +31,10 @@ pub struct BuildRequest {
     pub output_dir: PathBuf,
     /// Existing prepared source cache. It is verified by the producer.
     pub cache_dir: PathBuf,
+    /// Optional managed local compiler cache; release producers default to off.
+    pub compiler_cache: aros_cache::CompilerBackendChoice,
+    /// Explicit prepared namespace for the selected compiler-cache backend.
+    pub compiler_cache_dir: Option<PathBuf>,
     /// Positive bounded producer parallelism.
     pub jobs: u64,
     /// Whole operation deadline.
