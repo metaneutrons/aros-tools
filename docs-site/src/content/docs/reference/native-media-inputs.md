@@ -156,6 +156,16 @@ Native owner projection and parsing consume the same recipe inputs:
 remain inputs. Before admission, the tool rechecks recipe discovery and captured
 bytes against the source-owned ignore policy. A diagnostic graph audit retains
 source failures and sibling evidence but publishes no build graph or inventory.
+When a sealed MetaMake policy proves the complete invocation, unowned parser
+capability failures from uninvoked recipes are recorded separately. Selection
+uses all actual parser origins, not architecture names or displayed paths.
+The protected inputs include both the classic source-owner traversal and every
+required native producer, including implicit link dependencies. Unbound native
+producer origins prevent all capability exclusions. Every failure from a
+selected recipe remains checked. Missing source endpoints,
+unknown origins and global failures cannot be waived by this scope proof.
+The `*.native-invocation.json` sidecar records successful export/preparation scope;
+excluded capabilities remain unsupported, including unsealed `.d` includes.
 
 Directory-only producers support finite `%mkdirs_q` recipes and explicit
 `%rule_makedirs dirs=... setuptarget=...` declarations. They create directories

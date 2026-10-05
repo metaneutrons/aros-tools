@@ -156,6 +156,16 @@ these failures and sibling evidence without publishing a graph or inventory.
 Rejected rules are attributed only through an exact source consumer chain;
 unmodeled Make includes and unknown conditional consumers retain unowned
 capability failures. These are translation limits, not source-defect proofs.
+The sealed MetaMake invocation can independently prove that a recipe is never
+called for the selected native roots. Only unowned parser capability failures
+with complete nonselected origins are separated from fatal failures, with the
+diagnostic and actual invoking recipes retained in audit/export scope evidence.
+Named, selected, shared, unknown and global failures retain normal checks. This
+selection also protects actual parser inputs of implicit native dependencies;
+an available endpoint with unbound provenance prevents all exclusions. This
+does not implement the excluded capabilities, remove source dependencies, or
+grant producer/build qualification. Full discovery and snapshots are rechecked
+before publishing either a graph or a source-preparation sidecar.
 
 Native owner projection and parsing use the same effective inputs:
 `mmakefile.src` supersedes its generated `mmakefile`, while direct fragments

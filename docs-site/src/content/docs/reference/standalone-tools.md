@@ -52,6 +52,20 @@ is a separate capability. Ownership searches have a shared work and path-size
 limit. Exceeding either limit leaves the diagnostic unowned.
 Inert Make `define` bodies and commented declarations never enable a producer;
 attributing a disabled declaration for diagnosis does not activate it.
+For a native profile with a sealed MetaMake invocation policy, complete
+discovery and GenMF ownership metadata also establish which recipes are called.
+An unowned parser capability failure outside that invocation is recorded under
+`source_uninvoked_capability_failures`, with every actual parser-input origin.
+A displayed diagnostic path alone cannot exclude a failure. Selected, shared,
+unknown and global origins remain fatal; named failures retain target-closure
+validation. Classic metadata and actual native parser-input provenance are
+checked independently; implicit native link dependencies also protect their
+declaring recipes. An available native endpoint without bound input provenance
+prevents exclusions. Without the policy or resolved native roots, failures remain fatal.
+Successful native exports and source preparation publish a
+`*.native-invocation.json` sidecar with this scope evidence. It does not prove
+support for excluded rules or a successful build. Sources are rechecked before
+publication; full-tree translation keeps its existing capability requirements.
 Source-owned `host_make_variables` selects only the actual native host's
 configuration; a missing declared host fails. Shared defaults cannot supply
 host identities. Verified compile macros may associate dependency sidecars
