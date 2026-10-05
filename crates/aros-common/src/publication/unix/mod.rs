@@ -523,6 +523,14 @@ pub(super) fn measure_tree_content_cas_bounded(
     measure_tree_content_cas_with_limits(path, Some(limits))
 }
 
+pub(super) fn measure_source_tree_content_cas_bounded(
+    path: &Path,
+    generated_subtree: Option<&[Vec<u8>]>,
+    limits: TreeTraversalLimits,
+) -> std::io::Result<TreeContentCas> {
+    tree::measure_source_tree_content_cas_bounded(path, generated_subtree, limits)
+}
+
 pub(super) fn copy_tree_from_snapshot_nofollow(
     source: &Path,
     destination: &Path,
@@ -568,6 +576,33 @@ pub(super) fn exchange_prepared_tree_if_unchanged(
     staging: &Path,
     destination: &Path,
     expected_destination: &TreeContentCas,
+) -> std::io::Result<PublicationReceipt> {
+    exchange_prepared_tree_with_name_policy(
+        staging,
+        destination,
+        expected_destination,
+        PreparedTreeNamePolicy::PortableGeneratedOutput,
+    )
+}
+
+pub(super) fn exchange_prepared_source_tree_if_unchanged(
+    staging: &Path,
+    destination: &Path,
+    expected_destination: &TreeContentCas,
+) -> std::io::Result<PublicationReceipt> {
+    exchange_prepared_tree_with_name_policy(
+        staging,
+        destination,
+        expected_destination,
+        PreparedTreeNamePolicy::PreservedSource,
+    )
+}
+
+fn exchange_prepared_tree_with_name_policy(
+    staging: &Path,
+    destination: &Path,
+    expected_destination: &TreeContentCas,
+    name_policy: PreparedTreeNamePolicy,
 ) -> std::io::Result<PublicationReceipt> {
     let stage_parent = open_parent(staging, false)?;
     let destination_parent = open_parent(destination, false)?;
@@ -615,11 +650,7 @@ pub(super) fn exchange_prepared_tree_if_unchanged(
     }
     let expected_stage = stable_measure_tree_content_at(&stage_fd, staging)?;
     test_pause_point("prepared-tree-after-stage-content-cas-before-sync");
-    sync_prepared_tree(
-        &stage_fd,
-        staging,
-        PreparedTreeNamePolicy::PortableGeneratedOutput,
-    )?;
+    sync_prepared_tree(&stage_fd, staging, name_policy)?;
     if stable_measure_tree_content_at(&stage_fd, staging)? != expected_stage {
         return Err(std::io::Error::other(
             "prepared-tree staging content changed while it was synced",

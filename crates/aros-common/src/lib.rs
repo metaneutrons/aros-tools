@@ -27,11 +27,19 @@ pub mod diagnostic;
 pub mod digest;
 pub mod elf;
 pub mod error;
+pub mod esp_partition;
+pub mod flash_plan;
+pub mod local_source;
+pub mod local_toolchain;
 pub mod media_input_lock;
 pub mod media_plan;
 pub mod media_profile;
 pub mod media_receipt;
 pub mod media_tree;
+pub mod native_build_contract;
+pub mod native_host_generator;
+pub mod native_make_template;
+pub mod native_media;
 pub mod observability;
 pub mod pins;
 pub mod process;
@@ -66,20 +74,21 @@ pub use process::{
 pub use publication::{
     canonical_source_file, casefold_path_key, copy_tree_from_snapshot_nofollow,
     create_unique_directory_nofollow, directory_entry_names_nofollow_bounded,
-    ensure_directory_nofollow, exchange_prepared_tree, exchange_prepared_tree_if_unchanged,
-    is_publication_journal_lock_name, is_rollback_incomplete, measure_regular_file,
-    measure_regular_file_bounded, measure_tree_content_cas, measure_tree_content_cas_bounded,
-    open_regular_file_nofollow, payload_casefold_path_key, probe_advisory_file_lock,
-    publication_failure_class, publication_journal_lock_path, publication_journal_path,
-    publish_atomic_file, publish_flat_tree_noclobber, publish_prepared_source_tree_noclobber,
-    publish_prepared_tree_noclobber, remove_regular_file_from_snapshot_nofollow,
-    remove_tree_from_snapshot_nofollow, validate_existing_directory_prefix_nofollow,
-    validate_private_directory_nofollow, AdvisoryFileLock, AdvisoryLockMode,
-    AdvisoryLockObservation, AdvisoryLockState, AtomicFilePolicy, DurableFileSet, FileIdentity,
-    PortableOutputName, PublicationError, PublicationFailureClass, PublicationReceipt,
-    RecoveryOutcome, TreeContentCas, TreeTraversalLimits,
+    ensure_directory_nofollow, exchange_prepared_source_tree_if_unchanged, exchange_prepared_tree,
+    exchange_prepared_tree_if_unchanged, is_publication_journal_lock_name, is_rollback_incomplete,
+    measure_regular_file, measure_regular_file_bounded, measure_tree_content_cas,
+    measure_tree_content_cas_bounded, open_regular_file_nofollow, payload_casefold_path_key,
+    probe_advisory_file_lock, publication_failure_class, publication_journal_lock_path,
+    publication_journal_path, publish_atomic_file, publish_flat_tree_noclobber,
+    publish_prepared_source_tree_noclobber, publish_prepared_tree_noclobber,
+    remove_regular_file_from_snapshot_nofollow, remove_tree_from_snapshot_nofollow,
+    validate_existing_directory_prefix_nofollow, validate_private_directory_nofollow,
+    AdvisoryFileLock, AdvisoryLockMode, AdvisoryLockObservation, AdvisoryLockState,
+    AtomicFilePolicy, DurableFileSet, FileIdentity, PortableOutputName, PublicationError,
+    PublicationFailureClass, PublicationReceipt, RecoveryOutcome, TreeContentCas,
+    TreeTraversalLimits,
 };
-pub use target::{TargetProfile, TranspilerProfile};
+pub use target::{BootstrapAbiProfile, TargetProfile, TranspilerProfile};
 pub use text::read_source;
 pub use toolchain::Toolchain;
 pub use toolchain_inventory::{

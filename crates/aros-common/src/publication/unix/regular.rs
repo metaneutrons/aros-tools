@@ -28,7 +28,9 @@ pub(in crate::publication) fn open_regular_file_nofollow(
     let fd = rfs::openat(
         &parent.fd,
         Path::new(&parent.leaf),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        // A raced FIFO must not block before fstat can reject its file type.
+        // NONBLOCK has no effect on the regular files admitted below.
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
     let stat = rfs::fstat(&fd)?;
@@ -163,7 +165,9 @@ fn read_regular_with_mode_bounded(
     let fd = match rfs::openat(
         &parent.fd,
         Path::new(&parent.leaf),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        // A raced FIFO must not block before fstat can reject its file type.
+        // NONBLOCK has no effect on the regular files admitted below.
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => fd,

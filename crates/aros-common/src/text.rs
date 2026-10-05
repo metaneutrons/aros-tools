@@ -23,10 +23,27 @@ use std::path::Path;
 /// Only for an unreadable file. Encoding is never an error.
 pub fn read_source(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    Ok(match String::from_utf8(bytes) {
+    Ok(decode_source(bytes))
+}
+
+/// Read and hash one source byte snapshot before legacy text decoding.
+///
+/// Source-bound consumers must use this digest, not reopen the file
+/// separately to hash bytes that may differ from the parsed snapshot.
+///
+/// # Errors
+/// Returns an error when the source file cannot be read.
+pub fn read_source_with_sha256(path: &Path) -> io::Result<(String, crate::Sha256Digest)> {
+    let bytes = fs::read(path)?;
+    let digest = crate::sha256_bytes(&bytes);
+    Ok((decode_source(bytes), digest))
+}
+
+fn decode_source(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(e) => e.into_bytes().into_iter().map(char::from).collect(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -68,5 +85,21 @@ mod tests {
     #[test]
     fn missing_file_is_an_error() {
         assert!(read_source(std::path::Path::new("/nonexistent/mmakefile.src")).is_err());
+    }
+
+    #[test]
+    fn source_snapshot_digest_measures_original_bytes_not_decoded_or_reopened_file() {
+        let original = b"# \xa9\n#MM- owner : headers-$(AROS_TARGET_CPU)\n";
+        let mut file = temp_with(original);
+        let (text, digest) = super::read_source_with_sha256(file.path()).unwrap();
+        file.as_file_mut().set_len(0).unwrap();
+        std::fs::write(file.path(), b"#MM- different :\n").unwrap();
+        assert!(text.starts_with("# ©\n#MM- owner :"));
+        assert_eq!(digest, crate::sha256_bytes(original));
+        assert_ne!(digest, crate::sha256_bytes(text.as_bytes()));
+        assert_ne!(
+            digest,
+            crate::sha256_bytes(&std::fs::read(file.path()).unwrap())
+        );
     }
 }

@@ -135,6 +135,7 @@ dependencies = [
  "aros-cache",
  "aros-cmake-engine",
  "aros-common",
+ "aros-fetch",
  "aros-release",
  "aros-toolchain",
  "aros-verify",
@@ -161,6 +162,7 @@ name = "aros-cmake-engine"
 version = "0.3.19"
 dependencies = [
  "aros-common",
+ "serde_json",
  "sha2",
  "tempfile",
 ]
@@ -183,6 +185,7 @@ version = "0.3.19"
 dependencies = [
  "anyhow",
  "clap",
+ "md-5",
  "rustix",
  "serde",
  "serde_json",
@@ -274,6 +277,7 @@ dependencies = [
  "aros-cmake-engine",
  "aros-common",
  "aros-fetch",
+ "aros-verify",
  "flate2",
  "fs2",
  "rustix",
@@ -318,6 +322,7 @@ dependencies = [
  "aros-cmake-engine",
  "aros-common",
  "clap",
+ "md-5",
  "rayon",
  "regex",
  "serde",
@@ -1114,6 +1119,16 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]

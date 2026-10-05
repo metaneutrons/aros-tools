@@ -71,6 +71,40 @@ fn measures_machine_type_and_flags_for_both_widths() {
 }
 
 #[test]
+fn retains_virtual_section_addresses_for_both_widths() {
+    for class in [1, 2] {
+        let mut bytes = header(class);
+        let (header_size, stride, stride_offset, count_offset) = if class == 1 {
+            (52_usize, 40_usize, 0x2e, 0x30)
+        } else {
+            (64, 64, 0x3a, 0x3c)
+        };
+        bytes.resize(header_size + 2 * stride, 0);
+        bytes[stride_offset..stride_offset + 2].copy_from_slice(&(stride as u16).to_le_bytes());
+        bytes[count_offset..count_offset + 2].copy_from_slice(&2_u16.to_le_bytes());
+        if class == 1 {
+            bytes[0x20..0x24].copy_from_slice(&(header_size as u32).to_le_bytes());
+            let offset = header_size + stride + 0xc;
+            bytes[offset..offset + 4].copy_from_slice(&0x4ff0_0100_u32.to_le_bytes());
+        } else {
+            bytes[0x28..0x30].copy_from_slice(&(header_size as u64).to_le_bytes());
+            let offset = header_size + stride + 0x10;
+            bytes[offset..offset + 8].copy_from_slice(&0x1_4ff00100_u64.to_le_bytes());
+        }
+        let parsed = read(&bytes).unwrap();
+        assert_eq!(parsed.sections[0].address, 0);
+        assert_eq!(
+            parsed.sections[1].address,
+            if class == 1 {
+                0x4ff0_0100
+            } else {
+                0x1_4ff0_0100
+            }
+        );
+    }
+}
+
+#[test]
 fn validates_header_version_size_and_absent_table_consistency() {
     for class in [1, 2] {
         let (size_offset, stride_offset, count_offset, stride) = if class == 1 {
