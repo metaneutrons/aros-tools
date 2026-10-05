@@ -40,6 +40,7 @@ mod completion_model;
 mod golden;
 mod host_compiler;
 mod image;
+mod image_prepare;
 mod observability;
 mod repo;
 mod source;
@@ -826,6 +827,7 @@ fn command_boundary(command: &Commands) -> (observability::ErrorBoundary, Diagno
             DiagnosticCode::CliMediaSafety,
             DiagnosticStage::MediaSafety,
             match command {
+                image::ImageCommand::Prepare(_) => "image.prepare",
                 image::ImageCommand::Receipt(_) => "image.receipt",
                 image::ImageCommand::Build(_) => "image.build",
                 image::ImageCommand::Inspect(_) => "image.inspect",
