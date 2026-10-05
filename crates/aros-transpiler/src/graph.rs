@@ -25,6 +25,8 @@ mod source_archives;
 #[path = "graph_source_headers.rs"]
 mod source_headers;
 pub use sdk_assets::SdkProgramOutput;
+pub(crate) use source_archives::private_source_object_owner;
+pub(crate) use source_headers::private_source_directory_owner;
 
 /// A script-generated file bound to the targets that consume it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,6 +498,7 @@ mod linking;
 mod meta;
 #[path = "graph_selection.rs"]
 mod selection;
+pub(crate) use selection::endpoint as native_endpoint;
 
 pub use audit::NativeGraphAudit;
 

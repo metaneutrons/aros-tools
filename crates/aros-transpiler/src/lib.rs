@@ -41,6 +41,7 @@ pub mod metamake_project;
 pub mod module_paths;
 mod native_meta_providers;
 pub mod native_owner_projection;
+pub mod native_parser_origins;
 pub mod packages;
 pub mod parser;
 pub mod sdk_asset_rules;

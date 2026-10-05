@@ -303,6 +303,14 @@ fn main() -> ExitCode {
     reason = "the transpiler command coordinates one diagnostic transaction; parsing and generation remain isolated library stages"
 )]
 fn run(args: &Args, logger: &Logger) -> Result<()> {
+    if resolved_publication_path(&args.output)?
+        == resolved_publication_path(&args.output.with_extension("native-invocation.json"))?
+    {
+        return Err(ArosError::Configuration {
+            file: args.output.display().to_string(),
+            message: "output path must not alias its native invocation sidecar".into(),
+        });
+    }
     if let Err(error) = aros_transpiler::fingerprints::validate() {
         return Err(diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::InternalInvariant,
@@ -538,6 +546,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // belonging to a selected recipe.
     let mut native_diagnostic_origins =
         std::collections::BTreeMap::<Diagnostic, std::collections::BTreeSet<String>>::new();
+    let mut native_parser_origins =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut native_script_origins = std::collections::BTreeMap::<
+        aros_transpiler::native_parser_origins::ScriptInputIdentity,
+        std::collections::BTreeSet<String>,
+    >::new();
     let mut optional_meta_proofs = std::collections::BTreeSet::new();
     let mut meta_edge_sources =
         std::collections::BTreeMap::<(String, String), std::collections::BTreeSet<String>>::new();
@@ -557,6 +571,24 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                         .entry(diagnostic.clone())
                         .or_default()
                         .insert(origin.clone());
+                }
+                if let Some(context) = target.as_ref().filter(|_| native_contract.is_some()) {
+                    for identity in
+                        aros_transpiler::native_parser_origins::script_input_identities(&parsed)
+                    {
+                        native_script_origins
+                            .entry(identity)
+                            .or_default()
+                            .insert(origin.clone());
+                    }
+                    for endpoint in
+                        aros_transpiler::native_parser_origins::endpoints(&parsed, context)
+                    {
+                        native_parser_origins
+                            .entry(endpoint)
+                            .or_default()
+                            .insert(origin.clone());
+                    }
                 }
                 if let Some(contract) = &native_contract {
                     let relative = path
@@ -698,6 +730,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
         }
     }
     let mut native_optional_omissions = Vec::new();
+    let mut native_invocation_report = None;
     let mut capability_errors: Vec<Diagnostic> = Vec::new();
     let mut unscoped_diagnostics = std::collections::BTreeSet::new();
     let mut unresolved: Vec<String> = Vec::new();
@@ -929,6 +962,19 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // Before uselibs, because a generated source has to be registered before
     // the target that names it is emitted.
     skipped_script_outputs.extend(graph.resolve_script_outputs());
+    // Preserve the original invocation inputs across consumer-bound script
+    // naming. Compare exact declared script/output identities, not guessed
+    // recipe directories or generated target-name prefixes.
+    for declaration in &graph.script_outputs {
+        if let Some(origins) =
+            native_script_origins.get(&(declaration.script.clone(), declaration.outputs.clone()))
+        {
+            native_parser_origins
+                .entry(declaration.owner.clone())
+                .or_default()
+                .extend(origins.iter().cloned());
+        }
+    }
 
     if let Some(context) = target.as_ref() {
         graph.bind_explicit_meta_provenance(context);
@@ -1096,20 +1142,64 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 }
                 Err(error) => return Err(error),
             };
-        let native_owner_evidence = native_owner_projection
-            .as_ref()
-            .map(|projection| {
-                projection
-                    .verify(&args.source_dir)
-                    .and_then(|()| projection.select(&roots))
+        // Keep full parsing, provider resolution and global failure checks.
+        // Only a reverified source invocation can establish that an unowned
+        // parser failure belongs to a recipe that this profile never calls.
+        let (native_owner_evidence, source_uninvoked_capability_failures) =
+            if let Some(projection) = native_owner_projection
+                .as_ref()
+                .filter(|_| root_resolution_error.is_none() && !roots.is_empty())
+            {
+                // Native link dependencies can be stricter than the classic
+                // MetaMake root traversal. Keep every source owner named by
+                // either closure; metadata-only exclusion cannot hide an
+                // unsupported rule in a native-required provider's recipe.
+                let native_audit =
+                    graph.audit_native_dependency_graph(&roots, context, &capability_errors);
+                let unavailable_endpoints = native_audit
+                    .missing_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.name.clone())
+                    .collect();
+                let (evidence, excluded) = projection
+                    .scope_capability_failures(
+                        &args.source_dir,
+                        aros_transpiler::native_owner_projection::NativeInvocationSelection {
+                            roots: &roots,
+                            endpoints: &native_audit.reachable,
+                            unavailable_endpoints: &unavailable_endpoints,
+                            parser_origins: &native_parser_origins,
+                        },
+                        &mut capability_errors,
+                        &native_diagnostic_origins,
+                        &unscoped_diagnostics,
+                    )
                     .map_err(|message| {
                         native_selection_input_error(ArosError::Configuration {
                             file: "native MetaMake projection".into(),
                             message,
                         })
-                    })
-            })
-            .transpose()?;
+                    })?;
+                (Some(evidence), excluded)
+            } else {
+                (None, Vec::new())
+            };
+        if let Some(evidence) = &native_owner_evidence {
+            native_invocation_report = Some(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
+                    "qualification": "source-invocation-scope-not-build-proof",
+                    "native_profile": args.native_profile,
+                    "native_contract_sha256": contract.sha256,
+                    "native_owner_projection": evidence,
+                    "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
+                }))
+                .map_err(|error| ArosError::Configuration {
+                    file: "native invocation report".into(),
+                    message: error.to_string(),
+                })?,
+            );
+        }
         // A diagnostic-only audit retains source errors alongside every other
         // graph failure. It cannot publish a build graph or grant admission.
         // Malformed/unbound declarations remain fatal even in audit mode.
@@ -1131,13 +1221,21 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             aros_common::outputln!("Source-declared absent optional MetaMake edge: {omission}");
         }
         if let Some(audit_path) = &args.native_graph_audit {
+            let audit_destination = resolved_publication_path(audit_path)?;
+            let protected_outputs = [
+                args.output.clone(),
+                args.output.with_extension("coverage.json"),
+                args.output.with_extension("source-inventory.cmake"),
+                args.output.with_extension("native-invocation.json"),
+            ];
             if audit_path
                 .extension()
                 .is_none_or(|extension| extension != "json")
-                || resolved_publication_path(audit_path)?
-                    == resolved_publication_path(&args.output)?
-                || resolved_publication_path(audit_path)?
-                    == resolved_publication_path(&args.output.with_extension("coverage.json"))?
+                || protected_outputs
+                    .iter()
+                    .map(|path| resolved_publication_path(path))
+                    .collect::<std::io::Result<Vec<_>>>()?
+                    .contains(&audit_destination)
             {
                 return Err(ArosError::Configuration {
                     file: audit_path.display().to_string(),
@@ -1167,12 +1265,14 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
                 "typed_plain_archive_header_omissions": plain_archive_header_omissions,
                 "source_declared_optional_omissions": native_optional_omissions,
                 "native_owner_projection": native_owner_evidence,
+                "source_uninvoked_capability_failures": source_uninvoked_capability_failures,
                 "root_resolution_error": root_resolution_error,
                 "source_dependency_validation_error": source_dependency_validation_error,
                 "coverage_limits": [
                     "If root resolution fails, reachability is unavailable; no substitute roots are invented.",
                     "Traverses every known reachable declaration, including sibling failures; does not infer prerequisites hidden by rejected declarations.",
                     "Unowned diagnostics remain unresolved ownership; foreign architecture locations do not prove selected P4 requirements.",
+                    "Uninvoked parser failures are separated only by complete, reverified source invocation metadata and every actual parser origin; this does not support their capabilities.",
                     "Does not compile, link, produce boot images or prove complete source-language coverage, target ABI or runtime behavior."
                 ],
                 "audit": audit,
@@ -1183,6 +1283,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             })?;
             let mut publication = Publication::for_output(audit_path);
             publication.present(audit_path.clone(), report_json);
+            reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
             publication.publish()?;
             aros_common::outputln!(
                 "Diagnostic-only graph audit written; no build graph or source inventory published."
@@ -1223,6 +1324,12 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
             let output = args.output.with_extension("source-inventory.cmake");
             let mut inventory = Publication::for_output(&output);
             inventory.present(output, render_source_inventory_manifest(&graph));
+            if let Some(report) = native_invocation_report.take() {
+                inventory.present(args.output.with_extension("native-invocation.json"), report);
+            } else {
+                inventory.absent(args.output.with_extension("native-invocation.json"));
+            }
+            reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
             inventory.publish()?;
             aros_common::outputln!("Selected source inventory prepared; no build graph published.");
             return Ok(());
@@ -1276,6 +1383,11 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     );
 
     let mut publication = Publication::for_output(&args.output);
+    if let Some(report) = native_invocation_report {
+        publication.present(args.output.with_extension("native-invocation.json"), report);
+    } else {
+        publication.absent(args.output.with_extension("native-invocation.json"));
+    }
     write_report(
         &mut publication,
         &args.output,
@@ -1628,6 +1740,7 @@ fn run(args: &Args, logger: &Logger) -> Result<()> {
     // The graph is the commit marker consumed by CMake and is deliberately
     // replaced after every sidecar and report in the same transaction.
     publication.present(args.output.clone(), cmake_content);
+    reverify_native_owner_projection(native_owner_projection.as_ref(), &args.source_dir)?;
     publication.publish().map_err(|error| {
         diagnostics_error(vec![Diagnostic::error(
             DiagnosticCode::OutputIo,
@@ -1668,6 +1781,21 @@ fn native_selection_input_error(error: ArosError) -> ArosError {
         ]),
         other => other,
     }
+}
+
+fn reverify_native_owner_projection(
+    projection: Option<&aros_transpiler::native_owner_projection::NativeOwnerProjection>,
+    source: &Path,
+) -> Result<()> {
+    if let Some(projection) = projection {
+        projection.verify(source).map_err(|message| {
+            native_selection_input_error(ArosError::Configuration {
+                file: "native MetaMake projection".into(),
+                message,
+            })
+        })?;
+    }
+    Ok(())
 }
 
 fn append_unscoped_diagnostics(

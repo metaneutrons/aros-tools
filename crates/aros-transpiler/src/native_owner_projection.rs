@@ -9,6 +9,7 @@ use crate::metamake_project::{ConfiguredProject, ProjectGlobals};
 use crate::parser::TargetContext;
 use aros_common::native_build_contract::LoadedNativeBuildContract;
 use aros_common::native_build_contract::NATIVE_RESERVED_MAKE_VARIABLES;
+use aros_common::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -80,12 +81,42 @@ pub struct NativeOwnerProjection {
 #[derive(Debug, Serialize)]
 pub struct OwnerSelectionEvidence {
     pub qualification: &'static str,
+    /// True only after both invocation and required native input provenance
+    /// have been verified. False never permits capability exclusions.
+    pub capability_scope_proven: bool,
     pub policy_sha256: String,
     pub selected_source_files: BTreeSet<String>,
+    /// Additional source owners named by the native dependency closure. This
+    /// conservative union also protects implicit native link dependencies
+    /// which the classic root metadata does not explicitly traverse.
+    pub additional_native_source_files: BTreeSet<String>,
+    /// Actual parser inputs of required native declarations, independently
+    /// indexed from the source invocation metadata.
+    pub native_parser_source_files: BTreeSet<String>,
+    /// Available native endpoints without a bound parser input. Any such
+    /// uncertainty prevents capability exclusions for this invocation.
+    pub unbound_native_endpoints: BTreeSet<String>,
     pub reached_targets: BTreeSet<String>,
     pub missing_endpoints: BTreeSet<String>,
     pub snapshot_count: usize,
     pub expanded_bytes: usize,
+}
+
+/// An unsupported rule in a source recipe that this closed MetaMake invocation
+/// never calls. This is scope evidence, not support for that rule's capability.
+#[derive(Debug, Serialize)]
+pub struct UninvokedCapabilityFailure {
+    pub diagnostic: Diagnostic,
+    pub invoking_recipes: BTreeSet<String>,
+}
+
+/// Required native endpoints and their independently captured parser origins.
+#[derive(Clone, Copy)]
+pub struct NativeInvocationSelection<'a> {
+    pub roots: &'a [String],
+    pub endpoints: &'a BTreeSet<String>,
+    pub unavailable_endpoints: &'a BTreeSet<String>,
+    pub parser_origins: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
 impl NativeOwnerProjection {
@@ -165,8 +196,12 @@ impl NativeOwnerProjection {
             .collect::<Result<_, _>>()?;
         Ok(OwnerSelectionEvidence {
             qualification: "source-owner-metadata-not-producer-proof",
+            capability_scope_proven: false,
             policy_sha256: self.policy_sha256.clone(),
             selected_source_files,
+            additional_native_source_files: BTreeSet::new(),
+            native_parser_source_files: BTreeSet::new(),
+            unbound_native_endpoints: BTreeSet::new(),
             reached_targets,
             missing_endpoints,
             snapshot_count: self.snapshots.len(),
@@ -181,6 +216,83 @@ impl NativeOwnerProjection {
         self.owners.values().map(String::as_str)
     }
 
+    /// Separate unowned parser failures from recipes outside the exact source
+    /// invocation. Keep complete parsing and global inventories: metadata does
+    /// not establish that a native producer exists or that a rule is supported.
+    ///
+    /// Only original parser-input identities are used, never a diagnostic's
+    /// displayed path. A failure with any selected, unknown, or global origin
+    /// remains fatal. Named failures retain the ordinary target-closure check.
+    ///
+    /// # Errors
+    /// Refuses changed discovery/snapshots or invalid root selection. There is
+    /// no default invocation when roots or a source policy are unavailable.
+    pub fn scope_capability_failures(
+        &self,
+        root: &Path,
+        selection: NativeInvocationSelection<'_>,
+        failures: &mut Vec<Diagnostic>,
+        origins: &BTreeMap<Diagnostic, BTreeSet<String>>,
+        global_failures: &BTreeSet<Diagnostic>,
+    ) -> Result<(OwnerSelectionEvidence, Vec<UninvokedCapabilityFailure>), String> {
+        let NativeInvocationSelection {
+            roots,
+            endpoints: native_endpoints,
+            unavailable_endpoints,
+            parser_origins,
+        } = selection;
+        if roots.is_empty() || native_endpoints.is_empty() {
+            return Err("capability scope requires resolved native roots".into());
+        }
+        self.verify(root)?;
+        let mut evidence = self.select(roots)?;
+        let native_roots: Vec<_> = native_endpoints.iter().cloned().collect();
+        let native_sources = self.select(&native_roots)?.selected_source_files;
+        evidence.additional_native_source_files = native_sources
+            .difference(&evidence.selected_source_files)
+            .cloned()
+            .collect();
+        let inputs: BTreeSet<_> = self.effective_inputs().map(str::to_owned).collect();
+        for endpoint in native_endpoints {
+            match parser_origins.get(endpoint) {
+                Some(origins) if !origins.is_empty() && origins.is_subset(&inputs) => {
+                    evidence
+                        .native_parser_source_files
+                        .extend(origins.iter().cloned());
+                }
+                _ if !unavailable_endpoints.contains(endpoint) => {
+                    evidence.unbound_native_endpoints.insert(endpoint.clone());
+                }
+                _ => {}
+            }
+        }
+        // A missing selected metadata root or an available native producer
+        // without exact input provenance cannot establish a closed scope.
+        // Preserve all failures instead of inferring an unrelated recipe.
+        if roots
+            .iter()
+            .any(|root| evidence.missing_endpoints.contains(root))
+            || !evidence.unbound_native_endpoints.is_empty()
+        {
+            return Ok((evidence, Vec::new()));
+        }
+        evidence.capability_scope_proven = true;
+        let selected_sources = evidence
+            .selected_source_files
+            .union(&native_sources)
+            .cloned()
+            .chain(evidence.native_parser_source_files.iter().cloned())
+            .collect();
+        let excluded = partition_uninvoked_failures(
+            failures,
+            origins,
+            global_failures,
+            &inputs,
+            &selected_sources,
+        );
+        Ok((evidence, excluded))
+    }
+
     /// Recheck complete discovery and every captured policy, recipe and
     /// imported template before use.
     ///
@@ -191,6 +303,46 @@ impl NativeOwnerProjection {
         verify_captured_discovery(root, &self.discovered_inputs, &self.ignored_directories)?;
         verify_snapshot_digests(root, &self.snapshots)
     }
+}
+
+fn partition_uninvoked_failures(
+    failures: &mut Vec<Diagnostic>,
+    origins: &BTreeMap<Diagnostic, BTreeSet<String>>,
+    global_failures: &BTreeSet<Diagnostic>,
+    inputs: &BTreeSet<String>,
+    selected: &BTreeSet<String>,
+) -> Vec<UninvokedCapabilityFailure> {
+    let mut excluded = Vec::new();
+    failures.retain(|diagnostic| {
+        if diagnostic.code != aros_common::DiagnosticCode::CapabilityDrift
+            || diagnostic.stage != aros_common::DiagnosticStage::CapabilityValidation
+        {
+            return true;
+        }
+        let named = diagnostic
+            .context
+            .as_ref()
+            .and_then(|context| context.target.as_ref())
+            .is_some();
+        let Some(recipes) = origins.get(diagnostic) else {
+            return true;
+        };
+        if named
+            || global_failures.contains(diagnostic)
+            || recipes.is_empty()
+            || recipes
+                .iter()
+                .any(|recipe| !inputs.contains(recipe) || selected.contains(recipe))
+        {
+            return true;
+        }
+        excluded.push(UninvokedCapabilityFailure {
+            diagnostic: diagnostic.clone(),
+            invoking_recipes: recipes.clone(),
+        });
+        false
+    });
+    excluded
 }
 
 fn sealed_inputs(native: &LoadedNativeBuildContract) -> BTreeMap<String, String> {
@@ -685,6 +837,237 @@ fn require_seal(path: &str, bytes: &[u8], seals: &BTreeMap<String, String>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unowned_failure() -> Diagnostic {
+        Diagnostic::error(
+            aros_common::DiagnosticCode::CapabilityDrift,
+            aros_common::DiagnosticStage::CapabilityValidation,
+            "unsupported source rule",
+        )
+        .with_location(aros_common::SourceLocation::new("foreign/display-path.src"))
+    }
+
+    #[test]
+    fn capability_scope_uses_all_parser_origins_not_the_displayed_location() {
+        let diagnostic = unowned_failure();
+        let inputs = BTreeSet::from([
+            "selected/mmakefile.src".into(),
+            "other/mmakefile.src".into(),
+        ]);
+        let selected = BTreeSet::from(["selected/mmakefile.src".into()]);
+        let mut failures = vec![diagnostic.clone()];
+        let origins = BTreeMap::from([(
+            diagnostic.clone(),
+            BTreeSet::from(["other/mmakefile.src".into()]),
+        )]);
+        let excluded = partition_uninvoked_failures(
+            &mut failures,
+            &origins,
+            &BTreeSet::new(),
+            &inputs,
+            &selected,
+        );
+        assert!(failures.is_empty());
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].invoking_recipes, origins[&diagnostic]);
+
+        let origins = BTreeMap::from([(diagnostic.clone(), inputs.clone())]);
+        let mut failures = vec![diagnostic.clone()];
+        assert!(partition_uninvoked_failures(
+            &mut failures,
+            &origins,
+            &BTreeSet::new(),
+            &inputs,
+            &selected
+        )
+        .is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn capability_scope_keeps_unknown_empty_and_global_origins_fatal() {
+        let diagnostic = unowned_failure();
+        let inputs = BTreeSet::from(["other/mmakefile.src".into()]);
+        let unknown = BTreeSet::from(["unknown/mmakefile.src".into()]);
+        for recipes in [BTreeSet::new(), unknown] {
+            let mut failures = vec![diagnostic.clone()];
+            let origins = BTreeMap::from([(diagnostic.clone(), recipes)]);
+            assert!(partition_uninvoked_failures(
+                &mut failures,
+                &origins,
+                &BTreeSet::new(),
+                &inputs,
+                &BTreeSet::new()
+            )
+            .is_empty());
+            assert_eq!(failures.as_slice(), std::slice::from_ref(&diagnostic));
+        }
+        let mut failures = vec![diagnostic.clone()];
+        assert!(partition_uninvoked_failures(
+            &mut failures,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &inputs,
+            &BTreeSet::new()
+        )
+        .is_empty());
+        assert_eq!(failures.as_slice(), std::slice::from_ref(&diagnostic));
+        let origins = BTreeMap::from([(diagnostic.clone(), inputs.clone())]);
+        let mut failures = vec![diagnostic.clone()];
+        assert!(partition_uninvoked_failures(
+            &mut failures,
+            &origins,
+            &BTreeSet::from([diagnostic.clone()]),
+            &inputs,
+            &BTreeSet::new()
+        )
+        .is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn named_capability_failures_retain_target_closure_validation() {
+        let diagnostic = unowned_failure().with_context(aros_common::DiagnosticContext {
+            target: Some("named-owner".into()),
+            ..Default::default()
+        });
+        let inputs = BTreeSet::from(["other/mmakefile.src".into()]);
+        let origins = BTreeMap::from([(diagnostic.clone(), inputs.clone())]);
+        let mut failures = vec![diagnostic.clone()];
+        assert!(partition_uninvoked_failures(
+            &mut failures,
+            &origins,
+            &BTreeSet::new(),
+            &inputs,
+            &BTreeSet::new()
+        )
+        .is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn source_and_graph_errors_are_not_capability_scope_exemptions() {
+        let mut diagnostic = unowned_failure();
+        diagnostic.code = aros_common::DiagnosticCode::GraphValidation;
+        diagnostic.stage = aros_common::DiagnosticStage::GraphValidation;
+        let inputs = BTreeSet::from(["other/mmakefile.src".into()]);
+        let origins = BTreeMap::from([(diagnostic.clone(), inputs.clone())]);
+        let mut failures = vec![diagnostic.clone()];
+        assert!(partition_uninvoked_failures(
+            &mut failures,
+            &origins,
+            &BTreeSet::new(),
+            &inputs,
+            &BTreeSet::new()
+        )
+        .is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn capability_scope_requires_nonempty_roots_before_mutating_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+        let diagnostic = unowned_failure();
+        let mut failures = vec![diagnostic.clone()];
+        let error = projection
+            .scope_capability_failures(
+                root.path(),
+                NativeInvocationSelection {
+                    roots: &[],
+                    endpoints: &BTreeSet::new(),
+                    unavailable_endpoints: &BTreeSet::new(),
+                    parser_origins: &BTreeMap::new(),
+                },
+                &mut failures,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            )
+            .unwrap_err();
+        assert!(error.contains("resolved native roots"));
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn unbound_native_producer_prevents_all_exclusions() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("extra")).unwrap();
+        fs::write(root.path().join("mmakefile.src"), "#MM root\n").unwrap();
+        fs::write(root.path().join("extra/mmakefile.src"), "#MM extra\n").unwrap();
+        let mut projection = projection_for_discovery(root.path(), BTreeSet::new());
+        projection.graph = MetaMakeOwnerGraph::parse_with_declared_absence(
+            &BTreeMap::from([
+                ("mmakefile".into(), "#MM root\n".into()),
+                ("extra/mmakefile".into(), "#MM extra\n".into()),
+            ]),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let diagnostic = unowned_failure();
+        let origins = BTreeMap::from([(
+            diagnostic.clone(),
+            BTreeSet::from(["extra/mmakefile.src".into()]),
+        )]);
+        let endpoints = BTreeSet::from(["root".into(), "unmapped-provider".into()]);
+        let parser_origins =
+            BTreeMap::from([("root".into(), BTreeSet::from(["mmakefile.src".into()]))]);
+        let mut failures = vec![diagnostic.clone()];
+        let (evidence, excluded) = projection
+            .scope_capability_failures(
+                root.path(),
+                NativeInvocationSelection {
+                    roots: &["root".into()],
+                    endpoints: &endpoints,
+                    unavailable_endpoints: &BTreeSet::new(),
+                    parser_origins: &parser_origins,
+                },
+                &mut failures,
+                &origins,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            evidence.unbound_native_endpoints,
+            BTreeSet::from(["unmapped-provider".into()])
+        );
+        assert!(!evidence.capability_scope_proven);
+        assert!(excluded.is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
+
+    #[test]
+    fn absent_metadata_root_prevents_exclusions_even_with_native_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("mmakefile.src"), "#MM root\n").unwrap();
+        let projection = projection_for_discovery(root.path(), BTreeSet::new());
+        let diagnostic = unowned_failure();
+        let origins =
+            BTreeMap::from([(diagnostic.clone(), BTreeSet::from(["mmakefile.src".into()]))]);
+        let endpoints = BTreeSet::from(["absent-root".into()]);
+        let parser_origins = BTreeMap::from([(
+            "absent-root".into(),
+            BTreeSet::from(["mmakefile.src".into()]),
+        )]);
+        let mut failures = vec![diagnostic.clone()];
+        let (_, excluded) = projection
+            .scope_capability_failures(
+                root.path(),
+                NativeInvocationSelection {
+                    roots: &["absent-root".into()],
+                    endpoints: &endpoints,
+                    unavailable_endpoints: &BTreeSet::new(),
+                    parser_origins: &parser_origins,
+                },
+                &mut failures,
+                &origins,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(excluded.is_empty());
+        assert_eq!(failures, [diagnostic]);
+    }
 
     fn selector_globals() -> BTreeMap<String, String> {
         BTreeMap::from([
