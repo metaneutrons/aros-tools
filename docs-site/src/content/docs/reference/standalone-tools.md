@@ -22,6 +22,45 @@ Prefer the recorded invocation from a configured build so you retain its exact
 target context. Supplying a selector does not add support for an otherwise
 unmodeled Mesa, LLVM, or Rust recipe.
 
+For a source-bound native profile with a cold ports tree,
+`--source-inventory-only` prepares only the
+`*.source-inventory.cmake` sidecar. It does not create or replace a build graph
+and is not a build qualification. Only source and fetched-header owners in the
+profile's validated dependency closure enter this inventory; unrelated ports
+are not prepared. Cold declaration identities do not create compile targets.
+The CMake engine materializes the selected inventories, then requires a full
+export before using any targets. Missing or ambiguous selected producers stop
+preparation rather than becoming empty placeholder targets.
+
+For diagnosis, add `--native-graph-audit report.json` to a native
+`--source-inventory-only` invocation. It traverses all known reachable branches
+and records missing endpoints, unproven recipes, capability failures and
+unowned diagnostics. It writes only the separate JSON report, never a graph
+or inventory. Audit success means the report was produced, not that the build
+is supported; rejected declarations may still hide prerequisites.
+The report distinguishes selected failures from diagnostics without proven
+owners and lists every typed producer family. Native discovery honors only
+literal directory exclusions from the contract-bound `mmake.config.in`;
+unresolved configure substitutions do not exclude source directories.
+Diagnostic ownership follows only complete, source-proven consumer chains.
+If an alternative consumer is unresolved, the diagnostic stays unowned.
+Macro evidence verifies the reachable helper definitions, not just the outer
+macro. Unrepresented includes or inline macro effects veto attribution.
+`build_prog` remains uncertain for diagnostic attribution until its implicit
+objects and generated dependency inputs are sealed; native program generation
+is a separate capability. Ownership searches have a shared work and path-size
+limit. Exceeding either limit leaves the diagnostic unowned.
+Inert Make `define` bodies and commented declarations never enable a producer;
+attributing a disabled declaration for diagnosis does not activate it.
+Source-owned `host_make_variables` selects only the actual native host's
+configuration; a missing declared host fails. Shared defaults cannot supply
+host identities. Verified compile macros may associate dependency sidecars
+with complete object-owner proofs for diagnosis, without creating build edges
+or proving the contents of runtime dependency files.
+Make-expression evaluation also limits recursion, aggregate work, output bytes
+and list items. Exhaustion rejects the expression; it never supplies an empty
+result as a fallback.
+
 The implementation follows supported MetaMake constructs. It is not a general
 GNU Make interpreter that can execute arbitrary recipes. Recognized capability
 drift is fatal; other uncovered declarations remain visible in the generated
@@ -70,14 +109,29 @@ Source: [verifier CLI and profile model](https://github.com/metaneutrons/aros-to
 
 ## aros-collect
 
-**Input:** linker arguments and an explicit linker.
-**Purpose:** link relocatable AROS objects and materialize symbol sets.
+**Input:** linker arguments and an explicit linker, or a KOBJ and explicit
+target `nm`/`objcopy` tools.
+**Purpose:** collect AROS symbol sets or localize a completed KOBJ.
 
 ```sh
 aros-collect --ld /path/to/ld.lld -- -r -o output.o input.o
 ```
 
-This is the direct linking form. It preserves the caller's link contract and
+Native KOBJ development also has a separate localization mode:
+
+```sh
+aros-collect --localize-kobj member.o --nm /path/to/target-nm \
+  --objcopy /path/to/target-objcopy
+```
+
+It applies the source macro's plain-nm symbol filter and fixed library bases
+to an already linked object. Both tools are explicit; linker arguments are
+not accepted in this mode. Precommit failures leave the original unchanged.
+A post-rename durability failure reports uncertain commit state and retains a
+recovery journal; the new object may already be installed. This step alone does
+not qualify a native core or board.
+
+The `--ld` form preserves the caller's link contract and
 supports `--keep-script PATH` and `--report PATH`.
 
 The compiler-driver entry points `collect-aros` and `collect-aros32` use

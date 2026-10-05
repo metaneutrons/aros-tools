@@ -20,6 +20,14 @@ This page is generated from the `aros` Clap command model. Global arguments are 
 | `aros image build` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros image inspect` | artifact | --artifact | — | required | 1 |  |  | — |  |
 | `aros image inspect` | format | --format | — | optional | 1 | human | human, json | — |  |
+| `aros image prepare` | preset | --preset | — | required | 1 |  |  | — |  |
+| `aros image prepare` | source_root | --source-root | — | required | 1 |  |  | — |  |
+| `aros image prepare` | inputs | --inputs | — | required | 1 |  |  | — |  |
+| `aros image prepare` | inputs_sha256 | --inputs-sha256 | — | required | 1 |  |  | — |  |
+| `aros image prepare` | work_parent | --work-parent | — | required | 1 |  |  | — |  |
+| `aros image prepare` | jobs | --jobs | — | required | 1 |  |  | — |  |
+| `aros image prepare` | timeout_seconds | --timeout-seconds | — | required | 1 |  |  | — |  |
+| `aros image prepare` | format | --format | — | optional | 1 | human | human, json | — |  |
 | `aros image receipt` | profile | --profile | — | required | 1 |  |  | — |  |
 | `aros image receipt` | build_root | --build-root | — | required | 1 |  |  | — |  |
 | `aros image receipt` | source_root | --source-root | — | required | 1 |  |  | — |  |

@@ -6,33 +6,33 @@ the compiler target; `boards.toml` supplies a local board identity and guarded
 device settings. A media profile binds a stable model and transport to required
 file roles and destinations.
 
-The current registry contains only `rpi4-uboot-usb-ecm` and
-`milk-v-titan-uefi`, the existing Pi 4 U-Boot USB-ECM and Milk-V Titan UEFI
-bundle layouts. It does not yet describe native Pi SD media
-or the PC ISO, and it does not imply that either board has passed a physical
-boot qualification. The SD bundle validator loads these contracts from the
-binary's reviewed source revision; changing a profile requires a new tools
-build and tests.
+The runtime registry contains `rpi4-uboot-usb-ecm`, `milk-v-titan-uefi` and
+`pc-bios-iso`: the two existing MBR/FAT32 bundle layouts and the PC BIOS
+ISO9660/El Torito composer. Native Pi SD profiles are not registered. Image
+composition does not imply a physical boot qualification. Contracts are embedded
+from the binary's reviewed source revision; changing one requires a new tools
+build and tests. PC ISO composition requires `xorriso`.
 
 Parser fixtures under `crates/aros-common/tests/fixtures/media/` exercise PC
 BIOS ISO and native Pi target identities, including `pc-x86_64`. They are not
 part of the runtime registry and are not media-build or boot claims.
 
-Each TOML document has a closed `format_version = 1` schema. It may declare
+Each TOML document has a closed, versioned schema. It may declare
 identities and file destinations, never commands or host devices. Required
 roles and media destinations must be unique, relative and traversal-free. The
 external bundle must still supply regular files with measured hashes.
 The `layout` section is format-specific: MBR/FAT32 profiles declare a
 sector-aligned partition and FAT label; BIOS ISO profiles declare a volume ID
 and the required El Torito boot-image role. The existing Pi 4 and Titan
-profiles declare a reviewed 64 MiB/2048-LBA geometry for future portable
-composition. Legacy v1 bundles may still declare other valid geometries;
-their existing `aros board sd image` behavior is unchanged. The PC/Pi schema
-fixtures are not runtime profiles.
+profiles declare a reviewed 64 MiB/2048-LBA geometry for portable composition.
+Legacy v1 bundles may still declare other valid geometries; their existing
+`aros board sd image` behavior is unchanged. Schema fixtures do not extend
+the runtime registry; the actual PC profile lives in this directory.
 
 The internal `MediaBuildReceipt` v1 contract records target, model, transport,
 and the roles, relative paths, sizes and SHA-256 digests of source-dependent
-inputs. It distinguishes future CMake output from measured legacy-v1 bundle
+inputs. Source-bound and complete-tree receipt versions additionally identify
+the clean source, verified installed toolchain and empty directories. It distinguishes CMake output from measured legacy-v1 bundle
 inputs; a legacy bundle cannot prove its own build origin. Verification rejects
 unsafe paths, symlinks, missing required roles and altered bytes. An adapter
 can derive this receipt from an already validated `boot-bundle.toml` v1
@@ -63,6 +63,18 @@ directory. Its independent artifact verifier checks the exact file inventory,
 checksums, MBR, FAT32 tree and payload hashes without the source tree. The
 public `aros image inspect` and `aros image verify` commands use that verifier.
 This is self-consistency evidence, not authenticated origin or a boot test.
-The ISO backend and native Pi media profiles remain unimplemented.
-The current Pi 4 reference firmware lock still lacks per-file hashes and is
-not accepted as a complete automated media input lock.
+The native PC `boot-iso` target uses the implemented ISO backend. Native Pi SD
+media profiles remain unimplemented. A firmware lock without complete per-file
+hashes is not accepted as an automated media input.
+
+## Source-owned native flash preparation
+
+`aros image prepare` resolves an explicit source preset and inventoried native
+media geometry, not a board-name fallback in this registry. Its closed local
+input document pins prepared vendor sources, tools and Python wheels. The
+currently implemented provider builds a fresh ESP-IDF bootloader offline and
+independently verifies it and the source-derived partition table. It retains
+logs and receipts, never adopts a prior vendor output or runs installation
+helpers. The result excludes native core/BSP/Developer artifacts: it is not a
+complete flash plan, secure-boot result, release or device-write authorization.
+See the public native-media-input reference for the exact schema.

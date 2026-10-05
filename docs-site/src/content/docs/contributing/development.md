@@ -17,7 +17,7 @@ jq, GnuPG, dpkg-deb and the archive utilities named in CONTRIBUTING.
 On macOS, after installing the Xcode Command Line Tools:
 
 ```sh
-brew install actionlint cmake coreutils cosign curl dpkg gh git gnupg jq ninja node pkg-config python@3.14 shellcheck
+brew install actionlint cmake coreutils cosign curl dpkg gh git gnupg gnu-sed jq ninja node pkg-config python@3.14 shellcheck
 ```
 
 On Debian or Ubuntu:
@@ -77,7 +77,9 @@ AROS_TEST_MESA26_SOURCE_ROOT=/absolute/path/to/qualified/AROS-NX \
 
 Do not substitute a moving branch. Tests use that source as input and create
 their own temporary work where needed. CMake-engine fixtures require clang,
-CMake and Ninja; platform-specific omissions are reported explicitly.
+CMake and Ninja. Source-value parity tests additionally use GNU sed (`gsed`
+from Homebrew on macOS) as an independent oracle, not a build dependency.
+Platform-specific omissions are reported explicitly.
 
 Every PR has a stable Linux x86-64 check. A narrow documentation-only set
 (`README.md`, `CONTRIBUTING.md`, `docs/**` and `docs-site/**`)

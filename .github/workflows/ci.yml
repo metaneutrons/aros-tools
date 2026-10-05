@@ -220,7 +220,7 @@ jobs:
           else
             # The GNU lifecycle fixtures require GNU Make >=4, not Apple's 3.81.
             # Homebrew's make formula exposes the selected executable as gmake.
-            brew install xorriso make bison flex pkg-config ninja
+            brew install xorriso make bison flex pkg-config ninja gnu-sed
             gmake --version
           fi
           xorriso -version

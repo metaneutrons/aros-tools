@@ -22,6 +22,9 @@ Native GNU lifecycle fixtures also require GNU Make 4.0 or newer, bison, flex,
 patch and pkg-config. On macOS, Homebrew's `make` formula provides `gmake`;
 Apple's Make 3.81 is rejected. CI installs these test prerequisites explicitly
 rather than relying on a particular runner image.
+Source-value parity fixtures require GNU sed as an independent test oracle;
+install Homebrew's `gnu-sed` on macOS (`gsed`). Native extraction itself does
+not execute sed or depend on it.
 Source-contract tests need the immutable AROS-NX revision named in
 `contracts/aros-source-v1.toml`; do not substitute a moving branch or infer a
 neighboring checkout.
