@@ -16,7 +16,7 @@
 //! nothing defines, which is reportable.
 
 use aros_common::read_source;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// How deep a `$(VAR)` chain may nest before it is treated as unresolvable.
@@ -25,6 +25,87 @@ use std::path::{Path, PathBuf};
 /// AROS_PREFS -> AROSDIR -> TARGETDIR. The cap exists for a cycle, not for
 /// depth.
 const MAX_DEPTH: usize = 12;
+const MAX_EXPANSION_VALUE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EXPANSION_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EXPANSION_SCANNED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EXPANSION_WORK_UNITS: usize = 1_048_576;
+const MAX_EXPANSION_LIST_ITEMS: usize = 65_536;
+const EXPANSION_RESOURCE_ERROR: &str = "directory expansion exceeded its resource budget";
+
+#[derive(Default)]
+struct ExpansionBudget {
+    output_bytes: usize,
+    scanned_bytes: usize,
+    work_units: usize,
+    list_items: usize,
+}
+
+impl ExpansionBudget {
+    fn charge_output(&mut self, bytes: usize) -> Option<()> {
+        let total = self.output_bytes.checked_add(bytes)?;
+        if total > MAX_EXPANSION_OUTPUT_BYTES {
+            return None;
+        }
+        self.output_bytes = total;
+        Some(())
+    }
+
+    fn charge_scan(&mut self, bytes: usize) -> Option<()> {
+        let total = self.scanned_bytes.checked_add(bytes)?;
+        if total > MAX_EXPANSION_SCANNED_BYTES {
+            return None;
+        }
+        self.scanned_bytes = total;
+        Some(())
+    }
+
+    fn charge_work(&mut self, units: usize) -> Option<()> {
+        let total = self.work_units.checked_add(units)?;
+        if total > MAX_EXPANSION_WORK_UNITS {
+            return None;
+        }
+        self.work_units = total;
+        Some(())
+    }
+
+    const fn charge_item(&mut self) -> Option<()> {
+        if self.list_items >= MAX_EXPANSION_LIST_ITEMS {
+            return None;
+        }
+        self.list_items += 1;
+        Some(())
+    }
+}
+
+fn append_expansion(output: &mut String, text: &str, budget: &mut ExpansionBudget) -> Option<()> {
+    let next_len = output.len().checked_add(text.len())?;
+    if next_len > MAX_EXPANSION_VALUE_BYTES {
+        return None;
+    }
+    budget.charge_output(text.len())?;
+    // Charge limits before asking the allocator to grow the output buffer.
+    output.try_reserve(text.len()).ok()?;
+    output.push_str(text);
+    Some(())
+}
+
+fn push_diagnostic_value(
+    queue: &mut VecDeque<String>,
+    value: String,
+    budget: &mut ExpansionBudget,
+    already_charged: bool,
+) -> Option<()> {
+    if value.len() > MAX_EXPANSION_VALUE_BYTES {
+        return None;
+    }
+    budget.charge_item()?;
+    if !already_charged {
+        budget.charge_output(value.len())?;
+    }
+    queue.try_reserve(1).ok()?;
+    queue.push_back(value);
+    Some(())
+}
 
 /// The values this build supplies for variables config/make.cfg.in expects from
 /// configure or from the environment.
@@ -84,6 +165,19 @@ pub struct DirVars {
 }
 
 impl DirVars {
+    /// Makes admitted target-tool roles available to an explicitly bound
+    /// native Make configuration. These are not ambient Make defaults and
+    /// must never be enabled for an ordinary unqualified tree export.
+    pub fn bind_native_target_tool_roles(&mut self) {
+        for (name, value) in [
+            ("NATIVE_TARGET_CC", "${CMAKE_C_COMPILER}"),
+            ("NATIVE_TARGET_AR", "${CMAKE_AR}"),
+            ("NATIVE_TARGET_RANLIB", "${CMAKE_RANLIB}"),
+        ] {
+            self.resolved.insert(name.to_owned(), value.to_owned());
+        }
+    }
+
     /// Reads config/make.cfg.in under `root`.
     ///
     /// A missing or unreadable file yields an empty table rather than an error:
@@ -214,29 +308,56 @@ impl DirVars {
     /// and expanded there.
     #[must_use]
     pub fn expand(&self, raw: &str) -> Option<String> {
-        self.expand_depth(raw, MAX_DEPTH)
+        self.expand_depth(raw, MAX_DEPTH, &mut ExpansionBudget::default())
     }
 
-    fn expand_depth(&self, raw: &str, depth: usize) -> Option<String> {
+    fn expand_depth(
+        &self,
+        raw: &str,
+        depth: usize,
+        budget: &mut ExpansionBudget,
+    ) -> Option<String> {
         if depth == 0 {
             return None;
         }
-        let mut out = String::with_capacity(raw.len());
-        let mut rest = raw;
-        while let Some(start) = rest.find("$(") {
-            out.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let end = after.find(')')?;
-            let name = &after[..end];
+        if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+            return None;
+        }
+        budget.charge_scan(raw.len())?;
+        budget.charge_work(1)?;
+
+        let bytes = raw.as_bytes();
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        let mut segment_start = 0usize;
+        while cursor + 1 < bytes.len() {
+            if bytes[cursor] != b'$' || bytes[cursor + 1] != b'(' {
+                cursor += 1;
+                continue;
+            }
+
+            append_expansion(&mut out, &raw[segment_start..cursor], budget)?;
+            cursor += 2;
+            let name_start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b')' {
+                cursor += 1;
+            }
+            if cursor == bytes.len() {
+                return None;
+            }
+            let name = raw.get(name_start..cursor)?;
             // A nested reference or a function call is not a plain variable.
             if name.contains('$') || name.contains(' ') {
                 return None;
             }
+            budget.charge_work(1)?;
             let value = self.resolved.get(name)?;
-            out.push_str(&self.expand_depth(value, depth - 1)?);
-            rest = &after[end + 1..];
+            let expanded = self.expand_depth(value, depth - 1, budget)?;
+            append_expansion(&mut out, &expanded, budget)?;
+            cursor += 1;
+            segment_start = cursor;
         }
-        out.push_str(rest);
+        append_expansion(&mut out, &raw[segment_start..], budget)?;
         Some(out)
     }
 
@@ -259,77 +380,182 @@ impl DirVars {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let Some(value) = self.expand_with_depth(raw, local, MAX_DEPTH) else {
-            let mut missing = self.missing_in_with(raw, local);
-            if missing.is_empty() {
-                // Resolvable names, but something in the value is not a plain
-                // reference: a function call, or a cycle.
-                missing.push(format!("{raw} (not a plain variable reference)"));
-            }
-            return Err(missing);
+        let mut budget = ExpansionBudget::default();
+        if let Some(value) = self.expand_with_depth(raw, local, MAX_DEPTH, &mut budget) {
+            return Ok(value);
+        }
+
+        let Some(mut missing) = self.missing_in_with(raw, local, &mut budget) else {
+            return Err(vec![EXPANSION_RESOURCE_ERROR.to_owned()]);
         };
-        Ok(value)
+        if missing.is_empty() {
+            // Resolvable names, but something in the value is not a plain
+            // reference: a function call, a cycle, or a bounded-work refusal.
+            // Preserve the old contextual message only when it also fits the
+            // same call's output and diagnostic budgets.
+            let suffix = " (not a plain variable reference)";
+            let message_len = raw.len().checked_add(suffix.len());
+            if raw.len() <= MAX_EXPANSION_VALUE_BYTES
+                && budget.charge_item().is_some()
+                && message_len.is_some_and(|size| {
+                    size <= MAX_EXPANSION_VALUE_BYTES && budget.charge_output(size).is_some()
+                })
+            {
+                let mut message = String::new();
+                if message_len.is_some_and(|size| message.try_reserve(size).is_ok()) {
+                    message.push_str(raw);
+                    message.push_str(suffix);
+                    if missing.try_reserve(1).is_ok() {
+                        missing.push(message);
+                    } else {
+                        return Err(vec![EXPANSION_RESOURCE_ERROR.to_owned()]);
+                    }
+                } else {
+                    return Err(vec![EXPANSION_RESOURCE_ERROR.to_owned()]);
+                }
+            } else {
+                return Err(vec![EXPANSION_RESOURCE_ERROR.to_owned()]);
+            }
+        }
+        Err(missing)
     }
 
-    fn expand_with_depth<F>(&self, raw: &str, local: &F, depth: usize) -> Option<String>
+    fn expand_with_depth<F>(
+        &self,
+        raw: &str,
+        local: &F,
+        depth: usize,
+        budget: &mut ExpansionBudget,
+    ) -> Option<String>
     where
         F: Fn(&str) -> Option<String>,
     {
         if depth == 0 {
             return None;
         }
-        let mut out = String::with_capacity(raw.len());
-        let mut rest = raw;
-        while let Some(start) = rest.find("$(") {
-            out.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let end = after.find(')')?;
-            let name = &after[..end];
+        if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+            return None;
+        }
+        budget.charge_scan(raw.len())?;
+        budget.charge_work(1)?;
+
+        let bytes = raw.as_bytes();
+        let mut out = String::new();
+        let mut cursor = 0usize;
+        let mut segment_start = 0usize;
+        while cursor + 1 < bytes.len() {
+            if bytes[cursor] != b'$' || bytes[cursor + 1] != b'(' {
+                cursor += 1;
+                continue;
+            }
+
+            append_expansion(&mut out, &raw[segment_start..cursor], budget)?;
+            cursor += 2;
+            let name_start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b')' {
+                cursor += 1;
+            }
+            if cursor == bytes.len() {
+                return None;
+            }
+            let name = raw.get(name_start..cursor)?;
             if name.contains('$') || name.contains(' ') {
                 return None;
             }
-            let value = local(name).or_else(|| self.resolved.get(name).cloned())?;
-            out.push_str(&self.expand_with_depth(&value, local, depth - 1)?);
-            rest = &after[end + 1..];
+            budget.charge_work(1)?;
+            let expanded = if let Some(value) = local(name) {
+                // The callback's String allocation occurs before it returns;
+                // reject it immediately and account for its retained bytes
+                // before doing any further work. This module cannot bound the
+                // callback's allocation itself.
+                if value.len() > MAX_EXPANSION_VALUE_BYTES {
+                    return None;
+                }
+                budget.charge_output(value.len())?;
+                self.expand_with_depth(&value, local, depth - 1, budget)?
+            } else {
+                self.expand_with_depth(self.resolved.get(name)?, local, depth - 1, budget)?
+            };
+            append_expansion(&mut out, &expanded, budget)?;
+            cursor += 1;
+            segment_start = cursor;
         }
-        out.push_str(rest);
+        append_expansion(&mut out, &raw[segment_start..], budget)?;
         Some(out)
     }
 
     /// The unresolvable names in `raw`, checking the local scope too.
-    fn missing_in_with<F>(&self, raw: &str, local: &F) -> Vec<String>
+    fn missing_in_with<F>(
+        &self,
+        raw: &str,
+        local: &F,
+        budget: &mut ExpansionBudget,
+    ) -> Option<Vec<String>>
     where
         F: Fn(&str) -> Option<String>,
     {
-        let mut out = Vec::new();
-        let mut queue = vec![raw.to_owned()];
-        let mut seen = 0usize;
-        while let Some(text) = queue.pop() {
-            seen += 1;
-            if seen > 64 {
-                break;
+        if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+            return None;
+        }
+        budget.charge_item()?;
+        budget.charge_output(raw.len())?;
+        let mut queue = VecDeque::new();
+        queue.try_reserve(1).ok()?;
+        queue.push_back(raw.to_owned());
+        let mut missing = BTreeSet::<String>::new();
+
+        while let Some(text) = queue.pop_back() {
+            if text.len() > MAX_EXPANSION_VALUE_BYTES {
+                return None;
             }
-            let mut rest = text.as_str();
-            while let Some(start) = rest.find("$(") {
-                let after = &rest[start + 2..];
-                let Some(end) = after.find(')') else {
+            budget.charge_scan(text.len())?;
+            budget.charge_work(1)?;
+            let bytes = text.as_bytes();
+            let mut cursor = 0usize;
+            while cursor + 1 < bytes.len() {
+                if bytes[cursor] != b'$' || bytes[cursor + 1] != b'(' {
+                    cursor += 1;
+                    continue;
+                }
+                cursor += 2;
+                let name_start = cursor;
+                while cursor < bytes.len() && bytes[cursor] != b')' {
+                    cursor += 1;
+                }
+                if cursor == bytes.len() {
                     break;
-                };
-                let name = &after[..end];
+                }
+                let name = text.get(name_start..cursor)?;
                 if !name.contains('$') && !name.contains(' ') {
-                    match local(name).or_else(|| self.resolved.get(name).cloned()) {
-                        Some(v) => queue.push(v),
-                        None => {
-                            if !out.iter().any(|n| n == name) {
-                                out.push(name.to_owned());
-                            }
+                    budget.charge_work(1)?;
+                    if let Some(value) = local(name) {
+                        if value.len() > MAX_EXPANSION_VALUE_BYTES {
+                            return None;
                         }
+                        // The local callback allocates before returning. Its
+                        // size is checked/accounted before queue growth.
+                        budget.charge_output(value.len())?;
+                        push_diagnostic_value(&mut queue, value, budget, true)?;
+                    } else if let Some(value) = self.resolved.get(name) {
+                        if value.len() > MAX_EXPANSION_VALUE_BYTES {
+                            return None;
+                        }
+                        budget.charge_output(value.len())?;
+                        push_diagnostic_value(&mut queue, value.clone(), budget, true)?;
+                    } else if !missing.contains(name) {
+                        budget.charge_item()?;
+                        budget.charge_output(name.len())?;
+                        missing.insert(name.to_owned());
                     }
                 }
-                rest = &after[end + 1..];
+                cursor += 1;
             }
         }
-        out
+
+        let mut result = Vec::new();
+        result.try_reserve_exact(missing.len()).ok()?;
+        result.extend(missing);
+        Some(result)
     }
 
     /// The names a raw value references that nothing defines.
@@ -338,24 +564,49 @@ impl DirVars {
     /// not be resolved.
     #[must_use]
     pub fn missing_in(&self, raw: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut rest = raw;
-        while let Some(start) = rest.find("$(") {
-            let after = &rest[start + 2..];
-            let Some(end) = after.find(')') else {
-                break;
-            };
-            let name = &after[..end];
-            if !name.contains('$')
-                && !name.contains(' ')
-                && !self.resolved.contains_key(name)
-                && !out.iter().any(|n| n == name)
-            {
-                out.push(name.to_owned());
-            }
-            rest = &after[end + 1..];
+        let Some(missing) = self.missing_in_bounded(raw, &mut ExpansionBudget::default()) else {
+            return vec![EXPANSION_RESOURCE_ERROR.to_owned()];
+        };
+        missing
+    }
+
+    fn missing_in_bounded(&self, raw: &str, budget: &mut ExpansionBudget) -> Option<Vec<String>> {
+        if raw.len() > MAX_EXPANSION_VALUE_BYTES {
+            return None;
         }
-        out
+        budget.charge_scan(raw.len())?;
+        budget.charge_work(1)?;
+        let bytes = raw.as_bytes();
+        let mut cursor = 0usize;
+        let mut missing = BTreeSet::<String>::new();
+        while cursor + 1 < bytes.len() {
+            if bytes[cursor] != b'$' || bytes[cursor + 1] != b'(' {
+                cursor += 1;
+                continue;
+            }
+            cursor += 2;
+            let name_start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != b')' {
+                cursor += 1;
+            }
+            if cursor == bytes.len() {
+                break;
+            }
+            let name = raw.get(name_start..cursor)?;
+            if !name.contains('$') && !name.contains(' ') {
+                budget.charge_work(1)?;
+                if !self.resolved.contains_key(name) && !missing.contains(name) {
+                    budget.charge_item()?;
+                    budget.charge_output(name.len())?;
+                    missing.insert(name.to_owned());
+                }
+            }
+            cursor += 1;
+        }
+        let mut result = Vec::new();
+        result.try_reserve_exact(missing.len()).ok()?;
+        result.extend(missing);
+        Some(result)
     }
 }
 
@@ -514,6 +765,31 @@ mod tests {
     }
 
     #[test]
+    fn native_target_tool_roles_require_explicit_admission() {
+        let mut dirs = from_text("");
+        for name in [
+            "NATIVE_TARGET_CC",
+            "NATIVE_TARGET_AR",
+            "NATIVE_TARGET_RANLIB",
+        ] {
+            assert!(dirs.expand(&format!("$({name})")).is_none());
+        }
+        dirs.bind_native_target_tool_roles();
+        assert_eq!(
+            dirs.expand("$(NATIVE_TARGET_CC)").as_deref(),
+            Some("${CMAKE_C_COMPILER}")
+        );
+        assert_eq!(
+            dirs.expand("$(NATIVE_TARGET_AR)").as_deref(),
+            Some("${CMAKE_AR}")
+        );
+        assert_eq!(
+            dirs.expand("$(NATIVE_TARGET_RANLIB)").as_deref(),
+            Some("${CMAKE_RANLIB}")
+        );
+    }
+
+    #[test]
     fn assignment_forms() {
         assert_eq!(split_assignment("A := b"), Some(("A", "b")));
         assert_eq!(split_assignment("A = b"), Some(("A", "b")));
@@ -551,6 +827,71 @@ mod tests {
             _ => None,
         };
         assert_eq!(d.expand_with("$(AROS_DIR_TOOLS)", &local).unwrap(), "Local");
+    }
+
+    #[test]
+    fn bounded_expansion_preserves_local_shadowing_through_a_normal_chain() {
+        let d = from_text("BASE := global\nLOCAL_CHAIN := $(BASE)/shared\n");
+        let local = |name: &str| match name {
+            "BASE" => Some("local".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            d.expand_with("$(LOCAL_CHAIN)/leaf", &local).unwrap(),
+            "local/shared/leaf"
+        );
+    }
+
+    #[test]
+    fn recursive_fanout_and_large_leaf_fail_closed_at_the_expansion_budgets() {
+        let mut d = from_text("");
+        d.resolved
+            .insert("FANOUT_9".to_owned(), "x".repeat(64 * 1024));
+        for index in (0..9).rev() {
+            let next = index + 1;
+            d.resolved.insert(
+                format!("FANOUT_{index}"),
+                format!("$(FANOUT_{next})$(FANOUT_{next})"),
+            );
+        }
+        assert!(d.expand("$(FANOUT_0)").is_none());
+
+        d.resolved.insert(
+            "LARGE_LEAF".to_owned(),
+            "x".repeat(super::MAX_EXPANSION_VALUE_BYTES + 1),
+        );
+        assert!(d.expand("$(LARGE_LEAF)").is_none());
+    }
+
+    #[test]
+    fn missing_variable_diagnostics_bound_fanout_and_return_a_refusal() {
+        let d = from_text("");
+        let aliases = (0..=super::MAX_EXPANSION_LIST_ITEMS)
+            .map(|index| format!("$(MISSING_{index})"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let local = |name: &str| (name == "ROOT").then(|| aliases.clone());
+        let error = d.expand_with("$(ROOT)", &local).unwrap_err();
+        assert_eq!(error, vec![super::EXPANSION_RESOURCE_ERROR.to_owned()]);
+        assert_eq!(
+            d.missing_in(&aliases),
+            vec![super::EXPANSION_RESOURCE_ERROR.to_owned()]
+        );
+    }
+
+    #[test]
+    fn missing_diagnostics_reject_an_oversized_global_before_copying_it() {
+        let mut d = from_text("");
+        d.resolved.insert(
+            "LARGE".to_owned(),
+            "x".repeat(super::MAX_EXPANSION_VALUE_BYTES + 1),
+        );
+        let mut budget = super::ExpansionBudget::default();
+        let raw = "$(LARGE)/$(MISSING)";
+        assert!(d.missing_in_with(raw, &|_| None, &mut budget).is_none());
+        // Only the initial diagnostic input may have been retained. The
+        // rejected global must not consume output budget or be cloned.
+        assert_eq!(budget.output_bytes, raw.len());
     }
 
     #[test]

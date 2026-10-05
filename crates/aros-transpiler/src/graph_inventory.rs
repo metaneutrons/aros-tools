@@ -327,7 +327,20 @@ impl DependencyGraph {
     /// transpiler/configure pass enough source text to derive those exact
     /// edges without prefetching every third-party package.
     pub fn resolve_header_inventory_fetches(&mut self, ports_dir: Option<&Path>) {
+        self.resolve_selected_header_inventory_fetches(ports_dir, None);
+    }
+
+    /// Preparation may only fetch public-header trees reached by the selected
+    /// declaration closure; unselected ports are not configure inputs.
+    pub fn resolve_selected_header_inventory_fetches(
+        &mut self,
+        ports_dir: Option<&Path>,
+        selected: Option<&BTreeSet<String>>,
+    ) {
         for declaration in &self.copy_includes {
+            if selected.is_some_and(|selected| !selected.contains(&declaration.name)) {
+                continue;
+            }
             let source = declaration.source_dir.trim_end_matches('/');
             if let (Some(ports_dir), Some(relative)) =
                 (ports_dir, source.strip_prefix("${AROS_PORTS_DIR}"))
@@ -442,7 +455,7 @@ impl DependencyGraph {
         // after optional-`@` copy recognition it would otherwise become a
         // second Ninja producer for the same file. Consolidate only that exact
         // derived copy, leaving every other duplicate to CMake's hard error.
-        let host_header_copies: HashSet<(String, String)> = self
+        let mut host_header_copies: HashSet<(String, String)> = self
             .host_generated_headers
             .iter()
             .map(|header| {
@@ -452,6 +465,22 @@ impl DependencyGraph {
                 )
             })
             .collect();
+        host_header_copies.extend(
+            self.host_header_rules
+                .iter()
+                .map(|header| (header.primary_output.clone(), header.sdk_output.clone())),
+        );
+        host_header_copies.extend(self.host_header_aggregates.iter().flat_map(|rule| {
+            rule.headers
+                .iter()
+                .filter(|header| header.generated_mirror)
+                .map(|header| {
+                    (
+                        format!("${{AROS_SDK_INCLUDE_DIR}}/{}", header.header),
+                        format!("${{CMAKE_BINARY_DIR}}/GENINCDIR/{}", header.header),
+                    )
+                })
+        }));
         self.header_transforms.retain(|transform| {
             !transform.copy_only
                 || !host_header_copies
@@ -697,6 +726,9 @@ impl DependencyGraph {
 }
 
 fn target_has_compile_inputs(target: &TargetDefinition) -> bool {
+    if target.module_type == ModuleType::ModuleHeaders {
+        return false;
+    }
     !target.source_files.is_empty()
         || !target.cxx_source_files.is_empty()
         || !target.objc_source_files.is_empty()

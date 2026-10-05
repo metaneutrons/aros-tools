@@ -21,9 +21,15 @@
 //! provenance, so it can opt declarations in independently rather than making
 //! every target which happens to include a syntactically safe file concrete.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+use aros_common::native_make_template::ResolvedGeneratedMakeTemplate;
+
+const MAX_RESOLVED_TEMPLATE_BYTES: usize = 256 * 1024;
+const MAX_TEMPLATE_BINDINGS: usize = 16;
+const MAX_TEMPLATE_SUBSTITUTIONS: usize = 32;
 
 /// Default limits for one mmakefile expansion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +66,10 @@ pub enum LocalMakeFragmentPolicy {
     /// prove declaration ownership, select every conditional for a concrete
     /// target profile and materialise the header as a real build output.
     LiteralDefineHeader,
+    /// Explicit source-native configuration. Only a caller-supplied binding
+    /// can replace a global include; both source endpoints remain regular
+    /// in-root files. This mode never reads generated configuration.
+    NativeConfiguration,
 }
 
 impl Default for LocalMakeIncludeLimits {
@@ -152,6 +162,11 @@ pub struct IncludedLocalMakeFragment {
     pub plain_source_list: bool,
     /// Whether the fragment passed the complete literal-define-header grammar.
     pub literal_define_header: bool,
+    /// Generated output path for an explicitly bound configure template.
+    /// `path` remains the sealed source template path in that case.
+    pub generated_output: Option<PathBuf>,
+    /// Exact source-owned substitutions used by the configure template.
+    pub template_substitutions: Option<BTreeMap<String, String>>,
 }
 
 /// Result of scanning one mmakefile for local source-tree includes.
@@ -180,6 +195,86 @@ pub fn inline_local_make_includes(
     mmake_relative_path: &Path,
     limits: LocalMakeIncludeLimits,
     policy: LocalMakeFragmentPolicy,
+) -> LocalMakeIncludeScan {
+    inline_make_includes(
+        content,
+        source_root,
+        mmake_relative_path,
+        limits,
+        policy,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+}
+
+/// Expands explicitly bound native configuration at its original include
+/// position.
+///
+/// An unbound global include stays visible, so a consuming
+/// capability must refuse it instead of treating missing values as empty.
+#[must_use]
+pub fn inline_native_make_configuration(
+    content: &str,
+    source_root: &Path,
+    mmake_relative_path: &Path,
+    limits: LocalMakeIncludeLimits,
+    bindings: &BTreeMap<String, String>,
+) -> LocalMakeIncludeScan {
+    inline_native_make_configuration_with_templates(
+        content,
+        source_root,
+        mmake_relative_path,
+        limits,
+        bindings,
+        &BTreeMap::new(),
+    )
+}
+
+/// Expands explicitly bound native configuration and sealed configure-owned
+/// Make templates at their original include positions.
+///
+/// A template is selected only by a source-relative generated-path key that
+/// matches an explicit `$(TOP)/$(CURDIR)/<path>` include from this declaring
+/// directory. `TOP` is deliberately not expanded or equated with `SRCDIR`,
+/// and no generated output is opened. Missing template bindings remain as
+/// unresolved includes in the text.
+#[must_use]
+pub fn inline_native_make_configuration_with_templates(
+    content: &str,
+    source_root: &Path,
+    mmake_relative_path: &Path,
+    limits: LocalMakeIncludeLimits,
+    bindings: &BTreeMap<String, String>,
+    templates: &BTreeMap<String, ResolvedGeneratedMakeTemplate>,
+) -> LocalMakeIncludeScan {
+    if let Err((kind, subject, detail)) =
+        validate_template_bindings(bindings, templates, limits, mmake_relative_path)
+    {
+        return LocalMakeIncludeScan {
+            expanded: content.to_owned(),
+            fragments: Vec::new(),
+            issues: vec![issue(mmake_relative_path, 1, kind, subject, detail)],
+        };
+    }
+    inline_make_includes(
+        content,
+        source_root,
+        mmake_relative_path,
+        limits,
+        LocalMakeFragmentPolicy::NativeConfiguration,
+        bindings,
+        templates,
+    )
+}
+
+fn inline_make_includes(
+    content: &str,
+    source_root: &Path,
+    mmake_relative_path: &Path,
+    limits: LocalMakeIncludeLimits,
+    policy: LocalMakeFragmentPolicy,
+    bindings: &BTreeMap<String, String>,
+    templates: &BTreeMap<String, ResolvedGeneratedMakeTemplate>,
 ) -> LocalMakeIncludeScan {
     let original = || LocalMakeIncludeScan {
         expanded: content.to_owned(),
@@ -242,6 +337,8 @@ pub fn inline_local_make_includes(
         files_read: 0,
         bytes_read: 0,
         active: Vec::new(),
+        bindings: bindings.clone(),
+        templates: templates.clone(),
     };
     let expanded = expand_text(content, mmake_relative_path, false, &mut state);
     LocalMakeIncludeScan {
@@ -261,6 +358,8 @@ struct ExpansionState {
     files_read: usize,
     bytes_read: usize,
     active: Vec<PathBuf>,
+    bindings: BTreeMap<String, String>,
+    templates: BTreeMap<String, ResolvedGeneratedMakeTemplate>,
 }
 
 #[derive(Default)]
@@ -302,7 +401,74 @@ fn expand_text(
             continue;
         };
         let line_no = index + 1;
-        if !is_local_candidate(include.path) {
+
+        if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
+            match generated_template_include_key(include.path, state) {
+                Ok(Some(generated_path)) => {
+                    if !state.templates.contains_key(&generated_path) {
+                        output.issues.push(issue(
+                            source,
+                            line_no,
+                            LocalMakeIncludeIssueKind::UnresolvedPath,
+                            include.path,
+                            "generated Make include has no explicit source-owned template binding",
+                        ));
+                        if inside_fragment {
+                            output.fatal = true;
+                        }
+                        continue;
+                    }
+                    match expand_generated_template(
+                        &generated_path,
+                        include.path,
+                        source,
+                        line_no,
+                        state,
+                    ) {
+                        Ok(fragment) => {
+                            output.text.truncate(output.text.len() - chunk.len());
+                            output
+                                .text
+                                .push_str("# Verified source configuration template\n");
+                            if !output.text.ends_with('\n') {
+                                output.text.push('\n');
+                            }
+                            output.text.push_str(&fragment.text);
+                            if !output.text.ends_with('\n') {
+                                output.text.push('\n');
+                            }
+                            output.fragments.extend(fragment.fragments);
+                            output.issues.extend(fragment.issues);
+                        }
+                        Err(mut issues) => {
+                            output.issues.append(&mut issues);
+                            if inside_fragment {
+                                output.fatal = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(detail) => {
+                    output.issues.push(issue(
+                        source,
+                        line_no,
+                        LocalMakeIncludeIssueKind::UnresolvedPath,
+                        include.path,
+                        detail,
+                    ));
+                    if inside_fragment {
+                        output.fatal = true;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        let bound = bound_include_key(include.path, state)
+            .is_some_and(|key| state.bindings.contains_key(&key));
+        if !bound && !is_local_candidate(include.path) {
             if inside_fragment {
                 output.issues.push(issue(
                     source,
@@ -318,6 +484,14 @@ fn expand_text(
 
         match expand_one_fragment(include, source, line_no, state) {
             Ok(fragment) => {
+                if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
+                    // Only a successfully expanded directive is removed.
+                    // Rejected includes remain explicit uncertainty.
+                    output.text.truncate(output.text.len() - chunk.len());
+                    output
+                        .text
+                        .push_str("# Verified source configuration include\n");
+                }
                 if !output.text.ends_with('\n') {
                     output.text.push('\n');
                 }
@@ -348,7 +522,35 @@ fn expand_one_fragment(
     include_line: usize,
     state: &mut ExpansionState,
 ) -> Result<TextExpansion, Vec<LocalMakeIncludeIssue>> {
-    let path = resolve_local_path(include.path, included_from, include_line, state)?;
+    let mut path = resolve_local_path(include.path, included_from, include_line, state)?;
+    if let Some(key) = bound_include_key(include.path, state) {
+        if let Some(replacement) = state.bindings.get(&key) {
+            assert_bound_regular(
+                &path,
+                &state.root,
+                included_from,
+                include_line,
+                include.path,
+            )?;
+            if !safe_bound_path(replacement) {
+                return Err(vec![issue(
+                    included_from,
+                    include_line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    include.path,
+                    "native include replacement must be a normalized source-relative .mk file",
+                )]);
+            }
+            path = resolve_local_path(replacement, included_from, include_line, state)?;
+            assert_bound_regular(
+                &path,
+                &state.root,
+                included_from,
+                include_line,
+                include.path,
+            )?;
+        }
+    }
     if state.active.len() >= state.limits.depth {
         return Err(vec![issue(
             included_from,
@@ -430,7 +632,11 @@ fn expand_one_fragment(
     let safety = if state.policy == LocalMakeFragmentPolicy::LiteralDefineHeader {
         validate_literal_define_header_fragment(&body, &relative)?
     } else {
-        validate_fragment(&body, &relative)?
+        validate_fragment(
+            &body,
+            &relative,
+            state.policy == LocalMakeFragmentPolicy::NativeConfiguration,
+        )?
     };
     if state.policy == LocalMakeFragmentPolicy::PlainSourceLists && !safety.plain_source_list {
         return Err(vec![issue(
@@ -458,10 +664,446 @@ fn expand_one_fragment(
         has_conditionals: safety.has_conditionals,
         plain_source_list: safety.plain_source_list,
         literal_define_header: safety.literal_define_header,
+        generated_output: None,
+        template_substitutions: None,
     });
     fragments.append(&mut nested.fragments);
     nested.fragments = fragments;
     Ok(nested)
+}
+
+fn expand_generated_template(
+    generated_path: &str,
+    include_path: &str,
+    included_from: &Path,
+    include_line: usize,
+    state: &mut ExpansionState,
+) -> Result<TextExpansion, Vec<LocalMakeIncludeIssue>> {
+    let Some(template) = state.templates.get(generated_path).cloned() else {
+        return Err(vec![issue(
+            included_from,
+            include_line,
+            LocalMakeIncludeIssueKind::UnresolvedPath,
+            include_path,
+            "the generated Make template binding disappeared during expansion",
+        )]);
+    };
+
+    if state.active.len() >= state.limits.depth {
+        return Err(vec![issue(
+            included_from,
+            include_line,
+            LocalMakeIncludeIssueKind::DepthLimit,
+            include_path,
+            "the local include nesting limit was reached",
+        )]);
+    }
+    if state.files_read >= state.limits.files {
+        return Err(vec![issue(
+            included_from,
+            include_line,
+            LocalMakeIncludeIssueKind::FileLimit,
+            include_path,
+            "the local include file-count limit was reached",
+        )]);
+    }
+    let Some(total_bytes) = state.bytes_read.checked_add(template.expanded_text.len()) else {
+        return Err(vec![issue(
+            included_from,
+            include_line,
+            LocalMakeIncludeIssueKind::ByteLimit,
+            include_path,
+            "the aggregate fragment byte count overflowed",
+        )]);
+    };
+    if total_bytes > state.limits.bytes {
+        return Err(vec![issue(
+            included_from,
+            include_line,
+            LocalMakeIncludeIssueKind::ByteLimit,
+            include_path,
+            "the aggregate local include byte limit was reached",
+        )]);
+    }
+
+    let template_path = PathBuf::from(&template.template_relative);
+    let safety = validate_resolved_template(&template, &template_path)?;
+    state.files_read += 1;
+    state.bytes_read = total_bytes;
+
+    Ok(TextExpansion {
+        text: template.expanded_text,
+        fragments: vec![IncludedLocalMakeFragment {
+            path: template_path,
+            included_from: included_from.to_path_buf(),
+            include_line,
+            assigned_variables: safety.assigned_variables,
+            has_conditionals: false,
+            plain_source_list: false,
+            literal_define_header: false,
+            generated_output: Some(PathBuf::from(generated_path)),
+            template_substitutions: Some(template.substitutions),
+        }],
+        issues: Vec::new(),
+        fatal: false,
+    })
+}
+
+fn validate_resolved_template(
+    template: &ResolvedGeneratedMakeTemplate,
+    source: &Path,
+) -> Result<FragmentSafety, Vec<LocalMakeIncludeIssue>> {
+    let content = &template.expanded_text;
+    if content.len() > MAX_RESOLVED_TEMPLATE_BYTES
+        || !content.is_ascii()
+        || content.contains('\t')
+        || content
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\r'))
+        || content
+            .bytes()
+            .enumerate()
+            .any(|(index, byte)| byte == b'\r' && content.as_bytes().get(index + 1) != Some(&b'\n'))
+        || content.contains('\\')
+    {
+        return Err(vec![issue(
+            source,
+            1,
+            LocalMakeIncludeIssueKind::UnsafeSyntax,
+            source.display().to_string(),
+            "resolved configure template is not bounded plain ASCII Make text",
+        )]);
+    }
+
+    let safety = validate_fragment(content, source, true)?;
+    if safety.has_conditionals || safety.assigned_variables.is_empty() {
+        return Err(vec![issue(
+            source,
+            1,
+            LocalMakeIncludeIssueKind::UnsafeSyntax,
+            source.display().to_string(),
+            "resolved configure template must be a nonempty unconditional assignment scope",
+        )]);
+    }
+
+    let mut marker_seen = false;
+    let mut assignment_seen = false;
+    let mut assigned = BTreeSet::new();
+    let mut assignment_count = 0_usize;
+    for logical in logical_lines(content) {
+        let line = logical.text.as_str();
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "%common" {
+            if line != "%common" || marker_seen || assignment_seen || logical.recipe {
+                return Err(vec![issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    trimmed,
+                    "only one exact leading %common section marker is permitted",
+                )]);
+            }
+            marker_seen = true;
+            continue;
+        }
+
+        let uncommented = strip_make_comment(trimmed).trim();
+        if uncommented.is_empty() {
+            continue;
+        }
+        if parse_include_directive(uncommented).is_some() {
+            return Err(vec![issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "resolved configure templates may not include additional files",
+            )]);
+        }
+        let Some((lhs, rhs)) = uncommented.split_once('=') else {
+            return Err(vec![issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "resolved configure templates may contain only plain assignments",
+            )]);
+        };
+        let name = lhs.trim();
+        if lhs.ends_with('+')
+            || lhs.ends_with(':')
+            || lhs.ends_with('?')
+            || lhs.ends_with('!')
+            || rhs.contains('=')
+            || name.is_empty()
+            || name.len() > 64
+            || !name
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_uppercase() || *byte == b'_')
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(vec![issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "resolved configure template has an unsupported assignment form",
+            )]);
+        }
+        let value = rhs.trim();
+        if !safe_template_assignment_value(value) || !assigned.insert(name.to_owned()) {
+            return Err(vec![issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "resolved configure template has an unsafe or duplicate assignment",
+            )]);
+        }
+        assignment_seen = true;
+        assignment_count += 1;
+        if assignment_count > 64 {
+            return Err(vec![issue(
+                source,
+                logical.line,
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                uncommented,
+                "resolved configure template exceeds the assignment limit",
+            )]);
+        }
+    }
+    Ok(safety)
+}
+
+fn safe_template_assignment_value(value: &str) -> bool {
+    if let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return inner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte));
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+}
+
+fn validate_template_bindings(
+    bindings: &BTreeMap<String, String>,
+    templates: &BTreeMap<String, ResolvedGeneratedMakeTemplate>,
+    _limits: LocalMakeIncludeLimits,
+    mmake_relative_path: &Path,
+) -> Result<(), (LocalMakeIncludeIssueKind, String, String)> {
+    if templates.is_empty() {
+        return Ok(());
+    }
+    if templates.len() > MAX_TEMPLATE_BINDINGS {
+        return Err((
+            LocalMakeIncludeIssueKind::FileLimit,
+            "generated Make template bindings".into(),
+            format!("template map exceeds {MAX_TEMPLATE_BINDINGS} entries"),
+        ));
+    }
+    if bindings.len() > MAX_TEMPLATE_BINDINGS {
+        return Err((
+            LocalMakeIncludeIssueKind::FileLimit,
+            "native include bindings".into(),
+            format!("normal include map exceeds {MAX_TEMPLATE_BINDINGS} entries"),
+        ));
+    }
+    let mmake_path = mmake_relative_path.to_str().ok_or_else(|| {
+        (
+            LocalMakeIncludeIssueKind::InvalidContext,
+            mmake_relative_path.display().to_string(),
+            "the declaring mmakefile path is not valid UTF-8".into(),
+        )
+    })?;
+    if !safe_source_relative_key(mmake_path) {
+        return Err((
+            LocalMakeIncludeIssueKind::InvalidContext,
+            mmake_path.to_owned(),
+            "template expansion requires a canonical source-relative mmakefile path".into(),
+        ));
+    }
+
+    for (key, replacement) in bindings {
+        if !safe_source_relative_key(key)
+            || !safe_source_relative_key(replacement)
+            || Path::new(replacement)
+                .extension()
+                .is_none_or(|extension| extension != "mk")
+        {
+            return Err((
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                key.clone(),
+                "native include binding keys/replacements must be canonical source-relative paths and replacements must be .mk files".into(),
+            ));
+        }
+    }
+
+    for (index, generated_path) in templates.keys().enumerate() {
+        let Some(template) = templates.get(generated_path) else {
+            return Err((
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                generated_path.clone(),
+                "generated template map entry is unexpectedly absent".into(),
+            ));
+        };
+        if !safe_source_relative_key(generated_path)
+            || !safe_source_relative_key(&template.template_relative)
+            || Path::new(&template.template_relative)
+                .extension()
+                .is_none_or(|extension| extension != "in")
+        {
+            return Err((
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                generated_path.clone(),
+                "generated output and template must be normalized source-relative paths, with a .in template".into(),
+            ));
+        }
+        if paths_overlap(generated_path, &template.template_relative) {
+            return Err((
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                generated_path.clone(),
+                "generated output overlaps its source template path".into(),
+            ));
+        }
+        if template.expanded_text.len() > MAX_RESOLVED_TEMPLATE_BYTES
+            || template.expanded_text.contains('@')
+        {
+            return Err((
+                LocalMakeIncludeIssueKind::ByteLimit,
+                generated_path.clone(),
+                "resolved template text exceeds its byte limit or contains a residual token marker"
+                    .into(),
+            ));
+        }
+        if template.substitutions.len() > MAX_TEMPLATE_SUBSTITUTIONS
+            || template.substitutions.iter().any(|(token, value)| {
+                !safe_substitution_key(token)
+                    || value.len() > 128
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.+-".contains(&byte))
+            })
+        {
+            return Err((
+                LocalMakeIncludeIssueKind::UnsafeSyntax,
+                generated_path.clone(),
+                "resolved template substitutions are unsafe or exceed their entry limit".into(),
+            ));
+        }
+
+        for other in templates.keys().skip(index + 1) {
+            if paths_overlap(generated_path, other) {
+                return Err((
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    generated_path.clone(),
+                    format!("generated template path overlaps {other:?}"),
+                ));
+            }
+        }
+        for normal_key in bindings.keys() {
+            if paths_overlap(generated_path, normal_key) {
+                return Err((
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    generated_path.clone(),
+                    format!(
+                        "generated template key overlaps normal native include binding {normal_key:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn generated_template_include_key(
+    raw: &str,
+    state: &ExpansionState,
+) -> std::result::Result<Option<String>, &'static str> {
+    const PREFIXES: [&str; 4] = [
+        "$(TOP)/$(CURDIR)/",
+        "$(TOP)/${CURDIR}/",
+        "${TOP}/$(CURDIR)/",
+        "${TOP}/${CURDIR}/",
+    ];
+    let Some(prefix) = PREFIXES.iter().find(|prefix| raw.starts_with(**prefix)) else {
+        return Ok(None);
+    };
+    let suffix = &raw[prefix.len()..];
+    if !safe_source_relative_key(suffix) {
+        return Err("generated include suffix is not a canonical relative path");
+    }
+    let generated_path = state.curdir.join(suffix);
+    let Some(generated_path) = generated_path.to_str() else {
+        return Err("generated include path is not valid UTF-8");
+    };
+    if !safe_source_relative_key(generated_path) {
+        return Err("generated include does not normalize to a source-relative output");
+    }
+    Ok(Some(generated_path.to_owned()))
+}
+
+fn safe_source_relative_key(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 4096
+        || value.starts_with('/')
+        || value.contains(['\\', ':', '$', '*', '?'])
+        || value.chars().any(char::is_whitespace)
+    {
+        return false;
+    }
+    let mut normalized = PathBuf::new();
+    for segment in value.split('/') {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || !segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
+        {
+            return false;
+        }
+        normalized.push(segment);
+    }
+    normalized.to_str() == Some(value)
+}
+
+fn safe_substitution_key(token: &str) -> bool {
+    let Some(name) = token
+        .strip_prefix('@')
+        .and_then(|token| token.strip_suffix('@'))
+    else {
+        return false;
+    };
+    (1..=64).contains(&name.len())
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_uppercase() || *byte == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    left == right
+        || left
+            .strip_prefix(&right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(&left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn resolve_local_path(
@@ -534,12 +1176,83 @@ fn resolve_local_path(
             "the local include resolves outside the source tree",
         )]);
     }
+    if state.policy == LocalMakeFragmentPolicy::NativeConfiguration {
+        if canonical != lexical {
+            return Err(vec![issue(
+                source,
+                line,
+                LocalMakeIncludeIssueKind::OutsideSourceTree,
+                raw,
+                "native configuration may not traverse symlinks",
+            )]);
+        }
+        assert_bound_regular(&canonical, &state.root, source, line, raw)?;
+    }
     Ok(canonical)
+}
+
+fn safe_bound_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['$', '\\'])
+        && !path.contains(char::is_whitespace)
+        && Path::new(path)
+            .extension()
+            .is_some_and(|extension| extension == "mk")
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn bound_include_key(raw: &str, state: &ExpansionState) -> Option<String> {
+    let relative = raw
+        .trim()
+        .strip_prefix("$(SRCDIR)/")
+        .or_else(|| raw.trim().strip_prefix("${SRCDIR}/"))
+        .unwrap_or_else(|| raw.trim());
+    let expanded = relative
+        .replace("$(CURDIR)", &state.curdir.to_string_lossy())
+        .replace("${CURDIR}", &state.curdir.to_string_lossy());
+    if expanded.is_empty()
+        || expanded.contains(['$', '\\'])
+        || expanded.contains(char::is_whitespace)
+        || !Path::new(&expanded)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(expanded)
+}
+
+fn assert_bound_regular(
+    path: &Path,
+    root: &Path,
+    source: &Path,
+    line: usize,
+    subject: &str,
+) -> Result<(), Vec<LocalMakeIncludeIssue>> {
+    let mut cursor = path.to_path_buf();
+    while cursor != root {
+        let valid = fs::symlink_metadata(&cursor).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink()
+                && if cursor == path {
+                    metadata.is_file()
+                } else {
+                    metadata.is_dir()
+                }
+        });
+        if !cursor.starts_with(root) || !valid || !cursor.pop() {
+            return Err(vec![issue(source, line, LocalMakeIncludeIssueKind::OutsideSourceTree,
+                subject, "native configuration endpoints must be regular source files without symlink ancestors")]);
+        }
+    }
+    Ok(())
 }
 
 fn validate_fragment(
     content: &str,
     source: &Path,
+    native_configuration: bool,
 ) -> Result<FragmentSafety, Vec<LocalMakeIncludeIssue>> {
     let mut assigned = BTreeSet::new();
     let mut conditional_depth = 0usize;
@@ -547,6 +1260,8 @@ fn validate_fragment(
     let mut has_includes = false;
     let mut all_assignments_are_plain_lists = true;
     let mut assignment_count = 0usize;
+    let mut common_section_seen = false;
+    let mut active_content_seen = false;
     let mut issues = Vec::new();
 
     for logical in logical_lines(content) {
@@ -562,6 +1277,21 @@ fn validate_fragment(
                 trimmed,
                 "Make recipes are not evaluated during transpilation",
             ));
+            continue;
+        }
+        if native_configuration && trimmed == "%common" {
+            if common_section_seen || active_content_seen {
+                issues.push(issue(
+                    source,
+                    logical.line,
+                    LocalMakeIncludeIssueKind::UnsafeSyntax,
+                    trimmed,
+                    "only one leading %common section marker is permitted",
+                ));
+            } else {
+                common_section_seen = true;
+                active_content_seen = true;
+            }
             continue;
         }
         if trimmed.starts_with("#MM") {
@@ -581,6 +1311,7 @@ fn validate_fragment(
         if uncommented.is_empty() {
             continue;
         }
+        active_content_seen = true;
         if let Some(function) = unsafe_make_function(uncommented) {
             issues.push(issue(
                 source,
@@ -640,6 +1371,13 @@ fn validate_fragment(
             assignment_count += 1;
             all_assignments_are_plain_lists &= is_plain_source_list(value);
             continue;
+        }
+        if native_configuration {
+            if let Ok(Some(name)) = crate::make_vars::undefine_directive(uncommented) {
+                assigned.insert(name.to_owned());
+                all_assignments_are_plain_lists = false;
+                continue;
+            }
         }
 
         issues.push(issue(
@@ -1211,7 +1949,320 @@ fn issue(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        inline_native_make_configuration, inline_native_make_configuration_with_templates,
+        LocalMakeIncludeLimits,
+    };
     use super::{is_local_candidate, parse_include_directive};
+    use aros_common::native_make_template::ResolvedGeneratedMakeTemplate;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn native_fixture() -> (tempfile::TempDir, BTreeMap<String, String>) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("config")).unwrap();
+        std::fs::create_dir_all(directory.path().join("arch/native")).unwrap();
+        std::fs::write(
+            directory.path().join("config/aros.cfg"),
+            "include generated/target.cfg\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("arch/native/compile.mk"),
+            "undefine UNUSED\nFLAGS = -DFLAG=1 -UFLAG -DFLAG=2 -DFLAG=2\n",
+        )
+        .unwrap();
+        (
+            directory,
+            BTreeMap::from([("config/aros.cfg".into(), "arch/native/compile.mk".into())]),
+        )
+    }
+
+    #[test]
+    fn native_configuration_expands_only_explicit_regular_endpoints_in_order() {
+        let (directory, bindings) = native_fixture();
+        let scan = inline_native_make_configuration(
+            "BEFORE := first\ninclude $(SRCDIR)/config/aros.cfg\nFLAGS += -DTAIL\n",
+            directory.path(),
+            std::path::Path::new("compiler/libinit/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &bindings,
+        );
+        assert!(scan.issues.is_empty(), "{:#?}", scan.issues);
+        assert_eq!(scan.fragments.len(), 1);
+        assert!(!scan.expanded.contains("include generated/target.cfg"));
+        assert!(!scan.expanded.contains("include $(SRCDIR)/config/aros.cfg"));
+        assert!(scan.expanded.contains("undefine UNUSED"));
+        assert!(scan.expanded.contains("-DFLAG=1 -UFLAG -DFLAG=2 -DFLAG=2"));
+        assert!(scan.expanded.find("BEFORE").unwrap() < scan.expanded.find("FLAGS =").unwrap());
+        assert!(scan.expanded.find("FLAGS =").unwrap() < scan.expanded.find("FLAGS +=").unwrap());
+    }
+
+    #[test]
+    fn native_configuration_keeps_unbound_or_unsafe_includes_explicit() {
+        let (directory, bindings) = native_fixture();
+        let input = "include $(SRCDIR)/config/aros.cfg\n";
+        let unbound = inline_native_make_configuration(
+            input,
+            directory.path(),
+            std::path::Path::new("compiler/libinit/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(unbound.expanded, input);
+        for body in [
+            "FLAGS = -DGOOD\ninclude generated/target.cfg\n",
+            "FLAGS = $(shell touch sentinel)\n",
+            "entry.o : entry.c\n\tcc -c entry.c\n",
+        ] {
+            std::fs::write(directory.path().join("arch/native/compile.mk"), body).unwrap();
+            let scan = inline_native_make_configuration(
+                input,
+                directory.path(),
+                std::path::Path::new("compiler/libinit/mmakefile.src"),
+                LocalMakeIncludeLimits::default(),
+                &bindings,
+            );
+            assert!(!scan.issues.is_empty());
+            assert_eq!(scan.expanded, input);
+            assert!(scan.fragments.is_empty());
+            assert!(!directory.path().join("sentinel").exists());
+        }
+    }
+
+    #[test]
+    fn native_configuration_refuses_missing_endpoints_limits_and_bad_replacements() {
+        let (directory, mut bindings) = native_fixture();
+        for replacement in [
+            "../compile.mk",
+            "/tmp/compile.mk",
+            "arch/native/compile.cfg",
+            "arch/native/missing.mk",
+            "arch/native/$(NAME).mk",
+        ] {
+            bindings.insert("config/aros.cfg".into(), replacement.into());
+            let scan = inline_native_make_configuration(
+                "include $(SRCDIR)/config/aros.cfg\n",
+                directory.path(),
+                std::path::Path::new("compiler/libinit/mmakefile.src"),
+                LocalMakeIncludeLimits::default(),
+                &bindings,
+            );
+            assert!(!scan.issues.is_empty(), "{replacement}");
+            assert!(scan.fragments.is_empty());
+        }
+        bindings.insert("config/aros.cfg".into(), "arch/native/compile.mk".into());
+        let scan = inline_native_make_configuration(
+            "include $(SRCDIR)/config/aros.cfg\n",
+            directory.path(),
+            std::path::Path::new("compiler/libinit/mmakefile.src"),
+            LocalMakeIncludeLimits {
+                bytes: 4,
+                ..LocalMakeIncludeLimits::default()
+            },
+            &bindings,
+        );
+        assert!(!scan.issues.is_empty());
+        assert!(scan.fragments.is_empty());
+        std::fs::remove_file(directory.path().join("config/aros.cfg")).unwrap();
+        let scan = inline_native_make_configuration(
+            "-include $(SRCDIR)/config/aros.cfg\n",
+            directory.path(),
+            std::path::Path::new("compiler/libinit/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &bindings,
+        );
+        assert!(!scan.issues.is_empty());
+        assert!(scan.fragments.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_configuration_refuses_source_and_projection_symlinks() {
+        use std::os::unix::fs::symlink;
+        let (directory, bindings) = native_fixture();
+        for path in ["config/aros.cfg", "arch/native/compile.mk"] {
+            let original = directory.path().join(path);
+            let saved = original.with_extension("saved");
+            std::fs::rename(&original, &saved).unwrap();
+            symlink(&saved, &original).unwrap();
+            let scan = inline_native_make_configuration(
+                "include $(SRCDIR)/config/aros.cfg\n",
+                directory.path(),
+                std::path::Path::new("compiler/libinit/mmakefile.src"),
+                LocalMakeIncludeLimits::default(),
+                &bindings,
+            );
+            assert!(!scan.issues.is_empty(), "{path}");
+            assert!(scan.fragments.is_empty());
+            std::fs::remove_file(&original).unwrap();
+            std::fs::rename(&saved, &original).unwrap();
+        }
+    }
+
+    fn resolved_geninc_template() -> BTreeMap<String, ResolvedGeneratedMakeTemplate> {
+        BTreeMap::from([(
+            "compiler/include/geninc.cfg".into(),
+            ResolvedGeneratedMakeTemplate {
+                template_relative: "compiler/include/geninc.cfg.in".into(),
+                expanded_text: "%common\nEXECSMP=\"\"\n".into(),
+                substitutions: BTreeMap::from([("@ENABLE_EXECSMP@".into(), String::new())]),
+            },
+        )])
+    }
+
+    #[test]
+    fn generated_template_uses_only_sealed_text_and_preserves_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("compiler/include")).unwrap();
+        std::fs::write(
+            directory.path().join("compiler/include/geninc.cfg.in"),
+            "%common\nEXECSMP=\"@ENABLE_EXECSMP@\"\n",
+        )
+        .unwrap();
+        let generated = directory.path().join("compiler/include/geninc.cfg");
+        assert!(!generated.exists());
+
+        let scan = inline_native_make_configuration_with_templates(
+            "include $(TOP)/$(CURDIR)/geninc.cfg\nAFTER=present\n",
+            directory.path(),
+            Path::new("compiler/include/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+            &resolved_geninc_template(),
+        );
+
+        assert!(scan.issues.is_empty(), "{:#?}", scan.issues);
+        assert_eq!(scan.fragments.len(), 1);
+        assert_eq!(
+            scan.fragments[0].path,
+            Path::new("compiler/include/geninc.cfg.in")
+        );
+        assert_eq!(
+            scan.fragments[0].generated_output.as_deref(),
+            Some(Path::new("compiler/include/geninc.cfg"))
+        );
+        assert_eq!(
+            scan.fragments[0].template_substitutions.as_ref().unwrap()["@ENABLE_EXECSMP@"],
+            ""
+        );
+        assert!(scan.expanded.contains("%common\nEXECSMP=\"\"\n"));
+        assert!(scan.expanded.contains("AFTER=present"));
+        assert!(!scan
+            .expanded
+            .contains("include $(TOP)/$(CURDIR)/geninc.cfg"));
+        assert!(!generated.exists());
+    }
+
+    #[test]
+    fn generated_template_never_reads_a_hostile_existing_output() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("compiler/include")).unwrap();
+        std::fs::write(
+            directory.path().join("compiler/include/geninc.cfg"),
+            "$(shell touch should-not-run)\n",
+        )
+        .unwrap();
+        let scan = inline_native_make_configuration_with_templates(
+            "include $(TOP)/$(CURDIR)/geninc.cfg\n",
+            directory.path(),
+            Path::new("compiler/include/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+            &resolved_geninc_template(),
+        );
+
+        assert!(scan.issues.is_empty(), "{:#?}", scan.issues);
+        assert!(scan.expanded.contains("EXECSMP=\"\""));
+        assert!(!scan.expanded.contains("should-not-run"));
+        assert!(!directory.path().join("should-not-run").exists());
+    }
+
+    #[test]
+    fn generated_template_without_binding_is_left_visible_and_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = "include $(TOP)/$(CURDIR)/geninc.cfg\n";
+        let scan = inline_native_make_configuration(
+            input,
+            directory.path(),
+            Path::new("compiler/include/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(scan.expanded, input);
+        assert!(scan.fragments.is_empty());
+        assert_eq!(scan.issues.len(), 1);
+        assert_eq!(
+            scan.issues[0].kind,
+            super::LocalMakeIncludeIssueKind::UnresolvedPath
+        );
+    }
+
+    #[test]
+    fn generated_template_rejects_overlapping_keys_and_resource_overruns_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = "include $(TOP)/$(CURDIR)/geninc.cfg\n";
+        let mut overlapping = BTreeMap::new();
+        overlapping.insert(
+            "compiler/include/geninc.cfg".into(),
+            "compiler/include/other.mk".into(),
+        );
+        let scan = inline_native_make_configuration_with_templates(
+            input,
+            directory.path(),
+            Path::new("compiler/include/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &overlapping,
+            &resolved_geninc_template(),
+        );
+        assert_eq!(scan.expanded, input);
+        assert!(scan.fragments.is_empty());
+        assert_eq!(scan.issues.len(), 1);
+
+        let templates = resolved_geninc_template();
+        for limits in [
+            LocalMakeIncludeLimits {
+                files: 0,
+                ..LocalMakeIncludeLimits::default()
+            },
+            LocalMakeIncludeLimits {
+                bytes: 4,
+                ..LocalMakeIncludeLimits::default()
+            },
+        ] {
+            let scan = inline_native_make_configuration_with_templates(
+                input,
+                directory.path(),
+                Path::new("compiler/include/mmakefile.src"),
+                limits,
+                &BTreeMap::new(),
+                &templates,
+            );
+            assert_eq!(scan.expanded, input);
+            assert!(scan.fragments.is_empty());
+            assert_eq!(scan.issues.len(), 1);
+        }
+    }
+
+    #[test]
+    fn generated_template_rejects_noncanonical_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut templates = resolved_geninc_template();
+        let value = templates.remove("compiler/include/geninc.cfg").unwrap();
+        templates.insert("compiler/include/../geninc.cfg".into(), value);
+        let input = "include $(TOP)/$(CURDIR)/geninc.cfg\n";
+        let scan = inline_native_make_configuration_with_templates(
+            input,
+            directory.path(),
+            Path::new("compiler/include/mmakefile.src"),
+            LocalMakeIncludeLimits::default(),
+            &BTreeMap::new(),
+            &templates,
+        );
+        assert_eq!(scan.expanded, input);
+        assert!(scan.fragments.is_empty());
+        assert_eq!(scan.issues.len(), 1);
+    }
 
     #[test]
     fn literal_source_root_cfg_is_local_but_global_and_dynamic_scopes_are_not() {

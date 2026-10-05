@@ -1,7 +1,6 @@
 mod common;
 
-#[path = "../src/local_make_includes.rs"]
-mod local_make_includes;
+use aros_transpiler::local_make_includes;
 
 use local_make_includes::{
     inline_local_make_includes, LocalMakeFragmentPolicy, LocalMakeIncludeIssueKind,

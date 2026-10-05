@@ -8,6 +8,33 @@ use aros_common::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The exact module-producing MetaMake macro that declared a target.
+///
+/// These spellings share substantial implementation, but differ in the KOBJ
+/// prerequisites emitted by `config/make.tmpl`; retain the source declaration
+/// rather than attempting to reconstruct it from config or generated ABI data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModuleMacroForm {
+    Full,
+    RuntimeOnly,
+    AbiOnly,
+    Simple,
+}
+
+impl ModuleMacroForm {
+    /// The stable form token accepted by the generated CMake metadata helper.
+    #[must_use]
+    pub const fn cmake_form(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::RuntimeOnly => "runtime-only",
+            Self::AbiOnly => "abi-only",
+            Self::Simple => "simple",
+        }
+    }
+}
+
 /// Types of buildable units in AROS mmakefiles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleType {
@@ -16,6 +43,9 @@ pub enum ModuleType {
     /// runtime module. Keeping this distinct from [`Library`](Self::Library)
     /// prevents package resolution from treating an ABI skeleton as a file.
     Abi,
+    /// Source-bound genmodule headers from a full declaration whose runtime
+    /// capability was rejected. This creates neither a runtime nor an archive.
+    ModuleHeaders,
     Device,
     Resource,
     Hidd,
@@ -63,11 +93,25 @@ pub struct TargetDefinition {
     pub mmake_name: String,
     pub target_name: String,
     pub module_type: ModuleType,
+    /// Exact `%build_module*` spelling, when this declaration came from one.
+    /// `None` for every other concrete target macro. This metadata is source
+    /// provenance; config-derived genmodule ABI facts remain separate.
+    #[serde(default)]
+    pub module_macro: Option<ModuleMacroForm>,
+    /// Declaration-scoped native partial-link inputs. Absence means that no
+    /// target-conditioned source scope was captured, never an empty input set.
+    #[serde(default)]
+    pub kobj_scoped_inputs: Option<crate::kobj_scoped_inputs::KobjScopedInputs>,
     /// The module has no hand-written sources because genmodule supplies its
     /// complete runtime implementation. This is deliberately set only for an
     /// explicit `files=""`, never for a source expression that resolved empty.
     #[serde(default)]
     pub genmodule_only: bool,
+    /// The source invokes an ABI-producing full module macro with a readable
+    /// declaration-owned config. Runtime-only and simple macros never set it.
+    /// Header/FD membership is still decided by that config, not by board ID.
+    #[serde(default)]
+    pub genmodule_abi: bool,
     /// The legacy `%build_linklib` deliberately invokes the archiver with no
     /// objects for this profile. This is accepted only by a target-specific
     /// audited capability; an unresolved source expression must never set it.
@@ -218,6 +262,86 @@ pub struct TargetDefinition {
     /// no longer tells them apart.
     #[serde(default)]
     pub arch_source_options: Vec<(String, String, String, String)>,
+}
+
+/// A source wildcard waiting for its fetched owner.
+///
+/// Unlike a compilation target, this record is only a hint for the
+/// cold-source preflight and must never be emitted as a build producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceInventoryNeed {
+    pub pattern: String,
+    /// Sanitized MetaMake owner from the declaration that contained the
+    /// deferred pattern.
+    pub owner_mmake: String,
+    /// Source-root-relative recipe path that declared the pattern.
+    pub recipe: PathBuf,
+    /// One-based source line of the declaring macro invocation.
+    pub line: usize,
+}
+
+/// Selection metadata for a declaration with a deferred source inventory.
+///
+/// This deliberately excludes
+/// compiler inputs and is stored outside `ParsedMmakefile::targets`, so it can
+/// inform cold-root selection without becoming a compile producer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// Independent source declaration facts, not lifecycle or board-selection states.
+#[allow(clippy::struct_excessive_bools)]
+pub struct InventoryTargetIdentity {
+    pub mmake_name: String,
+    pub target_name: String,
+    pub module_type: ModuleType,
+    pub dir_path: PathBuf,
+    pub variant_32bit: bool,
+    pub declared_mod_type: Option<String>,
+    pub mod_suffix: Option<String>,
+    pub linklib_output_dir: Option<String>,
+    pub genmodule_abi: bool,
+    pub genmodule_only: bool,
+    pub module_macro: Option<ModuleMacroForm>,
+    pub target_dir: Option<String>,
+    pub linklib_name: Option<String>,
+    pub genmodule_linklibs: Option<GenmoduleLinklibs>,
+    pub config_relative_libraries: Vec<String>,
+    pub canonical_linklib_output: bool,
+    pub canonical_linklib_eligible: bool,
+    pub empty_archive: bool,
+    pub dependencies: Vec<String>,
+    pub link_libs: Vec<String>,
+    pub use_libs: Vec<String>,
+    pub link_options: Vec<String>,
+    pub spec_switches: Vec<String>,
+}
+
+impl From<&TargetDefinition> for InventoryTargetIdentity {
+    fn from(target: &TargetDefinition) -> Self {
+        Self {
+            mmake_name: target.mmake_name.clone(),
+            target_name: target.target_name.clone(),
+            module_type: target.module_type.clone(),
+            dir_path: target.dir_path.clone(),
+            variant_32bit: target.variant_32bit,
+            declared_mod_type: target.declared_mod_type.clone(),
+            mod_suffix: target.mod_suffix.clone(),
+            linklib_output_dir: target.linklib_output_dir.clone(),
+            genmodule_abi: target.genmodule_abi,
+            genmodule_only: target.genmodule_only,
+            module_macro: target.module_macro,
+            target_dir: target.target_dir.clone(),
+            linklib_name: target.linklib_name.clone(),
+            genmodule_linklibs: target.genmodule_linklibs.clone(),
+            config_relative_libraries: target.config_relative_libraries.clone(),
+            canonical_linklib_output: target.canonical_linklib_output,
+            canonical_linklib_eligible: target.canonical_linklib_eligible,
+            empty_archive: target.empty_archive,
+            dependencies: target.dependencies.clone(),
+            link_libs: target.link_libs.clone(),
+            use_libs: target.use_libs.clone(),
+            link_options: target.link_options.clone(),
+            spec_switches: target.spec_switches.clone(),
+        }
+    }
 }
 
 /// A parsed meta-target rule (#MM or #MM-).
@@ -513,10 +637,65 @@ pub struct PythonOutputsDecl {
 /// Result of parsing an mmakefile.src.
 #[derive(Debug, Clone, Default)]
 pub struct ParsedMmakefile {
+    /// Digest of the original byte snapshot used to parse this recipe. It is
+    /// not a later filesystem measurement or the re-encoded legacy text.
+    pub source_sha256: Option<String>,
+    /// Literal disabled `##MM` owners from the same original byte snapshot.
+    /// These are evidence, not graph providers or implicit optional edges.
+    pub disabled_meta_owners: Vec<String>,
+    /// Closed ordinary Make aggregates with all host-header leaves represented.
+    pub host_header_aggregates: Vec<crate::host_header_aggregates::HostHeaderAggregateDecl>,
+    /// Closed directory-only setup recipes with real build endpoints.
+    pub directory_setups: Vec<crate::directory_setup::DirectorySetupDecl>,
+    /// Named handwritten genmodule header-stamp producers.
+    pub genmodule_header_rules: Vec<crate::genmodule_header_rules::GenmoduleHeaderRuleDecl>,
+    /// Source-owned handwritten client-source generators, distinct from headers.
+    pub genmodule_writefiles_rules:
+        Vec<crate::genmodule_writefiles_rules::GenmoduleWritefilesRuleDecl>,
+    pub host_file_generators: Vec<aros_common::native_host_generator::NativeHostFileGenerator>,
+    /// Closed source-owned host-C header producers with exact prerequisites.
+    pub host_header_rules: Vec<crate::host_header_rules::HostHeaderRuleDecl>,
+    /// Source-derived SDK text products with ordered literal operations.
+    pub sdk_text_rules: Vec<crate::sdk_text_rules::SdkTextRuleDecl>,
+    /// Source-owned SDK headers generated from local SFD descriptions.
+    pub sfd_header_rules: Vec<crate::sfd_header_rules::SfdHeaderRuleDecl>,
+    /// Complete multi-output source text producers, including SDK/host tools.
+    pub source_text_rules: Vec<crate::source_text_rules::SourceTextRuleDecl>,
+    /// Local source values extracted by closed literal recipe semantics.
+    pub source_value_rules: Vec<crate::source_value_rules::SourceValueRuleDecl>,
+    pub sdk_file_copies: Vec<crate::sdk_file_copies::SdkFileCopyDecl>,
+    pub sdk_asset_rules: Vec<crate::sdk_asset_rules::SdkAssetRuleDecl>,
+    pub sdk_program_outputs: Vec<crate::graph::SdkProgramOutput>,
+    /// Finite source-owned compilation and Developer-library object staging.
+    pub sdk_object_groups: Vec<crate::sdk_objects::SdkObjectGroupDecl>,
+    /// Literal compile-only objects, without Developer-library staging.
+    pub literal_object_groups: Vec<crate::literal_objects::LiteralObjectGroupDecl>,
+    /// Partial source projections, not executable providers. Archive members
+    /// still need exact compiler ownership; layered headers still need their
+    /// setup and generated-header prerequisites to be closed.
+    pub source_archive_projections: Vec<crate::source_archive_rules::SourceArchiveDecl>,
+    /// Command proofs are distinct from complete member ownership. A proven
+    /// archiver alone does not make a partial archive a native provider.
+    pub source_archive_commands: std::collections::BTreeMap<
+        (String, String),
+        crate::source_archive_command::SourceArchiveCommand,
+    >,
+    pub source_compile_projections: Vec<crate::source_compile_rules::SourceCompileGroupDecl>,
+    pub layered_header_projections: Vec<crate::layered_header_copies::LayeredHeaderCopyDecl>,
+    pub source_header_pipelines: Vec<crate::source_header_pipeline::SourceHeaderPipelineDecl>,
+    pub source_directory_groups: std::collections::BTreeMap<
+        (String, String),
+        crate::source_directory_rules::SourceDirectoryGroupDecl,
+    >,
     /// Drift in a recognised closed capability. Unlike general coverage gaps,
     /// these are fatal: continuing would execute stale target-specific
     /// assumptions.
     pub capability_errors: Vec<Diagnostic>,
+    /// Handwritten recipes outside the new native graph's closed models.
+    /// These become fatal when selected by an explicit source-bound native
+    /// contract. Full-tree translation retains its existing coverage reports
+    /// and SDK bootstrap path rather than treating every older recipe as drift.
+    pub native_graph_errors: Vec<Diagnostic>,
     pub targets: Vec<TargetDefinition>,
     /// Strictly modelled `%build_with_cmake` declarations.
     pub external_cmake: Vec<ExternalCMakeDecl>,
@@ -540,6 +719,12 @@ pub struct ParsedMmakefile {
     /// contract and therefore remain deliberately unmodelled.
     pub skipped_flexcat_sources: Vec<String>,
     pub meta_rules: Vec<MetaTargetRule>,
+    /// Handwritten source rules retained separately from macro-generated
+    /// aliases. Their prerequisites must not be rebound as implicit spellings.
+    pub explicit_meta_rules: Vec<MetaTargetRule>,
+    /// Explicit nonvirtual #MM providers. An empty virtual declaration must
+    /// not hide a same-named provider whose Make recipe remains unmodelled.
+    pub make_meta_providers: Vec<String>,
     /// `%build_icons` target identities, including declarations whose inputs
     /// could not be resolved. Keeping the identity makes the gap visible and
     /// preserves meta-target edges even when no command can be emitted.
@@ -592,6 +777,11 @@ pub struct ParsedMmakefile {
     /// Fetched-tree wildcard patterns that need their owning fetch to finish
     /// before a second configure can obtain the complete source inventory.
     pub source_inventory_patterns: Vec<String>,
+    /// Deferred source wildcards with their declaration owner and provenance.
+    pub source_inventory_needs: Vec<SourceInventoryNeed>,
+    /// Target identities for deferred declarations, separate from buildable
+    /// compilation targets.
+    pub source_inventory_targets: Vec<InventoryTargetIdentity>,
     /// Modules whose genmodule config demands a client archive that the target
     /// model does not build yet, because the archive's generated sources are
     /// only derived for `modtype=library`.
