@@ -633,9 +633,7 @@ fn recipe_prefix_mutation_reason(statement: &str) -> Option<&'static str> {
     if undefines_recipe_prefix(statement) {
         return Some("source undefines .RECIPEPREFIX; recipe boundaries are unprovable");
     }
-    let Some(lhs) = assignment_lhs(statement) else {
-        return None;
-    };
+    let lhs = assignment_lhs(statement)?;
     let name = strip_assignment_modifiers(lhs);
     if name == ".RECIPEPREFIX" {
         Some("source changes .RECIPEPREFIX; recipe boundaries are unprovable")

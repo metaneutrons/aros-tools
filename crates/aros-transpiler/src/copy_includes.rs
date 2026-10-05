@@ -919,7 +919,7 @@ fn rule_is_in_conditional(lines: &[&str], rule_index: usize) -> bool {
             Some(MakeConditionalDirective::Else | MakeConditionalDirective::Close)
                 if depth == 0 =>
             {
-                malformed = true
+                malformed = true;
             }
             Some(MakeConditionalDirective::Close) => depth -= 1,
             Some(MakeConditionalDirective::Else) | None => {}
